@@ -87,7 +87,8 @@ impl Pki {
 pub struct TestBroker {
     pub addr: String,
     pub pki: Pki,
-    broker: ActorRef<BrokerMessage>,
+    broker: Mutex<ActorRef<BrokerMessage>>,
+    retention_secs: Option<u64>,
 }
 
 /// The names the broker's actors register under. A broker left over from a test that failed holds
@@ -145,11 +146,32 @@ impl TestBroker {
             probe.local_addr().unwrap().port()
         };
         let addr = format!("127.0.0.1:{port}");
+        let broker = Self::spawn_broker(&addr, &pki, retention_secs).await;
+
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+                return Self {
+                    addr,
+                    pki,
+                    broker: Mutex::new(broker),
+                    retention_secs,
+                };
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the broker never began listening on {addr}");
+    }
+
+    async fn spawn_broker(
+        addr: &str,
+        pki: &Pki,
+        retention_secs: Option<u64>,
+    ) -> ActorRef<BrokerMessage> {
         let (broker, _) = Actor::spawn(
             Some(cassini_broker::BROKER_NAME.to_string()),
             Broker,
             BrokerArgs {
-                bind_addr: addr.clone(),
+                bind_addr: addr.to_string(),
                 session_timeout: retention_secs,
                 server_cert_file: pki.path("server.pem").to_string_lossy().into_owned(),
                 private_key_file: pki.path("server.key").to_string_lossy().into_owned(),
@@ -159,19 +181,25 @@ impl TestBroker {
         )
         .await
         .expect("the broker starts");
+        broker
+    }
 
-        for _ in 0..100 {
-            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-                return Self { addr, pki, broker };
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        panic!("the broker never began listening on {addr}");
+    /// Stops the broker, then starts another on the same address with the same certificates:
+    /// everything the first one held, sessions included, is gone. Returns how long the broker
+    /// was away.
+    pub async fn restart(&self, away_for: Duration) -> Duration {
+        let began = std::time::Instant::now();
+        self.stop().await;
+        tokio::time::sleep(away_for).await;
+        let broker = Self::spawn_broker(&self.addr, &self.pki, self.retention_secs).await;
+        *self.broker.lock().unwrap() = broker;
+        began.elapsed()
     }
 
     /// Stops the broker and waits until its names are free for the next test.
     pub async fn stop(&self) {
-        self.broker
+        let broker = self.broker.lock().unwrap().clone();
+        broker
             .stop_and_wait(None, Some(Duration::from_secs(10)))
             .await
             .ok();
@@ -289,6 +317,15 @@ impl TestClient {
             })
             .await;
         client
+    }
+
+    pub fn registration_events(&self) -> usize {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, ClientEvent::Registered { .. }))
+            .count()
     }
 
     /// The id of the session the broker gave this client, once it has.

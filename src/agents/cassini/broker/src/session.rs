@@ -636,12 +636,6 @@ impl SessionManager {
                 let _ = session_agent.send_message(BrokerMessage::SetBrokerRef {
                     broker: state.broker.clone(),
                 });
-                session_agent
-                    .cast(BrokerMessage::InitSession {
-                        client_id: client_id.clone(),
-                        trace_ctx: Some(span.context()),
-                    })
-                    .ok();
                 let Some(_listener_mgr) = &state.listener_mgr else {
                     error!(
                         "SessionManager: listener_mgr not set, cannot send registration response for new session"
@@ -782,13 +776,6 @@ impl Actor for SessionAgent {
             }
             BrokerMessage::PrepareForShutdown { .. } => {
                 self.handle_prepare_for_shutdown(state).await?;
-            }
-            BrokerMessage::InitSession {
-                trace_ctx,
-                client_id,
-            } => {
-                self.handle_init_session(myself.clone(), state, client_id, trace_ctx)
-                    .await?;
             }
             BrokerMessage::RegistrationRequest {
                 client_id,
@@ -946,30 +933,6 @@ impl SessionAgent {
         debug!("Session agent entering shutdown mode – will reject new requests");
         state.shutting_down = true;
         // Do NOT disconnect – client will disconnect when finished.
-        Ok(())
-    }
-
-    async fn handle_init_session(
-        &self,
-        _myself: ActorRef<BrokerMessage>,
-        state: &mut SessionAgentState,
-        client_id: String,
-        trace_ctx: Option<opentelemetry::Context>,
-    ) -> Result<(), ActorProcessingErr> {
-        let registration_id = state.registration_id.clone();
-        let span = trace_span!("session.init", %client_id, %registration_id);
-        try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-        trace!("received init");
-
-        state
-            .client_ref
-            .cast(BrokerMessage::RegistrationResponse {
-                client_id,
-                result: Ok(registration_id),
-                trace_ctx: Some(span.context()),
-            })
-            .ok();
         Ok(())
     }
 

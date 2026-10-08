@@ -196,3 +196,34 @@ async fn a_client_that_loses_its_connection_comes_back_to_its_session_and_what_i
     })
     .await;
 }
+
+// -- a client is told once that it registered --------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_session_is_announced_to_the_client_once() {
+    with_broker(|broker| async move {
+        let client = TestClient::connect(&broker, "agent.test").await;
+        pause().await;
+        assert_eq!(
+            client.registration_events(),
+            1,
+            "every announcement makes an agent initialise again"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_session_is_announced_to_the_client_once() {
+    with_broker(|broker| async move {
+        let away = TestClient::connect(&broker, "agent.test").await;
+        let session = away.registration_id().unwrap();
+        away.vanish().await;
+        pause().await;
+
+        let back = TestClient::connect_resuming(&broker, "agent.test", Some(session)).await;
+        pause().await;
+        assert_eq!(back.registration_events(), 1);
+    })
+    .await;
+}

@@ -308,6 +308,26 @@ impl Actor for ListenerManager {
         Ok(())
     }
 
+    /// However the manager ends, it stops listening and closes its connections: the accept loop is
+    /// a task of its own, and left running it would keep the address bound.
+    async fn post_stop(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        state.shutdown_token.cancel();
+        if let Some(handle) = state.accept_task_abort.take() {
+            handle.abort();
+        }
+        // A connection's reading task outlives a listener that is killed rather than stopped, and
+        // while it does the socket stays open and the client never learns the broker is gone.
+        myself
+            .get_cell()
+            .stop_children_and_wait(None, Some(std::time::Duration::from_secs(5)))
+            .await;
+        Ok(())
+    }
+
     async fn handle_supervisor_evt(
         &self,
         myself: ActorRef<Self::Msg>,

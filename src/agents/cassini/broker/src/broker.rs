@@ -395,6 +395,12 @@ impl Actor for Broker {
         myself: ActorRef<Self::Msg>,
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        // The managers are this actor's children and nothing else stops them: left running they
+        // keep their names, and the listener keeps the address bound.
+        myself
+            .get_cell()
+            .stop_children_and_wait(None, Some(std::time::Duration::from_secs(5)))
+            .await;
         debug!(actor = ?myself, "Broker stopped");
         Ok(())
     }

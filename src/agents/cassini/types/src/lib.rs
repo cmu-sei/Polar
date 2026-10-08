@@ -110,11 +110,6 @@ pub enum BrokerMessage {
         client_ref: ActorRef<BrokerMessage>,
         trace_ctx: Option<opentelemetry::Context>,
     },
-    /// Helper variant to start a session and re/initialize it with a new client connection + tracing context
-    InitSession {
-        client_id: String,
-        trace_ctx: Option<opentelemetry::Context>,
-    },
     GetSessions {
         reply_to: RpcReplyPort<SessionMap>,
         trace_ctx: Option<opentelemetry::Context>,
