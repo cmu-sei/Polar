@@ -126,3 +126,42 @@ async fn what_was_held_expires_a_retention_window_after_it_was_taken_over() {
     })
     .await;
 }
+
+// -- an older session that still looks connected -------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_session_also_takes_over_an_older_one_that_still_looks_connected() {
+    with_broker(|broker| async move {
+        // The old instance's connection is dead, but the broker has not noticed.
+        let old = TestClient::connect(&broker, "agent.test").await;
+        let old_session = old.registration_id().unwrap();
+        old.subscribe("news");
+        pause().await;
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        publisher.publish("news", b"seen by the old instance");
+        old.wait_for_messages("news", 1).await;
+
+        // Its replacement registers, as a new session.
+        let new = TestClient::connect(&broker, "agent.test").await;
+        pause().await;
+        publisher.publish("news", b"for whoever is there now");
+        pause().await;
+        new.subscribe("news");
+        assert_eq!(
+            new.wait_for_messages("news", 1).await,
+            [b"for whoever is there now".to_vec()],
+            "what the old session would have been sent, and not what it already had"
+        );
+
+        // Two instances must not both go on being served as the same identity.
+        pause().await;
+        assert_eq!(old.received("news").len(), 1, "nothing more for the old one");
+        old.wait_for("its connection to be closed", Duration::from_secs(5), |c| {
+            c.lost_its_connection()
+        })
+        .await;
+        let late = TestClient::connect_resuming(&broker, "agent.test", Some(old_session.clone())).await;
+        assert_ne!(late.registration_id().unwrap(), old_session, "it cannot come back");
+    })
+    .await;
+}

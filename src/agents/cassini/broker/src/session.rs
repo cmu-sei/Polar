@@ -313,17 +313,23 @@ impl SessionManager {
         }
     }
 
-    /// A new session of `identity` has registered: every detached session of that identity is
-    /// superseded. It can no longer be resumed; its subscribers are told to hold what they
-    /// receive, and the session stops once they all do.
-    fn supersede_detached(state: &mut SessionManagerState, identity: &str, new_id: &str) {
+    /// A new session of `identity` has registered: every older session of that identity is
+    /// superseded, whether its client has gone or only looks connected (a pod replaced before
+    /// the broker has noticed the old connection is dead). It can no longer be resumed; a
+    /// connection it still has is closed; its subscribers are told to hold what they receive,
+    /// and the session stops once they all do.
+    fn supersede_older(
+        state: &mut SessionManagerState,
+        identity: &str,
+        new_id: &str,
+        new_client_id: &str,
+    ) {
         let superseded: Vec<String> = state
             .sessions
             .iter()
             .filter(|(id, session)| {
                 id.as_str() != new_id
                     && !session.superseded
-                    && session.detached_at.is_some()
                     && session.identity.as_deref() == Some(identity)
             })
             .map(|(id, _)| id.clone())
@@ -332,6 +338,11 @@ impl SessionManager {
             info!(%registration_id, %identity, new_session = %new_id, "superseded by a new session of the same identity");
             if let Some(session) = state.sessions.get_mut(&registration_id) {
                 session.superseded = true;
+                if session.detached_at.is_none() {
+                    let _ = session.agent_ref.send_message(BrokerMessage::CloseConnection {
+                        except: new_client_id.to_string(),
+                    });
+                }
             }
             state.held.push(HeldSession {
                 registration_id: registration_id.clone(),
@@ -630,7 +641,7 @@ impl SessionManager {
                     },
                 );
                 if let Some(identity) = &peer_identity {
-                    Self::supersede_detached(state, identity, &new_id);
+                    Self::supersede_older(state, identity, &new_id, &client_id);
                 }
                 // Pass broker ref to the session agent
                 let _ = session_agent.send_message(BrokerMessage::SetBrokerRef {
@@ -791,6 +802,12 @@ impl Actor for SessionAgent {
             } => {
                 self.handle_reassign_client(state, client_ref, trace_ctx)
                     .await?;
+            }
+            BrokerMessage::CloseConnection { except } => {
+                if state.client_ref.get_name().as_deref() != Some(except.as_str()) {
+                    info!(registration_id = %state.registration_id, "closing the connection of a superseded session");
+                    state.client_ref.stop(Some("SUPERSEDED".to_string()));
+                }
             }
             BrokerMessage::PublishRequest {
                 registration_id,

@@ -319,6 +319,15 @@ impl TestClient {
         client
     }
 
+    /// The connection to the broker was lost, as the client itself reports it.
+    pub fn lost_its_connection(&self) -> bool {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, ClientEvent::TransportError { .. }))
+    }
+
     pub fn registration_events(&self) -> usize {
         self.events
             .lock()

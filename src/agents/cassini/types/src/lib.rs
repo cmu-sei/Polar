@@ -233,6 +233,12 @@ pub enum BrokerMessage {
     SessionSuperseded {
         registration_id: String,
     },
+    /// Internal: a session was superseded while its client still looked connected. The session
+    /// agent closes that connection, unless it is the one named (a client that registered a
+    /// second session on the connection it already had).
+    CloseConnection {
+        except: String,
+    },
     /// Internal: every subscriber of the superseded session is holding; the session may stop.
     SessionHeld {
         registration_id: String,
