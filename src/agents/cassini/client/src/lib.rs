@@ -465,6 +465,13 @@ impl TcpClientActor {
                         ActorProcessingErr::from(format!("Failed to convert to std stream: {}", e))
                     })?;
 
+                    // Find a dead broker in about a minute, whether the connection is idle or
+                    // has data in flight, instead of waiting on it forever.
+                    if let Err(e) = cassini_types::socket::enable_dead_peer_detection(&std_stream)
+                    {
+                        warn!("could not enable dead-peer detection on the broker connection: {e}");
+                    }
+
                     // Use socket2 to set buffer sizes
                     let sock_ref = SockRef::from(&std_stream);
                     sock_ref

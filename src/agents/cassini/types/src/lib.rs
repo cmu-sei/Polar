@@ -3,6 +3,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub mod socket;
 pub mod trace;
 pub use trace::WireTraceCtx;
 

@@ -221,6 +221,12 @@ impl Actor for ListenerManager {
                         }
                     };
 
+                    // Find a client that has died without a word in about a minute, instead of
+                    // keeping its session, and everything held for it, until a write fails.
+                    if let Err(e) = cassini_types::socket::enable_dead_peer_detection(&stream) {
+                        warn!(error = %e, %peer_addr, "could not enable dead-peer detection");
+                    }
+
                     // Check if we're shutting down before accepting new connection
                     if shutdown_token.is_cancelled() {
                         debug!(
