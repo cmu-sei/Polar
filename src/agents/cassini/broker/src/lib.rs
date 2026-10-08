@@ -3,6 +3,7 @@ pub mod broker;
 pub mod control;
 pub mod listener;
 pub mod session;
+pub mod signals;
 pub mod subscriber;
 pub mod topic;
 
@@ -40,14 +41,19 @@ pub const SHUTDOWN_AUTH_TOKEN: &str = "CASSINI_SHUTDOWN_TOKEN";
 #[derive(Debug, Clone)]
 pub enum BrokerConfigError {
     EnvVar { var: String, source: env::VarError },
+    /// A variable is set, to something that is not valid.
+    Invalid { var: String, value: String, expected: &'static str },
 }
 
 impl fmt::Display for BrokerConfigError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use crate::BrokerConfigError::EnvVar;
+        use crate::BrokerConfigError::{EnvVar, Invalid};
         match self {
             EnvVar { var, source } => {
                 write!(f, "{source}. Pleaes provide a value for {var}")
+            }
+            Invalid { var, value, expected } => {
+                write!(f, "{var} is \"{value}\"; expected {expected}")
             }
         }
     }

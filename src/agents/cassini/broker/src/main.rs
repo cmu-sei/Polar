@@ -24,8 +24,13 @@ async fn main() {
 
     let exit_code = match BrokerArgs::new() {
         Ok(args) => {
+            let shutdown_token = args.shutdown_auth_token.clone();
             match Actor::spawn(Some(BROKER_NAME.to_string()), Broker, args).await {
-                Ok((_broker, handle)) => {
+                Ok((broker, handle)) => {
+                    cassini_broker::signals::begin_shutdown_on_signal(
+                        broker,
+                        shutdown_token,
+                    );
                     handle.await.ok();
                     // Broker exited cleanly — graceful rejuvenation shutdown.
                     2

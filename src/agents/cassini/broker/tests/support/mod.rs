@@ -89,6 +89,8 @@ pub struct TestBroker {
     pub pki: Pki,
     broker: Mutex<ActorRef<BrokerMessage>>,
     retention_secs: Option<u64>,
+    /// The exit codes the broker asked the process to exit with.
+    pub exits: Arc<Mutex<Vec<i32>>>,
 }
 
 /// The names the broker's actors register under. A broker left over from a test that failed holds
@@ -137,6 +139,12 @@ impl TestBroker {
     /// As `start`, with a disconnected session kept for `retention_secs` seconds (the broker's own
     /// default, ten minutes, when `None`).
     pub async fn start_retaining(retention_secs: Option<u64>) -> Self {
+        Self::start_with(retention_secs, Duration::from_secs(20)).await
+    }
+
+    /// As `start_retaining`, with `shutdown_budget` to finish an orderly shutdown in. The broker
+    /// does not exit the process: it records the code it would have exited with in `exits`.
+    pub async fn start_with(retention_secs: Option<u64>, shutdown_budget: Duration) -> Self {
         init_logging();
         clear_names().await;
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -146,7 +154,8 @@ impl TestBroker {
             probe.local_addr().unwrap().port()
         };
         let addr = format!("127.0.0.1:{port}");
-        let broker = Self::spawn_broker(&addr, &pki, retention_secs).await;
+        let exits = Arc::new(Mutex::new(Vec::new()));
+        let broker = Self::spawn_broker(&addr, &pki, retention_secs, shutdown_budget, &exits).await;
 
         for _ in 0..100 {
             if tokio::net::TcpStream::connect(&addr).await.is_ok() {
@@ -155,6 +164,7 @@ impl TestBroker {
                     pki,
                     broker: Mutex::new(broker),
                     retention_secs,
+                    exits,
                 };
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -166,7 +176,10 @@ impl TestBroker {
         addr: &str,
         pki: &Pki,
         retention_secs: Option<u64>,
+        shutdown_budget: Duration,
+        exits: &Arc<Mutex<Vec<i32>>>,
     ) -> ActorRef<BrokerMessage> {
+        let recorded = exits.clone();
         let (broker, _) = Actor::spawn(
             Some(cassini_broker::BROKER_NAME.to_string()),
             Broker,
@@ -177,6 +190,8 @@ impl TestBroker {
                 private_key_file: pki.path("server.key").to_string_lossy().into_owned(),
                 ca_cert_file: pki.ca().to_string_lossy().into_owned(),
                 shutdown_auth_token: None,
+                shutdown_budget,
+                process_exit: Arc::new(move |code| recorded.lock().unwrap().push(code)),
             },
         )
         .await
@@ -191,7 +206,14 @@ impl TestBroker {
         let began = std::time::Instant::now();
         self.stop().await;
         tokio::time::sleep(away_for).await;
-        let broker = Self::spawn_broker(&self.addr, &self.pki, self.retention_secs).await;
+        let broker = Self::spawn_broker(
+            &self.addr,
+            &self.pki,
+            self.retention_secs,
+            Duration::from_secs(20),
+            &self.exits,
+        )
+        .await;
         *self.broker.lock().unwrap() = broker;
         began.elapsed()
     }
@@ -225,6 +247,21 @@ impl TestBroker {
             .await
             .ok();
         clear_names().await;
+    }
+}
+
+/// As `with_broker`, with `shutdown_budget` to finish an orderly shutdown in.
+pub async fn with_broker_shutting_down_within<F, Fut>(shutdown_budget: Duration, test: F)
+where
+    F: FnOnce(Arc<TestBroker>) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let _only = serial().await;
+    let broker = Arc::new(TestBroker::start_with(None, shutdown_budget).await);
+    let outcome = tokio::spawn(test(broker.clone())).await;
+    broker.stop().await;
+    if let Err(failure) = outcome {
+        std::panic::resume_unwind(failure.into_panic());
     }
 }
 

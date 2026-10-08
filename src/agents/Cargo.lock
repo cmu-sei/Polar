@@ -870,6 +870,7 @@ dependencies = [
  "cassini-client",
  "cassini-tracing",
  "cassini-types",
+ "libc",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

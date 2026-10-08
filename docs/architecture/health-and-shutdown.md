@@ -350,3 +350,22 @@ with exit code 1 and a logged reason, never 137.
   shutdown funnel, its triggers, and the watchdog.
 
 See `sequences/assets/asset_regeneration.md` to re-render.
+
+## The Cassini broker
+
+The broker is not built with the agent builder, and has its own copy of the same ideas.
+
+- **What starts a shutdown.** The health actor ending or failing, SIGTERM or SIGINT, or a
+  `PrepareForShutdown` with the shutdown token. Each begins the same five phases (stop accepting
+  connections, drain sessions, flush topic queues, terminate subscribers, terminate listeners),
+  after which the broker stops and the process exits.
+- **The budget.** `CASSINI_SHUTDOWN_BUDGET_SECS` (default 20) is what the whole sequence has, and
+  each phase gets a fifth of it. A phase that overruns has its manager stopped and the sequence
+  goes on.
+- **The watchdog.** When the sequence begins a detached task sleeps for the budget and then exits
+  the process with 1. A sequence that finishes in time stops it. This is what keeps a stuck
+  manager from outliving the pod's grace period.
+- **The grace period.** The Cassini chart sets `terminationGracePeriodSeconds` to the budget plus
+  a 10 second margin, from the same two values that set the environment variable, so they cannot
+  disagree. Before this the pod had Kubernetes' default 30 seconds, no signal handler, and a
+  sequence that could take 150.

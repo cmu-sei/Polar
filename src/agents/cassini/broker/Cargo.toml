@@ -36,3 +36,4 @@ proptest = { workspace = true }
 cassini-client.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
+libc.workspace = true

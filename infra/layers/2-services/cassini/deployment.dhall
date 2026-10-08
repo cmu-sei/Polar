@@ -19,6 +19,8 @@ let render =
           , ports            : { http : Natural, tcp : Natural }
           , jaegerDNSName    : Text
           , shutdownToken    : Text
+          , shutdownBudgetSecs : Natural
+          , graceMarginSecs    : Natural
           }
       ) ->
         let environment =
@@ -28,6 +30,7 @@ let render =
               , k8s.EnvVar::{ name = "CASSINI_BIND_ADDR",     value = Some "0.0.0.0:${Natural/show v.ports.tcp}" }
               , k8s.EnvVar::{ name = "JAEGER_OTLP_ENDPOINT",  value = Some v.jaegerDNSName           }
               , k8s.EnvVar::{ name = "CASSINI_SHUTDOWN_TOKEN", value = Some v.shutdownToken           }
+              , k8s.EnvVar::{ name = "CASSINI_SHUTDOWN_BUDGET_SECS", value = Some (Natural/show v.shutdownBudgetSecs) }
               , k8s.EnvVar::{ name = "CASSINI_LOG", value = Some "info" }
               , k8s.EnvVar::{ name = "POLAR_HEALTH_FILE",     value = Some "/var/run/polar-health/polar-health.json" }
               , k8s.EnvVar::{ name = "POLAR_HEALTH_CERTS",    value = Some "${Constants.mtls.certPath},${Constants.mtls.caCertPath}" }
@@ -69,6 +72,9 @@ let render =
                     , serviceAccountName = Some v.name
                     , automountServiceAccountToken = Some False
                     , restartPolicy   = Some "Never"
+                    -- The orderly shutdown has the budget; the margin is for the pod to be
+                    -- told and to exit. Kubernetes kills the pod when this runs out.
+                    , terminationGracePeriodSeconds = Some (v.shutdownBudgetSecs + v.graceMarginSecs)
                     , volumes         = Some volumes
                     , initContainers  = Some
                       [ functions.makePolarInitContainer

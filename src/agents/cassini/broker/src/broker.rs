@@ -31,8 +31,29 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub struct Broker;
 
+/// What the broker calls to end the process. The real one flushes tracing and exits; a test's
+/// records the code instead.
+pub type ProcessExit = Arc<dyn Fn(i32) + Send + Sync>;
+
+pub fn real_process_exit() -> ProcessExit {
+    Arc::new(|code| {
+        shutdown_tracing();
+        std::process::exit(code)
+    })
+}
+
+/// How long an orderly shutdown has, from its start to the process ending, when the deployment
+/// does not say. The pod's termination grace period is this plus a margin.
+pub const DEFAULT_SHUTDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+pub const SHUTDOWN_BUDGET_ENV: &str = "CASSINI_SHUTDOWN_BUDGET_SECS";
+
 // State object containing references to worker actors
 pub struct BrokerState {
+    shutdown_budget: std::time::Duration,
+    process_exit: ProcessExit,
+    /// The task that ends the process if an orderly shutdown overruns its budget.
+    watchdog: Option<tokio::task::AbortHandle>,
     listener_mgr: Option<ActorRef<BrokerMessage>>,
     session_mgr: Option<ActorRef<BrokerMessage>>,
     topic_mgr: Option<ActorRef<BrokerMessage>>,
@@ -72,6 +93,13 @@ pub struct BrokerArgs {
 
     /// Authorization token for shutdown operations
     pub shutdown_auth_token: Option<String>,
+
+    /// How long an orderly shutdown has before the process is ended regardless. Each of the five
+    /// phases gets a fifth of it.
+    pub shutdown_budget: std::time::Duration,
+
+    /// How the process is ended when the shutdown overruns, or a worker fails.
+    pub process_exit: ProcessExit,
 }
 
 impl BrokerArgs {
@@ -90,6 +118,17 @@ impl BrokerArgs {
             env::var("CASSINI_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
         let shutdown_auth_token = env::var("CASSINI_SHUTDOWN_TOKEN").ok();
+        let shutdown_budget = match env::var(SHUTDOWN_BUDGET_ENV) {
+            Ok(value) => value
+                .parse::<u64>()
+                .map(std::time::Duration::from_secs)
+                .map_err(|_| BrokerConfigError::Invalid {
+                    var: SHUTDOWN_BUDGET_ENV.to_string(),
+                    value,
+                    expected: "a whole number of seconds",
+                })?,
+            Err(_) => DEFAULT_SHUTDOWN_BUDGET,
+        };
 
         Ok(BrokerArgs {
             bind_addr,
@@ -98,6 +137,8 @@ impl BrokerArgs {
             private_key_file,
             ca_cert_file,
             shutdown_auth_token,
+            shutdown_budget,
+            process_exit: real_process_exit(),
         })
     }
 }
@@ -197,9 +238,8 @@ impl Actor for Broker {
                     error = %e,
                     "Worker failed; stopping broker"
                 );
-                shutdown_tracing();
                 // Exit code 1 — unexpected failure, distinct from graceful rejuvenation (2).
-                std::process::exit(1);
+                (state.process_exit)(1);
             }
 
             SupervisionEvent::ProcessGroupChanged(_) => (),
@@ -341,7 +381,8 @@ impl Actor for Broker {
             phase_completed: false,
             phase_timeout_handle: None,
             phase_timeout_token: CancellationToken::new(),
-            shutdown_timeout: Duration::from_secs(30), // 30 seconds per phase max
+            // The budget is shared by the five phases.
+            shutdown_timeout: (args.shutdown_budget / 5).max(Duration::from_millis(1)),
             shutdown_completed: false,
         };
 
@@ -368,6 +409,9 @@ impl Actor for Broker {
             healthcheck,
             shutdown_auth_token: args.shutdown_auth_token.clone(),
             is_shutting_down: false,
+            shutdown_budget: args.shutdown_budget,
+            process_exit: args.process_exit.clone(),
+            watchdog: None,
         })
     }
 
@@ -398,8 +442,12 @@ impl Actor for Broker {
     async fn post_stop(
         &self,
         myself: ActorRef<Self::Msg>,
-        _: &mut Self::State,
+        state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        // Finished in time: nothing left for the watchdog to do.
+        if let Some(watchdog) = state.watchdog.take() {
+            watchdog.abort();
+        }
         // The managers are this actor's children and nothing else stops them: left running they
         // keep their names, and the listener keeps the address bound.
         myself
@@ -588,6 +636,23 @@ impl Broker {
         let _g = span.enter();
 
         info!("Initiating shutdown phase: {:?}", phase);
+        if !state.is_shutting_down {
+            // The shutdown has begun. If it has not finished when the budget runs out something
+            // is stuck, and the process ends anyway rather than wait for Kubernetes to kill it.
+            let budget = state.shutdown_budget;
+            let process_exit = state.process_exit.clone();
+            state.watchdog = Some(
+                tokio::spawn(async move {
+                    tokio::time::sleep(budget).await;
+                    error!(
+                        budget_secs = budget.as_secs_f32(),
+                        "the orderly shutdown did not finish within its budget, exiting 1"
+                    );
+                    process_exit(1);
+                })
+                .abort_handle(),
+            );
+        }
         state.is_shutting_down = true;
 
         match phase {
