@@ -658,9 +658,9 @@ Every Job sets `podReplacementPolicy: Failed` (`JobPodReplacementPolicy` in
 `schema/constants.dhall`, used by `agent.dhall` and every custom chart). The Kubernetes default,
 `TerminatingOrFailed`, creates the replacement pod the moment the old one starts terminating, so a
 pod that is deleted or evicted overlaps with its replacement for the whole drain, up to its
-`terminationGracePeriodSeconds`: two instances of one identity at once, with the same key and the
-same volumes (the credentials agent's ledger is on a `ReadWriteOnce` volume, which still lets two pods
-on one node mount it). With `Failed` the controller waits until the old pod is fully gone.
+`terminationGracePeriodSeconds`: two instances of one identity at once, with the same volumes and the same
+Cassini identity (the credentials agent's ledger is on a `ReadWriteOnce` volume, which still lets two pods
+on one node mount it). Their kernel keys do not collide: each pod loads its own key under its own number. With `Failed` the controller waits until the old pod is fully gone.
 
 This costs nothing in the normal case. Every agent ends a pod by exiting non-zero, whether it chose to
 (rejuvenation, a health verdict) or was told to (SIGTERM runs the drain and then exits 1), so a pod

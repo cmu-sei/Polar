@@ -483,4 +483,37 @@ mod tests {
         // Unloading what is already gone is not an error.
         unload_key(serial);
     }
+
+    #[test]
+    fn two_loads_under_one_description_are_two_keys_in_the_user_keyring() {
+        // Loaded one after the other, as pods do, the same description gives two separate keys,
+        // each with its own number, each usable, and each removed by its own number. A pod
+        // releasing its key therefore cannot take another pod's key with it. (Two loads at the
+        // same moment in one process can meet in the session keyring that try_load_asymmetric_key
+        // uses on the way in, where the kernel updates a key of the same description in place;
+        // that is why tests that run side by side give each actor an identity of its own.)
+        let description = "polar-kernel-keyring-same-description-test";
+        let (first, first_public) = loaded(description);
+        let (second, second_public) = loaded(description);
+        assert_ne!(first, second);
+
+        let mut rng = rand::rng();
+        let to_first = first_public
+            .encrypt(&mut rng, Oaep::<EscrowOaepHash>::new(), b"for the first key")
+            .unwrap();
+        let to_second = second_public
+            .encrypt(&mut rng, Oaep::<EscrowOaepHash>::new(), b"for the second key")
+            .unwrap();
+        assert_eq!(decrypt(first, &to_first).unwrap(), b"for the first key");
+        assert_eq!(decrypt(second, &to_second).unwrap(), b"for the second key");
+
+        unload_key(first);
+        assert!(decrypt(first, &to_first).is_err(), "the first is gone");
+        assert_eq!(
+            decrypt(second, &to_second).unwrap(),
+            b"for the second key",
+            "the second is untouched"
+        );
+        unload_key(second);
+    }
 }
