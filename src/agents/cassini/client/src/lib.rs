@@ -1,6 +1,7 @@
 pub use cassini_tracing::{init_tracing, shutdown_tracing};
 pub use cassini_tracing::{try_set_parent_otel, try_set_parent_wire};
 pub mod environment;
+pub mod facade;
 
 use cassini_types::{ClientEvent, ClientMessage, ControlOp, WireTraceCtx};
 use ractor::concurrency::{Duration, sleep};
