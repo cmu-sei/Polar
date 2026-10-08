@@ -149,6 +149,9 @@ impl Actor for SubscriberManager {
                 self.handle_timeout_message(myself.clone(), state, registration_id)
                     .await?;
             }
+            BrokerMessage::SessionSuperseded { registration_id } => {
+                Self::hold_subscriptions(&myself, state, registration_id).await;
+            }
             other => warn!(?other, "{UNEXPECTED_MESSAGE_STR}"),
         }
         Ok(())
@@ -179,6 +182,79 @@ impl Actor for SubscriberManager {
 }
 
 impl SubscriberManager {
+    /// Has every subscriber of a superseded session keep what it receives, then tells the session
+    /// manager they all do. Until then the session stays up, so nothing reaches a stopped session.
+    async fn hold_subscriptions(
+        myself: &ActorRef<BrokerMessage>,
+        state: &SubscriberManagerState,
+        registration_id: String,
+    ) {
+        for subscriber in myself.get_children().into_iter().filter(|cell| {
+            cell.get_name()
+                .and_then(|name| name.split_once(':').map(|(id, _)| id == registration_id))
+                .unwrap_or(false)
+        }) {
+            let held = ractor::rpc::call(
+                &subscriber,
+                |reply| BrokerMessage::HoldSubscription { reply },
+                Some(Duration::from_millis(500)),
+            )
+            .await;
+            if !matches!(held, Ok(CallResult::Success(()))) {
+                warn!(%registration_id, "a subscriber did not confirm holding: {held:?}");
+            }
+        }
+        let _ = state
+            .session_mgr
+            .send_message(BrokerMessage::SessionHeld { registration_id });
+    }
+
+    /// Takes what the sessions held for this session's identity have kept on `topic`, oldest
+    /// session first, ending those subscribers.
+    async fn claim_held(
+        state: &SubscriberManagerState,
+        registration_id: &str,
+        topic: &str,
+    ) -> Vec<(Arc<Vec<u8>>, Option<String>)> {
+        let held_sessions = match state
+            .session_mgr
+            .call(
+                |reply_to| BrokerMessage::GetHeldSessions {
+                    registration_id: registration_id.to_string(),
+                    reply_to,
+                },
+                Some(Duration::from_secs(2)),
+            )
+            .await
+        {
+            Ok(CallResult::Success(ids)) => ids,
+            other => {
+                warn!(%registration_id, "could not learn what is held for this identity: {other:?}");
+                return Vec::new();
+            }
+        };
+        let mut claimed = Vec::new();
+        for old in held_sessions {
+            let Some(holder) = where_is(get_subscriber_name(&old, topic)) else {
+                continue;
+            };
+            match ractor::rpc::call(
+                &holder,
+                |reply| BrokerMessage::ClaimHeld { reply },
+                Some(Duration::from_millis(500)),
+            )
+            .await
+            {
+                Ok(CallResult::Success(mut messages)) => {
+                    info!(%registration_id, from = %old, %topic, count = messages.len(), "inheriting held messages");
+                    claimed.append(&mut messages);
+                }
+                other => warn!(from = %old, %topic, "could not claim held messages: {other:?}"),
+            }
+        }
+        claimed
+    }
+
     /// Removes all subscriptions for a given session
     fn forget_subscriptions(
         registration_id: String,
@@ -348,6 +424,18 @@ impl SubscriberManager {
         .await
         {
             Ok((subscriber, _)) => {
+                // What was held for this identity on this topic goes to the new session first,
+                // ahead of anything published once the subscription is attached to the topic.
+                for (payload, published_by) in
+                    Self::claim_held(state, &registration_id, &topic).await
+                {
+                    let _ = session_ref.send_message(BrokerMessage::PushMessage {
+                        payload,
+                        topic: topic.clone(),
+                        trace_ctx: None,
+                        published_by,
+                    });
+                }
                 state.subscribers.insert(subscriber_id, subscriber.clone());
                 let _ = reply.send(Ok(subscriber));
             }
@@ -506,6 +594,9 @@ pub struct SubscriberAgentState {
     session_ref: ActorRef<BrokerMessage>,
     topic: String,
     dead_letter_queue: VecDeque<(Arc<Vec<u8>>, Option<String>)>,
+    /// The session this subscription belonged to was superseded: nothing is forwarded, everything
+    /// is kept until a new session of the same identity claims it, or the broker lets it go.
+    held: bool,
 }
 
 pub struct SubscriberAgentArgs {
@@ -537,6 +628,7 @@ impl Actor for SubscriberAgent {
                 session_ref: args.session,
                 topic: topic.to_string(),
                 dead_letter_queue: VecDeque::new(),
+                held: false,
             })
         } else {
             Err(ActorProcessingErr::from(format!(
@@ -601,6 +693,16 @@ impl Actor for SubscriberAgent {
                 self.handle_push_message_failed(myself.clone(), state, payload, published_by)
                     .await?;
             }
+            BrokerMessage::HoldSubscription { reply } => {
+                state.held = true;
+                let _ = reply.send(());
+            }
+            BrokerMessage::ClaimHeld { reply } => {
+                let held: Vec<_> = state.dead_letter_queue.drain(..).collect();
+                debug!(topic = %state.topic, count = held.len(), "handing over what was held");
+                let _ = reply.send(held);
+                myself.stop(Some("CLAIMED".to_string()));
+            }
             other => warn!(?other, "{UNEXPECTED_MESSAGE_STR}"),
         }
         Ok(())
@@ -660,6 +762,10 @@ impl SubscriberAgent {
             "New message on topic: \"{topic}\", forwarding to session: {}",
             state.registration_id
         );
+        if state.held {
+            state.dead_letter_queue.push_back((payload, published_by));
+            return Ok(());
+        }
         let session = state.session_ref.clone();
         if let Err(e) = session.send_message(BrokerMessage::PushMessage {
             payload: payload.clone(),

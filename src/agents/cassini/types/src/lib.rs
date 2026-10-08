@@ -232,6 +232,31 @@ pub enum BrokerMessage {
     /// Internal: time for the session manager to end the disconnected sessions that have been
     /// kept for longer than the retention window.
     SessionExpiryTick,
+    /// Internal: a client came back as a new session, so this detached session of the same
+    /// identity can no longer be resumed. The subscriber manager has its subscribers hold what
+    /// they receive, and answers with `SessionHeld`.
+    SessionSuperseded {
+        registration_id: String,
+    },
+    /// Internal: every subscriber of the superseded session is holding; the session may stop.
+    SessionHeld {
+        registration_id: String,
+    },
+    /// Internal: which sessions of the same identity as `registration_id` are held for it, oldest
+    /// first. Answered once every takeover in progress for that identity has completed.
+    GetHeldSessions {
+        registration_id: String,
+        reply_to: ractor::RpcReplyPort<Vec<String>>,
+    },
+    /// Internal: a subscriber of a superseded session keeps what it receives instead of
+    /// forwarding it, and stays subscribed.
+    HoldSubscription {
+        reply: ractor::RpcReplyPort<()>,
+    },
+    /// Internal: a held subscriber hands over what it holds, and ends.
+    ClaimHeld {
+        reply: ractor::RpcReplyPort<Vec<(std::sync::Arc<Vec<u8>>, Option<String>)>>,
+    },
     DisconnectRequest {
         reason: DisconnectReason,
         client_id: String,

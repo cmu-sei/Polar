@@ -29,6 +29,21 @@ struct Session {
     /// When the client's connection went away without a goodbye. `None` while it is connected.
     /// A session detached for longer than the retention window is ended.
     detached_at: Option<tokio::time::Instant>,
+    /// The verified identity of the client that registered this session.
+    identity: Option<String>,
+    /// A new session of the same identity has taken over: this one cannot be resumed, and is
+    /// only waiting for its subscribers to hold, then stops.
+    superseded: bool,
+}
+
+/// What a superseded session left behind: its subscribers, holding what they receive for a new
+/// session of the same identity to claim, until the retention window after the takeover.
+struct HeldSession {
+    registration_id: String,
+    identity: String,
+    since: tokio::time::Instant,
+    /// Every subscriber of the session confirmed it is holding.
+    ready: bool,
 }
 
 pub struct SessionManagerState {
@@ -44,6 +59,10 @@ pub struct SessionManagerState {
     /// forever with no reachable cleanup path.
     subscriber_mgr: Option<ActorRef<BrokerMessage>>,
     retention: std::time::Duration,
+    /// Superseded sessions, oldest first.
+    held: Vec<HeldSession>,
+    /// Questions about an identity with a takeover still in progress, answered when it is done.
+    parked: Vec<(String, ractor::RpcReplyPort<Vec<String>>)>,
     is_shutting_down: bool,
     drain_phase_active: bool,
     drain_completion_notified: bool,
@@ -84,6 +103,8 @@ impl Actor for SessionManager {
             subscriber_mgr: None,
             sessions: HashMap::new(),
             retention: args.retention,
+            held: Vec::new(),
+            parked: Vec::new(),
             is_shutting_down: false,
             drain_phase_active: false,
             drain_completion_notified: false,
@@ -188,6 +209,27 @@ impl Actor for SessionManager {
             BrokerMessage::SessionExpiryTick => {
                 Self::end_expired_sessions(state);
             }
+            BrokerMessage::SessionHeld { registration_id } => {
+                Self::complete_takeover(state, &registration_id);
+            }
+            BrokerMessage::GetHeldSessions {
+                registration_id,
+                reply_to,
+            } => {
+                let identity = state
+                    .sessions
+                    .get(&registration_id)
+                    .and_then(|session| session.identity.clone());
+                match identity {
+                    None => {
+                        let _ = reply_to.send(Vec::new());
+                    }
+                    Some(identity) => {
+                        state.parked.push((identity, reply_to));
+                        Self::answer_parked(state);
+                    }
+                }
+            }
 
             _ => (),
         }
@@ -271,15 +313,110 @@ impl SessionManager {
         }
     }
 
-    /// Ends every session that has been without its client for longer than the retention window.
+    /// A new session of `identity` has registered: every detached session of that identity is
+    /// superseded. It can no longer be resumed; its subscribers are told to hold what they
+    /// receive, and the session stops once they all do.
+    fn supersede_detached(state: &mut SessionManagerState, identity: &str, new_id: &str) {
+        let superseded: Vec<String> = state
+            .sessions
+            .iter()
+            .filter(|(id, session)| {
+                id.as_str() != new_id
+                    && !session.superseded
+                    && session.detached_at.is_some()
+                    && session.identity.as_deref() == Some(identity)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for registration_id in superseded {
+            info!(%registration_id, %identity, new_session = %new_id, "superseded by a new session of the same identity");
+            if let Some(session) = state.sessions.get_mut(&registration_id) {
+                session.superseded = true;
+            }
+            state.held.push(HeldSession {
+                registration_id: registration_id.clone(),
+                identity: identity.to_string(),
+                since: tokio::time::Instant::now(),
+                ready: false,
+            });
+            match &state.subscriber_mgr {
+                Some(subscriber_mgr) => {
+                    let _ = subscriber_mgr
+                        .send_message(BrokerMessage::SessionSuperseded { registration_id });
+                }
+                None => warn!("SessionManager: subscriber_mgr not set, cannot hold subscriptions"),
+            }
+        }
+    }
+
+    /// The subscribers of a superseded session all hold: the session itself is no longer needed.
+    fn complete_takeover(state: &mut SessionManagerState, registration_id: &str) {
+        if let Some(held) = state
+            .held
+            .iter_mut()
+            .find(|held| held.registration_id == registration_id)
+        {
+            held.ready = true;
+        }
+        if let Some(session) = state.sessions.get(registration_id) {
+            session.agent_ref.stop(Some("SUPERSEDED".to_string()));
+        }
+        Self::answer_parked(state);
+    }
+
+    /// Answers each parked question whose identity has no takeover still in progress.
+    fn answer_parked(state: &mut SessionManagerState) {
+        let parked = std::mem::take(&mut state.parked);
+        for (identity, reply_to) in parked {
+            let in_progress = state
+                .held
+                .iter()
+                .any(|held| held.identity == identity && !held.ready);
+            if in_progress {
+                state.parked.push((identity, reply_to));
+            } else {
+                let ids = state
+                    .held
+                    .iter()
+                    .filter(|held| held.identity == identity)
+                    .map(|held| held.registration_id.clone())
+                    .collect();
+                let _ = reply_to.send(ids);
+            }
+        }
+    }
+
+    /// Ends every session that has been without its client for longer than the retention window,
+    /// and lets go of what superseded sessions held once their window has passed.
     fn end_expired_sessions(state: &mut SessionManagerState) {
+        let lapsed: Vec<String> = state
+            .held
+            .iter()
+            .filter(|held| held.ready && held.since.elapsed() >= state.retention)
+            .map(|held| held.registration_id.clone())
+            .collect();
+        for registration_id in lapsed {
+            info!(%registration_id, "retention window passed, letting go of what was held");
+            state
+                .held
+                .retain(|held| held.registration_id != registration_id);
+            if let Some(subscriber_mgr) = &state.subscriber_mgr {
+                let _ = subscriber_mgr.send_message(BrokerMessage::DisconnectRequest {
+                    client_id: "retention".to_string(),
+                    registration_id: Some(registration_id),
+                    reason: DisconnectReason::RemoteClosed,
+                    trace_ctx: None,
+                });
+            }
+        }
         let expired: Vec<String> = state
             .sessions
             .iter()
             .filter(|(_, session)| {
-                session
-                    .detached_at
-                    .is_some_and(|since| since.elapsed() >= state.retention)
+                !session.superseded
+                    && session
+                        .detached_at
+                        .is_some_and(|since| since.elapsed() >= state.retention)
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -387,7 +524,7 @@ impl SessionManager {
         registration_id: Option<String>,
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
-        _peer_identity: Option<String>,
+        peer_identity: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
         let span =
             trace_span!("session_manager.registration_request", %client_id, ?registration_id);
@@ -418,7 +555,11 @@ impl SessionManager {
 
         // Try to reuse an existing session
         if let Some(existing_id) = &registration_id {
-            if let Some(session) = state.sessions.get_mut(existing_id) {
+            if let Some(session) = state
+                .sessions
+                .get_mut(existing_id)
+                .filter(|session| !session.superseded)
+            {
                 info!(registration_id = %existing_id, "reusing existing session");
                 session.detached_at = None;
                 if let Err(e) = session
@@ -484,8 +625,13 @@ impl SessionManager {
                         agent_ref: session_agent.clone(),
                         pending_publishes: 0,
                         detached_at: None,
+                        identity: peer_identity.clone(),
+                        superseded: false,
                     },
                 );
+                if let Some(identity) = &peer_identity {
+                    Self::supersede_detached(state, identity, &new_id);
+                }
                 // Pass broker ref to the session agent
                 let _ = session_agent.send_message(BrokerMessage::SetBrokerRef {
                     broker: state.broker.clone(),
