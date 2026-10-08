@@ -32,6 +32,7 @@
 #![deny(clippy::disallowed_methods)]
 
 mod environment;
+mod goodbye;
 mod handle;
 
 use std::str::FromStr;
@@ -402,6 +403,12 @@ async fn ensure_escrow_bootstrapped(own_identity: &str, escrow: &environment::Es
                 {
                     // Not fatal: without a number the workload retrieves the key itself.
                     tracing::warn!("{e}; the workload will hold the key itself");
+                }
+                // Leave the broker properly so it ends this session now, rather than keeping it
+                // for the workload's identity to find. The crypto actor is left running: the key
+                // it holds must outlive init.
+                if !goodbye::say_goodbye(&tcp_client, std::time::Duration::from_secs(2)).await {
+                    tracing::warn!("could not confirm the goodbye to the broker");
                 }
                 return;
             }
