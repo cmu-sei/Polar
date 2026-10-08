@@ -193,11 +193,11 @@ credentials agent's volume and the databases.
    memory, bounded, while the transport is down, and honouring `OfflineBehavior` (`Fail` and `Drop`
    by the facade's connection state, `Queue` by the buffer). Messages already in flight when a
    connection dies are still lost until step 2.
-1b. The broker: detect a dead connection (keepalive and/or a ping, and a real idle limit, since
-   `BrokerConfig::session_timeout` is read nowhere), and keep a disconnected session, with its
-   subscriptions and undelivered messages, for `R` instead of removing it at once, so a reconnect can
-   resume it. Today the session manager removes a session the moment a disconnect is detected, and a
-   half-open connection is never detected.
+1b. The broker. Dead-connection detection is done (keepalive and a user timeout on both ends). What is left is what the
+   end-to-end harness found: a disconnect never reaches the session manager, so a disconnected session and
+   its subscriptions are never removed, and a message published while a subscriber is away is lost. The
+   work is to route the disconnect (a clean goodbye removes the session at once), detach a session that
+   vanished for `R`, hold the messages for it meanwhile, and remove it at `R`.
 2. The outbox with an in-memory queue, and the acknowledgement path, using a message id added to the
    existing ack.
 3. The offline file: quiesce on trouble, rehydrate on start, replay.

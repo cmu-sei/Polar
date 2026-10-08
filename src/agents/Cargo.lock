@@ -867,6 +867,7 @@ name = "cassini-broker"
 version = "1.0.0"
 dependencies = [
  "async-trait",
+ "cassini-client",
  "cassini-tracing",
  "cassini-types",
  "opentelemetry",
@@ -876,8 +877,10 @@ dependencies = [
  "polar-health",
  "proptest",
  "ractor",
+ "rcgen",
  "rkyv",
  "rustls",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-util",
