@@ -68,6 +68,23 @@ def main [] {
         "a single object that is not a job has no jobs": {
             assert equal (jobs_in { kind: "Deployment", metadata: { name: "d", namespace: "polar" } }) []
         }
+        "a pod that is ready but being deleted does not count as ready": {
+            let old = { metadata: { deletionTimestamp: "2026-10-08T00:00:00Z" }, status: { phase: "Running", containerStatuses: [{ ready: true }] } }
+            assert (not (any_pod_ready [$old]))
+        }
+        "a ready pod beside a deleted one counts": {
+            let old = { metadata: { deletionTimestamp: "2026-10-08T00:00:00Z" }, status: { phase: "Running", containerStatuses: [{ ready: true }] } }
+            let new = { metadata: {}, status: { phase: "Running", containerStatuses: [{ ready: true }] } }
+            assert (any_pod_ready [$old $new])
+        }
+        "a running pod with a container that is not ready does not count": {
+            let p = { metadata: {}, status: { phase: "Running", containerStatuses: [{ ready: true } { ready: false }] } }
+            assert (not (any_pod_ready [$p]))
+        }
+        "a pod still initialising does not count": {
+            let p = { metadata: {}, status: { phase: "Pending" } }
+            assert (not (any_pod_ready [$p]))
+        }
         "cassini is waited on before anything after it is applied": {
             let gate = (gate_after "cassini.yaml")
             assert ($gate != null)

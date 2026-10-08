@@ -62,3 +62,16 @@ export def job_verdict [diff_exit: int, jobs: list, rebuilt: bool = false] {
         { restart: true, reason: $"unchanged, but not ready: ($unwell | str join ', ')" }
     }
 }
+
+# Whether any pod in `items` (the `items` of `kubectl get pods -o json`) is Running with every
+# container ready. A pod that is being deleted does not count: it still reports ready until it
+# is gone, and a wait that counted the old broker would let the clients start before the new one.
+export def any_pod_ready [items: list] {
+    $items | any {|p|
+        let statuses = ($p.status?.containerStatuses? | default [])
+        let leaving = (($p.metadata?.deletionTimestamp? | default null) != null)
+        let running = (($p.status?.phase? | default "") == "Running")
+        let all_ready = ($statuses | is-not-empty) and ($statuses | all {|c| $c.ready })
+        (not $leaving) and $running and $all_ready
+    }
+}

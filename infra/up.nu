@@ -31,7 +31,7 @@ const POLAR = "polar"
 const GRAPH = "polar-graph"
 
 use images.nu
-use apply.nu [gate_after, job_verdict, jobs_in]
+use apply.nu [any_pod_ready, gate_after, job_verdict, jobs_in]
 
 def note [msg: string] { print $"  -- ($msg)" }
 def ok [msg: string] { print $"  ok: ($msg)" }
@@ -102,15 +102,12 @@ def apply_file [output_dir: string, filename: string, rebuilt: bool = false] {
     if $env.LAST_EXIT_CODE != 0 { fail $"kubectl apply failed for ($filename)" }
 }
 
-# True when at least one pod matching the selector is Running with every
-# container ready.
+# True when at least one pod matching the selector is Running with every container ready, and
+# not on its way out.
 def pod_ready [ns: string, selector: string] {
     let r = (do { ^kubectl -n $ns get pods -l $selector -o json } | complete)
     if $r.exit_code != 0 { return false }
-    $r.stdout | from json | get items | any {|p|
-        let statuses = ($p.status.containerStatuses? | default [])
-        ($p.status.phase == "Running") and ($statuses | is-not-empty) and ($statuses | all {|c| $c.ready })
-    }
+    any_pod_ready ($r.stdout | from json | get items)
 }
 
 def wait_pods [waits: list, timeout: duration] {
