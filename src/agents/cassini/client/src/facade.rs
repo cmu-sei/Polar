@@ -11,7 +11,7 @@
 //! registers, so a publish made during a reconnect is no longer dropped with a warning.
 //!
 //! It deliberately reuses two existing messages, so the public protocol does not change:
-//! `ClientRegistered(id)` is how the facade learns the transport registered (the transport reports
+//! `ClientRegistered(id)` is how the facade learns the transport registered, and which session it has (the transport reports
 //! `ClientEvent::Registered` through its delivery, which the facade observes), and `Reconnect` means
 //! "bring a transport up if there is none".
 //!
@@ -156,8 +156,10 @@ impl TcpClientFacade {
                 &state.args.transport_name,
                 TcpClientArgs {
                     config: state.args.config.clone(),
-                    // Fresh each time, as the supervisor's respawn did before this split.
-                    registration_id: None,
+                    // Ask for the session this client last had. The broker keeps one whose client
+                    // went away for a while, with what was held for it, and the transport takes
+                    // whichever session it is given if that one is gone.
+                    registration_id: state.registration_id.clone(),
                     delivery: state.delivery.clone(),
                 },
                 myself.get_cell(),
@@ -629,8 +631,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_fresh_registration_is_asked_for_on_every_replacement() {
-        // As before this split, a replacement transport registers fresh rather than resuming.
+    async fn a_replacement_asks_to_resume_the_last_session() {
+        // The broker keeps a session whose client went away for a while, with what was held for
+        // it, so the replacement asks for that session, and gets it back if it still exists.
         let rig = rig(10).await;
         registered(&rig, "reg-1");
         settle().await;
@@ -638,7 +641,40 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1100)).await;
         assert_eq!(
             *rig.spawner.registration_ids_asked_for.lock().unwrap(),
-            vec![None, None]
+            vec![None, Some("reg-1".to_string())],
+            "the first transport has no session to resume; the replacement does"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_session_asked_for_is_the_latest_the_broker_gave() {
+        let rig = rig(10).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        rig.spawner.latest().0.kill();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        // The broker had lost it and gave a new one: that is the one to ask for next.
+        registered(&rig, "reg-2");
+        settle().await;
+        rig.spawner.latest().0.kill();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert_eq!(
+            rig.spawner.registration_ids_asked_for.lock().unwrap().last(),
+            Some(&Some("reg-2".to_string()))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replacement_that_never_registered_keeps_asking_for_the_last_session() {
+        let rig = rig(10).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        // Two deaths with no registration in between.
+        rig.spawner.latest().0.kill();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        rig.spawner.latest().0.kill();
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        let asked = rig.spawner.registration_ids_asked_for.lock().unwrap().clone();
+        assert_eq!(asked.last(), Some(&Some("reg-1".to_string())));
     }
 }

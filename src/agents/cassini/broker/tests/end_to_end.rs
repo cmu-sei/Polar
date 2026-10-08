@@ -1,7 +1,7 @@
 //! The broker end to end: a real broker and real clients over mutual TLS.
 mod support;
 use std::time::Duration;
-use support::{TestClient, pause, with_broker, with_broker_retaining};
+use support::{FacadeClient, TestClient, pause, with_broker, with_broker_retaining};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_published_message_reaches_a_subscriber() {
@@ -158,6 +158,40 @@ async fn what_was_held_for_a_session_goes_when_the_session_does() {
         assert!(
             newcomer.received("news").is_empty(),
             "a different identity does not inherit it, and the holder has expired"
+        );
+    })
+    .await;
+}
+
+// -- the client that the agents use ------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_loses_its_connection_comes_back_to_its_session_and_what_it_missed() {
+    with_broker(|broker| async move {
+        let agent = FacadeClient::connect(&broker, "agent.test").await;
+        let session = agent.client.registration_id().unwrap();
+        agent.client.subscribe("news");
+        pause().await;
+
+        agent.lose_the_connection().await;
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        publisher.publish("news", b"while the connection was down");
+
+        // The front brings its own connection back, asking for the session it had.
+        agent
+            .client
+            .wait_for("a second registration", std::time::Duration::from_secs(10), |_| {
+                agent.registrations().len() >= 2
+            })
+            .await;
+        assert_eq!(
+            agent.registrations(),
+            [session.clone(), session],
+            "the same session, resumed"
+        );
+        assert_eq!(
+            agent.client.wait_for_messages("news", 1).await,
+            [b"while the connection was down".to_vec()]
         );
     })
     .await;

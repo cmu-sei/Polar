@@ -6,6 +6,9 @@
 #![allow(dead_code)]
 
 use cassini_broker::broker::{Broker, BrokerArgs};
+use cassini_client::facade::{
+    Backoff, DEFAULT_OFFLINE_BUFFER, FacadeArgs, TcpClientFacade, TlsTransportSpawner,
+};
 use cassini_client::{
     DeliveryMode, TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage,
 };
@@ -371,6 +374,92 @@ impl TestClient {
         )
         .await;
         self.received(topic)
+    }
+}
+
+/// A client held by the stable front the agents use, which brings its connection back by itself.
+pub struct FacadeClient {
+    pub client: TestClient,
+    transport_name: String,
+}
+
+impl FacadeClient {
+    pub async fn connect(broker: &TestBroker, identity: &str) -> Self {
+        let (cert, key) = broker.pki.client(identity);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let port = Arc::new(OutputPort::default());
+        let (collector, _) = Actor::spawn(
+            None,
+            Collector {
+                events: events.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        port.subscribe(collector, Some);
+        let transport_name = format!("transport-{}", uuid::Uuid::new_v4());
+        let (facade, _) = Actor::spawn(
+            None,
+            TcpClientFacade,
+            FacadeArgs {
+                config: TCPClientConfig::from_values(
+                    broker.addr.clone(),
+                    "localhost".to_string(),
+                    broker.pki.ca().to_string_lossy().into_owned(),
+                    cert.to_string_lossy().into_owned(),
+                    key.to_string_lossy().into_owned(),
+                ),
+                delivery: DeliveryMode::Broadcast(port),
+                transport_name: transport_name.clone(),
+                spawner: Arc::new(TlsTransportSpawner),
+                online: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                buffer_limit: DEFAULT_OFFLINE_BUFFER,
+                backoff: Backoff {
+                    first: Duration::from_millis(200),
+                    last: Duration::from_secs(1),
+                },
+            },
+        )
+        .await
+        .expect("the client starts");
+        let client = TestClient {
+            transport: facade,
+            events,
+        };
+        client
+            .wait_for("a registration", Duration::from_secs(10), |c| {
+                c.registration_id().is_some()
+            })
+            .await;
+        Self {
+            client,
+            transport_name,
+        }
+    }
+
+    /// The connection drops (the transport stops and its socket closes); the front stays up.
+    pub async fn lose_the_connection(&self) {
+        let transport = ractor::registry::where_is(self.transport_name.clone())
+            .expect("a transport is running");
+        ActorRef::<TcpClientMessage>::from(transport)
+            .stop_and_wait(None, Some(Duration::from_secs(5)))
+            .await
+            .ok();
+    }
+
+    /// How many times the broker has registered this client, counting a resume.
+    pub fn registrations(&self) -> Vec<String> {
+        self.client
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                ClientEvent::Registered { registration_id } => Some(registration_id.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }
 
