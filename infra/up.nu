@@ -31,6 +31,7 @@ const POLAR = "polar"
 const GRAPH = "polar-graph"
 
 use images.nu
+use apply.nu [gate_after, job_verdict, jobs_in]
 
 def note [msg: string] { print $"  -- ($msg)" }
 def ok [msg: string] { print $"  ok: ($msg)" }
@@ -64,18 +65,36 @@ def cmd_ok [] {
     $r.exit_code == 0
 }
 
-# kubectl apply, deleting first when the manifest holds a Job (their pod
-# templates are immutable).
-def apply_file [output_dir: string, filename: string] {
+# kubectl apply, deleting first when the manifest holds a Job (their pod templates are
+# immutable). A manifest whose Jobs are unchanged and ready is left alone, unless the images
+# were just rebuilt: a re-run should not restart what is already running, since that drops
+# every session its peers hold (decided by apply.nu's job_verdict).
+def apply_file [output_dir: string, filename: string, rebuilt: bool = false] {
     let manifest = ($output_dir | path join $filename)
     if not ($manifest | path exists) {
         note $"skipping ($filename), not found"
         return
     }
-    print $"  applying ($filename)..."
     let has_job = (open --raw $manifest
         | find --regex r#'(?m)^\s*["']?kind["']?\s*:\s*["']?Job["']?\s*,?\s*$'#
         | is-not-empty)
+    if $has_job {
+        let diff = (do { ^kubectl diff -f $manifest } | complete)
+        let jobs = if $diff.exit_code == 0 {
+            let got = (do { ^kubectl get -f $manifest -o json } | complete)
+            if $got.exit_code == 0 {
+                jobs_in ($got.stdout | from json)
+                | each {|j| $j | insert ready (pod_ready $j.ns $"job-name=($j.name)") }
+            } else { [] }
+        } else { [] }
+        let verdict = (job_verdict $diff.exit_code $jobs $rebuilt)
+        if not $verdict.restart {
+            ok $"($filename): left running, ($verdict.reason)"
+            return
+        }
+        note $"($filename): restarting its Jobs, ($verdict.reason)"
+    }
+    print $"  applying ($filename)..."
     if $has_job {
         ^kubectl delete --ignore-not-found -f $manifest
     }
@@ -153,7 +172,7 @@ def build_plan [config: record, dev: bool] {
     ]
 }
 
-def print_plan [target: string, plan: list] {
+def print_plan [target: string, plan: list, dev: bool] {
     print $"=== Plan for target ($target) ==="
     for s in $plan {
         if $s.on {
@@ -162,6 +181,13 @@ def print_plan [target: string, plan: list] {
             print $"  skip  ($s.title): ($s.why)"
         }
     }
+    if $dev {
+        print "  note  --dev rebuilds the images, which keep their tags, so every Job is restarted"
+    } else {
+        print "  note  a Job whose manifest is unchanged and whose pods are ready is left running;"
+        print "        the others are restarted. Which, is decided and printed as each manifest is applied."
+    }
+    print "  note  cassini is applied first of the agents and waited on before anything after it"
 }
 
 # What each deployed service needs to be waited on.
@@ -238,7 +264,7 @@ def step_ca [] {
     }
 }
 
-def step_infra [config: record] {
+def step_infra [config: record, rebuilt: bool] {
     let output_dir = $config.output_dir
     let secrets_script = ($config.target_dir | path join "secrets.nu")
     if ($secrets_script | path exists) {
@@ -247,7 +273,14 @@ def step_infra [config: record] {
         if $env.LAST_EXIT_CODE != 0 { fail "secrets.nu failed" }
     }
     for filename in ($config.apply_order | skip 1) {
-        apply_file $output_dir $filename
+        apply_file $output_dir $filename $rebuilt
+        # What the next manifests connect to must be up before they start: a client that comes
+        # up first attaches to a broker that is about to go away, and loses it.
+        let gate = (gate_after $filename)
+        if $gate != null and ($output_dir | path join $filename | path exists) {
+            print $"  waiting for ($gate.label) before applying what follows..."
+            wait_pods [{ kind: "pods", ns: $gate.ns, ref: $gate.ref, label: $gate.label }] 5min
+        }
     }
     ok "manifests applied"
 }
@@ -324,7 +357,7 @@ def main [
     let enabled = ($plan | where on)
     let waits = (build_waits $config)
     let forwards = (build_forwards $config)
-    print_plan $target $plan
+    print_plan $target $plan $dev
 
     # Ask for what the plan needs up front, so nothing prompts mid-run.
     let needs_admin = ($enabled | any {|s| $s.id == "admin" })
@@ -342,7 +375,7 @@ def main [
             "images" => { step_images $config }
             "namespaces" => { apply_file $config.output_dir "namespaces.yaml" }
             "ca" => { step_ca }
-            "infra" => { step_infra $config }
+            "infra" => { step_infra $config $dev }
             "pods" => { wait_pods $waits 10min }
             "forwards" => { step_forwards $forwards }
             "admin" => { step_admin $username $mail }
