@@ -129,13 +129,14 @@ matter, handled by mTLS and, for configuration, by signed monotonic versions.
 
 ## 5a. Retention, migration and durability (David, 2026-10-08)
 
-**One retention number.** The broker discards a disconnected session, and what was queued for it,
-after `R`. Everything else is derived from `R` and nothing is unbounded:
+**One retention number, `R` = 10 minutes** (decided 2026-10-08; it is roughly what the resources for
+running a broker at full tilt allow). The broker discards a disconnected session, and what was queued
+for it, after `R`. Everything else is derived from `R` and nothing is unbounded:
 
 - the broker's per-topic queue age (hard-coded today to about three minutes in `topic.rs`) is at most `R`;
 - a client's outbox entry older than `R` is dropped, with an event and a log line, instead of being
   retransmitted: the system has already forgotten what it was part of;
-- a subscriber remembers origins for at least `2R` plus a margin, so a retransmit that is as old as
+- a subscriber remembers origins for at least `2R` (20 minutes) plus a margin, so a retransmit that is as old as
   the outbox allows, arriving after a broker delay as long as the queue allows, is still recognised
   as a repeat.
 
@@ -166,23 +167,32 @@ budget, and the deployment must provide it:
   that outlives the pod, as the credentials agent's ledger is. Two pods never hold it at once,
   because Jobs wait for the old pod to be gone.
 
+**Decided (David, 2026-10-08):** `R` is 10 minutes; the two storage tiers are Ephemeral for observers
+and Durable for consumers; graph writes are almost entirely MERGE-style, so a repeated delivery is
+safe for them, and the exceptions are an audit item. The dev cluster provides the Durable tier: the
+`managed-csi` storage class (local-path, `ReadWriteOnce`, bound on first use) already backs the
+credentials agent's volume and the databases.
+
 ## 6. Open decisions
 
-1. **Where duplicates are removed:** at every hop by the origin tuple (section 4), or only
-   client-to-broker first.
-2. **The storage tiers** of section 5a: whether the split is observers and consumers, how the
-   code declares it, and how the catalog provisions the volume.
-3. **The retention number `R`**, and whether the broker's sessions and queues persist across a
-   restart (assumed not: the broker is best-effort).
-4. **Bounds.** The outbox needs a size limit and a rule when it is full. `OfflineBehavior` becomes the
+1. **Where duplicates are removed:** at every hop by the origin `(publisher identity, epoch, seq)`
+   (section 4, assumed), or only client-to-broker first.
+2. **Whether the broker's sessions and queues persist across a restart** (assumed not: the broker is
+   best-effort and `R` bounds what it holds).
+3. **Bounds.** The outbox needs a size limit and a rule when it is full. `OfflineBehavior` becomes the
    caller's statement of that rule: `Queue` (wait for the connection), `Fail` (error now), `Drop`
    (best-effort).
-5. **Receipts.** Whether a publisher can ask to be told its message was acknowledged.
+4. **Receipts.** Whether a publisher can ask to be told its message was acknowledged.
 
 ## 7. Build order
 
-1. Facade and transport split, no behaviour change: the facade owns the mailbox and the
-   transport's respawn, and the domain supervisors drop `InfrastructureRespawned`.
+1. Facade and transport split: the facade owns the mailbox and the transport's respawn (with backoff),
+   and the domain supervisors drop `InfrastructureRespawned`. A facade that is always alive would turn
+   today's errors on a dead client into silent drops, so this step includes buffering publishes in
+   memory, bounded, while the transport is down, and honouring `OfflineBehavior` (`Fail` and `Drop`
+   by the facade's connection state, `Queue` by the buffer). Messages already in flight when a
+   connection dies are still lost until step 2.
+1b. The broker's session expiry at `R`.
 2. The outbox with an in-memory queue, and the acknowledgement path, using a message id added to the
    existing ack.
 3. The offline file: quiesce on trouble, rehydrate on start, replay.
