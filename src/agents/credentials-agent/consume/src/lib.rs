@@ -21,6 +21,7 @@
    DM24-0470
 */
 
+pub mod activity;
 pub mod state;
 pub mod supervisor;
 pub mod ledger;

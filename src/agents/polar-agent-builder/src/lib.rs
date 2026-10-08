@@ -348,7 +348,12 @@ pub(crate) fn build_lifecycle_handler<M: ractor::Message>(
     map_lifecycle_event: Box<dyn Fn(ClientEvent) -> Option<M> + Send + Sync>,
 ) -> impl Fn(ClientEvent) -> Option<M> {
     move |event: ClientEvent| -> Option<M> {
-        if let ClientEvent::Registered { .. } = &event {
+        if let ClientEvent::Registered { registration_id } = &event {
+            tracing::info!(
+                %registration_id,
+                topics = subscribed_topics.len(),
+                "AgentBuilder: registered with Cassini, subscribing to every request topic"
+            );
             // The real, live TcpClientActor genuinely, necessarily
             // already exists by the time Registered fires -- it's
             // the very actor that produced this event -- so a
@@ -372,11 +377,14 @@ pub(crate) fn build_lifecycle_handler<M: ractor::Message>(
                 // credentials-agent's own dispatch_store_secret_request).
                 let tcp_client_ref: ActorRef<TcpClientMessage> = tcp_client_cell.into();
                 for topic in &subscribed_topics {
-                    if let Err(e) = tcp_client_ref.send_message(TcpClientMessage::Subscribe {
+                    match tcp_client_ref.send_message(TcpClientMessage::Subscribe {
                         topic: topic.clone(),
                         trace_ctx: None,
                     }) {
-                        tracing::error!("AgentBuilder: failed to subscribe to {topic}: {e}");
+                        Ok(()) => tracing::info!("AgentBuilder: subscribing to {topic}"),
+                        Err(e) => {
+                            tracing::error!("AgentBuilder: failed to subscribe to {topic}: {e}")
+                        }
                     }
                 }
             } else {

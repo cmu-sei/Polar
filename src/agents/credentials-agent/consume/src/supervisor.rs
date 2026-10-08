@@ -201,7 +201,12 @@ pub enum ConsumerSupervisorMessage {
     PrepareShutdown,
     /// The drain window has elapsed.
     DrainElapsed,
+    /// Time to say how many requests have arrived since the last time.
+    ReportActivity,
 }
+
+/// How often the consumer says how many requests it has seen.
+const ACTIVITY_REPORT_EVERY: Duration = Duration::from_secs(60);
 
 pub struct ConsumerSupervisor;
 
@@ -222,6 +227,8 @@ pub struct ConsumerSupervisorState {
     /// Answered with `ProceedWithShutdown` once this agent's own children are
     /// down.
     infrastructure: ActorRef<InfrastructureSupervisorMessage>,
+    /// Requests seen, reported periodically so that silence can be told from idleness.
+    activity: crate::activity::Activity,
     draining: bool,
     /// The drain was started by `PrepareShutdown` (as opposed to a failure),
     /// so it ends by releasing the infrastructure and not by exiting.
@@ -955,12 +962,17 @@ impl Actor for ConsumerSupervisor {
                 }
             });
 
+        drop(myself.send_interval(ACTIVITY_REPORT_EVERY, || {
+            ConsumerSupervisorMessage::ReportActivity
+        }));
+
         Ok(ConsumerSupervisorState {
             projection_actor,
             ledger,
             healthcheck: resources.healthcheck,
             broker_client: resources.tcp_client,
             infrastructure: resources.infrastructure,
+            activity: crate::activity::Activity::new(),
             draining: false,
             rejuvenating: false,
         })
@@ -992,6 +1004,11 @@ impl Actor for ConsumerSupervisor {
                     Self::unsubscribe_from_topics(&state.broker_client);
                     Self::schedule_drain_end(&myself);
                 }
+            }
+
+            ConsumerSupervisorMessage::ReportActivity => {
+                let report = state.activity.take_report(std::time::Instant::now());
+                info!("CONSUMER_SUPERVISOR: {report}");
             }
 
             ConsumerSupervisorMessage::DrainElapsed => {
@@ -1057,10 +1074,15 @@ impl Actor for ConsumerSupervisor {
             }
 
             ConsumerSupervisorMessage::ClientEvent { event } => match event {
-                ClientEvent::Registered { .. } => {
+                ClientEvent::Registered { registration_id } => {
                     // The builder has already (re)subscribed to every request
                     // topic; this is only the health signal. No graph signal:
                     // this agent's health never depends on graph availability.
+                    info!(
+                        %registration_id,
+                        topics = REQUEST_TOPICS.len(),
+                        "CONSUMER_SUPERVISOR: registered; the builder subscribes to every request topic"
+                    );
                     let _ = state.healthcheck.cassini_connected();
                 }
                 ClientEvent::MessagePublished {
@@ -1069,6 +1091,14 @@ impl Actor for ConsumerSupervisor {
                     published_by,
                     ..
                 } => {
+                    state.activity.record(&topic, std::time::Instant::now());
+                    info!(
+                        %topic,
+                        bytes = payload.len(),
+                        requester = published_by.as_deref().unwrap_or("unverified"),
+                        draining = state.draining,
+                        "CONSUMER_SUPERVISOR: request received"
+                    );
                     if state.draining {
                         warn!(
                             "CONSUMER_SUPERVISOR: draining -- logging message on topic \

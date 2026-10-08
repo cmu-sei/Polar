@@ -276,6 +276,12 @@ impl Actor for InfrastructureSupervisor {
         let subscribed_topics: Vec<String> =
             args.subscriptions.iter().map(|s| s.topic.clone()).collect();
 
+        tracing::info!(
+            "InfrastructureSupervisor: expecting {} subscription(s): {}",
+            subscribed_topics.len(),
+            subscribed_topics.join(", ")
+        );
+
         for subscription in args.subscriptions {
             router
                 .send_message(polar_router::RouterMessage::Register {

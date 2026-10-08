@@ -436,6 +436,7 @@ impl SubscriberManager {
                         published_by,
                     });
                 }
+                info!(%registration_id, %topic, "subscription created");
                 state.subscribers.insert(subscriber_id, subscriber.clone());
                 let _ = reply.send(Ok(subscriber));
             }
@@ -463,6 +464,7 @@ impl SubscriberManager {
 
         let subscriber_name = format!("{registration_id}:{topic}");
         if let Some(subscriber) = state.subscribers.get(&subscriber_name) {
+            info!(%registration_id, %topic, "subscription ended by the client");
             subscriber.stop(Some("UNSUBSCRIBED".to_string()));
             // Forward acknowledgment via session manager
             if let Err(e) =
