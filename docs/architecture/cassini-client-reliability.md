@@ -127,17 +127,53 @@ matter, handled by mTLS and, for configuration, by signed monotonic versions.
 - The per-topic queue the broker holds when there are no subscribers, and sessions, are in memory
   today. Whether they persist is a separate decision (section 6).
 
+## 5a. Retention, migration and durability (David, 2026-10-08)
+
+**One retention number.** The broker discards a disconnected session, and what was queued for it,
+after `R`. Everything else is derived from `R` and nothing is unbounded:
+
+- the broker's per-topic queue age (hard-coded today to about three minutes in `topic.rs`) is at most `R`;
+- a client's outbox entry older than `R` is dropped, with an event and a log line, instead of being
+  retransmitted: the system has already forgotten what it was part of;
+- a subscriber remembers origins for at least `2R` plus a margin, so a retransmit that is as old as
+  the outbox allows, arriving after a broker delay as long as the queue allows, is still recognised
+  as a repeat.
+
+**Migration is keying by identity.** The broker's per-subscriber delivery outbox is keyed by the
+subscriber's identity and subscription, not by the session id. A new session from the same identity
+inherits the deliveries the old one never acknowledged, which is the migration, and they expire after
+`R`. This needs one instance per identity, which the catalog already has (one pod per Job, and
+`podReplacementPolicy: Failed` guarantees no overlap).
+
+**What the client sends is not tied to a session either.** An outbox entry holds topic, payload,
+epoch and seq; the registration id is attached when it is transmitted, so after losing the session
+the facade retransmits everything unacknowledged under the new one.
+
+**Consumers acknowledge a delivery after the work, not after the hand-off.** Today the plan above has
+the facade acknowledge a delivery to the broker once it has handed it to the router. For a consumer
+that is too early: the message has not yet landed on the graph. So the delivery ack is deferred to
+the domain: the facade acknowledges when the domain actor reports the message processed (after the
+graph write), and until then the broker holds the delivery in the subscriber's outbox, where a
+restarted consumer's new session inherits it. That makes processing at-least-once, so the handlers
+must tolerate a repeat (graph writes keyed so that doing one twice is the same as once).
+
+**Storage tiers.** The code declares how much it needs, as it does for capabilities and the shutdown
+budget, and the deployment must provide it:
+
+- `Ephemeral` (observers): the outbox file is on an `emptyDir`, and the drain flushes within the
+  budget. A hard-killed pod loses what was unsent.
+- `Durable` (consumers, and anything whose unsent messages matter): the file is on a small volume
+  that outlives the pod, as the credentials agent's ledger is. Two pods never hold it at once,
+  because Jobs wait for the old pod to be gone.
+
 ## 6. Open decisions
 
 1. **Where duplicates are removed:** at every hop by the origin tuple (section 4), or only
    client-to-broker first.
-2. **Where the outbox file lives.** An `emptyDir` survives a container restart but not the pod
-   replacement that every rejuvenation is, so unsent messages left at pod end would be lost. Either
-   the drain flushes the outbox within the shutdown budget (and leftovers are accepted as lost when
-   the pod is killed hard), or the file lives on a volume that outlives the pod, as the credentials
-   agent's ledger already does.
-3. **Broker persistence** of sessions and topic queues. Without it a broker restart still loses
-   whatever it held.
+2. **The storage tiers** of section 5a: whether the split is observers and consumers, how the
+   code declares it, and how the catalog provisions the volume.
+3. **The retention number `R`**, and whether the broker's sessions and queues persist across a
+   restart (assumed not: the broker is best-effort).
 4. **Bounds.** The outbox needs a size limit and a rule when it is full. `OfflineBehavior` becomes the
    caller's statement of that rule: `Queue` (wait for the connection), `Fail` (error now), `Drop`
    (best-effort).
