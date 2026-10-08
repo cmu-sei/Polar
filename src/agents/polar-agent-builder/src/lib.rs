@@ -32,6 +32,7 @@ pub use infrastructure::{
 };
 pub mod message;
 pub use message::{Encrypted, Outbound, Plaintext};
+pub mod selftest;
 pub mod shutdown;
 pub(crate) mod startup;
 pub use shutdown::{DEFAULT_SHUTDOWN_BUDGET, SHUTDOWN_BUDGET_ENV};
@@ -118,6 +119,7 @@ pub struct AgentBuilder<M: ractor::Message> {
     requires: Vec<Capability>,
     map_lifecycle_event: Option<Box<dyn Fn(ClientEvent) -> Option<M> + Send + Sync>>,
     wants_crypto: bool,
+    self_test: bool,
     shutdown_budget: Option<std::time::Duration>,
     environment: Vec<&'static polar_env::Section>,
 }
@@ -131,6 +133,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
             requires: Vec::new(),
             map_lifecycle_event: None,
             wants_crypto: false,
+            self_test: false,
             shutdown_budget: None,
             environment: Vec::new(),
         }
@@ -190,6 +193,15 @@ impl<M: ractor::Message> AgentBuilder<M> {
     pub fn with_encryption(mut self) -> Self {
         self.wants_crypto = true;
         self.requires(Capability::Encryption)
+    }
+
+    /// The agent publishes probes to itself and expects to hear them: if it is registered but
+    /// no probe comes back, it reports its Cassini connection as lost, and the health check
+    /// ends it. For agents that wait on requests, whose silence would otherwise look like
+    /// having nothing to do. See `selftest`.
+    pub fn with_self_test(mut self) -> Self {
+        self.self_test = true;
+        self
     }
 
     pub fn with_subscription(mut self, subscription: Subscription) -> Self {
@@ -299,6 +311,7 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
                 config: startup.config,
                 subscriptions: this.subscriptions,
                 wants_crypto: this.wants_crypto,
+                self_test: this.self_test,
                 shutdown_budget: startup.shutdown_budget,
                 listen_for_signals: true,
                 process_exit: shutdown::real_process_exit(),

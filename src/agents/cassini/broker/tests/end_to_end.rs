@@ -227,3 +227,21 @@ async fn a_resumed_session_is_announced_to_the_client_once() {
     })
     .await;
 }
+
+// -- a client that publishes to a topic it subscribes to ----------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_hears_what_it_publishes_to_a_topic_it_subscribes_to() {
+    with_broker(|broker| async move {
+        let client = TestClient::connect(&broker, "agent.test").await;
+        client.subscribe("selftest");
+        pause().await;
+        client.publish("selftest", b"probe");
+        assert_eq!(
+            client.wait_for_messages("selftest", 1).await,
+            [b"probe".to_vec()],
+            "the probe of a self-test depends on this"
+        );
+    })
+    .await;
+}

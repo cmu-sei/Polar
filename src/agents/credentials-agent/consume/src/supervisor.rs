@@ -617,6 +617,9 @@ impl Actor for ConsumerSupervisor {
         // certificates) come from POLAR_HEALTH_DEP_ENDPOINTS in the deployment.
         let mut builder = AgentBuilder::new(myself.clone(), SERVICE_NAME)
             .with_shutdown_budget(SHUTDOWN_BUDGET)
+            // A consumer that waits on requests is silent when idle and silent when deaf; the
+            // self-test is what tells them apart.
+            .with_self_test()
             .with_environment(&polar::graph::environment::SECTION)
             .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }));
         for subscription in Self::request_subscriptions(&myself) {

@@ -83,6 +83,8 @@ pub enum InfrastructureSupervisorMessage {
     /// it can be sent by anything holding AgentResources::infrastructure. If a
     /// shutdown is already under way this changes nothing.
     BeginShutdown { reason: String },
+    /// Internal: time for the self-test to look.
+    SelfTestTick,
 }
 
 /// The lifecycle callback the Cassini client is given.
@@ -135,6 +137,45 @@ pub struct InfrastructureSupervisorArgs {
     pub(crate) listen_for_signals: bool,
     pub(crate) process_exit: ProcessExit,
     pub(crate) tcp_spawner: Arc<dyn TcpClientSpawner>,
+    /// Publish probes to the agent itself and expect them back; see `selftest`.
+    pub(crate) self_test: bool,
+}
+
+/// How often the self-test looks at the clock; a probe is sent every `SELF_TEST_INTERVAL`, and
+/// the agent is judged deaf when one has gone `SELF_TEST_TIMEOUT` unanswered.
+const SELF_TEST_TICK: Duration = Duration::from_secs(5);
+const SELF_TEST_INTERVAL: Duration = Duration::from_secs(30);
+const SELF_TEST_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The topic an agent's probes travel on. Shared by every instance of the service: each tells its
+/// own probes from the others by the instance id they carry.
+fn self_test_topic(service_name: &str) -> String {
+    format!("selftest.{service_name}")
+}
+
+/// A probe is the instance id followed by its number.
+fn probe_payload(instance: &[u8; 16], number: u64) -> Vec<u8> {
+    let mut payload = instance.to_vec();
+    payload.extend_from_slice(&number.to_be_bytes());
+    payload
+}
+
+/// The number in a probe sent by `instance`, if that is what this is.
+fn probe_number(instance: &[u8; 16], payload: &[u8]) -> Option<u64> {
+    let (id, number) = payload.split_at_checked(16)?;
+    (id == instance).then_some(())?;
+    Some(u64::from_be_bytes(number.try_into().ok()?))
+}
+
+struct SelfTestState {
+    machine: crate::selftest::SelfTest,
+    instance: [u8; 16],
+    topic: String,
+    /// The highest probe number the router has delivered back.
+    heard: Arc<std::sync::atomic::AtomicU64>,
+    began: tokio::time::Instant,
+    /// Whether the Cassini client is registered, as far as its events say.
+    connected: bool,
 }
 
 pub struct InfrastructureSupervisorState {
@@ -149,6 +190,7 @@ pub struct InfrastructureSupervisorState {
     shutdown: ShutdownMachine,
     shutdown_budget: Duration,
     process_exit: ProcessExit,
+    self_test: Option<SelfTestState>,
 }
 
 pub struct InfrastructureSupervisor;
@@ -171,6 +213,50 @@ impl InfrastructureSupervisor {
         state
             .infrastructure_events
             .send(InfrastructureEvent::PrepareShutdown);
+    }
+
+    /// Looks at what has come back, then at the clock, and does what the self-test says.
+    fn self_test_tick(state: &mut InfrastructureSupervisorState) {
+        use crate::health::HealthClient;
+        use crate::selftest::Action;
+
+        let Some(test) = &mut state.self_test else {
+            return;
+        };
+        let heard = test.heard.load(std::sync::atomic::Ordering::SeqCst);
+        if heard > 0 && let Some(Action::Hearing) = test.machine.heard(heard) {
+            tracing::info!(
+                "InfrastructureSupervisor: self-test: a probe came back, the agent hears the \
+                 broker again"
+            );
+            let _ = state.healthcheck.cassini_connected();
+        }
+        for action in test.machine.tick(test.began.elapsed(), test.connected) {
+            match action {
+                Action::Probe(number) => {
+                    tracing::debug!(number, "InfrastructureSupervisor: self-test: probing");
+                    let _ = state
+                        .tcp_client
+                        .as_actor_ref()
+                        .send_message(cassini_client::TcpClientMessage::publish(
+                            test.topic.clone(),
+                            probe_payload(&test.instance, number),
+                            None,
+                        ));
+                }
+                Action::Deaf { unanswered_for } => {
+                    tracing::error!(
+                        unanswered_secs = unanswered_for.as_secs(),
+                        topic = %test.topic,
+                        "InfrastructureSupervisor: self-test: no probe has come back, the agent \
+                         is registered but cannot hear the broker; reporting the Cassini \
+                         connection as lost"
+                    );
+                    let _ = state.healthcheck.cassini_disconnected();
+                }
+                Action::Hearing => {}
+            }
+        }
     }
 
     /// The last resort: if the process is still alive when the budget runs out, the
@@ -273,8 +359,33 @@ impl Actor for InfrastructureSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
-        let subscribed_topics: Vec<String> =
-            args.subscriptions.iter().map(|s| s.topic.clone()).collect();
+        let mut subscriptions = args.subscriptions;
+        let self_test = if args.self_test {
+            let instance: [u8; 16] = rand::random();
+            let topic = self_test_topic(&args.service_name);
+            let heard = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let heard_by_router = heard.clone();
+            subscriptions.push(Subscription::new(topic.clone(), move |incoming| {
+                if let Some(number) = probe_number(&instance, &incoming.payload) {
+                    heard_by_router.fetch_max(number, std::sync::atomic::Ordering::SeqCst);
+                }
+            }));
+            drop(myself.send_interval(SELF_TEST_TICK, || {
+                InfrastructureSupervisorMessage::SelfTestTick
+            }));
+            Some(SelfTestState {
+                machine: crate::selftest::SelfTest::new(SELF_TEST_INTERVAL, SELF_TEST_TIMEOUT),
+                instance,
+                topic,
+                heard,
+                began: tokio::time::Instant::now(),
+                connected: false,
+            })
+        } else {
+            None
+        };
+
+        let subscribed_topics: Vec<String> = subscriptions.iter().map(|s| s.topic.clone()).collect();
 
         tracing::info!(
             "InfrastructureSupervisor: expecting {} subscription(s): {}",
@@ -282,7 +393,7 @@ impl Actor for InfrastructureSupervisor {
             subscribed_topics.join(", ")
         );
 
-        for subscription in args.subscriptions {
+        for subscription in subscriptions {
             router
                 .send_message(polar_router::RouterMessage::Register {
                     topic: subscription.topic,
@@ -355,6 +466,7 @@ impl Actor for InfrastructureSupervisor {
             shutdown: ShutdownMachine::new(),
             shutdown_budget: args.shutdown_budget,
             process_exit: args.process_exit,
+            self_test,
         })
     }
 
@@ -370,6 +482,20 @@ impl Actor for InfrastructureSupervisor {
                 // the client has registered; the client drops any Subscribe
                 // sent earlier. Sent on every Registered, so a reconnect
                 // restores them too.
+                match &event {
+                    ClientEvent::Registered { .. } => {
+                        if let Some(test) = &mut state.self_test {
+                            test.connected = true;
+                            test.machine.registered();
+                        }
+                    }
+                    ClientEvent::TransportError { .. } => {
+                        if let Some(test) = &mut state.self_test {
+                            test.connected = false;
+                        }
+                    }
+                    _ => {}
+                }
                 if let ClientEvent::Registered { .. } = &event {
                     if let Some(crypto) = &state.crypto {
                         if let Err(e) = crypto
@@ -397,6 +523,7 @@ impl Actor for InfrastructureSupervisor {
             InfrastructureSupervisorMessage::BeginShutdown { reason } => {
                 Self::begin_shutdown(state, reason);
             }
+            InfrastructureSupervisorMessage::SelfTestTick => Self::self_test_tick(state),
             InfrastructureSupervisorMessage::ProceedWithShutdown => {
                 if !state.shutdown.proceed() {
                     tracing::info!(
@@ -461,6 +588,9 @@ mod tests {
 
     struct FakeTcp {
         fail_on_message: bool,
+        /// If set, whatever is published comes straight back through the router, as a broker
+        /// would deliver it to a subscriber of the topic.
+        echo_to: Option<ActorRef<polar_router::RouterMessage>>,
     }
 
     #[async_trait]
@@ -480,9 +610,21 @@ mod tests {
         async fn handle(
             &self,
             _myself: ActorRef<Self::Msg>,
-            _message: Self::Msg,
+            message: Self::Msg,
             _state: &mut Self::State,
         ) -> Result<(), ActorProcessingErr> {
+            if let (Some(router), TcpClientMessage::Publish { topic, payload, .. }) =
+                (&self.echo_to, message)
+            {
+                let _ = router.send_message(polar_router::RouterMessage::Route(
+                    polar_router::IncomingMessage {
+                        topic,
+                        payload,
+                        published_by: None,
+                        trace_ctx: None,
+                    },
+                ));
+            }
             if self.fail_on_message {
                 Err(ActorProcessingErr::from("the fake client was made to fail"))
             } else {
@@ -496,6 +638,8 @@ mod tests {
         spawned: AtomicUsize,
         fail_next_spawn: AtomicBool,
         clients_fail_on_message: AtomicBool,
+        /// Clients hand what they publish back to the router.
+        clients_echo: AtomicBool,
         /// The configuration each client was started with, in order.
         configs: Mutex<Vec<TCPClientConfig>>,
     }
@@ -507,7 +651,7 @@ mod tests {
             service_name: &str,
             supervisor: ActorRef<InfrastructureSupervisorMessage>,
             _lifecycle: LifecycleHandler,
-            _router: ActorRef<polar_router::RouterMessage>,
+            router: ActorRef<polar_router::RouterMessage>,
             config: TCPClientConfig,
         ) -> Result<TcpClient, ActorProcessingErr> {
             self.configs.lock().unwrap().push(config);
@@ -521,6 +665,10 @@ mod tests {
                 Some(format!("{service_name}.tcp")),
                 FakeTcp {
                     fail_on_message: self.clients_fail_on_message.load(Ordering::SeqCst),
+                    echo_to: self
+                        .clients_echo
+                        .load(Ordering::SeqCst)
+                        .then(|| router.clone()),
                 },
                 (),
                 supervisor.get_cell(),
@@ -589,13 +737,27 @@ mod tests {
             health_env: &[(&str, &str)],
             listen_for_signals: bool,
         ) -> Self {
-            Self::build(service, budget, health_env, listen_for_signals, false).await
+            Self::build(service, budget, health_env, listen_for_signals, false, None).await
+        }
+
+        /// A rig whose agent tests itself. `echo` is whether its Cassini client hands the
+        /// probes back, as a working broker connection would.
+        async fn self_testing(service: &str, echo: bool) -> Self {
+            Self::build(
+                service,
+                Duration::from_secs(20),
+                &[],
+                false,
+                false,
+                Some(echo),
+            )
+            .await
         }
 
         /// A rig whose agent encrypts: it has a real certificate for the crypto actor to take
         /// its identity from.
         async fn with_crypto(service: &str) -> Self {
-            Self::build(service, Duration::from_secs(20), &[], false, true).await
+            Self::build(service, Duration::from_secs(20), &[], false, true, None).await
         }
 
         async fn build(
@@ -604,6 +766,7 @@ mod tests {
             health_env: &[(&str, &str)],
             listen_for_signals: bool,
             crypto: bool,
+            self_test: Option<bool>,
         ) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let certificate = dir.path().join("cert.pem");
@@ -642,6 +805,9 @@ mod tests {
             let exits = Arc::new(Mutex::new(Vec::new()));
             let recorded = exits.clone();
             let spawner = Arc::new(FakeSpawner::default());
+            if self_test == Some(true) {
+                spawner.clients_echo.store(true, Ordering::SeqCst);
+            }
 
             let (infra, done) = Actor::spawn(
                 None,
@@ -657,6 +823,7 @@ mod tests {
                     listen_for_signals,
                     process_exit: Arc::new(move |code| recorded.lock().unwrap().push(code)),
                     tcp_spawner: spawner.clone(),
+                    self_test: self_test.is_some(),
                 },
             )
             .await
@@ -688,6 +855,26 @@ mod tests {
 
         fn events(&self) -> Vec<String> {
             self.events.lock().unwrap().clone()
+        }
+
+        /// What the health actor last wrote about the agent.
+        fn health(&self) -> polar_health::HealthState {
+            let text = std::fs::read_to_string(self._dir.path().join("health.json"))
+                .expect("a health file");
+            serde_json::from_str(&text).expect("a health file that parses")
+        }
+
+        /// The agent registers, as its Cassini client reports it.
+        async fn registered(&self) {
+            use crate::health::HealthClient;
+            self.resources.healthcheck.cassini_connected().unwrap();
+            self.infra
+                .cast(InfrastructureSupervisorMessage::ClientEvent(
+                    ClientEvent::Registered {
+                        registration_id: "r".to_string(),
+                    },
+                ))
+                .unwrap();
         }
 
         fn exits(&self) -> Vec<i32> {
@@ -1012,5 +1199,42 @@ mod tests {
         assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(rig.events(), ["prepare_shutdown"]);
+    }
+
+    // -- the self-test -----------------------------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_that_hears_its_probes_stays_connected() {
+        let rig = Rig::self_testing("selftest-hearing", true).await;
+        rig.registered().await;
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        assert!(rig.health().cassini_connected, "{:?}", rig.health());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_registered_but_deaf_reports_its_connection_lost() {
+        let rig = Rig::self_testing("selftest-deaf", false).await;
+        rig.registered().await;
+        // Past the timeout, with room for the health actor's own tick to write the file.
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        let health = rig.health();
+        assert!(!health.cassini_connected, "{health:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_without_the_self_test_is_not_judged_by_silence() {
+        let rig = Rig::standard("selftest-off").await;
+        rig.registered().await;
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        assert!(rig.health().cassini_connected, "{:?}", rig.health());
+    }
+
+    #[test]
+    fn a_probe_is_recognised_only_by_the_instance_that_sent_it() {
+        let ours = [1u8; 16];
+        let theirs = [2u8; 16];
+        assert_eq!(probe_number(&ours, &probe_payload(&ours, 7)), Some(7));
+        assert_eq!(probe_number(&ours, &probe_payload(&theirs, 7)), None);
+        assert_eq!(probe_number(&ours, b"short"), None);
     }
 }

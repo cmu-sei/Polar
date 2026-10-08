@@ -15,6 +15,7 @@ polar-crypto.workspace = true
 polar-env.workspace = true
 polar-health = { path = "../polar-health" }
 polar-router.workspace = true
+rand.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
 serde_json.workspace = true
@@ -24,7 +25,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 polar-health = { path = "../polar-health", features = ["virtual-time"] }
-rand.workspace = true
 rcgen.workspace = true
 rsa.workspace = true
 tempfile.workspace = true
