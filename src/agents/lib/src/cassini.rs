@@ -1,5 +1,8 @@
 use async_trait::async_trait;
 pub use cassini_client::{MessageQueue, OfflineBehavior, PublishRequest, QueueEntry};
+use cassini_client::facade::{
+    Backoff, DEFAULT_OFFLINE_BUFFER, FacadeArgs, TcpClientFacade, TlsTransportSpawner,
+};
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::{ClientEvent, ControlOp, WireTraceCtx};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort};
@@ -72,6 +75,10 @@ pub trait CassiniClient: Send + Sync {
 pub struct TcpClient {
     inner: ActorRef<TcpClientMessage>,
     queue: Option<MessageQueue>,
+    /// Whether the connection is registered with the broker right now, when something is
+    /// tracking it (the stable front the agent builder starts). `None` for a client that is the
+    /// connection itself, which has no such state to read.
+    online: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl TcpClient {
@@ -103,7 +110,11 @@ impl TcpClient {
 
         let queue = MessageQueue::from_env();
 
-        Ok(Self { inner, queue })
+        Ok(Self {
+            inner,
+            queue,
+            online: None,
+        })
     }
 
     /// Same real, existing purpose as `spawn` -- a real `TcpClient`
@@ -165,13 +176,20 @@ impl TcpClient {
                 }
             });
 
+        // The agent holds the stable front, which keeps the connection up. See
+        // cassini_client::facade.
+        let online = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (inner, _) = Actor::spawn_linked(
             Some(format!("{service_name}.tcp")),
-            TcpClientActor,
-            TcpClientArgs {
+            TcpClientFacade,
+            FacadeArgs {
                 config,
-                registration_id: None,
                 delivery: cassini_client::DeliveryMode::Router { router, lifecycle },
+                transport_name: format!("{service_name}.tcp.transport"),
+                spawner: std::sync::Arc::new(TlsTransportSpawner),
+                online: online.clone(),
+                buffer_limit: DEFAULT_OFFLINE_BUFFER,
+                backoff: Backoff::default(),
             },
             supervisor.into(),
         )
@@ -179,7 +197,11 @@ impl TcpClient {
 
         let queue = MessageQueue::from_env();
 
-        Ok(Self { inner, queue })
+        Ok(Self {
+            inner,
+            queue,
+            online: Some(online),
+        })
     }
 
     /// The real, raw ActorRef<TcpClientMessage> underneath this
@@ -202,7 +224,24 @@ impl TcpClient {
     /// higher-level CassiniClient methods, rather than being forced
     /// back down to raw send_message calls.
     pub fn from_actor_ref(inner: ActorRef<TcpClientMessage>) -> Self {
-        Self { inner, queue: None }
+        Self {
+            inner,
+            queue: None,
+            online: None,
+        }
+    }
+
+    /// As [`from_actor_ref`](Self::from_actor_ref), for a front that tracks whether the connection
+    /// is registered, so each publish can honour its `OfflineBehavior` against it.
+    pub fn from_actor_ref_with_state(
+        inner: ActorRef<TcpClientMessage>,
+        online: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            inner,
+            queue: None,
+            online: Some(online),
+        }
     }
 }
 
@@ -210,6 +249,18 @@ impl TcpClient {
 #[async_trait]
 impl CassiniClient for TcpClient {
     fn publish(&self, req: PublishRequest) -> Result<(), CassiniClientError> {
+        // The front is always there, so a cast to it always succeeds. Whether the connection is
+        // up is what decides these two: `Queue` is handed to the front, which holds it.
+        if let Some(online) = &self.online
+            && !online.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            match req.offline_behavior {
+                OfflineBehavior::Fail => return Err(CassiniClientError::BrokerUnavailable),
+                OfflineBehavior::Drop => return Ok(()),
+                OfflineBehavior::Queue => {}
+            }
+        }
+
         let result = self.inner.send_message(TcpClientMessage::Publish {
             topic: req.topic.clone(),
             payload: req.payload.clone(),
@@ -306,5 +357,119 @@ impl CassiniClient for TcpClient {
             .send_message(TcpClientMessage::Register)
             .map_err(|_e| CassiniClientError::Disconnected)?;
         Err(CassiniClientError::Timeout)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// Stands in for the client's front and records what it is sent.
+    struct Recorder {
+        received: Arc<Mutex<Vec<TcpClientMessage>>>,
+    }
+
+    #[async_trait]
+    impl Actor for Recorder {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            self.received.lock().unwrap().push(message);
+            Ok(())
+        }
+    }
+
+    async fn client(online: bool) -> (TcpClient, Arc<Mutex<Vec<TcpClientMessage>>>) {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (inner, _) = Actor::spawn(
+            None,
+            Recorder {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        let client = TcpClient::from_actor_ref_with_state(inner, Arc::new(AtomicBool::new(online)));
+        (client, received)
+    }
+
+    fn publish(behavior: OfflineBehavior) -> PublishRequest {
+        PublishRequest {
+            topic: "t".into(),
+            payload: b"p".to_vec(),
+            trace_ctx: None,
+            offline_behavior: behavior,
+            share_identity: true,
+        }
+    }
+
+    async fn sent(received: &Arc<Mutex<Vec<TcpClientMessage>>>) -> usize {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        received.lock().unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn while_online_a_publish_is_sent_whatever_its_offline_behavior() {
+        for behavior in [OfflineBehavior::Fail, OfflineBehavior::Drop, OfflineBehavior::Queue] {
+            let (client, received) = client(true).await;
+            client.publish(publish(behavior)).unwrap();
+            assert_eq!(sent(&received).await, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn while_offline_fail_is_an_error_at_once_and_sends_nothing() {
+        let (client, received) = client(false).await;
+        assert!(matches!(
+            client.publish(publish(OfflineBehavior::Fail)),
+            Err(CassiniClientError::BrokerUnavailable)
+        ));
+        assert_eq!(sent(&received).await, 0);
+    }
+
+    #[tokio::test]
+    async fn while_offline_drop_succeeds_and_sends_nothing() {
+        let (client, received) = client(false).await;
+        client.publish(publish(OfflineBehavior::Drop)).unwrap();
+        assert_eq!(sent(&received).await, 0);
+    }
+
+    #[tokio::test]
+    async fn while_offline_queue_is_handed_to_the_front_which_holds_it() {
+        let (client, received) = client(false).await;
+        client.publish(publish(OfflineBehavior::Queue)).unwrap();
+        assert_eq!(sent(&received).await, 1);
+    }
+
+    #[tokio::test]
+    async fn the_connection_state_is_read_each_time() {
+        let online = Arc::new(AtomicBool::new(false));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (inner, _) = Actor::spawn(None, Recorder { received: received.clone() }, ())
+            .await
+            .unwrap();
+        let client = TcpClient::from_actor_ref_with_state(inner, online.clone());
+        assert!(client.publish(publish(OfflineBehavior::Fail)).is_err());
+        online.store(true, Ordering::SeqCst);
+        client.publish(publish(OfflineBehavior::Fail)).unwrap();
+        assert_eq!(sent(&received).await, 1);
     }
 }
