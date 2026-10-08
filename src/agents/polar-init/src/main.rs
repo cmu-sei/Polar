@@ -364,6 +364,8 @@ async fn ensure_escrow_bootstrapped(own_identity: &str, escrow: &environment::Es
         }
     };
 
+    // This actor is never stopped: stopping it releases the key it holds from the kernel keyring,
+    // and the key has to outlive this container for the workload to adopt it. The process exits.
     let (crypto_actor, _) = Actor::spawn(
         None,
         polar_crypto::CryptoActor,

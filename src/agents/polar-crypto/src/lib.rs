@@ -185,6 +185,15 @@ pub enum CryptoMessage {
     /// construction. Sent on every registration, so a reconnect
     /// restores them too. Subscribing again is harmless.
     ClientRegistered,
+    /// The Cassini client was replaced (the old one died and the agent started a new one).
+    /// From now on requests go through the new client. This actor is never replaced along
+    /// with it: it holds this agent's key custody and its caches, and there is exactly one for
+    /// the life of the agent. Requests that were waiting on the old client get no reply and
+    /// time out, as any lost reply does, and `ClientRegistered` is sent again once the new
+    /// client registers, to subscribe through it.
+    ClientReplaced {
+        tcp_client: ActorRef<TcpClientMessage>,
+    },
     /// A general secret to escrow -- e.g. an access token an observer
     /// holds and wants the Credentials Agent to store on its behalf.
     /// Not the agent's own escrow private key -- see
@@ -429,6 +438,24 @@ impl Actor for CryptoActor {
         })
     }
 
+    /// The actor stops once, when the agent is going away, since a replaced Cassini client no
+    /// longer replaces it. So a key held in the kernel keyring is released here: revoked, and
+    /// unlinked from the user keyring, so it does not outlive the agent that used it. This is the
+    /// only holder of its number. A hard kill gets no cleanup; nothing runs.
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if let Some(EscrowKeypairHandle::KernelBacked(serial)) =
+            state.escrow_keypair_handle.lock().await.take()
+        {
+            info!("releasing escrow key {serial} from the kernel keyring");
+            polar_kernel_keyring::unload_key(serial);
+        }
+        Ok(())
+    }
+
     async fn handle(
         &self,
         _myself: ActorRef<Self::Msg>,
@@ -436,6 +463,9 @@ impl Actor for CryptoActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            CryptoMessage::ClientReplaced { tcp_client } => {
+                state.tcp_client = tcp_client;
+            }
             CryptoMessage::ClientRegistered => {
                 // Subscribes to the *_REPLIES_TOPIC constants specifically --
                 // CryptoActor is a requester here, not a responder, so it
@@ -1023,16 +1053,22 @@ fn adopt_key_left_by_init(path: &str, own_identity: &str) -> Option<EscrowKeypai
         return None;
     };
     let Ok(serial) = raw.trim().parse::<i32>() else {
-        warn!("the escrow key handle at {path} is not a key number: this process will hold the key itself");
+        warn!(
+            "the escrow key handle at {path} is not a key number: this process will hold the key itself"
+        );
         return None;
     };
     match polar_kernel_keyring::adopt_asymmetric_key(serial, own_identity) {
         Some(adopted) => {
-            info!("adopted escrow key {serial} from the kernel keyring: this process never holds the key");
+            info!(
+                "adopted escrow key {serial} from the kernel keyring: this process never holds the key"
+            );
             Some(EscrowKeypairHandle::KernelBacked(adopted))
         }
         None => {
-            warn!("the key {serial} named in {path} is not this identity's or cannot be used: this process will hold the key itself");
+            warn!(
+                "the key {serial} named in {path} is not this identity's or cannot be used: this process will hold the key itself"
+            );
             None
         }
     }
@@ -2113,5 +2149,153 @@ mod tests {
                 polar_kernel_keyring::unload_key(own);
             }
         }
+    }
+
+    // -- one actor for the life of the agent -------------------------------------------------
+
+    /// A stand-in for the Cassini client that records what it is sent.
+    struct RecordingClient {
+        received: Arc<std::sync::Mutex<Vec<TcpClientMessage>>>,
+    }
+
+    #[async_trait]
+    impl Actor for RecordingClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            self.received.lock().unwrap().push(message);
+            Ok(())
+        }
+    }
+
+    fn subscriptions(received: &Arc<std::sync::Mutex<Vec<TcpClientMessage>>>) -> usize {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| matches!(m, TcpClientMessage::Subscribe { .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_replaced_client_is_the_one_used_from_then_on() {
+        let identity = format!("test-agent-{}", uuid::Uuid::new_v4());
+        let cert = write_test_agent_certificate(&identity);
+        let (router, _) = Actor::spawn(None, polar_router::RouterActor, ())
+            .await
+            .unwrap();
+        let old_received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let new_received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (old_client, _) = Actor::spawn(
+            None,
+            RecordingClient {
+                received: old_received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        let (new_client, _) = Actor::spawn(
+            None,
+            RecordingClient {
+                received: new_received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let (crypto_actor, _) = Actor::spawn(
+            None,
+            CryptoActor,
+            CryptoActorArgs::new(old_client, router).with_settings(environment::CryptoSettings {
+                own_certificate_path: cert.path().to_string_lossy().into_owned(),
+                service_account_token_path: "/unused".to_string(),
+                escrow_key_handle_path: "/nonexistent/escrow-key-handle".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        crypto_actor.cast(CryptoMessage::ClientRegistered).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            subscriptions(&old_received),
+            5,
+            "subscribed through the first client"
+        );
+
+        // The Cassini client died and was replaced. The same actor carries on, with the new one.
+        crypto_actor
+            .cast(CryptoMessage::ClientReplaced {
+                tcp_client: new_client,
+            })
+            .unwrap();
+        crypto_actor.cast(CryptoMessage::ClientRegistered).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert_eq!(
+            subscriptions(&new_received),
+            5,
+            "subscribed again through the new one"
+        );
+        assert_eq!(
+            subscriptions(&old_received),
+            5,
+            "and nothing more through the old one"
+        );
+    }
+
+    #[tokio::test]
+    async fn stopping_the_actor_unloads_the_key_it_adopted() {
+        let identity = format!("test-agent-{}", uuid::Uuid::new_v4());
+        let (serial, _) = load_key_as_the_init_container_would(&identity);
+        let handle = write_handle(serial.get());
+        let ((crypto_actor, _), _, _) =
+            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
+                escrow_key_handle_path: Some(handle.path().to_string_lossy().into_owned()),
+                identity: Some(identity.clone()),
+                ..Default::default()
+            })
+            .await;
+        let custody = ractor::call!(crypto_actor, |reply| CryptoMessage::EnsureBootstrapped {
+            reply
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            custody,
+            Custody::Kernel {
+                serial: serial.get()
+            }
+        );
+        assert!(polar_kernel_keyring::adopt_asymmetric_key(serial.get(), &identity).is_some());
+
+        // The actor is stopped once, when the agent is going away, so the key goes with it.
+        crypto_actor
+            .stop_and_wait(None, Some(std::time::Duration::from_secs(5)))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            polar_kernel_keyring::adopt_asymmetric_key(serial.get(), &identity),
+            None,
+            "the key does not outlive the agent that used it"
+        );
     }
 }
