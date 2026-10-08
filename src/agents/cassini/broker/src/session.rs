@@ -11,7 +11,7 @@ use cassini_types::{
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait, registry::where_is,
 };
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -26,6 +26,9 @@ pub struct SessionManager;
 struct Session {
     agent_ref: ActorRef<BrokerMessage>,
     pending_publishes: usize, // Number of unacknowledged publish requests
+    /// When the client's connection went away without a goodbye. `None` while it is connected.
+    /// A session detached for longer than the retention window is ended.
+    detached_at: Option<tokio::time::Instant>,
 }
 
 pub struct SessionManagerState {
@@ -40,6 +43,7 @@ pub struct SessionManagerState {
     /// SubscriberManager at all, and every subscription it owned leaks
     /// forever with no reachable cleanup path.
     subscriber_mgr: Option<ActorRef<BrokerMessage>>,
+    retention: std::time::Duration,
     is_shutting_down: bool,
     drain_phase_active: bool,
     drain_completion_notified: bool,
@@ -51,6 +55,8 @@ pub struct SessionManagerArgs {
     pub broker: ActorRef<BrokerMessage>,
     /// Reference to the listener manager; initially None, will be set via SetListenerManager.
     pub listener_mgr: Option<ActorRef<BrokerMessage>>,
+    /// How long a session whose client went away without a goodbye is kept.
+    pub retention: std::time::Duration,
 }
 
 // ============================== SessionManager Actor ============================== //
@@ -67,11 +73,17 @@ impl Actor for SessionManager {
         args: SessionManagerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
+        // Often enough that a session is ended soon after its window passes, never faster than
+        // a tenth of a second or slower than every thirty.
+        let tick = (args.retention / 4)
+            .clamp(std::time::Duration::from_millis(100), std::time::Duration::from_secs(30));
+        drop(myself.send_interval(tick, || BrokerMessage::SessionExpiryTick));
         Ok(SessionManagerState {
             broker: args.broker,
             listener_mgr: args.listener_mgr,
             subscriber_mgr: None,
             sessions: HashMap::new(),
+            retention: args.retention,
             is_shutting_down: false,
             drain_phase_active: false,
             drain_completion_notified: false,
@@ -154,30 +166,27 @@ impl Actor for SessionManager {
                 trace_ctx,
             } => {
                 if let Some(registration_id) = registration_id {
-                    match state.sessions.entry(registration_id.clone()) {
-                        Entry::Occupied(entry) => {
-                            entry.remove();
+                    match reason {
+                        // The client is not coming back for this session.
+                        DisconnectReason::Goodbye => {
+                            Self::end_session(state, &registration_id, client_id, reason, trace_ctx)
                         }
-                        Entry::Vacant(_) => (),
-                    }
-
-                    // Continue the layered flow (Listener -> Session ->
-                    // Subscriber -> Topic). Without this, SubscriberManager
-                    // never learns a session ended, and its
-                    // handle_disconnect_request/forget_subscriptions logic
-                    // -- already correct -- is unreachable from a real
-                    // socket disconnect.
-                    if let Some(subscriber_mgr) = &state.subscriber_mgr {
-                        let _ = subscriber_mgr.send_message(BrokerMessage::DisconnectRequest {
-                            client_id,
-                            registration_id: Some(registration_id),
-                            reason,
-                            trace_ctx,
-                        });
-                    } else {
-                        warn!("SessionManager: subscriber_mgr not set, cannot forward disconnect");
+                        // The connection went away with no word: keep the session for the
+                        // retention window, in case the client returns.
+                        DisconnectReason::RemoteClosed | DisconnectReason::TransportError(_) => {
+                            Self::detach_session(state, &registration_id);
+                        }
                     }
                 }
+            }
+            // A write to the client failed: its connection is gone.
+            BrokerMessage::TimeoutMessage {
+                registration_id, ..
+            } => {
+                Self::detach_session(state, &registration_id);
+            }
+            BrokerMessage::SessionExpiryTick => {
+                Self::end_expired_sessions(state);
             }
 
             _ => (),
@@ -221,6 +230,71 @@ impl Actor for SessionManager {
 }
 
 impl SessionManager {
+    /// The client's connection is gone and it did not say goodbye: keep the session, with its
+    /// subscribers and what they hold, until the retention window passes.
+    fn detach_session(state: &mut SessionManagerState, registration_id: &str) {
+        if let Some(session) = state.sessions.get_mut(registration_id)
+            && session.detached_at.is_none()
+        {
+            info!(%registration_id, retention = ?state.retention, "client went away, keeping its session");
+            session.detached_at = Some(tokio::time::Instant::now());
+        }
+    }
+
+    /// Ends the session now: the session actor stops (the map entry and its accounting go when the
+    /// supervisor sees it end), and the subscriber manager forgets its subscriptions, which stops
+    /// the subscriber actors and drops what they held.
+    fn end_session(
+        state: &mut SessionManagerState,
+        registration_id: &str,
+        client_id: String,
+        reason: DisconnectReason,
+        trace_ctx: Option<opentelemetry::Context>,
+    ) {
+        if let Some(session) = state.sessions.get(registration_id) {
+            session
+                .agent_ref
+                .stop(Some(format!("session ended: {reason:?}")));
+        }
+        // Continue the layered flow (Listener -> Session -> Subscriber -> Topic), so every
+        // subscription the session owned is cleaned up.
+        match &state.subscriber_mgr {
+            Some(subscriber_mgr) => {
+                let _ = subscriber_mgr.send_message(BrokerMessage::DisconnectRequest {
+                    client_id,
+                    registration_id: Some(registration_id.to_string()),
+                    reason,
+                    trace_ctx,
+                });
+            }
+            None => warn!("SessionManager: subscriber_mgr not set, cannot forward disconnect"),
+        }
+    }
+
+    /// Ends every session that has been without its client for longer than the retention window.
+    fn end_expired_sessions(state: &mut SessionManagerState) {
+        let expired: Vec<String> = state
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                session
+                    .detached_at
+                    .is_some_and(|since| since.elapsed() >= state.retention)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for registration_id in expired {
+            info!(%registration_id, "retention window passed, ending the session");
+            Self::end_session(
+                state,
+                &registration_id,
+                "retention".to_string(),
+                DisconnectReason::RemoteClosed,
+                None,
+            );
+        }
+    }
+
     // ===== Handler methods for SessionManager =====
     async fn handle_prepare_for_shutdown(
         &self,
@@ -346,6 +420,7 @@ impl SessionManager {
         if let Some(existing_id) = &registration_id {
             if let Some(session) = state.sessions.get_mut(existing_id) {
                 info!(registration_id = %existing_id, "reusing existing session");
+                session.detached_at = None;
                 if let Err(e) = session
                     .agent_ref
                     .send_message(BrokerMessage::ReassignClient {
@@ -408,6 +483,7 @@ impl SessionManager {
                     Session {
                         agent_ref: session_agent.clone(),
                         pending_publishes: 0,
+                        detached_at: None,
                     },
                 );
                 // Pass broker ref to the session agent
@@ -1141,36 +1217,6 @@ impl SessionAgent {
             }
             None => return Err(ActorProcessingErr::from("Failed to find supervisor")),
         }
-        Ok(())
-    }
-
-    async fn handle_disconnect_request(
-        &self,
-        myself: ActorRef<BrokerMessage>,
-        _state: &mut SessionAgentState,
-        reason: DisconnectReason,
-        client_id: String,
-        registration_id: Option<String>,
-        trace_ctx: Option<opentelemetry::Context>,
-    ) -> Result<(), ActorProcessingErr> {
-        let span = trace_span!("session.disconnect_request", %client_id);
-        try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-        trace!("received disconnect request");
-        info!("client disconnected");
-
-        if let Some(manager) = myself.try_get_supervisor() {
-            let _ = manager.send_message(BrokerMessage::DisconnectRequest {
-                reason,
-                client_id,
-                registration_id,
-                trace_ctx: Some(span.context()),
-            });
-        } else {
-            error!("couldn't find supervisor");
-        }
-        // Stop this session actor now that the client is gone
-        myself.stop(Some("DISCONNECTED".to_string()));
         Ok(())
     }
 

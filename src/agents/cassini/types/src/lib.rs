@@ -23,6 +23,11 @@ pub struct SessionDetails {
 ///
 #[derive(Debug, Clone)]
 pub enum DisconnectReason {
+    /// The client said goodbye: it sent an explicit disconnect and is not coming back for this
+    /// session, so the broker can end it at once.
+    Goodbye,
+    /// The connection closed with no goodbye (the client died, was killed, or lost its network).
+    /// The session is kept for a while in case the client returns.
     RemoteClosed,
     //TODO: It's possible we may eventually want to detect rougue clients, this would let us be explicit.
     // PolicyViolation(PolicyViolation),
@@ -224,6 +229,9 @@ pub enum BrokerMessage {
         result: Result<(), String>, // Ok for success, Err with error message
     },
     /// Disconnect request from the client.
+    /// Internal: time for the session manager to end the disconnected sessions that have been
+    /// kept for longer than the retention window.
+    SessionExpiryTick,
     DisconnectRequest {
         reason: DisconnectReason,
         client_id: String,
@@ -361,7 +369,7 @@ impl BrokerMessage {
                 client_id,
                 registration_id,
                 trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
-                reason: DisconnectReason::RemoteClosed,
+                reason: DisconnectReason::Goodbye,
             },
             ClientMessage::ControlRequest {
                 registration_id,

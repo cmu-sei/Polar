@@ -8,6 +8,11 @@ pub mod topic;
 
 /// Constant names of core supervisors, should remain constant
 /// as they are used to conduct lookups in the ractor registry
+/// How long a session whose client has gone away is kept, with what was held for it, before it is
+/// ended. A client that returns inside this window resumes its session and is replayed what it
+/// missed.
+pub const DEFAULT_SESSION_RETENTION: std::time::Duration = std::time::Duration::from_secs(600);
+
 pub const BROKER_NAME: &str = "BROKER_SUPERVISOR";
 pub const LISTENER_MANAGER_NAME: &str = "LISTENER_MANAGER";
 pub const SESSION_MANAGER_NAME: &str = "SESSION_MANAGER";

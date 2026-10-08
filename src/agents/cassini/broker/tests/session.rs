@@ -41,6 +41,7 @@ mod tests {
         let args = SessionManagerArgs {
             broker: Actor::spawn(None, MockActor, ()).await.unwrap().0,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Just make sure we can spawn the SessionManager
@@ -60,6 +61,7 @@ mod tests {
         let args = SessionManagerArgs {
             broker: broker_ref,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Spawn SessionManager
@@ -90,6 +92,7 @@ mod tests {
         let args = SessionManagerArgs {
             broker: broker_ref,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Spawn SessionManager
@@ -118,6 +121,7 @@ mod tests {
         let args = SessionManagerArgs {
             broker: broker_ref,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Spawn SessionManager
@@ -145,6 +149,7 @@ mod tests {
         let args = SessionManagerArgs {
             broker: broker_ref,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Spawn SessionManager
@@ -172,6 +177,7 @@ mod tests {
         let args = SessionManagerArgs {
             broker: broker_ref,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Spawn SessionManager
@@ -199,6 +205,7 @@ mod tests {
         let args = SessionManagerArgs {
             broker: broker_ref,
             listener_mgr: None,
+            retention: std::time::Duration::from_secs(600),
         };
 
         // Spawn SessionManager

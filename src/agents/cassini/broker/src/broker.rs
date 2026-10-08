@@ -62,8 +62,8 @@ pub struct BrokerArgs {
     /// Socket address to listen for connections on
     pub bind_addr: String,
 
-    /// The amount of time (in seconds) before a session times out
-    /// Should be between 10 and 300 seconds
+    /// How long (in seconds) a session whose client has gone away is kept, with the messages held
+    /// for it, before it is ended. `None` is `DEFAULT_SESSION_RETENTION` (ten minutes).
     pub session_timeout: Option<u64>,
 
     pub server_cert_file: String,
@@ -240,6 +240,10 @@ impl Actor for Broker {
             SessionManagerArgs {
                 broker: myself.clone(),
                 listener_mgr: None,
+                retention: args
+                    .session_timeout
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or(crate::DEFAULT_SESSION_RETENTION),
             },
             myself.clone().into(),
         )

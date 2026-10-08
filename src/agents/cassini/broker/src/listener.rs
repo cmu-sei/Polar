@@ -517,31 +517,16 @@ impl ListenerManager {
         let _g = span.enter();
         trace!("ListenerManager handling disconnect");
 
-        // Always notify the session if we have a registration_id
+        // The session manager decides what a disconnect means (a goodbye ends the session, anything
+        // else keeps it for a while). It used to be sent to the session actor, which does not
+        // handle it and logged it as unexpected.
         if let Some(id) = registration_id {
-            if let Some(session) = where_is(id.clone()) {
-                match reason {
-                    DisconnectReason::RemoteClosed => {
-                        info!("Client disconnected (remote closed)");
-                        let _ = session.send_message(BrokerMessage::DisconnectRequest {
-                            reason,
-                            client_id: client_id.clone(),
-                            registration_id: Some(id),
-                            trace_ctx: Some(span.context()),
-                        });
-                    }
-                    DisconnectReason::TransportError(ref err) => {
-                        warn!("Client disconnected unexpectedly; notifying session");
-                        let _ = session.send_message(BrokerMessage::TimeoutMessage {
-                            client_id: client_id.clone(),
-                            registration_id: id,
-                            error: Some(err.clone()),
-                        });
-                    }
-                }
-            } else {
-                warn!("Session not found for registration_id: {}", id);
-            }
+            let _ = state.session_mgr.send_message(BrokerMessage::DisconnectRequest {
+                reason,
+                client_id: client_id.clone(),
+                registration_id: Some(id),
+                trace_ctx: Some(span.context()),
+            });
         } else {
             warn!("DisconnectRequest missing registration_id");
         }

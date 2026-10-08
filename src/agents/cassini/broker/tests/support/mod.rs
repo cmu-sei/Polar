@@ -127,6 +127,12 @@ fn init_logging() {
 
 impl TestBroker {
     pub async fn start() -> Self {
+        Self::start_retaining(None).await
+    }
+
+    /// As `start`, with a disconnected session kept for `retention_secs` seconds (the broker's own
+    /// default, ten minutes, when `None`).
+    pub async fn start_retaining(retention_secs: Option<u64>) -> Self {
         init_logging();
         clear_names().await;
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -141,7 +147,7 @@ impl TestBroker {
             Broker,
             BrokerArgs {
                 bind_addr: addr.clone(),
-                session_timeout: None,
+                session_timeout: retention_secs,
                 server_cert_file: pki.path("server.pem").to_string_lossy().into_owned(),
                 private_key_file: pki.path("server.key").to_string_lossy().into_owned(),
                 ca_cert_file: pki.ca().to_string_lossy().into_owned(),
@@ -177,8 +183,17 @@ where
     F: FnOnce(Arc<TestBroker>) -> Fut,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    with_broker_retaining(None, test).await
+}
+
+/// As `with_broker`, with a disconnected session kept for `retention_secs` seconds.
+pub async fn with_broker_retaining<F, Fut>(retention_secs: Option<u64>, test: F)
+where
+    F: FnOnce(Arc<TestBroker>) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     let _only = serial().await;
-    let broker = Arc::new(TestBroker::start().await);
+    let broker = Arc::new(TestBroker::start_retaining(retention_secs).await);
     let outcome = tokio::spawn(test(broker.clone())).await;
     broker.stop().await;
     if let Err(failure) = outcome {
