@@ -1,0 +1,19 @@
+flowchart LR
+    subgraph Agent["Agent process"]
+        D["Domain actors<br/>supervisor, handlers, CryptoActor"]
+        subgraph Stable["Stable: lives as long as the agent"]
+            F["Facade + Outbox<br/>the one agent-facing mailbox<br/>session identity, remembered subscriptions<br/>sequenced outbox, retransmit, dedupe"]
+        end
+        T["Transport<br/>TLS connection, reader and writer<br/>disposable: respawned on any failure"]
+        R["Router"]
+        S[("Outbox file<br/>unacknowledged entries")]
+    end
+    B["Cassini broker"]
+
+    D -->|"Publish, Subscribe"| F
+    F -->|"Send with epoch and seq"| T
+    T -->|"Acked, Delivered, ConnectionLost"| F
+    F -->|"inbound, deduplicated"| R
+    R --> D
+    F <-->|"quiesce on trouble, rehydrate on start"| S
+    T <-->|"mTLS"| B

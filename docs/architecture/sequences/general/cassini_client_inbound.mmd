@@ -1,0 +1,17 @@
+sequenceDiagram
+    autonumber
+    participant B as Broker
+    participant T as Transport
+    participant F as Facade + Outbox
+    participant R as Router
+    participant D as Domain actor
+
+    B->>T: PublishResponse(topic, payload, published_by, origin epoch and seq, delivery id)
+    T->>F: Delivered(...)
+    F->>F: origin (publisher, epoch, seq) already seen? yes: skip delivery and acknowledge again
+    F->>R: Route(topic, payload)
+    R->>D: deliver to the topic's registered handler
+    F->>T: PublishResponseAck(delivery id)
+    T->>B: PublishResponseAck(delivery id)
+    B->>B: remove the delivery from this subscriber's outbox
+    Note over B,F: If the connection fails before the acknowledgement, the broker keeps the delivery<br/>and sends it again after the reconnect. The facade drops the duplicate by its origin<br/>and acknowledges it again.

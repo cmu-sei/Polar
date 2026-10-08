@@ -1,0 +1,14 @@
+stateDiagram-v2
+    [*] --> Connecting: start, unacknowledged entries loaded from the file
+    Connecting --> Online: Connected, subscriptions sent, outbox retransmitted
+    Online --> Offline: ConnectionLost, outbox written to the file
+    Offline --> Connecting: backoff elapsed, transport respawned
+    Online --> Draining: PrepareShutdown
+    Offline --> Draining: PrepareShutdown
+    Draining --> [*]: outbox empty or the budget is spent, the remainder written to the file
+
+    note right of Offline
+        Every publish goes into the outbox
+        and is appended to the file.
+        Nothing is dropped, nothing is sent.
+    end note
