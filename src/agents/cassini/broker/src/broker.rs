@@ -137,20 +137,14 @@ impl Actor for Broker {
                 );
 
                 if let Some(name) = actor_cell.get_name() {
-                    // Healthcheck actor terminating cleanly means rejuvenation
-                    // sequence completed — begin this broker's own, real,
-                    // multi-phase shutdown sequence directly (previously
-                    // triggered via a real OutputPort/ShutdownAck handshake;
-                    // ordinary, real Ractor supervision -- this very
-                    // ActorTerminated event -- already, genuinely provided
-                    // everything that existed for).
+                    // The health actor ending is the decision that this broker should go. Begin
+                    // the orderly, multi-phase shutdown and let it run: it ends the broker when
+                    // every manager has finished, and the process exits from main.
                     if name == "cassini.healthcheck" {
-                        info!("HealthCheckActor terminated cleanly — beginning graceful shutdown");
+                        info!("HealthCheckActor terminated -- beginning graceful shutdown");
                         let _ = myself.send_message(BrokerMessage::PrepareForShutdown {
                             auth_token: state.shutdown_auth_token.clone(),
                         });
-                        shutdown_tracing();
-                        std::process::exit(1);
                     }
 
                     match name.as_str() {
@@ -182,6 +176,17 @@ impl Actor for Broker {
                     self.check_shutdown_completion(myself.clone(), state)
                         .await?;
                 }
+            }
+
+            // The health actor failing is its verdict that the broker is unhealthy. That is the
+            // same decision as it ending, and gets the same orderly shutdown.
+            SupervisionEvent::ActorFailed(actor_cell, e)
+                if actor_cell.get_name().as_deref() == Some("cassini.healthcheck") =>
+            {
+                error!(error = %e, "HealthCheckActor failed -- beginning graceful shutdown");
+                let _ = myself.send_message(BrokerMessage::PrepareForShutdown {
+                    auth_token: state.shutdown_auth_token.clone(),
+                });
             }
 
             SupervisionEvent::ActorFailed(actor_cell, e) => {

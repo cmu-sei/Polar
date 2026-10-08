@@ -196,6 +196,27 @@ impl TestBroker {
         began.elapsed()
     }
 
+    /// The broker supervisor, to send it what the running broker would be sent.
+    pub fn actor(&self) -> ActorRef<BrokerMessage> {
+        self.broker.lock().unwrap().clone()
+    }
+
+    /// Waits for the broker to end by itself, and says whether it did within `within`.
+    pub async fn ends_by_itself(&self, within: Duration) -> bool {
+        let broker = self.actor();
+        let deadline = tokio::time::Instant::now() + within;
+        while tokio::time::Instant::now() < deadline {
+            if matches!(
+                broker.get_status(),
+                ractor::ActorStatus::Stopping | ractor::ActorStatus::Stopped
+            ) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
     /// Stops the broker and waits until its names are free for the next test.
     pub async fn stop(&self) {
         let broker = self.broker.lock().unwrap().clone();
