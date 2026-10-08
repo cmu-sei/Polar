@@ -703,46 +703,90 @@ async fn handle_store_secret(
     }
 }
 
+/// One request to the Credentials Agent and the wait for its reply: the exchange every call
+/// above makes, written once. The reply is registered for before the request is published, so
+/// one that arrives at once has somewhere to go, and the registration is removed on every way
+/// out. `what` names the exchange in the log. Only identifiers and outcomes are logged, never
+/// what a request or reply carries.
+async fn request_reply<Req, Rep>(
+    tcp_client: &ActorRef<TcpClientMessage>,
+    reply_router: &Arc<ReplyRouter<Rep>>,
+    topic: &str,
+    what: &str,
+    request: Req,
+    timeout: Duration,
+) -> Result<Rep, CryptoError>
+where
+    Req: rkyv::Archive
+        + for<'a> rkyv::Serialize<
+            rkyv::api::high::HighSerializer<
+                rkyv::util::AlignedVec,
+                rkyv::ser::allocator::ArenaHandle<'a>,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    let correlation_id = uuid::Uuid::new_v4().to_string();
+    let envelope = Envelope {
+        correlation_id: correlation_id.clone(),
+        payload: request,
+    };
+    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
+        .map(|bytes| bytes.to_vec())
+        .map_err(|e| CryptoError::Serialization(e.to_string()))?;
+
+    info!(%correlation_id, %topic, "requesting: {what}");
+    let began = std::time::Instant::now();
+    let outcome = reply_router
+        .register_with_timeout(correlation_id.clone(), timeout, || {
+            tcp_client
+                .send_message(TcpClientMessage::publish(topic.to_string(), payload, None))
+                .map_err(|e| e.to_string())
+        })
+        .await;
+
+    match outcome {
+        Ok(reply) => {
+            info!(%correlation_id, elapsed_ms = began.elapsed().as_millis() as u64, "reply received: {what}");
+            Ok(reply)
+        }
+        Err(polar::request_reply::ReplyError::PublishFailed(e)) => {
+            warn!(%correlation_id, %topic, "could not publish the request for {what}: {e}");
+            Err(CryptoError::BrokerUnreachable(e))
+        }
+        Err(polar::request_reply::ReplyError::ChannelClosed) => {
+            warn!(%correlation_id, "the reply channel for {what} closed with no reply");
+            Err(CryptoError::NoReply)
+        }
+        Err(polar::request_reply::ReplyError::Timeout) => {
+            warn!(
+                %correlation_id,
+                %topic,
+                waited_secs = timeout.as_secs(),
+                "no reply to {what}: nothing answered on the request topic, or its reply never \
+                 reached this client"
+            );
+            Err(CryptoError::Timeout)
+        }
+    }
+}
+
 async fn query_escrow_key(
     tcp_client: &ActorRef<TcpClientMessage>,
     escrow_key_reply_router: &Arc<
         ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>,
     >,
 ) -> Result<String, CryptoError> {
-    let correlation_id = uuid::Uuid::new_v4().to_string();
-
-    // Registered before publishing -- a reply arriving in the gap
-    // between publishing and registering would have nowhere to route.
-    let rx = escrow_key_reply_router.register(correlation_id.clone());
-
-    let envelope = Envelope {
-        correlation_id: correlation_id.clone(),
-        payload: EscrowKeyRequest,
-    };
-    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
-        .map(|b| b.to_vec())
-        .map_err(|e| {
-            escrow_key_reply_router.cancel(&correlation_id);
-            CryptoError::Serialization(e.to_string())
-        })?;
-
-    if let Err(e) = tcp_client.send_message(TcpClientMessage::publish(
-        CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC.to_string(),
-        payload,
-        None,
-    )) {
-        escrow_key_reply_router.cancel(&correlation_id);
-        return Err(CryptoError::BrokerUnreachable(e.to_string()));
-    }
-
-    match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
-        Ok(Ok(reply)) => Ok(reply.public_key_pem),
-        Ok(Err(_)) => Err(CryptoError::NoReply),
-        Err(_) => {
-            escrow_key_reply_router.cancel(&correlation_id);
-            Err(CryptoError::Timeout)
-        }
-    }
+    request_reply(
+        tcp_client,
+        escrow_key_reply_router,
+        CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
+        "escrow public key",
+        EscrowKeyRequest,
+        REPLY_TIMEOUT,
+    )
+    .await
+    .map(|reply| reply.public_key_pem)
 }
 
 async fn publish_store_secret_request(
@@ -750,38 +794,15 @@ async fn publish_store_secret_request(
     store_secret_reply_router: &Arc<ReplyRouter<StoreSecretReply>>,
     request: StoreSecretRequest,
 ) -> Result<StoreSecretReply, CryptoError> {
-    let correlation_id = uuid::Uuid::new_v4().to_string();
-
-    let rx = store_secret_reply_router.register(correlation_id.clone());
-
-    let envelope = Envelope {
-        correlation_id: correlation_id.clone(),
-        payload: request,
-    };
-    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
-        .map(|b| b.to_vec())
-        .map_err(|e| {
-            store_secret_reply_router.cancel(&correlation_id);
-            CryptoError::Serialization(e.to_string())
-        })?;
-
-    if let Err(e) = tcp_client.send_message(TcpClientMessage::publish(
-        CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC.to_string(),
-        payload,
-        None,
-    )) {
-        store_secret_reply_router.cancel(&correlation_id);
-        return Err(CryptoError::BrokerUnreachable(e.to_string()));
-    }
-
-    match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
-        Ok(Ok(reply)) => Ok(reply),
-        Ok(Err(_)) => Err(CryptoError::NoReply),
-        Err(_) => {
-            store_secret_reply_router.cancel(&correlation_id);
-            Err(CryptoError::Timeout)
-        }
-    }
+    request_reply(
+        tcp_client,
+        store_secret_reply_router,
+        CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+        "store secret",
+        request,
+        REPLY_TIMEOUT,
+    )
+    .await
 }
 
 /// The retrieve half of the agent escrow-keypair bootstrap flow --
@@ -833,38 +854,15 @@ async fn publish_retrieve_agent_escrow_keypair_request(
     retrieve_agent_escrow_keypair_reply_router: &Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
     request: RetrieveAgentEscrowKeypairRequest,
 ) -> Result<RetrieveAgentEscrowKeypairReply, CryptoError> {
-    let correlation_id = uuid::Uuid::new_v4().to_string();
-
-    let rx = retrieve_agent_escrow_keypair_reply_router.register(correlation_id.clone());
-
-    let envelope = Envelope {
-        correlation_id: correlation_id.clone(),
-        payload: request,
-    };
-    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
-        .map(|b| b.to_vec())
-        .map_err(|e| {
-            retrieve_agent_escrow_keypair_reply_router.cancel(&correlation_id);
-            CryptoError::Serialization(e.to_string())
-        })?;
-
-    if let Err(e) = tcp_client.send_message(TcpClientMessage::publish(
-        CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC.to_string(),
-        payload,
-        None,
-    )) {
-        retrieve_agent_escrow_keypair_reply_router.cancel(&correlation_id);
-        return Err(CryptoError::BrokerUnreachable(e.to_string()));
-    }
-
-    match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
-        Ok(Ok(reply)) => Ok(reply),
-        Ok(Err(_)) => Err(CryptoError::NoReply),
-        Err(_) => {
-            retrieve_agent_escrow_keypair_reply_router.cancel(&correlation_id);
-            Err(CryptoError::Timeout)
-        }
-    }
+    request_reply(
+        tcp_client,
+        retrieve_agent_escrow_keypair_reply_router,
+        CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
+        "retrieve own escrow keypair",
+        request,
+        REPLY_TIMEOUT,
+    )
+    .await
 }
 
 /// Reads this pod's own, mounted Kubernetes service-account token --
@@ -1205,38 +1203,15 @@ async fn publish_agent_escrow_key_request(
     agent_escrow_key_reply_router: &Arc<ReplyRouter<AgentEscrowKeyReply>>,
     request: AgentEscrowKeyRequest,
 ) -> Result<AgentEscrowKeyReply, CryptoError> {
-    let correlation_id = uuid::Uuid::new_v4().to_string();
-
-    let rx = agent_escrow_key_reply_router.register(correlation_id.clone());
-
-    let envelope = Envelope {
-        correlation_id: correlation_id.clone(),
-        payload: request,
-    };
-    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
-        .map(|b| b.to_vec())
-        .map_err(|e| {
-            agent_escrow_key_reply_router.cancel(&correlation_id);
-            CryptoError::Serialization(e.to_string())
-        })?;
-
-    if let Err(e) = tcp_client.send_message(TcpClientMessage::publish(
-        CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC.to_string(),
-        payload,
-        None,
-    )) {
-        agent_escrow_key_reply_router.cancel(&correlation_id);
-        return Err(CryptoError::BrokerUnreachable(e.to_string()));
-    }
-
-    match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
-        Ok(Ok(reply)) => Ok(reply),
-        Ok(Err(_)) => Err(CryptoError::NoReply),
-        Err(_) => {
-            agent_escrow_key_reply_router.cancel(&correlation_id);
-            Err(CryptoError::Timeout)
-        }
-    }
+    request_reply(
+        tcp_client,
+        agent_escrow_key_reply_router,
+        CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
+        "agent escrow key",
+        request,
+        REPLY_TIMEOUT,
+    )
+    .await
 }
 
 async fn publish_agent_escrow_issuance_request(
@@ -1244,38 +1219,15 @@ async fn publish_agent_escrow_issuance_request(
     agent_escrow_issuance_reply_router: &Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
     request: AgentEscrowIssuanceRequest,
 ) -> Result<AgentEscrowIssuanceReply, CryptoError> {
-    let correlation_id = uuid::Uuid::new_v4().to_string();
-
-    let rx = agent_escrow_issuance_reply_router.register(correlation_id.clone());
-
-    let envelope = Envelope {
-        correlation_id: correlation_id.clone(),
-        payload: request,
-    };
-    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&envelope)
-        .map(|b| b.to_vec())
-        .map_err(|e| {
-            agent_escrow_issuance_reply_router.cancel(&correlation_id);
-            CryptoError::Serialization(e.to_string())
-        })?;
-
-    if let Err(e) = tcp_client.send_message(TcpClientMessage::publish(
-        CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC.to_string(),
-        payload,
-        None,
-    )) {
-        agent_escrow_issuance_reply_router.cancel(&correlation_id);
-        return Err(CryptoError::BrokerUnreachable(e.to_string()));
-    }
-
-    match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
-        Ok(Ok(reply)) => Ok(reply),
-        Ok(Err(_)) => Err(CryptoError::NoReply),
-        Err(_) => {
-            agent_escrow_issuance_reply_router.cancel(&correlation_id);
-            Err(CryptoError::Timeout)
-        }
-    }
+    request_reply(
+        tcp_client,
+        agent_escrow_issuance_reply_router,
+        CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
+        "agent escrow issuance",
+        request,
+        REPLY_TIMEOUT,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1304,6 +1256,72 @@ mod tests {
                 (private_key, public_key_pem)
             })
             .clone()
+    }
+
+    /// An actor that takes whatever it is sent and says nothing: a client whose request goes
+    /// out and is never answered.
+    struct Silent;
+
+    #[async_trait]
+    impl Actor for Silent {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _message: Self::Msg,
+            _state: &mut (),
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_nobody_answers_times_out_and_leaves_nothing_registered() {
+        let (client, _) = Actor::spawn(None, Silent, ()).await.unwrap();
+        let router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>> =
+            Arc::new(ReplyRouter::new());
+        let outcome = request_reply(
+            &client,
+            &router,
+            CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
+            "test",
+            EscrowKeyRequest,
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(matches!(outcome, Err(CryptoError::Timeout)), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn a_request_to_a_client_that_is_gone_fails_at_once_as_unreachable() {
+        let (client, _) = Actor::spawn(None, Silent, ()).await.unwrap();
+        client.stop_and_wait(None, None).await.unwrap();
+        let router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>> =
+            Arc::new(ReplyRouter::new());
+        let outcome = request_reply(
+            &client,
+            &router,
+            CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
+            "test",
+            EscrowKeyRequest,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(CryptoError::BrokerUnreachable(_))),
+            "{outcome:?}"
+        );
     }
 
     /// Intercepts CryptoActor's own outgoing publishes and answers

@@ -48,11 +48,11 @@ use credentials_agent_common::identity::{
 };
 use credentials_agent_common::issuance::{IssuanceReply, IssuanceRefusalReason, IssuanceRequest};
 use credentials_agent_common::observer::ObserverRejection;
-use polar::request_reply::{Envelope, ReplyRouter};
+use polar::request_reply::{Envelope, ReplyError, ReplyRouter};
 use ractor::ActorRef;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{warn, error};
+use tracing::{error, info, warn};
 
 /// Hard ceiling on a single attempt's wait, per
 /// cassini-request-reply-protocol.md: `min(token_remaining_lifetime / 3, 100s)`.
@@ -113,6 +113,76 @@ pub struct ObserverState {
     pub admin_action_reply_router: Arc<ReplyRouter<AdminActionReply>>,
 }
 
+/// One request relayed to the consumer and the wait for its reply: the exchange every handler
+/// above makes, written once. The failures it can end in are already the responses to send.
+/// `what` names the exchange in the log; only identifiers and outcomes are logged, never what the
+/// request or reply carries.
+async fn relay<Req, Rep>(
+    broker: &BrokerHandle,
+    router: &Arc<ReplyRouter<Rep>>,
+    topic: &str,
+    what: &str,
+    request: Req,
+    timeout: Duration,
+) -> Result<Rep, Response>
+where
+    Req: rkyv::Archive
+        + for<'a> rkyv::Serialize<
+            rkyv::api::high::HighSerializer<
+                rkyv::util::AlignedVec,
+                rkyv::ser::allocator::ArenaHandle<'a>,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    let correlation_id = uuid::Uuid::new_v4().to_string();
+    let envelope = Envelope {
+        correlation_id: correlation_id.clone(),
+        payload: request,
+    };
+    let payload = match rkyv::to_bytes::<rkyv::rancor::Error>(&envelope) {
+        Ok(bytes) => bytes.to_vec(),
+        Err(e) => {
+            error!(%correlation_id, "failed to serialize the {what} request: {e}");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response());
+        }
+    };
+
+    info!(%correlation_id, %topic, "relaying a {what} request");
+    let began = std::time::Instant::now();
+    let outcome = router
+        .register_with_timeout(correlation_id.clone(), timeout, || {
+            broker
+                .send_message(TcpClientMessage::publish(topic.to_string(), payload, None))
+                .map_err(|e| e.to_string())
+        })
+        .await;
+
+    match outcome {
+        Ok(reply) => {
+            info!(%correlation_id, elapsed_ms = began.elapsed().as_millis() as u64, "{what} reply received");
+            Ok(reply)
+        }
+        Err(ReplyError::PublishFailed(e)) => {
+            error!(%correlation_id, %topic, "failed to publish the {what} request: {e}");
+            Err((StatusCode::SERVICE_UNAVAILABLE, "failed to reach the broker").into_response())
+        }
+        Err(ReplyError::ChannelClosed) => {
+            warn!(%correlation_id, "the reply channel for the {what} request closed with no reply");
+            Err((StatusCode::GATEWAY_TIMEOUT, "no reply received").into_response())
+        }
+        Err(ReplyError::Timeout) => {
+            warn!(
+                %correlation_id,
+                %topic,
+                waited_secs = timeout.as_secs(),
+                "no reply to the {what} request: the consumer did not answer"
+            );
+            Err((StatusCode::GATEWAY_TIMEOUT, "timed out waiting for a reply").into_response())
+        }
+    }
+}
+
 pub async fn issue(
     State(state): State<Arc<ObserverState>>,
     Json(request): Json<IssuanceRequest>,
@@ -125,46 +195,19 @@ pub async fn issue(
         return (StatusCode::BAD_REQUEST, Json(rejection)).into_response();
     }
 
-    let correlation_id = uuid::Uuid::new_v4().to_string();
     let timeout = compute_timeout(&request.credential);
-
-    // Registered *before* publishing -- a reply arriving in the gap
-    // between publishing and registering would have nowhere to route.
-    let rx = state.issuance_reply_router.register(correlation_id.clone());
-
-    let envelope = Envelope {
-        correlation_id: correlation_id.clone(),
-        payload: request,
-    };
-    let payload = match rkyv::to_bytes::<rkyv::rancor::Error>(&envelope) {
-        Ok(bytes) => bytes.to_vec(),
-        Err(e) => {
-            state.issuance_reply_router.cancel(&correlation_id);
-            error!("Failed to serialize issuance request envelope: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
-        }
-    };
-
-    if let Err(e) = state.broker_client.send_message(TcpClientMessage::publish(
-        CREDENTIALS_ISSUANCE_REQUESTS_TOPIC.to_string(),
-        payload,
-        None,
-    )) {
-        state.issuance_reply_router.cancel(&correlation_id);
-        error!("Failed to publish issuance request: {e}");
-        return (StatusCode::SERVICE_UNAVAILABLE, "failed to reach the broker").into_response();
-    }
-
-    match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(reply)) => reply_to_response(reply),
-        Ok(Err(_)) => {
-            warn!("Reply channel closed with no reply for correlation_id {correlation_id}");
-            (StatusCode::GATEWAY_TIMEOUT, "no reply received").into_response()
-        }
-        Err(_) => {
-            state.issuance_reply_router.cancel(&correlation_id);
-            (StatusCode::GATEWAY_TIMEOUT, "timed out waiting for a reply").into_response()
-        }
+    match relay(
+        &state.broker_client,
+        &state.issuance_reply_router,
+        CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
+        "issuance",
+        request,
+        timeout,
+    )
+    .await
+    {
+        Ok(reply) => reply_to_response(reply),
+        Err(response) => response,
     }
 }
 
@@ -172,44 +215,19 @@ pub async fn identity(
     State(state): State<Arc<ObserverState>>,
     Json(request): Json<IdentityNormalizationRequest>,
 ) -> Response {
-    let correlation_id = uuid::Uuid::new_v4().to_string();
     let timeout = compute_timeout(&request.credential);
-
-    let rx = state.identity_reply_router.register(correlation_id.clone());
-
-    let envelope = Envelope {
-        correlation_id: correlation_id.clone(),
-        payload: request,
-    };
-    let payload = match rkyv::to_bytes::<rkyv::rancor::Error>(&envelope) {
-        Ok(bytes) => bytes.to_vec(),
-        Err(e) => {
-            state.identity_reply_router.cancel(&correlation_id);
-            error!("Failed to serialize identity-normalization request envelope: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
-        }
-    };
-
-    if let Err(e) = state.broker_client.send_message(TcpClientMessage::publish(
-        CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC.to_string(),
-        payload,
-        None,
-    )) {
-        state.identity_reply_router.cancel(&correlation_id);
-        error!("Failed to publish identity-normalization request: {e}");
-        return (StatusCode::SERVICE_UNAVAILABLE, "failed to reach the broker").into_response();
-    }
-
-    match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(reply)) => identity_reply_to_response(reply),
-        Ok(Err(_)) => {
-            warn!("Reply channel closed with no reply for correlation_id {correlation_id}");
-            (StatusCode::GATEWAY_TIMEOUT, "no reply received").into_response()
-        }
-        Err(_) => {
-            state.identity_reply_router.cancel(&correlation_id);
-            (StatusCode::GATEWAY_TIMEOUT, "timed out waiting for a reply").into_response()
-        }
+    match relay(
+        &state.broker_client,
+        &state.identity_reply_router,
+        CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
+        "identity normalization",
+        request,
+        timeout,
+    )
+    .await
+    {
+        Ok(reply) => identity_reply_to_response(reply),
+        Err(response) => response,
     }
 }
 
@@ -242,43 +260,18 @@ pub async fn account(
         AccountRequest::Begin { claimant } | AccountRequest::Complete { claimant, .. } => claimant,
     };
     let timeout = claimant_timeout(claimant);
-
-    let correlation_id = uuid::Uuid::new_v4().to_string();
-    let rx = state.account_reply_router.register(correlation_id.clone());
-
-    let envelope = Envelope {
-        correlation_id: correlation_id.clone(),
-        payload: request,
-    };
-    let payload = match rkyv::to_bytes::<rkyv::rancor::Error>(&envelope) {
-        Ok(bytes) => bytes.to_vec(),
-        Err(e) => {
-            state.account_reply_router.cancel(&correlation_id);
-            error!("Failed to serialize account request envelope: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
-        }
-    };
-
-    if let Err(e) = state.broker_client.send_message(TcpClientMessage::publish(
-        CREDENTIALS_ACCOUNT_REQUESTS_TOPIC.to_string(),
-        payload,
-        None,
-    )) {
-        state.account_reply_router.cancel(&correlation_id);
-        error!("Failed to publish account request: {e}");
-        return (StatusCode::SERVICE_UNAVAILABLE, "failed to reach the broker").into_response();
-    }
-
-    match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(reply)) => account_reply_to_response(reply),
-        Ok(Err(_)) => {
-            warn!("Reply channel closed with no reply for correlation_id {correlation_id}");
-            (StatusCode::GATEWAY_TIMEOUT, "no reply received").into_response()
-        }
-        Err(_) => {
-            state.account_reply_router.cancel(&correlation_id);
-            (StatusCode::GATEWAY_TIMEOUT, "timed out waiting for a reply").into_response()
-        }
+    match relay(
+        &state.broker_client,
+        &state.account_reply_router,
+        CREDENTIALS_ACCOUNT_REQUESTS_TOPIC,
+        "account",
+        request,
+        timeout,
+    )
+    .await
+    {
+        Ok(reply) => account_reply_to_response(reply),
+        Err(response) => response,
     }
 }
 
@@ -321,45 +314,18 @@ pub async fn admin_action(
 ) -> Response {
     // No credential to read a lifetime from, so wait the full ceiling.
     let timeout = Duration::from_secs(MAX_TIMEOUT_SECS as u64);
-
-    let correlation_id = uuid::Uuid::new_v4().to_string();
-    let rx = state
-        .admin_action_reply_router
-        .register(correlation_id.clone());
-
-    let envelope = Envelope {
-        correlation_id: correlation_id.clone(),
-        payload: signed,
-    };
-    let payload = match rkyv::to_bytes::<rkyv::rancor::Error>(&envelope) {
-        Ok(bytes) => bytes.to_vec(),
-        Err(e) => {
-            state.admin_action_reply_router.cancel(&correlation_id);
-            error!("Failed to serialize admin action envelope: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response();
-        }
-    };
-
-    if let Err(e) = state.broker_client.send_message(TcpClientMessage::publish(
-        CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC.to_string(),
-        payload,
-        None,
-    )) {
-        state.admin_action_reply_router.cancel(&correlation_id);
-        error!("Failed to publish admin action: {e}");
-        return (StatusCode::SERVICE_UNAVAILABLE, "failed to reach the broker").into_response();
-    }
-
-    match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(reply)) => admin_action_reply_to_response(reply),
-        Ok(Err(_)) => {
-            warn!("Reply channel closed with no reply for correlation_id {correlation_id}");
-            (StatusCode::GATEWAY_TIMEOUT, "no reply received").into_response()
-        }
-        Err(_) => {
-            state.admin_action_reply_router.cancel(&correlation_id);
-            (StatusCode::GATEWAY_TIMEOUT, "timed out waiting for a reply").into_response()
-        }
+    match relay(
+        &state.broker_client,
+        &state.admin_action_reply_router,
+        CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC,
+        "admin action",
+        signed,
+        timeout,
+    )
+    .await
+    {
+        Ok(reply) => admin_action_reply_to_response(reply),
+        Err(response) => response,
     }
 }
 
