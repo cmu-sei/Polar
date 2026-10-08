@@ -362,10 +362,25 @@ impl SessionManager {
                         return Ok(());
                     };
                     listener_ref.send_message(BrokerMessage::RegistrationResponse {
-                        client_id,
+                        client_id: client_id.clone(),
                         result: Ok(existing_id.clone()),
                         trace_ctx: Some(span.context()),
                     })?;
+
+                    // Only now that the session agent has been told of the new connection are
+                    // the subscribers told to replay what they held for it. Told at the same
+                    // time (as the broker used to), they replayed to the old, dead connection
+                    // before it was replaced, and the messages failed again.
+                    if let Some(subscriber_mgr) = &state.subscriber_mgr {
+                        let _ = subscriber_mgr.send_message(BrokerMessage::RegistrationRequest {
+                            registration_id: Some(existing_id.clone()),
+                            client_id,
+                            trace_ctx: Some(span.context()),
+                            peer_identity: None,
+                        });
+                    } else {
+                        warn!("SessionManager: subscriber_mgr not set, cannot rehydrate subscribers");
+                    }
                     return Ok(());
                 }
             } else {

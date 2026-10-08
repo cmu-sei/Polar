@@ -688,18 +688,8 @@ impl Broker {
                 error!(error = %e, "Failed to forward RegistrationRequest to SessionManager");
             }
 
-            if let Some(sub_mgr) = &state.subscriber_mgr {
-                if let Err(e) = sub_mgr.send_message(BrokerMessage::RegistrationRequest {
-                    registration_id,
-                    client_id,
-                    trace_ctx: Some(span.context()),
-                    peer_identity,
-                }) {
-                    warn!(error = %e, "Failed to notify SubscriberManager about registration");
-                }
-            } else {
-                error!("SubscriberManager ActorRef missing in broker state");
-            }
+            // The session manager tells the subscriber manager itself, once a resumed session has
+            // its new connection. See SessionManager::handle_registration_request.
         } else {
             error!("SessionManager ActorRef missing in broker state; cannot process registration");
         }

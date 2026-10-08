@@ -43,10 +43,7 @@ async fn a_client_that_vanishes_keeps_its_session_and_can_resume_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_message_published_while_the_subscriber_is_away_is_lost() {
-    // Today: the broker tries to deliver to the session whose connection is gone, fails
-    // ("Listener not found"), and the message is gone. It is not held for the session that
-    // resumes, and it is not left on the topic for a new subscriber. Retention changes this.
+async fn a_message_published_while_the_subscriber_is_away_is_delivered_when_it_resumes() {
     with_broker(|broker| async move {
         let away = TestClient::connect(&broker, "away.test").await;
         let session = away.registration_id().unwrap();
@@ -58,19 +55,15 @@ async fn a_message_published_while_the_subscriber_is_away_is_lost() {
         let publisher = TestClient::connect(&broker, "publisher.test").await;
         publisher.publish("news", b"while you were out");
         pause().await;
-        pause().await;
 
         let back = TestClient::connect_resuming(&broker, "away.test", Some(session)).await;
-        let stranger = TestClient::connect(&broker, "stranger.test").await;
-        stranger.subscribe("news");
-        pause().await;
-        pause().await;
-
-        assert!(back.received("news").is_empty(), "not held for the session");
-        assert!(
-            stranger.received("news").is_empty(),
-            "not left on the topic"
+        assert_eq!(
+            back.wait_for_messages("news", 1).await,
+            [b"while you were out".to_vec()],
+            "held for the session, and replayed to the connection that resumed it"
         );
+        pause().await;
+        assert_eq!(back.received("news").len(), 1, "once, not repeatedly");
     })
     .await;
 }
