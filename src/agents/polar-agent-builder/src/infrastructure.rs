@@ -257,8 +257,8 @@ impl InfrastructureSupervisor {
         }
     }
 
-    /// Replaces the Cassini client, and the crypto actor that holds a reference to
-    /// it, together, sharing the same router.
+    /// Replaces the Cassini client, sharing the same router. The crypto actor, if there is one,
+    /// stays and is told about the new client.
     async fn respawn_tcp_client(
         myself: &ActorRef<InfrastructureSupervisorMessage>,
         state: &mut InfrastructureSupervisorState,
@@ -286,35 +286,29 @@ impl InfrastructureSupervisor {
             )
             .await?;
 
-        let new_crypto = if state.wants_crypto {
-            let (crypto_actor, _) = polar_crypto::CryptoActor::spawn_linked(
-                None,
-                polar_crypto::CryptoActor,
-                polar_crypto::CryptoActorArgs::new(
-                    new_tcp_client.as_actor_ref(),
-                    state.router.clone(),
-                )
-                .with_settings(
-                    polar_crypto::environment::CryptoSettings::from_env(&*state.config)
-                        .map_err(ActorProcessingErr::from)?,
-                ),
-                myself.get_cell(),
-            )
-            .await
-            .map_err(ActorProcessingErr::from)?;
-            Some(CryptoHandle::new(crypto_actor))
-        } else {
-            None
-        };
+        // The crypto actor is not replaced with the client: it holds this agent's key custody
+        // and caches, and there is one for the life of the agent. It is told the new client.
+        // (A second actor would also be refused the first one's reply topics by the router.)
+        if let Some(crypto) = &state.crypto
+            && let Err(e) =
+                crypto
+                    .as_actor_ref()
+                    .send_message(polar_crypto::CryptoMessage::ClientReplaced {
+                        tcp_client: new_tcp_client.as_actor_ref(),
+                    })
+        {
+            tracing::warn!(
+                "InfrastructureSupervisor: could not tell the crypto actor about the new client: {e}"
+            );
+        }
 
         state.tcp_client = new_tcp_client.clone();
-        state.crypto = new_crypto.clone();
 
         state
             .infrastructure_events
             .send(InfrastructureEvent::Respawned {
                 tcp_client: new_tcp_client,
-                crypto: new_crypto,
+                crypto: state.crypto.clone(),
             });
         Ok(())
     }
@@ -675,8 +669,35 @@ mod tests {
             health_env: &[(&str, &str)],
             listen_for_signals: bool,
         ) -> Self {
+            Self::build(service, budget, health_env, listen_for_signals, false).await
+        }
+
+        /// A rig whose agent encrypts: it has a real certificate for the crypto actor to take
+        /// its identity from.
+        async fn with_crypto(service: &str) -> Self {
+            Self::build(service, Duration::from_secs(20), &[], false, true).await
+        }
+
+        async fn build(
+            service: &str,
+            budget: Duration,
+            health_env: &[(&str, &str)],
+            listen_for_signals: bool,
+            crypto: bool,
+        ) -> Self {
             let dir = tempfile::tempdir().unwrap();
-            let vars: HashMap<String, String> = [
+            let certificate = dir.path().join("cert.pem");
+            if crypto {
+                let params = rcgen::CertificateParams::new(vec![format!("{service}-identity")])
+                    .expect("certificate parameters");
+                let key = rcgen::KeyPair::generate().expect("key");
+                std::fs::write(
+                    &certificate,
+                    params.self_signed(&key).expect("self-sign").pem(),
+                )
+                .expect("write the certificate");
+            }
+            let mut vars: HashMap<String, String> = [
                 (
                     "POLAR_HEALTH_FILE",
                     dir.path().join("health.json").to_str().unwrap(),
@@ -688,8 +709,15 @@ mod tests {
             .chain(health_env.iter().copied())
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-            let startup =
-                crate::startup::prepare(&vars, &[], &[crate::Capability::Cassini], None).unwrap();
+            let mut required = vec![crate::Capability::Cassini];
+            if crypto {
+                vars.insert(
+                    "TLS_CLIENT_CERT".to_string(),
+                    certificate.to_string_lossy().into_owned(),
+                );
+                required.push(crate::Capability::Encryption);
+            }
+            let startup = crate::startup::prepare(&vars, &[], &required, None).unwrap();
 
             let exits = Arc::new(Mutex::new(Vec::new()));
             let recorded = exits.clone();
@@ -704,7 +732,7 @@ mod tests {
                         .with_config(startup.health),
                     config: startup.config,
                     subscriptions: vec![],
-                    wants_crypto: false,
+                    wants_crypto: crypto,
                     shutdown_budget: budget,
                     listen_for_signals,
                     process_exit: Arc::new(move |code| recorded.lock().unwrap().push(code)),
@@ -989,6 +1017,43 @@ mod tests {
         );
         assert_eq!(rig.events(), ["respawned"], "told, and not shut down");
         assert!(rig.infra.get_status() == ActorStatus::Running);
+    }
+
+    async fn current_resources(rig: &Rig) -> AgentResources {
+        ractor::call!(rig.infra, |reply| {
+            InfrastructureSupervisorMessage::GetResources { reply }
+        })
+        .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_replaced_client_does_not_replace_the_crypto_actor() {
+        let rig = Rig::with_crypto("infra-crypto-once").await;
+        let before = current_resources(&rig).await;
+        let crypto_before = before.crypto.expect("an encrypting agent has one");
+        let children_before = rig.infra.get_children().len();
+
+        rig.resources.tcp_client.as_actor_ref().kill();
+        rig.settle().await;
+
+        let after = current_resources(&rig).await;
+        let crypto_after = after.crypto.expect("still has one");
+        assert_eq!(
+            crypto_after.as_actor_ref().get_id(),
+            crypto_before.as_actor_ref().get_id(),
+            "the same actor, not a second one beside it"
+        );
+        assert_eq!(
+            crypto_before.as_actor_ref().get_status(),
+            ActorStatus::Running,
+            "and it is still running"
+        );
+        assert_eq!(
+            rig.infra.get_children().len(),
+            children_before,
+            "a new client, and no new crypto actor"
+        );
+        assert_eq!(rig.events(), ["respawned"]);
     }
 
     #[tokio::test(start_paused = true)]
