@@ -640,7 +640,16 @@ impl SessionManager {
                         superseded: false,
                     },
                 );
-                if let Some(identity) = &peer_identity {
+                // A client asking to resume a session that was superseded is the instance that
+                // lost it, still running. It is given a session of its own, but it does not
+                // displace the one that took over: two live instances would otherwise take
+                // turns closing each other's connections.
+                let is_the_loser = registration_id
+                    .as_ref()
+                    .is_some_and(|id| state.held.iter().any(|held| &held.registration_id == id));
+                if let Some(identity) = &peer_identity
+                    && !is_the_loser
+                {
                     Self::supersede_older(state, identity, &new_id, &client_id);
                 }
                 // Pass broker ref to the session agent

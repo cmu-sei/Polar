@@ -165,3 +165,31 @@ async fn a_new_session_also_takes_over_an_older_one_that_still_looks_connected()
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_instance_that_lost_its_session_does_not_take_it_back_by_force() {
+    with_broker(|broker| async move {
+        // Both instances are alive: the old one reconnects by itself when the broker closes its
+        // connection, asking for the session it had.
+        let old = TestClient::connect(&broker, "agent.test").await;
+        old.subscribe("news");
+        pause().await;
+        let new = TestClient::connect(&broker, "agent.test").await;
+        // Long enough for the old one to come back several times.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            !new.lost_its_connection(),
+            "the old instance coming back must not close the new one's connection"
+        );
+        new.subscribe("news");
+        pause().await;
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        publisher.publish("news", b"for the new instance");
+        assert_eq!(
+            new.wait_for_messages("news", 1).await,
+            [b"for the new instance".to_vec()],
+            "the new instance is still being served"
+        );
+    })
+    .await;
+}
