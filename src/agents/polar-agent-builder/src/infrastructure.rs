@@ -57,13 +57,6 @@ pub enum InfrastructureEvent {
     /// that's genuinely, fully done. Sent at most once. If it does not answer
     /// within the shutdown budget the process exits 1 regardless.
     PrepareShutdown,
-    /// The TCP client terminated unexpectedly and was genuinely,
-    /// freshly respawned (only when not already shutting down) --
-    /// fresh, real handles for the domain supervisor's own state.
-    Respawned {
-        tcp_client: TcpClient,
-        crypto: Option<CryptoHandle>,
-    },
 }
 
 pub enum InfrastructureSupervisorMessage {
@@ -153,12 +146,9 @@ pub struct InfrastructureSupervisorState {
     crypto: Option<CryptoHandle>,
     healthcheck: HealthHandle,
     service_name: String,
-    subscribed_topics: Vec<String>,
-    wants_crypto: bool,
     shutdown: ShutdownMachine,
     shutdown_budget: Duration,
     process_exit: ProcessExit,
-    tcp_spawner: Arc<dyn TcpClientSpawner>,
 }
 
 pub struct InfrastructureSupervisor;
@@ -226,12 +216,7 @@ impl InfrastructureSupervisor {
         }
     }
 
-    async fn child_ended(
-        myself: &ActorRef<InfrastructureSupervisorMessage>,
-        state: &mut InfrastructureSupervisorState,
-        cell: ActorCell,
-        death: Death,
-    ) {
+    fn child_ended(state: &mut InfrastructureSupervisorState, cell: ActorCell, death: Death) {
         let child = Self::classify(state, &cell);
         match shutdown::on_child_death(state.shutdown.is_running(), &child, &death) {
             Action::Ignore => {
@@ -243,74 +228,7 @@ impl InfrastructureSupervisor {
                 tracing::error!("InfrastructureSupervisor: {reason}");
                 Self::begin_shutdown(state, reason);
             }
-            Action::RespawnTcpClient => {
-                tracing::warn!(
-                    "InfrastructureSupervisor: TcpClientActor terminated unexpectedly \
-                     ({death:?}) -- respawning it, and CryptoActor if requested, together"
-                );
-                if let Err(e) = Self::respawn_tcp_client(myself, state).await {
-                    let reason = format!("the Cassini client could not be respawned: {e}");
-                    tracing::error!("InfrastructureSupervisor: {reason}");
-                    Self::begin_shutdown(state, reason);
-                }
-            }
         }
-    }
-
-    /// Replaces the Cassini client, sharing the same router. The crypto actor, if there is one,
-    /// stays and is told about the new client.
-    async fn respawn_tcp_client(
-        myself: &ActorRef<InfrastructureSupervisorMessage>,
-        state: &mut InfrastructureSupervisorState,
-    ) -> Result<(), ActorProcessingErr> {
-        let lifecycle_handler: LifecycleHandler = Box::new(build_lifecycle_handler(
-            state.service_name.clone(),
-            state.subscribed_topics.clone(),
-            Box::new(|event: ClientEvent| {
-                Some(InfrastructureSupervisorMessage::ClientEvent(event))
-            }),
-        ));
-
-        // From the snapshot, as at the first start: a respawn is not a second reading of
-        // the process.
-        let client_config =
-            TCPClientConfig::from_env(&*state.config).map_err(ActorProcessingErr::from)?;
-        let new_tcp_client = state
-            .tcp_spawner
-            .spawn(
-                &state.service_name,
-                myself.clone(),
-                lifecycle_handler,
-                state.router.clone(),
-                client_config,
-            )
-            .await?;
-
-        // The crypto actor is not replaced with the client: it holds this agent's key custody
-        // and caches, and there is one for the life of the agent. It is told the new client.
-        // (A second actor would also be refused the first one's reply topics by the router.)
-        if let Some(crypto) = &state.crypto
-            && let Err(e) =
-                crypto
-                    .as_actor_ref()
-                    .send_message(polar_crypto::CryptoMessage::ClientReplaced {
-                        tcp_client: new_tcp_client.as_actor_ref(),
-                    })
-        {
-            tracing::warn!(
-                "InfrastructureSupervisor: could not tell the crypto actor about the new client: {e}"
-            );
-        }
-
-        state.tcp_client = new_tcp_client.clone();
-
-        state
-            .infrastructure_events
-            .send(InfrastructureEvent::Respawned {
-                tcp_client: new_tcp_client,
-                crypto: state.crypto.clone(),
-            });
-        Ok(())
     }
 }
 
@@ -428,12 +346,9 @@ impl Actor for InfrastructureSupervisor {
             crypto,
             healthcheck: HealthHandle::new(healthcheck),
             service_name: args.service_name,
-            subscribed_topics,
-            wants_crypto: args.wants_crypto,
             shutdown: ShutdownMachine::new(),
             shutdown_budget: args.shutdown_budget,
             process_exit: args.process_exit,
-            tcp_spawner: args.tcp_spawner,
         })
     }
 
@@ -511,16 +426,16 @@ impl Actor for InfrastructureSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: SupervisionEvent,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             SupervisionEvent::ActorTerminated(cell, _, reason) => {
-                Self::child_ended(&myself, state, cell, Death::Terminated(reason)).await;
+                Self::child_ended(state, cell, Death::Terminated(reason));
             }
             SupervisionEvent::ActorFailed(cell, error) => {
-                Self::child_ended(&myself, state, cell, Death::Failed(error.to_string())).await;
+                Self::child_ended(state, cell, Death::Failed(error.to_string()));
             }
             _ => {}
         }
@@ -635,7 +550,6 @@ mod tests {
         ) -> Result<(), ActorProcessingErr> {
             seen.lock().unwrap().push(match event {
                 InfrastructureEvent::PrepareShutdown => "prepare_shutdown".to_string(),
-                InfrastructureEvent::Respawned { .. } => "respawned".to_string(),
             });
             Ok(())
         }
@@ -1003,102 +917,45 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_cassini_client_stopping_is_replaced_not_fatal() {
-        let rig = Rig::standard("infra-tcp-replaced").await;
+    async fn the_cassini_client_ending_starts_an_orderly_shutdown_and_is_not_replaced() {
+        // The client front keeps the connection up itself, so what ends here is the front,
+        // which only happens when it cannot go on. The supervisor does not make another.
+        let rig = Rig::standard("infra-tcp-ends").await;
         assert_eq!(rig.spawner.spawned.load(Ordering::SeqCst), 1);
 
         rig.resources.tcp_client.as_actor_ref().kill();
         rig.settle().await;
 
+        assert_eq!(rig.events(), ["prepare_shutdown"]);
         assert_eq!(
             rig.spawner.spawned.load(Ordering::SeqCst),
-            2,
-            "a new client"
+            1,
+            "no replacement"
         );
-        assert_eq!(rig.events(), ["respawned"], "told, and not shut down");
-        assert!(rig.infra.get_status() == ActorStatus::Running);
-    }
-
-    async fn current_resources(rig: &Rig) -> AgentResources {
-        ractor::call!(rig.infra, |reply| {
-            InfrastructureSupervisorMessage::GetResources { reply }
-        })
-        .unwrap()
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_replaced_client_does_not_replace_the_crypto_actor() {
-        let rig = Rig::with_crypto("infra-crypto-once").await;
-        let before = current_resources(&rig).await;
-        let crypto_before = before.crypto.expect("an encrypting agent has one");
-        let children_before = rig.infra.get_children().len();
-
-        rig.resources.tcp_client.as_actor_ref().kill();
+    async fn the_crypto_actor_dying_starts_an_orderly_shutdown() {
+        let rig = Rig::with_crypto("infra-crypto-dies").await;
+        let crypto = rig
+            .resources
+            .crypto
+            .clone()
+            .expect("an encrypting agent has one");
+        crypto.as_actor_ref().kill();
         rig.settle().await;
-
-        let after = current_resources(&rig).await;
-        let crypto_after = after.crypto.expect("still has one");
-        assert_eq!(
-            crypto_after.as_actor_ref().get_id(),
-            crypto_before.as_actor_ref().get_id(),
-            "the same actor, not a second one beside it"
-        );
-        assert_eq!(
-            crypto_before.as_actor_ref().get_status(),
-            ActorStatus::Running,
-            "and it is still running"
-        );
-        assert_eq!(
-            rig.infra.get_children().len(),
-            children_before,
-            "a new client, and no new crypto actor"
-        );
-        assert_eq!(rig.events(), ["respawned"]);
+        assert_eq!(rig.events(), ["prepare_shutdown"]);
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_client_is_started_and_restarted_with_the_snapshots_coordinates() {
+    async fn the_client_is_started_with_the_snapshots_coordinates() {
         // The rig's process has no BROKER_ADDR; the snapshot is built from a map that does.
         let rig = Rig::standard("infra-tcp-config").await;
-        rig.resources.tcp_client.as_actor_ref().kill();
-        rig.settle().await;
-
         let configs = rig.spawner.configs.lock().unwrap().clone();
-        assert_eq!(configs.len(), 2, "the first client and its replacement");
-        for config in configs {
-            assert_eq!(config.broker_endpoint, "cassini:8080");
-            assert_eq!(config.server_name, "cassini.local");
-            assert_eq!(config.client_certificate_path, "/c/cert.pem");
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn the_cassini_client_failing_starts_an_orderly_shutdown() {
-        let rig = Rig::standard("infra-tcp-fails").await;
-        rig.spawner
-            .clients_fail_on_message
-            .store(true, Ordering::SeqCst);
-        // Respawn one that will fail, then make it fail.
-        rig.resources.tcp_client.as_actor_ref().kill();
-        rig.settle().await;
-        assert_eq!(rig.events(), ["respawned"]);
-
-        let client = ractor::registry::where_is("infra-tcp-fails.tcp".to_string())
-            .expect("the replacement is registered");
-        let client: ActorRef<TcpClientMessage> = client.into();
-        client.cast(TcpClientMessage::Register).unwrap();
-        rig.settle().await;
-
-        assert_eq!(rig.events(), ["respawned", "prepare_shutdown"]);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_cassini_client_that_cannot_be_replaced_starts_an_orderly_shutdown() {
-        let rig = Rig::standard("infra-tcp-no-replacement").await;
-        rig.spawner.fail_next_spawn.store(true, Ordering::SeqCst);
-        rig.resources.tcp_client.as_actor_ref().kill();
-        rig.settle().await;
-        assert_eq!(rig.events(), ["prepare_shutdown"], "and no respawned event");
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].broker_endpoint, "cassini:8080");
+        assert_eq!(configs[0].server_name, "cassini.local");
+        assert_eq!(configs[0].client_certificate_path, "/c/cert.pem");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1111,11 +968,7 @@ mod tests {
         rig.resources.tcp_client.as_actor_ref().kill();
         rig.settle().await;
 
-        assert_eq!(
-            rig.events(),
-            ["prepare_shutdown"],
-            "no second event, no respawn"
-        );
+        assert_eq!(rig.events(), ["prepare_shutdown"], "no second event");
         assert_eq!(
             rig.spawner.spawned.load(Ordering::SeqCst),
             1,

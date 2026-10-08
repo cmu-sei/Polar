@@ -43,12 +43,13 @@ domain supervisor (per agent)
 └── InfrastructureSupervisor            owns the shutdown pipeline
     ├── HealthCheckActor                judges health, writes the liveness file
     ├── RouterActor
-    ├── TcpClient (Cassini client)
-    └── CryptoActor                     only with_encryption()
+    ├── TcpClientFacade (Cassini client) the stable front; supervises the transport
+    │   └── TcpClientActor              the connection; replaced when it dies
+    └── CryptoActor                     only with_encryption(); one for the agent's life
 ```
 
 `polar-agent-builder` wires this. The domain supervisor receives
-`InfrastructureEvent::{Respawned, PrepareShutdown}` and replies with
+`InfrastructureEvent::PrepareShutdown` and replies with
 `InfrastructureSupervisorMessage::ProceedWithShutdown`.
 
 ## 3. The HealthCheckActor
@@ -193,8 +194,8 @@ plain functions that can be tested without starting an actor.
 | Health verdict: hard deadline (cert, graph, Cassini) | abrupt (actor fails) | orderly |
 | HealthCheckActor dies unexpectedly (panic, bug) | abrupt | orderly, logged as a fault in the health actor |
 | Router / CryptoActor dies unexpectedly | abrupt | orderly |
-| Cassini client fails (error or panic) | abrupt | orderly |
-| Cassini client stops cleanly | replaced | replaced (if it cannot be replaced: orderly) |
+| Cassini connection (the transport) dies | the client died with it and was replaced, and every holder was told | the client front brings a new transport up with backoff, holding publishes meanwhile; nothing else is told |
+| Cassini client front ends (error, panic or clean stop) | abrupt, or replaced | orderly |
 | SIGTERM or SIGINT | ignored by PID 1 | orderly |
 | `kubectl delete`, rollout, node drain | SIGKILL after the grace period | orderly, via SIGTERM (grace period: stage S5) |
 
@@ -214,7 +215,7 @@ Design decisions:
   logged and changes nothing. The domain supervisor is told once.
 - **Children ending during a shutdown are expected.** Once it has begun, the
   children are being stopped on purpose, so nothing they do starts anything:
-  no second `PrepareShutdown`, no new Cassini client. (Stopping the health actor
+  no second `PrepareShutdown`. (Stopping the health actor
   used to start a second shutdown.)
 - **In-process watchdog.** When the shutdown begins, a detached task starts a clock
   for the shutdown budget. If the process is still alive when it runs out, the

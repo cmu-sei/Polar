@@ -46,7 +46,6 @@ use credentials_agent_common::{
     CREDENTIALS_ACCOUNT_REPLIES_TOPIC, CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC,
     CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC, CREDENTIALS_ISSUANCE_REPLIES_TOPIC,
 };
-use polar::cassini::TcpClient;
 use polar::request_reply::{Envelope, ReplyRouter};
 use polar_agent_builder::{
     AgentBuilder, HealthClient, HealthHandle, InfrastructureEvent, InfrastructureSupervisorMessage,
@@ -138,12 +137,6 @@ pub enum ObserverSupervisorMessage {
     ClientEvent {
         event: ClientEvent,
     },
-    /// The TCP client died and the infrastructure supervisor spawned a fresh
-    /// one. This agent has no CryptoActor, so the event's crypto half is
-    /// always empty and dropped.
-    InfrastructureRespawned {
-        tcp_client: TcpClient,
-    },
     /// The health check has ended for rejuvenation. Drain, then let the
     /// infrastructure go.
     PrepareShutdown,
@@ -164,7 +157,6 @@ struct HttpServer {
 pub struct ObserverSupervisorState {
     healthcheck: HealthHandle,
     infrastructure: ActorRef<InfrastructureSupervisorMessage>,
-    observer: Arc<ObserverState>,
     http: Option<HttpServer>,
 }
 
@@ -240,9 +232,6 @@ impl Actor for ObserverSupervisor {
         resources
             .infrastructure_events
             .subscribe(myself.clone(), |event| match event {
-                InfrastructureEvent::Respawned { tcp_client, .. } => {
-                    Some(ObserverSupervisorMessage::InfrastructureRespawned { tcp_client })
-                }
                 InfrastructureEvent::PrepareShutdown => {
                     Some(ObserverSupervisorMessage::PrepareShutdown)
                 }
@@ -261,7 +250,6 @@ impl Actor for ObserverSupervisor {
         Ok(ObserverSupervisorState {
             healthcheck: resources.healthcheck,
             infrastructure: resources.infrastructure,
-            observer,
             http: Some(http),
         })
     }
@@ -285,16 +273,6 @@ impl Actor for ObserverSupervisor {
                 }
                 _ => {}
             },
-            ObserverSupervisorMessage::InfrastructureRespawned { tcp_client } => {
-                warn!(
-                    "TCP client was respawned by the infrastructure supervisor; \
-                     pointing the request handlers at the new one"
-                );
-                state
-                    .observer
-                    .broker_client
-                    .replace(tcp_client.as_actor_ref());
-            }
             ObserverSupervisorMessage::PrepareShutdown => {
                 info!("PrepareShutdown received: draining the HTTP server before infrastructure");
                 if let Some(http) = state.http.take() {

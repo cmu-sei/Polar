@@ -46,13 +46,6 @@ const SHUTDOWN_BUDGET: Duration = Duration::from_secs(3 * 10 + 10);
 /// genuinely needs is the correct, clean fix, not a workaround.
 pub enum ObserverSupervisorMessage {
     ClientEvent { event: ClientEvent },
-    /// InfrastructureSupervisor's own InfrastructureEvent::Respawned,
-    /// forwarded here -- a real, unexpected TcpClientActor
-    /// termination was detected and a fresh client already, genuinely
-    /// spawned. This agent has no CryptoActor (no with_encryption() call
-    /// below), so InfrastructureEvent::Respawned's own crypto field
-    /// is always, genuinely None here and deliberately dropped.
-    InfrastructureRespawned { tcp_client: TcpClient },
     /// InfrastructureSupervisor's own InfrastructureEvent::PrepareShutdown,
     /// forwarded here -- HealthCheckActor (now InfrastructureSupervisor's
     /// own, direct child, not this supervisor's) has genuinely,
@@ -146,9 +139,6 @@ impl Actor for ClusterObserverSupervisor {
         resources
             .infrastructure_events
             .subscribe(myself.clone(), |event| match event {
-                InfrastructureEvent::Respawned { tcp_client, .. } => {
-                    Some(ObserverSupervisorMessage::InfrastructureRespawned { tcp_client })
-                }
                 InfrastructureEvent::PrepareShutdown => {
                     Some(ObserverSupervisorMessage::PrepareShutdown)
                 }
@@ -239,35 +229,6 @@ impl Actor for ClusterObserverSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            ObserverSupervisorMessage::InfrastructureRespawned { tcp_client } => {
-                warn!(
-                    "TCP client was respawned by InfrastructureSupervisor; tearing down \
-                     watcher trees to rebuild fresh on the next, real reconnect"
-                );
-
-                // Stop any existing watcher trees — they hold stale TcpClient
-                // handles baked in at spawn time and can't publish through a
-                // dead client. Rather than propagate a fresh handle down
-                // through several actor layers, we just let the Registered
-                // handler rebuild them fresh once the new client reconnects.
-                // Exactly this supervisor's own, pre-existing, established
-                // design -- only the real trigger changed (an explicit,
-                // real InfrastructureEvent::Respawned message now, rather
-                // than a direct SupervisionEvent::ActorTerminated match on
-                // TcpClientActor, which is no longer this supervisor's own,
-                // direct child at all).
-                if let Some(w) = state.namespace_watcher.take() {
-                    w.stop(Some("tcp_client_respawn".to_string()));
-                }
-                if let Some(w) = state.oci_repository_watcher.take() {
-                    w.stop(Some("tcp_client_respawn".to_string()));
-                }
-                if let Some(w) = state.kustomization_watcher.take() {
-                    w.stop(Some("tcp_client_respawn".to_string()));
-                }
-
-                state.tcp_client = tcp_client;
-            }
             ObserverSupervisorMessage::PrepareShutdown => {
                 info!(
                     "CLUSTER_SUPERVISOR: PrepareShutdown received -- stopping this \

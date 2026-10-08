@@ -46,12 +46,6 @@ pub enum ConsumerSupervisorMessage {
         event: ClientEvent,
     },
     GraphSignal(GraphSignal),
-    /// InfrastructureSupervisor replaced the TcpClient after an unexpected
-    /// termination. The builder re-fires every Subscription when the new
-    /// client registers; this supervisor only needs the new handle.
-    InfrastructureRespawned {
-        tcp_client: TcpClient,
-    },
     /// The HealthCheckActor, a child of InfrastructureSupervisor, has
     /// terminated for rejuvenation. Finish this supervisor's own work,
     /// then send InfrastructureSupervisorMessage::ProceedWithShutdown.
@@ -169,9 +163,6 @@ impl Actor for ConsumerSupervisor {
         resources
             .infrastructure_events
             .subscribe(myself.clone(), |event| match event {
-                InfrastructureEvent::Respawned { tcp_client, .. } => {
-                    Some(ConsumerSupervisorMessage::InfrastructureRespawned { tcp_client })
-                }
                 InfrastructureEvent::PrepareShutdown => {
                     Some(ConsumerSupervisorMessage::PrepareShutdown)
                 }
@@ -222,10 +213,6 @@ impl Actor for ConsumerSupervisor {
                     let _ = state.healthcheck.graph_op_failed(reason);
                 }
             },
-            ConsumerSupervisorMessage::InfrastructureRespawned { tcp_client } => {
-                warn!("CONSUMER_SUPERVISOR: TCP client was respawned; subscriptions are restored on its next registration");
-                state.broker_client = tcp_client;
-            }
             ConsumerSupervisorMessage::PrepareShutdown => {
                 info!(
                     "CONSUMER_SUPERVISOR: PrepareShutdown received -- unsubscribing and \

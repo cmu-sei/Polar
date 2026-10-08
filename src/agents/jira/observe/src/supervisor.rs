@@ -57,10 +57,6 @@ pub enum ObserverSupervisorMessage {
     ClientEvent {
         event: ClientEvent,
     },
-    /// InfrastructureSupervisor replaced the TcpClient after an unexpected
-    /// termination. The observers hold the old handle, so they are stopped
-    /// and rebuilt on the next Registered.
-    InfrastructureRespawned { tcp_client: TcpClient },
     /// The HealthCheckActor, a child of InfrastructureSupervisor, has
     /// terminated for rejuvenation. Stop the observers, then send
     /// InfrastructureSupervisorMessage::ProceedWithShutdown.
@@ -245,9 +241,6 @@ impl Actor for ObserverSupervisor {
         resources
             .infrastructure_events
             .subscribe(myself.clone(), |event| match event {
-                InfrastructureEvent::Respawned { tcp_client, .. } => {
-                    Some(ObserverSupervisorMessage::InfrastructureRespawned { tcp_client })
-                }
                 InfrastructureEvent::PrepareShutdown => {
                     Some(ObserverSupervisorMessage::PrepareShutdown)
                 }
@@ -276,14 +269,6 @@ impl Actor for ObserverSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            ObserverSupervisorMessage::InfrastructureRespawned { tcp_client } => {
-                warn!(
-                    "TCP client was respawned by InfrastructureSupervisor; stopping observers \
-                     so they are rebuilt with the new handle on the next Registered"
-                );
-                state.stop_observers("tcp_client_respawn").await;
-                state.tcp_client = tcp_client;
-            }
             ObserverSupervisorMessage::PrepareShutdown => {
                 info!(
                     "OBSERVER_SUPERVISOR: PrepareShutdown received, stopping observers \

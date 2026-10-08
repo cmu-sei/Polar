@@ -188,26 +188,27 @@ impl Death {
 pub(crate) enum Action {
     /// Expected: the children are being stopped as part of the shutdown.
     Ignore,
-    /// The Cassini client stopped cleanly while the agent was running. Replace it.
-    RespawnTcpClient,
     /// An orderly shutdown, for this reason.
     Shutdown(String),
 }
 
 /// What the supervisor does when one of its children ends.
 ///
-/// While the agent is running, any child ending is a reason to shut down, except
-/// the Cassini client stopping cleanly, which is replaced. Once the shutdown is
-/// under way the children are being stopped on purpose, so nothing they do matters.
+/// While the agent is running, any child ending is a reason to shut down. The Cassini
+/// connection is not one of them: the client front keeps it up itself, bringing a new
+/// transport when one dies, so what ends here is the front, which only happens when it
+/// cannot go on. Once the shutdown is under way the children are being stopped on purpose,
+/// so nothing they do matters.
 pub(crate) fn on_child_death(running: bool, child: &Child, death: &Death) -> Action {
     if !running {
         return Action::Ignore;
     }
     match (child, death) {
-        (Child::TcpClient, Death::Terminated(_)) => Action::RespawnTcpClient,
-        (Child::TcpClient, Death::Failed(error)) => {
-            Action::Shutdown(format!("the Cassini client failed: {error}"))
-        }
+        (Child::TcpClient, _) => Action::Shutdown(format!(
+            "the Cassini client ended unexpectedly ({}); it keeps its own connection up, so \
+             this is the client itself failing",
+            death.detail()
+        )),
         (Child::Health, _) => Action::Shutdown(format!(
             "the health actor ended unexpectedly ({}); it reports a verdict and stays alive, \
              so this is a fault in the health actor itself",
@@ -462,21 +463,12 @@ mod tests {
     }
 
     #[test]
-    fn the_cassini_client_stopping_cleanly_is_replaced() {
-        assert_eq!(
-            on_child_death(true, &Child::TcpClient, &terminated()),
-            Action::RespawnTcpClient
-        );
-        assert_eq!(
-            on_child_death(true, &Child::TcpClient, &Death::Terminated(None)),
-            Action::RespawnTcpClient
-        );
-    }
-
-    #[test]
-    fn the_cassini_client_failing_is_a_shutdown() {
+    fn the_cassini_client_ending_is_a_shutdown_whichever_way_it_goes() {
+        for death in [terminated(), failed(), Death::Terminated(None)] {
+            let reason = shutdown_reason(on_child_death(true, &Child::TcpClient, &death));
+            assert!(reason.contains("Cassini client"), "{reason}");
+        }
         let reason = shutdown_reason(on_child_death(true, &Child::TcpClient, &failed()));
-        assert!(reason.contains("Cassini client failed"), "{reason}");
         assert!(reason.contains("boom"), "{reason}");
     }
 

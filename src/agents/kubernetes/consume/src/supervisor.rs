@@ -22,7 +22,7 @@ use polar::graph::nodes::builds::ArtifactNodeKey;
 use polar::graph::nodes::kube::KubeNodeKey;
 use polar::topics::KUBERNETES_RESOLUTION_EVENTS;
 use polar_agent_builder::{
-    AgentBuilder, CryptoHandle, HealthClient, HealthHandle, InfrastructureEvent,
+    AgentBuilder, HealthClient, HealthHandle, InfrastructureEvent,
     InfrastructureSupervisorMessage, Subscription,
 };
 use ractor::{Actor, OutputPort};
@@ -57,12 +57,6 @@ pub enum ConsumerSupervisorMessage {
         event: ClientEvent,
     },
     GraphSignal(GraphSignal),
-    /// InfrastructureSupervisor replaced a TcpClient that terminated
-    /// unexpectedly (and its CryptoActor with it).
-    InfrastructureRespawned {
-        tcp_client: TcpClient,
-        crypto: Option<CryptoHandle>,
-    },
     /// HealthCheckActor, a child of the InfrastructureSupervisor, terminated
     /// cleanly for rejuvenation. The infrastructure now waits for this
     /// supervisor to finish its own shutdown and answer with
@@ -160,7 +154,6 @@ pub struct ClusterConsumerSupervisorState {
     /// logic; the real, upcoming, plaintext-Kubernetes-secret
     /// encryption work (see this crate's own, real design
     /// discussion) is the actual, first real caller.
-    crypto: CryptoHandle,
     /// The InfrastructureSupervisor (HealthCheckActor, RouterActor,
     /// TcpClientActor, CryptoActor) this supervisor's builder spawned. Its
     /// termination means the shutdown handshake is complete (or that
@@ -396,9 +389,6 @@ impl Actor for ClusterConsumerSupervisor {
         resources
             .infrastructure_events
             .subscribe(myself.clone(), |event| match event {
-                InfrastructureEvent::Respawned { tcp_client, crypto } => {
-                    Some(ConsumerSupervisorMessage::InfrastructureRespawned { tcp_client, crypto })
-                }
                 InfrastructureEvent::PrepareShutdown => {
                     Some(ConsumerSupervisorMessage::PrepareShutdown)
                 }
@@ -429,7 +419,8 @@ impl Actor for ClusterConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
-        let crypto = resources.crypto.ok_or_else(|| {
+        // The encryption capability must have produced the crypto actor; nothing here uses it.
+        resources.crypto.as_ref().ok_or_else(|| {
             ActorProcessingErr::from("with_encryption() was called but the builder returned no CryptoHandle")
         })?;
 
@@ -440,7 +431,6 @@ impl Actor for ClusterConsumerSupervisor {
                 entries: HashMap::new(),
             },
             healthcheck: resources.healthcheck,
-            crypto,
             infrastructure: resources.infrastructure,
             draining: false,
             rejuvenating: false,
@@ -463,16 +453,6 @@ impl Actor for ClusterConsumerSupervisor {
                 }
             },
 
-            ConsumerSupervisorMessage::InfrastructureRespawned { tcp_client, crypto } => {
-                // Everything that held the old client is stale; the builder's
-                // lifecycle handler re-subscribes both topics when the new
-                // client registers.
-                warn!("CONSUMER_SUPERVISOR: TCP client was respawned by the infrastructure supervisor");
-                state.broker_client = tcp_client;
-                if let Some(crypto) = crypto {
-                    state.crypto = crypto;
-                }
-            }
 
             ConsumerSupervisorMessage::PrepareShutdown => {
                 if state.draining {

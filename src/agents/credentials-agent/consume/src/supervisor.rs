@@ -196,8 +196,6 @@ pub enum ConsumerSupervisorMessage {
     /// Connection lifecycle events from the Cassini client, and, re-wrapped by
     /// the subscriptions, every message published on a request topic.
     ClientEvent { event: ClientEvent },
-    /// The infrastructure supervisor replaced a Cassini client that died.
-    InfrastructureRespawned { tcp_client: TcpClient },
     /// The health check ended for rejuvenation. Drain, stop this agent's own
     /// children, then answer `ProceedWithShutdown`.
     PrepareShutdown,
@@ -952,9 +950,6 @@ impl Actor for ConsumerSupervisor {
         resources
             .infrastructure_events
             .subscribe(myself.clone(), |event| match event {
-                InfrastructureEvent::Respawned { tcp_client, .. } => {
-                    Some(ConsumerSupervisorMessage::InfrastructureRespawned { tcp_client })
-                }
                 InfrastructureEvent::PrepareShutdown => {
                     Some(ConsumerSupervisorMessage::PrepareShutdown)
                 }
@@ -978,16 +973,6 @@ impl Actor for ConsumerSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            ConsumerSupervisorMessage::InfrastructureRespawned { tcp_client } => {
-                // The handler actors find the client by registry name on every
-                // publish, so they pick the new one up on their own; only the
-                // handle kept here for unsubscribing needs replacing. The
-                // builder's lifecycle handler re-subscribes when it registers.
-                warn!(
-                    "CONSUMER_SUPERVISOR: TCP client was respawned by the infrastructure supervisor"
-                );
-                state.broker_client = tcp_client;
-            }
 
             ConsumerSupervisorMessage::PrepareShutdown => {
                 if state.draining {

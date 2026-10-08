@@ -1,6 +1,7 @@
 # Cassini client reliability
 
-Status: **design, nothing built.** Written 2026-10-08 from a design discussion. It describes what the
+Status: **design; build step 1 is done** (the facade, the in-memory offline buffer and the removal of the
+supervisor's respawn, 2026-10-08), the rest is not. Written 2026-10-08 from a design discussion. It describes what the
 Cassini client does today, why that loses messages, and the structure that replaces it. The open
 decisions are in section 6.
 

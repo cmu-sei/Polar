@@ -185,15 +185,6 @@ pub enum CryptoMessage {
     /// construction. Sent on every registration, so a reconnect
     /// restores them too. Subscribing again is harmless.
     ClientRegistered,
-    /// The Cassini client was replaced (the old one died and the agent started a new one).
-    /// From now on requests go through the new client. This actor is never replaced along
-    /// with it: it holds this agent's key custody and its caches, and there is exactly one for
-    /// the life of the agent. Requests that were waiting on the old client get no reply and
-    /// time out, as any lost reply does, and `ClientRegistered` is sent again once the new
-    /// client registers, to subscribe through it.
-    ClientReplaced {
-        tcp_client: ActorRef<TcpClientMessage>,
-    },
     /// A general secret to escrow -- e.g. an access token an observer
     /// holds and wants the Credentials Agent to store on its behalf.
     /// Not the agent's own escrow private key -- see
@@ -438,8 +429,8 @@ impl Actor for CryptoActor {
         })
     }
 
-    /// The actor stops once, when the agent is going away, since a replaced Cassini client no
-    /// longer replaces it. So a key held in the kernel keyring is released here: revoked, and
+    /// The actor stops once, when the agent is going away: the Cassini client it talks to is
+    /// a stable front that keeps its own connection up, so nothing replaces this actor. So a key held in the kernel keyring is released here: revoked, and
     /// unlinked from the user keyring, so it does not outlive the agent that used it. This is the
     /// only holder of its number. A hard kill gets no cleanup; nothing runs.
     async fn post_stop(
@@ -463,9 +454,6 @@ impl Actor for CryptoActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            CryptoMessage::ClientReplaced { tcp_client } => {
-                state.tcp_client = tcp_client;
-            }
             CryptoMessage::ClientRegistered => {
                 // Subscribes to the *_REPLIES_TOPIC constants specifically --
                 // CryptoActor is a requester here, not a responder, so it
@@ -2151,115 +2139,7 @@ mod tests {
         }
     }
 
-    // -- one actor for the life of the agent -------------------------------------------------
-
-    /// A stand-in for the Cassini client that records what it is sent.
-    struct RecordingClient {
-        received: Arc<std::sync::Mutex<Vec<TcpClientMessage>>>,
-    }
-
-    #[async_trait]
-    impl Actor for RecordingClient {
-        type Msg = TcpClientMessage;
-        type State = ();
-        type Arguments = ();
-
-        async fn pre_start(
-            &self,
-            _myself: ActorRef<Self::Msg>,
-            _args: (),
-        ) -> Result<Self::State, ActorProcessingErr> {
-            Ok(())
-        }
-
-        async fn handle(
-            &self,
-            _myself: ActorRef<Self::Msg>,
-            message: Self::Msg,
-            _state: &mut Self::State,
-        ) -> Result<(), ActorProcessingErr> {
-            self.received.lock().unwrap().push(message);
-            Ok(())
-        }
-    }
-
-    fn subscriptions(received: &Arc<std::sync::Mutex<Vec<TcpClientMessage>>>) -> usize {
-        received
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|m| matches!(m, TcpClientMessage::Subscribe { .. }))
-            .count()
-    }
-
-    #[tokio::test]
-    async fn a_replaced_client_is_the_one_used_from_then_on() {
-        let identity = format!("test-agent-{}", uuid::Uuid::new_v4());
-        let cert = write_test_agent_certificate(&identity);
-        let (router, _) = Actor::spawn(None, polar_router::RouterActor, ())
-            .await
-            .unwrap();
-        let old_received = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let new_received = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (old_client, _) = Actor::spawn(
-            None,
-            RecordingClient {
-                received: old_received.clone(),
-            },
-            (),
-        )
-        .await
-        .unwrap();
-        let (new_client, _) = Actor::spawn(
-            None,
-            RecordingClient {
-                received: new_received.clone(),
-            },
-            (),
-        )
-        .await
-        .unwrap();
-
-        let (crypto_actor, _) = Actor::spawn(
-            None,
-            CryptoActor,
-            CryptoActorArgs::new(old_client, router).with_settings(environment::CryptoSettings {
-                own_certificate_path: cert.path().to_string_lossy().into_owned(),
-                service_account_token_path: "/unused".to_string(),
-                escrow_key_handle_path: "/nonexistent/escrow-key-handle".to_string(),
-            }),
-        )
-        .await
-        .unwrap();
-
-        crypto_actor.cast(CryptoMessage::ClientRegistered).unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(
-            subscriptions(&old_received),
-            5,
-            "subscribed through the first client"
-        );
-
-        // The Cassini client died and was replaced. The same actor carries on, with the new one.
-        crypto_actor
-            .cast(CryptoMessage::ClientReplaced {
-                tcp_client: new_client,
-            })
-            .unwrap();
-        crypto_actor.cast(CryptoMessage::ClientRegistered).unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        assert_eq!(
-            subscriptions(&new_received),
-            5,
-            "subscribed again through the new one"
-        );
-        assert_eq!(
-            subscriptions(&old_received),
-            5,
-            "and nothing more through the old one"
-        );
-    }
+    // -- the actor stops once, when the agent is going away ----------------------------------
 
     #[tokio::test]
     async fn stopping_the_actor_unloads_the_key_it_adopted() {
