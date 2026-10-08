@@ -87,3 +87,20 @@ export def shutdown_problems [who: string, s: record]: nothing -> list<string> {
 
     $problems
 }
+
+# Problems with how rendered Jobs replace their pods. `docs` is every rendered Kubernetes object.
+#
+# A Job must wait until a pod is fully gone before it creates the next (`Failed`). The default
+# creates the replacement as soon as the old pod starts terminating, so a deleted or evicted pod
+# overlaps with its replacement for the whole drain: two instances of one identity at once, with
+# the same key, the same volumes. Every agent ends a pod by exiting non-zero, so a pod always
+# finishes Failed and the stricter policy loses nothing.
+export def job_replacement_problems [docs: list]: nothing -> list<string> {
+    $docs
+    | where {|d| ($d.kind? | default "") == "Job" }
+    | where {|d| ($d.spec?.podReplacementPolicy? | default "") != "Failed" }
+    | each {|d|
+        let policy = ($d.spec?.podReplacementPolicy? | default "unset")
+        $"Job ($d.metadata.name) has podReplacementPolicy ($policy), not Failed: a deleted pod would overlap with its replacement for the whole drain"
+    }
+}

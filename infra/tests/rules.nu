@@ -81,6 +81,32 @@ def main [] {
             assert (has $p "hard expiry floor")
         }
 
+        "a Job that replaces pods only after they are gone passes": {
+            let docs = [{ kind: "Job", metadata: { name: "kube-consumer" }, spec: { podReplacementPolicy: "Failed" } }]
+            assert equal (job_replacement_problems $docs) []
+        }
+
+        "a Job with the default policy is a problem, named": {
+            let docs = [{ kind: "Job", metadata: { name: "kube-consumer" }, spec: {} }]
+            let p = (job_replacement_problems $docs)
+            assert equal ($p | length) 1
+            assert (has $p "kube-consumer")
+            assert (has $p "podReplacementPolicy")
+        }
+
+        "the other policy is a problem too": {
+            let docs = [{ kind: "Job", metadata: { name: "jira-processor" }, spec: { podReplacementPolicy: "TerminatingOrFailed" } }]
+            assert equal (job_replacement_problems $docs | length) 1
+        }
+
+        "things that are not Jobs are not asked for the policy": {
+            let docs = [
+                { kind: "Deployment", metadata: { name: "cert-issuer" }, spec: {} }
+                { kind: "ServiceAccount", metadata: { name: "x" } }
+            ]
+            assert equal (job_replacement_problems $docs) []
+        }
+
         "the caller's own environment does not leak into the check": {
             # The shell running the tests may have these set; the check must not see them.
             with-env { POLAR_HEALTH_TICK_SECS: "soon", POLAR_SHUTDOWN_BUDGET_SECS: "0" } {

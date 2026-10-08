@@ -85,6 +85,7 @@ let render =
               }
             , spec = Some kubernetes.JobSpec::{
               , backoffLimit            = Some 1000000
+              , podReplacementPolicy = Some Constants.JobPodReplacementPolicy
               , parallelism             = Some 1
               , completions             = Some 1
               , ttlSecondsAfterFinished = Some 300

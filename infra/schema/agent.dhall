@@ -160,6 +160,7 @@ let render =
               }
             , spec = Some kubernetes.JobSpec::{
               , backoffLimit = Some v.backoff_limit
+              , podReplacementPolicy = Some Constants.JobPodReplacementPolicy
               , parallelism = Some 1
               , completions = Some 1
               , ttlSecondsAfterFinished = Some v.ttl_after_finished_secs

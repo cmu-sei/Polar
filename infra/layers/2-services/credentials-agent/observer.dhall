@@ -130,6 +130,7 @@ let render =
               , metadata = k8s.ObjectMeta::{ name = Some v.name, namespace = Some Constants.PolarNamespace, annotations = Some [ Constants.RejectSidecarAnnotation ] }
               , spec = Some k8s.JobSpec::{
                 , backoffLimit            = Some 1000000
+                , podReplacementPolicy = Some Constants.JobPodReplacementPolicy
                 , parallelism             = Some 1
                 , completions             = Some 1
                 , ttlSecondsAfterFinished = Some 300

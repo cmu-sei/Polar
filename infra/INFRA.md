@@ -652,6 +652,40 @@ nushell gotchas that have bitten this pipeline:
 
 ---
 
+## Jobs wait for the old pod to be gone
+
+Every Job sets `podReplacementPolicy: Failed` (`JobPodReplacementPolicy` in
+`schema/constants.dhall`, used by `agent.dhall` and every custom chart). The Kubernetes default,
+`TerminatingOrFailed`, creates the replacement pod the moment the old one starts terminating, so a
+pod that is deleted or evicted overlaps with its replacement for the whole drain, up to its
+`terminationGracePeriodSeconds`: two instances of one identity at once, with the same key and the
+same volumes (the credentials agent's ledger is on a `ReadWriteOnce` volume, which still lets two pods
+on one node mount it). With `Failed` the controller waits until the old pod is fully gone.
+
+This costs nothing in the normal case. Every agent ends a pod by exiting non-zero, whether it chose to
+(rejuvenation, a health verdict) or was told to (SIGTERM runs the drain and then exits 1), so a pod
+always finishes `Failed` and the Job replaces it as before. `render.nu` refuses a render in which a
+Job does not carry the policy (`job_replacement_problems` in `rules.nu`).
+
+**The risk it brings: a pod stuck terminating.** If a pod's node dies or becomes unreachable, the
+kubelet cannot confirm the pod stopped, and the pod stays `Terminating`. With `Failed` the Job then
+creates no replacement until the pod is gone, where the default would have started one. For a
+single-instance agent that is the correct failure (the alternative is a second instance running
+beside one that may still be alive), but it is an outage until someone acts.
+
+- A healthy node with a slow pod is not this case: the kubelet kills the container when
+  `terminationGracePeriodSeconds` ends, the pod goes `Failed`, and the replacement starts. That
+  period is derived from the shutdown budget, so the overlap-free wait is bounded.
+- For a dead node there is no field on the Job or the pod that force-deletes the pod; the manifest can
+  only tune how soon it is marked for deletion (`tolerationSeconds` on the `unreachable` and
+  `not-ready` tolerations). The fix is an operator action once the node is known to be down: taint
+  the node `node.kubernetes.io/out-of-service` (NoExecute), which tells the control plane to force
+  delete the pods on it, or delete the Node object. `kubectl delete pod --force --grace-period=0`
+  also works, but only do it when the node is confirmed down, since it removes the pod object
+  without any evidence the process stopped. Check the Kubernetes documentation for your version
+  before relying on the exact taint form.
+- The dev cluster has one node, so a dead node means no cluster and this does not arise there.
+
 ## Known issues and limits
 
 - **Service-account token ordering.** On a fresh cluster, a `kubernetes.io/service-account-token` Secret is populated by the token controller only after its ServiceAccount exists, so the first apply may need repeating. `serviceaccounts.yaml` precedes `kube-observer-resources.yaml` in `apply_order`, which should avoid it, but this has only been exercised on an existing cluster.

@@ -14,6 +14,7 @@
 #   nu infra/up.nu <target>
 
 use validate.nu *
+use rules.nu [job_replacement_problems]
 
 def main [
     target: string        # Target name: local, sandbox, ace
@@ -111,6 +112,10 @@ def main [
     check_and_emit_service_accounts $output_dir
     print ""
 
+    print "Checking Job pod replacement policy..."
+    check_job_replacement_policy $output_dir
+    print ""
+
     print "Checking cert-issuer's TLS identity..."
     check_cert_issuer_identity $output_dir $cert_issuer_url
     print ""
@@ -149,6 +154,14 @@ def docs_in_file [file: string] {
 # one, or falling back to `default`, are indistinguishable at the
 # application layer. Fails the render on either, then emits a ServiceAccount
 # for every workload identity no rendered manifest already declares.
+def check_job_replacement_policy [output_dir: string] {
+    let files = (ls $output_dir | get name | where {|f| $f | str ends-with ".yaml" })
+    let docs = ($files | reduce --fold [] {|f, acc| $acc ++ (docs_in_file $f) })
+    let problems = (job_replacement_problems $docs)
+    for p in $problems { print $"  ERROR: ($p)" }
+    if ($problems | length) > 0 { exit 1 }
+}
+
 def check_and_emit_service_accounts [output_dir: string] {
     let files = (ls $output_dir | get name | where {|f| $f | str ends-with ".yaml" })
     let docs = ($files | reduce --fold [] {|f, acc| $acc ++ (docs_in_file $f) })

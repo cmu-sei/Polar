@@ -176,6 +176,13 @@ let commonClientEnv =
         }
       ]
 
+-- When a Job replaces a pod. `Failed` waits until the old pod is fully gone. The default
+-- (`TerminatingOrFailed`) creates the replacement the moment the old pod starts terminating,
+-- so a deleted or evicted pod overlaps with its replacement for the whole drain. Every agent
+-- ends a pod by exiting non-zero, so a pod always finishes `Failed` and this loses nothing.
+-- See infra/INFRA.md for the one case it makes worse (a pod stuck terminating on a dead node).
+let JobPodReplacementPolicy = "Failed"
+
 in  { PolarNamespace
     , GraphNamespace
     , AuthNamespace
@@ -207,6 +214,7 @@ in  { PolarNamespace
     , OciRegistrySecret
     , DropAllCapSecurityContext
     , RejectSidecarAnnotation
+    , JobPodReplacementPolicy
     , commonClientTls
     , certEmptyDirVolume
     , saTokenVolume
