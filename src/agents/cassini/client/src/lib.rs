@@ -901,6 +901,10 @@ impl TcpClientActor {
         TcpClientActor::send_or_fail(myself, state, envelope).await
     }
 
+    /// The broker accepted a registration: this is the session from now on, and the agent is
+    /// told, so it subscribes. Used whether the client was unregistered or was asking to resume
+    /// (the broker may answer a resume with the same session, or, after a restart that lost it,
+    /// a new one); in both the agent must be told, and subscribing again is harmless.
     async fn handle_registration_response_unregistered(
         &self,
         _myself: ActorRef<TcpClientMessage>,
@@ -1298,6 +1302,18 @@ impl Actor for TcpClientActor {
                     .await?
             }
 
+            // ---- A registration answer while already registered ----
+            // The client asked to resume a session. Whatever the broker answers, that is the
+            // session now, and the agent is told. Ignoring it left the agent running and deaf
+            // after a broker restart, because nothing resubscribed.
+            (
+                RegistrationState::Registered { .. },
+                TcpClientMessage::RegistrationResponse(registration_id),
+            ) => {
+                self.handle_registration_response_unregistered(myself, state, registration_id)
+                    .await?
+            }
+
             // ---- Registered state ----
             (RegistrationState::Registered { registration_id }, msg) => {
                 // Clone registration_id to release the borrow on state.registration
@@ -1564,5 +1580,134 @@ mod process_client_message_tests {
                 .any(|m| matches!(m, TcpClientMessage::SessionInvalidated)),
             "an ordinary error must never trigger a real re-registration"
         );
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    async fn router() -> ActorRef<polar_router::RouterMessage> {
+        Actor::spawn(None, polar_router::RouterActor, ())
+            .await
+            .unwrap()
+            .0
+    }
+
+    /// A transport state with no connection, whose lifecycle events land in the returned list.
+    async fn state(
+        registration: RegistrationState,
+    ) -> (TcpClientState, Arc<Mutex<Vec<ClientEvent>>>) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let state = TcpClientState {
+            bind_addr: "broker:1".into(),
+            server_name: "broker".into(),
+            writer: None,
+            reader: None,
+            registration,
+            client_config: Arc::new(
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(rustls::RootCertStore::empty())
+                    .with_no_client_auth(),
+            ),
+            delivery: DeliveryMode::Router {
+                router: router().await,
+                lifecycle: Arc::new(move |event| captured.lock().unwrap().push(event)),
+            },
+            abort_handle: None,
+        };
+        (state, events)
+    }
+
+    async fn myself() -> ActorRef<TcpClientMessage> {
+        struct Idle;
+        #[async_trait]
+        impl Actor for Idle {
+            type Msg = TcpClientMessage;
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(
+                &self,
+                _myself: ActorRef<Self::Msg>,
+                _args: (),
+            ) -> Result<Self::State, ActorProcessingErr> {
+                Ok(())
+            }
+        }
+        Actor::spawn(None, Idle, ()).await.unwrap().0
+    }
+
+    fn registered_ids(events: &Arc<Mutex<Vec<ClientEvent>>>) -> Vec<String> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                ClientEvent::Registered { registration_id } => Some(registration_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_first_registration_is_reported() {
+        let (mut state, events) = state(RegistrationState::Unregistered).await;
+        TcpClientActor
+            .handle(
+                myself().await,
+                TcpClientMessage::RegistrationResponse("first".into()),
+                &mut state,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            &state.registration,
+            RegistrationState::Registered { registration_id } if registration_id == "first"
+        ));
+        assert_eq!(registered_ids(&events), ["first"]);
+    }
+
+    #[tokio::test]
+    async fn a_new_session_given_to_a_client_that_asked_to_resume_is_reported() {
+        // After a broker restart the broker has no record of the session the client asks to
+        // resume, and answers with a new one. The client used to ignore that, so nothing
+        // resubscribed and the agent was up and deaf.
+        let (mut state, events) = state(RegistrationState::Registered {
+            registration_id: "old".into(),
+        })
+        .await;
+        TcpClientActor
+            .handle(
+                myself().await,
+                TcpClientMessage::RegistrationResponse("new".into()),
+                &mut state,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            &state.registration,
+            RegistrationState::Registered { registration_id } if registration_id == "new"
+        ));
+        assert_eq!(registered_ids(&events), ["new"]);
+    }
+
+    #[tokio::test]
+    async fn a_resumed_session_is_reported_too_so_the_agent_resubscribes_harmlessly() {
+        let (mut state, events) = state(RegistrationState::Registered {
+            registration_id: "same".into(),
+        })
+        .await;
+        TcpClientActor
+            .handle(
+                myself().await,
+                TcpClientMessage::RegistrationResponse("same".into()),
+                &mut state,
+            )
+            .await
+            .unwrap();
+        assert_eq!(registered_ids(&events), ["same"]);
     }
 }
