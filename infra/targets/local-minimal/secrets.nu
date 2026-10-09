@@ -9,98 +9,7 @@
 #
 # Called by infra/up.nu after namespaces are created.
 
-def kubectl_upsert_secret [
-    name: string
-    namespace: string
-    literals: list<string> = []
-    files: list<string> = []
-] {
-    let exists = (
-        do { run-external "kubectl" "get" "secret" $name "-n" $namespace }
-        | complete
-        | get exit_code
-    ) == 0
-
-    if $exists {
-        print $"    secret/($name) already exists in ($namespace) — skipping"
-        return
-    }
-
-    mut args = ["create" "secret" "generic" $name "-n" $namespace]
-    for lit in $literals {
-        $args = ($args | append ["--from-literal" $lit])
-    }
-    for f in $files {
-        $args = ($args | append ["--from-file" $f])
-    }
-
-    run-external "kubectl" ...$args
-    print $"    secret/($name) created in ($namespace)"
-}
-
-def kubectl_upsert_configmap [
-    name: string
-    namespace: string
-    files: list<string> = []
-    literals: list<string> = []
-] {
-    let exists = (
-        do { run-external "kubectl" "get" "configmap" $name "-n" $namespace }
-        | complete
-        | get exit_code
-    ) == 0
-
-    if $exists {
-        print $"    configmap/($name) already exists in ($namespace) — skipping"
-        return
-    }
-
-    mut args = ["create" "configmap" $name "-n" $namespace]
-    for f in $files {
-        $args = ($args | append ["--from-file" $f])
-    }
-    for lit in $literals {
-        $args = ($args | append ["--from-literal" $lit])
-    }
-
-    run-external "kubectl" ...$args
-    print $"    configmap/($name) created in ($namespace)"
-}
-
-def decrypt_sops [target_dir: string, file: string] {
-    let path = ($target_dir | path join $file)
-
-    if not ($path | path exists) {
-        print $"    WARNING: ($file) not found — skipping"
-        return {}
-    }
-
-    let sops_config = if ($file == "user.sops.yaml") {
-        ($target_dir | path join ".user.sops.yaml")
-    } else {
-        ($target_dir | path join ".sops.yaml")
-    }
-
-    if not ($sops_config | path exists) {
-        print $"    WARNING: SOPS config not found at ($sops_config) — skipping ($file)"
-        return {}
-    }
-
-    let result = (
-        do {
-            with-env { SOPS_CONFIG: $sops_config } {
-                run-external "sops" "--decrypt" "--output-type" "json" $path
-            }
-        } | complete
-    )
-
-    if $result.exit_code != 0 {
-        print $"    WARNING: failed to decrypt ($file) — ($result.stderr)"
-        return {}
-    }
-
-    $result.stdout | from json
-}
+use ../../secrets-lib.nu *
 
 def main [target_dir: string, repo_root: string] {
     print "── secrets ──"
@@ -108,9 +17,27 @@ def main [target_dir: string, repo_root: string] {
 
     let shared = (decrypt_sops $target_dir "secrets.sops.yaml")
     let user   = (decrypt_sops $target_dir "user.sops.yaml")
+    let failures = ([$shared.failure $user.failure] | compact)
 
     # Merge — user values take precedence
-    let secrets = ($shared | merge $user)
+    let secrets = ($shared.data | merge $user.data)
+
+    # A file that will not decrypt matters only if it leaves a secret the cluster needs unmade.
+    let required = [
+        { namespace: "polar-graph", name: "neo4j-secret", key: "neo4j_auth" }
+        { namespace: "polar", name: "polar-graph-pw", key: "graph_password" }
+    ]
+    let existing = ($required
+        | where {|r| secret_exists $r.name $r.namespace }
+        | each {|r| $"($r.namespace)/($r.name)" })
+    let problems = (required_secret_problems $required $existing $secrets $failures)
+    if ($problems | is-not-empty) {
+        for p in $problems { print -e $"  FAILED: ($p)" }
+        exit 1
+    }
+    for f in $failures {
+        print $"    note: could not decrypt ($f.file) \(($f.reason)\); every secret needed already exists"
+    }
 
     print "  Creating secrets and ConfigMaps..."
     print ""
@@ -152,14 +79,14 @@ def main [target_dir: string, repo_root: string] {
             $"username=($keycloak_admin_user)"
             $"password=($keycloak_admin_password)"
         ]
-    } else {
+    } else if not (secret_exists "keycloak-admin-secret" "polar-auth") {
         print "    WARNING: keycloak_admin_password not set -- skipping keycloak-admin-secret"
     }
 
     let keycloak_db_password = ($secrets | get -o keycloak_db_password | default "")
     if ($keycloak_db_password | is-not-empty) {
         kubectl_upsert_secret "keycloak-db-secret" "polar-auth" [$"password=($keycloak_db_password)"]
-    } else {
+    } else if not (secret_exists "keycloak-db-secret" "polar-auth") {
         print "    WARNING: keycloak_db_password not set -- skipping keycloak-db-secret"
     }
 
