@@ -9,7 +9,9 @@ use crate::account::DEFAULT_BOOTSTRAP_IDENTITY;
 use crate::credential::KUBERNETES_ISSUERS_DEFAULT;
 use crate::escrow::CREDENTIALS_ESCROW_KEY_PATH_DEFAULT;
 use cassini_client::environment::{TLS_CLIENT_CERT, TLS_CLIENT_KEY};
-use polar_env::{Config, ConfigError, Defaulted, Described, Optional, Required, Section};
+use polar_env::{
+    Config, ConfigError, Defaulted, Described, Env, Optional, Required, Section,
+};
 
 pub const CREDENTIALS_EVENT_LOG_PATH_DEFAULT: &str = "/var/lib/credentials-agent/events.jsonl";
 
@@ -82,8 +84,29 @@ static VARIABLES: &[&dyn Described] = &[
 pub static SECTION: Section = Section {
     name: "credentials-agent",
     vars: VARIABLES,
-    relations: |_| Vec::new(),
+    relations: introspection_is_all_or_none,
 };
+
+/// Introspection is on when its three settings are all given and off when none is. One or two of
+/// them is a mistake that would otherwise switch the check off without a word, and a token the
+/// identity provider has revoked would pass.
+fn introspection_is_all_or_none(env: &dyn Env) -> Vec<String> {
+    let names = [
+        INTROSPECTION_ENDPOINT.name(),
+        INTROSPECTION_CLIENT_ID.name(),
+        INTROSPECTION_CLIENT_SECRET.name(),
+    ];
+    let set = |name: &str| env.var(name).is_some_and(|v| !v.trim().is_empty());
+    let missing: Vec<&str> = names.iter().copied().filter(|n| !set(n)).collect();
+    if missing.len() == names.len() || missing.is_empty() {
+        return Vec::new();
+    }
+    vec![format!(
+        "introspection needs all three of {} or none; {} not set",
+        names.join(", "),
+        missing.join(", ")
+    )]
+}
 
 /// How to ask the identity provider whether a token is still active.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn introspection_needs_all_three_and_is_off_without_them() {
+    fn introspection_is_off_without_its_settings() {
         let all = ConsumerSettings::read(&config(&with(&[
             ("CREDENTIALS_AGENT_INTROSPECTION_ENDPOINT", "https://idp/introspect"),
             ("CREDENTIALS_AGENT_INTROSPECTION_CLIENT_ID", "agent"),
@@ -244,12 +267,29 @@ mod tests {
                 client_secret: "s3cret".into(),
             })
         );
-        let partial = ConsumerSettings::read(&config(&with(&[(
-            "CREDENTIALS_AGENT_INTROSPECTION_ENDPOINT",
-            "https://idp/introspect",
-        )])))
-        .unwrap();
-        assert_eq!(partial.introspection, None);
+    }
+
+    #[test]
+    fn a_partial_introspection_setting_is_a_problem_that_names_what_is_missing() {
+        let problems = config(&with(&[
+            ("CREDENTIALS_AGENT_INTROSPECTION_ENDPOINT", "https://idp/introspect"),
+            ("CREDENTIALS_AGENT_INTROSPECTION_CLIENT_ID", "agent"),
+        ]))
+        .check();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("CREDENTIALS_AGENT_INTROSPECTION_CLIENT_SECRET")
+                && problems[0].contains("all three"),
+            "{problems:?}"
+        );
+        // none, or all three, are fine
+        assert!(config(MINIMUM).check().is_empty());
+        let all = with(&[
+            ("CREDENTIALS_AGENT_INTROSPECTION_ENDPOINT", "e"),
+            ("CREDENTIALS_AGENT_INTROSPECTION_CLIENT_ID", "i"),
+            ("CREDENTIALS_AGENT_INTROSPECTION_CLIENT_SECRET", "s"),
+        ]);
+        assert!(config(&all).check().is_empty());
     }
 
     #[test]
