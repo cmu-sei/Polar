@@ -455,7 +455,7 @@ much the deployment provides (`shutdown.budget_secs`):
 
 | Where | When | What it does |
 |---|---|---|
-| `resolve.nu check`, running `polar-config-check` | render time | the environment each workload will be given is judged by the agent's own check, the same function the agent runs when it starts: every variable the agent reads must parse, and what must hold between them must hold (room to rejuvenate before the certificate expires, the probe's stale limit above twice the tick, ...). Each problem names the workload, the variable and what it is for |
+| `resolve.nu check`, running the agent's `--check` | render time | the configuration document each workload will be given is judged by the agent itself (`<agent> --check --config FILE`, in its built image under `up.nu`), the same function the agent runs when it starts: every variable the agent reads must parse, and what must hold between them must hold (room to rejuvenate before the certificate expires, the probe's stale limit above twice the tick, ...). Each problem names the workload, the variable and what it is for |
 | `resolve.nu check`, running `infra/rules.nu` | render time | what only the deployment knows: the pod's termination grace period must exceed the shutdown budget |
 | `AgentBuilder::build()` | agent startup | the whole environment is checked first (the same function), and `POLAR_SHUTDOWN_BUDGET_SECS` must be at least what the code declared, else it exits non-zero naming both numbers. The deployment may give more, never less |
 
@@ -463,23 +463,23 @@ So raising a number is a catalog change. Lowering what the code needs is a chang
 code, which someone has to review.
 
 **Whoever owns a fact owns the rule about it.** What the agent's code needs of its
-environment is the code's, so those rules are Rust and are not repeated in Nushell:
-`resolve.nu check` runs `polar-config-check`, a small program in `polar-agent-builder` that
-reads the environment a workload will be given and calls `environment::check_environment`,
-the function `build()` calls. Change a rule or a constant in the Rust and the render check
-changes with it, with no second copy to update. What only the deployment knows (the grace
-period against the budget) is here, in `infra/rules.nu`.
+configuration is the code's, so those rules are Rust and are not repeated in Nushell:
+`resolve.nu check` runs the agent's own `--check --config FILE` on the document it rendered,
+which is the function the agent runs when it starts. Change a rule or a constant in the Rust and
+the render check changes with it, with no second copy to update. What only the deployment knows
+(the grace period against the budget) is here, in `infra/rules.nu`.
 
 Each variable is declared once, with `polar-env`: name, type, default, what it is for, and
 whether it is secret. The check, the agent's own reads and the documentation all come from
-that declaration. `polar-config-check --describe` lists every variable the agent reads,
-by section.
+that declaration. `<agent> --scaffold` lists every variable the agent reads, by section.
 
-`resolve.nu check` runs the checker with `cargo run`, which rebuilds it when the code has
-changed. Set `POLAR_CONFIG_CHECK` to the path of a prebuilt binary to skip that (for CI).
-The checker not being found or failing is an error, never a skipped check.
+`resolve.nu check` asks the agent from its image when `POLAR_AGENT_SOURCE=images` (what `up.nu`
+sets), and otherwise runs it with `cargo run`, which rebuilds it when the code has changed. An
+agent that cannot be run, or does not answer, is an error, never a skipped check. (There used to be
+a separate program, `polar-config-check`, that judged an environment; it is retired, and a catalog
+workload is an agent that describes itself.)
 
-Run the catalog's tests with `nu infra/tests/rules.nu` and `nu infra/tests/resolve.nu`; the checker's own tests are `cargo test -p polar-agent-builder`.
+Run the catalog's tests with `nu infra/tests/rules.nu` and `nu infra/tests/resolve.nu`; the agent's own checks are tested by `cargo test -p polar-agent-builder`.
 
 In Rust an agent declares what its own code needs:
 

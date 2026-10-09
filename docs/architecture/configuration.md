@@ -128,7 +128,7 @@ arrives. Open questions, not decisions:
 
 ## 7. The schema export (direction)
 
-`polar-config-check --describe --json` returns, as one JSON document, every variable with its type, default, purpose, secrecy and mutability. That one
+`<agent> --scaffold` returns, as one JSON document, every variable with its type, default, purpose, secrecy and mutability. That one
 export serves three uses:
 
 - **Scaffolding a workload entry** at render time: start from a minimal entry, run the check,
@@ -146,9 +146,9 @@ running a "check configuration and exit" mode in the agent's own image.
 Built: the declaration layer (`polar-env`), including the pure layered `Config` (a snapshot of
 only the declared variables, the three layers with a source reported for each value, `Static`
 and `Dynamic` mutability on every declaration, and all-or-nothing overrides that re-check every
-section's relations); the health actor and probe on it; the builder's shared check
-(`environment::check_environment`); the `polar-config-check` binary run by `resolve.nu check`;
-and the catalog's own checks. The builder takes the one `Config` snapshot in `build()`
+section's relations); the health actor and probe on it; the builder's startup check
+(`startup::prepare`); the agent's own `--check`, run by `resolve.nu check`; and the catalog's own
+checks. (The separate `polar-config-check` program is retired.) The builder takes the one `Config` snapshot in `build()`
 (`startup::prepare`, a pure function of an `Env`), with `with_environment` for an agent's own
 sections; the infrastructure supervisor holds it and hands it out as `AgentResources::config`; the
 health actor is handed its parsed `HealthConfig` and never sees an environment, and agents not yet
@@ -165,7 +165,7 @@ its settings from it (the credentials consumer too: the builder is split into `c
 environment and spawns nothing, and `build()`, which spawns, so a domain supervisor can take its own
 settings from the snapshot before it starts the actors that need them).
 
-`polar-config-check --effective` shows what an environment resolves to, value by value with its
+`<agent> --scaffold --config FILE` shows what a document resolves to, value by value with its
 source, secrets hidden.
 
 Next, in order: the ConfigurationActor shell, then the scheduler integration, then the credentials agent's use of
@@ -247,8 +247,9 @@ document. With no arguments it runs the agent, so a container's default command 
 | `--check --config FILE` | the resolver, CI | the judgement the agent makes when it starts, on FILE; exit 0 or 1, every problem on stderr |
 
 `--describe` and `--effective` are not separate flags: the schema, the empty document and the
-populated one are one shape, so one flag prints them. `polar-config-check` stays until the resolver
-uses the agents themselves; it covers the builder's fixed composition.
+populated one are one shape, so one flag prints them. `polar-config-check`, which covered the
+builder's fixed composition before the resolver used the agents themselves, is retired
+(2026-10-09).
 
 ### 9.4 The document
 

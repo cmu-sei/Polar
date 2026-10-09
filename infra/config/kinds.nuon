@@ -18,8 +18,8 @@
     probe: { initial_delay_secs: 150, period_secs: 30, failure_threshold: 2, timeout_secs: 5 }
 
     # Read by HealthCheckActor and the polar-healthcheck probe. These become the agent's
-    # environment (POLAR_HEALTH_*), and `resolve.nu check` runs the agent's own check of
-    # that environment over every workload (polar-config-check), so a combination the agent
+    # configuration (POLAR_HEALTH_*), and `resolve.nu check` runs the agent's own check of
+    # its document over every workload (`<agent> --check --config`), so a combination the agent
     # would refuse to start on, such as no room to rejuvenate before the certificate expires,
     # fails the render and names the variables. The rules live in the Rust code, not here.
     health: {

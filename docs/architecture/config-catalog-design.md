@@ -82,9 +82,9 @@ Derived, never hand-written per agent:
 - `POLAR_SHUTDOWN_BUDGET_SECS` from the kind's `shutdown` block, and the pod's
   `terminationGracePeriodSeconds` = budget + margin, never set separately
 
-The environment a workload will be given is judged at render time by the agent's own check
-(`polar-config-check`, the function the agent runs at startup), not by a copy of its rules in
-the catalog tooling; see `infra/INFRA.md`.
+The configuration a workload will be given is judged at render time by the agent's own check
+(`<agent> --check --config`, the function the agent runs at startup), not by a copy of its rules
+in the catalog tooling; see `infra/INFRA.md`.
 - init `--check-dep-cert host:port:ttl` and `--cert type:dir:alg[:sans]`
 - a workload's ServiceAccount is uniform: render.nu emits one for every workload
   identity no manifest declares (the catalog does not need to).

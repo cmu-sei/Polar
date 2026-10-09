@@ -235,23 +235,21 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         }
     )
 
-    # A workload whose agent implements PolarAgent says nothing of its needs or of the least
-    # time it needs to drain: the binary does, in its own scaffold, and the catalog supplies what
-    # only the deployment knows.
-    let document_mode = (($spec.config? | default "env") == "document")
-    let scaffold = if $document_mode { scaffold_of $name $spec } else { null }
-    if $document_mode and (($entry.needs? | default [] | is-not-empty) or ($ov.needs? | default [] | is-not-empty)) {
+    # A catalog agent implements PolarAgent: it says what it needs and the least time it needs to
+    # drain in its own scaffold, and the catalog supplies what only the deployment knows. An agent
+    # that cannot yet say so is a hand-written chart under infra/layers, not a catalog workload.
+    if ($spec.config? | default "") != "document" {
+        error make { msg: $"($name): a catalog workload is an agent that describes itself and reads a configuration document \(config: \"document\"\). One that does not is a chart under infra/layers" }
+    }
+    let scaffold = (scaffold_of $name $spec)
+    if (($entry.needs? | default [] | is-not-empty) or ($ov.needs? | default [] | is-not-empty)) {
         error make { msg: $"($name): the catalog lists `needs`, but this agent says its own: remove it from the entry \(the binary requires: (requires_of $scaffold | str join ', ')\)" }
     }
     # What the deployment gives beyond what the code requires: a workload may be given the graph
-    # without needing it to be healthy, for example. A document agent says what it requires in
-    # its scaffold and the entry says what else it is provided; an env agent lists `needs`.
+    # without needing it to be healthy, for example. The agent says what it requires in its
+    # scaffold and the entry says what else it is provided.
     let provided = (($entry.provides? | default []) ++ ($ov.provides? | default []))
-    let needs = if $document_mode {
-        ($kind.needs ++ (requires_of $scaffold) ++ $provided | uniq)
-    } else {
-        ($kind.needs ++ ($entry.needs? | default []) ++ ($ov.needs? | default []) ++ $provided | uniq)
-    }
+    let needs = ($kind.needs ++ (requires_of $scaffold) ++ $provided | uniq)
 
     # Services whose certificates the health check still watches but that polar-init does not wait
     # for before the workload starts: one that must be able to start, and serve, while they are down.
@@ -349,10 +347,9 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
 
     # Shutdown: the grace period is derived, never set on its own, so it cannot
     # disagree with the budget.
-    # In a document the budget defaults to the least the code says it needs; the entry sets it
-    # only to give more.
+    # The budget defaults to the least the code says it needs; the entry sets it only to give more.
     let explicit_budget = (($ov.shutdown?.budget_secs? | default ($entry.shutdown?.budget_secs? | default null)))
-    let sd = if $document_mode and $explicit_budget == null {
+    let sd = if $explicit_budget == null {
         $spec.shutdown | upsert budget_secs (budget_minimum_of $scaffold)
     } else {
         $spec.shutdown
@@ -383,22 +380,18 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         $env_list = ($env_list | append (env_entry $e $vars "kind" $name))
     }
 
-    # A document agent reads one document, not an environment: the entries above are written into
-    # the variables they name, and the pod is given the document and the secrets it refers to.
+    # The agent reads one document, not an environment: the entries above are written into the
+    # variables they name, and the pod is given the document and the secrets it refers to.
     let entries = $env_list
-    mut config_map: any = null
-    mut config_problems: list<string> = []
-    if $document_mode {
-        let filled = (fill_document $scaffold $env_list $name)
-        $config_problems = $filled.problems
-        if $sd.budget_secs < (budget_minimum_of $scaffold) {
-            $config_problems = ($config_problems | append $"($name) needs at least (budget_minimum_of $scaffold)s to drain, and the catalog gives (($sd.budget_secs))s")
-        }
-        $config_map = { name: $"($name)-config", key: $DOCUMENT_FILE, content: (document_json $filled) }
-        $env_list = (pod_env $filled $"($DOCUMENT_DIR)/($DOCUMENT_FILE)")
-        $volumes = ($volumes | append { name: $DOCUMENT_VOLUME, secret: null, audience: null, config_map: $config_map.name, from: "document" })
-        $mounts = ($mounts | append { name: $DOCUMENT_VOLUME, path: $DOCUMENT_DIR, read_only: true, from: "document" })
+    let filled = (fill_document $scaffold $env_list $name)
+    mut config_problems: list<string> = $filled.problems
+    if $sd.budget_secs < (budget_minimum_of $scaffold) {
+        $config_problems = ($config_problems | append $"($name) needs at least (budget_minimum_of $scaffold)s to drain, and the catalog gives (($sd.budget_secs))s")
     }
+    let config_map = { name: $"($name)-config", key: $DOCUMENT_FILE, content: (document_json $filled) }
+    $env_list = (pod_env $filled $"($DOCUMENT_DIR)/($DOCUMENT_FILE)")
+    $volumes = ($volumes | append { name: $DOCUMENT_VOLUME, secret: null, audience: null, config_map: $config_map.name, from: "document" })
+    $mounts = ($mounts | append { name: $DOCUMENT_VOLUME, path: $DOCUMENT_DIR, read_only: true, from: "document" })
     $volumes = ($volumes | each {|v| $v | default null config_map | default null claim })
 
     let ci = ($vars | get cert-issuer)
@@ -508,9 +501,9 @@ def check_all [target: string] {
             {
                 who: $n
                 identity: $"($r.service_account).($r.namespace)"
-                # A document agent's configuration is judged by filling its own scaffold; its
-                # pod environment is a pointer, not the variables.
-                rules: ((if $r.config_map == null { environment_problems $n $r.env } else { $r.config_problems ++ (agent_check $n $r) }) ++ (shutdown_problems $n $r._settings.shutdown))
+                # The agent's configuration is judged by filling its own scaffold and then by the agent
+                # itself; its pod environment is a pointer, not the variables.
+                rules: ($r.config_problems ++ (agent_check $n $r) ++ (shutdown_problems $n $r._settings.shutdown))
                 error: null
             }
         } catch {|e|
@@ -662,16 +655,14 @@ def "main explain" [
         let v = if $e.secret != null { $"secret ($e.secret)/($e.key)" } else { $e.value }
         print $"    ($e.name | fill -w 28)  ($v)   [($e.from)]"
     }
-    if $r.config_map != null {
-        print ""
-        print $"  document: ($r.config_map.name)/($r.config_map.key), read by the agent through POLAR_CONFIG"
-        print "    the env above is written into the variables the agent's own scaffold declares;"
-        print "    the pod is given the pointer and the secrets it refers to:"
-        for e in $r.env { print $"      ($e.name | fill -w 24)  (if $e.secret != null { $"secret ($e.secret)/($e.key)" } else { $e.value })" }
-        if ($r.config_problems | is-not-empty) {
-            print "    problems:"
-            for p in $r.config_problems { print $"      ($p)" }
-        }
+    print ""
+    print $"  document: ($r.config_map.name)/($r.config_map.key), read by the agent through POLAR_CONFIG"
+    print "    the env above is written into the variables the agent's own scaffold declares;"
+    print "    the pod is given the pointer and the secrets it refers to:"
+    for e in $r.env { print $"      ($e.name | fill -w 24)  (if $e.secret != null { $"secret ($e.secret)/($e.key)" } else { $e.value })" }
+    if ($r.config_problems | is-not-empty) {
+        print "    problems:"
+        for p in $r.config_problems { print $"      ($p)" }
     }
     print ""
     print "  volumes:"
@@ -732,7 +723,7 @@ def "main resources" [
         sa_token_secrets: $r.resources.sa_token_secrets
         pvcs: $r.resources.pvcs
         services: $r.resources.services
-        config_maps: (if $r.config_map == null { [] } else { [$r.config_map] })
+        config_maps: [$r.config_map]
     } | to json
 }
 

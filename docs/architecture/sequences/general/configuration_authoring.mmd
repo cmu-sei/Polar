@@ -12,7 +12,7 @@ flowchart LR
     R["resolve.nu<br/>unions what each need contributes<br/>derives env, volumes, init args,<br/>grace period"]
     subgraph Judge["Judged at render time, before any cluster"]
         RU["rules.nu<br/>grace period above the budget,<br/>capability complete"]
-        CC["polar-config-check<br/>runs the very function the agent<br/>runs at startup on the env it will get"]
+        CC["the agent's --check<br/>runs the very function the agent<br/>runs at startup on the document it will get"]
     end
     D["render-catalog.nu → Dhall<br/>the agent kind chart"]
     M["manifests/*.yaml"]

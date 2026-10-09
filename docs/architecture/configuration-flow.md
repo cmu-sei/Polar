@@ -31,8 +31,9 @@ forget one.
 `resolve.nu` unions what each need contributes and derives the rest (the termination grace period
 is the budget plus a margin and cannot be set separately). Before anything is rendered it is
 judged twice: `rules.nu` checks what only the deployment knows (the grace period against the
-budget), and `polar-config-check` runs the very function the agent runs when it starts on the
-environment the workload will be given, so a bad environment fails the render and not the rollout.
+budget), and the agent itself (`--check --config`) runs the very function it runs when it starts
+on the document the workload will be given, so a bad configuration fails the render and not the
+rollout.
 Dhall then renders the manifest from the `agent` kind chart and `up.nu` applies it (it compares
 with `kubectl diff`, leaves unchanged healthy Jobs alone, and waits for Cassini before the
 clients).
@@ -92,9 +93,9 @@ the bracket says which capability or kind put it there:
     POLAR_CAPABILITIES            cassini,graph-write,encryption   [kind]
 ```
 
-What the code says that environment means (`polar-config-check --effective`, run with exactly
-that environment): every variable of the sections that apply, with its value, where it came from
-and whether a scheduled override may change it.
+What the code says that configuration means (`<agent> --scaffold --config FILE`): every variable
+of the sections that apply, with its value, where it came from and whether a scheduled override
+may change it.
 
 ```text
 builder
@@ -141,13 +142,10 @@ nothing at the deployment layer says. This is the gap between the two views, lis
 | To learn | Command | Answers from |
 | --- | --- | --- |
 | what the catalog gives a workload, and why | `nu infra/resolve.nu explain <workload>` | the catalog |
-| whether the whole catalog is consistent | `nu infra/resolve.nu check` | the catalog and the checker |
-| every variable the builder's sections declare | `polar-config-check --describe` (`--json` for tools) | the code, for all agents alike |
-| what an environment resolves to | `polar-config-check --effective` with the environment set | the code |
-| whether an environment would start an agent | `polar-config-check` | the code |
-
-Run `polar-config-check` from `src/agents` (`cargo run -p polar-agent-builder --bin
-polar-config-check -- --describe`).
+| whether the whole catalog is consistent | `nu infra/resolve.nu check` | the catalog and the agents |
+| every variable an agent reads | `<agent> --scaffold` | the code |
+| what a document resolves to | `<agent> --scaffold --config FILE` | the code |
+| whether a document would start an agent | `<agent> --check --config FILE` | the code |
 
 ### Try the agent interface
 
