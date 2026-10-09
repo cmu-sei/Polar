@@ -334,7 +334,11 @@ The resolver has to run the agent's own binary, so there is no copy that can go 
 3. kube-consumer end to end: declare it, scaffold it, fill it from the resolver, render the
    ConfigMap, run it on the cluster.
 4. The other five builder agents; the Jira and Kubernetes variables declared and the lint
-   extended.
+   extended. **Done 2026-10-09**, and the credentials agent's pair went further: their variables
+   are declared (`settings.rs` in each) and both are catalog workloads on a document, with the
+   catalog taught what their hand charts did (`config/workloads/credentials.nuon`, the
+   `persistent-data`, `pinned-ca` and `escrow-authority` capabilities, the `init` facet, and the
+   entry fields `provides`, `no_start_wait` and `service`).
 5. Agents that bypass the catalog, later (see `remaining-work.md`).
 
 ### 9.9 Still open

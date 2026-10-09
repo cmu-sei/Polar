@@ -179,6 +179,8 @@ Closed for the agents on the builder:
   jira-observer, jira-processor, and the credentials agent's consumer and observer).
 - **Agents' own variables are declared.** The Jira observer's six are a `polar-env` section, read
   from its configuration, and the `disallowed_methods` lint now covers the four catalog agents.
+- **The credentials agent is in the catalog too.** Its consumer and observer are declared,
+  scaffolded and filled like the others; the hand charts are gone.
 - **The code's requirements and the catalog's `needs` are not copies any more.** For the four
   catalog agents the entry says `config: "document"`; the capabilities and the least shutdown
   budget come from the binary's own scaffold.
@@ -188,15 +190,12 @@ Closed for the agents on the builder:
 
 Still open:
 
-1. **The credentials agent's consumer and observer read their environment**, not a document, and
-   about ten of the consumer's variables are read with `std::env` and are not declared. Their
-   charts are hand-written.
-2. **Most workloads are not in the catalog.** Only `kube-observer`, `kube-consumer`,
-   `jira-observer` and `jira-processor` are. The rest are hand-written charts under
-   `infra/layers/`: the credentials agent consumer and observer, the Cassini broker (not on
+1. **Most workloads are not in the catalog.** Only `kube-observer`, `kube-consumer`,
+   `jira-observer`, `jira-processor` and the credentials agent's consumer and observer are. The
+   rest are hand-written charts under `infra/layers/`: the Cassini broker (not on
    `polar-env`, its budget and grace written by hand), `polar-init`, ace, cert-issuer, Neo4j,
    Postgres, Keycloak, Jaeger; and the agents not yet on the builder (gitlab, git, scheduler,
    openapi, build-processor, resolver) are in neither. Their numbers are tied to their code by
    convention or by the runtime check only.
-3. **The scaffold comes from a `cargo run`** at render time. Running the built image, which is the
+2. **The scaffold comes from a `cargo run`** at render time. Running the built image, which is the
    exact artifact that deploys, is not done (`configuration.md` 9.7).

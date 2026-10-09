@@ -241,10 +241,21 @@ every **facet**:
 | `pod` | env, volumes and mounts the agent container gets |
 | `identity` | client certificates polar-init obtains from cert-issuer (each also adds its volume, mounts, and a health-checked cert path) |
 | `dependency` | the service whose certificate must be valid before the agent starts, and for how long |
-| `resources` | Kubernetes objects that live alongside the workload (cluster roles, token Secrets) |
+| `init` | what polar-init is given besides the certificates it issues: environment and mounts |
+| `resources` | Kubernetes objects that live alongside the workload (cluster roles, token Secrets, persistent volume claims) |
 
-Today's capabilities are `cassini`, `graph-write`, `encryption` and
-`kube-api-read`. Every `agent` gets `cassini` from its kind. `encryption` is an
+Today's capabilities are `cassini`, `graph-write`, `encryption`,
+`kube-api-read`, and three that describe the shape of the pod rather than what
+the code needs: `persistent-data` (a claim named for the workload, mounted at
+`/var/lib/<workload>`), `pinned-ca` (polar-init and the container trust the Polar CA
+from a mounted file) and `escrow-authority` (polar-init skips the escrow
+bootstrap, because this workload serves it). An agent on a document says what its
+code requires in its own scaffold; its entry adds what else the deployment gives
+it with `provides`, lists services it watches but does not wait for at start with
+`no_start_wait`, and, if it answers requests, a `service` (a port, which becomes
+the container port, a Service, and the value of the variable the agent reads it
+from). The credentials agent (`config/workloads/credentials.nuon`) uses all of
+them. Every `agent` gets `cassini` from its kind. `encryption` is an
 opt-in marker with no footprint yet (see
 [Capabilities and the Rust agent builder](#capabilities-and-the-rust-agent-builder)).
 From a workload's `needs` the resolver derives, without anyone writing them per
