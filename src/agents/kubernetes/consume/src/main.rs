@@ -21,32 +21,12 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
-use kube_consumer::supervisor;
-use polar::init_logging;
-use ractor::Actor;
-use std::error::Error;
+use kube_consumer::agent::KubeConsumer;
+use std::process::ExitCode;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    init_logging("kubernetes.cluster.consumer.supervisor".to_string());
-
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
-
-    let (_, handle) = Actor::spawn(
-        Some("kubernetes.cluster.supervisor".to_string()),
-        supervisor::ClusterConsumerSupervisor,
-        (),
-    )
-    .await
-    .map_err(|e| format!("kube-consumer failed to start: {e}"))?;
-
-    handle
-        .await
-        .map_err(|e| format!("kube-consumer supervisor task failed: {e}"))?;
-
-    // The supervisor stopping is never a success: a consumer that is no
-    // longer consuming must be restarted. Exit non-zero so the Job does.
-    Err("kube-consumer supervisor stopped; exiting non-zero so the Job restarts it".into())
+/// The agent says what it is in `KubeConsumer`; `run` answers the command line (`--help`,
+/// `--scaffold`, `--check`), judges the configuration and starts it. It never exits 0 for a
+/// started agent.
+fn main() -> ExitCode {
+    polar_agent_builder::run::<KubeConsumer>()
 }

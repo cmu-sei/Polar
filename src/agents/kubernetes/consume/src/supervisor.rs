@@ -22,6 +22,7 @@ use polar::graph::nodes::builds::ArtifactNodeKey;
 use polar::graph::nodes::kube::KubeNodeKey;
 use polar::topics::KUBERNETES_RESOLUTION_EVENTS;
 use polar_agent_builder::{
+    Configured,
     AgentBuilder, HealthClient, HealthHandle, InfrastructureEvent,
     InfrastructureSupervisorMessage, Subscription,
 };
@@ -45,7 +46,7 @@ const DRAIN_WINDOW_SECS: u64 = 5;
 /// How long the infrastructure supervisor gives this agent to drain: the drain
 /// window and the graph controller's stop (up to 30 s), plus a margin. If it is
 /// not done by then the process exits 1 regardless.
-const SHUTDOWN_BUDGET: Duration = Duration::from_secs(DRAIN_WINDOW_SECS + 30 + 10);
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(DRAIN_WINDOW_SECS + 30 + 10);
 
 /// This supervisor's own message type. The shared `polar::SupervisorMessage`
 /// cannot carry the two infrastructure signals (respawn, prepare-shutdown)
@@ -353,12 +354,14 @@ impl ClusterConsumerSupervisor {
 impl Actor for ClusterConsumerSupervisor {
     type Msg = ConsumerSupervisorMessage;
     type State = ClusterConsumerSupervisorState;
-    type Arguments = ();
+    /// The configuration `run` judged: the builder is made from it, so what the agent declared
+    /// (its capabilities, its budget, the self-test) is what the infrastructure is built to.
+    type Arguments = Configured;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _args: (),
+        configured: Configured,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
         info!("Read neo configuration successfully.");
@@ -370,17 +373,14 @@ impl Actor for ClusterConsumerSupervisor {
         // ClientEvent::Registered -- see polar-agent-builder's own
         // Subscription for the complete, real reasoning), TcpClient,
         // and CryptoActor -- collapsed into one, real, composed call.
-        let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
-            .with_shutdown_budget(SHUTDOWN_BUDGET)
-            .with_self_test()
-            .with_graph_write();
+        let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME);
 
         for subscription in Self::kube_subscriptions(&myself) {
             builder = builder.with_subscription(subscription);
         }
         let resources = builder
             .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }))
-            .with_encryption()
+            .into_configured(configured)
             .build()
             .await?;
 

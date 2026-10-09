@@ -84,6 +84,7 @@ use polar::{
 };
 use ractor::{ActorProcessingErr, ActorRef};
 
+pub mod agent;
 pub mod supervisor;
 
 pub const BROKER_CLIENT_NAME: &str = "kubernetes.cluster.cassini.client";

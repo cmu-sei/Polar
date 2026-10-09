@@ -61,8 +61,9 @@ pub trait PolarAgent: Sized + 'static {
     const NAME: &'static str;
     /// One line, for a person: what the agent is for.
     const PURPOSE: &'static str;
-    /// What it asks of its deployment. The deployment states what it provides in
-    /// `POLAR_CAPABILITIES`, and the agent does not start if one it needs is missing.
+    /// What it asks of its deployment, beyond the Cassini client, which every agent is and so
+    /// need not list. The deployment states what it provides in `POLAR_CAPABILITIES`, and the
+    /// agent does not start if one it needs is missing.
     const NEEDS: &'static [Capability];
     /// The least time the agent needs to drain once told to shut down. The deployment may
     /// give more, never less.
@@ -124,6 +125,18 @@ pub struct AgentInfo {
     pub purpose: String,
 }
 
+/// What `A` needs, with the Cassini client first: every agent built here is one, so the agent
+/// does not have to say so and cannot forget to.
+pub(crate) fn needs_of<A: PolarAgent>() -> Vec<Capability> {
+    let mut needs = vec![Capability::Cassini];
+    for capability in A::NEEDS {
+        if !needs.contains(capability) {
+            needs.push(*capability);
+        }
+    }
+    needs
+}
+
 /// The sections that apply to `A`, each with the capability that brings it in (none for the
 /// ones every agent has, and for its own).
 fn sections_of<A: PolarAgent>() -> Vec<(Option<Capability>, &'static Section)> {
@@ -131,16 +144,11 @@ fn sections_of<A: PolarAgent>() -> Vec<(Option<Capability>, &'static Section)> {
         .into_iter()
         .map(|section| (None, section))
         .collect();
-    let mut seen: Vec<Capability> = Vec::new();
-    for capability in A::NEEDS {
-        if seen.contains(capability) {
-            continue;
-        }
-        seen.push(*capability);
+    for capability in needs_of::<A>() {
         sections.extend(
-            environment::sections_for(&[*capability])
+            environment::sections_for(&[capability])
                 .into_iter()
-                .map(|section| (Some(*capability), section)),
+                .map(|section| (Some(capability), section)),
         );
     }
     sections.extend(A::SECTIONS.iter().map(|section| (None, *section)));
@@ -158,7 +166,10 @@ pub fn scaffold_document<A: PolarAgent>() -> AgentDocument {
             name: A::NAME.to_string(),
             purpose: A::PURPOSE.to_string(),
         },
-        requires: A::NEEDS.iter().map(|c| c.as_str().to_string()).collect(),
+        requires: needs_of::<A>()
+            .iter()
+            .map(|c| c.as_str().to_string())
+            .collect(),
         shutdown_budget_minimum_secs: A::SHUTDOWN_BUDGET.as_secs(),
         document: Document::scaffold(&tagged),
         problems: Vec::new(),
@@ -214,7 +225,7 @@ fn problems_of<A: PolarAgent>(loaded: &Loaded) -> Vec<String> {
         &loaded.env,
         Source::File,
         A::SECTIONS,
-        A::NEEDS,
+        &needs_of::<A>(),
         Some(A::SHUTDOWN_BUDGET),
     ) {
         problems.extend(error.problems());
@@ -319,15 +330,12 @@ pub fn help_text<A: PolarAgent>() -> String {
             A::NAME
         )),
     }
-    if A::NEEDS.is_empty() {
-        text.push_str("Capabilities: no capabilities beyond what every agent has.\n");
-    } else {
-        let names: Vec<&str> = A::NEEDS.iter().map(|c| c.as_str()).collect();
-        text.push_str(&format!(
-            "Capabilities it needs from its deployment: {}\n",
-            names.join(", ")
-        ));
-    }
+    let names: Vec<&str> = needs_of::<A>().iter().map(|c| c.as_str()).collect();
+    text.push_str(&format!(
+        "Capabilities it needs from its deployment: {} (cassini is implied: every agent is a \
+         Cassini client)\n",
+        names.join(", ")
+    ));
     text.push_str(&format!(
         "Shutdown: it needs at least {} seconds to drain.\n\n",
         A::SHUTDOWN_BUDGET.as_secs()
@@ -483,7 +491,7 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
         &*env,
         source,
         A::SECTIONS,
-        A::NEEDS,
+        &needs_of::<A>(),
         Some(A::SHUTDOWN_BUDGET),
     ) {
         Ok(startup) => startup,
@@ -496,7 +504,7 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
     };
     let configured = Configured {
         startup,
-        required: A::NEEDS.to_vec(),
+        required: needs_of::<A>(),
         self_test: A::SELF_TEST,
     };
 
@@ -714,10 +722,7 @@ mod tests {
             text.contains("bare-agent") && text.contains("Needs nothing"),
             "{text}"
         );
-        assert!(
-            text.contains("needs nothing from its deployment") || text.contains("no capabilities"),
-            "{text}"
-        );
+        assert!(text.contains("cassini"), "the client is implied: {text}");
     }
 
     // -- the scaffold --------------------------------------------------------------------------
@@ -759,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_agents_scaffold_has_only_the_sections_every_agent_has() {
+    fn a_bare_agents_scaffold_has_only_the_sections_every_agent_has_and_the_clients() {
         let doc = scaffold_document::<Bare>();
         let names: Vec<_> = doc
             .document
@@ -767,8 +772,9 @@ mod tests {
             .iter()
             .map(|s| s.name.as_str())
             .collect();
-        assert_eq!(names, vec!["builder", "health"]);
-        assert!(doc.requires.is_empty());
+        // Every agent is a Cassini client, so it is implied: an agent cannot forget it.
+        assert_eq!(names, vec!["builder", "health", "cassini-client"]);
+        assert_eq!(doc.requires, vec!["cassini"]);
     }
 
     #[test]
