@@ -187,6 +187,19 @@ impl<M: Message + Sync> Actor for ClientEventForwarder<M> {
     }
 }
 
+/// What a transport does when its connection to the broker is lost.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReconnectMode {
+    /// Connect again and ask to resume, inside the same actor. The transport on its own (the CLI
+    /// daemon, and every agent that holds it directly) has always done this.
+    #[default]
+    InPlace,
+    /// End, and leave bringing up a new transport to whoever supervises it. The facade does:
+    /// it knows whether a transport is registered, holds publishes meanwhile, and backs off. A
+    /// transport that mended itself would leave it believing the connection was still up.
+    LeaveToSupervisor,
+}
+
 /// A basse configuration for a TCP Client actor
 #[derive(Clone, Debug)]
 pub struct TCPClientConfig {
@@ -195,6 +208,8 @@ pub struct TCPClientConfig {
     pub ca_certificate_path: String,
     pub client_certificate_path: String,
     pub client_key_path: String,
+    /// What the transport does when the connection is lost.
+    pub reconnect: ReconnectMode,
 }
 
 #[derive(Debug)]
@@ -219,7 +234,14 @@ impl TCPClientConfig {
             ca_certificate_path,
             client_certificate_path,
             client_key_path,
+            reconnect: ReconnectMode::default(),
         }
+    }
+
+    /// This configuration, with the transport to do `reconnect` when the connection is lost.
+    pub fn with_reconnect(mut self, reconnect: ReconnectMode) -> Self {
+        self.reconnect = reconnect;
+        self
     }
 
     /// Read the coordinates from the process environment. If we can't read these, we can't
@@ -256,6 +278,7 @@ impl TCPClientConfig {
             ca_certificate_path,
             client_certificate_path,
             client_key_path,
+            reconnect: ReconnectMode::default(),
         })
     }
 
@@ -278,6 +301,7 @@ impl TCPClientConfig {
             ca_certificate_path,
             client_certificate_path,
             client_key_path,
+            reconnect: ReconnectMode::default(),
         })
     }
 }
@@ -426,6 +450,7 @@ pub struct TcpClientState {
 
     delivery: DeliveryMode,
     abort_handle: Option<AbortHandle>, // abort handle switch for the stream read loop
+    reconnect: ReconnectMode,
 }
 
 pub struct TcpClientArgs {
@@ -522,6 +547,7 @@ impl TcpClientActor {
 
         let delivery = state.delivery.clone();
         let broker_addr = state.bind_addr.clone();
+        let reconnect = state.reconnect;
 
         let read_loop_span =
             info_span!("cassini.tcp_client.read_loop", broker_addr = %broker_addr,);
@@ -578,8 +604,16 @@ impl TcpClientActor {
                             reason: format!("{UNEXPECTED_DISCONNECT} {e}")
                         };
                         TcpClientActor::dispatch_event(&delivery, event);
-                        // Instead of breaking, send Reconnect to self
-                        let _ = myself.send_message(TcpClientMessage::Reconnect);
+                        match reconnect {
+                            // Instead of breaking, send Reconnect to self
+                            ReconnectMode::InPlace => {
+                                let _ = myself.send_message(TcpClientMessage::Reconnect);
+                            }
+                            // The supervisor brings a new transport; this one is done.
+                            ReconnectMode::LeaveToSupervisor => {
+                                myself.stop(Some(format!("{UNEXPECTED_DISCONNECT} {e}")));
+                            }
+                        }
                         break;
                     }
                 }
@@ -1188,6 +1222,7 @@ impl Actor for TcpClientActor {
         // --- 7. Construct final state ---
         // init_span ends when this function returns (no long-lived spawned tasks here)
         let state = TcpClientState {
+            reconnect: args.config.reconnect,
             bind_addr: args.config.broker_endpoint,
             server_name: args.config.server_name,
             reader: None,
@@ -1603,6 +1638,7 @@ mod registration_tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = events.clone();
         let state = TcpClientState {
+            reconnect: ReconnectMode::default(),
             bind_addr: "broker:1".into(),
             server_name: "broker".into(),
             writer: None,

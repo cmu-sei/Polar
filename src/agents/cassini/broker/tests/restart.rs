@@ -44,3 +44,92 @@ async fn a_client_that_stays_up_finds_a_restarted_broker_and_can_subscribe_again
     })
     .await;
 }
+
+// -- what the front knows while the connection is lost -------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_connection_ends_the_transport_and_the_front_brings_a_new_one() {
+    with_broker(|broker| async move {
+        let agent = FacadeClient::connect(&broker, "agent.test").await;
+        let before = agent.transport_id().expect("a transport");
+        pause().await;
+
+        broker.restart(Duration::from_secs(3)).await;
+        agent
+            .client
+            .wait_for("a second registration", Duration::from_secs(40), |_| {
+                agent.registrations().len() >= 2
+            })
+            .await;
+
+        let after = agent.transport_id().expect("a transport");
+        assert_ne!(
+            before, after,
+            "the front replaces the transport; the transport does not mend itself"
+        );
+        assert_eq!(agent.registrations().len(), 2, "told once for each registration");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_front_knows_it_is_offline_while_the_broker_is_away() {
+    with_broker(|broker| async move {
+        let agent = FacadeClient::connect(&broker, "agent.test").await;
+        assert!(agent.is_online());
+        pause().await;
+
+        let broker_for_restart = broker.clone();
+        let away = tokio::spawn(async move { broker_for_restart.restart(Duration::from_secs(3)).await });
+
+        agent
+            .client
+            .wait_for("the front to go offline", Duration::from_secs(5), |_| {
+                !agent.is_online()
+            })
+            .await;
+        away.await.unwrap();
+        agent
+            .client
+            .wait_for("the front to come back online", Duration::from_secs(40), |_| {
+                agent.is_online()
+            })
+            .await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_publish_made_while_the_broker_is_away_arrives_when_it_returns() {
+    with_broker(|broker| async move {
+        let publisher = FacadeClient::connect(&broker, "publisher.test").await;
+        pause().await;
+
+        let broker_for_restart = broker.clone();
+        let away = tokio::spawn(async move { broker_for_restart.restart(Duration::from_secs(3)).await });
+        publisher
+            .client
+            .wait_for("the front to go offline", Duration::from_secs(5), |_| {
+                !publisher.is_online()
+            })
+            .await;
+        publisher.client.publish("news", b"sent while the broker was away");
+        away.await.unwrap();
+
+        // A reader that arrives after the broker is back and asks for the topic.
+        publisher
+            .client
+            .wait_for("the front to come back online", Duration::from_secs(40), |_| {
+                publisher.is_online()
+            })
+            .await;
+        let reader = TestClient::connect(&broker, "reader.test").await;
+        reader.subscribe("news");
+        assert_eq!(
+            reader.wait_for_messages("news", 1).await,
+            [b"sent while the broker was away".to_vec()],
+            "held by the front, then sent in order once it registered"
+        );
+    })
+    .await;
+}

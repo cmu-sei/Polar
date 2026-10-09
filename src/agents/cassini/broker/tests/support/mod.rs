@@ -485,6 +485,7 @@ impl TestClient {
 pub struct FacadeClient {
     pub client: TestClient,
     transport_name: String,
+    online: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FacadeClient {
@@ -503,6 +504,7 @@ impl FacadeClient {
         .unwrap();
         port.subscribe(collector, Some);
         let transport_name = format!("transport-{}", uuid::Uuid::new_v4());
+        let online = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (facade, _) = Actor::spawn(
             None,
             TcpClientFacade,
@@ -517,7 +519,7 @@ impl FacadeClient {
                 delivery: DeliveryMode::Broadcast(port),
                 transport_name: transport_name.clone(),
                 spawner: Arc::new(TlsTransportSpawner),
-                online: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                online: online.clone(),
                 buffer_limit: DEFAULT_OFFLINE_BUFFER,
                 backoff: Backoff {
                     first: Duration::from_millis(200),
@@ -539,7 +541,18 @@ impl FacadeClient {
         Self {
             client,
             transport_name,
+            online,
         }
+    }
+
+    /// Whether the front believes a transport is registered with the broker.
+    pub fn is_online(&self) -> bool {
+        self.online.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The actor id of the transport now running, to tell one from its replacement.
+    pub fn transport_id(&self) -> Option<u64> {
+        ractor::registry::where_is(self.transport_name.clone()).map(|cell| cell.get_id().pid())
     }
 
     /// The connection drops (the transport stops and its socket closes); the front stays up.

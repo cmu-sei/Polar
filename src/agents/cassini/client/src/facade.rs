@@ -19,7 +19,9 @@
 //! lost, because nothing acknowledges it. That is the next step of the design in
 //! `docs/architecture/cassini-client-reliability.md`.
 
-use crate::{DeliveryMode, TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
+use crate::{
+    DeliveryMode, ReconnectMode, TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage,
+};
 use async_trait::async_trait;
 use cassini_types::ClientEvent;
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SupervisionEvent};
@@ -78,9 +80,12 @@ impl TransportSpawner for TlsTransportSpawner {
     async fn spawn(
         &self,
         name: &str,
-        args: TcpClientArgs,
+        mut args: TcpClientArgs,
         supervisor: ActorCell,
     ) -> Result<ActorRef<TcpClientMessage>, ActorProcessingErr> {
+        // The facade replaces a transport that loses its connection; the transport must not
+        // mend itself behind its back.
+        args.config = args.config.with_reconnect(ReconnectMode::LeaveToSupervisor);
         let (transport, _) =
             Actor::spawn_linked(Some(name.to_string()), TcpClientActor, args, supervisor)
                 .await
