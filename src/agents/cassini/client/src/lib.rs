@@ -2,6 +2,7 @@ pub use cassini_tracing::{init_tracing, shutdown_tracing};
 pub use cassini_tracing::{try_set_parent_otel, try_set_parent_wire};
 pub mod environment;
 pub mod facade;
+mod connect;
 
 use cassini_types::{ClientEvent, ClientMessage, ControlOp, WireTraceCtx};
 use ractor::concurrency::{Duration, sleep};
@@ -475,66 +476,51 @@ impl TcpClientActor {
         client_config: &Arc<ClientConfig>,
     ) -> Result<TlsStream<TcpStream>, ActorProcessingErr> {
         let connector = TlsConnector::from(Arc::clone(client_config));
-        let mut backoff = std::time::Duration::from_millis(100);
-        let max_backoff = std::time::Duration::from_secs(2);
-        let max_attempts = 8;
-
         let server_name = ServerName::try_from(server_name)
             .map_err(|_| ActorProcessingErr::from("Invalid DNS name"))?;
 
-        for attempt in 1..=max_attempts {
-            match TcpStream::connect(addr.clone()).await {
-                Ok(tcp) => {
-                    // Convert to std::net::TcpStream to set socket options
-                    let std_stream = tcp.into_std().map_err(|e| {
-                        ActorProcessingErr::from(format!("Failed to convert to std stream: {}", e))
-                    })?;
+        // Each try is bounded: with the broker gone its address answers nothing, and an
+        // unbounded try would wait on the kernel's retransmits (see connect.rs).
+        connect::with_retries(&connect::Policy::default(), |_| {
+            let connector = connector.clone();
+            let server_name = server_name.clone();
+            let addr = addr.clone();
+            async move {
+                let tcp = TcpStream::connect(addr)
+                    .await
+                    .map_err(|e| format!("TCP connect failed: {e}"))?;
+                // Convert to std::net::TcpStream to set socket options
+                let std_stream = tcp
+                    .into_std()
+                    .map_err(|e| format!("Failed to convert to std stream: {e}"))?;
 
-                    // Find a dead broker in about a minute, whether the connection is idle or
-                    // has data in flight, instead of waiting on it forever.
-                    if let Err(e) = cassini_types::socket::enable_dead_peer_detection(&std_stream)
-                    {
-                        warn!("could not enable dead-peer detection on the broker connection: {e}");
-                    }
-
-                    // Use socket2 to set buffer sizes
-                    let sock_ref = SockRef::from(&std_stream);
-                    sock_ref
-                        .set_recv_buffer_size(100 * 1024 * 1024)
-                        .map_err(|e| {
-                            ActorProcessingErr::from(format!(
-                                "Failed to set recv buffer size: {}",
-                                e
-                            ))
-                        })?;
-                    sock_ref
-                        .set_send_buffer_size(100 * 1024 * 1024)
-                        .map_err(|e| {
-                            ActorProcessingErr::from(format!(
-                                "Failed to set send buffer size: {}",
-                                e
-                            ))
-                        })?;
-
-                    // Convert back to tokio stream
-                    let tcp = tokio::net::TcpStream::from_std(std_stream).map_err(|e| {
-                        ActorProcessingErr::from(format!(
-                            "Failed to convert back to tokio stream: {}",
-                            e
-                        ))
-                    })?;
-
-                    match connector.connect(server_name.clone(), tcp).await {
-                        Ok(tls) => return Ok(tls),
-                        Err(e) => debug!(attempt, error = %e, "TLS handshake failed, retrying"),
-                    }
+                // Find a dead broker in about a minute, whether the connection is idle or
+                // has data in flight, instead of waiting on it forever.
+                if let Err(e) = cassini_types::socket::enable_dead_peer_detection(&std_stream) {
+                    warn!("could not enable dead-peer detection on the broker connection: {e}");
                 }
-                Err(e) => debug!(attempt, error = %e, "TCP connect failed, retrying"),
+
+                // Use socket2 to set buffer sizes
+                let sock_ref = SockRef::from(&std_stream);
+                sock_ref
+                    .set_recv_buffer_size(100 * 1024 * 1024)
+                    .map_err(|e| format!("Failed to set recv buffer size: {e}"))?;
+                sock_ref
+                    .set_send_buffer_size(100 * 1024 * 1024)
+                    .map_err(|e| format!("Failed to set send buffer size: {e}"))?;
+
+                // Convert back to tokio stream
+                let tcp = tokio::net::TcpStream::from_std(std_stream)
+                    .map_err(|e| format!("Failed to convert back to tokio stream: {e}"))?;
+
+                connector
+                    .connect(server_name, tcp)
+                    .await
+                    .map_err(|e| format!("TLS handshake failed: {e}"))
             }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(max_backoff);
-        }
-        Err(ActorProcessingErr::from("Failed to connect after retries"))
+        })
+        .await
+        .map_err(|last| ActorProcessingErr::from(format!("Failed to connect after retries: {last}")))
     }
 
     fn spawn_reader(
