@@ -37,6 +37,21 @@ pub enum ResolverSupervisorMessage {
 
 pub struct ResolverSupervisor;
 
+/// The OCI client's configuration: https for every registry except those named as insecure, which
+/// are spoken to over http (a development registry), and the extra root certificates, if any.
+pub fn client_config(insecure_registries: &[String], certs: Vec<Certificate>) -> ClientConfig {
+    if certs.is_empty() {
+        debug!("Initializing OCI client without extra certificates");
+    } else {
+        debug!("Initializing OCI client with {} extra root certificates", certs.len());
+    }
+    ClientConfig {
+        protocol: ClientProtocol::HttpsExcept(insecure_registries.to_vec()),
+        extra_root_certificates: certs,
+        ..ClientConfig::default()
+    }
+}
+
 pub struct ResolverSupervisorState {
     resolver: Option<ActorRef<ProvenanceEvent>>,
     tcp_client: polar::cassini::TcpClient,
@@ -62,27 +77,7 @@ impl ResolverSupervisor {
             });
         }
 
-        // TODO: Specify ClientProtocol explictly based on configuraton.
-        // The oci client code automatically appends "http" or "https" based on
-        // the value of that enum.
-        Ok(if certs.is_empty() {
-            debug!("Initializing OCI client without extra certificates");
-            OciClient::new(ClientConfig {
-                protocol: ClientProtocol::HttpsExcept(vec![
-                    "registry.local-registry.svc.cluster.local:5000".to_string(),
-                ]),
-                ..ClientConfig::default()
-            })
-        } else {
-            debug!(
-                "Initializing OCI client with {} extra root certificates",
-                certs.len()
-            );
-            OciClient::new(ClientConfig {
-                extra_root_certificates: certs,
-                ..ClientConfig::default()
-            })
-        })
+        Ok(OciClient::new(client_config(&settings.insecure_registries, certs)))
     }
 
     /// Decodes what was published on the discovery topic. Anything that does not decode is logged
@@ -255,6 +250,30 @@ impl Actor for ResolverSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registries_named_as_insecure_are_spoken_to_over_http_and_no_other() {
+        let config = client_config(&["10.0.2.2:5000".to_string(), "reg.local:5000".to_string()], Vec::new());
+        match config.protocol {
+            ClientProtocol::HttpsExcept(except) => {
+                assert_eq!(except, vec!["10.0.2.2:5000".to_string(), "reg.local:5000".to_string()])
+            }
+            other => panic!("expected https except the named ones, got {other:?}"),
+        }
+        // and none named means https for every registry
+        assert!(matches!(
+            client_config(&[], Vec::new()).protocol,
+            ClientProtocol::HttpsExcept(ref e) if e.is_empty()
+        ));
+    }
+
+    #[test]
+    fn extra_certificates_do_not_change_which_registries_are_insecure() {
+        let cert = Certificate { encoding: CertificateEncoding::Pem, data: b"x".to_vec() };
+        let config = client_config(&["10.0.2.2:5000".to_string()], vec![cert]);
+        assert_eq!(config.extra_root_certificates.len(), 1);
+        assert!(matches!(config.protocol, ClientProtocol::HttpsExcept(ref e) if e.len() == 1));
+    }
 
     #[test]
     fn a_payload_that_is_not_an_event_is_dropped_not_fatal() {

@@ -6,6 +6,12 @@
 {
   cluster: {}
   workloads: {
+    # The cluster pulls from the development registry over plain http, and so must the resolver.
+    oci-registry-resolver: {
+      env: [
+        { name: "OCI_INSECURE_REGISTRIES", value: "10.0.2.2:5000" }
+      ]
+    }
     jira-observer: {
       env: [
         { name: "JIRA_URL", value: "https://daveman1010220.atlassian.net" }

@@ -6,7 +6,7 @@
 //! configuration document. Declared here they are in its scaffold, and the resolver is handed the
 //! values.
 
-use polar_env::{Config, ConfigError, Described, Optional, Section};
+use polar_env::{Config, ConfigError, Defaulted, Described, Optional, Section};
 
 pub static PROXY_CA_CERT: Optional<String> = Optional::text(
     "PROXY_CA_CERT",
@@ -22,7 +22,18 @@ pub static DOCKER_CONFIG: Optional<String> = Optional::text(
      without credentials the registry is asked anonymously",
 );
 
-static VARIABLES: &[&dyn Described] = &[&PROXY_CA_CERT, &DOCKER_CONFIG];
+/// The registry a local cluster pulls from, over http: kept as the default so a deployment that
+/// says nothing behaves as the resolver always did.
+pub const DEFAULT_INSECURE_REGISTRIES: &str = "registry.local-registry.svc.cluster.local:5000";
+
+pub static INSECURE_REGISTRIES: Defaulted<Vec<String>> = Defaulted::list(
+    "OCI_INSECURE_REGISTRIES",
+    "registries, as host:port, that are spoken to over plain http instead of https, comma-separated: \
+     a development registry. Every other registry is https only",
+    DEFAULT_INSECURE_REGISTRIES,
+);
+
+static VARIABLES: &[&dyn Described] = &[&PROXY_CA_CERT, &DOCKER_CONFIG, &INSECURE_REGISTRIES];
 
 /// The section the OCI resolver registers.
 pub static SECTION: Section = Section {
@@ -34,6 +45,7 @@ pub static SECTION: Section = Section {
 pub struct ResolverSettings {
     pub proxy_ca_cert: Option<String>,
     pub docker_config: Option<String>,
+    pub insecure_registries: Vec<String>,
 }
 
 impl ResolverSettings {
@@ -41,6 +53,7 @@ impl ResolverSettings {
         Ok(Self {
             proxy_ca_cert: config.read(&PROXY_CA_CERT)?,
             docker_config: config.read(&DOCKER_CONFIG)?,
+            insecure_registries: config.read(&INSECURE_REGISTRIES)?,
         })
     }
 }
@@ -68,6 +81,7 @@ mod tests {
         let settings = ResolverSettings::read(&config(&[])).unwrap();
         assert_eq!(settings.proxy_ca_cert, None);
         assert_eq!(settings.docker_config, None);
+        assert_eq!(settings.insecure_registries, vec![DEFAULT_INSECURE_REGISTRIES.to_string()]);
         assert!(config(&[]).check().is_empty());
     }
 
@@ -76,8 +90,10 @@ mod tests {
         let settings = ResolverSettings::read(&config(&[
             ("PROXY_CA_CERT", "/etc/proxy/ca.pem"),
             ("DOCKER_CONFIG", "/etc/oci-registry-auth"),
+            ("OCI_INSECURE_REGISTRIES", "10.0.2.2:5000, reg.local:5000"),
         ]))
         .unwrap();
+        assert_eq!(settings.insecure_registries, vec!["10.0.2.2:5000", "reg.local:5000"]);
         assert_eq!(settings.proxy_ca_cert.as_deref(), Some("/etc/proxy/ca.pem"));
         assert_eq!(settings.docker_config.as_deref(), Some("/etc/oci-registry-auth"));
     }

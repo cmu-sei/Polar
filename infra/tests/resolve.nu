@@ -254,6 +254,12 @@ def main [] {
             assert equal (env_value $r "DOCKER_CONFIG") "/etc/oci-registry-auth"
         }
 
+        "the resolver speaks http to the cluster's own development registry, which the target names": {
+            let r = (resolve "oci-registry-resolver")
+            let cluster = (open ($RESOLVER | path dirname | path join "config/cluster.nuon"))
+            assert ((env_value $r "OCI_INSECURE_REGISTRIES") | str contains $cluster.registry)
+        }
+
         "a volume that is not a Secret with items has none": {
             let r = (resolve "kube-consumer")
             assert ($r.volumes | all {|v| $v.items == [] })
