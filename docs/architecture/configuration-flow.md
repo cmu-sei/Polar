@@ -169,22 +169,34 @@ No real agent uses it yet; `kube-consumer` is the first to move.
 
 ## 5. What is missing
 
-These are in `remaining-work.md` with the rest; they are here so the picture is honest.
+Updated 2026-10-09 after the agent interface (`configuration.md` section 9) was built and the
+builder agents moved onto it.
 
-1. **An agent cannot be asked what it needs.** `--describe` prints the builder's fixed
-   composition, the same for every agent. No agent binary has a mode that says what that agent
-   requires, which sections it adds, or what its budget is.
-2. **Agents' own variables are not declared.** `jira-observer` reads `JIRA_URL`, `JIRA_TOKEN`,
-   `JIRA_EMAIL` and `JIRA_DEPLOYMENT` with `std::env`; the catalog and the target config set them,
-   and neither tool can see or check them.
-3. **The code's requirements and the catalog's `needs` are two hand-typed copies.** The builder
-   enforces them when the pod starts; the render cannot, because it cannot ask the binary.
-4. **The two views do not meet** (section 3).
-5. **Most workloads are not in the catalog.** Only `kube-observer`, `kube-consumer`,
+Closed for the agents on the builder:
+
+- **An agent can be asked what it needs.** Each implements `PolarAgent`; `--help`, `--scaffold` and
+  `--check` answer for it. All six agents on the builder do (kube-observer, kube-consumer,
+  jira-observer, jira-processor, and the credentials agent's consumer and observer).
+- **Agents' own variables are declared.** The Jira observer's six are a `polar-env` section, read
+  from its configuration, and the `disallowed_methods` lint now covers the four catalog agents.
+- **The code's requirements and the catalog's `needs` are not copies any more.** For the four
+  catalog agents the entry says `config: "document"`; the capabilities and the least shutdown
+  budget come from the binary's own scaffold.
+- **The two views meet.** The resolver fills the agent's scaffold, so what the pod is given is the
+  agent's own declarations with the deployment's values written into them, the defaults visible
+  (`<agent> --scaffold --config FILE`).
+
+Still open:
+
+1. **The credentials agent's consumer and observer read their environment**, not a document, and
+   about ten of the consumer's variables are read with `std::env` and are not declared. Their
+   charts are hand-written.
+2. **Most workloads are not in the catalog.** Only `kube-observer`, `kube-consumer`,
    `jira-observer` and `jira-processor` are. The rest are hand-written charts under
-   `infra/layers/`: the credentials agent consumer and observer (both on the builder), the Cassini
-   broker (not on `polar-env`, its budget and grace written by hand), `polar-init`, ace, cert-issuer,
-   Neo4j, Postgres, Keycloak, Jaeger; and the agents not yet on the builder (gitlab, git,
-   scheduler, openapi, build-processor, resolver) are in neither. Their numbers are tied to their code
-   by convention or by the runtime check only.
-6. **This document's diagrams are new**; the design documents have none.
+   `infra/layers/`: the credentials agent consumer and observer, the Cassini broker (not on
+   `polar-env`, its budget and grace written by hand), `polar-init`, ace, cert-issuer, Neo4j,
+   Postgres, Keycloak, Jaeger; and the agents not yet on the builder (gitlab, git, scheduler,
+   openapi, build-processor, resolver) are in neither. Their numbers are tied to their code by
+   convention or by the runtime check only.
+3. **The scaffold comes from a `cargo run`** at render time. Running the built image, which is the
+   exact artifact that deploys, is not done (`configuration.md` 9.7).
