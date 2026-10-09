@@ -328,6 +328,7 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
                 config: startup.config,
                 subscriptions: this.subscriptions,
                 wants_crypto: this.wants_crypto,
+                with_client: true,
                 self_test: this.self_test,
                 shutdown_budget: startup.shutdown_budget,
                 listen_for_signals: true,
@@ -342,7 +343,8 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
         let resources: AgentResources = ractor::call!(infrastructure, |reply| {
             InfrastructureSupervisorMessage::GetResources { reply }
         })
-        .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
+        .map_err(|e| ActorProcessingErr::from(e.to_string()))?
+        .ok_or_else(|| ActorProcessingErr::from("the infrastructure has no Cassini client"))?;
 
         // The caller's own, real lifecycle-handling closure --
         // subscribed directly to InfrastructureSupervisor's own,
@@ -357,6 +359,132 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
             .events_output
             .subscribe(this.myself, move |event| map_lifecycle_event(event));
 
+        Ok(resources)
+    }
+}
+
+/// What a service that is not a Cassini client is given: the health handle, the shutdown
+/// events, the shutdown handshake and the snapshot. The broker is one.
+#[derive(Clone)]
+pub struct ServiceResources {
+    pub healthcheck: crate::health::HealthHandle,
+    /// The infrastructure's side of the shutdown handshake: `PrepareShutdown` arrives here, for
+    /// whatever reason the service is to end (a health verdict, SIGTERM, a child's death).
+    pub infrastructure_events: Arc<ractor::OutputPort<crate::infrastructure::InfrastructureEvent>>,
+    /// Where to send `ProceedWithShutdown` once the service has drained, and `BeginShutdown` to
+    /// ask for the service to end (a shutdown requested over the wire, for example).
+    pub infrastructure: ActorRef<crate::infrastructure::InfrastructureSupervisorMessage>,
+    pub config: Arc<polar_env::Config>,
+}
+
+/// The infrastructure of a service that is not a Cassini client: the broker itself, or any
+/// future service that serves instead of consuming. It has the health check, the signals, the
+/// shutdown handshake with its budget and watchdog, and the one configuration snapshot, and none
+/// of the router, the client or the subscriptions that `AgentBuilder` adds.
+pub struct ServiceBuilder<M: ractor::Message> {
+    myself: ActorRef<M>,
+    service_name: String,
+    requires: Vec<Capability>,
+    shutdown_budget: Option<std::time::Duration>,
+    environment: Vec<&'static polar_env::Section>,
+}
+
+impl<M: ractor::Message> ServiceBuilder<M> {
+    pub fn new(myself: ActorRef<M>, service_name: impl Into<String>) -> Self {
+        Self {
+            myself,
+            service_name: service_name.into(),
+            requires: Vec::new(),
+            shutdown_budget: None,
+            environment: Vec::new(),
+        }
+    }
+
+    /// Declares the variables the service's own code reads, as `AgentBuilder::with_environment`.
+    pub fn with_environment(mut self, section: &'static polar_env::Section) -> Self {
+        self.environment.push(section);
+        self
+    }
+
+    /// The least the service needs to drain, as `AgentBuilder::with_shutdown_budget`.
+    pub fn with_shutdown_budget(mut self, budget: std::time::Duration) -> Self {
+        self.shutdown_budget = Some(budget);
+        self
+    }
+
+    /// For a service that implements [`PolarAgent`] with `CASSINI_CLIENT = false`: takes what
+    /// `run` already judged.
+    pub fn into_configured(mut self, configured: Configured) -> ConfiguredService<M> {
+        self.requires = configured.required.clone();
+        ConfiguredService {
+            builder: self,
+            startup: configured.startup,
+            hooks: configured.hooks,
+        }
+    }
+}
+
+/// A service whose configuration has been judged and whose infrastructure is not yet spawned.
+pub struct ConfiguredService<M: ractor::Message> {
+    builder: ServiceBuilder<M>,
+    startup: startup::Startup,
+    hooks: agent::Hooks,
+}
+
+impl<M: ractor::Message> ConfiguredService<M> {
+    pub fn config(&self) -> &Arc<polar_env::Config> {
+        &self.startup.config
+    }
+
+    /// Spawns the infrastructure: the health actor, the signal listener and the shutdown
+    /// handshake, on the snapshot taken when this was configured.
+    pub async fn build(self) -> Result<ServiceResources, ActorProcessingErr> {
+        let ConfiguredService {
+            builder: this,
+            startup,
+            hooks,
+        } = self;
+        if this.requires.contains(&Capability::Encryption) {
+            return Err(ActorProcessingErr::from(
+                "a service without a Cassini client cannot encrypt: the crypto actor works \
+                 through the client",
+            ));
+        }
+        let health_check_args = HealthCheckArgs::new(
+            startup.health.expects_graph,
+            startup.health.rejuvenation_threshold_secs,
+            startup.health.dep_cert_endpoints.clone(),
+        )
+        .with_config(startup.health);
+
+        let (infrastructure, _) = InfrastructureSupervisor::spawn_linked(
+            None,
+            InfrastructureSupervisor,
+            infrastructure::InfrastructureSupervisorArgs {
+                service_name: this.service_name.clone(),
+                health_check_args,
+                config: startup.config,
+                subscriptions: Vec::new(),
+                wants_crypto: false,
+                with_client: false,
+                self_test: false,
+                shutdown_budget: startup.shutdown_budget,
+                listen_for_signals: hooks.listen_for_signals,
+                process_exit: hooks.process_exit.clone(),
+                tcp_spawner: Arc::new(infrastructure::CassiniSpawner),
+            },
+            this.myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let resources: ServiceResources = ractor::call!(infrastructure, |reply| {
+            InfrastructureSupervisorMessage::GetService { reply }
+        })
+        .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
+        if let Some(out) = &hooks.resources_out {
+            *out.lock().unwrap() = Some(resources.clone());
+        }
         Ok(resources)
     }
 }
@@ -650,6 +778,7 @@ mod tests {
             startup,
             required: required.clone(),
             self_test: false,
+            hooks: crate::agent::Hooks::real(),
         };
 
         let built = AgentBuilder::new(idle, "from-the-trait")

@@ -74,8 +74,14 @@ pub trait PolarAgent: Sized + 'static {
     /// Longer help than the purpose, for `--help`. Without it a generic text is given.
     const HELP: Option<&'static str> = None;
     /// Whether the agent publishes probes to itself and reports itself disconnected when none
-    /// comes back (see `selftest`). On unless the agent has a reason.
+    /// comes back (see `selftest`). On unless the agent has a reason. A service that is not a
+    /// Cassini client sets it off.
     const SELF_TEST: bool = true;
+    /// Whether this is a Cassini client, as every observer and consumer is. A service that is
+    /// not (the broker itself) sets this off and is built with `ServiceBuilder`: it has the
+    /// health check, the signals and the shutdown handshake, and no router, client or
+    /// subscriptions. It must also turn `SELF_TEST` off and not list `Cassini` in `NEEDS`.
+    const CASSINI_CLIENT: bool = true;
 
     /// The agent proper. It is given the configuration the infrastructure judged, and builds
     /// its infrastructure from it (see `AgentBuilder::into_configured`). It returns when the
@@ -89,6 +95,26 @@ pub struct Configured {
     pub(crate) startup: Startup,
     pub(crate) required: Vec<Capability>,
     pub(crate) self_test: bool,
+    pub(crate) hooks: Hooks,
+}
+
+/// What a test replaces about how an agent ends: the real process exit, the signal listener.
+#[derive(Clone)]
+pub(crate) struct Hooks {
+    pub(crate) process_exit: crate::shutdown::ProcessExit,
+    pub(crate) listen_for_signals: bool,
+    /// Where `ConfiguredService::build` leaves the resources it made, for a test to hold.
+    pub(crate) resources_out: Option<Arc<std::sync::Mutex<Option<crate::ServiceResources>>>>,
+}
+
+impl Hooks {
+    pub(crate) fn real() -> Self {
+        Self {
+            process_exit: crate::shutdown::real_process_exit(),
+            listen_for_signals: true,
+            resources_out: None,
+        }
+    }
 }
 
 impl Configured {
@@ -99,6 +125,35 @@ impl Configured {
 
     pub fn shutdown_budget(&self) -> Duration {
         self.startup.shutdown_budget
+    }
+
+    /// For the tests of a service built on [`crate::ServiceBuilder`]: a configuration judged
+    /// from `env` with no capabilities required, that records the codes the process was asked
+    /// to exit with instead of exiting, does not listen for signals (they belong to the whole
+    /// process), and leaves the resources the builder makes where the test can reach them.
+    #[doc(hidden)]
+    pub fn for_service_test(
+        env: &dyn Env,
+        budget: Duration,
+        exits: Arc<std::sync::Mutex<Vec<i32>>>,
+    ) -> (
+        Self,
+        Arc<std::sync::Mutex<Option<crate::ServiceResources>>>,
+    ) {
+        let startup = startup::prepare(env, &[], &[], Some(budget))
+            .unwrap_or_else(|problems| panic!("the test's environment is not sound: {problems}"));
+        let out = Arc::new(std::sync::Mutex::new(None));
+        let configured = Self {
+            startup,
+            required: Vec::new(),
+            self_test: false,
+            hooks: Hooks {
+                process_exit: Arc::new(move |code| exits.lock().unwrap().push(code)),
+                listen_for_signals: false,
+                resources_out: Some(out.clone()),
+            },
+        };
+        (configured, out)
     }
 }
 
@@ -128,7 +183,11 @@ pub struct AgentInfo {
 /// What `A` needs, with the Cassini client first: every agent built here is one, so the agent
 /// does not have to say so and cannot forget to.
 pub(crate) fn needs_of<A: PolarAgent>() -> Vec<Capability> {
-    let mut needs = vec![Capability::Cassini];
+    let mut needs = if A::CASSINI_CLIENT {
+        vec![Capability::Cassini]
+    } else {
+        Vec::new()
+    };
     for capability in A::NEEDS {
         if !needs.contains(capability) {
             needs.push(*capability);
@@ -322,20 +381,34 @@ pub fn help_text<A: PolarAgent>() -> String {
     let mut text = format!("{}\n\n{}\n\n", A::NAME, A::PURPOSE);
     match A::HELP {
         Some(help) => text.push_str(&format!("{}\n\n", help.trim())),
-        None => text.push_str(&format!(
+        None if A::CASSINI_CLIENT => text.push_str(&format!(
             "{} is a Polar agent: it connects to the Cassini broker as a client with its own \
              certificate, reports its health, and drains before it exits. Its configuration \
              is a document (see --scaffold); a value it does not find there it takes from \
              the default its declaration gives.\n\n",
             A::NAME
         )),
+        None => text.push_str(&format!(
+            "{} is a Polar service, not a Cassini client: it reports its health and drains \
+             before it exits, and has no connection of its own to the broker. Its configuration \
+             is a document (see --scaffold); a value it does not find there it takes from \
+             the default its declaration gives.\n\n",
+            A::NAME
+        )),
     }
     let names: Vec<&str> = needs_of::<A>().iter().map(|c| c.as_str()).collect();
-    text.push_str(&format!(
-        "Capabilities it needs from its deployment: {} (cassini is implied: every agent is a \
-         Cassini client)\n",
-        names.join(", ")
-    ));
+    if A::CASSINI_CLIENT {
+        text.push_str(&format!(
+            "Capabilities it needs from its deployment: {} (cassini is implied: every agent is \
+             a Cassini client)\n",
+            names.join(", ")
+        ));
+    } else {
+        text.push_str(&format!(
+            "Capabilities it needs from its deployment: {} (it is not a Cassini client)\n",
+            if names.is_empty() { "none".to_string() } else { names.join(", ") }
+        ));
+    }
     text.push_str(&format!(
         "Shutdown: it needs at least {} seconds to drain.\n\n",
         A::SHUTDOWN_BUDGET.as_secs()
@@ -386,6 +459,22 @@ pub fn declaration_problems<A: PolarAgent>() -> Vec<String> {
     }
     if A::SHUTDOWN_BUDGET < Duration::from_secs(1) {
         problems.push("the shutdown budget is under a second".to_string());
+    }
+    if !A::CASSINI_CLIENT {
+        if A::SELF_TEST {
+            problems.push(
+                "the agent is not a Cassini client but SELF_TEST is on: a service has no broker \
+                 to publish its probes to; set SELF_TEST = false"
+                    .to_string(),
+            );
+        }
+        if A::NEEDS.contains(&Capability::Cassini) {
+            problems.push(
+                "the agent is not a Cassini client (CASSINI_CLIENT = false) but lists Cassini in \
+                 NEEDS"
+                    .to_string(),
+            );
+        }
     }
     let mut seen: Vec<Capability> = Vec::new();
     for capability in A::NEEDS {
@@ -505,7 +594,8 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
     let configured = Configured {
         startup,
         required: needs_of::<A>(),
-        self_test: A::SELF_TEST,
+        self_test: A::SELF_TEST && A::CASSINI_CLIENT,
+        hooks: Hooks::real(),
     };
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -597,6 +687,35 @@ mod tests {
         }
     }
 
+    /// A service that is not a Cassini client, as the broker is.
+    struct Serving;
+
+    impl PolarAgent for Serving {
+        const NAME: &'static str = "serving";
+        const PURPOSE: &'static str = "Serves instead of consuming";
+        const NEEDS: &'static [Capability] = &[];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
+        const SELF_TEST: bool = false;
+        const CASSINI_CLIENT: bool = false;
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
+    /// One that says it is not a client but forgot the rest of what that means.
+    struct Muddled;
+
+    impl PolarAgent for Muddled {
+        const NAME: &'static str = "muddled";
+        const PURPOSE: &'static str = "Contradicts itself";
+        const NEEDS: &'static [Capability] = &[Capability::Cassini];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
+        const CASSINI_CLIENT: bool = false;
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
     crate::polar_agent_tests!(Example);
 
     fn strings(args: &[&str]) -> Vec<String> {
@@ -654,6 +773,48 @@ mod tests {
             .flat_map(|s| s.variables.iter())
             .find(|v| v.name == name)
             .unwrap_or_else(|| panic!("{name} is not in the document"))
+    }
+
+    // -- a service that is not a Cassini client ----------------------------------------------
+
+    #[test]
+    fn a_service_is_not_given_the_cassini_client() {
+        assert!(needs_of::<Serving>().is_empty());
+        assert_eq!(needs_of::<Example>()[0], Capability::Cassini, "an agent still is");
+        let document = scaffold_document::<Serving>();
+        assert!(document.requires.is_empty());
+        let sections: Vec<&str> = document
+            .document
+            .sections
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(
+            !sections.contains(&"cassini-client"),
+            "no client variables are asked of a service: {sections:?}"
+        );
+        assert!(sections.contains(&"health") && sections.contains(&"builder"));
+    }
+
+    #[test]
+    fn a_service_that_contradicts_itself_is_told_so() {
+        let problems = declaration_problems::<Muddled>();
+        assert!(
+            problems.iter().any(|p| p.contains("SELF_TEST")),
+            "a service has nothing to test itself against: {problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("Cassini")),
+            "it lists the Cassini client it says it is not: {problems:?}"
+        );
+        assert!(declaration_problems::<Serving>().is_empty());
+    }
+
+    #[test]
+    fn the_help_of_a_service_does_not_say_it_connects_to_cassini() {
+        let text = help_text::<Serving>();
+        assert!(!text.contains("connects to the Cassini broker"), "{text}");
+        assert!(text.contains("not a Cassini client"), "{text}");
     }
 
     // -- the command line --------------------------------------------------------------------

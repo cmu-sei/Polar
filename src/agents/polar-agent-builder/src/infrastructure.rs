@@ -1,6 +1,8 @@
 //! InfrastructureSupervisor -- owns HealthCheckActor, RouterActor,
 //! TcpClientActor, and (if requested) CryptoActor as real, direct,
-//! linked children, in one, real, cohesive subtree. Spawned by
+//! linked children, in one, real, cohesive subtree. A service that is not a Cassini client (the
+//! broker itself) has only the health actor: no router, client or crypto, and nothing to
+//! subscribe to. Everything about how it ends is the same. Spawned by
 //! AgentBuilder::build() itself as a real, linked child of the
 //! domain supervisor; the domain supervisor never spawns any of
 //! these four actors directly at all.
@@ -74,8 +76,16 @@ pub enum InfrastructureSupervisorMessage {
     ProceedWithShutdown,
     /// The one, real way AgentBuilder::build() itself retrieves the
     /// initial, real AgentResources this actor's own pre_start
-    /// already, genuinely spawned internally.
-    GetResources { reply: RpcReplyPort<AgentResources> },
+    /// already, genuinely spawned internally. `None` when this supervisor has no Cassini
+    /// client, which is what `ServiceBuilder` builds.
+    GetResources {
+        reply: RpcReplyPort<Option<AgentResources>>,
+    },
+    /// What a service without a Cassini client is given: the health handle, the shutdown
+    /// events and the snapshot.
+    GetService {
+        reply: RpcReplyPort<crate::ServiceResources>,
+    },
     /// Internal: the health actor's verdict, delivered through the port this
     /// supervisor gave it.
     Health(HealthVerdict),
@@ -130,6 +140,9 @@ pub struct InfrastructureSupervisorArgs {
     pub config: Arc<polar_env::Config>,
     pub subscriptions: Vec<Subscription>,
     pub wants_crypto: bool,
+    /// Whether this is a Cassini client: a router, a client and its subscriptions. A service
+    /// that is the broker, or otherwise not a client, has none of them.
+    pub(crate) with_client: bool,
     /// How long the domain supervisor has to drain before the process exits anyway.
     pub(crate) shutdown_budget: Duration,
     /// Listen for SIGTERM and SIGINT. Off in tests, because signals belong to the
@@ -180,13 +193,27 @@ struct SelfTestState {
     connected: bool,
 }
 
-pub struct InfrastructureSupervisorState {
+/// What the supervisor needs to make a Cassini client.
+struct ClientSetup {
+    subscriptions: Vec<Subscription>,
+    wants_crypto: bool,
+    self_test: bool,
+    tcp_spawner: Arc<dyn TcpClientSpawner>,
     config: Arc<polar_env::Config>,
+}
+
+/// What a Cassini client brings with it.
+struct ClientParts {
     events_output: Arc<OutputPort<ClientEvent>>,
-    infrastructure_events: Arc<OutputPort<InfrastructureEvent>>,
     router: ActorRef<polar_router::RouterMessage>,
     tcp_client: TcpClient,
     crypto: Option<CryptoHandle>,
+}
+
+pub struct InfrastructureSupervisorState {
+    config: Arc<polar_env::Config>,
+    infrastructure_events: Arc<OutputPort<InfrastructureEvent>>,
+    client: Option<ClientParts>,
     healthcheck: HealthHandle,
     service_name: String,
     shutdown: ShutdownMachine,
@@ -222,7 +249,7 @@ impl InfrastructureSupervisor {
         use crate::health::HealthClient;
         use crate::selftest::Action;
 
-        let Some(test) = &mut state.self_test else {
+        let (Some(test), Some(client)) = (&mut state.self_test, &state.client) else {
             return;
         };
         let heard = test.heard.load(std::sync::atomic::Ordering::SeqCst);
@@ -237,7 +264,7 @@ impl InfrastructureSupervisor {
             match action {
                 Action::Probe(number) => {
                     tracing::debug!(number, "InfrastructureSupervisor: self-test: probing");
-                    let _ = state
+                    let _ = client
                         .tcp_client
                         .as_actor_ref()
                         .send_message(cassini_client::TcpClientMessage::publish(
@@ -280,19 +307,144 @@ impl InfrastructureSupervisor {
         });
     }
 
+    /// The router, the subscriptions, the Cassini client and, if asked, the crypto actor: what
+    /// makes this agent a client. Moved out of `pre_start` so a service without one skips it all.
+    async fn spawn_client_parts(
+        myself: &ActorRef<InfrastructureSupervisorMessage>,
+        service_name: &str,
+        setup: ClientSetup,
+    ) -> Result<(ClientParts, Option<SelfTestState>), ActorProcessingErr> {
+        let myself_cell = myself.get_cell();
+        let (router, _) = polar_router::RouterActor::spawn_linked(
+            None,
+            polar_router::RouterActor,
+            (),
+            myself_cell.clone(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let mut subscriptions = setup.subscriptions;
+        let self_test = if setup.self_test {
+            let instance: [u8; 16] = rand::random();
+            let topic = self_test_topic(service_name);
+            let heard = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let heard_by_router = heard.clone();
+            subscriptions.push(Subscription::new(topic.clone(), move |incoming| {
+                if let Some(number) = probe_number(&instance, &incoming.payload) {
+                    heard_by_router.fetch_max(number, std::sync::atomic::Ordering::SeqCst);
+                }
+            }));
+            drop(myself.send_interval(SELF_TEST_TICK, || {
+                InfrastructureSupervisorMessage::SelfTestTick
+            }));
+            Some(SelfTestState {
+                machine: crate::selftest::SelfTest::new(SELF_TEST_INTERVAL, SELF_TEST_TIMEOUT),
+                instance,
+                topic,
+                heard,
+                began: tokio::time::Instant::now(),
+                connected: false,
+            })
+        } else {
+            None
+        };
+
+        let subscribed_topics: Vec<String> = subscriptions.iter().map(|s| s.topic.clone()).collect();
+
+        tracing::info!(
+            "InfrastructureSupervisor: expecting {} subscription(s): {}",
+            subscribed_topics.len(),
+            subscribed_topics.join(", ")
+        );
+
+        for subscription in subscriptions {
+            router
+                .send_message(polar_router::RouterMessage::Register {
+                    topic: subscription.topic,
+                    deliver: subscription.deliver,
+                })
+                .map_err(ActorProcessingErr::from)?;
+        }
+
+        let events_output = Arc::new(OutputPort::default());
+
+        // Every real ClientEvent this agent's own TcpClient ever
+        // produces is immediately, directly re-sent out via
+        // events_output above -- this actor never, itself, tries to
+        // interpret them (Registered vs TransportError, etc); a real
+        // domain supervisor's own, real lifecycle-handling closure,
+        // subscribed to that port, does that.
+        let lifecycle_handler: LifecycleHandler = Box::new(build_lifecycle_handler(
+            service_name.to_string(),
+            subscribed_topics.clone(),
+            Box::new(|event: ClientEvent| {
+                Some(InfrastructureSupervisorMessage::ClientEvent(event))
+            }),
+        ));
+
+        let client_config =
+            TCPClientConfig::from_env(&*setup.config).map_err(ActorProcessingErr::from)?;
+        let tcp_client = setup
+            .tcp_spawner
+            .spawn(
+                service_name,
+                myself.clone(),
+                lifecycle_handler,
+                router.clone(),
+                client_config,
+            )
+            .await?;
+
+        let crypto = if setup.wants_crypto {
+            let (crypto_actor, _) = polar_crypto::CryptoActor::spawn_linked(
+                None,
+                polar_crypto::CryptoActor,
+                polar_crypto::CryptoActorArgs::new(tcp_client.as_actor_ref(), router.clone())
+                    .with_settings(
+                        polar_crypto::environment::CryptoSettings::from_env(&*setup.config)
+                            .map_err(ActorProcessingErr::from)?,
+                    ),
+                myself_cell,
+            )
+            .await
+            .map_err(ActorProcessingErr::from)?;
+            Some(CryptoHandle::new(crypto_actor))
+        } else {
+            None
+        };
+
+        Ok((
+            ClientParts {
+                events_output,
+                router,
+                tcp_client,
+                crypto,
+            },
+            self_test,
+        ))
+    }
+
     fn classify(state: &InfrastructureSupervisorState, cell: &ActorCell) -> Child {
         let id = cell.get_id();
         if id == state.healthcheck.as_actor_ref().get_id() {
             Child::Health
-        } else if cell.get_name() == Some(format!("{}.tcp", state.service_name)) {
+        } else if state.client.is_some()
+            && cell.get_name() == Some(format!("{}.tcp", state.service_name))
+        {
             // TcpClientActor is spawned under its own deterministic name; see
             // TcpClient::spawn_with_router.
             Child::TcpClient
-        } else if id == state.router.get_id() {
+        } else if state
+            .client
+            .as_ref()
+            .is_some_and(|client| id == client.router.get_id())
+        {
             Child::Other("the router".to_string())
         } else if state
-            .crypto
+            .client
             .as_ref()
+            .and_then(|client| client.crypto.as_ref())
             .is_some_and(|crypto| crypto.as_actor_ref().get_id() == id)
         {
             Child::Other("the crypto actor".to_string())
@@ -352,104 +504,28 @@ impl Actor for InfrastructureSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
-        let (router, _) = polar_router::RouterActor::spawn_linked(
-            None,
-            polar_router::RouterActor,
-            (),
-            myself_cell.clone(),
-        )
-        .await
-        .map_err(ActorProcessingErr::from)?;
-
-        let mut subscriptions = args.subscriptions;
-        let self_test = if args.self_test {
-            let instance: [u8; 16] = rand::random();
-            let topic = self_test_topic(&args.service_name);
-            let heard = Arc::new(std::sync::atomic::AtomicU64::new(0));
-            let heard_by_router = heard.clone();
-            subscriptions.push(Subscription::new(topic.clone(), move |incoming| {
-                if let Some(number) = probe_number(&instance, &incoming.payload) {
-                    heard_by_router.fetch_max(number, std::sync::atomic::Ordering::SeqCst);
-                }
-            }));
-            drop(myself.send_interval(SELF_TEST_TICK, || {
-                InfrastructureSupervisorMessage::SelfTestTick
-            }));
-            Some(SelfTestState {
-                machine: crate::selftest::SelfTest::new(SELF_TEST_INTERVAL, SELF_TEST_TIMEOUT),
-                instance,
-                topic,
-                heard,
-                began: tokio::time::Instant::now(),
-                connected: false,
-            })
-        } else {
-            None
-        };
-
-        let subscribed_topics: Vec<String> = subscriptions.iter().map(|s| s.topic.clone()).collect();
-
-        tracing::info!(
-            "InfrastructureSupervisor: expecting {} subscription(s): {}",
-            subscribed_topics.len(),
-            subscribed_topics.join(", ")
-        );
-
-        for subscription in subscriptions {
-            router
-                .send_message(polar_router::RouterMessage::Register {
-                    topic: subscription.topic,
-                    deliver: subscription.deliver,
-                })
-                .map_err(ActorProcessingErr::from)?;
-        }
-
-        let events_output = Arc::new(OutputPort::default());
         let infrastructure_events = Arc::new(OutputPort::default());
 
-        // Every real ClientEvent this agent's own TcpClient ever
-        // produces is immediately, directly re-sent out via
-        // events_output above -- this actor never, itself, tries to
-        // interpret them (Registered vs TransportError, etc); a real
-        // domain supervisor's own, real lifecycle-handling closure,
-        // subscribed to that port, does that.
-        let lifecycle_handler: LifecycleHandler = Box::new(build_lifecycle_handler(
-            args.service_name.clone(),
-            subscribed_topics.clone(),
-            Box::new(|event: ClientEvent| {
-                Some(InfrastructureSupervisorMessage::ClientEvent(event))
-            }),
-        ));
-
-        let client_config =
-            TCPClientConfig::from_env(&*args.config).map_err(ActorProcessingErr::from)?;
-        let tcp_client = args
-            .tcp_spawner
-            .spawn(
+        let (client, self_test) = if args.with_client {
+            let (client, self_test) = Self::spawn_client_parts(
+                &myself,
                 &args.service_name,
-                myself.clone(),
-                lifecycle_handler,
-                router.clone(),
-                client_config,
+                ClientSetup {
+                    subscriptions: args.subscriptions,
+                    wants_crypto: args.wants_crypto,
+                    self_test: args.self_test,
+                    tcp_spawner: args.tcp_spawner,
+                    config: args.config.clone(),
+                },
             )
             .await?;
-
-        let crypto = if args.wants_crypto {
-            let (crypto_actor, _) = polar_crypto::CryptoActor::spawn_linked(
-                None,
-                polar_crypto::CryptoActor,
-                polar_crypto::CryptoActorArgs::new(tcp_client.as_actor_ref(), router.clone())
-                    .with_settings(
-                        polar_crypto::environment::CryptoSettings::from_env(&*args.config)
-                            .map_err(ActorProcessingErr::from)?,
-                    ),
-                myself_cell,
-            )
-            .await
-            .map_err(ActorProcessingErr::from)?;
-            Some(CryptoHandle::new(crypto_actor))
+            (Some(client), self_test)
         } else {
-            None
+            // A service that is not a Cassini client has no connection to wait for. The health
+            // actor starts its ticks when it is told Cassini is connected, so tell it, once.
+            use crate::health::HealthClient;
+            let _ = HealthHandle::new(healthcheck.clone()).cassini_connected();
+            (None, None)
         };
 
         if args.listen_for_signals {
@@ -458,11 +534,8 @@ impl Actor for InfrastructureSupervisor {
 
         Ok(InfrastructureSupervisorState {
             config: args.config,
-            events_output,
             infrastructure_events,
-            router,
-            tcp_client,
-            crypto,
+            client,
             healthcheck: HealthHandle::new(healthcheck),
             service_name: args.service_name,
             shutdown: ShutdownMachine::new(),
@@ -498,17 +571,21 @@ impl Actor for InfrastructureSupervisor {
                     }
                     _ => {}
                 }
-                if let ClientEvent::Registered { .. } = &event {
-                    if let Some(crypto) = &state.crypto {
-                        if let Err(e) = crypto
-                            .as_actor_ref()
-                            .send_message(polar_crypto::CryptoMessage::ClientRegistered)
-                        {
-                            tracing::warn!("failed to tell CryptoActor the client registered: {e}");
+                if let Some(client) = &state.client {
+                    if let ClientEvent::Registered { .. } = &event {
+                        if let Some(crypto) = &client.crypto {
+                            if let Err(e) = crypto
+                                .as_actor_ref()
+                                .send_message(polar_crypto::CryptoMessage::ClientRegistered)
+                            {
+                                tracing::warn!(
+                                    "failed to tell CryptoActor the client registered: {e}"
+                                );
+                            }
                         }
                     }
+                    client.events_output.send(event);
                 }
-                state.events_output.send(event);
             }
             InfrastructureSupervisorMessage::Health(verdict) => {
                 match &verdict {
@@ -544,12 +621,20 @@ impl Actor for InfrastructureSupervisor {
                 myself.stop(Some("infrastructure shutdown complete".to_string()));
             }
             InfrastructureSupervisorMessage::GetResources { reply } => {
-                let _ = reply.send(AgentResources {
-                    router: state.router.clone(),
-                    tcp_client: state.tcp_client.clone(),
+                let _ = reply.send(state.client.as_ref().map(|client| AgentResources {
+                    router: client.router.clone(),
+                    tcp_client: client.tcp_client.clone(),
                     healthcheck: state.healthcheck.clone(),
-                    crypto: state.crypto.clone(),
-                    events_output: state.events_output.clone(),
+                    crypto: client.crypto.clone(),
+                    events_output: client.events_output.clone(),
+                    infrastructure_events: state.infrastructure_events.clone(),
+                    infrastructure: myself.clone(),
+                    config: state.config.clone(),
+                }));
+            }
+            InfrastructureSupervisorMessage::GetService { reply } => {
+                let _ = reply.send(crate::ServiceResources {
+                    healthcheck: state.healthcheck.clone(),
                     infrastructure_events: state.infrastructure_events.clone(),
                     infrastructure: myself.clone(),
                     config: state.config.clone(),
@@ -821,6 +906,7 @@ mod tests {
                     config: startup.config,
                     subscriptions: vec![],
                     wants_crypto: crypto,
+                    with_client: true,
                     shutdown_budget: budget,
                     listen_for_signals,
                     process_exit: Arc::new(move |code| recorded.lock().unwrap().push(code)),
@@ -834,7 +920,8 @@ mod tests {
             let resources: AgentResources = ractor::call!(infra, |reply| {
                 InfrastructureSupervisorMessage::GetResources { reply }
             })
-            .unwrap();
+            .unwrap()
+            .expect("a supervisor with a Cassini client");
 
             let events = Arc::new(Mutex::new(Vec::new()));
             let (log, _) = Actor::spawn(None, EventLog, events.clone()).await.unwrap();
@@ -1252,5 +1339,200 @@ mod tests {
         assert_eq!(probe_number(&ours, &probe_payload(&ours, 7)), Some(7));
         assert_eq!(probe_number(&ours, &probe_payload(&theirs, 7)), None);
         assert_eq!(probe_number(&ours, b"short"), None);
+    }
+}
+
+/// A service that is not a Cassini client: the same funnel, the health actor and the watchdog,
+/// with no router, client or crypto.
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+    use ractor::ActorStatus;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    struct Seen;
+
+    #[async_trait]
+    impl Actor for Seen {
+        type Msg = InfrastructureEvent;
+        type State = Arc<Mutex<Vec<String>>>;
+        type Arguments = Self::State;
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            seen: Self::State,
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(seen)
+        }
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            _: Self::Msg,
+            seen: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            seen.lock().unwrap().push("prepare_shutdown".to_string());
+            Ok(())
+        }
+    }
+
+    struct ServiceRig {
+        infra: ActorRef<InfrastructureSupervisorMessage>,
+        done: Option<ractor::concurrency::JoinHandle<()>>,
+        service: crate::ServiceResources,
+        events: Arc<Mutex<Vec<String>>>,
+        exits: Arc<Mutex<Vec<i32>>>,
+        dir: tempfile::TempDir,
+    }
+
+    impl ServiceRig {
+        async fn new(budget: Duration, health_env: &[(&str, &str)]) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let vars: HashMap<String, String> = [(
+                "POLAR_HEALTH_FILE",
+                dir.path().join("health.json").to_str().unwrap(),
+            )]
+            .into_iter()
+            .chain(health_env.iter().copied())
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            // No Cassini capability: a service is not a client.
+            let startup = crate::startup::prepare(&vars, &[], &[], None).unwrap();
+            let exits = Arc::new(Mutex::new(Vec::new()));
+            let recorded = exits.clone();
+            let (infra, done) = Actor::spawn(
+                None,
+                InfrastructureSupervisor,
+                InfrastructureSupervisorArgs {
+                    service_name: "a-service".to_string(),
+                    health_check_args: HealthCheckArgs::new(false, 300, vec![])
+                        .with_config(startup.health),
+                    config: startup.config,
+                    subscriptions: vec![],
+                    wants_crypto: false,
+                    with_client: false,
+                    shutdown_budget: budget,
+                    listen_for_signals: false,
+                    process_exit: Arc::new(move |code| recorded.lock().unwrap().push(code)),
+                    tcp_spawner: Arc::new(CassiniSpawner),
+                    self_test: false,
+                },
+            )
+            .await
+            .unwrap();
+            let service = ractor::call!(infra, |reply| InfrastructureSupervisorMessage::GetService {
+                reply
+            })
+            .unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let (log, _) = Actor::spawn(None, Seen, events.clone()).await.unwrap();
+            service.infrastructure_events.subscribe(log, Some);
+            Self {
+                infra,
+                done: Some(done),
+                service,
+                events,
+                exits,
+                dir,
+            }
+        }
+
+        async fn settle(&self) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_service_has_no_cassini_client_and_says_so() {
+        let rig = ServiceRig::new(Duration::from_secs(20), &[]).await;
+        let resources = ractor::call!(rig.infra, |reply| {
+            InfrastructureSupervisorMessage::GetResources { reply }
+        })
+        .unwrap();
+        assert!(resources.is_none(), "no router, client or crypto to give");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_service_is_not_failed_for_a_connection_it_never_makes() {
+        // An agent that never connects is ended at its Cassini deadline. A service has nothing
+        // to connect to, so the health actor is told it is connected and never gives that verdict.
+        let rig = ServiceRig::new(
+            Duration::from_secs(20),
+            &[("POLAR_HEALTH_CASSINI_DEADLINE_SECS", "60")],
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(200)).await;
+        assert!(rig.events.lock().unwrap().is_empty(), "no verdict, no shutdown");
+        assert_eq!(
+            rig.service.healthcheck.as_actor_ref().get_status(),
+            ActorStatus::Running
+        );
+        // And it is keeping its health file, which is what the probe reads.
+        assert!(rig.dir.path().join("health.json").exists());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_health_verdict_tells_the_service_once() {
+        let rig = ServiceRig::new(Duration::from_secs(20), &[]).await;
+        for verdict in [HealthVerdict::Rejuvenate, HealthVerdict::Unhealthy("late".into())] {
+            rig.infra
+                .cast(InfrastructureSupervisorMessage::Health(verdict))
+                .unwrap();
+        }
+        rig.settle().await;
+        assert_eq!(*rig.events.lock().unwrap(), ["prepare_shutdown"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_service_asking_to_end_goes_through_the_same_funnel() {
+        // A shutdown requested over the wire, as the broker's control manager does.
+        let rig = ServiceRig::new(Duration::from_secs(20), &[]).await;
+        rig.infra
+            .cast(InfrastructureSupervisorMessage::BeginShutdown {
+                reason: "asked over the wire".into(),
+            })
+            .unwrap();
+        rig.settle().await;
+        assert_eq!(*rig.events.lock().unwrap(), ["prepare_shutdown"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_watchdog_ends_a_service_that_never_finishes_draining() {
+        let rig = ServiceRig::new(Duration::from_secs(20), &[]).await;
+        rig.infra
+            .cast(InfrastructureSupervisorMessage::BeginShutdown { reason: "test".into() })
+            .unwrap();
+        rig.settle().await;
+        tokio::time::sleep(Duration::from_secs(19)).await;
+        assert!(rig.exits.lock().unwrap().is_empty());
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(*rig.exits.lock().unwrap(), [1]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn proceeding_ends_the_service_infrastructure() {
+        let mut rig = ServiceRig::new(Duration::from_secs(20), &[]).await;
+        rig.infra
+            .cast(InfrastructureSupervisorMessage::BeginShutdown { reason: "test".into() })
+            .unwrap();
+        rig.settle().await;
+        rig.infra
+            .cast(InfrastructureSupervisorMessage::ProceedWithShutdown)
+            .unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(30), rig.done.take().unwrap()).await;
+        assert!(ended.is_ok(), "the supervisor never ended");
+        assert_eq!(
+            rig.service.healthcheck.as_actor_ref().get_status(),
+            ActorStatus::Stopped
+        );
+        assert!(rig.exits.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_health_actor_dying_ends_a_service_in_order() {
+        let rig = ServiceRig::new(Duration::from_secs(20), &[]).await;
+        rig.service.healthcheck.as_actor_ref().kill();
+        rig.settle().await;
+        assert_eq!(*rig.events.lock().unwrap(), ["prepare_shutdown"]);
     }
 }
