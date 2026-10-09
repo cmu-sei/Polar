@@ -189,9 +189,9 @@ Closed for the agents on the builder:
 Still open:
 
 1. **Most workloads are not in the catalog.** Only `kube-observer`, `kube-consumer`,
-   `jira-observer`, `jira-processor` and the credentials agent's consumer and observer are. The
-   rest are hand-written charts under `infra/layers/`: the Cassini broker (not on
-   `polar-env`, its budget and grace written by hand), `polar-init`, ace, cert-issuer, Neo4j,
+   `jira-observer`, `jira-processor`, the credentials agent's consumer and observer and the
+   Cassini broker (a service, not a client) are. The
+   rest are hand-written charts under `infra/layers/`: `polar-init`, ace, cert-issuer, Neo4j,
    Postgres, Keycloak, Jaeger; and the agents not yet on the builder (gitlab, git, scheduler,
    openapi, build-processor, resolver) are in neither. Their numbers are tied to their code by
    convention or by the runtime check only.
