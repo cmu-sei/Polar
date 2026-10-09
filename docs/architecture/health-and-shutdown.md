@@ -336,8 +336,7 @@ with exit code 1 and a logged reason, never 137.
   lost. Until this is fixed, an agent whose broker restarted is genuinely
   unavailable, and a longer disconnect grace would only prolong the outage. The
   Cassini disconnect grace and the session repair are therefore one paired item.
-- **Cassini broker shutdown.** The broker calls `exit(1)` immediately after
-  `PrepareForShutdown`, without waiting for a handshake. Tracked separately.
+- **Cassini broker shutdown.** Done: the broker has the orderly shutdown below.
 - **Graph-write capability split.** `with_graph_write()` also sets
   `expects_graph`, so health depends on Neo4j whenever an agent writes to it.
   Tracked separately.
@@ -353,19 +352,30 @@ See `sequences/assets/asset_regeneration.md` to re-render.
 
 ## The Cassini broker
 
-The broker is not built with the agent builder, and has its own copy of the same ideas.
+The broker is built on the same infrastructure as the agents, as a service rather than a client
+(`ServiceBuilder`; the `PolarAgent` it implements says `CASSINI_CLIENT = false`). It has the health
+actor, the signal listener, the shutdown funnel with its budget and watchdog, and the
+`PrepareShutdown`/`ProceedWithShutdown` handshake of section 4, and none of the router, the Cassini
+client or the subscriptions, since it is what the client connects to. It is told once that Cassini
+is connected, because it has nothing to connect to. The five-phase drain is the broker's own.
 
-- **What starts a shutdown.** The health actor ending or failing, SIGTERM or SIGINT, or a
-  `PrepareForShutdown` with the shutdown token. Each begins the same five phases (stop accepting
-  connections, drain sessions, flush topic queues, terminate subscribers, terminate listeners),
-  after which the broker stops and the process exits.
-- **The budget.** `CASSINI_SHUTDOWN_BUDGET_SECS` (default 20) is what the whole sequence has, and
-  each phase gets a fifth of it. A phase that overruns has its manager stopped and the sequence
-  goes on.
-- **The watchdog.** When the sequence begins a detached task sleeps for the budget and then exits
-  the process with 1. A sequence that finishes in time stops it. This is what keeps a stuck
-  manager from outliving the pod's grace period.
-- **The grace period.** The Cassini chart sets `terminationGracePeriodSeconds` to the budget plus
-  a 10 second margin, from the same two values that set the environment variable, so they cannot
-  disagree. Before this the pod had Kubernetes' default 30 seconds, no signal handler, and a
-  sequence that could take 150.
+- **What starts a shutdown.** Anything that starts it for an agent: the health actor's verdict or
+  its death, SIGTERM or SIGINT, a child of the infrastructure dying. Each reaches the broker as the
+  `PrepareShutdown` event, which starts the five phases (stop accepting connections, drain
+  sessions, flush topic queues, terminate subscribers, terminate listeners). A shutdown requested
+  over the wire with the shutdown token is validated by the control manager, which starts the
+  phases; the broker then asks the infrastructure to begin, so the same budget applies to it. A
+  worker of the broker failing now ends the broker the same way, in order, where it used to exit
+  at once.
+- **The budget.** `POLAR_SHUTDOWN_BUDGET_SECS` (the broker needs at least 20, which it declares in
+  its code like every agent) is what the whole sequence has, and each phase gets a fifth of it. A
+  phase that overruns has its manager stopped and the sequence goes on.
+- **The watchdog.** The infrastructure's: when the shutdown begins it sleeps for the budget and then
+  exits the process with 1. It stays armed until the process ends, which covers the time between
+  the broker finishing and `main` returning. This is what keeps a stuck manager from outliving the
+  pod's grace period. (It used to be the broker's own and was stopped when the sequence finished.)
+- **The grace period.** The catalog sets `terminationGracePeriodSeconds` to the budget plus a
+  margin, from the one value, as for every workload.
+- **On the cluster** (2026-10-09, `kubectl delete pod`): SIGTERM, the five phases in about 100 ms,
+  the process ended, a new broker ready 24 s after the delete, every agent re-registered with no
+  restart.
