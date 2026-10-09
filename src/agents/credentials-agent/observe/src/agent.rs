@@ -1,9 +1,9 @@
 //! What the credentials agent observer is, as the infrastructure asks to be told: see
-//! `polar_agent_builder::PolarAgent`. Its configuration is still the environment its hand-written
-//! chart gives it.
+//! `polar_agent_builder::PolarAgent`.
 
 use crate::supervisor::{ObserverSupervisor, SERVICE_NAME, SHUTDOWN_BUDGET};
 use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
+use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
 
@@ -15,6 +15,7 @@ impl PolarAgent for CredentialsObserver {
         "The HTTP front of the credentials agent: relays certificate, account and admin requests to the consumer over Cassini";
     const NEEDS: &'static [Capability] = &[];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    const SECTIONS: &'static [&'static Section] = &[&crate::settings::SECTION];
     const HELP: Option<&'static str> = Some(
         "The observer takes the credentials agent's requests over HTTP, publishes each on Cassini \
          and waits for the consumer's reply. It makes no trust decision: it checks that a request \

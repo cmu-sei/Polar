@@ -1,9 +1,7 @@
 //! What the credentials agent consumer is, as the infrastructure asks to be told: see
 //! `polar_agent_builder::PolarAgent`.
 //!
-//! Its configuration is still the environment its hand-written chart gives it (no document yet:
-//! it reads about ten variables with `std::env`, listed in `remaining-work.md`), but it is told to
-//! the infrastructure the same way as every agent.
+//! Its settings are a section of its own (`settings.rs`), read from the snapshot the builder took.
 
 use crate::supervisor::{ConsumerSupervisor, SHUTDOWN_BUDGET};
 use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
@@ -22,7 +20,10 @@ impl PolarAgent for CredentialsConsumer {
     // truth and the graph only a projection).
     const NEEDS: &'static [Capability] = &[];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
-    const SECTIONS: &'static [&'static Section] = &[&polar::graph::environment::SECTION];
+    const SECTIONS: &'static [&'static Section] = &[
+        &polar::graph::environment::SECTION,
+        &crate::settings::SECTION,
+    ];
     const HELP: Option<&'static str> = Some(
         "The credentials agent consumer answers the certificate, identity, account, secret and \
          escrow-key requests the cluster's agents make over Cassini. The ledger is its source of \

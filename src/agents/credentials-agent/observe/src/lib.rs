@@ -1,3 +1,4 @@
+#![deny(clippy::disallowed_methods)]
 /*
    Polar (OSS)
 
@@ -23,4 +24,5 @@
 
 pub mod agent;
 pub mod handler;
+pub mod settings;
 pub mod supervisor;

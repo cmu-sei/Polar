@@ -31,9 +31,6 @@
 
 use serde::Deserialize;
 
-pub const INTROSPECTION_ENDPOINT_ENV: &str = "CREDENTIALS_AGENT_INTROSPECTION_ENDPOINT";
-pub const INTROSPECTION_CLIENT_ID_ENV: &str = "CREDENTIALS_AGENT_INTROSPECTION_CLIENT_ID";
-pub const INTROSPECTION_CLIENT_SECRET_ENV: &str = "CREDENTIALS_AGENT_INTROSPECTION_CLIENT_SECRET";
 
 #[derive(Debug, thiserror::Error)]
 pub enum IntrospectionError {
@@ -66,21 +63,6 @@ impl IntrospectionClient {
                 .build()
                 .expect("reqwest client construction is infallible with these settings"),
         }
-    }
-
-    /// Reads client credentials from
-    /// `CREDENTIALS_AGENT_INTROSPECTION_{ENDPOINT,CLIENT_ID,CLIENT_SECRET}`.
-    /// Fails loudly rather than falling back to a default -- there is
-    /// no sane default for an IdP-specific introspection endpoint or
-    /// this agent's own registered client credentials.
-    pub fn from_env() -> Result<Self, String> {
-        let endpoint = std::env::var(INTROSPECTION_ENDPOINT_ENV)
-            .map_err(|_| format!("{INTROSPECTION_ENDPOINT_ENV} not set"))?;
-        let client_id = std::env::var(INTROSPECTION_CLIENT_ID_ENV)
-            .map_err(|_| format!("{INTROSPECTION_CLIENT_ID_ENV} not set"))?;
-        let client_secret = std::env::var(INTROSPECTION_CLIENT_SECRET_ENV)
-            .map_err(|_| format!("{INTROSPECTION_CLIENT_SECRET_ENV} not set"))?;
-        Ok(Self::new(endpoint, client_id, client_secret))
     }
 
     /// True if `token` is currently active per the IdP's own record --

@@ -58,10 +58,9 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
-pub const SERVICE_NAME: &str = "credentials-agent-observer";
+use crate::settings::ObserverSettings;
 
-const PORT_ENV: &str = "CREDENTIALS_AGENT_OBSERVER_PORT";
-const DEFAULT_PORT: &str = "8080";
+pub const SERVICE_NAME: &str = "credentials-agent-observer";
 
 /// How long an in-flight request may keep the process alive once shutdown
 /// has begun. A request waits for the consumer's reply for up to a third of
@@ -160,8 +159,10 @@ pub struct ObserverSupervisorState {
     http: Option<HttpServer>,
 }
 
-async fn start_http(state: Arc<ObserverState>) -> Result<HttpServer, ActorProcessingErr> {
-    let port = std::env::var(PORT_ENV).unwrap_or_else(|_| DEFAULT_PORT.to_string());
+async fn start_http(
+    state: Arc<ObserverState>,
+    port: u16,
+) -> Result<HttpServer, ActorProcessingErr> {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
         .map_err(|e| {
@@ -227,6 +228,7 @@ impl Actor for ObserverSupervisor {
         for subscription in reply_subscriptions(&routers) {
             builder = builder.with_subscription(subscription);
         }
+        let settings = ObserverSettings::read(configured.config())?;
         let resources = builder.into_configured(configured).build().await?;
 
         resources
@@ -245,7 +247,7 @@ impl Actor for ObserverSupervisor {
             admin_action_reply_router: routers.admin_action.clone(),
         });
 
-        let http = start_http(observer.clone()).await?;
+        let http = start_http(observer.clone(), settings.port).await?;
 
         Ok(ObserverSupervisorState {
             healthcheck: resources.healthcheck,

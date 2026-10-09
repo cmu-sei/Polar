@@ -76,7 +76,7 @@ use credentials_agent_common::retrieve_secret::RetrieveSecretRequest;
 use credentials_agent_common::secret::StoreSecretRequest;
 
 // ---- Local: shared infrastructure ----
-use crate::credential::configured_kubernetes_issuers;
+use crate::settings::ConsumerSettings;
 use crate::introspection::IntrospectionClient;
 use crate::ledger::{LedgerActor, LedgerActorArgs, LedgerMessage};
 use crate::projection::{ProjectionActor, ProjectionActorArgs, ProjectionMessage};
@@ -105,7 +105,7 @@ use crate::issuance::IssuanceHandler;
 use crate::issuance_actor::{IssuanceActor, IssuanceActorArgs};
 use crate::retrieve_secret::RetrieveSecretHandler;
 use crate::retrieve_secret_actor::{RetrieveSecretActor, RetrieveSecretActorArgs, RetrieveSecretDispatch};
-use crate::account::{AccountHandler, DEFAULT_BOOTSTRAP_IDENTITY};
+use crate::account::AccountHandler;
 use crate::account_actor::{AccountActor, AccountActorArgs};
 use crate::admin_action::AdminActionHandler;
 use crate::admin_action_actor::{AdminActionActor, AdminActionActorArgs};
@@ -155,22 +155,6 @@ pub const REQUEST_TOPICS: [&str; 15] = [
     CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
 ];
 
-/// Path to the ledger's own event log -- the actual source of truth,
-/// per credentials-agent-architecture.md. Expected to live on a
-/// PersistentVolume, the same way cert-issuer's own CA material is
-/// persisted, so "rebuild the log at startup" rebuilds from real
-/// history rather than from nothing on every pod restart.
-const CREDENTIALS_EVENT_LOG_PATH_ENV: &str = "CREDENTIALS_EVENT_LOG_PATH";
-const CREDENTIALS_EVENT_LOG_PATH_DEFAULT: &str = "/var/lib/credentials-agent/events.jsonl";
-
-const CERT_ISSUER_URL_ENV: &str = "CREDENTIALS_AGENT_CERT_ISSUER_URL";
-
-/// Path to the Polar CA certificate (PEM) this consumer verifies
-/// cert-issuer against from its first request. If unset, the CA is
-/// fetched once from GET /ca without verification and pinned -- the
-/// degraded self-bootstrap mode. A path that is set but unreadable is a
-/// startup error and never falls back.
-const CERT_ISSUER_CA_CERT_ENV: &str = "CREDENTIALS_AGENT_CA_CERT";
 const ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.issuance";
 const IDENTITY_NORMALIZATION_ACTOR_NAME: &str = "polar.credentials-agent.identity-normalization";
 const ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.escrow-key";
@@ -178,9 +162,6 @@ const CERTIFICATE_ACTOR_NAME: &str = "polar.credentials-agent.certificate";
 const STORE_SECRET_ACTOR_NAME: &str = "polar.credentials-agent.store-secret";
 const ADMIN_ACTION_ACTOR_NAME: &str = "polar.credentials-agent.admin-action";
 const ACCOUNT_ACTOR_NAME: &str = "polar.credentials-agent.account";
-/// Overrides the Kubernetes identity allowed to bootstrap. Unset means the
-/// well-known `polar-admin-bootstrap` service account.
-const BOOTSTRAP_IDENTITY_ENV: &str = "CREDENTIALS_AGENT_BOOTSTRAP_IDENTITY";
 const RETRIEVE_SECRET_ACTOR_NAME: &str = "polar.credentials-agent.retrieve-secret";
 const AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME: &str =
     "polar.credentials-agent.agent-escrow-keypair-bootstrap";
@@ -625,8 +606,9 @@ impl Actor for ConsumerSupervisor {
             polar::graph::environment::GraphSettings::from_env(&**configured.config())
                 .map_err(ActorProcessingErr::from)?;
 
-        let log_path = std::env::var(CREDENTIALS_EVENT_LOG_PATH_ENV)
-            .unwrap_or_else(|_| CREDENTIALS_EVENT_LOG_PATH_DEFAULT.to_string());
+        let settings = ConsumerSettings::read(configured.config())
+            .map_err(ActorProcessingErr::from)?;
+        let log_path = settings.event_log_path.clone();
 
         // ProjectionActor owns the graph projection as its own,
         // genuinely separate concern -- see projection.rs's own
@@ -672,16 +654,14 @@ impl Actor for ConsumerSupervisor {
 
         let _ = projection_actor.cast(ProjectionMessage::SetLedger(ledger.clone()));
 
-        let cert_issuer_url = std::env::var(CERT_ISSUER_URL_ENV).map_err(|_| {
-            ActorProcessingErr::from(format!("{CERT_ISSUER_URL_ENV} must be set"))
-        })?;
+        let cert_issuer_url = settings.cert_issuer_url.clone();
 
         // How this consumer trusts cert-issuer. With the CA path set it
         // verifies against that file from its first request; without it,
         // the CA is fetched once from GET /ca and pinned (the degraded
         // self-bootstrap mode). Each handler owns its own client, so the
         // trust setup runs once per handler.
-        let cert_issuer_ca_path = HandshakeClient::ca_path_from_env(CERT_ISSUER_CA_CERT_ENV);
+        let cert_issuer_ca_path = settings.ca_cert.clone();
         let make_cert_issuer_client = || async {
             HandshakeClient::for_trust_mode(
                 cert_issuer_url.clone(),
@@ -694,12 +674,8 @@ impl Actor for ConsumerSupervisor {
         };
 
         let escrow_keypair = {
-            let escrow_key_path = std::env::var(crate::escrow::CREDENTIALS_ESCROW_KEY_PATH_ENV)
-                .unwrap_or_else(|_| {
-                    crate::escrow::CREDENTIALS_ESCROW_KEY_PATH_DEFAULT.to_string()
-                });
             std::sync::Arc::new(
-                crate::escrow::EscrowKeypair::load_or_generate(&escrow_key_path)
+                crate::escrow::EscrowKeypair::load_or_generate(&settings.escrow_key_path)
                     .map_err(ActorProcessingErr::from)?,
             )
         };
@@ -713,8 +689,14 @@ impl Actor for ConsumerSupervisor {
             // arrive without introspection configured, the handler
             // itself refuses it (TokenIntrospectionFailed) rather
             // than silently proceeding unintrospected.
-            introspection: IntrospectionClient::from_env().ok(),
-            known_kubernetes_issuers: configured_kubernetes_issuers(),
+            introspection: settings.introspection.as_ref().map(|i| {
+                IntrospectionClient::new(
+                    i.endpoint.clone(),
+                    i.client_id.clone(),
+                    i.client_secret.clone(),
+                )
+            }),
+            known_kubernetes_issuers: settings.kubernetes_issuers.clone(),
             escrow_keypair: escrow_keypair.clone(),
         };
 
@@ -732,7 +714,7 @@ impl Actor for ConsumerSupervisor {
         let agent_escrow_issuance_handler = AgentEscrowIssuanceHandler {
             ledger: ledger.clone(),
             cert_issuer: make_cert_issuer_client().await?,
-            known_kubernetes_issuers: configured_kubernetes_issuers(),
+            known_kubernetes_issuers: settings.kubernetes_issuers.clone(),
             escrow_keypair: escrow_keypair.clone(),
         };
         let (_agent_escrow_issuance_actor, _) = AgentEscrowIssuanceActor::spawn_linked(
@@ -836,12 +818,8 @@ impl Actor for ConsumerSupervisor {
         // its caller by the client certificate on the connection: this is
         // the agent's own mTLS identity, the same files its Cassini client
         // uses.
-        let own_cert_path = std::env::var("TLS_CLIENT_CERT").map_err(|_| {
-            ActorProcessingErr::from("TLS_CLIENT_CERT must be set".to_string())
-        })?;
-        let own_key_path = std::env::var("TLS_CLIENT_KEY").map_err(|_| {
-            ActorProcessingErr::from("TLS_CLIENT_KEY must be set".to_string())
-        })?;
+        let own_cert_path = settings.own_cert_path.clone();
+        let own_key_path = settings.own_key_path.clone();
         let account_cert_issuer = HandshakeClient::for_trust_mode_with_identity(
             cert_issuer_url.clone(),
             cert_issuer_ca_path.as_deref(),
@@ -855,10 +833,7 @@ impl Actor for ConsumerSupervisor {
         let account_handler = AccountHandler {
             ledger: ledger.clone(),
             cert_issuer: account_cert_issuer,
-            bootstrap_identity: std::env::var(BOOTSTRAP_IDENTITY_ENV)
-                .ok()
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| DEFAULT_BOOTSTRAP_IDENTITY.to_string()),
+            bootstrap_identity: settings.bootstrap_identity.clone(),
         };
         let (_account_actor, _) = AccountActor::spawn_linked(
             Some(ACCOUNT_ACTOR_NAME.to_string()),
@@ -1279,9 +1254,6 @@ mod tests {
 #[cfg(test)]
 mod issuance_wiring_tests {
     use super::*;
-    use crate::introspection::{
-        INTROSPECTION_CLIENT_ID_ENV, INTROSPECTION_CLIENT_SECRET_ENV, INTROSPECTION_ENDPOINT_ENV,
-    };
     use crate::state::GrantRecord;
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1338,13 +1310,6 @@ mod issuance_wiring_tests {
         // real logic (classify, validate, grant/renewal checks, sign)
         // -> a genuinely recorded IssuanceCompleted event in the ledger.
         // No shortcuts -- every real component in the actual chain.
-
-        // No introspection needed for this scenario (Kubernetes credential).
-        unsafe {
-            std::env::remove_var(INTROSPECTION_ENDPOINT_ENV);
-            std::env::remove_var(INTROSPECTION_CLIENT_ID_ENV);
-            std::env::remove_var(INTROSPECTION_CLIENT_SECRET_ENV);
-        }
 
         let cert_issuer = MockServer::start().await;
         Mock::given(method("POST"))
