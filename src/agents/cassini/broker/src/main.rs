@@ -1,52 +1,10 @@
 #![allow(clippy::incompatible_msrv)]
-use cassini_broker::{
-    BROKER_NAME,
-    broker::{Broker, BrokerArgs},
-};
-use cassini_tracing::{init_tracing, shutdown_tracing};
-use ractor::Actor;
-use tracing::error;
+use cassini_broker::agent::CassiniBroker;
+use std::process::ExitCode;
 
-// ============================== Exit Codes ============================== //
-// 1 — unexpected actor/worker failure
-// 2 — graceful rejuvenation shutdown (normal cert rotation cycle)
-// 3 — startup failure (bad args, crypto provider, spawn failure)
-
-#[tokio::main]
-async fn main() {
-    // Install aws-lc-rs as the default Rustls crypto provider.
-    // Required when multiple providers are present in the dependency tree.
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
-
-    init_tracing("cassini-broker");
-
-    let exit_code = match BrokerArgs::new() {
-        Ok(args) => {
-            let shutdown_token = args.shutdown_auth_token.clone();
-            match Actor::spawn(Some(BROKER_NAME.to_string()), Broker, args).await {
-                Ok((broker, handle)) => {
-                    cassini_broker::signals::begin_shutdown_on_signal(
-                        broker,
-                        shutdown_token,
-                    );
-                    handle.await.ok();
-                    // Broker exited cleanly — graceful rejuvenation shutdown.
-                    2
-                }
-                Err(e) => {
-                    error!("Failed to spawn broker actor: {e}");
-                    3
-                }
-            }
-        }
-        Err(e) => {
-            error!("Failed to load arguments: {e}");
-            3
-        }
-    };
-
-    shutdown_tracing();
-    std::process::exit(exit_code);
+// The one `main` every agent has: it answers `--help`, `--scaffold` and `--check`, judges the
+// configuration, and starts the broker. A broker that ends has failed, so it exits 1 whether it
+// returned an error or not; the Job starts a fresh pod, which gets fresh certificates.
+fn main() -> ExitCode {
+    polar_agent_builder::run::<CassiniBroker>()
 }

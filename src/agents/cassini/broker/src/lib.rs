@@ -1,9 +1,10 @@
-use std::{env, fmt};
+#![deny(clippy::disallowed_methods)]
+pub mod agent;
 pub mod broker;
 pub mod control;
 pub mod listener;
 pub mod session;
-pub mod signals;
+pub mod settings;
 pub mod subscriber;
 pub mod topic;
 
@@ -36,28 +37,6 @@ pub const REGISTRATION_REQ_FAILED_TXT: &str = "Failed to register session!";
 pub const LISTENER_MGR_NOT_FOUND_TXT: &str = "Listener Manager not found!";
 pub const TIMEOUT_REASON: &str = "SESSION_TIMEDOUT";
 pub const DISCONNECTED_REASON: &str = "CLIENT_DISCONNECTED";
-pub const SHUTDOWN_AUTH_TOKEN: &str = "CASSINI_SHUTDOWN_TOKEN";
-
-#[derive(Debug, Clone)]
-pub enum BrokerConfigError {
-    EnvVar { var: String, source: env::VarError },
-    /// A variable is set, to something that is not valid.
-    Invalid { var: String, value: String, expected: &'static str },
-}
-
-impl fmt::Display for BrokerConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use crate::BrokerConfigError::{EnvVar, Invalid};
-        match self {
-            EnvVar { var, source } => {
-                write!(f, "{source}. Pleaes provide a value for {var}")
-            }
-            Invalid { var, value, expected } => {
-                write!(f, "{var} is \"{value}\"; expected {expected}")
-            }
-        }
-    }
-}
 
 ///Consider a different naming convention for the subscribers, right now they're named directly after the session they represent and the topic they subscribe to
 /// IF we wanted to support topics subscribing to topics e.g overloading the type of subscriber topics can have, we will want to reconsider this approach.

@@ -572,17 +572,13 @@ impl Actor for InfrastructureSupervisor {
                     _ => {}
                 }
                 if let Some(client) = &state.client {
-                    if let ClientEvent::Registered { .. } = &event {
-                        if let Some(crypto) = &client.crypto {
-                            if let Err(e) = crypto
-                                .as_actor_ref()
-                                .send_message(polar_crypto::CryptoMessage::ClientRegistered)
-                            {
-                                tracing::warn!(
-                                    "failed to tell CryptoActor the client registered: {e}"
-                                );
-                            }
-                        }
+                    if let ClientEvent::Registered { .. } = &event
+                        && let Some(crypto) = &client.crypto
+                        && let Err(e) = crypto
+                            .as_actor_ref()
+                            .send_message(polar_crypto::CryptoMessage::ClientRegistered)
+                    {
+                        tracing::warn!("failed to tell CryptoActor the client registered: {e}");
                     }
                     client.events_output.send(event);
                 }

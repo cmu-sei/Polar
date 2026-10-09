@@ -84,10 +84,14 @@ impl Pki {
     }
 }
 
+/// What the builder made for the broker, left where a test can reach it.
+type Infrastructure = Arc<Mutex<Option<polar_agent_builder::ServiceResources>>>;
+
 pub struct TestBroker {
     pub addr: String,
     pub pki: Pki,
     broker: Mutex<ActorRef<BrokerMessage>>,
+    infrastructure: Mutex<Infrastructure>,
     retention_secs: Option<u64>,
     /// The exit codes the broker asked the process to exit with.
     pub exits: Arc<Mutex<Vec<i32>>>,
@@ -155,7 +159,8 @@ impl TestBroker {
         };
         let addr = format!("127.0.0.1:{port}");
         let exits = Arc::new(Mutex::new(Vec::new()));
-        let broker = Self::spawn_broker(&addr, &pki, retention_secs, shutdown_budget, &exits).await;
+        let (broker, infrastructure) =
+            Self::spawn_broker(&addr, &pki, retention_secs, shutdown_budget, &exits).await;
 
         for _ in 0..100 {
             if tokio::net::TcpStream::connect(&addr).await.is_ok() {
@@ -163,6 +168,7 @@ impl TestBroker {
                     addr,
                     pki,
                     broker: Mutex::new(broker),
+                    infrastructure: Mutex::new(infrastructure),
                     retention_secs,
                     exits,
                 };
@@ -178,8 +184,18 @@ impl TestBroker {
         retention_secs: Option<u64>,
         shutdown_budget: Duration,
         exits: &Arc<Mutex<Vec<i32>>>,
-    ) -> ActorRef<BrokerMessage> {
-        let recorded = exits.clone();
+    ) -> (ActorRef<BrokerMessage>, Infrastructure) {
+        // The builder's infrastructure as the broker gets it in the pod, except that the process
+        // is not ended (the code it would have exited with is recorded in `exits`) and the
+        // process's signals are left alone.
+        let env: std::collections::HashMap<String, String> = [(
+            "POLAR_HEALTH_FILE".to_string(),
+            pki.path("health.json").to_string_lossy().into_owned(),
+        )]
+        .into_iter()
+        .collect();
+        let (configured, infrastructure) =
+            polar_agent_builder::Configured::for_service_test(&env, shutdown_budget, exits.clone());
         let (broker, _) = Actor::spawn(
             Some(cassini_broker::BROKER_NAME.to_string()),
             Broker,
@@ -190,13 +206,12 @@ impl TestBroker {
                 private_key_file: pki.path("server.key").to_string_lossy().into_owned(),
                 ca_cert_file: pki.ca().to_string_lossy().into_owned(),
                 shutdown_auth_token: None,
-                shutdown_budget,
-                process_exit: Arc::new(move |code| recorded.lock().unwrap().push(code)),
+                configured,
             },
         )
         .await
         .expect("the broker starts");
-        broker
+        (broker, infrastructure)
     }
 
     /// Stops the broker, then starts another on the same address with the same certificates:
@@ -206,7 +221,7 @@ impl TestBroker {
         let began = std::time::Instant::now();
         self.stop().await;
         tokio::time::sleep(away_for).await;
-        let broker = Self::spawn_broker(
+        let (broker, infrastructure) = Self::spawn_broker(
             &self.addr,
             &self.pki,
             self.retention_secs,
@@ -215,7 +230,19 @@ impl TestBroker {
         )
         .await;
         *self.broker.lock().unwrap() = broker;
+        *self.infrastructure.lock().unwrap() = infrastructure;
         began.elapsed()
+    }
+
+    /// The health actor the builder gave the broker, to end it as it would end itself.
+    pub fn health_actor(&self) -> ActorRef<polar_health::HealthCheckMessage> {
+        let infrastructure = self.infrastructure.lock().unwrap().clone();
+        let resources = infrastructure
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the broker built its infrastructure");
+        resources.healthcheck.as_actor_ref()
     }
 
     /// The broker supervisor, to send it what the running broker would be sent.

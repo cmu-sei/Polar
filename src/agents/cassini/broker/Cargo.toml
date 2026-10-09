@@ -8,6 +8,8 @@ license.workspace = true
 rkyv = { workspace = true }
 polar = { path = "../../lib" }
 polar-health = { workspace = true }
+polar-agent-builder.workspace = true
+polar-env.workspace = true
 async-trait.workspace = true
 ractor.workspace = true
 tokio.workspace = true

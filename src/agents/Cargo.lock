@@ -875,6 +875,8 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "polar",
+ "polar-agent-builder",
+ "polar-env",
  "polar-health",
  "proptest",
  "ractor",

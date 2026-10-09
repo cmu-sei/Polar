@@ -1,5 +1,5 @@
 use crate::{
-    BrokerConfigError, LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME, SUBSCRIBER_MANAGER_NAME,
+    LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME, SUBSCRIBER_MANAGER_NAME,
     TOPIC_MANAGER_NAME, UNEXPECTED_MESSAGE_STR,
     control::{ControlManager, ControlManagerState},
     listener::{ListenerManager, ListenerManagerArgs},
@@ -8,19 +8,19 @@ use crate::{
     topic::{TopicManager, TopicManagerArgs},
 };
 
-use cassini_tracing::shutdown_tracing;
 use cassini_tracing::try_set_parent_otel;
 
 use cassini_types::{BrokerMessage, ShutdownPhase};
 use cassini_types::ControlOp;
 use cassini_types::DisconnectReason;
 
-use polar_health::{HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
+use polar_agent_builder::{
+    Configured, InfrastructureEvent, InfrastructureSupervisorMessage, ServiceBuilder,
+};
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use ractor::concurrency::Duration;
 
-use std::env;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -31,54 +31,22 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub struct Broker;
 
-/// What the broker calls to end the process. The real one flushes tracing and exits; a test's
-/// records the code instead.
-pub type ProcessExit = Arc<dyn Fn(i32) + Send + Sync>;
-
-pub fn real_process_exit() -> ProcessExit {
-    Arc::new(|code| {
-        shutdown_tracing();
-        std::process::exit(code)
-    })
-}
-
-/// How long an orderly shutdown has, from its start to the process ending, when the deployment
-/// does not say. The pod's termination grace period is this plus a margin.
-pub const DEFAULT_SHUTDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
-
-pub const SHUTDOWN_BUDGET_ENV: &str = "CASSINI_SHUTDOWN_BUDGET_SECS";
-
 // State object containing references to worker actors
 pub struct BrokerState {
-    shutdown_budget: std::time::Duration,
-    process_exit: ProcessExit,
-    /// The task that ends the process if an orderly shutdown overruns its budget.
-    watchdog: Option<tokio::task::AbortHandle>,
+    /// The builder's infrastructure: the broker asks it to begin the shutdown (which starts the
+    /// budget's watchdog), and it tells the broker when something else has decided it should end.
+    infrastructure: ActorRef<InfrastructureSupervisorMessage>,
     listener_mgr: Option<ActorRef<BrokerMessage>>,
     session_mgr: Option<ActorRef<BrokerMessage>>,
     topic_mgr: Option<ActorRef<BrokerMessage>>,
     subscriber_mgr: Option<ActorRef<BrokerMessage>>,
     control_mgr: Option<ActorRef<BrokerMessage>>,
 
-    /// Held to keep the HealthCheckActor alive.
-    #[allow(dead_code)]
-    healthcheck: ActorRef<HealthCheckMessage>,
-
-    /// Held so handle_supervisor_evt's own ActorTerminated arm can
-    /// genuinely, directly construct a real
-    /// BrokerMessage::PrepareForShutdown once HealthCheckActor
-    /// terminates cleanly -- HealthCheckActor no longer signals this
-    /// via a real OutputPort/ShutdownAck handshake at all (removed as
-    /// genuine, unnecessary machinery; ordinary, real Ractor
-    /// supervision already, directly provides everything it existed
-    /// for).
-    shutdown_auth_token: Option<String>,
-
     is_shutting_down: bool,
 }
 
-/// Would-be configurations for the broker actor itself, as well its workers
-#[derive(Clone)]
+/// What the broker is started with: where it listens and with what certificate, and the
+/// configuration the builder judged, from which it builds its infrastructure.
 pub struct BrokerArgs {
     /// Socket address to listen for connections on
     pub bind_addr: String,
@@ -94,52 +62,24 @@ pub struct BrokerArgs {
     /// Authorization token for shutdown operations
     pub shutdown_auth_token: Option<String>,
 
-    /// How long an orderly shutdown has before the process is ended regardless. Each of the five
-    /// phases gets a fifth of it.
-    pub shutdown_budget: std::time::Duration,
-
-    /// How the process is ended when the shutdown overruns, or a worker fails.
-    pub process_exit: ProcessExit,
+    /// The configuration `run` judged: the snapshot, the health settings and the shutdown budget,
+    /// from which the broker builds its infrastructure (the health check, the signals, the
+    /// shutdown handshake with its budget and watchdog).
+    pub configured: Configured,
 }
 
 impl BrokerArgs {
-    fn required_env(var: &str) -> Result<String, BrokerConfigError> {
-        env::var(var).map_err(|e| BrokerConfigError::EnvVar {
-            var: var.to_string(),
-            source: e,
-        })
-    }
-
-    pub fn new() -> Result<Self, BrokerConfigError> {
-        let server_cert_file = BrokerArgs::required_env("TLS_SERVER_CERT_CHAIN")?;
-        let private_key_file = BrokerArgs::required_env("TLS_SERVER_KEY")?;
-        let ca_cert_file = BrokerArgs::required_env("TLS_CA_CERT")?;
-        let bind_addr =
-            env::var("CASSINI_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-
-        let shutdown_auth_token = env::var("CASSINI_SHUTDOWN_TOKEN").ok();
-        let shutdown_budget = match env::var(SHUTDOWN_BUDGET_ENV) {
-            Ok(value) => value
-                .parse::<u64>()
-                .map(std::time::Duration::from_secs)
-                .map_err(|_| BrokerConfigError::Invalid {
-                    var: SHUTDOWN_BUDGET_ENV.to_string(),
-                    value,
-                    expected: "a whole number of seconds",
-                })?,
-            Err(_) => DEFAULT_SHUTDOWN_BUDGET,
-        };
-
-        Ok(BrokerArgs {
-            bind_addr,
+    /// From the broker's settings and what `run` judged.
+    pub fn from_settings(settings: crate::settings::BrokerSettings, configured: Configured) -> Self {
+        Self {
+            bind_addr: settings.bind_addr,
             session_timeout: None,
-            server_cert_file,
-            private_key_file,
-            ca_cert_file,
-            shutdown_auth_token,
-            shutdown_budget,
-            process_exit: real_process_exit(),
-        })
+            server_cert_file: settings.server_cert_file,
+            private_key_file: settings.private_key_file,
+            ca_cert_file: settings.ca_cert_file,
+            shutdown_auth_token: Some(settings.shutdown_auth_token),
+            configured,
+        }
     }
 }
 
@@ -178,16 +118,6 @@ impl Actor for Broker {
                 );
 
                 if let Some(name) = actor_cell.get_name() {
-                    // The health actor ending is the decision that this broker should go. Begin
-                    // the orderly, multi-phase shutdown and let it run: it ends the broker when
-                    // every manager has finished, and the process exits from main.
-                    if name == "cassini.healthcheck" {
-                        info!("HealthCheckActor terminated -- beginning graceful shutdown");
-                        let _ = myself.send_message(BrokerMessage::PrepareForShutdown {
-                            auth_token: state.shutdown_auth_token.clone(),
-                        });
-                    }
-
                     match name.as_str() {
                         crate::LISTENER_MANAGER_NAME => {
                             state.listener_mgr = None;
@@ -219,27 +149,24 @@ impl Actor for Broker {
                 }
             }
 
-            // The health actor failing is its verdict that the broker is unhealthy. That is the
-            // same decision as it ending, and gets the same orderly shutdown.
-            SupervisionEvent::ActorFailed(actor_cell, e)
-                if actor_cell.get_name().as_deref() == Some("cassini.healthcheck") =>
-            {
-                error!(error = %e, "HealthCheckActor failed -- beginning graceful shutdown");
-                let _ = myself.send_message(BrokerMessage::PrepareForShutdown {
-                    auth_token: state.shutdown_auth_token.clone(),
-                });
-            }
-
             SupervisionEvent::ActorFailed(actor_cell, e) => {
-                // Today: fatal. Tomorrow: restart policy per worker type.
+                // Today: the broker ends. Tomorrow: restart policy per worker type. It ends in
+                // order: the infrastructure tells the broker to begin its shutdown, and its
+                // watchdog ends the process if that does not finish within the budget.
                 error!(
                     worker_name = ?actor_cell.get_name(),
                     worker_id = ?actor_cell.get_id(),
                     error = %e,
-                    "Worker failed; stopping broker"
+                    "Worker failed; ending the broker in order"
                 );
-                // Exit code 1 — unexpected failure, distinct from graceful rejuvenation (2).
-                (state.process_exit)(1);
+                let _ = state
+                    .infrastructure
+                    .cast(InfrastructureSupervisorMessage::BeginShutdown {
+                        reason: format!(
+                            "the broker's worker {} failed: {e}",
+                            actor_cell.get_name().unwrap_or_default()
+                        ),
+                    });
             }
 
             SupervisionEvent::ProcessGroupChanged(_) => (),
@@ -259,24 +186,27 @@ impl Actor for Broker {
 
         debug!(actor = ?myself, "Broker starting");
 
-        let (healthcheck, _) = HealthCheckActor::spawn_linked(
-            Some("cassini.healthcheck".to_string()),
-            HealthCheckActor,
-            // No dep cert endpoints: cert-issuer is HTTP only, and its availability is
-            // proven implicitly by successful cert issuance.
-            HealthCheckArgs::new(false, 300, vec![]),
-            myself.get_cell(),
-        )
-        .await
-        .map_err(|e| {
-            error!(error = ?e, "Broker startup failed: HealthCheckActor failed to start");
-            ActorProcessingErr::from(e)
-        })?;
-
-        // Cassini doesn't connect to itself, so manually signal CassiniConnected
-        // to kick off the tick loop. This is the equivalent of the Registered
-        // event that agent supervisors receive when they connect to Cassini.
-        let _ = healthcheck.cast(HealthCheckMessage::CassiniConnected);
+        // The infrastructure: the health check, the signal listener and the shutdown handshake
+        // with its budget and watchdog, as every agent has, without a Cassini client (the broker
+        // is what a client connects to). It tells the broker when something has decided it
+        // should end: a health verdict, SIGTERM, a worker's death.
+        let shutdown_budget = args.configured.shutdown_budget();
+        let infrastructure = ServiceBuilder::new(myself.clone(), "cassini")
+            .into_configured(args.configured)
+            .build()
+            .await
+            .map_err(|e| {
+                error!(error = ?e, "Broker startup failed: the infrastructure did not start");
+                e
+            })?;
+        let token_for_infrastructure = args.shutdown_auth_token.clone();
+        infrastructure
+            .infrastructure_events
+            .subscribe(myself.clone(), move |event| match event {
+                InfrastructureEvent::PrepareShutdown => Some(BrokerMessage::PrepareForShutdown {
+                    auth_token: token_for_infrastructure.clone(),
+                }),
+            });
 
         // Create SessionManager without listener manager (will set later)
         let (session_mgr, _) = Actor::spawn_linked(
@@ -382,7 +312,7 @@ impl Actor for Broker {
             phase_timeout_handle: None,
             phase_timeout_token: CancellationToken::new(),
             // The budget is shared by the five phases.
-            shutdown_timeout: (args.shutdown_budget / 5).max(Duration::from_millis(1)),
+            shutdown_timeout: (shutdown_budget / 5).max(Duration::from_millis(1)),
             shutdown_completed: false,
         };
 
@@ -406,12 +336,8 @@ impl Actor for Broker {
             topic_mgr: Some(topic_mgr),
             subscriber_mgr: Some(subscriber_mgr),
             control_mgr: Some(control_mgr),
-            healthcheck,
-            shutdown_auth_token: args.shutdown_auth_token.clone(),
+            infrastructure: infrastructure.infrastructure,
             is_shutting_down: false,
-            shutdown_budget: args.shutdown_budget,
-            process_exit: args.process_exit.clone(),
-            watchdog: None,
         })
     }
 
@@ -444,10 +370,10 @@ impl Actor for Broker {
         myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        // Finished in time: nothing left for the watchdog to do.
-        if let Some(watchdog) = state.watchdog.take() {
-            watchdog.abort();
-        }
+        // The infrastructure is told it may come down, which also ends its watchdog.
+        let _ = state
+            .infrastructure
+            .cast(InfrastructureSupervisorMessage::ProceedWithShutdown);
         // The managers are this actor's children and nothing else stops them: left running they
         // keep their names, and the listener keeps the address bound.
         myself
@@ -637,21 +563,14 @@ impl Broker {
 
         info!("Initiating shutdown phase: {:?}", phase);
         if !state.is_shutting_down {
-            // The shutdown has begun. If it has not finished when the budget runs out something
-            // is stuck, and the process ends anyway rather than wait for Kubernetes to kill it.
-            let budget = state.shutdown_budget;
-            let process_exit = state.process_exit.clone();
-            state.watchdog = Some(
-                tokio::spawn(async move {
-                    tokio::time::sleep(budget).await;
-                    error!(
-                        budget_secs = budget.as_secs_f32(),
-                        "the orderly shutdown did not finish within its budget, exiting 1"
-                    );
-                    process_exit(1);
-                })
-                .abort_handle(),
-            );
+            // The shutdown has begun. The infrastructure starts the budget's watchdog if nothing
+            // asked for the shutdown through it (a shutdown requested over the wire did not); if
+            // it has begun already this changes nothing.
+            let _ = state
+                .infrastructure
+                .cast(InfrastructureSupervisorMessage::BeginShutdown {
+                    reason: "an orderly shutdown was requested".to_string(),
+                });
         }
         state.is_shutting_down = true;
 
