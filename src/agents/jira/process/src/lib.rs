@@ -1,3 +1,5 @@
+#![deny(clippy::disallowed_methods)]
+
 /*
    Polar (OSS)
 
@@ -21,6 +23,7 @@
    DM24-0470
 */
 
+pub mod agent;
 pub mod groups;
 pub mod issues;
 pub mod projects;

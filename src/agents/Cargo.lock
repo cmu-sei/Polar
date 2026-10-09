@@ -3611,6 +3611,7 @@ dependencies = [
  "log",
  "polar",
  "polar-agent-builder",
+ "polar-env",
  "ractor",
  "reqwest 0.12.28",
  "rkyv",

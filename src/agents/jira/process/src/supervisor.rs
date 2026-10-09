@@ -11,7 +11,7 @@ use polar::graph::controller::{
     GraphController, GraphControllerActor, GraphControllerArgs, GraphSignal,
 };
 use polar_agent_builder::{
-    AgentBuilder, HealthClient, HealthHandle, InfrastructureEvent, InfrastructureSupervisorMessage,
+    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent, InfrastructureSupervisorMessage,
     Subscription,
 };
 use ractor::ActorProcessingErr;
@@ -35,7 +35,7 @@ const JIRA_TOPICS: [&str; 4] = [
 /// How long the infrastructure supervisor gives this agent to drain: the graph
 /// controller's stop (up to 30 s) plus a margin. If it is not done by then the
 /// process exits 1 regardless.
-const SHUTDOWN_BUDGET: Duration = Duration::from_secs(30 + 10);
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(30 + 10);
 
 /// This supervisor's own message type. polar::SupervisorMessage cannot
 /// carry the two infrastructure signals without polar-agent-builder
@@ -133,12 +133,13 @@ impl ConsumerSupervisor {
 impl Actor for ConsumerSupervisor {
     type Msg = ConsumerSupervisorMessage;
     type State = ConsumerSupervisorState;
-    type Arguments = ();
+    /// The configuration `run` judged; the builder is made from it.
+    type Arguments = Configured;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _args: (),
+        configured: Configured,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
@@ -148,15 +149,13 @@ impl Actor for ConsumerSupervisor {
         // spawning anything, and reads the dependency endpoints from
         // POLAR_HEALTH_DEP_ENDPOINTS. This agent never encrypts a payload,
         // so it does not declare encryption.
-        let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
-            .with_shutdown_budget(SHUTDOWN_BUDGET)
-            .with_self_test()
-            .with_graph_write();
+        let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME);
         for subscription in Self::jira_subscriptions(&myself) {
             builder = builder.with_subscription(subscription);
         }
         let resources = builder
             .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }))
+            .into_configured(configured)
             .build()
             .await?;
 

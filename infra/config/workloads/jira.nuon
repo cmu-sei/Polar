@@ -10,21 +10,17 @@
     name: "jira-observer"
     kind: "agent"
     image: "jira-observer"
+    config: "document"
+    # The agent declares JIRA_TOKEN as a secret, so it can only be given from a Secret.
     env: [
       { name: "JIRA_TOKEN", secret: "jira-secret", key: "token" }
     ]
-    # Each observer is stopped in turn, bounded at 10 s, so this allows for several,
-    # plus a margin. The code declares the same (SHUTDOWN_BUDGET in its supervisor).
-    shutdown: { budget_secs: 40 }
   }
 
   {
     name: "jira-processor"
     kind: "agent"
     image: "jira-processor"
-    needs: ["graph-write"]
-    # The graph controller's stop, up to 30 s, plus a margin. The code declares the
-    # same (SHUTDOWN_BUDGET in its supervisor).
-    shutdown: { budget_secs: 40 }
+    config: "document"
   }
 ]

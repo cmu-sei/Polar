@@ -31,7 +31,6 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use reqwest::Url;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::env;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
@@ -78,11 +77,10 @@ impl JiraIssueObserver {
             .map(|f| (f.id.to_string(), f.name.to_string()))
             .collect();
 
-        let query_date = env::var("QUERY_DATE").ok();
         let filter = jql_filter(
             state.full_pull_done,
             state.base_interval,
-            query_date.as_deref(),
+            state.query_date.as_deref(),
         );
         info!(
             "Pulling issues ({})",
@@ -192,7 +190,8 @@ impl Actor for JiraIssueObserver {
             args.web_client,
             args.tcp_client,
             Duration::from_secs(args.base_interval),
-        ))
+        )
+        .with_query_date(args.query_date))
     }
 
     async fn post_start(

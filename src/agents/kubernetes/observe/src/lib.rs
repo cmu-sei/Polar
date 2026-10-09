@@ -1,3 +1,5 @@
+#![deny(clippy::disallowed_methods)]
+
 use cassini_client::{OfflineBehavior, PublishRequest};
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::NamespaceResourceScope;
@@ -22,6 +24,7 @@ use serde_json::{to_value, to_vec};
 use std::fmt::Debug;
 use tracing::{debug, error, instrument, trace, warn};
 // pub mod pods;
+pub mod agent;
 pub mod supervisor;
 
 pub const TCP_CLIENT_NAME: &str = "kubernetes.cluster_name.supervisor_name.client";

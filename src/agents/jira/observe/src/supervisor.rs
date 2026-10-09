@@ -32,7 +32,8 @@ use cassini_types::ClientEvent;
 use polar::async_get_file_as_byte_vec;
 use polar::cassini::TcpClient;
 use polar_agent_builder::{
-    AgentBuilder, HealthClient, HealthHandle, InfrastructureEvent, InfrastructureSupervisorMessage,
+    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
+    InfrastructureSupervisorMessage,
 };
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorId, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
@@ -48,7 +49,8 @@ const OBSERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// is stopped in turn, bounded at `OBSERVER_STOP_TIMEOUT`, so this allows for
 /// several, plus a margin. If it is not done by then the process exits 1
 /// regardless.
-const SHUTDOWN_BUDGET: Duration = Duration::from_secs(OBSERVER_STOP_TIMEOUT.as_secs() * 3 + 10);
+pub const SHUTDOWN_BUDGET: Duration =
+    Duration::from_secs(OBSERVER_STOP_TIMEOUT.as_secs() * 3 + 10);
 
 /// This supervisor's own message type. polar::SupervisorMessage cannot carry
 /// the infrastructure signals without polar-agent-builder depending back on
@@ -70,6 +72,7 @@ pub struct ObserverSupervisorState {
     auth: JiraAuth,
     deployment: JiraDeployment,
     base_interval: u64,
+    query_date: Option<String>,
     web_client: Client,
     tcp_client: TcpClient,
     healthcheck: HealthHandle,
@@ -82,10 +85,13 @@ pub struct ObserverSupervisorState {
 }
 
 pub struct ObserverSupervisorArgs {
+    /// The configuration `run` judged; the builder is made from it.
+    pub configured: Configured,
     pub jira_url: String,
     pub auth: JiraAuth,
     pub deployment: JiraDeployment,
     pub proxy_ca_cert_file: Option<String>,
+    pub query_date: Option<String>,
     pub base_interval: u64,
 }
 
@@ -98,6 +104,7 @@ impl ObserverSupervisorState {
             tcp_client: self.tcp_client.clone(),
             web_client: self.web_client.clone(),
             base_interval: self.base_interval,
+            query_date: self.query_date.clone(),
         }
     }
 
@@ -233,9 +240,8 @@ impl Actor for ObserverSupervisor {
         // depend on Cassini, which is the default capability, so there is
         // nothing to declare beyond the lifecycle handler.
         let resources = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
-            .with_shutdown_budget(SHUTDOWN_BUDGET)
-            .with_self_test()
             .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }))
+            .into_configured(args.configured)
             .build()
             .await?;
 
@@ -252,6 +258,7 @@ impl Actor for ObserverSupervisor {
             auth: args.auth,
             deployment: args.deployment,
             base_interval: args.base_interval,
+            query_date: args.query_date,
             web_client,
             tcp_client: resources.tcp_client,
             healthcheck: resources.healthcheck,

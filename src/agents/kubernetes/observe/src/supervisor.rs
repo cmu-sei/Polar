@@ -8,7 +8,7 @@ use kube::runtime::{watcher, watcher::Event};
 use kube::{Api, Client, api::ListParams};
 use kube_common::{KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY};
 use polar_agent_builder::{
-    AgentBuilder, Capability, HealthClient, HealthHandle, InfrastructureEvent,
+    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
     InfrastructureSupervisorMessage,
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
@@ -33,7 +33,7 @@ pub type Watcher = ActorRef<WatcherMsg>;
 /// How long the infrastructure supervisor gives this agent to drain: its three
 /// watchers are stopped one after another, each bounded at 10 s, plus a margin. If
 /// it is not done by then the process exits 1 regardless.
-const SHUTDOWN_BUDGET: Duration = Duration::from_secs(3 * 10 + 10);
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(3 * 10 + 10);
 
 /// This supervisor's own, real, local message type -- the shared,
 /// core polar::SupervisorMessage can't structurally carry either of
@@ -108,12 +108,13 @@ impl ClusterObserverSupervisor {
 impl Actor for ClusterObserverSupervisor {
     type Msg = ObserverSupervisorMessage;
     type State = ClusterObserverSupervisorState;
-    type Arguments = ();
+    /// The configuration `run` judged; the builder is made from it.
+    type Arguments = Configured;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _: (),
+        configured: Configured,
     ) -> Result<Self::State, ActorProcessingErr> {
         // Read Kubernetes credentials and other data from the environment
         info!("{myself:?} starting");
@@ -126,10 +127,8 @@ impl Actor for ClusterObserverSupervisor {
         // provisions (ClusterRole, binding, token); the builder checks
         // that against POLAR_CAPABILITIES before anything starts.
         let resources = AgentBuilder::new(myself.clone(), TCP_CLIENT_NAME)
-            .with_shutdown_budget(SHUTDOWN_BUDGET)
-            .with_self_test()
-            .requires(Capability::KubeApiRead)
             .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }))
+            .into_configured(configured)
             .build()
             .await?;
 

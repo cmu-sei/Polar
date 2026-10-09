@@ -36,6 +36,7 @@ jira_common.workspace = true
 log.workspace = true
 polar.workspace = true
 polar-agent-builder.workspace = true
+polar-env.workspace = true
 ractor.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 rkyv.workspace = true

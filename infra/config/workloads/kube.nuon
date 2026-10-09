@@ -7,10 +7,7 @@
     name: "kube-observer"
     kind: "agent"
     image: "kube-observer"
-    needs: ["kube-api-read"]
-    # Its three watchers are stopped one after another, each bounded at 10 s, plus
-    # a margin. The code declares the same (SHUTDOWN_BUDGET in its supervisor).
-    shutdown: { budget_secs: 40 }
+    config: "document"
   }
 
   {

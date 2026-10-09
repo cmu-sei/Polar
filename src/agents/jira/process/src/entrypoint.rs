@@ -21,25 +21,12 @@ This Software includes and/or makes use of Third-Party Software each subject to 
 DM24-0470
 */
 
-use jira_processor::supervisor;
-use polar::init_logging;
-use ractor::Actor;
-use std::error::Error;
+use jira_processor::agent::JiraProcessor;
+use std::process::ExitCode;
 
-const JIRA_PROCESSOR_SUPERVISOR: &str = "jira.supervisor.processor";
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    init_logging(JIRA_PROCESSOR_SUPERVISOR.to_string());
-
-    let (_, handle) = Actor::spawn(
-        Some(JIRA_PROCESSOR_SUPERVISOR.to_string()),
-        supervisor::ConsumerSupervisor,
-        (),
-    )
-    .await
-    .expect("Expected to start observer agent");
-    let _ = handle.await;
-
-    Ok(())
+/// The agent says what it is in `JiraProcessor`; `run` answers the command line (`--help`,
+/// `--scaffold`, `--check`), judges the configuration and starts it. Unlike before, a processor
+/// that stops exits non-zero (it exited 0 here), so the Job restarts it.
+fn main() -> ExitCode {
+    polar_agent_builder::run::<JiraProcessor>()
 }

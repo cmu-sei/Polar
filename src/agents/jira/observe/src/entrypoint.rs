@@ -21,43 +21,11 @@
    DM24-0470
 */
 
-use jira_observer::*;
-use polar::init_logging;
-use ractor::Actor;
-use std::env;
-use std::error::Error;
+use jira_observer::agent::JiraObserver;
+use std::process::ExitCode;
 
-const JIRA_OBSERVER_SUPERVISOR: &str = "jira.supervisor.observer";
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    init_logging(JIRA_OBSERVER_SUPERVISOR.to_string());
-    let jira_url = env::var("JIRA_URL").map_err(|_| {
-        "JIRA_URL is not set; provide the url of the jira server, ex 'https://example.atlassian.net'"
-    })?;
-    let jira_token = env::var("JIRA_TOKEN").map_err(|_| "JIRA_TOKEN is not set")?;
-    let auth = JiraAuth::from_env(jira_token);
-    let deployment = JiraDeployment::from_env(&jira_url);
-    let proxy_ca_cert_file = env::var("PROXY_CA_CERT").ok();
-    let args = supervisor::ObserverSupervisorArgs {
-        jira_url,
-        auth,
-        deployment,
-        proxy_ca_cert_file,
-        // TODO: read these from configuration
-        base_interval: 1800,
-    };
-    let (_, handle) = Actor::spawn(
-        Some(JIRA_OBSERVER_SUPERVISOR.to_string()),
-        supervisor::ObserverSupervisor,
-        args,
-    )
-    .await
-    .map_err(|e| format!("failed to start {JIRA_OBSERVER_SUPERVISOR}: {e}"))?;
-
-    handle.await?;
-
-    // The supervisor stopping is never a success: this agent runs as a Job
-    // and only a non-zero exit gets it restarted.
-    Err(format!("{JIRA_OBSERVER_SUPERVISOR} stopped; exiting non-zero so the Job restarts it").into())
+/// The agent says what it is in `JiraObserver`; `run` answers the command line (`--help`,
+/// `--scaffold`, `--check`), judges the configuration and starts it.
+fn main() -> ExitCode {
+    polar_agent_builder::run::<JiraObserver>()
 }

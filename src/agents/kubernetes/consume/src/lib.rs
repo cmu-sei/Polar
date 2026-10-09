@@ -1,3 +1,5 @@
+#![deny(clippy::disallowed_methods)]
+
 //! Kubernetes consumer: projects observed cluster resources into the Polar
 //! knowledge graph.
 //!

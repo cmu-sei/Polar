@@ -1,3 +1,5 @@
+#![deny(clippy::disallowed_methods)]
+
 /*
    Polar (OSS)
 
@@ -21,9 +23,11 @@
    DM24-0470
 */
 
+pub mod agent;
 pub mod groups;
 pub mod issues;
 pub mod projects;
+pub mod settings;
 pub mod supervisor;
 pub mod users;
 
@@ -57,10 +61,10 @@ pub enum JiraAuth {
 }
 
 impl JiraAuth {
-    /// Resolve auth mode from environment. JIRA_EMAIL present => Basic
-    /// (Cloud-style). JIRA_EMAIL absent => Bearer (on-prem/Server/DC-style).
-    pub fn from_env(token: String) -> Self {
-        match std::env::var("JIRA_EMAIL").ok() {
+    /// Resolve auth mode from configuration. An email present => Basic (Cloud-style); absent
+    /// or empty => Bearer (on-prem/Server/DC-style).
+    pub fn from_parts(email: Option<String>, token: String) -> Self {
+        match email {
             Some(email) if !email.is_empty() => JiraAuth::Basic { email, token },
             _ => JiraAuth::Bearer { token },
         }
@@ -89,12 +93,12 @@ pub enum JiraDeployment {
 }
 
 impl JiraDeployment {
-    /// Resolve deployment type from environment. Defaults to
+    /// Resolve deployment type from configuration. Defaults to
     /// ServerOrDataCenter (today's existing behavior) unless explicitly
     /// overridden with JIRA_DEPLOYMENT=cloud, or the URL itself looks
     /// like an Atlassian-hosted Cloud site (*.atlassian.net).
-    pub fn from_env(jira_url: &str) -> Self {
-        match std::env::var("JIRA_DEPLOYMENT").ok().as_deref() {
+    pub fn resolve(configured: Option<&str>, jira_url: &str) -> Self {
+        match configured {
             Some(v) if v.eq_ignore_ascii_case("cloud") => JiraDeployment::Cloud,
             Some(v) if v.eq_ignore_ascii_case("server") || v.eq_ignore_ascii_case("datacenter") => {
                 JiraDeployment::ServerOrDataCenter
@@ -128,6 +132,9 @@ pub struct JiraObserverState {
     /// Set by the issue observer once a full pull has completed, after
     /// which it only pulls what changed. The other observers ignore it.
     pub full_pull_done: bool,
+    /// A date the first full pull of issues starts from (`QUERY_DATE`); only the issue
+    /// observer reads it.
+    pub query_date: Option<String>,
 }
 
 /// Renders an error together with every cause beneath it. reqwest reports
@@ -163,7 +170,14 @@ impl JiraObserverState {
             tcp_client,
             base_interval,
             full_pull_done: false,
+            query_date: None,
         }
+    }
+
+    /// The date the first full pull starts from.
+    pub fn with_query_date(mut self, query_date: Option<String>) -> Self {
+        self.query_date = query_date;
+        self
     }
 
     /// GETs a Jira URL with this agent's credentials and decodes the JSON
@@ -205,6 +219,7 @@ pub struct JiraObserverArgs {
     pub tcp_client: TcpClient,
     pub web_client: Client,
     pub base_interval: u64,
+    pub query_date: Option<String>,
 }
 
 /// Publishes one JiraData value on a topic through the agent's client.

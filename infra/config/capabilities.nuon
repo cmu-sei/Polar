@@ -77,7 +77,8 @@
   # leaves automountServiceAccountToken unset because of this mount.
   kube-api-read: {
     pod: {
-      env: [ { name: "KUBE_TOKEN", secret: "{workload}-sa-token", key: "token" } ]
+      # No KUBE_TOKEN: nothing reads it. The client finds the API and the token itself, from the
+      # variables Kubernetes sets in every pod and the mounted service account directory.
       volumes: [ { name: "{workload}-sa-token", secret: "{workload}-sa-token" } ]
       mounts: [ { name: "{workload}-sa-token", path: "/var/run/secrets/kubernetes.io/serviceaccount", read_only: false } ]
     }

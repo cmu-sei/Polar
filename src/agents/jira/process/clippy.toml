@@ -1,0 +1,14 @@
+# Reading or changing the process environment goes through polar-env, so that every variable an
+# agent reads is declared once, judged before the agent starts, and described by the checker.
+# See docs/architecture/configuration.md.
+#
+# This file is enforced in a crate by `#![deny(clippy::disallowed_methods)]` in its root. A crate
+# opts in when it has moved onto polar-env; the same file is copied into each (keep them identical).
+disallowed-methods = [
+    { path = "std::env::var", reason = "declare the variable with polar-env and read it through Env or Config" },
+    { path = "std::env::var_os", reason = "declare the variable with polar-env and read it through Env or Config" },
+    { path = "std::env::vars", reason = "an agent sees only the variables it declared; read them through Config" },
+    { path = "std::env::vars_os", reason = "an agent sees only the variables it declared; read them through Config" },
+    { path = "std::env::set_var", reason = "the environment is read once, into a Config; a test passes an Env of its own" },
+    { path = "std::env::remove_var", reason = "the environment is read once, into a Config; a test passes an Env of its own" },
+]
