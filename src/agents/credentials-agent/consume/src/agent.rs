@@ -31,7 +31,7 @@ impl PolarAgent for CredentialsConsumer {
     );
 
     async fn start(configured: Configured) -> Result<(), StartError> {
-        polar::init_logging("credentials-agent-consumer".to_string());
+        configured.init_logging("credentials-agent-consumer");
         let (_agent, handle) = Actor::spawn(
             Some("credentials-agent-consumer.supervisor".to_string()),
             ConsumerSupervisor,

@@ -149,8 +149,8 @@
   }
 
   # The broker's identity and arrangements: a server certificate for the Cassini service's name,
-  # read-only in the container, the paths the broker reads it from, the address it listens on, the
-  # shutdown token from a Secret, and where it sends its traces. The broker declares these
+  # read-only in the container, the paths the broker reads it from, the address it listens on and the
+  # shutdown token from a Secret. The broker declares these
   # variables itself (`cassini --scaffold`, section cassini-broker); a workload without that section
   # cannot be given this capability.
   cassini-server: {
@@ -161,10 +161,24 @@
         { name: "TLS_CA_CERT",             value: "/etc/tls/certs/ca.pem" }
         { name: "CASSINI_BIND_ADDR",       value: "0.0.0.0:{cassini.port}" }
         { name: "CASSINI_SHUTDOWN_TOKEN",  secret: "cassini-shutdown-token", key: "token" }
-        { name: "JAEGER_OTLP_ENDPOINT",    value: "{jaeger.url}/v1/traces" }
       ]
     }
     identity: { certs: [ { dir: "/etc/tls/certs", volume: "polar-certs", read_only: true, kind: "server", san: "{cassini.dns}", watch: ["cert.pem", "ca.pem"] } ] }
+    dependency: {}
+    init: {}
+    resources: {}
+  }
+
+  # Where the workload sends its traces: Jaeger's OTLP HTTP port. Every workload has it, from its
+  # kind. How much it sends is its own: the `logging` section every agent declares (RUST_LOG for
+  # the console, POLAR_TRACE_FILTER for what is exported, both info unless a workload says more).
+  tracing: {
+    pod: {
+      env: [
+        { name: "JAEGER_OTLP_ENDPOINT", value: "{jaeger.url}/v1/traces" }
+      ]
+    }
+    identity: {}
     dependency: {}
     init: {}
     resources: {}

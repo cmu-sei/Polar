@@ -4,8 +4,8 @@
 # of these by naming the field; `needs` is unioned with the kind's.
 {
   agent: {
-    # Every agent is a Cassini client.
-    needs: ["cassini"]
+    # Every agent is a Cassini client, and sends its traces to Jaeger.
+    needs: ["cassini", "tracing"]
     namespace: "polar"
     pull_policy: "IfNotPresent"
     pull_secrets: []
@@ -50,6 +50,6 @@
   # certificate arrangements as an agent, and none of the client's needs.
   service: {
     extends: "agent"
-    needs: []
+    needs: ["tracing"]
   }
 }

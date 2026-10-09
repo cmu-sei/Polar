@@ -127,6 +127,20 @@ impl Configured {
         self.startup.shutdown_budget
     }
 
+    /// Sets logging up as the deployment says (`RUST_LOG`, `POLAR_TRACE_FILTER`,
+    /// `JAEGER_OTLP_ENDPOINT` in the snapshot), and starts exporting traces when an endpoint is
+    /// given. Call it first in `start`. It cannot fail: the snapshot was judged before this ran.
+    pub fn init_logging(&self, service_name: &str) {
+        match polar::logging::LoggingSettings::read(&self.startup.config) {
+            Ok(settings) => polar::logging::init_with(service_name.to_string(), &settings),
+            Err(error) => {
+                // Unreachable once the snapshot has been judged; log with the defaults.
+                eprintln!("ERROR: cannot read the logging settings: {error}");
+                polar::init_logging(service_name.to_string());
+            }
+        }
+    }
+
     /// For the tests of a service built on [`crate::ServiceBuilder`]: a configuration judged
     /// from `env` with no capabilities required, that records the codes the process was asked
     /// to exit with instead of exiting, does not listen for signals (they belong to the whole
@@ -933,8 +947,9 @@ mod tests {
             .iter()
             .map(|s| s.name.as_str())
             .collect();
-        // Every agent is a Cassini client, so it is implied: an agent cannot forget it.
-        assert_eq!(names, vec!["builder", "health", "cassini-client"]);
+        // Every agent is a Cassini client, so it is implied: an agent cannot forget it. And every
+        // agent logs and traces as its deployment says.
+        assert_eq!(names, vec!["builder", "health", "logging", "cassini-client"]);
         assert_eq!(doc.requires, vec!["cassini"]);
     }
 

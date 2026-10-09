@@ -27,7 +27,7 @@ impl PolarAgent for KubeObserver {
             .install_default()
             .map_err(|_| "a rustls crypto provider was already installed")?;
 
-        polar::init_logging("kubernetes.cluster.observer.supervisor".to_string());
+        configured.init_logging("kubernetes.cluster.observer.supervisor");
 
         let (_, handle) = Actor::spawn(
             Some("kubernetes.cluster.observer.supervisor".to_string()),

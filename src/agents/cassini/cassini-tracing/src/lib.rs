@@ -31,17 +31,28 @@ static TRACER_PROVIDER: Mutex<Option<opentelemetry_sdk::trace::SdkTracerProvider
 pub struct TracingSettings {
     /// The console filter, in tracing's syntax. `warn` when unset or when it does not parse.
     pub log_filter: Option<String>,
+    /// Which spans and events are exported, in tracing's syntax. `debug` when unset or when it
+    /// does not parse.
+    pub trace_filter: Option<String>,
     /// Where spans are exported over OTLP HTTP. The local collector's port when unset.
     pub otlp_endpoint: Option<String>,
 }
 
 impl TracingSettings {
-    /// `CASSINI_LOG` and `JAEGER_OTLP_ENDPOINT` from the process environment.
+    /// `CASSINI_LOG`, `RUST_LOG` and `JAEGER_OTLP_ENDPOINT` from the process environment.
     pub fn from_env() -> Self {
         Self {
             log_filter: std::env::var("CASSINI_LOG").ok(),
+            trace_filter: std::env::var("RUST_LOG").ok(),
             otlp_endpoint: std::env::var("JAEGER_OTLP_ENDPOINT").ok(),
         }
+    }
+
+    fn trace_filter(&self) -> EnvFilter {
+        self.trace_filter
+            .as_deref()
+            .and_then(|filter| EnvFilter::try_new(filter).ok())
+            .unwrap_or_else(|| EnvFilter::new("debug"))
     }
 
     fn console_filter(&self) -> EnvFilter {
@@ -72,8 +83,7 @@ pub fn init_tracing(service_name: &str) {
 pub fn init_tracing_with(service_name: &str, settings: &TracingSettings) {
     let console_filter = settings.console_filter();
 
-    let jaeger_filter =
-        EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new("debug"));
+    let jaeger_filter = settings.trace_filter();
 
     let endpoint = settings.endpoint();
 
@@ -186,6 +196,7 @@ mod tests {
     fn nothing_set_logs_warnings_and_exports_to_the_local_collector() {
         let settings = TracingSettings::default();
         assert_eq!(settings.console_filter().to_string(), "warn");
+        assert_eq!(settings.trace_filter().to_string(), "debug");
         assert_eq!(settings.endpoint(), "http://localhost:4318/v1/traces");
     }
 
@@ -193,9 +204,11 @@ mod tests {
     fn what_is_set_is_used() {
         let settings = TracingSettings {
             log_filter: Some("info".to_string()),
+            trace_filter: Some("polar=info".to_string()),
             otlp_endpoint: Some("http://jaeger:4318/v1/traces".to_string()),
         };
         assert_eq!(settings.console_filter().to_string(), "info");
+        assert_eq!(settings.trace_filter().to_string(), "polar=info");
         assert_eq!(settings.endpoint(), "http://jaeger:4318/v1/traces");
     }
 
@@ -203,8 +216,10 @@ mod tests {
     fn a_filter_that_does_not_parse_falls_back_to_warn_instead_of_silencing_the_log() {
         let settings = TracingSettings {
             log_filter: Some("not=a=filter[".to_string()),
+            trace_filter: Some("not=a=filter[".to_string()),
             otlp_endpoint: None,
         };
         assert_eq!(settings.console_filter().to_string(), "warn");
+        assert_eq!(settings.trace_filter().to_string(), "debug");
     }
 }

@@ -34,11 +34,15 @@ impl PolarAgent for CassiniBroker {
 
     async fn start(configured: Configured) -> Result<(), StartError> {
         let settings = settings::BrokerSettings::read(configured.config())?;
+        // How it logs and traces is the deployment's, in the section every agent has; the broker
+        // keeps its own console format.
+        let logging = polar::logging::LoggingSettings::read(configured.config())?;
         cassini_tracing::init_tracing_with(
             "cassini-broker",
             &cassini_tracing::TracingSettings {
-                log_filter: settings.log_filter.clone(),
-                otlp_endpoint: settings.otlp_endpoint.clone(),
+                log_filter: Some(logging.console_filter),
+                trace_filter: Some(logging.trace_filter),
+                otlp_endpoint: logging.otlp_endpoint,
             },
         );
         // Required by the TLS listener when more than one provider is in the dependency tree.

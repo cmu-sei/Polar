@@ -1,6 +1,7 @@
 pub mod cassini;
 pub mod events;
 pub mod graph;
+pub mod logging;
 pub mod request_reply;
 pub mod time;
 pub mod event_log;
@@ -305,81 +306,5 @@ pub struct NormalizedSbom {
 // ── Logging ────────────────────────────────────────────────────────────────────
 
 pub fn init_logging(service_name: String) {
-    use opentelemetry::{KeyValue, global};
-    use opentelemetry_otlp::Protocol;
-    use opentelemetry_otlp::WithExportConfig;
-    use opentelemetry_sdk::{
-        Resource,
-        trace::{self, RandomIdGenerator},
-    };
-    use tracing_subscriber::Layer;
-    use tracing_subscriber::filter::EnvFilter;
-    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    let enable_jaeger = std::env::var("JAEGER_ENABLE_TRACING")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    if enable_jaeger {
-        let endpoint = std::env::var("JAEGER_OTLP_ENDPOINT")
-            .unwrap_or_else(|_| "http://localhost:4318/v1/traces".to_string());
-
-        if !endpoint.is_empty()
-            && let Ok(exporter) = opentelemetry_otlp::SpanExporter::builder()
-                .with_http()
-                .with_protocol(Protocol::HttpBinary)
-                .with_endpoint(endpoint)
-                .build()
-        {
-            let tracer_provider = trace::SdkTracerProvider::builder()
-                .with_batch_exporter(exporter)
-                .with_sampler(trace::Sampler::AlwaysOn)
-                .with_id_generator(RandomIdGenerator::default())
-                .with_resource(
-                    Resource::builder()
-                        .with_service_name(service_name.clone())
-                        .with_attributes([
-                            KeyValue::new("service.name", service_name.clone()),
-                            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-                        ])
-                        .build(),
-                )
-                .build();
-
-            global::set_tracer_provider(tracer_provider);
-
-            let tracer = global::tracer("cassini-tracing");
-            let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-            let filtered_telemetry_layer =
-                telemetry_layer.with_filter(EnvFilter::from_default_env());
-
-            if tracing_subscriber::registry()
-                .with(filter)
-                .with(tracing_subscriber::fmt::layer())
-                .with(filtered_telemetry_layer)
-                .try_init()
-                .is_err()
-            {
-                eprintln!("Logging registry already initialized");
-            }
-        }
-    } else {
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .pretty()
-            .with_thread_ids(true)
-            .with_target(true)
-            .with_file(true)
-            .with_line_number(true);
-
-        if tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt_layer)
-            .try_init()
-            .is_err()
-        {
-            eprintln!("Logging registry already initialized");
-        }
-    }
+    logging::init_with(service_name, &logging::LoggingSettings::from_process_env());
 }

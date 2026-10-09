@@ -24,7 +24,7 @@ impl PolarAgent for JiraProcessor {
     );
 
     async fn start(configured: Configured) -> Result<(), StartError> {
-        polar::init_logging(JIRA_PROCESSOR_SUPERVISOR.to_string());
+        configured.init_logging(JIRA_PROCESSOR_SUPERVISOR);
 
         let (_, handle) = Actor::spawn(
             Some(JIRA_PROCESSOR_SUPERVISOR.to_string()),

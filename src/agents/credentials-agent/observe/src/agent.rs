@@ -23,7 +23,7 @@ impl PolarAgent for CredentialsObserver {
     );
 
     async fn start(configured: Configured) -> Result<(), StartError> {
-        polar::init_logging(SERVICE_NAME.to_string());
+        configured.init_logging(SERVICE_NAME);
         let (_supervisor, handle) = Actor::spawn(
             Some(format!("{SERVICE_NAME}.supervisor")),
             ObserverSupervisor,

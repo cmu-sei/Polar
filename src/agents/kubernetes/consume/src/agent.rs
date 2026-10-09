@@ -21,7 +21,7 @@ impl PolarAgent for KubeConsumer {
     );
 
     async fn start(configured: Configured) -> Result<(), StartError> {
-        polar::init_logging("kubernetes.cluster.consumer.supervisor".to_string());
+        configured.init_logging("kubernetes.cluster.consumer.supervisor");
 
         rustls::crypto::ring::default_provider()
             .install_default()

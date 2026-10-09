@@ -214,9 +214,17 @@ def main [] {
             assert equal ($service.ports | get name) ["cassini-tcp"]
         }
 
-        "the broker exports its traces to Jaeger's OTLP port, not the UI's": {
+        "every workload exports its traces to Jaeger's OTLP port, not the UI's": {
+            for n in ["cassini" "kube-consumer" "kube-observer" "jira-observer" "jira-processor" "credentials-agent" "credentials-agent-observer"] {
+                let r = (resolve $n)
+                assert equal (env_value $r "JAEGER_OTLP_ENDPOINT") "http://jaeger-svc.polar.svc.cluster.local:4318/v1/traces" $n
+            }
+        }
+
+        "the broker's logging is the deployment's section every agent has, not a variable of its own": {
             let r = (resolve "cassini")
-            assert equal (env_value $r "JAEGER_OTLP_ENDPOINT") "http://jaeger-svc.polar.svc.cluster.local:4318/v1/traces"
+            assert equal (env_value $r "CASSINI_LOG") null
+            assert equal (env_value $r "RUST_LOG") null "the default, info, is not written down"
         }
 
         "the broker's health check watches the CA's certificate as well as its own": {
@@ -230,7 +238,8 @@ def main [] {
         "a kind can extend another and change only what differs": {
             let kinds = (open ($RESOLVER | path dirname | path join "config/kinds.nuon"))
             assert equal ($kinds.service.extends) "agent"
-            assert equal ($kinds.service | get -o needs) []
+            # not a client, but it still sends its traces
+            assert equal ($kinds.service | get -o needs) ["tracing"]
         }
 
         "the template does not see the settings record": {

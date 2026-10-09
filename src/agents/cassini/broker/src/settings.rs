@@ -2,10 +2,10 @@
 //!
 //! These were read with `std::env::var` in `BrokerArgs::new`, so nothing could list them, check
 //! them before the pod started, or say what they were for. Declared here they are in the broker's
-//! scaffold and judged with everything else (the builder's, the health actor's). The broker is
+//! scaffold and judged with everything else (the builder's, the health actor's, how it logs). The broker is
 //! not a Cassini client, so none of the client's variables are asked of it.
 
-use polar_env::{Config, ConfigError, Defaulted, Described, Optional, Required, Section};
+use polar_env::{Config, ConfigError, Defaulted, Described, Required, Section};
 
 pub const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
 
@@ -37,25 +37,12 @@ pub static SHUTDOWN_TOKEN: Required<String> = Required::text(
 )
 .secret();
 
-pub static LOG_FILTER: Optional<String> = Optional::text(
-    "CASSINI_LOG",
-    "the log filter for the console, in tracing's syntax (for example info, or cassini_broker=debug); \
-     warn when unset",
-);
-
-pub static OTLP_ENDPOINT: Optional<String> = Optional::text(
-    "JAEGER_OTLP_ENDPOINT",
-    "where to export traces over OTLP HTTP; localhost's Jaeger port when unset",
-);
-
 static VARIABLES: &[&dyn Described] = &[
     &SERVER_CERT_CHAIN,
     &SERVER_KEY,
     &CA_CERT,
     &BIND_ADDR,
     &SHUTDOWN_TOKEN,
-    &LOG_FILTER,
-    &OTLP_ENDPOINT,
 ];
 
 /// The section the broker registers.
@@ -71,8 +58,6 @@ pub struct BrokerSettings {
     pub ca_cert_file: String,
     pub bind_addr: String,
     pub shutdown_auth_token: String,
-    pub log_filter: Option<String>,
-    pub otlp_endpoint: Option<String>,
 }
 
 impl BrokerSettings {
@@ -83,8 +68,6 @@ impl BrokerSettings {
             ca_cert_file: config.read(&CA_CERT)?,
             bind_addr: config.read(&BIND_ADDR)?,
             shutdown_auth_token: config.read(&SHUTDOWN_TOKEN)?,
-            log_filter: config.read(&LOG_FILTER)?,
-            otlp_endpoint: config.read(&OTLP_ENDPOINT)?,
         })
     }
 }
@@ -122,8 +105,6 @@ mod tests {
         assert_eq!(settings.ca_cert_file, "/tls/ca.pem");
         assert_eq!(settings.bind_addr, DEFAULT_BIND_ADDR);
         assert_eq!(settings.shutdown_auth_token, "t0ken");
-        assert_eq!(settings.log_filter, None);
-        assert_eq!(settings.otlp_endpoint, None);
     }
 
     #[test]
@@ -131,16 +112,9 @@ mod tests {
         let mut vars = MINIMUM.to_vec();
         vars.extend([
             ("CASSINI_BIND_ADDR", "0.0.0.0:9000"),
-            ("CASSINI_LOG", "debug"),
-            ("JAEGER_OTLP_ENDPOINT", "http://jaeger:4318/v1/traces"),
         ]);
         let settings = BrokerSettings::read(&config(&vars)).unwrap();
         assert_eq!(settings.bind_addr, "0.0.0.0:9000");
-        assert_eq!(settings.log_filter.as_deref(), Some("debug"));
-        assert_eq!(
-            settings.otlp_endpoint.as_deref(),
-            Some("http://jaeger:4318/v1/traces")
-        );
     }
 
     #[test]

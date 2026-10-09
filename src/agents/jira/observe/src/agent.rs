@@ -33,7 +33,7 @@ impl PolarAgent for JiraObserver {
     );
 
     async fn start(configured: Configured) -> Result<(), StartError> {
-        polar::init_logging(JIRA_OBSERVER_SUPERVISOR.to_string());
+        configured.init_logging(JIRA_OBSERVER_SUPERVISOR);
 
         // Declared and judged with the rest of the configuration, so a missing address or token
         // was reported before this point, with every other problem.

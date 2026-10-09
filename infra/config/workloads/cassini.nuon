@@ -14,9 +14,6 @@
     # Its server certificate and addresses (cassini-server), and no escrow bootstrap, which
     # travels through the broker itself (escrow-exempt).
     provides: ["cassini-server", "escrow-exempt"]
-    env: [
-      { name: "CASSINI_LOG", value: "info" }
-    ]
     # What clients connect to. The name and the port are the ones services.nuon gives.
     service: {
       name: "{cassini.name}"
