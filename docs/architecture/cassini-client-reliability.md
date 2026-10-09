@@ -178,8 +178,10 @@ credentials agent's volume and the databases.
 
 1. **Where duplicates are removed:** at every hop by the origin `(publisher identity, epoch, seq)`
    (section 4, assumed), or only client-to-broker first.
-2. **Whether the broker's sessions and queues persist across a restart** (assumed not: the broker is
-   best-effort and `R` bounds what it holds).
+2. **Whether the broker's sessions and queues persist across a restart.** Decided 2026-10-09: no, the
+   broker is best-effort and `R` bounds what it holds. What that loses is pinned by tests in
+   `cassini/broker/tests/restart.rs` and listed in `remaining-work.md` (accepted limitations), with a
+   durable broker as the option to revisit.
 3. **Bounds.** The outbox needs a size limit and a rule when it is full. `OfflineBehavior` becomes the
    caller's statement of that rule: `Queue` (wait for the connection), `Fail` (error now), `Drop`
    (best-effort).

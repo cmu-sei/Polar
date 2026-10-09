@@ -471,7 +471,7 @@ mod tests {
         assert_eq!(defaults[POLAR_HEALTH_EXPIRY_SECS_ENV], Some("60"));
         assert_eq!(defaults[POLAR_HEALTH_STALE_SECS_ENV], Some("90"));
         assert_eq!(defaults[POLAR_HEALTH_GRAPH_DEADLINE_SECS_ENV], Some("120"));
-        assert_eq!(defaults[POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV], Some("60"));
+        assert_eq!(defaults[POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV], Some("120"));
         assert_eq!(
             defaults[POLAR_HEALTH_FILE_ENV],
             Some(crate::POLAR_HEALTH_FILE_DEFAULT)

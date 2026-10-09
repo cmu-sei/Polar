@@ -1354,7 +1354,11 @@ mod tests {
     async fn losing_cassini_for_too_long_becomes_a_verdict() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("health.json");
-        let config = health_config(&[(POLAR_HEALTH_FILE_ENV, file.to_str().unwrap())]);
+        // The deadline is set here, so the test says what it means whatever the default is.
+        let config = health_config(&[
+            (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
+            (POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV, "60"),
+        ]);
 
         let (a, seen, _collector) = args_with_verdicts(config).await;
         let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();

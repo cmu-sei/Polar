@@ -92,7 +92,7 @@ than queueing behind a timer.
 | Rejuvenation threshold | 300 s | `POLAR_HEALTH_REJUVENATION_SECS` |
 | Jitter window | 180 s | |
 | Graph deadline | 120 s | `POLAR_HEALTH_GRAPH_DEADLINE_SECS` |
-| Cassini disconnect deadline | 60 s | `POLAR_HEALTH_CASSINI_DEADLINE_SECS` |
+| Cassini disconnect deadline | 120 s | `POLAR_HEALTH_CASSINI_DEADLINE_SECS` |
 | Probe stale threshold | 90 s | `POLAR_HEALTH_STALE_SECS` |
 
 ### Startup consistency check
@@ -160,7 +160,7 @@ Hard deadlines belong to the actor, not to the probe:
 - **Certificate**: the agent's own cert is below the expiry floor.
 - **Graph**: `expects_graph` and no graph connection within the graph deadline.
 - **Cassini disconnect**: Cassini has been unreachable for longer than
-  `POLAR_HEALTH_CASSINI_DEADLINE_SECS` (default 60 s), timed from startup until the
+  `POLAR_HEALTH_CASSINI_DEADLINE_SECS` (default 120 s), timed from startup until the
   first connect and from each disconnect until the next connect. A repeated
   disconnect does not restart the clock, and a reconnect resets it. The 60 s is
   about what the liveness probe amounted to before the actor owned this decision.

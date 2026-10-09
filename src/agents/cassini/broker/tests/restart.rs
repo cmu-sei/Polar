@@ -133,3 +133,73 @@ async fn a_publish_made_while_the_broker_is_away_arrives_when_it_returns() {
     })
     .await;
 }
+
+// -- what a broker restart loses ------------------------------------------------------------------
+//
+// The broker is best-effort (decided 2026-10-09; see remaining-work.md): what it holds is in
+// memory. These tests state what that means, so the decision is visible and a change to it
+// shows up as these tests changing. Revisit with a durable broker if a workload needs it.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_queued_for_a_topic_with_no_subscriber_is_delivered_when_one_arrives() {
+    // The control for the next test: without a restart the broker does keep it.
+    with_broker(|broker| async move {
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        publisher.publish("orphan", b"waiting for a reader");
+        pause().await;
+
+        let reader = TestClient::connect(&broker, "reader.test").await;
+        reader.subscribe("orphan");
+        assert_eq!(
+            reader.wait_for_messages("orphan", 1).await,
+            [b"waiting for a reader".to_vec()]
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_queued_for_a_topic_with_no_subscriber_is_lost_when_the_broker_restarts() {
+    with_broker(|broker| async move {
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        publisher.publish("orphan", b"waiting for a reader");
+        pause().await;
+
+        broker.restart(Duration::from_secs(1)).await;
+
+        let reader = TestClient::connect(&broker, "reader.test").await;
+        reader.subscribe("orphan");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            reader.received("orphan").is_empty(),
+            "the queue was in the broker's memory"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_was_held_for_a_vanished_subscriber_is_lost_when_the_broker_restarts() {
+    with_broker(|broker| async move {
+        let away = TestClient::connect(&broker, "agent.test").await;
+        away.subscribe("news");
+        pause().await;
+        away.vanish().await;
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        publisher.publish("news", b"held for the agent");
+        pause().await;
+
+        broker.restart(Duration::from_secs(1)).await;
+
+        // The agent comes back as a new session after the restart and subscribes again. Without
+        // the restart it would inherit what was held (tests/supersede.rs).
+        let back = TestClient::connect(&broker, "agent.test").await;
+        back.subscribe("news");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            back.received("news").is_empty(),
+            "the session, and what was held for it, went with the broker"
+        );
+    })
+    .await;
+}

@@ -87,11 +87,14 @@ seconds_variable!(
 
 seconds_variable!(
     /// How long the agent may go without a Cassini connection, from startup or from a
-    /// disconnect, before the health actor gives up on it. About what the liveness
-    /// probe amounted to before the actor owned this decision; to be tuned together
-    /// with Cassini session repair, since a longer grace only helps once a reconnect
-    /// really restores the agent's subscriptions.
-    DEFAULT_CASSINI_DEADLINE_SECS, CASSINI_DEADLINE_SECS: u64 = 60,
+    /// disconnect, before the health actor gives up on it. Chosen against what a broker
+    /// restart costs on the dev cluster (measured 2026-10-09, three runs): the broker pod is
+    /// back in 24 to 25 s and the clients are registered again 3 to 4 s after that, so an
+    /// outage is 27 to 29 s. 120 s is four times that: room for a cold image pull or a slow
+    /// certificate issue. An agent that is registered but cannot hear the broker reports
+    /// itself disconnected too (the self-test), so this is also how long a deaf agent is
+    /// given before it is replaced.
+        DEFAULT_CASSINI_DEADLINE_SECS, CASSINI_DEADLINE_SECS: u64 = 120,
     "POLAR_HEALTH_CASSINI_DEADLINE_SECS",
     "seconds the agent may go without a Cassini connection"
 );
