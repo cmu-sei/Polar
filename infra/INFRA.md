@@ -245,11 +245,11 @@ every **facet**:
 | `resources` | Kubernetes objects that live alongside the workload (cluster roles, token Secrets, persistent volume claims) |
 
 Today's capabilities are `cassini`, `graph-write`, `encryption`,
-`kube-api-read`, and three that describe the shape of the pod rather than what
+`kube-api-read`, and others that describe the shape of the pod rather than what
 the code needs: `persistent-data` (a claim named for the workload, mounted at
 `/var/lib/<workload>`), `pinned-ca` (polar-init and the container trust the Polar CA
 from a mounted file) and `escrow-exempt` (polar-init skips the escrow
-bootstrap, because this workload serves it). An agent on a document says what its
+bootstrap, because this workload serves it or is what the request travels through), `tracing` (every workload sends its traces to Jaeger, from its kind) and `oci-registry-auth` (registry credentials mounted as a Docker config). An agent on a document says what its
 code requires in its own scaffold; its entry adds what else the deployment gives
 it with `provides`, lists services it watches but does not wait for at start with
 `no_start_wait`, and, if it answers requests, a `service` (a port, which becomes
