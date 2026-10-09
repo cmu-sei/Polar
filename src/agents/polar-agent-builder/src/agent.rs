@@ -1,0 +1,1071 @@
+//! What an agent is, as a trait, and the one `main` every agent has.
+//!
+//! An agent implements [`PolarAgent`]: what it is called and for, what it asks of its
+//! deployment, the least time it needs to drain, the variables it reads itself, and the function
+//! that starts it. That is the whole of what this infrastructure requires of it, so
+//! implementing the trait is hooking into the infrastructure, and the compiler checks the form.
+//! Associated constants need no runtime, so [`run`] answers the command line before any exists:
+//!
+//! - no arguments: judge the configuration, then start the agent;
+//! - `--help`: what the agent is, for a person;
+//! - `--scaffold`: the configuration document, as JSON: every variable of every section that
+//!   applies, with its type, default, secrecy and documentation, and each value empty. With
+//!   `--config FILE` it is the same document filled from FILE, with where each value came from
+//!   and every problem found;
+//! - `--check --config FILE`: the judgement the agent makes when it starts, on FILE, offline.
+//!
+//! The document an agent reads at runtime is one of these, filled in: see `polar_env::Document`.
+//!
+//! A complete agent, and one that leaves out what the trait requires, which does not compile:
+//!
+//! ```
+//! use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
+//! use std::time::Duration;
+//! struct Complete;
+//! impl PolarAgent for Complete {
+//!     const NAME: &'static str = "complete";
+//!     const PURPOSE: &'static str = "says what it needs";
+//!     const NEEDS: &'static [Capability] = &[Capability::Cassini];
+//!     const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
+//!     async fn start(_: Configured) -> Result<(), StartError> { Ok(()) }
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use polar_agent_builder::{Configured, PolarAgent, StartError};
+//! struct Incomplete;
+//! impl PolarAgent for Incomplete {
+//!     const NAME: &'static str = "incomplete";
+//!     const PURPOSE: &'static str = "says nothing of what it needs";
+//!     async fn start(_: Configured) -> Result<(), StartError> { Ok(()) }
+//! }
+//! ```
+
+use crate::capability::Capability;
+use crate::environment;
+use crate::startup::{self, Startup};
+use polar_env::{DocValue, Document, DocumentError, Env, FileEnv, ProcessEnv, Section, Source};
+use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Why an agent could not start, or stopped.
+pub type StartError = Box<dyn std::error::Error + Send + Sync>;
+
+/// What an agent is, and what it asks of the infrastructure.
+pub trait PolarAgent: Sized + 'static {
+    /// The agent's name: its service name, and the name its infrastructure is given.
+    const NAME: &'static str;
+    /// One line, for a person: what the agent is for.
+    const PURPOSE: &'static str;
+    /// What it asks of its deployment. The deployment states what it provides in
+    /// `POLAR_CAPABILITIES`, and the agent does not start if one it needs is missing.
+    const NEEDS: &'static [Capability];
+    /// The least time the agent needs to drain once told to shut down. The deployment may
+    /// give more, never less.
+    const SHUTDOWN_BUDGET: Duration;
+    /// The variables the agent reads itself, declared with `polar-env`. The builder's, the
+    /// health actor's and those of the components its needs bring are not listed here.
+    const SECTIONS: &'static [&'static Section] = &[];
+    /// Longer help than the purpose, for `--help`. Without it a generic text is given.
+    const HELP: Option<&'static str> = None;
+    /// Whether the agent publishes probes to itself and reports itself disconnected when none
+    /// comes back (see `selftest`). On unless the agent has a reason.
+    const SELF_TEST: bool = true;
+
+    /// The agent proper. It is given the configuration the infrastructure judged, and builds
+    /// its infrastructure from it (see `AgentBuilder::into_configured`). It returns when the
+    /// agent ends; `run` then exits non-zero, because an agent that ends has failed.
+    fn start(configured: Configured) -> impl Future<Output = Result<(), StartError>> + Send;
+}
+
+/// The configuration an agent was started with, already judged: the snapshot, the health
+/// actor's settings and the shutdown budget, and what the agent declared.
+pub struct Configured {
+    pub(crate) startup: Startup,
+    pub(crate) required: Vec<Capability>,
+    pub(crate) self_test: bool,
+}
+
+impl Configured {
+    /// The snapshot. Read the agent's own settings from it with `config.read(&VAR)`.
+    pub fn config(&self) -> &Arc<polar_env::Config> {
+        &self.startup.config
+    }
+
+    pub fn shutdown_budget(&self) -> Duration {
+        self.startup.shutdown_budget
+    }
+}
+
+// -- the document --------------------------------------------------------------------------------
+
+/// The configuration document of one agent: the sections that apply to it, and what it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDocument {
+    pub agent: AgentInfo,
+    /// The capabilities the agent's code requires.
+    pub requires: Vec<String>,
+    /// The least the deployment may give the agent to drain, in seconds.
+    pub shutdown_budget_minimum_secs: u64,
+    #[serde(flatten)]
+    pub document: Document,
+    /// Every problem found, when the document was filled from a file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub problems: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInfo {
+    pub name: String,
+    pub purpose: String,
+}
+
+/// The sections that apply to `A`, each with the capability that brings it in (none for the
+/// ones every agent has, and for its own).
+fn sections_of<A: PolarAgent>() -> Vec<(Option<Capability>, &'static Section)> {
+    let mut sections: Vec<(Option<Capability>, &'static Section)> = environment::base_sections()
+        .into_iter()
+        .map(|section| (None, section))
+        .collect();
+    let mut seen: Vec<Capability> = Vec::new();
+    for capability in A::NEEDS {
+        if seen.contains(capability) {
+            continue;
+        }
+        seen.push(*capability);
+        sections.extend(
+            environment::sections_for(&[*capability])
+                .into_iter()
+                .map(|section| (Some(*capability), section)),
+        );
+    }
+    sections.extend(A::SECTIONS.iter().map(|section| (None, *section)));
+    sections
+}
+
+/// The scaffold of `A`: every value empty.
+pub fn scaffold_document<A: PolarAgent>() -> AgentDocument {
+    let tagged: Vec<(&Section, Option<&str>)> = sections_of::<A>()
+        .into_iter()
+        .map(|(capability, section)| (section, capability.map(Capability::as_str)))
+        .collect();
+    AgentDocument {
+        agent: AgentInfo {
+            name: A::NAME.to_string(),
+            purpose: A::PURPOSE.to_string(),
+        },
+        requires: A::NEEDS.iter().map(|c| c.as_str().to_string()).collect(),
+        shutdown_budget_minimum_secs: A::SHUTDOWN_BUDGET.as_secs(),
+        document: Document::scaffold(&tagged),
+        problems: Vec::new(),
+    }
+}
+
+/// A document read from a file, and the environment it makes.
+struct Loaded {
+    document: Document,
+    env: FileEnv,
+}
+
+fn load(path: &Path, process: impl Env + 'static) -> Result<Loaded, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| DocumentError::Io {
+            path: path.display().to_string(),
+            reason: e.to_string(),
+        })
+        .map_err(|e| e.to_string())?;
+    let document = Document::from_json(&text).map_err(|e| e.to_string())?;
+    let env = FileEnv::new(&document, process);
+    Ok(Loaded { document, env })
+}
+
+/// Every problem with a document, as `A` would find them starting on it: what is wrong with
+/// the document itself, what it sets that the agent does not declare, and everything the
+/// agent's own judgement of its configuration finds.
+fn problems_of<A: PolarAgent>(loaded: &Loaded) -> Vec<String> {
+    let mut problems = loaded.document.problems();
+
+    let declared: Vec<String> = scaffold_document::<A>()
+        .document
+        .sections
+        .iter()
+        .flat_map(|s| s.variables.iter().map(|v| v.name.clone()))
+        .collect();
+    for variable in loaded
+        .document
+        .sections
+        .iter()
+        .flat_map(|s| s.variables.iter())
+    {
+        if variable.value.is_some() && !declared.contains(&variable.name) {
+            problems.push(format!(
+                "{} is given a value in the document, but {} does not declare it",
+                variable.name,
+                A::NAME
+            ));
+        }
+    }
+
+    if let Err(error) = startup::prepare_from(
+        &loaded.env,
+        Source::File,
+        A::SECTIONS,
+        A::NEEDS,
+        Some(A::SHUTDOWN_BUDGET),
+    ) {
+        problems.extend(error.problems());
+    }
+    problems
+}
+
+/// The scaffold of `A` as JSON; with `config`, filled from that file, with sources, resolved
+/// values and every problem found. `Err` when the file cannot be read as a document.
+pub fn scaffold_json<A: PolarAgent>(
+    config: Option<&Path>,
+    process: impl Env + 'static,
+) -> Result<String, String> {
+    let mut document = scaffold_document::<A>();
+    if let Some(path) = config {
+        let loaded = load(path, process)?;
+        document.problems = problems_of::<A>(&loaded);
+
+        let mut builder = polar_env::Config::builder(&loaded.env).source(Source::File);
+        for (_, section) in sections_of::<A>() {
+            builder = builder.register(section);
+        }
+        let report = builder.build().report();
+
+        let written: std::collections::HashMap<&str, &DocValue> = loaded
+            .document
+            .sections
+            .iter()
+            .flat_map(|s| s.variables.iter())
+            .filter_map(|v| Some((v.name.as_str(), v.value.as_ref()?)))
+            .collect();
+        for variable in document
+            .document
+            .sections
+            .iter_mut()
+            .flat_map(|s| s.variables.iter_mut())
+        {
+            variable.value = written.get(variable.name.as_str()).map(|v| (*v).clone());
+            if let Some(resolved) = report.iter().find(|r| r.name == variable.name) {
+                variable.source = Some(resolved.source.as_str().to_string());
+                variable.resolved = resolved.value.clone();
+            }
+        }
+    }
+    serde_json::to_string_pretty(&document).map_err(|e| e.to_string())
+}
+
+/// Every problem with the document at `config`, as the agent would find them starting on it.
+pub fn check<A: PolarAgent>(config: &Path, process: impl Env + 'static) -> Vec<String> {
+    match load(config, process) {
+        Ok(loaded) => problems_of::<A>(&loaded),
+        Err(error) => vec![error],
+    }
+}
+
+// -- the command line -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    Run,
+    Help,
+    Scaffold { config: Option<PathBuf> },
+    Check { config: PathBuf },
+}
+
+const USAGE: &str = "usage: <agent> [--help | --scaffold [--config FILE] | --check --config FILE]";
+
+pub fn parse_command(args: &[String]) -> Result<Command, String> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let config_of = |rest: &[&str]| -> Result<Option<PathBuf>, String> {
+        match rest {
+            [] => Ok(None),
+            ["--config", path] => Ok(Some(PathBuf::from(path))),
+            ["--config"] => Err(format!("--config needs a file\n{USAGE}")),
+            _ => Err(USAGE.to_string()),
+        }
+    };
+    match args.as_slice() {
+        [] => Ok(Command::Run),
+        ["--help"] | ["-h"] => Ok(Command::Help),
+        ["--scaffold", rest @ ..] => Ok(Command::Scaffold {
+            config: config_of(rest)?,
+        }),
+        ["--check", rest @ ..] => match config_of(rest)? {
+            Some(config) => Ok(Command::Check { config }),
+            None => Err(format!("--check needs --config FILE\n{USAGE}")),
+        },
+        _ => Err(USAGE.to_string()),
+    }
+}
+
+/// What `--help` prints for `A`.
+pub fn help_text<A: PolarAgent>() -> String {
+    let mut text = format!("{}\n\n{}\n\n", A::NAME, A::PURPOSE);
+    match A::HELP {
+        Some(help) => text.push_str(&format!("{}\n\n", help.trim())),
+        None => text.push_str(&format!(
+            "{} is a Polar agent: it connects to the Cassini broker as a client with its own \
+             certificate, reports its health, and drains before it exits. Its configuration \
+             is a document (see --scaffold); a value it does not find there it takes from \
+             the default its declaration gives.\n\n",
+            A::NAME
+        )),
+    }
+    if A::NEEDS.is_empty() {
+        text.push_str("Capabilities: no capabilities beyond what every agent has.\n");
+    } else {
+        let names: Vec<&str> = A::NEEDS.iter().map(|c| c.as_str()).collect();
+        text.push_str(&format!(
+            "Capabilities it needs from its deployment: {}\n",
+            names.join(", ")
+        ));
+    }
+    text.push_str(&format!(
+        "Shutdown: it needs at least {} seconds to drain.\n\n",
+        A::SHUTDOWN_BUDGET.as_secs()
+    ));
+    if !A::SECTIONS.is_empty() {
+        text.push_str("Variables it reads itself:\n");
+        for section in A::SECTIONS {
+            for variable in section.describe() {
+                let how = match variable.kind {
+                    polar_env::Kind::Required => "required".to_string(),
+                    polar_env::Kind::Optional => "optional".to_string(),
+                    polar_env::Kind::Default => {
+                        format!("default {}", variable.default.unwrap_or_default())
+                    }
+                };
+                let secret = if variable.secret { ", secret" } else { "" };
+                text.push_str(&format!(
+                    "  {}  [{how}{secret}]  {}\n",
+                    variable.name, variable.doc
+                ));
+            }
+        }
+        text.push('\n');
+    }
+    text.push_str(
+        "The builder's, the health actor's and those of its capabilities' components are in the \
+         scaffold.\n\n\
+         Flags:\n\
+         \x20 --help                    this text\n\
+         \x20 --scaffold                the configuration document, every value empty, as JSON\n\
+         \x20 --scaffold --config FILE  the same, filled from FILE, with sources and problems\n\
+         \x20 --check --config FILE     judge FILE the way the agent does when it starts\n\
+         With no flag it starts the agent, reading POLAR_CONFIG if it is set and the environment \
+         otherwise.\n",
+    );
+    text
+}
+
+/// What is wrong with how `A` declared itself, apart from any configuration. An agent crate runs
+/// this in its tests, through `polar_agent_tests!`.
+pub fn declaration_problems<A: PolarAgent>() -> Vec<String> {
+    let mut problems = Vec::new();
+    if A::NAME.trim().is_empty() {
+        problems.push("the agent has no name".to_string());
+    }
+    if A::PURPOSE.trim().is_empty() {
+        problems.push("the agent has no purpose: say in a line what it is for".to_string());
+    }
+    if A::SHUTDOWN_BUDGET < Duration::from_secs(1) {
+        problems.push("the shutdown budget is under a second".to_string());
+    }
+    let mut seen: Vec<Capability> = Vec::new();
+    for capability in A::NEEDS {
+        if seen.contains(capability) {
+            problems.push(format!(
+                "{} is listed more than once in NEEDS",
+                capability.as_str()
+            ));
+        }
+        seen.push(*capability);
+    }
+    let mut names: Vec<&str> = Vec::new();
+    let mut sections: Vec<&str> = Vec::new();
+    for (_, section) in sections_of::<A>() {
+        if sections.contains(&section.name) {
+            problems.push(format!(
+                "a section named {} is declared more than once",
+                section.name
+            ));
+        }
+        sections.push(section.name);
+        for variable in section.describe() {
+            if names.contains(&variable.name) {
+                problems.push(format!("{} is declared more than once", variable.name));
+            }
+            names.push(variable.name);
+        }
+        problems.extend(section.defaults_problems());
+    }
+    problems
+}
+
+/// Declares the test every agent crate runs on its declaration.
+#[macro_export]
+macro_rules! polar_agent_tests {
+    ($agent:ty) => {
+        #[test]
+        fn the_agent_declares_itself_soundly() {
+            let problems = $crate::agent::declaration_problems::<$agent>();
+            assert!(problems.is_empty(), "{problems:#?}");
+        }
+    };
+}
+
+/// The one `main`: answers the command line, judges the configuration, and starts the agent.
+/// The process exit status is 0 only for a command that was answered; an agent that was started
+/// never ends well, and exits 1 whether `start` returned an error or not.
+pub fn run<A: PolarAgent>() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    ExitCode::from(run_with::<A>(&args, ProcessEnv))
+}
+
+/// As [`run`], with the arguments and the process environment given, returning the exit status.
+pub fn run_with<A: PolarAgent>(args: &[String], process: impl Env + 'static) -> u8 {
+    let command = match parse_command(args) {
+        Ok(command) => command,
+        Err(message) => {
+            eprintln!("{message}");
+            return 2;
+        }
+    };
+    match command {
+        Command::Help => {
+            print!("{}", help_text::<A>());
+            0
+        }
+        Command::Scaffold { config } => match scaffold_json::<A>(config.as_deref(), process) {
+            Ok(text) => {
+                println!("{text}");
+                0
+            }
+            Err(error) => {
+                eprintln!("ERROR: {error}");
+                1
+            }
+        },
+        Command::Check { config } => {
+            let problems = check::<A>(&config, process);
+            if problems.is_empty() {
+                println!("ok: the configuration is sound");
+                0
+            } else {
+                for problem in &problems {
+                    eprintln!("ERROR: {problem}");
+                }
+                1
+            }
+        }
+        Command::Run => start::<A>(process),
+    }
+}
+
+/// Judges the configuration the process was given and, if it is sound, runs the agent.
+fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
+    let (env, source) = match polar_env::from_environment(process) {
+        Ok(chosen) => chosen,
+        Err(error) => {
+            eprintln!("ERROR: {error}");
+            return 1;
+        }
+    };
+    let startup = match startup::prepare_from(
+        &*env,
+        source,
+        A::SECTIONS,
+        A::NEEDS,
+        Some(A::SHUTDOWN_BUDGET),
+    ) {
+        Ok(startup) => startup,
+        Err(error) => {
+            for problem in error.problems() {
+                eprintln!("ERROR: {problem}");
+            }
+            return 1;
+        }
+    };
+    let configured = Configured {
+        startup,
+        required: A::NEEDS.to_vec(),
+        self_test: A::SELF_TEST,
+    };
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("ERROR: cannot start the async runtime: {error}");
+            return 1;
+        }
+    };
+    match runtime.block_on(A::start(configured)) {
+        Ok(()) => eprintln!(
+            "{} ended; an agent that ends has failed, exiting 1",
+            A::NAME
+        ),
+        Err(error) => eprintln!("{} failed: {error}", A::NAME),
+    }
+    1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::environment::fixtures::{CASSINI_ENV, GRAPH_ENV};
+    use polar_env::{Described, Required};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static BUCKET: Required<String> =
+        Required::text("EXAMPLE_BUCKET", "the bucket the example writes to");
+    static TOKEN: Required<String> =
+        Required::text("EXAMPLE_TOKEN", "the example's token").secret();
+    static OWN_VARS: &[&dyn Described] = &[&BUCKET, &TOKEN];
+    static OWN: Section = Section {
+        name: "example",
+        vars: OWN_VARS,
+        relations: |_| Vec::new(),
+    };
+
+    static STARTED: AtomicBool = AtomicBool::new(false);
+
+    struct Example;
+
+    impl PolarAgent for Example {
+        const NAME: &'static str = "example-agent";
+        const PURPOSE: &'static str = "Copies things from one place to another";
+        const NEEDS: &'static [Capability] = &[Capability::Cassini, Capability::GraphWrite];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(30);
+        const SECTIONS: &'static [&'static Section] = &[&OWN];
+        const HELP: Option<&'static str> = Some("It reads from the bucket and writes the graph.");
+
+        async fn start(configured: Configured) -> Result<(), StartError> {
+            // It reads its own settings from the snapshot it was given.
+            let bucket = configured.config().read(&BUCKET)?;
+            assert_eq!(bucket, "the-bucket");
+            STARTED.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// An agent that notes that it was started, apart from `Example`, so tests that run at the
+    /// same time do not see each other's.
+    static WATCHED_STARTED: AtomicBool = AtomicBool::new(false);
+
+    struct Watched;
+
+    impl PolarAgent for Watched {
+        const NAME: &'static str = "watched-agent";
+        const PURPOSE: &'static str = "Notes that it was started";
+        const NEEDS: &'static [Capability] = &[Capability::Cassini];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+        async fn start(_: Configured) -> Result<(), StartError> {
+            WATCHED_STARTED.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct Bare;
+
+    impl PolarAgent for Bare {
+        const NAME: &'static str = "bare-agent";
+        const PURPOSE: &'static str = "Needs nothing";
+        const NEEDS: &'static [Capability] = &[];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
+    crate::polar_agent_tests!(Example);
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    /// The values a deployment would give `Example`, as a document written to a temp file.
+    fn populated_file(name: &str, without: &[&str], capabilities: &str) -> PathBuf {
+        let mut doc = scaffold_document::<Example>();
+        let values: HashMap<&str, &str> = CASSINI_ENV
+            .iter()
+            .chain(GRAPH_ENV.iter())
+            .copied()
+            .chain([
+                ("EXAMPLE_BUCKET", "the-bucket"),
+                ("POLAR_CAPABILITIES", capabilities),
+            ])
+            .collect();
+        for variable in doc
+            .document
+            .sections
+            .iter_mut()
+            .flat_map(|s| s.variables.iter_mut())
+        {
+            if without.contains(&variable.name.as_str()) {
+                continue;
+            }
+            if variable.secret {
+                variable.value = Some(DocValue::Reference {
+                    env: format!("SECRET_FOR_{}", variable.name),
+                });
+            } else if let Some(value) = values.get(variable.name.as_str()) {
+                variable.value = Some(DocValue::Literal(value.to_string()));
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("polar-agent-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        path
+    }
+
+    /// The process environment of a pod whose secrets are wired.
+    fn with_secrets() -> impl Env + 'static {
+        |name: &str| {
+            name.strip_prefix("SECRET_FOR_")
+                .map(|_| "hunter2".to_string())
+        }
+    }
+
+    fn variable<'a>(doc: &'a AgentDocument, name: &str) -> &'a polar_env::DocVariable {
+        doc.document
+            .sections
+            .iter()
+            .flat_map(|s| s.variables.iter())
+            .find(|v| v.name == name)
+            .unwrap_or_else(|| panic!("{name} is not in the document"))
+    }
+
+    // -- the command line --------------------------------------------------------------------
+
+    #[test]
+    fn no_arguments_run_the_agent() {
+        assert_eq!(parse_command(&[]), Ok(Command::Run));
+    }
+
+    #[test]
+    fn the_flags_are_understood() {
+        assert_eq!(parse_command(&strings(&["--help"])), Ok(Command::Help));
+        assert_eq!(
+            parse_command(&strings(&["--scaffold"])),
+            Ok(Command::Scaffold { config: None })
+        );
+        assert_eq!(
+            parse_command(&strings(&["--scaffold", "--config", "f.json"])),
+            Ok(Command::Scaffold {
+                config: Some(PathBuf::from("f.json"))
+            })
+        );
+        assert_eq!(
+            parse_command(&strings(&["--check", "--config", "f.json"])),
+            Ok(Command::Check {
+                config: PathBuf::from("f.json")
+            })
+        );
+    }
+
+    #[test]
+    fn a_check_without_a_document_and_an_unknown_flag_are_refused_with_the_usage() {
+        let missing = parse_command(&strings(&["--check"])).unwrap_err();
+        assert!(missing.contains("--config"), "{missing}");
+        let unknown = parse_command(&strings(&["--describe"])).unwrap_err();
+        assert!(unknown.contains("usage:"), "{unknown}");
+        let dangling = parse_command(&strings(&["--scaffold", "--config"])).unwrap_err();
+        assert!(dangling.contains("--config"), "{dangling}");
+    }
+
+    // -- help ----------------------------------------------------------------------------------
+
+    #[test]
+    fn help_says_what_the_agent_is_what_it_needs_and_what_it_reads() {
+        let text = help_text::<Example>();
+        for expected in [
+            "example-agent",
+            "Copies things from one place to another",
+            "It reads from the bucket and writes the graph.",
+            "cassini",
+            "graph-write",
+            "EXAMPLE_BUCKET",
+            "30",
+            "--scaffold",
+            "--check",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in\n{text}");
+        }
+        assert!(!text.contains("EXAMPLE_TOKEN="), "no values in help");
+    }
+
+    #[test]
+    fn an_agent_without_long_help_still_gets_a_help() {
+        let text = help_text::<Bare>();
+        assert!(
+            text.contains("bare-agent") && text.contains("Needs nothing"),
+            "{text}"
+        );
+        assert!(
+            text.contains("needs nothing from its deployment") || text.contains("no capabilities"),
+            "{text}"
+        );
+    }
+
+    // -- the scaffold --------------------------------------------------------------------------
+
+    #[test]
+    fn the_scaffold_names_the_agent_and_what_it_requires() {
+        let doc = scaffold_document::<Example>();
+        assert_eq!(doc.agent.name, "example-agent");
+        assert_eq!(doc.requires, vec!["cassini", "graph-write"]);
+        assert_eq!(doc.shutdown_budget_minimum_secs, 30);
+        assert_eq!(doc.document.format, polar_env::DOCUMENT_FORMAT);
+    }
+
+    #[test]
+    fn the_scaffold_holds_the_sections_that_apply_tagged_with_what_brought_them() {
+        let doc = scaffold_document::<Example>();
+        let tags: Vec<(String, Option<String>)> = doc
+            .document
+            .sections
+            .iter()
+            .map(|s| (s.name.clone(), s.capability.clone()))
+            .collect();
+        for expected in [
+            ("builder", None),
+            ("health", None),
+            ("example", None),
+            ("cassini-client", Some("cassini")),
+            ("graph", Some("graph-write")),
+        ] {
+            assert!(
+                tags.contains(&(expected.0.to_string(), expected.1.map(str::to_string))),
+                "{expected:?} not in {tags:?}"
+            );
+        }
+        assert!(
+            !tags.iter().any(|(name, _)| name == "crypto"),
+            "a capability it does not need brings nothing: {tags:?}"
+        );
+    }
+
+    #[test]
+    fn a_bare_agents_scaffold_has_only_the_sections_every_agent_has() {
+        let doc = scaffold_document::<Bare>();
+        let names: Vec<_> = doc
+            .document
+            .sections
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["builder", "health"]);
+        assert!(doc.requires.is_empty());
+    }
+
+    #[test]
+    fn the_scaffold_has_no_values_and_marks_the_secrets() {
+        let doc = scaffold_document::<Example>();
+        assert!(
+            doc.document
+                .sections
+                .iter()
+                .flat_map(|s| s.variables.iter())
+                .all(|v| v.value.is_none())
+        );
+        assert!(variable(&doc, "EXAMPLE_TOKEN").secret);
+        assert!(variable(&doc, "GRAPH_PASSWORD").secret);
+        assert!(variable(&doc, "BROKER_ADDR").required);
+    }
+
+    #[test]
+    fn the_scaffold_as_json_reads_back_as_the_same_document() {
+        let text = scaffold_json::<Example>(None, |_: &str| None::<String>).unwrap();
+        let back: AgentDocument = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, scaffold_document::<Example>());
+    }
+
+    // -- filling it from a file ----------------------------------------------------------------
+
+    #[test]
+    fn a_complete_document_scaffolds_filled_with_sources_and_resolved_values_and_no_problems() {
+        let path = populated_file("complete", &[], "cassini,graph-write");
+        let text = scaffold_json::<Example>(Some(&path), with_secrets()).unwrap();
+        let doc: AgentDocument = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc.problems, Vec::<String>::new(), "{text}");
+
+        let bucket = variable(&doc, "EXAMPLE_BUCKET");
+        assert_eq!(bucket.value, Some(DocValue::Literal("the-bucket".into())));
+        assert_eq!(bucket.source.as_deref(), Some("file"));
+        assert_eq!(bucket.resolved.as_deref(), Some("the-bucket"));
+
+        let token = variable(&doc, "EXAMPLE_TOKEN");
+        assert!(matches!(token.value, Some(DocValue::Reference { .. })));
+        assert_eq!(
+            token.resolved.as_deref(),
+            Some("<hidden>"),
+            "a secret is never shown"
+        );
+        assert!(!text.contains("hunter2"));
+
+        let tick = variable(&doc, "POLAR_HEALTH_TICK_SECS");
+        assert_eq!(tick.source.as_deref(), Some("default"));
+        assert_eq!(tick.resolved.as_deref(), Some("30"));
+
+        let queue = variable(&doc, "CASSINI_QUEUE_PATH");
+        assert_eq!(queue.source.as_deref(), Some("unset"));
+    }
+
+    #[test]
+    fn an_incomplete_document_scaffolds_with_the_problem_named() {
+        let path = populated_file("incomplete", &["EXAMPLE_BUCKET"], "cassini,graph-write");
+        let text = scaffold_json::<Example>(Some(&path), with_secrets()).unwrap();
+        let doc: AgentDocument = serde_json::from_str(&text).unwrap();
+        assert!(
+            doc.problems.iter().any(|p| p.contains("EXAMPLE_BUCKET")),
+            "{:?}",
+            doc.problems
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_document_is_an_error_not_a_scaffold() {
+        let error = scaffold_json::<Example>(Some(Path::new("/no/such/config.json")), |_: &str| {
+            None::<String>
+        })
+        .unwrap_err();
+        assert!(error.contains("/no/such/config.json"), "{error}");
+    }
+
+    // -- check ---------------------------------------------------------------------------------
+
+    #[test]
+    fn a_complete_document_passes_the_check() {
+        let path = populated_file("check-ok", &[], "cassini,graph-write");
+        assert_eq!(
+            check::<Example>(&path, with_secrets()),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_missing_required_value_fails_the_check_naming_it() {
+        let path = populated_file("check-missing", &["EXAMPLE_BUCKET"], "cassini,graph-write");
+        let problems = check::<Example>(&path, with_secrets()).join(" | ");
+        assert!(problems.contains("EXAMPLE_BUCKET"), "{problems}");
+    }
+
+    #[test]
+    fn a_secret_whose_environment_variable_is_not_set_fails_the_check() {
+        let path = populated_file("check-secret", &[], "cassini,graph-write");
+        let problems = check::<Example>(&path, |_: &str| None::<String>).join(" | ");
+        assert!(problems.contains("EXAMPLE_TOKEN"), "{problems}");
+        assert!(
+            !problems.contains("SECRET_FOR_"),
+            "the variable's value, not its name: {problems}"
+        );
+    }
+
+    #[test]
+    fn a_deployment_that_does_not_provide_what_the_code_needs_fails_the_check() {
+        let path = populated_file("check-caps", &[], "cassini");
+        let problems = check::<Example>(&path, with_secrets()).join(" | ");
+        assert!(problems.contains("graph-write"), "{problems}");
+    }
+
+    /// `populated_file`, with one more variable given a literal value afterwards.
+    fn populated_file_with(name: &str, variable_name: &str, value: &str) -> PathBuf {
+        let path = populated_file(name, &[], "cassini,graph-write");
+        let mut doc: AgentDocument =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for variable in doc
+            .document
+            .sections
+            .iter_mut()
+            .flat_map(|s| s.variables.iter_mut())
+        {
+            if variable.name == variable_name {
+                variable.value = Some(DocValue::Literal(value.into()));
+            }
+        }
+        std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_budget_below_the_least_the_code_needs_fails_the_check() {
+        let path = populated_file_with("budget", "POLAR_SHUTDOWN_BUDGET_SECS", "10");
+        let problems = check::<Example>(&path, with_secrets()).join(" | ");
+        assert!(problems.contains("30"), "{problems}");
+    }
+
+    #[test]
+    fn a_secret_written_as_a_literal_fails_the_check_without_repeating_it() {
+        let path = populated_file_with("literal", "EXAMPLE_TOKEN", "hunter2");
+        let problems = check::<Example>(&path, with_secrets()).join(" | ");
+        assert!(problems.contains("EXAMPLE_TOKEN"), "{problems}");
+        assert!(!problems.contains("hunter2"), "{problems}");
+    }
+
+    #[test]
+    fn a_value_for_a_variable_the_agent_does_not_declare_fails_the_check() {
+        // A document written for another agent, or by hand: the extra variable is refused.
+        let path = populated_file("undeclared", &[], "cassini,graph-write");
+        let mut doc: AgentDocument =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        doc.document.sections[0]
+            .variables
+            .push(polar_env::DocVariable {
+                name: "SOMETHING_ELSE".into(),
+                type_name: "text".into(),
+                required: false,
+                secret: false,
+                default: None,
+                mutability: "static".into(),
+                doc: "not this agent's".into(),
+                value: Some(DocValue::Literal("x".into())),
+                source: None,
+                resolved: None,
+            });
+        std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+        let problems = check::<Example>(&path, with_secrets()).join(" | ");
+        assert!(problems.contains("SOMETHING_ELSE"), "{problems}");
+        assert!(problems.contains("example-agent"), "{problems}");
+    }
+
+    // -- running -------------------------------------------------------------------------------
+
+    #[test]
+    fn the_flags_are_answered_without_starting_the_agent() {
+        WATCHED_STARTED.store(false, Ordering::SeqCst);
+        // A document with every value a Watched agent needs: the Cassini client's.
+        let mut doc = scaffold_document::<Watched>();
+        for variable in doc
+            .document
+            .sections
+            .iter_mut()
+            .flat_map(|s| s.variables.iter_mut())
+        {
+            if let Some((_, value)) = CASSINI_ENV.iter().find(|(name, _)| *name == variable.name) {
+                variable.value = Some(DocValue::Literal(value.to_string()));
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("polar-agent-{}-watched", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+        let config = path.display().to_string();
+
+        assert_eq!(
+            run_with::<Watched>(&strings(&["--help"]), with_secrets()),
+            0
+        );
+        assert_eq!(
+            run_with::<Watched>(&strings(&["--scaffold"]), with_secrets()),
+            0
+        );
+        assert_eq!(
+            run_with::<Watched>(&strings(&["--check", "--config", &config]), with_secrets()),
+            0
+        );
+        assert_eq!(
+            run_with::<Watched>(&strings(&["--nonsense"]), with_secrets()),
+            2
+        );
+        assert!(!WATCHED_STARTED.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_check_of_a_bad_document_exits_one() {
+        let path = populated_file("flags-bad", &["EXAMPLE_BUCKET"], "cassini,graph-write");
+        let config = path.display().to_string();
+        assert_eq!(
+            run_with::<Example>(&strings(&["--check", "--config", &config]), with_secrets()),
+            1
+        );
+    }
+
+    #[test]
+    fn an_agent_is_started_with_the_configuration_its_document_gave_and_exits_nonzero_when_it_ends()
+    {
+        STARTED.store(false, Ordering::SeqCst);
+        let path = populated_file("start", &[], "cassini,graph-write");
+        let config = path.display().to_string();
+        let process = move |name: &str| {
+            if name == "POLAR_CONFIG" {
+                Some(config.clone())
+            } else {
+                name.strip_prefix("SECRET_FOR_")
+                    .map(|_| "hunter2".to_string())
+            }
+        };
+        let status = run_with::<Example>(&[], process);
+        assert!(
+            STARTED.load(Ordering::SeqCst),
+            "start was called, with its own setting readable"
+        );
+        assert_eq!(
+            status, 1,
+            "an agent that ends has failed, even when it returned Ok"
+        );
+    }
+
+    #[test]
+    fn an_agent_whose_configuration_is_not_sound_is_not_started() {
+        WATCHED_STARTED.store(false, Ordering::SeqCst);
+        let status = run_with::<Watched>(&[], |_: &str| None::<String>);
+        assert_eq!(status, 1);
+        assert!(!WATCHED_STARTED.load(Ordering::SeqCst));
+    }
+
+    // -- the declaration -----------------------------------------------------------------------
+
+    #[test]
+    fn a_sound_declaration_has_no_problems() {
+        assert_eq!(declaration_problems::<Example>(), Vec::<String>::new());
+        assert_eq!(declaration_problems::<Bare>(), Vec::<String>::new());
+    }
+
+    struct Unsound;
+    static DUPLICATE_VARS: &[&dyn Described] = &[&BUCKET];
+    static DUPLICATE: Section = Section {
+        name: "duplicate",
+        vars: DUPLICATE_VARS,
+        relations: |_| Vec::new(),
+    };
+    impl PolarAgent for Unsound {
+        const NAME: &'static str = "";
+        const PURPOSE: &'static str = "";
+        const NEEDS: &'static [Capability] = &[Capability::Cassini, Capability::Cassini];
+        const SHUTDOWN_BUDGET: Duration = Duration::ZERO;
+        const SECTIONS: &'static [&'static Section] = &[&OWN, &DUPLICATE];
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_unsound_declaration_is_reported_in_full() {
+        let problems = declaration_problems::<Unsound>().join(" | ");
+        for expected in [
+            "name",
+            "purpose",
+            "budget",
+            "more than once",
+            "EXAMPLE_BUCKET",
+        ] {
+            assert!(
+                problems.contains(expected),
+                "missing {expected:?}: {problems}"
+            );
+        }
+    }
+}

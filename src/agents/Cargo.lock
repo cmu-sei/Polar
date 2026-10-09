@@ -5523,6 +5523,7 @@ dependencies = [
  "rcgen",
  "rkyv",
  "rsa 0.10.0-rc.18",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
@@ -5559,6 +5560,10 @@ dependencies = [
 [[package]]
 name = "polar-env"
 version = "1.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "polar-health"

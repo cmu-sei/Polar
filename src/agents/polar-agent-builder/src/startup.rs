@@ -16,7 +16,7 @@
 
 use crate::capability::{self, Capability, CapabilityCheck};
 use crate::{environment, shutdown};
-use polar_env::{Config, Env, Section};
+use polar_env::{Config, Env, Section, Source};
 use polar_health::{DEFAULT_REJUVENATION_THRESHOLD_SECS, HealthCheckArgs, HealthConfig};
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,6 +31,35 @@ pub(crate) struct Startup {
     pub shutdown_budget: Duration,
 }
 
+/// Why an environment was refused.
+pub(crate) enum PrepareError {
+    /// Variables that are missing or malformed, every one of them.
+    Unsound(Vec<String>),
+    /// The environment is sound but does not suit this agent: a capability it needs is not
+    /// provided, or the shutdown budget is below what the code needs.
+    Mismatch(String),
+}
+
+impl PrepareError {
+    /// Each problem on its own.
+    pub(crate) fn problems(&self) -> Vec<String> {
+        match self {
+            PrepareError::Unsound(problems) => problems.clone(),
+            PrepareError::Mismatch(message) => vec![message.clone()],
+        }
+    }
+
+    /// The one message `AgentBuilder::build` fails with.
+    pub(crate) fn message(&self) -> String {
+        match self {
+            PrepareError::Unsound(problems) => {
+                format!("this agent's environment is not sound: {}", problems.join("; "))
+            }
+            PrepareError::Mismatch(message) => message.clone(),
+        }
+    }
+}
+
 /// Takes the snapshot of `env` and judges it, or says everything that is wrong with it.
 ///
 /// `agent_sections` are the ones the agent declared for itself; `required` the capabilities
@@ -41,7 +70,20 @@ pub(crate) fn prepare(
     required: &[Capability],
     declared_budget: Option<Duration>,
 ) -> Result<Startup, String> {
-    let mut builder = Config::builder(env);
+    prepare_from(env, Source::Env, agent_sections, required, declared_budget)
+        .map_err(|error| error.message())
+}
+
+/// As [`prepare`], for values that come from `source` (the process environment, or a
+/// configuration document), and with each problem kept apart.
+pub(crate) fn prepare_from(
+    env: &dyn Env,
+    source: Source,
+    agent_sections: &[&'static Section],
+    required: &[Capability],
+    declared_budget: Option<Duration>,
+) -> Result<Startup, PrepareError> {
+    let mut builder = Config::builder(env).source(source);
     for section in environment::base_sections()
         .into_iter()
         .chain(environment::sections_for(required))
@@ -55,10 +97,7 @@ pub(crate) fn prepare(
     // components and the agent read must be sound, and every problem is reported together.
     let problems = config.check();
     if !problems.is_empty() {
-        return Err(format!(
-            "this agent's environment is not sound: {}",
-            problems.join("; ")
-        ));
+        return Err(PrepareError::Unsound(problems));
     }
 
     // Checked before anything is spawned, so a mismatch with the deployment is one clear,
@@ -79,11 +118,15 @@ pub(crate) fn prepare(
             );
         }
         CapabilityCheck::Missing(missing) => {
-            return Err(capability::missing_message(&missing, provided.as_deref()));
+            return Err(PrepareError::Mismatch(capability::missing_message(
+                &missing,
+                provided.as_deref(),
+            )));
         }
     }
 
-    let shutdown_budget = shutdown::budget(declared_budget, &config)?;
+    let shutdown_budget =
+        shutdown::budget(declared_budget, &config).map_err(PrepareError::Mismatch)?;
 
     // Whether to watch the graph follows from the capabilities. The dependency endpoints
     // come from POLAR_HEALTH_DEP_ENDPOINTS, which the deployment sets from the same
@@ -95,7 +138,8 @@ pub(crate) fn prepare(
             Vec::new(),
         ),
         &config,
-    )?;
+    )
+    .map_err(PrepareError::Mismatch)?;
 
     Ok(Startup {
         config: Arc::new(config),

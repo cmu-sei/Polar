@@ -19,6 +19,8 @@
 // Reading the process environment goes through polar-env (see clippy.toml).
 #![deny(clippy::disallowed_methods)]
 
+pub mod agent;
+pub use agent::{Configured, PolarAgent, StartError, run};
 pub mod capability;
 pub use capability::Capability;
 pub mod crypto;
@@ -257,6 +259,21 @@ impl<M: ractor::Message> AgentBuilder<M> {
             builder: self,
             startup,
         })
+    }
+
+    /// For an agent that implements [`PolarAgent`]: takes what `run` already judged instead of
+    /// reading the environment again, and declares from it what the agent declared (its
+    /// capabilities, encryption, the self-test), so the builder cannot be told anything that
+    /// contradicts the trait. The subscriptions and the lifecycle handler are still the
+    /// agent's to add before this.
+    pub fn into_configured(mut self, configured: Configured) -> ConfiguredAgent<M> {
+        self.requires = configured.required.clone();
+        self.wants_crypto = configured.required.contains(&Capability::Encryption);
+        self.self_test = configured.self_test;
+        ConfiguredAgent {
+            builder: self,
+            startup: configured.startup,
+        }
     }
 
     /// Reads the environment and spawns the infrastructure: [`configure`](Self::configure)
@@ -621,6 +638,29 @@ mod tests {
         );
         // Nothing was spawned: the client's name is not registered.
         assert!(ractor::registry::where_is("configure-test.tcp".to_string()).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_agent_built_from_the_trait_declares_to_the_builder_what_the_trait_declared() {
+        let (idle, _) = Actor::spawn(None, Idle, ()).await.unwrap();
+        let env = map(environment::fixtures::CASSINI_ENV);
+        let required = vec![Capability::Cassini, Capability::Encryption];
+        let startup = startup::prepare(&env, &[], &required, None).unwrap();
+        let configured = Configured {
+            startup,
+            required: required.clone(),
+            self_test: false,
+        };
+
+        let built = AgentBuilder::new(idle, "from-the-trait")
+            // What a hand-written chain might also have said: it is overruled.
+            .with_graph_write()
+            .with_self_test()
+            .into_configured(configured);
+
+        assert_eq!(built.builder.requires, required);
+        assert!(built.builder.wants_crypto, "encryption was needed");
+        assert!(!built.builder.self_test, "the trait said no self-test");
     }
 
     #[tokio::test]

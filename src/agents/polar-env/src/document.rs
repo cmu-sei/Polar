@@ -48,9 +48,13 @@ pub struct DocVariable {
     pub doc: String,
     #[serde(default)]
     pub value: Option<DocValue>,
-    /// Where the value came from, in a document printed for a person. Not read.
+    /// Where the value came from (`file`, `default`, `unset`), in a document printed for a
+    /// person or a tool. Not read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// What the variable resolves to now, a secret as `<hidden>`. Not read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<String>,
 }
 
 /// What fills a variable.
@@ -124,6 +128,7 @@ impl Document {
                             doc: desc.doc.to_string(),
                             value: None,
                             source: None,
+                            resolved: None,
                         })
                         .collect(),
                 })
