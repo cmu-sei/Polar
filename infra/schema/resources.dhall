@@ -82,8 +82,22 @@ let render =
                   , type = Some "kubernetes.io/service-account-token"
                   }
 
+        let toConfigMap =
+              λ(c : T.ConfigMapEntry) →
+                kubernetes.Resource.ConfigMap
+                  kubernetes.ConfigMap::{
+                  , apiVersion = "v1"
+                  , kind = "ConfigMap"
+                  , metadata = kubernetes.ObjectMeta::{
+                    , name = Some c.name
+                    , namespace = Some v.namespace
+                    }
+                  , data = Some [ { mapKey = c.key, mapValue = c.content } ]
+                  }
+
         in    Prelude.List.map T.ClusterRoleEntry kubernetes.Resource toClusterRole v.cluster_roles
             # Prelude.List.map T.ClusterRoleEntry kubernetes.Resource toBinding v.cluster_roles
             # Prelude.List.map Text kubernetes.Resource toTokenSecret v.sa_token_secrets
+            # Prelude.List.map T.ConfigMapEntry kubernetes.Resource toConfigMap v.config_maps
 
 in  render

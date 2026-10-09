@@ -17,9 +17,8 @@
     name: "kube-consumer"
     kind: "agent"
     image: "kube-consumer"
-    needs: ["graph-write", "encryption"]
-    # The 5 s drain window and the graph controller's stop, up to 30 s, plus a
-    # margin. The code declares the same (SHUTDOWN_BUDGET in its supervisor).
-    shutdown: { budget_secs: 45 }
+    # The agent says what it needs and how long it needs to drain: `kube-consumer --scaffold`
+    # prints it, and the resolver fills the rest from the catalog. Nothing is repeated here.
+    config: "document"
   }
 ]

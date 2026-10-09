@@ -30,13 +30,21 @@ def settings [name: string] {
     ^nu $RESOLVER settings $name | from json
 }
 
+# What the agent will be given for a variable: from its environment, or, for an agent that reads
+# a configuration document, from the document the resolver wrote.
 def env_value [r: record, name: string] {
-    $r.env | where name == $name | get -o 0.value
+    if ($r.env | where name == "POLAR_CONFIG" | is-empty) {
+        $r.env | where name == $name | get -o 0.value
+    } else {
+        let maps = (^nu $RESOLVER resources $r.name | from json | get config_maps)
+        $maps | first | get content | from json | get sections | each {|s| $s.variables } | flatten
+        | where name == $name | get -o 0.value
+    }
 }
 
 def main [] {
     let tests = {
-        "every workload's budget is in its environment, as the code declared": {
+        "every workload's budget is in what the agent is given, as the code declared": {
             for w in ($BUDGETS | transpose name secs) {
                 let r = (resolve $w.name)
                 assert equal (env_value $r "POLAR_SHUTDOWN_BUDGET_SECS") ($w.secs | into string) $"($w.name)"
@@ -58,7 +66,7 @@ def main [] {
             }
         }
 
-        "the health settings the agent validates are in its environment": {
+        "the health settings the agent validates are in what the agent is given": {
             let r = (resolve "kube-consumer")
             assert equal (env_value $r "POLAR_HEALTH_REJUVENATION_SECS") "300"
             assert equal (env_value $r "POLAR_HEALTH_STALE_SECS") "90"

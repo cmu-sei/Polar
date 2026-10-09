@@ -11,12 +11,16 @@ let Rule =
 
 let ClusterRoleEntry = { name : Text, rules : List Rule }
 
+-- A ConfigMap with one key: the document a workload's agent reads.
+let ConfigMapEntry = { name : Text, key : Text, content : Text }
+
 let Spec =
       { name : Text
       , namespace : Text
       , service_account : Text
       , cluster_roles : List ClusterRoleEntry
       , sa_token_secrets : List Text
+      , config_maps : List ConfigMapEntry
       }
 
-in  { Spec, Rule, ClusterRoleEntry }
+in  { Spec, Rule, ClusterRoleEntry, ConfigMapEntry }

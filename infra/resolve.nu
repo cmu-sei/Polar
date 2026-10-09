@@ -22,6 +22,7 @@
 # (env, volumes, mounts, certs, dependency checks), in the order declared.
 
 use rules.nu *
+use document.nu *
 
 const INFRA = (path self | path dirname)
 const CONFIG = ($INFRA | path join "config")
@@ -93,6 +94,54 @@ def env_entry [e: record, vars: record, from: string, who: string] {
     }
 }
 
+# ── The agent's own scaffold ─────────────────────────────────────────────────
+
+# Where a document agent's pod finds its configuration.
+const DOCUMENT_DIR = "/etc/polar"
+const DOCUMENT_FILE = "config.json"
+const DOCUMENT_VOLUME = "polar-config"
+
+# The scaffold the agent prints about itself (`<agent> --scaffold`): from the binary, never from a
+# copy. `POLAR_SCAFFOLD_DIR` names a directory of `<workload>.json` files to read instead, for a
+# check that must not build anything (and for scaffolds taken from built images).
+def scaffold_of [name: string, spec: record] {
+    let dir = ($env.POLAR_SCAFFOLD_DIR? | default "")
+    if ($dir | is-not-empty) {
+        let file = ($dir | path join $"($name).json")
+        if not ($file | path exists) {
+            error make { msg: $"($name): no scaffold at ($file)" }
+        }
+        return (open $file)
+    }
+    let package = ($spec.scaffold_package? | default $spec.image)
+    let ran = (do { cd ($INFRA | path join "../src/agents"); ^cargo run -q -p $package -- --scaffold } | complete)
+    if $ran.exit_code != 0 {
+        error make { msg: $"($name): `cargo run -p ($package) -- --scaffold` failed: ($ran.stderr | lines | last 5 | str join ' | ')" }
+    }
+    $ran.stdout | from json
+}
+
+# The agent's own judgement of the document it will be given: `<agent> --check --config FILE`, the
+# function it runs when it starts. Skipped when scaffolds come from a directory, since then there is
+# no binary to ask. The secrets the document refers to are given dummy values: only that they are
+# set matters here.
+def agent_check [name: string, r: record] {
+    let dir = ($env.POLAR_SCAFFOLD_DIR? | default "")
+    if ($dir | is-not-empty) { return [] }
+    let file = (mktemp --suffix ".json")
+    $r.config_map.content | save --force $file
+    let package = $r.image_name
+    let secrets = ($r.env | where secret != null | get name | reduce --fold {} {|n, acc| $acc | insert $n "x" })
+    let ran = (do {
+        cd ($INFRA | path join "../src/agents")
+        with-env $secrets { ^cargo run -q -p $package -- --check --config $file }
+    } | complete)
+    rm -f $file
+    if $ran.exit_code == 0 { [] } else {
+        $ran.stderr | lines | where {|l| $l | str starts-with "ERROR:" } | each {|l| $"($name): ($l | str replace 'ERROR: ' '')" }
+    }
+}
+
 # ── Resolution ───────────────────────────────────────────────────────────────
 
 export def resolve [name: string, target: string = $DEFAULT_TARGET] {
@@ -128,7 +177,19 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         }
     )
 
-    let needs = ($kind.needs ++ ($entry.needs? | default []) ++ ($ov.needs? | default []) | uniq)
+    # A workload whose agent implements PolarAgent says nothing of its needs or of the least
+    # time it needs to drain: the binary does, in its own scaffold, and the catalog supplies what
+    # only the deployment knows.
+    let document_mode = (($spec.config? | default "env") == "document")
+    let scaffold = if $document_mode { scaffold_of $name $spec } else { null }
+    if $document_mode and (($entry.needs? | default [] | is-not-empty) or ($ov.needs? | default [] | is-not-empty)) {
+        error make { msg: $"($name): the catalog lists `needs`, but this agent says its own: remove it from the entry \(the binary requires: (requires_of $scaffold | str join ', ')\)" }
+    }
+    let needs = if $document_mode {
+        ($kind.needs ++ (requires_of $scaffold) | uniq)
+    } else {
+        ($kind.needs ++ ($entry.needs? | default []) ++ ($ov.needs? | default []) | uniq)
+    }
 
     mut env_list: list<any> = []
     mut volumes: list<any> = [
@@ -194,7 +255,14 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
 
     # Shutdown: the grace period is derived, never set on its own, so it cannot
     # disagree with the budget.
-    let sd = $spec.shutdown
+    # In a document the budget defaults to the least the code says it needs; the entry sets it
+    # only to give more.
+    let explicit_budget = (($ov.shutdown?.budget_secs? | default ($entry.shutdown?.budget_secs? | default null)))
+    let sd = if $document_mode and $explicit_budget == null {
+        $spec.shutdown | upsert budget_secs (budget_minimum_of $scaffold)
+    } else {
+        $spec.shutdown
+    }
     let grace = ($sd.budget_secs + $sd.grace_margin_secs)
 
     # Health: the files and thresholds HealthCheckActor and polar-healthcheck read.
@@ -220,6 +288,24 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     ] {
         $env_list = ($env_list | append (env_entry $e $vars "kind" $name))
     }
+
+    # A document agent reads one document, not an environment: the entries above are written into
+    # the variables they name, and the pod is given the document and the secrets it refers to.
+    let entries = $env_list
+    mut config_map: any = null
+    mut config_problems: list<string> = []
+    if $document_mode {
+        let filled = (fill_document $scaffold $env_list $name)
+        $config_problems = $filled.problems
+        if $sd.budget_secs < (budget_minimum_of $scaffold) {
+            $config_problems = ($config_problems | append $"($name) needs at least (budget_minimum_of $scaffold)s to drain, and the catalog gives (($sd.budget_secs))s")
+        }
+        $config_map = { name: $"($name)-config", key: $DOCUMENT_FILE, content: (document_json $filled) }
+        $env_list = (pod_env $filled $"($DOCUMENT_DIR)/($DOCUMENT_FILE)")
+        $volumes = ($volumes | append { name: $DOCUMENT_VOLUME, secret: null, audience: null, config_map: $config_map.name, from: "document" })
+        $mounts = ($mounts | append { name: $DOCUMENT_VOLUME, path: $DOCUMENT_DIR, read_only: true, from: "document" })
+    }
+    $volumes = ($volumes | each {|v| $v | default null config_map })
 
     let ci = ($vars | get cert-issuer)
     let scheme = ($services | get cert-issuer | get -o scheme | default "https")
@@ -254,16 +340,19 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         dep_checks: ($deps | get endpoint)
         certs: ($certs | get spec)
         resources: { cluster_roles: ($cluster_roles | reject from), sa_token_secrets: (if $sa_secret == null { [] } else { [$sa_secret] }) }
+        config_map: $config_map
+        config_problems: $config_problems
+        image_name: ($spec.scaffold_package? | default $spec.image)
         _origin: $origin
         _settings: { health: $h, shutdown: ($sd | insert termination_grace_secs $grace) }
-        _from: { roles: $cluster_roles, env: $env_list, volumes: $volumes, mounts: $mounts, deps: $deps, certs: $certs }
+        _from: { roles: $cluster_roles, env: $entries, volumes: $volumes, mounts: $mounts, deps: $deps, certs: $certs }
     }
 }
 
 # What the template takes: the resolved record without provenance.
 def for_template [r: record] {
     $r
-    | reject _origin _from _settings resources
+    | reject _origin _from _settings resources config_map config_problems image_name
     | update env { reject from }
     | update volumes { reject from }
     | update mounts { reject from }
@@ -322,7 +411,9 @@ def check_all [target: string] {
             {
                 who: $n
                 identity: $"($r.service_account).($r.namespace)"
-                rules: ((environment_problems $n $r.env) ++ (shutdown_problems $n $r._settings.shutdown))
+                # A document agent's configuration is judged by filling its own scaffold; its
+                # pod environment is a pointer, not the variables.
+                rules: ((if $r.config_map == null { environment_problems $n $r.env } else { $r.config_problems ++ (agent_check $n $r) }) ++ (shutdown_problems $n $r._settings.shutdown))
                 error: null
             }
         } catch {|e|
@@ -467,10 +558,21 @@ def "main explain" [
         let v = if $e.secret != null { $"secret ($e.secret)/($e.key)" } else { $e.value }
         print $"    ($e.name | fill -w 28)  ($v)   [($e.from)]"
     }
+    if $r.config_map != null {
+        print ""
+        print $"  document: ($r.config_map.name)/($r.config_map.key), read by the agent through POLAR_CONFIG"
+        print "    the env above is written into the variables the agent's own scaffold declares;"
+        print "    the pod is given the pointer and the secrets it refers to:"
+        for e in $r.env { print $"      ($e.name | fill -w 24)  (if $e.secret != null { $"secret ($e.secret)/($e.key)" } else { $e.value })" }
+        if ($r.config_problems | is-not-empty) {
+            print "    problems:"
+            for p in $r.config_problems { print $"      ($p)" }
+        }
+    }
     print ""
     print "  volumes:"
     for v in $r._from.volumes {
-        let what = if $v.secret != null { $"secret ($v.secret)" } else if $v.audience != null { $"projected token, audience ($v.audience)" } else { "emptyDir" }
+        let what = if $v.secret != null { $"secret ($v.secret)" } else if ($v.config_map? | default null) != null { $"ConfigMap ($v.config_map)" } else if $v.audience != null { $"projected token, audience ($v.audience)" } else { "emptyDir" }
         print $"    ($v.name | fill -w 24)  ($what)   [($v.from)]"
     }
     print ""
@@ -522,6 +624,7 @@ def "main resources" [
         service_account: $r.service_account
         cluster_roles: $r.resources.cluster_roles
         sa_token_secrets: $r.resources.sa_token_secrets
+        config_maps: (if $r.config_map == null { [] } else { [$r.config_map] })
     } | to json
 }
 

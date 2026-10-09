@@ -22,8 +22,13 @@ let EnvEntry =
 let VolumeEntry =
       -- secret set    -> a Secret volume
       -- audience set  -> a projected ServiceAccount token with that audience
+      -- config_map set -> a ConfigMap volume, of that ConfigMap
       -- neither       -> an emptyDir
-      { name : Text, secret : Optional Text, audience : Optional Text }
+      { name : Text
+      , secret : Optional Text
+      , audience : Optional Text
+      , config_map : Optional Text
+      }
 
 let MountEntry = { name : Text, path : Text, read_only : Bool }
 

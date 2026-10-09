@@ -59,6 +59,7 @@ def main [] {
             "gitlab-observer.yaml"
             "gitlab-consumer.yaml"
             "kube-observer.yaml"
+            "kube-consumer-resources.yaml"
             "kube-consumer.yaml"
             "git-observer.yaml"
             "git-consumer.yaml"

@@ -50,6 +50,7 @@ let render =
                 , emptyDir =
                     if    Prelude.Optional.null Text x.secret
                        && Prelude.Optional.null Text x.audience
+                       && Prelude.Optional.null Text x.config_map
                     then  Some kubernetes.EmptyDirVolumeSource::{=}
                     else  None kubernetes.EmptyDirVolumeSource.Type
                 , secret =
@@ -62,6 +63,16 @@ let render =
                           }
                       )
                       x.secret
+                , configMap =
+                    Prelude.Optional.map
+                      Text
+                      kubernetes.ConfigMapVolumeSource.Type
+                      ( λ(configMapName : Text) →
+                          kubernetes.ConfigMapVolumeSource::{
+                          , name = Some configMapName
+                          }
+                      )
+                      x.config_map
                 , projected =
                     Prelude.Optional.map
                       Text
