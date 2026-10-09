@@ -32,6 +32,7 @@ jwt_utils.workspace = true
 neo4rs.workspace = true
 polar.workspace = true
 polar-agent-builder.workspace = true
+polar-env.workspace = true
 polar-permissions.workspace = true
 polar-policy.workspace = true
 ractor.workspace = true

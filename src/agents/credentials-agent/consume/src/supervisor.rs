@@ -38,8 +38,8 @@ use polar::Supervisor;
 use polar::cassini::{CassiniClient, TcpClient, UnsubscribeRequest};
 use polar::request_reply::Envelope;
 use polar_agent_builder::{
-    AgentBuilder, HealthClient, HealthHandle, InfrastructureEvent, InfrastructureSupervisorMessage,
-    Subscription,
+    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
+    InfrastructureSupervisorMessage, Subscription,
 };
 use ractor::registry::where_is;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
@@ -133,7 +133,7 @@ const DRAIN_WINDOW_SECS: u64 = 5;
 /// told to shut down to releasing it: the drain window, the ledger's stop (10 s)
 /// and the projection's stop (30 s), plus a margin. If it is not done by then the
 /// process exits 1 regardless.
-const SHUTDOWN_BUDGET: Duration = Duration::from_secs(50);
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(50);
 
 /// Every topic this agent subscribes to. One subscription each; the same list
 /// is unsubscribed from when shutdown begins.
@@ -595,13 +595,13 @@ impl ConsumerSupervisor {
 impl Actor for ConsumerSupervisor {
     type Msg = ConsumerSupervisorMessage;
     type State = ConsumerSupervisorState;
-    type Arguments = ();
-
+    /// The configuration `run` judged; the builder is made from it.
+    type Arguments = Configured;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _args: (),
+        judged: Configured,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
@@ -616,16 +616,11 @@ impl Actor for ConsumerSupervisor {
         // bootstrap against itself). The dependency endpoints (Cassini and Neo4j
         // certificates) come from POLAR_HEALTH_DEP_ENDPOINTS in the deployment.
         let mut builder = AgentBuilder::new(myself.clone(), SERVICE_NAME)
-            .with_shutdown_budget(SHUTDOWN_BUDGET)
-            // A consumer that waits on requests is silent when idle and silent when deaf; the
-            // self-test is what tells them apart.
-            .with_self_test()
-            .with_environment(&polar::graph::environment::SECTION)
             .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }));
         for subscription in Self::request_subscriptions(&myself) {
             builder = builder.with_subscription(subscription);
         }
-        let configured = builder.configure()?;
+        let configured = builder.into_configured(judged);
         let graph_settings =
             polar::graph::environment::GraphSettings::from_env(&**configured.config())
                 .map_err(ActorProcessingErr::from)?;

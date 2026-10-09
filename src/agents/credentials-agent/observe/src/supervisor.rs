@@ -48,8 +48,8 @@ use credentials_agent_common::{
 };
 use polar::request_reply::{Envelope, ReplyRouter};
 use polar_agent_builder::{
-    AgentBuilder, HealthClient, HealthHandle, InfrastructureEvent, InfrastructureSupervisorMessage,
-    Subscription,
+    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
+    InfrastructureSupervisorMessage, Subscription,
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use std::sync::Arc;
@@ -72,7 +72,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the infrastructure supervisor gives this agent to drain: the HTTP
 /// server's drain, which can use all of `DRAIN_TIMEOUT`, plus a margin. If it is
 /// not done by then the process exits 1 regardless.
-const SHUTDOWN_BUDGET: Duration = Duration::from_secs(DRAIN_TIMEOUT.as_secs() + 10);
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(DRAIN_TIMEOUT.as_secs() + 10);
 
 /// The four reply routers: one per request/reply flow this observer fronts.
 /// Shared between the subscriptions that fill them and the HTTP handlers
@@ -210,25 +210,24 @@ async fn start_http(state: Arc<ObserverState>) -> Result<HttpServer, ActorProces
 impl Actor for ObserverSupervisor {
     type Msg = ObserverSupervisorMessage;
     type State = ObserverSupervisorState;
-    type Arguments = ();
+    /// The configuration `run` judged; the builder is made from it.
+    type Arguments = Configured;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _args: (),
+        configured: Configured,
     ) -> Result<Self::State, ActorProcessingErr> {
         info!("{myself:?} starting");
 
         let routers = ReplyRouters::default();
 
         let mut builder = AgentBuilder::new(myself.clone(), SERVICE_NAME)
-            .with_shutdown_budget(SHUTDOWN_BUDGET)
-            .with_self_test()
             .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }));
         for subscription in reply_subscriptions(&routers) {
             builder = builder.with_subscription(subscription);
         }
-        let resources = builder.build().await?;
+        let resources = builder.into_configured(configured).build().await?;
 
         resources
             .infrastructure_events

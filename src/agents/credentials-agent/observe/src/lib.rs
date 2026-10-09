@@ -21,5 +21,6 @@
    DM24-0470
 */
 
+pub mod agent;
 pub mod handler;
 pub mod supervisor;
