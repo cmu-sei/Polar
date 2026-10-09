@@ -31,7 +31,16 @@ pub struct ProbeConfig {
 
 impl ProbeConfig {
     pub fn from_env() -> Result<Self, String> {
-        Self::read(&ProcessEnv)
+        Self::from_environment(ProcessEnv)
+    }
+
+    /// As [`from_env`](Self::from_env), for any process environment: the configuration
+    /// document `POLAR_CONFIG` names if it is set (the probe reads the same document as the
+    /// agent it watches, so the two cannot disagree about the health file), the process
+    /// environment otherwise.
+    pub fn from_environment(process: impl Env + 'static) -> Result<Self, String> {
+        let (env, _) = polar_env::from_environment(process).map_err(|e| e.to_string())?;
+        Self::read(&*env)
     }
 
     /// As [`from_env`](Self::from_env), reading variables from `env`. A variable that is
@@ -340,5 +349,48 @@ mod tests {
             "{:?}",
             report.lines
         );
+    }
+
+    #[test]
+    fn the_probe_reads_the_document_the_agent_reads() {
+        use polar_env::{DocValue, Document};
+        let f = Fixture::new();
+        let mut document = Document::scaffold(&[(&crate::vars::SECTION, None)]);
+        for variable in document.sections.iter_mut().flat_map(|s| s.variables.iter_mut()) {
+            match variable.name.as_str() {
+                POLAR_HEALTH_FILE_ENV => {
+                    variable.value = Some(DocValue::Literal("/from/the/document".into()))
+                }
+                POLAR_HEALTH_STALE_SECS_ENV => variable.value = Some(DocValue::Literal("45".into())),
+                _ => {}
+            }
+        }
+        let path = f.dir.path().join("config.json");
+        fs::write(&path, document.to_json()).unwrap();
+        let path_text = path.to_string_lossy().into_owned();
+
+        let process = move |name: &str| match name {
+            "POLAR_CONFIG" => Some(path_text.clone()),
+            // What the environment says is not what the probe is to go by.
+            POLAR_HEALTH_FILE_ENV => Some("/from/the/environment".to_string()),
+            _ => None,
+        };
+        let config = ProbeConfig::from_environment(process).unwrap();
+        assert_eq!(config.health_file, "/from/the/document");
+        assert_eq!(config.stale_threshold_secs, 45);
+    }
+
+    #[test]
+    fn the_probe_still_reads_the_environment_when_there_is_no_document() {
+        let process = |name: &str| (name == POLAR_HEALTH_FILE_ENV).then(|| "/env/health".to_string());
+        let config = ProbeConfig::from_environment(process).unwrap();
+        assert_eq!(config.health_file, "/env/health");
+    }
+
+    #[test]
+    fn a_document_that_cannot_be_read_fails_the_probe_with_the_reason() {
+        let process = |name: &str| (name == "POLAR_CONFIG").then(|| "/no/such.json".to_string());
+        let error = ProbeConfig::from_environment(process).unwrap_err();
+        assert!(error.contains("/no/such.json"), "{error}");
     }
 }

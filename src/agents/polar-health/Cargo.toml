@@ -12,7 +12,7 @@ authors.workspace = true
 virtual-time = []
 
 [ dependencies ]
-polar-env = { workspace = true }
+polar-env = { workspace = true, features = ["document"] }
 rand = { workspace = true }
 ractor = { workspace = true }
 rustls = { workspace = true }

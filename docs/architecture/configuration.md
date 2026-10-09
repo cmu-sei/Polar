@@ -185,34 +185,54 @@ The code is the source of truth. An agent says what it needs once, in code, by r
 Nothing is kept in step by hand, because nobody writes a second copy: they ask the binary for a
 **scaffold**, fill it in, and the agent reads the filled-in document at runtime.
 
-### 9.2 What the code declares
+### 9.2 What the code declares: a trait every agent implements
 
-One value, in the agent's library crate, built by a function that needs no actors and no runtime,
-so a shared `main` can call it before anything starts:
+(Shape suggested by David on 2026-10-09: make the form of what we require of an agent the form of
+a trait, so implementing it is hooking into the infrastructure.)
 
 ```rust
-pub fn declare() -> Agent {
-    Agent::new("kube-consumer", "Writes what the Kubernetes observer sees to the graph")
-        .help(include_str!("../HELP.md"))          // optional; a generic help is generated without it
-        .needs(Capability::GraphWrite)
-        .needs(Capability::Encryption)
-        .environment(&OWN_SECTION)                 // the agent's own variables, declared with polar-env
-        .shutdown_budget(SHUTDOWN_BUDGET)          // the least it needs to drain
+pub trait PolarAgent: Sized + 'static {
+    const NAME: &'static str;
+    const PURPOSE: &'static str;                       // one line, required
+    const NEEDS: &'static [Capability];                // what it asks of its deployment
+    const SHUTDOWN_BUDGET: Duration;                   // the least it needs to drain
+    const SECTIONS: &'static [&'static Section] = &[]; // its own variables, declared with polar-env
+    const HELP: Option<&'static str> = None;           // long help, e.g. include_str!("../HELP.md")
+
+    /// The agent proper. It is handed the configured infrastructure and nothing else, so the
+    /// builder is the only way to get a router, a Cassini client or a graph.
+    fn start(agent: ConfiguredAgent) -> impl Future<Output = Result<(), StartError>> + Send;
 }
+
+// main.rs
+fn main() -> ExitCode { polar_agent_builder::run::<KubeConsumer>() }
 ```
 
-The supervisor builds `AgentBuilder` from this same value, and the `with_*` methods that declared
-things on the builder (graph write, encryption, the budget, `requires`) go away, so what the agent
-says it is and what it does cannot differ. This is not a manifest next to the code; it is the one
-statement of the code's needs, and the builder consumes it. Link-time registration of sections
-alone would not do: every agent links the graph crate, so every scaffold would list the graph's
-variables as required. The capability list is what says which sections apply.
+Why a trait and not a value built by a function:
+
+- **The compiler enforces the form.** An agent that does not say what it needs, its budget or
+  its purpose does not compile; the optional parts have defaults. There is no way to forget
+  `NEEDS`.
+- **Nothing runs to ask.** Associated constants and functions are available before any runtime or
+  actor exists, which is what `--help`, `--scaffold` and `--check` need. `run::<A>()` reads them
+  first, answers the command line, and only for a plain run starts the runtime.
+- **The builder cannot be bypassed.** `start` receives the `ConfiguredAgent` the builder made from
+  these very constants, and `run` is the only caller. What the agent declared and what it was
+  given cannot differ, and an agent cannot build its own infrastructure on the side.
+- **One more check for free.** A test macro, `polar_agent_tests!(KubeConsumer)`, run once in each
+  agent crate, checks the declaration: the purpose is not empty, the budget is at least one second,
+  every section's defaults parse (`Section::defaults_problems`), and no variable is declared twice.
 
 The agent's own variables are declared in sections with `polar-env` and read with
 `config.read(&VAR)`, as the graph's and the health actor's are. The existing
 `disallowed_methods` lint, which bans `std::env::var` in the migrated crates, is extended to the
 Jira and Kubernetes agents, so an agent cannot read a variable it did not declare: it does not
 compile.
+
+This is not a manifest next to the code. It is the one statement of the code's needs, in the
+language the code is written in, and the builder is built from it. Link-time registration of
+sections alone would not do: every agent links the graph crate, so every scaffold would list the
+graph's variables as required. `NEEDS` is what says which sections apply.
 
 ### 9.3 The command line
 
@@ -305,8 +325,10 @@ The resolver has to run the agent's own binary, so there is no copy that can go 
 ### 9.8 Order of work
 
 1. `polar-env`: the document type, `FileEnv`, `Source::File`, secret references; `polar-healthcheck`
-   reads it.
-2. The builder: `Agent`, the builder constructed from it, the `main` wrapper and the three flags.
+   reads it. **Done 2026-10-09** (`polar_env::Document`, `FileEnv`, `from_environment`, behind the
+   `document` feature; `ProbeConfig::from_environment`).
+2. The builder: the `PolarAgent` trait, the builder constructed from it, `run::<A>()` and the three
+   flags.
 3. kube-consumer end to end: declare it, scaffold it, fill it from the resolver, render the
    ConfigMap, run it on the cluster.
 4. The other five builder agents; the Jira and Kubernetes variables declared and the lint
