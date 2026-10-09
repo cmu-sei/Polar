@@ -203,15 +203,28 @@ def main [] {
             assert ($r.init_env | any {|e| $e.name == "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP" and $e.value == "true" })
         }
 
-        "the broker's Service has the name its clients use, selects the broker, and exposes both ports": {
+        "the broker's Service has the name its clients use, selects the broker, and exposes the one port it listens on": {
             let r = (resolve "cassini")
-            assert equal $r.ports [8080 3000]
+            assert equal $r.ports [8080]
             let res = (^nu $RESOLVER resources cassini | from json)
             let service = ($res.services | first)
             assert equal $service.name "cassini-ip-svc"
             assert equal $service.selector "cassini"
-            assert equal ($service.ports | get port) [8080 3000]
-            assert equal ($service.ports | get name) ["cassini-tcp" "cassini-http"]
+            assert equal ($service.ports | get port) [8080]
+            assert equal ($service.ports | get name) ["cassini-tcp"]
+        }
+
+        "the broker exports its traces to Jaeger's OTLP port, not the UI's": {
+            let r = (resolve "cassini")
+            assert equal (env_value $r "JAEGER_OTLP_ENDPOINT") "http://jaeger-svc.polar.svc.cluster.local:4318/v1/traces"
+        }
+
+        "the broker's health check watches the CA's certificate as well as its own": {
+            let r = (resolve "cassini")
+            assert equal (env_value $r "POLAR_HEALTH_CERTS") "/etc/tls/certs/cert.pem,/etc/tls/certs/ca.pem"
+            # an agent still watches its own certificate only
+            let agent = (resolve "kube-consumer")
+            assert equal (env_value $agent "POLAR_HEALTH_CERTS") "/etc/tls/certs/cert.pem,/etc/neo4j-client-tls/cert.pem"
         }
 
         "a kind can extend another and change only what differs": {

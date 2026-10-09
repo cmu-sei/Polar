@@ -7,5 +7,6 @@
   cassini:     { dns_name: "cassini-ip-svc", namespace: "polar", port: 8080 }
   neo4j:       { dns_name: "polar-db-svc",   namespace: "graph", port: 7687 }
   cert-issuer: { dns_name: "cert-issuer",    namespace: "polar", port: 8443, scheme: "https" }
-  jaeger:      { dns_name: "jaeger-svc",    namespace: "polar", port: 16686, scheme: "http" }
+  # Jaeger's OTLP HTTP port, where traces are sent (its UI, 16686, is not an endpoint for them).
+  jaeger:      { dns_name: "jaeger-svc",    namespace: "polar", port: 4318, scheme: "http" }
 }

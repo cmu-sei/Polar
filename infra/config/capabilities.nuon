@@ -11,9 +11,12 @@
 #   pod         env: [{ name, value | secret+key }]
 #               volumes: [{ name, secret? | claim? | config_map? }]   (none of them = emptyDir)
 #               mounts: [{ name, path, read_only }]
-#   identity    certs: [{ dir, volume, read_only }]
+#   identity    certs: [{ dir, volume, read_only, kind?, san?, watch? }]
 #                 dir/volume: where the cert lives; read_only in the agent
-#                 container (polar-init always writes)
+#                 container (polar-init always writes). kind: client (the
+#                 default) or server; san: the name a server certificate carries;
+#                 watch: the files in dir the health check watches for expiry
+#                 (cert.pem by default)
 #   dependency  service, ttl_secs
 #                 service: a key of services.nuon; ttl_secs: minimum remaining
 #                 lifetime of its certificate
@@ -161,7 +164,7 @@
         { name: "JAEGER_OTLP_ENDPOINT",    value: "{jaeger.url}/v1/traces" }
       ]
     }
-    identity: { certs: [ { dir: "/etc/tls/certs", volume: "polar-certs", read_only: true, kind: "server", san: "{cassini.dns}" } ] }
+    identity: { certs: [ { dir: "/etc/tls/certs", volume: "polar-certs", read_only: true, kind: "server", san: "{cassini.dns}", watch: ["cert.pem", "ca.pem"] } ] }
     dependency: {}
     init: {}
     resources: {}

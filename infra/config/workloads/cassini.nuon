@@ -17,13 +17,11 @@
     env: [
       { name: "CASSINI_LOG", value: "info" }
     ]
-    # What clients connect to. The name and the port are the ones services.nuon gives; the second
-    # port is declared and nothing listens on it today (kept as the chart had it).
+    # What clients connect to. The name and the port are the ones services.nuon gives.
     service: {
       name: "{cassini.name}"
       ports: [
         { name: "cassini-tcp", port: "{cassini.port}" }
-        { name: "cassini-http", port: 3000 }
       ]
     }
   }

@@ -104,6 +104,24 @@ impl Actor for ControlManager {
     }
 }
 
+/// Whether `given` is the token the broker was started with. No token configured means none is
+/// asked for. The comparison takes the same time wherever the tokens differ, so how long a refusal
+/// takes does not say how much of a guess was right.
+pub fn tokens_match(expected: Option<&str>, given: Option<&str>) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    let Some(given) = given else {
+        return false;
+    };
+    let (a, b) = (expected.as_bytes(), given.as_bytes());
+    let mut difference = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        difference |= usize::from(a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0));
+    }
+    difference == 0
+}
+
 impl ControlManager {
     // ===== Handler methods =====
     async fn handle_prepare_for_shutdown(
@@ -116,9 +134,7 @@ impl ControlManager {
         let _g = span.enter();
 
         // Validate shutdown token if required
-        if let Some(expected_token) = &state.shutdown_auth_token
-            && auth_token.as_ref() != Some(expected_token)
-        {
+        if !tokens_match(state.shutdown_auth_token.as_deref(), auth_token.as_deref()) {
             error!("Invalid shutdown token provided");
             return Ok(());
         }
@@ -373,17 +389,31 @@ impl ControlManager {
                 }
             }
             ControlOp::PrepareForShutdown { auth_token } => {
-                // Forward to ControlManager's own shutdown handler
-                myself
-                    .send_message(BrokerMessage::PrepareForShutdown {
-                        auth_token: Some(auth_token),
-                    })
-                    .ok();
+                // Say so when the token is wrong. The shutdown handler refuses it too, but it
+                // answers nobody, and an acknowledgement for a request that was refused tells an
+                // operator the broker is going down when it is not.
+                if !tokens_match(state.shutdown_auth_token.as_deref(), Some(&auth_token)) {
+                    error!("Refusing a shutdown request: invalid shutdown token");
+                    BrokerMessage::ControlResponse {
+                        registration_id,
+                        result: Err(ControlError::PermissionDenied(
+                            "invalid shutdown token".to_string(),
+                        )),
+                        trace_ctx: Some(span.context()),
+                    }
+                } else {
+                    // Forward to ControlManager's own shutdown handler
+                    myself
+                        .send_message(BrokerMessage::PrepareForShutdown {
+                            auth_token: Some(auth_token),
+                        })
+                        .ok();
 
-                BrokerMessage::ControlResponse {
-                    registration_id,
-                    result: Ok(ControlResult::ShutdownInitiated),
-                    trace_ctx: Some(span.context()),
+                    BrokerMessage::ControlResponse {
+                        registration_id,
+                        result: Ok(ControlResult::ShutdownInitiated),
+                        trace_ctx: Some(span.context()),
+                    }
                 }
             }
             ControlOp::GetSessionInfo { registration_id } => {
@@ -546,5 +576,26 @@ impl ControlManager {
             ShutdownPhase::TerminateSubscribers => crate::SUBSCRIBER_MANAGER_NAME.to_string(),
             ShutdownPhase::TerminateListeners => crate::LISTENER_MANAGER_NAME.to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::tokens_match;
+
+    #[test]
+    fn no_token_configured_asks_for_none() {
+        assert!(tokens_match(None, None));
+        assert!(tokens_match(None, Some("anything")));
+    }
+
+    #[test]
+    fn the_right_token_matches_and_nothing_else_does() {
+        assert!(tokens_match(Some("s3cret"), Some("s3cret")));
+        assert!(!tokens_match(Some("s3cret"), Some("s3creT")));
+        assert!(!tokens_match(Some("s3cret"), Some("s3cre")), "a prefix is not it");
+        assert!(!tokens_match(Some("s3cret"), Some("s3crets")), "nor is a longer one");
+        assert!(!tokens_match(Some("s3cret"), Some("")));
+        assert!(!tokens_match(Some("s3cret"), None), "none given where one is needed");
     }
 }

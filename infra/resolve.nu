@@ -307,7 +307,11 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
             let cert_kind = ($c.kind? | default "client")
             let san = (if ($c.san? | is-empty) { "" } else { subst $c.san $vars $name })
             $certs = ($certs | append { spec: $"($cert_kind):($c.dir):ecdsa-p256:($san)", from: $n })
-            $cert_dirs = ($cert_dirs | append $c.dir)
+            # The files the health check watches for expiry: the certificate, and whatever else the
+            # capability says (the broker watches the CA's as well).
+            for file in ($c.watch? | default ["cert.pem"]) {
+                $cert_dirs = ($cert_dirs | append $"($c.dir)/($file)")
+            }
         }
 
         # init: what polar-init gets besides the certificates it issues.
@@ -380,7 +384,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     let h = $spec.health
     $volumes = ($volumes | append { name: $h.volume, secret: null, audience: null, from: "kind" })
     $mounts = ($mounts | append { name: $h.volume, path: $h.dir, read_only: false, from: "kind" })
-    let cert_files = ($cert_dirs | each {|d| $"($d)/cert.pem" } | str join ",")
+    let cert_files = ($cert_dirs | str join ",")
     let dep_list = ($deps | get endpoint | str join ",")
     for e in [
         { name: "POLAR_HEALTH_FILE", value: $"($h.dir)/polar-health.json" }

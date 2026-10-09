@@ -4,7 +4,9 @@
 mod support;
 use cassini_types::BrokerMessage;
 use std::time::Duration;
-use support::{TestClient, pause, with_broker, with_broker_shutting_down_within};
+use support::{
+    TestClient, pause, with_broker, with_broker_guarded, with_broker_shutting_down_within,
+};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_broker_told_to_shut_down_finishes_the_sequence_and_ends() {
@@ -114,6 +116,66 @@ async fn a_shutdown_requested_over_the_wire_is_under_the_same_budget() {
             .unwrap();
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert_eq!(*broker.exits.lock().unwrap(), vec![1]);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shutdown_request_with_the_wrong_token_is_refused_and_said_to_be() {
+    with_broker_guarded("the-right-token", |broker| async move {
+        let client = TestClient::connect(&broker, "operator.test").await;
+        pause().await;
+
+        client.control(cassini_types::ControlOp::PrepareForShutdown {
+            auth_token: "the-wrong-token".to_string(),
+        });
+        client
+            .wait_for("an answer", Duration::from_secs(5), |c| {
+                !c.control_results().is_empty()
+            })
+            .await;
+
+        // Refused, and told so: not acknowledged as if it had been started.
+        assert!(
+            matches!(
+                client.control_results().as_slice(),
+                [Err(cassini_types::ControlError::PermissionDenied(_))]
+            ),
+            "{:?}",
+            client.control_results()
+        );
+        // And the broker goes on.
+        assert!(!broker.ends_by_itself(Duration::from_secs(2)).await);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shutdown_request_with_the_right_token_is_acknowledged_and_carried_out() {
+    with_broker_guarded("the-right-token", |broker| async move {
+        let client = TestClient::connect(&broker, "operator.test").await;
+        pause().await;
+
+        client.control(cassini_types::ControlOp::PrepareForShutdown {
+            auth_token: "the-right-token".to_string(),
+        });
+        client
+            .wait_for("an answer", Duration::from_secs(5), |c| {
+                !c.control_results().is_empty()
+            })
+            .await;
+        assert!(
+            matches!(
+                client.control_results().as_slice(),
+                [Ok(cassini_types::ControlResult::ShutdownInitiated)]
+            ),
+            "{:?}",
+            client.control_results()
+        );
+        assert!(
+            broker.ends_by_itself(Duration::from_secs(20)).await,
+            "the shutdown sequence never finished"
+        );
     })
     .await;
 }

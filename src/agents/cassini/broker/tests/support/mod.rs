@@ -92,6 +92,7 @@ pub struct TestBroker {
     pub pki: Pki,
     broker: Mutex<ActorRef<BrokerMessage>>,
     infrastructure: Mutex<Infrastructure>,
+    shutdown_token: Option<String>,
     retention_secs: Option<u64>,
     /// The exit codes the broker asked the process to exit with.
     pub exits: Arc<Mutex<Vec<i32>>>,
@@ -149,6 +150,16 @@ impl TestBroker {
     /// As `start_retaining`, with `shutdown_budget` to finish an orderly shutdown in. The broker
     /// does not exit the process: it records the code it would have exited with in `exits`.
     pub async fn start_with(retention_secs: Option<u64>, shutdown_budget: Duration) -> Self {
+        Self::start_guarded(retention_secs, shutdown_budget, None).await
+    }
+
+    /// As `start_with`, with a shutdown token that a request to shut down over the wire must
+    /// present.
+    pub async fn start_guarded(
+        retention_secs: Option<u64>,
+        shutdown_budget: Duration,
+        shutdown_token: Option<&str>,
+    ) -> Self {
         init_logging();
         clear_names().await;
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -159,8 +170,16 @@ impl TestBroker {
         };
         let addr = format!("127.0.0.1:{port}");
         let exits = Arc::new(Mutex::new(Vec::new()));
-        let (broker, infrastructure) =
-            Self::spawn_broker(&addr, &pki, retention_secs, shutdown_budget, &exits).await;
+        let token = shutdown_token.map(str::to_string);
+        let (broker, infrastructure) = Self::spawn_broker(
+            &addr,
+            &pki,
+            retention_secs,
+            shutdown_budget,
+            &exits,
+            token.clone(),
+        )
+        .await;
 
         for _ in 0..100 {
             if tokio::net::TcpStream::connect(&addr).await.is_ok() {
@@ -169,6 +188,7 @@ impl TestBroker {
                     pki,
                     broker: Mutex::new(broker),
                     infrastructure: Mutex::new(infrastructure),
+                    shutdown_token: token,
                     retention_secs,
                     exits,
                 };
@@ -184,6 +204,7 @@ impl TestBroker {
         retention_secs: Option<u64>,
         shutdown_budget: Duration,
         exits: &Arc<Mutex<Vec<i32>>>,
+        shutdown_auth_token: Option<String>,
     ) -> (ActorRef<BrokerMessage>, Infrastructure) {
         // The builder's infrastructure as the broker gets it in the pod, except that the process
         // is not ended (the code it would have exited with is recorded in `exits`) and the
@@ -205,7 +226,7 @@ impl TestBroker {
                 server_cert_file: pki.path("server.pem").to_string_lossy().into_owned(),
                 private_key_file: pki.path("server.key").to_string_lossy().into_owned(),
                 ca_cert_file: pki.ca().to_string_lossy().into_owned(),
-                shutdown_auth_token: None,
+                shutdown_auth_token,
                 configured,
             },
         )
@@ -227,6 +248,7 @@ impl TestBroker {
             self.retention_secs,
             Duration::from_secs(20),
             &self.exits,
+            self.shutdown_token.clone(),
         )
         .await;
         *self.broker.lock().unwrap() = broker;
@@ -274,6 +296,23 @@ impl TestBroker {
             .await
             .ok();
         clear_names().await;
+    }
+}
+
+/// As `with_broker`, with a shutdown token a request to shut down over the wire must present.
+pub async fn with_broker_guarded<F, Fut>(token: &str, test: F)
+where
+    F: FnOnce(Arc<TestBroker>) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let _only = serial().await;
+    let broker = Arc::new(
+        TestBroker::start_guarded(None, Duration::from_secs(20), Some(token)).await,
+    );
+    let outcome = tokio::spawn(test(broker.clone())).await;
+    broker.stop().await;
+    if let Err(failure) = outcome {
+        std::panic::resume_unwind(failure.into_panic());
     }
 }
 
@@ -452,6 +491,31 @@ impl TestClient {
                 None,
             ))
             .unwrap();
+    }
+
+    /// Asks the broker to do something over the wire, as the control tool does.
+    pub fn control(&self, op: cassini_types::ControlOp) {
+        self.transport
+            .cast(TcpClientMessage::ControlRequest {
+                op,
+                trace_ctx: None,
+            })
+            .unwrap();
+    }
+
+    /// The answers the broker has given to control requests, in order.
+    pub fn control_results(
+        &self,
+    ) -> Vec<Result<cassini_types::ControlResult, cassini_types::ControlError>> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                ClientEvent::ControlResponse { result, .. } => Some(result.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// An explicit goodbye.

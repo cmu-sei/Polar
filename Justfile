@@ -813,6 +813,13 @@ port-forwards-up *only:
     start_pf observer polar       credentials-agent-observer   "8081:8080"             /tmp/pf-credentials-observer.log
     echo "Logs: /tmp/pf-*.log"
 
+# Ask the Cassini broker in the cluster to shut down in order, over the wire, with the shutdown token
+# from its Secret and your certificate (just user-cert-install). The Job starts a new broker.
+# Usage: just cassini-shutdown            (as djshepard)
+#        just cassini-shutdown alice
+cassini-shutdown user="djshepard":
+    nu infra/cassini-shutdown.nu --user {{user}}
+
 # Stop all detached port-forwards started by port-forwards-up.
 port-forwards-down:
     #!/usr/bin/env bash
