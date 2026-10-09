@@ -104,3 +104,21 @@ export def job_replacement_problems [docs: list]: nothing -> list<string> {
         $"Job ($d.metadata.name) has podReplacementPolicy ($policy), not Failed: a deleted pod would overlap with its replacement for the whole drain"
     }
 }
+
+# Every manifest the catalog rendered must be applied, and a workload's resources (its
+# ConfigMap, token Secret, RBAC) before the Job that uses them: a Job whose ConfigMap is not there
+# yet sits in ContainerCreating. `rendered` and `order` are file names.
+export def apply_order_problems [rendered: list<string>, order: list<string>]: nothing -> list<string> {
+    let missing = ($rendered | where {|f| not ($f in $order) } | each {|f|
+        $"($f) is rendered but is not in the target's apply_order, so it would never be applied"
+    })
+    let misordered = ($rendered | where {|f| $f | str ends-with "-resources.yaml" } | each {|r|
+        let job = ($r | str replace "-resources.yaml" ".yaml")
+        let at_r = ($order | enumerate | where item == $r | get -o 0.index)
+        let at_j = ($order | enumerate | where item == $job | get -o 0.index)
+        if $at_r != null and $at_j != null and $at_r > $at_j {
+            [$"($r) is applied after ($job); it must come before"]
+        } else if $at_r != null and $at_j != null and $at_r == $at_j { [] } else { [] }
+    } | flatten)
+    $missing ++ $misordered
+}

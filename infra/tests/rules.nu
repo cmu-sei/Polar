@@ -129,6 +129,22 @@ def main [] {
             assert equal (shutdown_problems "w" ($GOOD_SHUTDOWN | update termination_grace_secs 21)) []
         }
 
+        "a rendered manifest that the apply order does not list is a problem naming it": {
+            let p = (apply_order_problems ["a.yaml" "a-resources.yaml" "b.yaml"] ["a.yaml" "b.yaml"])
+            assert equal ($p | length) 1
+            assert (has $p "a-resources.yaml")
+        }
+
+        "a manifest in the apply order is not a problem, and an order that lists more is fine": {
+            assert equal (apply_order_problems ["a.yaml"] ["x.yaml" "a.yaml" "y.yaml"]) []
+        }
+
+        "a resources manifest must be applied before the workload that mounts it": {
+            let p = (apply_order_problems ["a.yaml" "a-resources.yaml"] ["a.yaml" "a-resources.yaml"])
+            assert equal ($p | length) 1
+            assert (has $p "before")
+        }
+
         "the margin must be at least a second": {
             let p = (shutdown_problems "w" ($GOOD_SHUTDOWN | update grace_margin_secs 0 | update termination_grace_secs 20))
             assert (has $p "shutdown.grace_margin_secs must be at least 1")

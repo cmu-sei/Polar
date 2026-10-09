@@ -14,7 +14,7 @@
 #   nu infra/up.nu <target>
 
 use validate.nu *
-use rules.nu [job_replacement_problems]
+use rules.nu [job_replacement_problems, apply_order_problems]
 
 def main [
     target: string        # Target name: local, sandbox, ace
@@ -107,6 +107,16 @@ def main [
     print "Rendering catalog workloads..."
     ^nu ($infra_root | path join "render-catalog.nu") $target $output_dir
     if $env.LAST_EXIT_CODE != 0 { exit 1 }
+    print ""
+    print "Checking the apply order covers the catalog's manifests..."
+    let catalog_names = (^nu ($infra_root | path join "resolve.nu") names --target $target | from json)
+    let catalog_files = ($catalog_names | each {|n| [$"($n).yaml" $"($n)-resources.yaml"] } | flatten
+        | where {|f| ($output_dir | path join $f | path exists) })
+    let order_problems = (apply_order_problems $catalog_files $config.apply_order)
+    if ($order_problems | is-not-empty) {
+        for p in $order_problems { print -e $"  ERROR: ($p)" }
+        exit 1
+    }
     print ""
     print "Checking workload ServiceAccounts..."
     check_and_emit_service_accounts $output_dir

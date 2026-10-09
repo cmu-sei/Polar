@@ -61,7 +61,9 @@ def main [] {
             "kube-observer.yaml"
             "kube-consumer-resources.yaml"
             "kube-consumer.yaml"
+            "jira-observer-resources.yaml"
             "jira-observer.yaml"
+            "jira-processor-resources.yaml"
             "jira-processor.yaml"
         ]
 
