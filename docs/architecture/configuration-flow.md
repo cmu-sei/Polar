@@ -149,6 +149,24 @@ nothing at the deployment layer says. This is the gap between the two views, lis
 Run `polar-config-check` from `src/agents` (`cargo run -p polar-agent-builder --bin
 polar-config-check -- --describe`).
 
+### Try the agent interface
+
+`polar-agent-builder` has a small agent that implements `PolarAgent`
+(`examples/hello_agent.rs`). It answers the three flags the design in `configuration.md` section 9
+describes, and it reads its configuration from a document:
+
+```text
+cargo build -p polar-agent-builder --example hello_agent
+hello_agent --help                          # what it is, needs and reads
+hello_agent --scaffold > config.json        # the document, every value empty
+                                            # fill it in: the resolver will, by hand here
+hello_agent --check --config config.json    # ok: the configuration is sound
+hello_agent --scaffold --config config.json # filled, with source and resolved value of each
+POLAR_CONFIG=config.json hello_agent        # runs on the document
+```
+
+No real agent uses it yet; `kube-consumer` is the first to move.
+
 ## 5. What is missing
 
 These are in `remaining-work.md` with the rest; they are here so the picture is honest.

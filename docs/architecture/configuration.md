@@ -328,7 +328,9 @@ The resolver has to run the agent's own binary, so there is no copy that can go 
    reads it. **Done 2026-10-09** (`polar_env::Document`, `FileEnv`, `from_environment`, behind the
    `document` feature; `ProbeConfig::from_environment`).
 2. The builder: the `PolarAgent` trait, the builder constructed from it, `run::<A>()` and the three
-   flags.
+   flags. **Done 2026-10-09** (`polar_agent_builder::agent`, `AgentBuilder::into_configured`; a
+   runnable example, `cargo run -p polar-agent-builder --example hello_agent -- --help`). Not yet
+   used by any real agent.
 3. kube-consumer end to end: declare it, scaffold it, fill it from the resolver, render the
    ConfigMap, run it on the cluster.
 4. The other five builder agents; the Jira and Kubernetes variables declared and the lint
