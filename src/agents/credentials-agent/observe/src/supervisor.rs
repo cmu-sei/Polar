@@ -223,6 +223,7 @@ impl Actor for ObserverSupervisor {
 
         let mut builder = AgentBuilder::new(myself.clone(), SERVICE_NAME)
             .with_shutdown_budget(SHUTDOWN_BUDGET)
+            .with_self_test()
             .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }));
         for subscription in reply_subscriptions(&routers) {
             builder = builder.with_subscription(subscription);

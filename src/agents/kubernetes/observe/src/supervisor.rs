@@ -127,6 +127,7 @@ impl Actor for ClusterObserverSupervisor {
         // that against POLAR_CAPABILITIES before anything starts.
         let resources = AgentBuilder::new(myself.clone(), TCP_CLIENT_NAME)
             .with_shutdown_budget(SHUTDOWN_BUDGET)
+            .with_self_test()
             .requires(Capability::KubeApiRead)
             .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }))
             .build()

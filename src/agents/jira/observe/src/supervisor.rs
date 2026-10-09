@@ -234,6 +234,7 @@ impl Actor for ObserverSupervisor {
         // nothing to declare beyond the lifecycle handler.
         let resources = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
             .with_shutdown_budget(SHUTDOWN_BUDGET)
+            .with_self_test()
             .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }))
             .build()
             .await?;

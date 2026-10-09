@@ -372,6 +372,7 @@ impl Actor for ClusterConsumerSupervisor {
         // and CryptoActor -- collapsed into one, real, composed call.
         let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
             .with_shutdown_budget(SHUTDOWN_BUDGET)
+            .with_self_test()
             .with_graph_write();
 
         for subscription in Self::kube_subscriptions(&myself) {

@@ -150,6 +150,7 @@ impl Actor for ConsumerSupervisor {
         // so it does not declare encryption.
         let mut builder = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
             .with_shutdown_budget(SHUTDOWN_BUDGET)
+            .with_self_test()
             .with_graph_write();
         for subscription in Self::jira_subscriptions(&myself) {
             builder = builder.with_subscription(subscription);

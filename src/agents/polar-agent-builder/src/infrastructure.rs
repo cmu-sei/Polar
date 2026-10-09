@@ -150,7 +150,9 @@ const SELF_TEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// The topic an agent's probes travel on. Shared by every instance of the service: each tells its
 /// own probes from the others by the instance id they carry.
 fn self_test_topic(service_name: &str) -> String {
-    format!("selftest.{service_name}")
+    // The broker names a subscription `{session}:{topic}` and splits it at the first colon, and
+    // some services are named with colons.
+    format!("selftest.{}", service_name.replace(':', "-"))
 }
 
 /// A probe is the instance id followed by its number.
@@ -1227,6 +1229,20 @@ mod tests {
         rig.registered().await;
         tokio::time::sleep(Duration::from_secs(600)).await;
         assert!(rig.health().cassini_connected, "{:?}", rig.health());
+    }
+
+    #[test]
+    fn the_probe_topic_has_no_colon_in_it() {
+        // The broker names a subscription `{session}:{topic}` and splits it at the first colon;
+        // some services are named `jira:observer:web_client`.
+        assert_eq!(
+            self_test_topic("jira:observer:web_client"),
+            "selftest.jira-observer-web_client"
+        );
+        assert_eq!(
+            self_test_topic("credentials-agent-consumer"),
+            "selftest.credentials-agent-consumer"
+        );
     }
 
     #[test]
