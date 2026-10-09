@@ -318,9 +318,17 @@ The resolver has to run the agent's own binary, so there is no copy that can go 
 
 - **Locally:** `cargo run -q -p <agent> -- --scaffold`. Incremental after the first build, but a
   cold run compiles every agent.
-- **For a deploy:** the built image, `podman run --rm <image> --scaffold`, which is the exact
-  artifact that will run. `up.nu` builds the agent images first (the image list comes from the
-  catalog, not from the render), then renders.
+- **For a deploy:** the built image, which is the exact artifact that will run. **Done
+  2026-10-09.** `POLAR_AGENT_SOURCE=images` makes the resolver pull the image from the registry this
+  machine pushes to (`POLAR_REGISTRY`, default `localhost:5000`), read its entrypoint and cmd from
+  its configuration (the nix images set a cmd, not an entrypoint, so `podman run <image> --scaffold`
+  would try to run `--scaffold`), and run that with the flag and no network. The same route runs
+  `--check --config` on the document it rendered, with the file mounted. `up.nu` sets it, and with
+  `--dev` builds and pushes the images of the self-describing agents (`resolve.nu document-images`,
+  from the catalog, not from the render) in a step before the render. Without `--dev` the render
+  asks the images already in the registry, and says which to push when one is missing. The source
+  tree route stays the default for work on a developer's machine, and a test checks that both give
+  the same record.
 
 ### 9.8 Order of work
 

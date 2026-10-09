@@ -77,3 +77,13 @@ export def budget_minimum_of [scaffold: record] {
 export def document_json [filled: record] {
     $filled.document | to json
 }
+
+# The command an image runs, as the image's own configuration says it: its entrypoint, then its cmd.
+# The scaffold is asked of that command, so the agent that answers is the one the image would run.
+export def image_command [config: record] {
+    let command = (($config.Entrypoint? | default []) ++ ($config.Cmd? | default []))
+    if ($command | is-empty) {
+        error make { msg: "the image has neither an entrypoint nor a cmd, so there is nothing to ask for its scaffold" }
+    }
+    $command
+}

@@ -105,9 +105,46 @@ const DOCUMENT_DIR = "/etc/polar"
 const DOCUMENT_FILE = "config.json"
 const DOCUMENT_VOLUME = "polar-config"
 
+# Where the resolver gets an agent's own answers (`--scaffold`, `--check`):
+#   cargo   `cargo run -p <package>`: the source tree, for work on a developer's machine
+#   images  the built image in the registry this machine pushes to (POLAR_REGISTRY, default
+#           localhost:5000): the exact artifact that deploys. `up.nu` uses this.
+def agent_source [] { $env.POLAR_AGENT_SOURCE? | default "cargo" }
+
+def push_registry [] { $env.POLAR_REGISTRY? | default "localhost:5000" }
+
+# A local registry speaks plain HTTP.
+def registry_flags [] {
+    let r = (push_registry)
+    if ($r | str starts-with "localhost") or ($r | str starts-with "127.") { ["--tls-verify=false"] } else { [] }
+}
+
+# The image as this machine pulls it from the registry it pushed to (the cluster's name for it is
+# different: see `image_ref`).
+def pushed_image_ref [images: list, name: string, who: string] {
+    let hit = ($images | where image == $name)
+    if ($hit | is-empty) {
+        error make { msg: $"($who): image '($name)' has no row in infra/images.nuon" }
+    }
+    let i = ($hit | first)
+    $"(push_registry)/($i.image):($i.tag)"
+}
+
+# Runs the agent in its image, with no network, asking it `args`. `extra` is more `podman run`
+# options (a mounted file, environment). Returns the completed process.
+def run_in_image [ref: string, args: list<string>, extra: list<string> = []] {
+    let pulled = (^podman pull -q ...(registry_flags) $ref | complete)
+    if $pulled.exit_code != 0 {
+        error make { msg: $"cannot pull ($ref): ($pulled.stderr | str trim). Build and push it first: nu infra/images.nu push <image>" }
+    }
+    let config = (^podman image inspect --format '{{json .Config}}' $ref | from json)
+    let entrypoint = (image_command $config | to json --raw)
+    ^podman run --rm --network none --entrypoint $entrypoint ...$extra $ref ...$args | complete
+}
+
 # The scaffold the agent prints about itself (`<agent> --scaffold`): from the binary, never from a
 # copy. `POLAR_SCAFFOLD_DIR` names a directory of `<workload>.json` files to read instead, for a
-# check that must not build anything (and for scaffolds taken from built images).
+# check that must not build anything.
 def scaffold_of [name: string, spec: record] {
     let dir = ($env.POLAR_SCAFFOLD_DIR? | default "")
     if ($dir | is-not-empty) {
@@ -116,6 +153,14 @@ def scaffold_of [name: string, spec: record] {
             error make { msg: $"($name): no scaffold at ($file)" }
         }
         return (open $file)
+    }
+    if (agent_source) == "images" {
+        let ref = (pushed_image_ref (open ($INFRA | path join "images.nuon")) $spec.image $name)
+        let ran = (try { run_in_image $ref ["--scaffold"] } catch {|e| error make { msg: $"($name): ($e.msg)" } })
+        if $ran.exit_code != 0 {
+            error make { msg: $"($name): `($ref) --scaffold` failed: ($ran.stderr | lines | last 5 | str join ' | ')" }
+        }
+        return ($ran.stdout | from json)
     }
     let package = ($spec.scaffold_package? | default $spec.image)
     let ran = (do { cd ($INFRA | path join "../src/agents"); ^cargo run -q -p $package -- --scaffold } | complete)
@@ -134,12 +179,21 @@ def agent_check [name: string, r: record] {
     if ($dir | is-not-empty) { return [] }
     let file = (mktemp --suffix ".json")
     $r.config_map.content | save --force $file
-    let package = $r.image_name
     let secrets = ($r.env | where secret != null | get name | reduce --fold {} {|n, acc| $acc | insert $n "x" })
-    let ran = (do {
-        cd ($INFRA | path join "../src/agents")
-        with-env $secrets { ^cargo run -q -p $package -- --check --config $file }
-    } | complete)
+    let ran = if (agent_source) == "images" {
+        chmod 644 $file
+        let ref = (pushed_image_ref (open ($INFRA | path join "images.nuon")) $r.image_name $name)
+        let env_flags = ($secrets | columns | each {|n| ["-e" $"($n)=x"] } | flatten)
+        try {
+            run_in_image $ref ["--check" "--config" "/polar-config.json"] (["-v" $"($file):/polar-config.json:ro,Z"] ++ $env_flags)
+        } catch {|e| { exit_code: 1, stderr: $"ERROR: ($e.msg)" } }
+    } else {
+        let package = $r.image_name
+        do {
+            cd ($INFRA | path join "../src/agents")
+            with-env $secrets { ^cargo run -q -p $package -- --check --config $file }
+        } | complete
+    }
     rm -f $file
     if $ran.exit_code == 0 { [] } else {
         $ran.stderr | lines | where {|l| $l | str starts-with "ERROR:" } | each {|l| $"($name): ($l | str replace 'ERROR: ' '')" }
@@ -573,6 +627,13 @@ def main [] { help main }
 # List the workloads in the catalog.
 def "main list" [] {
     all_workloads | select name kind image | each {|w| $w }
+}
+
+# The images the agents of the catalog run, as a JSON array. Those whose workloads say
+# `config: "document"` are asked for their scaffold when the catalog is rendered, so they have to
+# be built first: `up.nu` builds exactly these before it renders.
+def "main document-images" [] {
+    print (all_workloads | where {|w| ($w.config? | default "env") == "document" } | get image | uniq | to json --raw)
 }
 
 # The workload names, as a JSON array (for scripts that render each one).

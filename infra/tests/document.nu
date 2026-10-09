@@ -135,6 +135,22 @@ def main [] {
                 assert equal ($back.sections.0.variables.0.value) "b"
             }
         }
+        {
+            name: "the command an image runs is its entrypoint then its cmd, which is how the agent is asked to describe itself"
+            body: {
+                assert equal (image_command { Cmd: ["/bin/kube-consumer"] }) ["/bin/kube-consumer"]
+                assert equal (image_command { Entrypoint: ["/bin/polar"], Cmd: ["agent"] }) ["/bin/polar" "agent"]
+                assert equal (image_command { Entrypoint: ["/bin/agent"], Cmd: null }) ["/bin/agent"]
+            }
+        }
+        {
+            name: "an image that runs nothing is an error that names the problem"
+            body: {
+                let failed = (try { image_command { Env: [] }; null } catch {|e| $e.msg })
+                assert ($failed != null)
+                assert ($failed | str contains "entrypoint")
+            }
+        }
     ]
 
     let results = ($tests | each {|t|

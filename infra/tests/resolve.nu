@@ -151,6 +151,22 @@ def main [] {
             assert equal (env_value $r "CREDENTIALS_AGENT_CERT_ISSUER_URL") $r.cert_issuer_url
         }
 
+        "what the built image says about itself is what the source tree says": {
+            # The scaffold taken from the image in the local registry, the artifact that deploys,
+            # must give the record the source tree gives. Skipped, and said so, where there is no
+            # podman or the image has not been pushed.
+            let have = (which podman | is-not-empty) and (try { (^curl -sf $"(($env.POLAR_REGISTRY? | default 'localhost:5000'))/v2/kube-consumer/tags/list" | from json | get tags | is-not-empty) } catch { false })
+            if not $have {
+                print "        (skipped: no podman, or kube-consumer is not in the local registry)"
+            } else {
+                for n in ["kube-consumer" "credentials-agent"] {
+                    let from_source = (^nu $RESOLVER json $n | from json)
+                    let from_image = (with-env { POLAR_AGENT_SOURCE: "images" } { ^nu $RESOLVER json $n | from json })
+                    assert equal $from_image $from_source $n
+                }
+            }
+        }
+
         "the template does not see the settings record": {
             # render-catalog hands the template record to json-to-dhall, which rejects
             # a field its schema does not have.

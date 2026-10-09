@@ -197,5 +197,5 @@ Still open:
    Postgres, Keycloak, Jaeger; and the agents not yet on the builder (gitlab, git, scheduler,
    openapi, build-processor, resolver) are in neither. Their numbers are tied to their code by
    convention or by the runtime check only.
-2. **The scaffold comes from a `cargo run`** at render time. Running the built image, which is the
-   exact artifact that deploys, is not done (`configuration.md` 9.7).
+2. **`render.nu` on its own still asks the source tree** (`cargo run`); `up.nu` makes it ask the
+   built image, the artifact that deploys (`configuration.md` 9.7).

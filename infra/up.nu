@@ -17,6 +17,8 @@
 #
 # Steps (each enabled only when the target needs it):
 #   preflight   cluster reachable, run from the repo root                 always
+#   agent-images build and push the images of the agents that describe          --dev
+#               themselves, before the render asks them (--scaffold, --check)
 #   render      nu infra/render.nu <target>                               always
 #   images      build and push only what the rendered manifests reference --dev
 #   namespaces  kubectl apply namespaces.yaml                             namespaces.yaml in apply_order
@@ -147,6 +149,7 @@ def build_plan [config: record, dev: bool] {
 
     [
         { id: "preflight", title: "preflight", on: true, why: "" }
+        { id: "agent-images", title: "agent images", on: $dev, why: "pass --dev to build the agents' images; without it the render asks the ones already in the local registry" }
         { id: "render", title: "render", on: true, why: "" }
         { id: "images", title: "images", on: $dev, why: "pass --dev to build and load images into the local registry" }
         { id: "namespaces", title: "namespaces", on: ("namespaces.yaml" in $order), why: "target has no namespaces.yaml in its apply order" }
@@ -234,8 +237,22 @@ def step_preflight [] {
     ok $"cluster reachable, ($nodes.stdout | lines | length) node\(s\)"
 }
 
+# The agents that describe themselves are asked for their scaffold, and to check the document they
+# will be given, when the catalog is rendered. They are asked in their built image, the artifact
+# that deploys, so those images exist before the render. (The images step later builds the rest
+# and finds these already built.)
+def step_agent_images [] {
+    ^just registry-up
+    let names = (^$nu.current-exe infra/resolve.nu document-images | from json)
+    print $"  ($names | length) agent image\(s\) the render asks: ($names | str join ', ')"
+    try { images sync (images named $names) } catch {|e| fail $e.msg }
+    ok "agent images built and pushed"
+}
+
 def step_render [target: string] {
-    ^$nu.current-exe infra/render.nu $target
+    with-env { POLAR_AGENT_SOURCE: "images" } {
+        ^$nu.current-exe infra/render.nu $target
+    }
     if $env.LAST_EXIT_CODE != 0 { fail "render failed" }
 }
 
@@ -368,6 +385,7 @@ def main [
         print $"[($it.index + 1)/($total)] ($s.title)"
         match $s.id {
             "preflight" => { step_preflight }
+            "agent-images" => { step_agent_images }
             "render" => { step_render $target }
             "images" => { step_images $config }
             "namespaces" => { apply_file $config.output_dir "namespaces.yaml" }
