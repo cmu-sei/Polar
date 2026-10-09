@@ -40,12 +40,19 @@
 #![deny(clippy::disallowed_methods)]
 
 mod config;
+#[cfg(feature = "document")]
+mod document;
 mod env;
 mod error;
 mod section;
 mod var;
 
 pub use config::{Config, ConfigBuilder, ConfigError, Resolved, Source};
+#[cfg(feature = "document")]
+pub use document::{
+    from_environment, DocSection, DocValue, DocVariable, Document, DocumentError, FileEnv,
+    CONFIG_PATH_VARIABLE, FORMAT as DOCUMENT_FORMAT,
+};
 pub use env::{Env, ProcessEnv};
 pub use error::{EnvError, Problem};
 pub use section::Section;

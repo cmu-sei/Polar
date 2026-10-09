@@ -31,6 +31,8 @@ pub enum Source {
     Override,
     /// The environment the agent was given.
     Env,
+    /// The configuration document the agent was given (a populated scaffold).
+    File,
     /// The default in the declaration.
     Default,
     /// Not set anywhere, and not required to be.
@@ -43,6 +45,7 @@ impl Source {
         match self {
             Source::Override => "override",
             Source::Env => "env",
+            Source::File => "file",
             Source::Default => "default",
             Source::Unset => "unset",
         }
@@ -103,13 +106,14 @@ impl Env for Layered<'_> {
 fn effective(
     overrides: &HashMap<&'static str, String>,
     snapshot: &HashMap<&'static str, String>,
+    snapshot_source: Source,
     desc: &VarDesc,
 ) -> (Option<String>, Source) {
     if let Some(value) = overrides.get(desc.name) {
         return (Some(value.clone()), Source::Override);
     }
     match snapshot.get(desc.name).filter(|v| !v.trim().is_empty()) {
-        Some(value) => (Some(value.clone()), Source::Env),
+        Some(value) => (Some(value.clone()), snapshot_source),
         None => match desc.default {
             Some(default) => (Some(default.to_string()), Source::Default),
             None => (None, Source::Unset),
@@ -121,6 +125,7 @@ fn effective(
 pub struct ConfigBuilder<'e> {
     env: &'e dyn Env,
     sections: Vec<&'static Section>,
+    snapshot_source: Source,
 }
 
 impl<'e> ConfigBuilder<'e> {
@@ -129,6 +134,13 @@ impl<'e> ConfigBuilder<'e> {
         if !self.sections.iter().any(|s| std::ptr::eq(*s, section)) {
             self.sections.push(section);
         }
+        self
+    }
+
+    /// Says where the environment's values come from, for the report: the process environment
+    /// (the default, [`Source::Env`]) or a configuration document ([`Source::File`]).
+    pub fn source(mut self, source: Source) -> Self {
+        self.snapshot_source = source;
         self
     }
 
@@ -146,6 +158,7 @@ impl<'e> ConfigBuilder<'e> {
         Config {
             sections: self.sections,
             snapshot,
+            snapshot_source: self.snapshot_source,
             overrides: HashMap::new(),
         }
     }
@@ -154,6 +167,7 @@ impl<'e> ConfigBuilder<'e> {
 pub struct Config {
     sections: Vec<&'static Section>,
     snapshot: HashMap<&'static str, String>,
+    snapshot_source: Source,
     overrides: HashMap<&'static str, String>,
 }
 
@@ -171,6 +185,7 @@ impl Config {
         ConfigBuilder {
             env,
             sections: Vec::new(),
+            snapshot_source: Source::Env,
         }
     }
 
@@ -234,7 +249,7 @@ impl Config {
     pub fn report(&self) -> Vec<Resolved> {
         self.declarations()
             .map(|(section, desc)| {
-                let (value, source) = effective(&self.overrides, &self.snapshot, &desc);
+                let (value, source) = effective(&self.overrides, &self.snapshot, self.snapshot_source, &desc);
                 Resolved {
                     section,
                     name: desc.name,
@@ -297,8 +312,8 @@ impl Config {
             .declarations()
             .map(|(_, desc)| desc)
             .filter(|desc| {
-                effective(&self.overrides, &self.snapshot, desc).0
-                    != effective(&candidate, &self.snapshot, desc).0
+                effective(&self.overrides, &self.snapshot, self.snapshot_source, desc).0
+                    != effective(&candidate, &self.snapshot, self.snapshot_source, desc).0
             })
             .map(|desc| desc.name)
             .collect();
