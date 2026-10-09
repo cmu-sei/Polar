@@ -171,67 +171,157 @@ source, secrets hidden.
 Next, in order: the ConfigurationActor shell, then the scheduler integration, then the credentials agent's use of
 it. Every step is in `remaining-work.md`.
 
-## 9. The agent's own interface (proposal, 2026-10-09)
+## 9. The agent's own interface (decided 2026-10-09, not yet built)
 
-For discussion; none of this is built. See `configuration-flow.md` for what exists and what is
-missing.
+See `configuration-flow.md` for what exists today and what is missing. This section is the design
+that closes the gaps there, agreed with David on 2026-10-09 after a first proposal (a committed
+contract file per agent, and `needs` kept in the catalog) was rejected: both were copies to keep in
+sync with the code.
 
-**The wish.** An agent should be able to say what it is and what it needs, the way a good command
-documents itself: `--help` for its purpose, and a way to list its environment as it was declared
-with `polar-env` and hooked into the infrastructure, for people and for tools (the resolver, a
-scaffolder, a documentation generator, a schedule editor).
+### 9.1 The principle
 
-**The difficulty.** Today an agent's declarations are made while it runs: the builder chain
-(`AgentBuilder::new(..).with_graph_write()..`) executes inside a supervisor's `pre_start`, which
-needs an actor system, and the agent's own variables are read with `std::env` where they are
-used. Asking an agent about itself before it runs therefore has nothing to ask.
+The code is the source of truth. An agent says what it needs once, in code, by registering it with
+`polar-env` and with the builder; everything else is derived from that, by the binary itself.
+Nothing is kept in step by hand, because nobody writes a second copy: they ask the binary for a
+**scaffold**, fill it in, and the agent reads the filled-in document at runtime.
 
-**Proposal: declare it as data, once, before the runtime.**
+### 9.2 What the code declares
 
-1. Each agent crate has one `const SPEC: AgentSpec`: its name, a one-line purpose, an optional long
-   help text (a markdown file pulled in with `include_str!`, and a generated generic one when it
-   is absent), its kind, the capabilities it requires, its shutdown budget, the sections of
-   variables it adds to the builder's, and, as information, the topics it subscribes to and
-   publishes.
-2. The builder is constructed from the spec (`AgentBuilder::new(myself, &SPEC)`), and the `with_*`
-   methods that declare things (graph write, encryption, self-test, the budget, `requires`) go
-   away. What the agent says it is and what it does cannot differ, for the reason `polar-env`
-   exists: one declaration, and everything else derived from it.
-3. A shared `main` wrapper (`polar_agent_builder::run(&SPEC, start)`) handles the command line
-   before any runtime or actor exists, as pure functions of the spec and the process environment:
-   `--help`, `--describe [--json]`, `--check`, `--effective [--json]`. With no arguments it runs
-   the agent, so a container's default command does not change. `polar-config-check` becomes the
-   same functions over the builder's fixed composition, kept for the render step.
-4. The agent's own variables are declared in sections with `polar-env` and read with
-   `config.read(&VAR)`, as the graph's and the health actor's are, so they appear in `--describe`
-   and `--effective`, and a variable the catalog sets that no section declares is an error.
+One value, in the agent's library crate, built by a function that needs no actors and no runtime,
+so a shared `main` can call it before anything starts:
 
-**How tools get an agent's description without building and running every agent.** Options:
+```rust
+pub fn declare() -> Agent {
+    Agent::new("kube-consumer", "Writes what the Kubernetes observer sees to the graph")
+        .help(include_str!("../HELP.md"))          // optional; a generic help is generated without it
+        .needs(Capability::GraphWrite)
+        .needs(Capability::Encryption)
+        .environment(&OWN_SECTION)                 // the agent's own variables, declared with polar-env
+        .shutdown_budget(SHUTDOWN_BUDGET)          // the least it needs to drain
+}
+```
 
-- Ask each binary at render time. Exact, but it needs every agent built before `resolve.nu check`
-  can run.
-- A committed contract file per agent, `infra/contracts/<agent>.json`, generated from the
-  binary's `--describe --json` by a recipe, with a test that fails when the file is stale. The
-  resolver reads the files. No build at render time, and a change to what an agent requires shows up
-  in review as a diff. This is the recommendation.
-- A registry crate that depends on every agent library. Cheap to ask, but it drags every agent's
-  dependencies into the checker.
+The supervisor builds `AgentBuilder` from this same value, and the `with_*` methods that declared
+things on the builder (graph write, encryption, the budget, `requires`) go away, so what the agent
+says it is and what it does cannot differ. This is not a manifest next to the code; it is the one
+statement of the code's needs, and the builder consumes it. Link-time registration of sections
+alone would not do: every agent links the graph crate, so every scaffold would list the graph's
+variables as required. The capability list is what says which sections apply.
 
-**What the resolver can then do.** Compare the catalog's `needs` with the code's `requires` (a
-mismatch fails the render); refuse an `env` entry in a workload that the agent does not declare,
-and a required variable nothing sets; show, in `explain`, the code's defaults for the variables the
-manifest leaves unset, so the two views become one; and scaffold a workload entry from the
-contract. The same file feeds the generated environment documentation and a schedule editor
-(which variables are `Dynamic`).
+The agent's own variables are declared in sections with `polar-env` and read with
+`config.read(&VAR)`, as the graph's and the health actor's are. The existing
+`disallowed_methods` lint, which bans `std::env::var` in the migrated crates, is extended to the
+Jira and Kubernetes agents, so an agent cannot read a variable it did not declare: it does not
+compile.
 
-**Things that need an answer:**
+### 9.3 The command line
 
-- Flags (`--describe`) or subcommands (`describe`)? Flags match `polar-config-check` and cannot be
-  confused with a mode of the agent; subcommands read better and extend to `help <topic>`.
-- Requirements that depend on configuration (a capability only when a feature is on): the spec
-  holds the static superset and conditions are expressed as section relations, as the graph's
+A shared `main` wrapper, `polar_agent_builder::run(declare(), start)`, answers the command line
+before any runtime or actor exists, as pure functions of the declaration and a configuration
+document. With no arguments it runs the agent, so a container's default command does not change.
+
+| Flag | For | What it does |
+| --- | --- | --- |
+| `--help` | people | the agent's purpose and long help text (generated and generic when the agent has none), the capabilities it needs, its variables in brief, and these flags |
+| `--scaffold` | tools and people | prints the configuration document as JSON: the schema with every variable's type, default, secrecy, mutability and documentation, the capabilities required, the minimum shutdown budget, and each value empty. With `--config FILE` it prints the same document filled from FILE, with where each value came from and every problem found |
+| `--check --config FILE` | the resolver, CI | the judgement the agent makes when it starts, on FILE; exit 0 or 1, every problem on stderr |
+
+`--describe` and `--effective` are not separate flags: the schema, the empty document and the
+populated one are one shape, so one flag prints them. `polar-config-check` stays until the resolver
+uses the agents themselves; it covers the builder's fixed composition.
+
+### 9.4 The document
+
+```json
+{
+  "format": 1,
+  "agent": { "name": "kube-consumer", "purpose": "..." },
+  "requires": ["cassini", "graph-write", "encryption"],
+  "sections": [
+    { "name": "cassini-client", "capability": "cassini", "variables": [
+      { "name": "BROKER_ADDR", "type": "text", "required": true, "secret": false,
+        "default": null, "mutability": "static", "doc": "the broker's address, host:port",
+        "value": null }
+    ] },
+    { "name": "graph", "capability": "graph-write", "variables": [
+      { "name": "GRAPH_PASSWORD", "type": "text", "required": true, "secret": true,
+        "value": { "env": "GRAPH_PASSWORD" }, "source": "file" }
+    ] }
+  ]
+}
+```
+
+A secret is never a literal in the document: the value is a reference (`{ "env": NAME }`), and the
+pod wires the real value through `secretKeyRef`, as today. The shutdown budget is a variable with
+a minimum the code declares, so "the deployment may give more, never less" is a property of the
+document and not of a rule copied into the resolver.
+
+### 9.5 Before deploy
+
+1. The resolver obtains the scaffold from the binary (9.7).
+2. It fills each variable from, in order: the workload's own override, what a capability
+   contributes (the nuon's `capabilities.nuon`: certificate directory, the Cassini address),
+   the kind's default, the target's facts, then the code's default.
+3. It checks: nothing required is left empty, nothing was set that the agent does not declare, no
+   capability the scaffold requires is unknown to the catalog, the shutdown budget is not below the
+   minimum, and `--check --config` passes, which is the agent's own startup judgement run offline.
+4. It writes the populated document into a ConfigMap (`<workload>-config`, key `config.json`),
+   which the agent chart mounts read-only at `/etc/polar/config.json`, and sets `POLAR_CONFIG` to
+   that path.
+
+The workload entry no longer says `needs`: the capabilities come from the scaffold, so the code
+is authoritative and the catalog cannot disagree with it. What the catalog still holds is
+deployment knowledge that cannot live in a binary: what a capability means for the pod (volumes,
+certificates to get, services to wait for, cluster roles), the addresses of services, and the
+target's facts. Those are values and resources to fill in, checked against the scaffold, not a
+mirror of it. The per-workload `shutdown.budget_secs` figure disappears; the budget defaults to
+the code's minimum and is overridden only to give more.
+
+### 9.6 At runtime
+
+`polar-env`'s `Env` is a one-method trait, `var(name)`. A `FileEnv` that serves the document's
+values drops in beneath `Config`, `Section` and `config.read`, which do not change; `Source` gains
+`File`, and the override layer stays above it for scheduled configuration. The environment still
+carries the secrets the document refers to, and the one variable `POLAR_CONFIG`.
+
+For the agents on the builder the document is the only source of declared variables. Agents not
+yet on the builder keep reading the environment and are unaffected. Two things follow:
+
+- `polar-healthcheck`, the liveness probe the kubelet runs in the agent's container, reads
+  `POLAR_HEALTH_*` from the environment today; it reads the same document.
+- Running an agent by hand is `agent --scaffold > config.json`, fill it in, and
+  `POLAR_CONFIG=config.json agent`.
+
+### 9.7 Getting the scaffold at render time
+
+The resolver has to run the agent's own binary, so there is no copy that can go stale:
+
+- **Locally:** `cargo run -q -p <agent> -- --scaffold`. Incremental after the first build, but a
+  cold run compiles every agent.
+- **For a deploy:** the built image, `podman run --rm <image> --scaffold`, which is the exact
+  artifact that will run. `up.nu` builds the agent images first (the image list comes from the
+  catalog, not from the render), then renders.
+
+### 9.8 Order of work
+
+1. `polar-env`: the document type, `FileEnv`, `Source::File`, secret references; `polar-healthcheck`
+   reads it.
+2. The builder: `Agent`, the builder constructed from it, the `main` wrapper and the three flags.
+3. kube-consumer end to end: declare it, scaffold it, fill it from the resolver, render the
+   ConfigMap, run it on the cluster.
+4. The other five builder agents; the Jira and Kubernetes variables declared and the lint
+   extended.
+5. Agents that bypass the catalog, later (see `remaining-work.md`).
+
+### 9.9 Still open
+
+- Where an agent's long help text lives, and whether a missing one is an error in CI or a generic
+  fallback (a fallback for now; the one-line purpose is required).
+- Requirements that depend on configuration (a capability only when a feature is on): a static
+  superset in the declaration, with the condition as a relation inside a section, as the graph's
   client-certificate trio already is.
-- Agents that do not use the builder (the Cassini broker, `polar-init`) could use the same wrapper
-  with a spec that has no capabilities, but that is later.
-- Where the long help text lives, and whether a missing one is an error in CI for builder agents
-  or a generic fallback.
+- Versioning the document (`format`), and what an agent does with a document of a newer format.
+- Whether the ConfigMap changing restarts the Job (it does not by itself; a Job's template is
+  immutable, so a changed document is a changed manifest and `up.nu` restarts it as it does today).
+- The Cassini broker and `polar-init` do not use the builder; the same wrapper with a declaration
+  that has no capabilities could serve them, later.
