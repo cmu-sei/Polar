@@ -3,7 +3,7 @@
 -- The objects that live alongside a workload: for each cluster role, the
 -- ClusterRole and a ClusterRoleBinding of the same name to the workload's
 -- ServiceAccount; for each token Secret, a service-account-token Secret for
--- that ServiceAccount.
+-- that ServiceAccount; for each persistent volume claim and Service, the object itself.
 --
 -- The ServiceAccount itself is not emitted here: render.nu emits one for
 -- every workload identity no manifest declares.
@@ -95,9 +95,47 @@ let render =
                   , data = Some [ { mapKey = c.key, mapValue = c.content } ]
                   }
 
+        let toPvc =
+              λ(c : T.PvcEntry) →
+                kubernetes.Resource.PersistentVolumeClaim
+                  kubernetes.PersistentVolumeClaim::{
+                  , metadata = kubernetes.ObjectMeta::{
+                    , name = Some c.name
+                    , namespace = Some v.namespace
+                    }
+                  , spec = Some kubernetes.PersistentVolumeClaimSpec::{
+                    , accessModes = Some [ "ReadWriteOnce" ]
+                    , storageClassName = Some c.storage_class
+                    , resources = Some kubernetes.VolumeResourceRequirements::{
+                      , requests = Some [ { mapKey = "storage", mapValue = c.size } ]
+                      }
+                    }
+                  }
+
+        let toService =
+              λ(c : T.ServiceEntry) →
+                kubernetes.Resource.Service
+                  kubernetes.Service::{
+                  , metadata = kubernetes.ObjectMeta::{
+                    , name = Some c.name
+                    , namespace = Some v.namespace
+                    }
+                  , spec = Some kubernetes.ServiceSpec::{
+                    , selector = Some [ { mapKey = "name", mapValue = c.name } ]
+                    , ports = Some
+                      [ kubernetes.ServicePort::{
+                        , port = c.port
+                        , targetPort = Some (kubernetes.NatOrString.Nat c.port)
+                        }
+                      ]
+                    }
+                  }
+
         in    Prelude.List.map T.ClusterRoleEntry kubernetes.Resource toClusterRole v.cluster_roles
             # Prelude.List.map T.ClusterRoleEntry kubernetes.Resource toBinding v.cluster_roles
             # Prelude.List.map Text kubernetes.Resource toTokenSecret v.sa_token_secrets
             # Prelude.List.map T.ConfigMapEntry kubernetes.Resource toConfigMap v.config_maps
+            # Prelude.List.map T.PvcEntry kubernetes.Resource toPvc v.pvcs
+            # Prelude.List.map T.ServiceEntry kubernetes.Resource toService v.services
 
 in  render

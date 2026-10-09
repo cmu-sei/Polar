@@ -1,7 +1,7 @@
 -- infra/targets/local-minimal/overrides.dhall
 --
 -- Minimal target value overrides, scoped per chart.
--- Covers: neo4j, cassini, cert-issuer, jaeger, credentials-agent.
+-- Covers: neo4j, cassini, cert-issuer, jaeger.
 -- Each chart's main.nu merges: values.dhall // overrides.<chart>
 --
 -- Image references are prefixed with the local registry address
@@ -46,11 +46,6 @@ in
   }
 , cassini =
   { image           = registry ++ "cassini:latest"
-  , imagePullSecrets = [] : List { name : Optional Text }
-  }
-, credentialsAgent =
-  { image            = registry ++ "credentials-agent-consumer:latest"
-  , observerImage    = registry ++ "credentials-agent-observer:latest"
   , imagePullSecrets = [] : List { name : Optional Text }
   }
 , certIssuer =

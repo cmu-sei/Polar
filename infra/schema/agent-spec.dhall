@@ -23,11 +23,13 @@ let VolumeEntry =
       -- secret set    -> a Secret volume
       -- audience set  -> a projected ServiceAccount token with that audience
       -- config_map set -> a ConfigMap volume, of that ConfigMap
-      -- neither       -> an emptyDir
+      -- claim set     -> a persistent volume claim, of that name
+      -- none of them  -> an emptyDir
       { name : Text
       , secret : Optional Text
       , audience : Optional Text
       , config_map : Optional Text
+      , claim : Optional Text
       }
 
 let MountEntry = { name : Text, path : Text, read_only : Bool }
@@ -68,6 +70,8 @@ let Spec =
       , volumes : List VolumeEntry
       , mounts : List MountEntry
       , init_mounts : List InitMountEntry
+      , init_env : List EnvEntry
+      , ports : List Natural
       , dep_checks : List Text
       , certs : List Text
       }

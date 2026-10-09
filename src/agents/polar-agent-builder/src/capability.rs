@@ -226,6 +226,12 @@ mod tests {
             .collect()
     }
 
+    /// Capabilities the catalog gives a deployment that no code ever requires: the shape of the
+    /// pod (a persistent volume, a pinned CA, an init container that skips the escrow bootstrap),
+    /// not something the agent's own health depends on. They are in `POLAR_CAPABILITIES`, which
+    /// ignores names the code does not know.
+    const DEPLOYMENT_ONLY: &[&str] = &["escrow-authority", "persistent-data", "pinned-ca"];
+
     #[test]
     fn names_match_the_deployment_catalog() {
         let path =
@@ -238,6 +244,13 @@ mod tests {
         };
 
         let mut in_catalog = catalog_keys(&nuon);
+        for name in DEPLOYMENT_ONLY {
+            assert!(
+                in_catalog.iter().any(|k| k == name),
+                "{name} is listed as deployment-only but the catalog has no such capability"
+            );
+        }
+        in_catalog.retain(|k| !DEPLOYMENT_ONLY.contains(&k.as_str()));
         let mut in_code: Vec<String> = Capability::ALL
             .iter()
             .map(|c| c.as_str().to_string())

@@ -52,7 +52,10 @@ def service_vars [services: record, cluster: record] {
     | reduce --fold {} {|it, acc|
         let ns = ($cluster.namespaces | get $it.s.namespace)
         let dns = $"($it.s.dns_name).($ns).svc.($cluster.domain)"
-        $acc | insert $it.name { dns: $dns, port: $it.s.port, addr: $"($dns):($it.s.port)" }
+        let addr = $"($dns):($it.s.port)"
+        # A service that says its scheme has a URL; one that does not is not addressed by URL.
+        let base = { dns: $dns, port: $it.s.port, addr: $addr }
+        $acc | insert $it.name (if ($it.s.scheme? | is-empty) { $base } else { $base | insert url $"($it.s.scheme)://($addr)" })
     }
 }
 
@@ -67,9 +70,10 @@ def subst [text: string, vars: record, who: string] {
             | str replace --all $"{($it.name).dns}" $it.v.dns
             | str replace --all $"{($it.name).port}" ($it.v.port | into string)
             | str replace --all $"{($it.name).addr}" $it.v.addr
+            | str replace --all $"{($it.name).url}" ($it.v.url? | default $"{($it.name).url}")
         }
     )
-    if ($out =~ '\{[A-Za-z0-9-]+\.(dns|port|addr)\}') {
+    if ($out =~ '\{[A-Za-z0-9-]+\.(dns|port|addr|url)\}') {
         error make { msg: $"($who): unresolved placeholder in '($text)'" }
     }
     $out
@@ -185,11 +189,19 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     if $document_mode and (($entry.needs? | default [] | is-not-empty) or ($ov.needs? | default [] | is-not-empty)) {
         error make { msg: $"($name): the catalog lists `needs`, but this agent says its own: remove it from the entry \(the binary requires: (requires_of $scaffold | str join ', ')\)" }
     }
+    # What the deployment gives beyond what the code requires: a workload may be given the graph
+    # without needing it to be healthy, for example. A document agent says what it requires in
+    # its scaffold and the entry says what else it is provided; an env agent lists `needs`.
+    let provided = (($entry.provides? | default []) ++ ($ov.provides? | default []))
     let needs = if $document_mode {
-        ($kind.needs ++ (requires_of $scaffold) | uniq)
+        ($kind.needs ++ (requires_of $scaffold) ++ $provided | uniq)
     } else {
-        ($kind.needs ++ ($entry.needs? | default []) ++ ($ov.needs? | default []) | uniq)
+        ($kind.needs ++ ($entry.needs? | default []) ++ ($ov.needs? | default []) ++ $provided | uniq)
     }
+
+    # Services whose certificates the health check still watches but that polar-init does not wait
+    # for before the workload starts: one that must be able to start, and serve, while they are down.
+    let no_start_wait = (($entry.no_start_wait? | default []) ++ ($ov.no_start_wait? | default []))
 
     mut env_list: list<any> = []
     mut volumes: list<any> = [
@@ -202,6 +214,10 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     mut cert_dirs: list<any> = []
     mut sa_secret: any = null
     mut cluster_roles: list<any> = []
+    mut pvcs: list<any> = []
+    mut init_env: list<any> = []
+    mut ports: list<any> = []
+    mut exposed: list<any> = []
 
     for n in $needs {
         if not ($n in ($caps | columns)) {
@@ -216,7 +232,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
             if $svc == null {
                 error make { msg: $"capability '($n)' names service '($dep.service)', which is not in services.nuon" }
             }
-            $deps = ($deps | append { endpoint: $"($svc.addr):($dep.ttl_secs)", from: $n })
+            $deps = ($deps | append { endpoint: $"($svc.addr):($dep.ttl_secs)", service: $dep.service, from: $n })
         }
 
         # identity: client certificates, each with its volume and mounts.
@@ -228,21 +244,34 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
             $cert_dirs = ($cert_dirs | append $c.dir)
         }
 
+        # init: what polar-init gets besides the certificates it issues.
+        for e in ($cap.init.env? | default []) {
+            $init_env = ($init_env | append (env_entry $e $vars $n $name))
+        }
+        for m in ($cap.init.mounts? | default []) {
+            $init_mounts = ($init_mounts | append { name: (subst $m.name $vars $name), path: (subst $m.path $vars $name), from: $n })
+        }
+
         # pod: what the agent container gets.
         for e in ($cap.pod.env? | default []) {
             $env_list = ($env_list | append (env_entry $e $vars $n $name))
         }
         for v in ($cap.pod.volumes? | default []) {
             let sec = (if ($v.secret? | is-empty) { null } else { subst $v.secret $vars $name })
-            $volumes = ($volumes | append { name: (subst $v.name $vars $name), secret: $sec, audience: null, from: $n })
+            let claim = (if ($v.claim? | is-empty) { null } else { subst $v.claim $vars $name })
+            let cm = (if ($v.config_map? | is-empty) { null } else { subst $v.config_map $vars $name })
+            $volumes = ($volumes | append { name: (subst $v.name $vars $name), secret: $sec, audience: null, claim: $claim, config_map: $cm, from: $n })
         }
         for m in ($cap.pod.mounts? | default []) {
-            $mounts = ($mounts | append { name: (subst $m.name $vars $name), path: $m.path, read_only: $m.read_only, from: $n })
+            $mounts = ($mounts | append { name: (subst $m.name $vars $name), path: (subst $m.path $vars $name), read_only: $m.read_only, from: $n })
         }
 
         # resources: objects that live alongside the workload.
         if ($cap.resources.sa_token_secret? | is-not-empty) {
             $sa_secret = (subst $cap.resources.sa_token_secret $vars $name)
+        }
+        for p in ($cap.resources.pvcs? | default []) {
+            $pvcs = ($pvcs | append { name: (subst $p.name $vars $name), storage_class: $cluster.storage.class, size: $cluster.storage.size })
         }
         for r in ($cap.resources.cluster_roles? | default []) {
             $cluster_roles = ($cluster_roles | append { name: (subst $r.name $vars $name), rules: $r.rules, from: $n })
@@ -251,6 +280,17 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
 
     for e in (($entry.env? | default []) ++ ($ov.env? | default [])) {
         $env_list = ($env_list | append (env_entry $e $vars "entry" $name))
+    }
+
+    # A workload that answers requests on a port: the container declares it, a Service exposes it,
+    # and the variable the agent reads it from is given the same number, so they cannot differ.
+    let service = ($entry.service? | default null)
+    if $service != null {
+        $ports = [$service.port]
+        $exposed = [{ name: $name, port: $service.port }]
+        if ($service.port_variable? | is-not-empty) {
+            $env_list = ($env_list | append { name: $service.port_variable, value: ($service.port | into string), secret: null, key: null, from: "service" })
+        }
     }
 
     # Shutdown: the grace period is derived, never set on its own, so it cannot
@@ -305,7 +345,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         $volumes = ($volumes | append { name: $DOCUMENT_VOLUME, secret: null, audience: null, config_map: $config_map.name, from: "document" })
         $mounts = ($mounts | append { name: $DOCUMENT_VOLUME, path: $DOCUMENT_DIR, read_only: true, from: "document" })
     }
-    $volumes = ($volumes | each {|v| $v | default null config_map })
+    $volumes = ($volumes | each {|v| $v | default null config_map | default null claim })
 
     let ci = ($vars | get cert-issuer)
     let scheme = ($services | get cert-issuer | get -o scheme | default "https")
@@ -337,9 +377,11 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         volumes: $volumes
         mounts: $mounts
         init_mounts: $init_mounts
-        dep_checks: ($deps | get endpoint)
+        init_env: $init_env
+        ports: $ports
+        dep_checks: ($deps | where {|d| not ($d.service in $no_start_wait) } | get endpoint)
         certs: ($certs | get spec)
-        resources: { cluster_roles: ($cluster_roles | reject from), sa_token_secrets: (if $sa_secret == null { [] } else { [$sa_secret] }) }
+        resources: { cluster_roles: ($cluster_roles | reject from), sa_token_secrets: (if $sa_secret == null { [] } else { [$sa_secret] }), pvcs: $pvcs, services: $exposed }
         config_map: $config_map
         config_problems: $config_problems
         image_name: ($spec.scaffold_package? | default $spec.image)
@@ -357,6 +399,7 @@ def for_template [r: record] {
     | update volumes { reject from }
     | update mounts { reject from }
     | update init_mounts { reject from }
+    | update init_env { reject from }
 }
 
 # ── Validation ───────────────────────────────────────────────────────────────
@@ -572,7 +615,7 @@ def "main explain" [
     print ""
     print "  volumes:"
     for v in $r._from.volumes {
-        let what = if $v.secret != null { $"secret ($v.secret)" } else if ($v.config_map? | default null) != null { $"ConfigMap ($v.config_map)" } else if $v.audience != null { $"projected token, audience ($v.audience)" } else { "emptyDir" }
+        let what = if $v.secret != null { $"secret ($v.secret)" } else if ($v.claim? | default null) != null { $"persistent volume claim ($v.claim)" } else if ($v.config_map? | default null) != null { $"ConfigMap ($v.config_map)" } else if $v.audience != null { $"projected token, audience ($v.audience)" } else { "emptyDir" }
         print $"    ($v.name | fill -w 24)  ($what)   [($v.from)]"
     }
     print ""
@@ -588,11 +631,13 @@ def "main explain" [
     print ""
     print "  resources:"
     for s in $r.resources.sa_token_secrets { print $"    Secret ($s) \(service-account-token\)" }
+    for p in $r.resources.pvcs { print $"    PersistentVolumeClaim ($p.name) \(($p.size), class ($p.storage_class)\)" }
+    for s in $r.resources.services { print $"    Service ($s.name) on port ($s.port)" }
     for c in $r._from.roles {
         let rules = ($c.rules | each {|x| $"($x.verbs | str join '/') on ($x.resources | str join ',')" } | str join "; ")
         print $"    ClusterRole ($c.name) bound to ($r.service_account): ($rules)   [($c.from)]"
     }
-    if ($r.resources.sa_token_secrets | is-empty) and ($r._from.roles | is-empty) { print "    (none)" }
+    if ($r.resources.sa_token_secrets | is-empty) and ($r._from.roles | is-empty) and ($r.resources.pvcs | is-empty) and ($r.resources.services | is-empty) { print "    (none)" }
 }
 
 # The health and shutdown settings the rules in rules.nu read, as JSON.
@@ -624,6 +669,8 @@ def "main resources" [
         service_account: $r.service_account
         cluster_roles: $r.resources.cluster_roles
         sa_token_secrets: $r.resources.sa_token_secrets
+        pvcs: $r.resources.pvcs
+        services: $r.resources.services
         config_maps: (if $r.config_map == null { [] } else { [$r.config_map] })
     } | to json
 }

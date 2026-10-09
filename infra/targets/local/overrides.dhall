@@ -72,11 +72,6 @@ in
   , observer  = { image = registry ++ "openapi-observer:latest", openapiEndpoint = "http://localhost:3000/api-docs/openapi.json" }
   , processor = { image = registry ++ "openapi-processor:latest" }
   }
-, credentialsAgent =
-  { image            = registry ++ "credentials-agent-consumer:latest"
-  , observerImage    = registry ++ "credentials-agent-observer:latest"
-  , imagePullSecrets = [] : List { name : Optional Text }
-  }
 , certIssuer =
   { image            = registry ++ "cert-issuer:latest"
   , polarInitImage   = registry ++ "polar-init:latest"

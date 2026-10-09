@@ -20,4 +20,8 @@
 
   # Audience of the projected ServiceAccount token presented to cert-issuer.
   sa_token_audience: "polar-cert-issuer.local"
+
+  # Persistent volume claims a workload's capabilities ask for: the storage class the cluster
+  # provides and how much each claim asks for.
+  storage: { class: "managed-csi", size: "1Gi" }
 }

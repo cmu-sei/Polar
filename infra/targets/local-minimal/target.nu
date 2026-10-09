@@ -28,7 +28,6 @@ def main [] {
             ($layers | path join "2-services/postgres/main.nu")
             ($layers | path join "2-services/keycloak/main.nu")
             ($layers | path join "2-services/cassini/main.nu")
-            ($layers | path join "2-services/credentials-agent/main.nu")
         ]
 
         apply_order : [
@@ -51,8 +50,9 @@ def main [] {
             "keycloak-service.yaml"
             "keycloak-deployment.yaml"
             "cassini.yaml"
-            "credentials-agent-pvc.yaml"
-            "credentials-agent-job.yaml"
+            "credentials-agent-resources.yaml"
+            "credentials-agent.yaml"
+            "credentials-agent-observer-resources.yaml"
             "credentials-agent-observer.yaml"
             "jaeger.yaml"
             "ace-rbac.yaml"

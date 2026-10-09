@@ -18,6 +18,8 @@ const BUDGETS = {
     kube-consumer: 45
     jira-observer: 40
     jira-processor: 40
+    credentials-agent: 50
+    credentials-agent-observer: 40
 }
 
 # The record the template takes, as the pipeline gets it.
@@ -86,6 +88,67 @@ def main [] {
             let r = (^nu ($RESOLVER) check | complete)
             assert equal $r.exit_code 0 $r.stderr
             assert ($r.stdout | str contains "resolve cleanly")
+        }
+
+        "the credentials consumer keeps its ledger on a persistent volume it is given as a claim": {
+            let r = (resolve "credentials-agent")
+            let data = ($r.volumes | where name == "credentials-agent-data")
+            assert equal ($data | length) 1
+            assert equal ($data | first | get claim) "credentials-agent-data"
+            assert equal ($r.mounts | where name == "credentials-agent-data" | first | get path) "/var/lib/credentials-agent"
+            let res = (^nu $RESOLVER resources credentials-agent | from json)
+            assert equal ($res.pvcs | get name) ["credentials-agent-data"]
+        }
+
+        "a workload whose code does not need the graph can still be given it": {
+            # The consumer writes the graph through its own section and must not need it to be
+            # healthy, so the entry provides it; the pod gets the same as for any graph-write.
+            let r = (resolve "credentials-agent")
+            assert ("graph-write" in $r.needs)
+            assert (env_value $r "GRAPH_ENDPOINT" | is-not-empty)
+            assert (env_value $r "POLAR_HEALTH_DEP_ENDPOINTS" | str contains "polar-db-svc")
+            assert equal (env_value $r "POLAR_CAPABILITIES" | split row "," | sort) ($r.needs | sort)
+        }
+
+        "a workload that must start without its dependencies is watched for them but does not wait at start": {
+            let consumer = (resolve "credentials-agent")
+            assert equal $consumer.dep_checks []
+            let health = (env_value $consumer "POLAR_HEALTH_DEP_ENDPOINTS")
+            assert ($health | str contains "cassini-ip-svc")
+            assert ($health | str contains "polar-db-svc")
+            # and one that does not say so waits, as every agent did
+            assert (resolve "kube-consumer" | get dep_checks | is-not-empty)
+        }
+
+        "the escrow authority's polar-init is told to skip the escrow bootstrap, and no other is": {
+            let consumer = (resolve "credentials-agent")
+            assert ($consumer.init_env | any {|e| $e.name == "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP" and $e.value == "true" })
+            let other = (resolve "kube-consumer")
+            assert ($other.init_env | where name == "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP" | is-empty)
+        }
+
+        "the observer is a Service on the port its code listens on": {
+            let r = (resolve "credentials-agent-observer")
+            assert equal $r.ports [8080]
+            assert equal (env_value $r "CREDENTIALS_AGENT_OBSERVER_PORT") "8080"
+            let res = (^nu $RESOLVER resources credentials-agent-observer | from json)
+            assert equal ($res.services | get name) ["credentials-agent-observer"]
+            assert equal ($res.services | first | get port) 8080
+        }
+
+        "both trust cert-issuer's CA from the first request, as a mounted file": {
+            for n in ["credentials-agent" "credentials-agent-observer"] {
+                let r = (resolve $n)
+                assert ($r.volumes | any {|v| $v.name == "polar-ca" and $v.config_map == "polar-ca" }) $n
+                assert ($r.init_env | any {|e| $e.name == "POLAR_INIT_CA_CERT" and $e.value == "/etc/polar-ca/ca.pem" }) $n
+                assert ($r.init_mounts | any {|m| $m.path == "/etc/polar-ca" }) $n
+            }
+            assert equal (env_value (resolve "credentials-agent") "CREDENTIALS_AGENT_CA_CERT") "/etc/polar-ca/ca.pem"
+        }
+
+        "the consumer is told where cert-issuer is, from the catalog's facts": {
+            let r = (resolve "credentials-agent")
+            assert equal (env_value $r "CREDENTIALS_AGENT_CERT_ISSUER_URL") $r.cert_issuer_url
         }
 
         "the template does not see the settings record": {

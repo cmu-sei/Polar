@@ -51,6 +51,7 @@ let render =
                     if    Prelude.Optional.null Text x.secret
                        && Prelude.Optional.null Text x.audience
                        && Prelude.Optional.null Text x.config_map
+                       && Prelude.Optional.null Text x.claim
                     then  Some kubernetes.EmptyDirVolumeSource::{=}
                     else  None kubernetes.EmptyDirVolumeSource.Type
                 , secret =
@@ -73,6 +74,16 @@ let render =
                           }
                       )
                       x.config_map
+                , persistentVolumeClaim =
+                    Prelude.Optional.map
+                      Text
+                      kubernetes.PersistentVolumeClaimVolumeSource.Type
+                      ( λ(claimName : Text) →
+                          kubernetes.PersistentVolumeClaimVolumeSource::{
+                          , claimName = claimName
+                          }
+                      )
+                      x.claim
                 , projected =
                     Prelude.Optional.map
                       Text
@@ -132,7 +143,12 @@ let render =
                     v.pull_policy
                     v.sa_token_volume
                     v.cert_issuer_url
-                    functions.noEnv
+                    ( Prelude.List.map
+                        T.EnvEntry
+                        kubernetes.EnvVar.Type
+                        toEnv
+                        v.init_env
+                    )
                     v.sa_token_path
                     ( Prelude.List.map
                         T.InitMountEntry
@@ -151,6 +167,18 @@ let render =
                   , imagePullPolicy = Some v.pull_policy
                   , securityContext = Some Constants.DropAllCapSecurityContext
                   , env = Some env
+                  , ports =
+                      if    Prelude.List.null Natural v.ports
+                      then  None (List kubernetes.ContainerPort.Type)
+                      else  Some
+                              ( Prelude.List.map
+                                  Natural
+                                  kubernetes.ContainerPort.Type
+                                  ( λ(port : Natural) →
+                                      kubernetes.ContainerPort::{ containerPort = port }
+                                  )
+                                  v.ports
+                              )
                   , volumeMounts = Some mounts
                   , livenessProbe = Some kubernetes.Probe::{
                     , exec = Some { command = Some [ "polar-healthcheck" ] }

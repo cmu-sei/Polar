@@ -9,7 +9,7 @@
 # `nu infra/resolve.nu check`):
 #
 #   pod         env: [{ name, value | secret+key }]
-#               volumes: [{ name, secret? }]      (no secret = emptyDir)
+#               volumes: [{ name, secret? | claim? | config_map? }]   (none of them = emptyDir)
 #               mounts: [{ name, path, read_only }]
 #   identity    certs: [{ dir, volume, read_only }]
 #                 dir/volume: where the cert lives; read_only in the agent
@@ -17,7 +17,10 @@
 #   dependency  service, ttl_secs
 #                 service: a key of services.nuon; ttl_secs: minimum remaining
 #                 lifetime of its certificate
-#   resources   sa_token_secret: name of a service-account-token Secret
+#   init        env: [{ name, value }], mounts: [{ name, path }]
+#                 given to polar-init, besides the certificates it issues
+#   resources   pvcs: [{ name }]   (storage class and size are the cluster's)
+#               sa_token_secret: name of a service-account-token Secret
 #               cluster_roles: [{ name, rules: [{ api_groups, resources, verbs }] }]
 #                 (each role is bound to the workload's ServiceAccount)
 #
@@ -36,6 +39,7 @@
     }
     identity: { certs: [ { dir: "/etc/tls/certs", volume: "polar-certs", read_only: false } ] }
     dependency: { service: "cassini", ttl_secs: 300 }
+    init: {}
     resources: {}
   }
 
@@ -56,6 +60,7 @@
     }
     identity: { certs: [ { dir: "/etc/neo4j-client-tls", volume: "neo4j-client-tls", read_only: true } ] }
     dependency: { service: "neo4j", ttl_secs: 300 }
+    init: {}
     resources: {}
   }
 
@@ -69,6 +74,7 @@
     pod: {}
     identity: {}
     dependency: {}
+    init: {}
     resources: {}
   }
 
@@ -84,11 +90,57 @@
     }
     identity: {}
     dependency: {}
+    init: {}
     resources: {
       sa_token_secret: "{workload}-sa-token"
       cluster_roles: [
         { name: "{workload}-read", rules: [ { api_groups: ["*"], resources: ["*"], verbs: ["get", "list", "watch"] } ] }
       ]
     }
+  }
+
+  # State that must outlive the pod, on a persistent volume claim named for the workload and
+  # mounted at /var/lib/<workload>. The claim is created alongside the workload (the storage
+  # class and size are the cluster's, in cluster.nuon). It is not an emptyDir: the credentials
+  # agent keeps its ledger's event log and its escrow keypair here, and losing either is losing
+  # what every secret ever escrowed depends on.
+  persistent-data: {
+    pod: {
+      volumes: [ { name: "{workload}-data", claim: "{workload}-data" } ]
+      mounts: [ { name: "{workload}-data", path: "/var/lib/{workload}", read_only: false } ]
+    }
+    identity: {}
+    dependency: {}
+    init: {}
+    resources: { pvcs: [ { name: "{workload}-data" } ] }
+  }
+
+  # The workload is the escrow authority: it serves the escrow-key requests every other agent's
+  # polar-init makes, so its own polar-init must not run the escrow bootstrap against itself.
+  # (CryptoActor is the gateway to the credentials agent; this one would be asking itself.)
+  escrow-authority: {
+    pod: {}
+    identity: {}
+    dependency: {}
+    init: { env: [ { name: "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP", value: "true" } ] }
+    resources: {}
+  }
+
+  # polar-init verifies cert-issuer against the Polar CA from its first request, read from the
+  # polar-ca ConfigMap mounted at /etc/polar-ca, and the container has the file too, for an
+  # agent that talks to cert-issuer itself. Without it the CA is fetched once, unverified, and
+  # pinned. Needs a target whose cert-issuer provisions its CA (render.nu checks this).
+  pinned-ca: {
+    pod: {
+      volumes: [ { name: "polar-ca", config_map: "polar-ca" } ]
+      mounts: [ { name: "polar-ca", path: "/etc/polar-ca", read_only: true } ]
+    }
+    identity: {}
+    dependency: {}
+    init: {
+      env: [ { name: "POLAR_INIT_CA_CERT", value: "/etc/polar-ca/ca.pem" } ]
+      mounts: [ { name: "polar-ca", path: "/etc/polar-ca" } ]
+    }
+    resources: {}
   }
 }

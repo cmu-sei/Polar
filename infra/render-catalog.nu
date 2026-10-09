@@ -71,7 +71,7 @@ def main [
 
         # Objects that live alongside the workload, if its capabilities ask for any.
         let res = (nu $resolver resources $name --target $target | from json)
-        if ($res.cluster_roles | is-not-empty) or ($res.sa_token_secrets | is-not-empty) or ($res.config_maps | is-not-empty) {
+        if ($res.cluster_roles | is-not-empty) or ($res.sa_token_secrets | is-not-empty) or ($res.config_maps | is-not-empty) or ($res.pvcs | is-not-empty) or ($res.services | is-not-empty) {
             let res_schema = ("(" + ($INFRA | path join "schema/resources-spec.dhall") + ").Spec")
             let res_typed = ($res | to json | json-to-dhall $res_schema | complete)
             if $res_typed.exit_code != 0 {

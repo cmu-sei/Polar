@@ -27,7 +27,6 @@ def main [] {
             ($layers | path join "2-services/jaeger/main.nu")
             ($layers | path join "2-services/neo4j/main.nu")
             ($layers | path join "2-services/cassini/main.nu")
-            ($layers | path join "2-services/credentials-agent/main.nu")
             ($layers | path join "3-workloads/agents/gitlab/main.nu")
             ($layers | path join "3-workloads/agents/git/main.nu")
             ($layers | path join "3-workloads/agents/build-processor/main.nu")
@@ -51,8 +50,9 @@ def main [] {
             "neo4j-service.yaml"
             "neo4j-statefulset.yaml"
             "cassini.yaml"
-            "credentials-agent-pvc.yaml"
-            "credentials-agent-job.yaml"
+            "credentials-agent-resources.yaml"
+            "credentials-agent.yaml"
+            "credentials-agent-observer-resources.yaml"
             "credentials-agent-observer.yaml"
             "jaeger.yaml"
             "kube-observer-resources.yaml"

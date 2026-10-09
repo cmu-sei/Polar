@@ -12,5 +12,6 @@
   pod: "env, volumes and mounts the agent container gets"
   identity: "client certificates polar-init obtains from cert-issuer (each also adds its volume, mounts and a health-checked cert path)"
   dependency: "the service whose certificate must be valid before the agent starts, and for how long (feeds polar-init --check-dep-cert and POLAR_HEALTH_DEP_ENDPOINTS)"
+  init: "what polar-init is given besides the certificates it issues: environment and mounts (the CA to trust, whether it bootstraps the escrow keypair)"
   resources: "Kubernetes objects that exist alongside the workload (RBAC, token Secrets)"
 }

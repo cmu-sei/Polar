@@ -14,6 +14,12 @@ let ClusterRoleEntry = { name : Text, rules : List Rule }
 -- A ConfigMap with one key: the document a workload's agent reads.
 let ConfigMapEntry = { name : Text, key : Text, content : Text }
 
+-- A persistent volume claim a workload's capabilities ask for.
+let PvcEntry = { name : Text, storage_class : Text, size : Text }
+
+-- A Service in front of the workload's pod, on one port.
+let ServiceEntry = { name : Text, port : Natural }
+
 let Spec =
       { name : Text
       , namespace : Text
@@ -21,6 +27,8 @@ let Spec =
       , cluster_roles : List ClusterRoleEntry
       , sa_token_secrets : List Text
       , config_maps : List ConfigMapEntry
+      , pvcs : List PvcEntry
+      , services : List ServiceEntry
       }
 
-in  { Spec, Rule, ClusterRoleEntry, ConfigMapEntry }
+in  { Spec, Rule, ClusterRoleEntry, ConfigMapEntry, PvcEntry, ServiceEntry }
