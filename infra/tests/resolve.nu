@@ -21,6 +21,7 @@ const BUDGETS = {
     credentials-agent: 50
     credentials-agent-observer: 40
     cassini: 20
+    oci-registry-resolver: 20
 }
 
 # The record the template takes, as the pipeline gets it.
@@ -240,6 +241,22 @@ def main [] {
             assert equal ($kinds.service.extends) "agent"
             # not a client, but it still sends its traces
             assert equal ($kinds.service | get -o needs) ["tracing"]
+        }
+
+        "the resolver reads its registry credentials from a Secret, mounted read-only where it is told to look": {
+            let r = (resolve "oci-registry-resolver")
+            let volume = ($r.volumes | where name == "oci-registry-auth")
+            assert equal ($volume | length) 1
+            assert equal ($volume | first | get secret) "oci-registry-auth"
+            assert equal ($volume | first | get items) [{ key: "oci-registry-auth", path: "config.json" }]
+            assert equal ($r.mounts | where name == "oci-registry-auth" | first | get path) "/etc/oci-registry-auth"
+            assert ($r.mounts | where name == "oci-registry-auth" | first | get read_only)
+            assert equal (env_value $r "DOCKER_CONFIG") "/etc/oci-registry-auth"
+        }
+
+        "a volume that is not a Secret with items has none": {
+            let r = (resolve "kube-consumer")
+            assert ($r.volumes | all {|v| $v.items == [] })
         }
 
         "the template does not see the settings record": {

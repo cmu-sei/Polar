@@ -330,7 +330,8 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
             let sec = (if ($v.secret? | is-empty) { null } else { subst $v.secret $vars $name })
             let claim = (if ($v.claim? | is-empty) { null } else { subst $v.claim $vars $name })
             let cm = (if ($v.config_map? | is-empty) { null } else { subst $v.config_map $vars $name })
-            $volumes = ($volumes | append { name: (subst $v.name $vars $name), secret: $sec, audience: null, claim: $claim, config_map: $cm, from: $n })
+            let items = ($v.items? | default [])
+            $volumes = ($volumes | append { name: (subst $v.name $vars $name), secret: $sec, audience: null, claim: $claim, config_map: $cm, items: $items, from: $n })
         }
         for m in ($cap.pod.mounts? | default []) {
             $mounts = ($mounts | append { name: (subst $m.name $vars $name), path: (subst $m.path $vars $name), read_only: $m.read_only, from: $n })
@@ -416,7 +417,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     $env_list = (pod_env $filled $"($DOCUMENT_DIR)/($DOCUMENT_FILE)")
     $volumes = ($volumes | append { name: $DOCUMENT_VOLUME, secret: null, audience: null, config_map: $config_map.name, from: "document" })
     $mounts = ($mounts | append { name: $DOCUMENT_VOLUME, path: $DOCUMENT_DIR, read_only: true, from: "document" })
-    $volumes = ($volumes | each {|v| $v | default null config_map | default null claim })
+    $volumes = ($volumes | each {|v| $v | default null config_map | default null claim | default [] items })
 
     let ci = ($vars | get cert-issuer)
     let scheme = ($services | get cert-issuer | get -o scheme | default "https")

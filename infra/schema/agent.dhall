@@ -61,6 +61,18 @@ let render =
                       ( λ(secretName : Text) →
                           kubernetes.SecretVolumeSource::{
                           , secretName = Some secretName
+                          , items =
+                              if    Prelude.List.null { key : Text, path : Text } x.items
+                              then  None (List kubernetes.KeyToPath.Type)
+                              else  Some
+                                      ( Prelude.List.map
+                                          { key : Text, path : Text }
+                                          kubernetes.KeyToPath.Type
+                                          ( λ(i : { key : Text, path : Text }) →
+                                              kubernetes.KeyToPath::{ key = i.key, path = i.path }
+                                          )
+                                          x.items
+                                      )
                           }
                       )
                       x.secret

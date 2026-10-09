@@ -29,7 +29,6 @@ def main [] {
             ($layers | path join "3-workloads/agents/gitlab/main.nu")
             ($layers | path join "3-workloads/agents/git/main.nu")
             ($layers | path join "3-workloads/agents/build-processor/main.nu")
-            ($layers | path join "3-workloads/agents/resolver/main.nu")
             ($layers | path join "3-workloads/agents/scheduler/main.nu")
             ($layers | path join "3-workloads/agents/openapi/main.nu")
         ]
@@ -69,7 +68,8 @@ def main [] {
             "jira-processor-resources.yaml"
             "jira-processor.yaml"
             "build-processor.yaml"
-            "resolver.yaml"
+            "oci-registry-resolver-resources.yaml"
+            "oci-registry-resolver.yaml"
             "scheduler-observer.yaml"
             "scheduler-processor.yaml"
             "openapi-observer.yaml"

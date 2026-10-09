@@ -10,6 +10,7 @@
 #
 #   pod         env: [{ name, value | secret+key }]
 #               volumes: [{ name, secret? | claim? | config_map? }]   (none of them = emptyDir)
+#                 a secret volume may list items: [{ key, path }], the keys it holds and their files
 #               mounts: [{ name, path, read_only }]
 #   identity    certs: [{ dir, volume, read_only, kind?, san?, watch? }]
 #                 dir/volume: where the cert lives; read_only in the agent
@@ -177,6 +178,23 @@
       env: [
         { name: "JAEGER_OTLP_ENDPOINT", value: "{jaeger.url}/v1/traces" }
       ]
+    }
+    identity: {}
+    dependency: {}
+    init: {}
+    resources: {}
+  }
+
+  # Registry credentials for a workload that pulls from private registries: the Secret
+  # `oci-registry-auth`, whose one key is a Docker credential file, mounted read-only as
+  # config.json in a directory the workload is told to look in (DOCKER_CONFIG). The secrets step
+  # makes the Secret; with no credentials it holds an empty file and the registries are asked
+  # anonymously.
+  oci-registry-auth: {
+    pod: {
+      env: [ { name: "DOCKER_CONFIG", value: "/etc/oci-registry-auth" } ]
+      volumes: [ { name: "oci-registry-auth", secret: "oci-registry-auth", items: [ { key: "oci-registry-auth", path: "config.json" } ] } ]
+      mounts: [ { name: "oci-registry-auth", path: "/etc/oci-registry-auth", read_only: true } ]
     }
     identity: {}
     dependency: {}

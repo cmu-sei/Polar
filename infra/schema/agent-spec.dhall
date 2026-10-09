@@ -30,6 +30,8 @@ let VolumeEntry =
       , audience : Optional Text
       , config_map : Optional Text
       , claim : Optional Text
+      -- the keys of a Secret volume to put in it, and the file each is: none means all of them
+      , items : List { key : Text, path : Text }
       }
 
 let MountEntry = { name : Text, path : Text, read_only : Bool }

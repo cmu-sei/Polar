@@ -65,6 +65,8 @@ def main [] {
             "jira-observer.yaml"
             "jira-processor-resources.yaml"
             "jira-processor.yaml"
+            "oci-registry-resolver-resources.yaml"
+            "oci-registry-resolver.yaml"
         ]
 
         neo4j_bolt_addr       : "bolt+s://polar-db-svc.polar-graph.svc.cluster.local:7687"

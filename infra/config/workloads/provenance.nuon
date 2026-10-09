@@ -1,0 +1,16 @@
+# infra/config/workloads/provenance.nuon
+#
+# The OCI resolver: follows image references other agents discover to their registry and publishes
+# the verified manifest. A PolarAgent: it says in its own code what it needs and how long it takes
+# to drain (`oci-resolver --scaffold`).
+[
+  {
+    # The Job and ServiceAccount keep the name the chart gave them.
+    name: "oci-registry-resolver"
+    kind: "agent"
+    image: "oci-resolver"
+    config: "document"
+    # Credentials for private registries, from the Secret the secrets step makes.
+    provides: ["oci-registry-auth"]
+  }
+]

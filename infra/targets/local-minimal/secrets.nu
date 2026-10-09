@@ -71,6 +71,10 @@ def main [target_dir: string, repo_root: string] {
         kubectl_upsert_secret "jira-secret" "polar" ["token=placeholder"]
     }
 
+    # Registry credentials for the OCI resolver: an empty Docker credential file, so registries are
+    # asked anonymously. Put real ones in the Secret to pull from a private registry.
+    kubectl_upsert_secret "oci-registry-auth" "polar" ["oci-registry-auth={}"]
+
     print ""
 
     # -- polar-auth namespace ------------------------------------------------
