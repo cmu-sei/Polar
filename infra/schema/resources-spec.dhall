@@ -17,8 +17,11 @@ let ConfigMapEntry = { name : Text, key : Text, content : Text }
 -- A persistent volume claim a workload's capabilities ask for.
 let PvcEntry = { name : Text, storage_class : Text, size : Text }
 
--- A Service in front of the workload's pod, on one port.
-let ServiceEntry = { name : Text, port : Natural }
+-- A Service in front of the workload's pod: its own name, the name of the workload it selects,
+-- and its ports (a name for each is needed only when there is more than one).
+let ServicePort = { name : Optional Text, port : Natural }
+
+let ServiceEntry = { name : Text, selector : Text, ports : List ServicePort }
 
 let Spec =
       { name : Text
@@ -31,4 +34,4 @@ let Spec =
       , services : List ServiceEntry
       }
 
-in  { Spec, Rule, ClusterRoleEntry, ConfigMapEntry, PvcEntry, ServiceEntry }
+in  { Spec, Rule, ClusterRoleEntry, ConfigMapEntry, PvcEntry, ServiceEntry, ServicePort }

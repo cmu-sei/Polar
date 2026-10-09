@@ -22,6 +22,17 @@ def failure [file: string, reason: string] { { file: $file, reason: $reason } }
 def main [] {
     let tests = [
         {
+            name: "a generated token is long, made of letters and digits, and different each time"
+            body: {
+                let a = (random_token)
+                let b = (random_token)
+                assert equal ($a | str length) 48
+                assert ($a =~ '^[A-Za-z0-9]+$')
+                assert ($a != $b)
+                assert equal (random_token 16 | str length) 16
+            }
+        }
+        {
             name: "a decrypt failure is harmless when every required secret already exists"
             body: {
                 let problems = (required_secret_problems $REQUIRED $BOTH_THERE {} [(failure "secrets.sops.yaml" "no identity matched")])

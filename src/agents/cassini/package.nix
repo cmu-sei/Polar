@@ -6,6 +6,7 @@
 , nix-container-lib
 , inputs
 , system
+, healthcheckDrv
 , ...
 }:
 let
@@ -38,7 +39,12 @@ let
   });
 
   cassiniContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = inputs // {
+      polar-healthcheck = {
+        packages.${system}.default = healthcheckDrv;
+      };
+    };
     configNixPath    = ./container-cassini.nix;
     extraDerivations = [ cassini ];
   };

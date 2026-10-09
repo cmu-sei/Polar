@@ -7,4 +7,5 @@
   cassini:     { dns_name: "cassini-ip-svc", namespace: "polar", port: 8080 }
   neo4j:       { dns_name: "polar-db-svc",   namespace: "graph", port: 7687 }
   cert-issuer: { dns_name: "cert-issuer",    namespace: "polar", port: 8443, scheme: "https" }
+  jaeger:      { dns_name: "jaeger-svc",    namespace: "polar", port: 16686, scheme: "http" }
 }

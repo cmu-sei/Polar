@@ -121,13 +121,20 @@ let render =
                     , namespace = Some v.namespace
                     }
                   , spec = Some kubernetes.ServiceSpec::{
-                    , selector = Some [ { mapKey = "name", mapValue = c.name } ]
+                    , selector = Some [ { mapKey = "name", mapValue = c.selector } ]
                     , ports = Some
-                      [ kubernetes.ServicePort::{
-                        , port = c.port
-                        , targetPort = Some (kubernetes.NatOrString.Nat c.port)
-                        }
-                      ]
+                        ( Prelude.List.map
+                            T.ServicePort
+                            kubernetes.ServicePort.Type
+                            ( λ(p : T.ServicePort) →
+                                kubernetes.ServicePort::{
+                                , name = p.name
+                                , port = p.port
+                                , targetPort = Some (kubernetes.NatOrString.Nat p.port)
+                                }
+                            )
+                            c.ports
+                        )
                     }
                   }
 

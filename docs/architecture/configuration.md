@@ -346,7 +346,7 @@ The resolver has to run the agent's own binary, so there is no copy that can go 
    extended. **Done 2026-10-09**, and the credentials agent's pair went further: their variables
    are declared (`settings.rs` in each) and both are catalog workloads on a document, with the
    catalog taught what their hand charts did (`config/workloads/credentials.nuon`, the
-   `persistent-data`, `pinned-ca` and `escrow-authority` capabilities, the `init` facet, and the
+   `persistent-data`, `pinned-ca` and `escrow-exempt` capabilities, the `init` facet, and the
    entry fields `provides`, `no_start_wait` and `service`).
 5. Agents that bypass the catalog, later (see `remaining-work.md`).
 

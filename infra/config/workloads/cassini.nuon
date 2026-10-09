@@ -1,0 +1,30 @@
+# infra/config/workloads/cassini.nuon
+#
+# The Cassini broker: what every agent connects to. A service, not a client, and a PolarAgent like
+# the rest: it says in its own code what it needs and how long it takes to drain
+# (`cassini --scaffold`), and the entry says what the deployment gives it.
+[
+  {
+    name: "cassini"
+    kind: "service"
+    image: "cassini"
+    # The crate is not named for the image.
+    scaffold_package: "cassini-broker"
+    config: "document"
+    # Its server certificate and addresses (cassini-server), and no escrow bootstrap, which
+    # travels through the broker itself (escrow-exempt).
+    provides: ["cassini-server", "escrow-exempt"]
+    env: [
+      { name: "CASSINI_LOG", value: "info" }
+    ]
+    # What clients connect to. The name and the port are the ones services.nuon gives; the second
+    # port is declared and nothing listens on it today (kept as the chart had it).
+    service: {
+      name: "{cassini.name}"
+      ports: [
+        { name: "cassini-tcp", port: "{cassini.port}" }
+        { name: "cassini-http", port: 3000 }
+      ]
+    }
+  }
+]

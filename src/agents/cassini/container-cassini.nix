@@ -26,7 +26,17 @@
       u.Auto;
     trustedUsers = [ "root" ];
   };
-  packageLayers = [ (u: u.Micro) ];
+  packageLayers = [
+    (u:
+      u.Micro)
+    (u:
+      u.Custom {
+        name = "polar-healthcheck-bin";
+        packages = [
+          { attrPath = "default"; flakeInput = "polar-healthcheck"; }
+        ];
+      })
+  ];
   pipeline = null;
   shell = null;
   ssh = null;

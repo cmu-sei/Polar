@@ -248,7 +248,7 @@ Today's capabilities are `cassini`, `graph-write`, `encryption`,
 `kube-api-read`, and three that describe the shape of the pod rather than what
 the code needs: `persistent-data` (a claim named for the workload, mounted at
 `/var/lib/<workload>`), `pinned-ca` (polar-init and the container trust the Polar CA
-from a mounted file) and `escrow-authority` (polar-init skips the escrow
+from a mounted file) and `escrow-exempt` (polar-init skips the escrow
 bootstrap, because this workload serves it). An agent on a document says what its
 code requires in its own scaffold; its entry adds what else the deployment gives
 it with `provides`, lists services it watches but does not wait for at start with

@@ -67,6 +67,13 @@ export def kubectl_upsert_configmap [
 }
 
 
+# A secret value made here instead of kept in the SOPS files: letters and digits, so it is safe
+# in a header or a command line. For a token nothing outside the cluster needs to know in advance;
+# whoever does read it from the Secret.
+export def random_token [length: int = 48] {
+    random chars --length $length
+}
+
 # True when the secret `name` exists in `namespace`.
 export def secret_exists [name: string, namespace: string] {
     (do { run-external "kubectl" "get" "secret" $name "-n" $namespace } | complete | get exit_code) == 0

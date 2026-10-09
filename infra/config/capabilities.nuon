@@ -115,10 +115,11 @@
     resources: { pvcs: [ { name: "{workload}-data" } ] }
   }
 
-  # The workload is the escrow authority: it serves the escrow-key requests every other agent's
-  # polar-init makes, so its own polar-init must not run the escrow bootstrap against itself.
-  # (CryptoActor is the gateway to the credentials agent; this one would be asking itself.)
-  escrow-authority: {
+  # The workload's polar-init must not run the escrow bootstrap, because the bootstrap asks the
+  # credentials agent for a key over Cassini and this workload is one of the two it depends on:
+  # the credentials agent serves those requests itself (it would be asking itself), and the broker
+  # is what the request travels through (it would be asking itself to carry its own request).
+  escrow-exempt: {
     pod: {}
     identity: {}
     dependency: {}
@@ -141,6 +142,28 @@
       env: [ { name: "POLAR_INIT_CA_CERT", value: "/etc/polar-ca/ca.pem" } ]
       mounts: [ { name: "polar-ca", path: "/etc/polar-ca" } ]
     }
+    resources: {}
+  }
+
+  # The broker's identity and arrangements: a server certificate for the Cassini service's name,
+  # read-only in the container, the paths the broker reads it from, the address it listens on, the
+  # shutdown token from a Secret, and where it sends its traces. The broker declares these
+  # variables itself (`cassini --scaffold`, section cassini-broker); a workload without that section
+  # cannot be given this capability.
+  cassini-server: {
+    pod: {
+      env: [
+        { name: "TLS_SERVER_CERT_CHAIN",   value: "/etc/tls/certs/cert.pem" }
+        { name: "TLS_SERVER_KEY",          value: "/etc/tls/certs/key.pem" }
+        { name: "TLS_CA_CERT",             value: "/etc/tls/certs/ca.pem" }
+        { name: "CASSINI_BIND_ADDR",       value: "0.0.0.0:{cassini.port}" }
+        { name: "CASSINI_SHUTDOWN_TOKEN",  secret: "cassini-shutdown-token", key: "token" }
+        { name: "JAEGER_OTLP_ENDPOINT",    value: "{jaeger.url}/v1/traces" }
+      ]
+    }
+    identity: { certs: [ { dir: "/etc/tls/certs", volume: "polar-certs", read_only: true, kind: "server", san: "{cassini.dns}" } ] }
+    dependency: {}
+    init: {}
     resources: {}
   }
 }

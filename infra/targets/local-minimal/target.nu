@@ -27,7 +27,6 @@ def main [] {
             ($layers | path join "2-services/neo4j/main.nu")
             ($layers | path join "2-services/postgres/main.nu")
             ($layers | path join "2-services/keycloak/main.nu")
-            ($layers | path join "2-services/cassini/main.nu")
         ]
 
         apply_order : [
@@ -49,6 +48,7 @@ def main [] {
             "postgres-statefulset.yaml"
             "keycloak-service.yaml"
             "keycloak-deployment.yaml"
+            "cassini-resources.yaml"
             "cassini.yaml"
             "credentials-agent-resources.yaml"
             "credentials-agent.yaml"
@@ -68,7 +68,6 @@ def main [] {
         ]
 
         neo4j_bolt_addr       : "bolt+s://polar-db-svc.polar-graph.svc.cluster.local:7687"
-        jaeger_dns_name       : "http://jaeger-svc.polar.svc.cluster.local:16686/v1/traces"
         scheduler_remote_url  : ""
         enable_tls            : true
         cert_issuer_url       : "https://cert-issuer.polar.svc.cluster.local:8443"
@@ -79,7 +78,6 @@ def main [] {
         # "provisioned" (check_ca_provisioning).
         cert_issuer_ca_configmap : "polar-ca"
         polar_init_image      : "10.0.2.2:5000/polar-init:latest"
-        cassini_shutdown_token : ($env.CASSINI_SHUTDOWN_TOKEN? | default "HEYTHERE")
         identity_lifetime_overrides : [
             { identity: "graph.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
             { identity: "ace.polar.serviceaccount.cluster.local", lifetimeSecs: 31536000 }

@@ -54,7 +54,7 @@ def service_vars [services: record, cluster: record] {
         let dns = $"($it.s.dns_name).($ns).svc.($cluster.domain)"
         let addr = $"($dns):($it.s.port)"
         # A service that says its scheme has a URL; one that does not is not addressed by URL.
-        let base = { dns: $dns, port: $it.s.port, addr: $addr }
+        let base = { name: $it.s.dns_name, dns: $dns, port: $it.s.port, addr: $addr }
         $acc | insert $it.name (if ($it.s.scheme? | is-empty) { $base } else { $base | insert url $"($it.s.scheme)://($addr)" })
     }
 }
@@ -67,13 +67,14 @@ def subst [text: string, vars: record, who: string] {
         | transpose name v
         | reduce --fold ($text | str replace --all "{workload}" $who) {|it, acc|
             $acc
+            | str replace --all $"{($it.name).name}" $it.v.name
             | str replace --all $"{($it.name).dns}" $it.v.dns
             | str replace --all $"{($it.name).port}" ($it.v.port | into string)
             | str replace --all $"{($it.name).addr}" $it.v.addr
             | str replace --all $"{($it.name).url}" ($it.v.url? | default $"{($it.name).url}")
         }
     )
-    if ($out =~ '\{[A-Za-z0-9-]+\.(dns|port|addr|url)\}') {
+    if ($out =~ '\{[A-Za-z0-9-]+\.(name|dns|port|addr|url)\}') {
         error make { msg: $"($who): unresolved placeholder in '($text)'" }
     }
     $out
@@ -95,6 +96,17 @@ def env_entry [e: record, vars: record, from: string, who: string] {
         secret: (if ($e.secret? | is-empty) { null } else { subst $e.secret $vars $who })
         key: ($e.key? | default null)
         from: $from
+    }
+}
+
+# A kind with `extends` is that kind with its own fields laid over it: a service is an agent
+# that is not a Cassini client, so it says `extends: "agent"` and `needs: []` and nothing else.
+def kind_of [kinds: record, name: string] {
+    let kind = ($kinds | get $name)
+    if ($kind.extends? | is-empty) {
+        $kind
+    } else {
+        (kind_of $kinds $kind.extends) | merge deep ($kind | reject extends)
     }
 }
 
@@ -220,7 +232,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     if not ($entry.kind in ($kinds | columns)) {
         error make { msg: $"($name): unknown kind '($entry.kind)'" }
     }
-    let kind = ($kinds | get $entry.kind)
+    let kind = (kind_of $kinds $entry.kind)
 
     # Scalars and nested records: kind < entry < target. Lists below.
     let spec = (
@@ -292,7 +304,9 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
             $volumes = ($volumes | append { name: $c.volume, secret: null, audience: null, from: $n })
             $mounts = ($mounts | append { name: $c.volume, path: $c.dir, read_only: $c.read_only, from: $n })
             $init_mounts = ($init_mounts | append { name: $c.volume, path: $c.dir, from: $n })
-            $certs = ($certs | append { spec: $"client:($c.dir):ecdsa-p256:", from: $n })
+            let cert_kind = ($c.kind? | default "client")
+            let san = (if ($c.san? | is-empty) { "" } else { subst $c.san $vars $name })
+            $certs = ($certs | append { spec: $"($cert_kind):($c.dir):ecdsa-p256:($san)", from: $n })
             $cert_dirs = ($cert_dirs | append $c.dir)
         }
 
@@ -338,10 +352,16 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     # and the variable the agent reads it from is given the same number, so they cannot differ.
     let service = ($entry.service? | default null)
     if $service != null {
-        $ports = [$service.port]
-        $exposed = [{ name: $name, port: $service.port }]
+        # A port is a number, or text naming a service's port (`{cassini.port}`), so the number is
+        # written once, in services.nuon.
+        let service_ports = ($service.ports | each {|p|
+            let port = if ($p.port | describe) == "string" { subst $p.port $vars $name | into int } else { $p.port }
+            { name: ($p.name? | default null), port: $port }
+        })
+        $ports = ($service_ports | get port)
+        $exposed = [{ name: (if ($service.name? | is-empty) { $name } else { subst $service.name $vars $name }), selector: $name, ports: $service_ports }]
         if ($service.port_variable? | is-not-empty) {
-            $env_list = ($env_list | append { name: $service.port_variable, value: ($service.port | into string), secret: null, key: null, from: "service" })
+            $env_list = ($env_list | append { name: $service.port_variable, value: (($service_ports | first).port | into string), secret: null, key: null, from: "service" })
         }
     }
 

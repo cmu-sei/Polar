@@ -53,6 +53,10 @@ def main [target_dir: string, repo_root: string] {
     # ── polar namespace ───────────────────────────────────────────────────────
     print "  [polar]"
 
+    # The token that lets a client ask the broker to shut down. Made here, once; a re-run finds it
+    # and leaves it. Read it with: kubectl -n polar get secret cassini-shutdown-token -o jsonpath='{.data.token}' | base64 -d
+    kubectl_upsert_secret "cassini-shutdown-token" "polar" [$"token=(random_token)"]
+
     let graph_password = ($secrets | get -o graph_password | default "")
     if ($graph_password | is-not-empty) {
         kubectl_upsert_secret "polar-graph-pw" "polar" [$"secret=($graph_password)"]

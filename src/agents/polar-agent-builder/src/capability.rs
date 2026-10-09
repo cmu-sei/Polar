@@ -230,7 +230,7 @@ mod tests {
     /// pod (a persistent volume, a pinned CA, an init container that skips the escrow bootstrap),
     /// not something the agent's own health depends on. They are in `POLAR_CAPABILITIES`, which
     /// ignores names the code does not know.
-    const DEPLOYMENT_ONLY: &[&str] = &["escrow-authority", "persistent-data", "pinned-ca"];
+    const DEPLOYMENT_ONLY: &[&str] = &["cassini-server", "escrow-exempt", "persistent-data", "pinned-ca"];
 
     #[test]
     fn names_match_the_deployment_catalog() {

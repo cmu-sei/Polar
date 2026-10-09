@@ -20,6 +20,7 @@ const BUDGETS = {
     jira-processor: 40
     credentials-agent: 50
     credentials-agent-observer: 40
+    cassini: 20
 }
 
 # The record the template takes, as the pipeline gets it.
@@ -133,7 +134,8 @@ def main [] {
             assert equal (env_value $r "CREDENTIALS_AGENT_OBSERVER_PORT") "8080"
             let res = (^nu $RESOLVER resources credentials-agent-observer | from json)
             assert equal ($res.services | get name) ["credentials-agent-observer"]
-            assert equal ($res.services | first | get port) 8080
+            assert equal ($res.services | first | get selector) "credentials-agent-observer"
+            assert equal ($res.services | first | get ports | get port) [8080]
         }
 
         "both trust cert-issuer's CA from the first request, as a mounted file": {
@@ -165,6 +167,57 @@ def main [] {
                     assert equal $from_image $from_source $n
                 }
             }
+        }
+
+        "the broker is a service, not a client: it needs nothing and is not given a Cassini client": {
+            let r = (resolve "cassini")
+            assert ("cassini" not-in $r.needs)
+            assert equal $r.kind "service"
+            # none of the client's variables are in its document, and it does not wait for Cassini
+            let maps = (^nu $RESOLVER resources cassini | from json | get config_maps)
+            let sections = ($maps | first | get content | from json | get sections | get name)
+            assert ("cassini-client" not-in $sections)
+            assert ("cassini-broker" in $sections)
+            assert equal $r.dep_checks []
+        }
+
+        "the broker is given a server certificate for the Cassini service's name, read-only": {
+            let r = (resolve "cassini")
+            assert equal $r.certs ["server:/etc/tls/certs:ecdsa-p256:cassini-ip-svc.polar.svc.cluster.local"]
+            assert ($r.mounts | any {|m| $m.name == "polar-certs" and $m.read_only })
+            assert equal (env_value $r "TLS_SERVER_CERT_CHAIN") "/etc/tls/certs/cert.pem"
+            assert equal (env_value $r "CASSINI_BIND_ADDR") "0.0.0.0:8080"
+        }
+
+        "the broker's shutdown token is a secret the pod is given from a Secret": {
+            let r = (resolve "cassini")
+            let token = ($r.env | where name == "CASSINI_SHUTDOWN_TOKEN")
+            assert equal ($token | length) 1
+            assert equal ($token | first | get secret) "cassini-shutdown-token"
+            assert equal ($token | first | get key) "token"
+            assert equal ($token | first | get value) null
+        }
+
+        "the broker starts without the escrow bootstrap, which needs the broker": {
+            let r = (resolve "cassini")
+            assert ($r.init_env | any {|e| $e.name == "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP" and $e.value == "true" })
+        }
+
+        "the broker's Service has the name its clients use, selects the broker, and exposes both ports": {
+            let r = (resolve "cassini")
+            assert equal $r.ports [8080 3000]
+            let res = (^nu $RESOLVER resources cassini | from json)
+            let service = ($res.services | first)
+            assert equal $service.name "cassini-ip-svc"
+            assert equal $service.selector "cassini"
+            assert equal ($service.ports | get port) [8080 3000]
+            assert equal ($service.ports | get name) ["cassini-tcp" "cassini-http"]
+        }
+
+        "a kind can extend another and change only what differs": {
+            let kinds = (open ($RESOLVER | path dirname | path join "config/kinds.nuon"))
+            assert equal ($kinds.service.extends) "agent"
+            assert equal ($kinds.service | get -o needs) []
         }
 
         "the template does not see the settings record": {

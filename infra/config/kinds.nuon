@@ -45,4 +45,11 @@
     # The projected token polar-init presents to cert-issuer.
     sa_token: { volume: "sa-token", path: "/workspace/token", expiration_secs: 3600 }
   }
+
+  # A service that is not a Cassini client: the broker itself. The same pod, health, shutdown and
+  # certificate arrangements as an agent, and none of the client's needs.
+  service: {
+    extends: "agent"
+    needs: []
+  }
 }

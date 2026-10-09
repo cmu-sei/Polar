@@ -21,7 +21,7 @@ const INFRA = (path self | path dirname)
 
 # Which template renders which workload kind. A kind with no entry here is a
 # custom chart, not a catalog workload.
-const TEMPLATES = { agent: "agent" }
+const TEMPLATES = { agent: "agent", service: "agent" }
 
 def fail [msg: string] {
     print -e $"  ERROR: ($msg)"

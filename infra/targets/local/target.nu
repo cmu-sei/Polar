@@ -26,7 +26,6 @@ def main [] {
             ($layers | path join "2-services/cert-issuer/main.nu")
             ($layers | path join "2-services/jaeger/main.nu")
             ($layers | path join "2-services/neo4j/main.nu")
-            ($layers | path join "2-services/cassini/main.nu")
             ($layers | path join "3-workloads/agents/gitlab/main.nu")
             ($layers | path join "3-workloads/agents/git/main.nu")
             ($layers | path join "3-workloads/agents/build-processor/main.nu")
@@ -49,6 +48,7 @@ def main [] {
             "neo4j-pvcs.yaml"
             "neo4j-service.yaml"
             "neo4j-statefulset.yaml"
+            "cassini-resources.yaml"
             "cassini.yaml"
             "credentials-agent-resources.yaml"
             "credentials-agent.yaml"
@@ -77,9 +77,7 @@ def main [] {
         ]
 
         neo4j_bolt_addr       : "bolt+s://polar-db-svc.polar-graph.svc.cluster.local:7687"
-        jaeger_dns_name       : "http://jaeger-svc.polar.svc.cluster.local:16686/v1/traces"
         scheduler_remote_url  : ($env.POLAR_SCHEDULER_REMOTE_URL? | default "https://github.com/daveman1010221/polar-schedules.git")
-        cassini_shutdown_token : ($env.CASSINI_SHUTDOWN_TOKEN? | default "HEYTHERE")
         identity_lifetime_overrides : [
             { identity: "graph.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
         ]

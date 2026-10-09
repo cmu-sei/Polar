@@ -77,6 +77,7 @@ let
     cassini = import (workspaceRoot + /cassini/package.nix) {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     gitlabAgent = import (workspaceRoot + /gitlab/package.nix) {

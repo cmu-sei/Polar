@@ -62,14 +62,12 @@ def main [
 
     # Cross-service resolved values injected into dependent charts
     let neo4j_bolt_addr      = $config.neo4j_bolt_addr
-    let jaeger_dns_name      = $config.jaeger_dns_name
     let scheduler_remote_url = $config.scheduler_remote_url
     let cert_issuer_url      = $config.cert_issuer_url
     let cert_issuer_audience = $config.cert_issuer_audience
     let cert_issuer_ca_configmap = ($config.cert_issuer_ca_configmap? | default "")
     let polar_init_image      = $config.polar_init_image
 
-    let cassini_shutdown_token = $config.cassini_shutdown_token
     let identity_lifetime_overrides = $config.identity_lifetime_overrides
 
     # ── Render each chart ─────────────────────────────────────────────────────
@@ -87,7 +85,6 @@ def main [
             match $chart_name {
                 "cert-issuer" => { identityLifetimeOverrides: $identity_lifetime_overrides }
                 "neo4j" => { polarInitImage: $polar_init_image }
-                "cassini" => { jaegerDNSName: $jaeger_dns_name, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image, cassiniShutdownToken: $cassini_shutdown_token }
                 "gitlab" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "git"         => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "build-processor" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
