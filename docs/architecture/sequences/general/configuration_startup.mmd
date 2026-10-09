@@ -1,0 +1,29 @@
+sequenceDiagram
+    autonumber
+    participant KL as Kubelet
+    participant PI as polar-init (init container)
+    participant AG as Agent process
+    participant AB as AgentBuilder
+    participant PE as polar-env (Config)
+    participant IS as InfrastructureSupervisor
+    participant DS as Domain supervisor
+
+    KL->>PI: start, with --cert and --check-dep-cert arguments
+    PI->>PI: wait for the dependencies' certificates, get this agent's certificates
+    PI->>PI: escrow key bootstrap, leave a kernel key handle for the workload
+    PI-->>KL: exit 0
+    KL->>AG: start, with the environment the resolver derived
+    AG->>DS: spawn the domain supervisor
+    DS->>AB: new(...).with_...().configure()
+    AB->>PE: snapshot of the process environment, declared variables only
+    PE-->>AB: values with their sources: env, default, unset
+    AB->>AB: judge it: capabilities the code requires against POLAR_CAPABILITIES, each section's variables and relations
+    alt any problem
+        AB-->>AG: every problem together, process exits non-zero
+    else all well
+        AB-->>DS: ConfiguredAgent, with the Config
+    end
+    DS->>DS: read its own settings from the snapshot
+    DS->>AB: build()
+    AB->>IS: spawn: health, router, subscriptions, Cassini client, crypto
+    IS-->>DS: AgentResources, including the same Config

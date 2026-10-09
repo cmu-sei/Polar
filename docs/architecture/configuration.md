@@ -170,3 +170,68 @@ source, secrets hidden.
 
 Next, in order: the ConfigurationActor shell, then the scheduler integration, then the credentials agent's use of
 it. Every step is in `remaining-work.md`.
+
+## 9. The agent's own interface (proposal, 2026-10-09)
+
+For discussion; none of this is built. See `configuration-flow.md` for what exists and what is
+missing.
+
+**The wish.** An agent should be able to say what it is and what it needs, the way a good command
+documents itself: `--help` for its purpose, and a way to list its environment as it was declared
+with `polar-env` and hooked into the infrastructure, for people and for tools (the resolver, a
+scaffolder, a documentation generator, a schedule editor).
+
+**The difficulty.** Today an agent's declarations are made while it runs: the builder chain
+(`AgentBuilder::new(..).with_graph_write()..`) executes inside a supervisor's `pre_start`, which
+needs an actor system, and the agent's own variables are read with `std::env` where they are
+used. Asking an agent about itself before it runs therefore has nothing to ask.
+
+**Proposal: declare it as data, once, before the runtime.**
+
+1. Each agent crate has one `const SPEC: AgentSpec`: its name, a one-line purpose, an optional long
+   help text (a markdown file pulled in with `include_str!`, and a generated generic one when it
+   is absent), its kind, the capabilities it requires, its shutdown budget, the sections of
+   variables it adds to the builder's, and, as information, the topics it subscribes to and
+   publishes.
+2. The builder is constructed from the spec (`AgentBuilder::new(myself, &SPEC)`), and the `with_*`
+   methods that declare things (graph write, encryption, self-test, the budget, `requires`) go
+   away. What the agent says it is and what it does cannot differ, for the reason `polar-env`
+   exists: one declaration, and everything else derived from it.
+3. A shared `main` wrapper (`polar_agent_builder::run(&SPEC, start)`) handles the command line
+   before any runtime or actor exists, as pure functions of the spec and the process environment:
+   `--help`, `--describe [--json]`, `--check`, `--effective [--json]`. With no arguments it runs
+   the agent, so a container's default command does not change. `polar-config-check` becomes the
+   same functions over the builder's fixed composition, kept for the render step.
+4. The agent's own variables are declared in sections with `polar-env` and read with
+   `config.read(&VAR)`, as the graph's and the health actor's are, so they appear in `--describe`
+   and `--effective`, and a variable the catalog sets that no section declares is an error.
+
+**How tools get an agent's description without building and running every agent.** Options:
+
+- Ask each binary at render time. Exact, but it needs every agent built before `resolve.nu check`
+  can run.
+- A committed contract file per agent, `infra/contracts/<agent>.json`, generated from the
+  binary's `--describe --json` by a recipe, with a test that fails when the file is stale. The
+  resolver reads the files. No build at render time, and a change to what an agent requires shows up
+  in review as a diff. This is the recommendation.
+- A registry crate that depends on every agent library. Cheap to ask, but it drags every agent's
+  dependencies into the checker.
+
+**What the resolver can then do.** Compare the catalog's `needs` with the code's `requires` (a
+mismatch fails the render); refuse an `env` entry in a workload that the agent does not declare,
+and a required variable nothing sets; show, in `explain`, the code's defaults for the variables the
+manifest leaves unset, so the two views become one; and scaffold a workload entry from the
+contract. The same file feeds the generated environment documentation and a schedule editor
+(which variables are `Dynamic`).
+
+**Things that need an answer:**
+
+- Flags (`--describe`) or subcommands (`describe`)? Flags match `polar-config-check` and cannot be
+  confused with a mode of the agent; subcommands read better and extend to `help <topic>`.
+- Requirements that depend on configuration (a capability only when a feature is on): the spec
+  holds the static superset and conditions are expressed as section relations, as the graph's
+  client-certificate trio already is.
+- Agents that do not use the builder (the Cassini broker, `polar-init`) could use the same wrapper
+  with a spec that has no capabilities, but that is later.
+- Where the long help text lives, and whether a missing one is an error in CI for builder agents
+  or a generic fallback.

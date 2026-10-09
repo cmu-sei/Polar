@@ -1,0 +1,32 @@
+flowchart LR
+    subgraph Author["What a person writes"]
+        W["workloads/*.nuon<br/>name, kind, image,<br/>needs: capabilities,<br/>shutdown budget, extra env"]
+        T["targets/&lt;target&gt;/config.nuon<br/>facts about the target:<br/>image prefix, cluster domain, Jira site"]
+    end
+    subgraph Vocab["The shared vocabulary (data, not code)"]
+        C["capabilities.nuon<br/>what a need contributes:<br/>env, volumes, certs, dependencies, RBAC"]
+        K["kinds.nuon<br/>defaults for agent, health,<br/>shutdown: budget, margin"]
+        F["facets.nuon<br/>the questions every capability answers"]
+        S["services.nuon, cluster.nuon<br/>addresses and ports"]
+    end
+    R["resolve.nu<br/>unions what each need contributes<br/>derives env, volumes, init args,<br/>grace period"]
+    subgraph Judge["Judged at render time, before any cluster"]
+        RU["rules.nu<br/>grace period above the budget,<br/>capability complete"]
+        CC["polar-config-check<br/>runs the very function the agent<br/>runs at startup on the env it will get"]
+    end
+    D["render-catalog.nu → Dhall<br/>the agent kind chart"]
+    M["manifests/*.yaml"]
+    U["up.nu<br/>kubectl diff, apply,<br/>wait on Cassini first"]
+    P["Job and Pod"]
+
+    W --> R
+    T --> R
+    C --> R
+    K --> R
+    F --> R
+    S --> R
+    R --> RU
+    R --> CC
+    RU --> D
+    CC --> D
+    D --> M --> U --> P
