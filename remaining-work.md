@@ -1,7 +1,7 @@
 # Remaining work
 
 The single source of truth for what is left. Update it as items finish; do not rely on conversation memory.
-Last updated: 2026-10-06.
+Last updated: 2026-10-10.
 
 ## Done (2026-09-29 to 2026-10-06)
 
@@ -23,6 +23,139 @@ Last updated: 2026-10-06.
 - [x] kube-observer deployed to the cluster and working with kube-consumer end to end (observer registers with Cassini, watches, the consumer receives and projects the initial listing without graph errors); `kube-observer-resources.yaml` applied; `kubectl diff` of it is empty afterwards
 - [x] Image building in stages (`infra/images.nu`, `just images-build|images-push|images-mirror|image|images-all`): `build` needs only nix; `push` needs the registry but not the cluster; `mirror` copies third-party images; `sync` does all of it and drops the u7s node's cached copy of rebuilt images. A failing image no longer aborts a stage (rest are attempted, summary, non-zero exit); mirror retries 3 times; error messages are one clean line. Verified against the real tools: build, push, mirror, sync, the failure summary (bogus mirror row), eviction (image pulled into the node cache, gone after `just image`), registry-down and unknown-name errors. `images.nu push` no longer mirrors or evicts; that is `sync`
 - [x] `images.nuon` has a row for every agent image (added git-observer/processor/scheduler, openapi-observer/processor, scheduler-observer/processor, oci-resolver, build-processor; each attr checked with `nix eval`, each built with `just images-build`, not pushed or deployed); the `git-agents`, `build-agents`, `openapi` and `scheduler` recipes are removed
+
+## Builder migration and catalog (ACTIVE, started 2026-10-10)
+
+Migrate the remaining agents onto `polar-agent-builder` (`PolarAgent`) and into the configuration catalog. Inventory verified in code on 2026-10-10 at HEAD `f249491b`; nothing built or tested on the second machine yet. Order, decisions and ticks are below; the other sections of this file hold everything else that is outstanding. Ground rules: `AGENTS.md`, tests first (red before green, stated in the commit message), one fix per commit, no behaviour change inside a refactor commit.
+
+### 1. What "migrated" means now
+
+The old `AgentBuilder::new(..).with_health_check(..)` shape is gone (older commit messages describe it). Today (`polar-agent-builder/src/agent.rs`, `examples/hello_agent.rs`):
+
+- The agent is a type implementing `PolarAgent`: `NAME`, `PURPOSE`, `NEEDS` (capabilities beyond the
+  Cassini client), `SHUTDOWN_BUDGET`, `SECTIONS` (its own `polar-env` variables), `HELP`,
+  `SELF_TEST`, `CASSINI_CLIENT`, and `async fn start(Configured)`.
+- `main` is `polar_agent_builder::run::<A>()`. `run` answers `--help`, `--scaffold`, `--check --config
+  FILE`, judges the configuration, and starts the agent; it never exits 0 for a started agent.
+- Capabilities (`.with_graph_write()`, `.with_encryption()`, `.requires(..)`) replace
+  `with_health_check`; health args come from capabilities and `POLAR_HEALTH_*`. The agent reads its own
+  variables through `polar-env` declarations, not `std::env` (a `disallowed_methods` lint and a
+  `clippy.toml` per crate enforce it).
+- The infrastructure supervisor owns health, router, Cassini facade (reconnects with backoff and
+  buffers offline publishes) and optionally crypto. `Respawned` / `InfrastructureRespawned` no
+  longer exist. The domain supervisor keeps its half of `PrepareShutdown` -> drain ->
+  `ProceedWithShutdown`, declares its own `SHUTDOWN_BUDGET`, and must treat the supervisor stopping as
+  failure (exit non-zero so the Job restarts).
+- A `Registered` arm must do health and nothing else, or guard what it spawns (`is_none()`), because
+  `Registered` now fires on every registration, including a resume after a transient drop
+  (see the FINDING item under "Gaps found 2026-10-08").
+- Tests: `polar_agent_tests!(MyAgent)` in the agent's `agent.rs`.
+
+### Per-agent checklist
+
+1. [ ] Read the supervisor and entrypoint completely; list children, topics, shutdown path, `Registered` arm
+2. [ ] `agent.rs`: `impl PolarAgent`; `main.rs` becomes `run::<A>()`; `lib.rs` exports the module
+3. [ ] Own env vars -> `settings.rs` `polar-env` section (`SECTIONS`); remove `std::env` reads; add `clippy.toml` (copy identical) and the `deny(clippy::disallowed_methods)` attribute
+4. [ ] Domain supervisor on the builder's `Configured`/resources: topics as `Subscription`s, drop the hand-rolled `HealthCheckActor` / `TcpClient::spawn` / `TcpClientActor`, drop `HealthCheckArgs` and dead dep-endpoint literals
+5. [ ] Declare `SHUTDOWN_BUDGET` (the drain's real worst case) and handle `PrepareShutdown`; make a stopped supervisor an error
+6. [ ] Fix the `Registered` arm per the rule above
+7. [ ] Graph agents: graph via the builder's graph capability / `GraphSettings` from the snapshot (watch the health-versus-projection distinction recorded for the credentials consumer)
+8. [ ] Tests (red first); `cargo check`, `clippy` on the crate, `fmt`, package tests, then workspace tests
+9. [ ] Catalog: add `infra/config/workloads/<group>.nuon` entry (`name`, `kind`, `image`, `config: "document"`, plus `provides`/secrets where the deployment gives more); image row in `infra/images.nuon`; golden-diff the render against the old chart; delete the hand chart and its `render.nu` arm
+10. [ ] `resolve.nu check` clean (it runs the agent's own `--check` from its image under `up.nu`); deploy and verify on the cluster, record what was and was not observed
+
+---
+
+### 2. Inventory (verified in code on 2026-10-10)
+
+### Done: on the builder AND in the catalog
+
+| Agent | Catalog file | Notes |
+|---|---|---|
+| kube-observer, kube-consumer | `kube.nuon` | the reference pair |
+| jira-observer, jira-processor | `jira.nuon` | jira follow-ups in this file |
+| credentials-agent (consumer), credentials-agent-observer | `credentials.nuon` | catalog gained persistent-data, pinned-ca, escrow-authority, init facet |
+| oci-registry-resolver (`resolver`) | `provenance.nuon` | `e245b97b`, `f249491b`, the latest migration; best template for a small agent with its own env |
+| cassini broker | `cassini.nuon` | kind `service` (`CASSINI_CLIENT = false`, `ServiceBuilder`) |
+
+### Remaining: not on the builder, not in the catalog
+
+All still build their own `HealthCheckActor` and Cassini client by hand. Hand charts live under
+`infra/layers/3-workloads/agents/<group>/`. Line counts are of the file holding the supervisor.
+
+| # | Agent | Source | Lines | Graph | Notes / known hazards |
+|---|---|---|---|---|---|
+| 1 | git-observer | `git/observe/src/supervisor.rs` | 232 | no | `Registered` arm at :205 spawns a named repo supervisor then stops itself on error: a reconnect ends the agent. Also `bin/discover_repo.rs` (one-off tool, probably leave) |
+| 2 | openapi-observer | `openapi/observe/src/actors.rs` | 311 | no | named spawn in `Registered`: second registration returns the error |
+| 3 | polar-scheduler-observer | `polar-scheduler/observer/src/main.rs` | 277 | no | already guards with `watcher.is_none()`; `config_tests` isolation (`serial_test`) open |
+| 4 | gitlab-observer | `gitlab/observe/src/supervisor.rs` | 244 | no | **has no `HealthCheckActor` at all today**; migration adds health/shutdown behaviour |
+| 5 | gitlab-consumer | `gitlab/consume/src/supervisor.rs` | 360 | yes | graph controller spawned in `Registered`, stops itself on repeat; `TcpClient::spawn` |
+| 6 | git-processor | `git/process/src/main.rs` | 373 | yes | graph controller spawn with `?` in `Registered`; logic lives in `main.rs` |
+| 7 | openapi-processor | `openapi/process/src/actors.rs` | 403 | yes (1 ref) | named spawn in `Registered` |
+| 8 | polar-scheduler-processor | `polar-scheduler/processor/src/supervisor.rs` | 274 | yes | |
+| 9 | build-processor | `build-processor/src/supervisor.rs` | 414 | yes | consumes the resolver's output; this file says it was not read to the end for the `Registered` hazard; unread |
+| 10 | git-scheduler | `git/scheduler/src/main.rs` | 430 | 1 ref | `init` only subscribes (repeatable). **this file says its image row goes "when the agent is retired": decide retire vs migrate first** |
+
+Not part of this migration, so nobody wonders: `polar-init` (init container; has its own client by
+design), `cassini/test/*` and `cassini-c2` and the Cassini CLI client, `credentials-agent/admin` (CLI),
+`polar-scheduler/tests/mock-*`, `cert-issuer` (HTTP service), `logger`, and the non-Rust services
+(ace, Neo4j, Postgres, Keycloak, Jaeger: charts under `infra/layers/2-services`).
+
+Facts to confirm per agent during triage (not yet established): exact `Registered` behaviour for
+build-processor and git-scheduler, whether any needs `with_encryption`, the real drain worst case for
+the budget, and the image row names in `infra/images.nuon` / flake attrs.
+
+### Catalog: what it is (this answers the earlier open question)
+
+"The catalog" = `infra/config/` (`kinds.nuon`, `capabilities.nuon`, `facets.nuon`, `services.nuon`,
+`cluster.nuon`, `workloads/*.nuon`), resolved by `infra/resolve.nu` into manifests, with the design in
+`docs/architecture/config-catalog-design.md`. A workload is "in the catalog" when it has an entry in
+`workloads/` and its hand chart (and `render.nu` arm) is deleted. The remaining agents' charts are
+the Dhall files listed above. Catalog-wide follow-ups (derive `apply_order`, replace the `render.nu`
+`match`, RBAC into the `resources` facet, env-precedence rule) are in the section
+"Configuration catalog (next slices)" below.
+
+---
+
+### 3. Proposed order (for Dave to confirm or change)
+
+Rationale: observers have no graph and the smallest blast radius; processors add the graph rule; the
+two with open decisions come last.
+
+1. [ ] git-observer, then openapi-observer, then polar-scheduler-observer (no graph; each has a `Registered` fix)
+2. [ ] gitlab-observer (adds a health check that never existed)
+3. [ ] gitlab-consumer, git-processor, openapi-processor, polar-scheduler-processor (graph agents)
+4. [ ] build-processor (read in full first)
+5. [ ] git-scheduler (after the retire-or-migrate decision)
+6. [ ] Close-out: remove the process-reading fallbacks that exist only for un-migrated agents
+   (`TCPClientConfig::new()`, `TcpClient::spawn_with_router`, `get_neo_config()`, the health actor
+   reading the process, the client's `Registered`-while-registered arm), per this file
+
+Each tick below is the whole checklist in section 1 for that agent, including catalog entry and
+cluster verification.
+
+| Agent | Rust | Catalog | Verified on cluster |
+|---|---|---|---|
+| git-observer | [ ] | [ ] | [ ] |
+| openapi-observer | [ ] | [ ] | [ ] |
+| polar-scheduler-observer | [ ] | [ ] | [ ] |
+| gitlab-observer | [ ] | [ ] | [ ] |
+| gitlab-consumer | [ ] | [ ] | [ ] |
+| git-processor | [ ] | [ ] | [ ] |
+| openapi-processor | [ ] | [ ] | [ ] |
+| polar-scheduler-processor | [ ] | [ ] | [ ] |
+| build-processor | [ ] | [ ] | [ ] |
+| git-scheduler | [ ] | [ ] | [ ] |
+
+### 4. Decisions needed
+
+- [ ] Order above (and whether the observers-first rationale holds for you)
+- [ ] git-scheduler: retire or migrate
+- [ ] Is the unfinished `Registered` fix to land with each migration (my assumption) or separately
+- [ ] Whether `cargo clippy --workspace -- -D warnings` (AGENTS.md) is expected to pass: this file says it cannot today (about 19 findings in five crates); per-crate clippy is what I would run
+- [ ] How to treat `agent-task.json` / `Observer-Scheduler-Consumer.md` (you deleted them; the pull succeeded with them gone, so commit the deletion when ready)
+
+- 2026-10-10: section created from an inventory of the code after pulling `f249491b`. The first draft (a separate WORK.md, now deleted) wrongly listed jira, credentials-agent and the resolver as unmigrated.
 
 ## Health system rework (plan, decided 2026-10-06)
 
@@ -105,7 +238,7 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   - Catalog gaps for this pair: persistent volume (PVC `credentials-agent-data` at `/var/lib/credentials-agent`), Service and port (observer), CA ConfigMap mount with `POLAR_INIT_CA_CERT` and `CREDENTIALS_AGENT_CA_CERT` (only the old charts do it; catalog agent templates do not mention it, so check how kube and jira agents cope), the escrow-bootstrap exception flag, `CREDENTIALS_AGENT_CERT_ISSUER_URL`
   - Consumer facts: its drain machinery is dead code (`draining` is never set, `ForceExit` is never sent), so a health termination just calls `myself.stop(None)`; give it the real `PrepareShutdown` handshake. Keep `expects_graph` false: the catalog gives it `graph-write` for the env, certs and dependency, but the Rust code does not call `.with_graph_write()` (the builder's capability check allows a deployment to provide more than the code declares)
 - [ ] Decision to revisit: how the credentials-agent observer serves HTTP. Today: axum, with handlers outside the actor tree, so the TCP client is re-pointed through `BrokerHandle` and the server task checks a `stopping` flag and calls `exit(1)` itself if it dies unasked. Options: (a) keep axum and add a gateway actor that owns the broker client and reply routers, handlers shrink to `ractor::call!` (respawn becomes a message; one mailbox hop; the gateway must not await replies inside `handle()` or it serializes requests); (b) drop axum for `hyper` with a listener actor and one supervised connection actor per connection (shutdown becomes `stop_children_and_wait`, nothing outside the tree), at the cost of owning body-size limits, slow-client timeouts, content-type checks and malformed-request behaviour on the Credentials Agent's public front door, each needing tests. Needs are small (four POST routes), so (b) is feasible, but it is security-sensitive code. Not done as part of the migration; decide once both halves run on the builder
-- [ ] Remaining agents (gitlab, git, scheduler, openapi, build-processor, resolver, ace); each needs its builder migration first
+- [ ] Remaining agents (gitlab, git, scheduler, openapi, build-processor): see "Builder migration and catalog" above. The resolver is done (`e245b97b`, `f249491b`); `ace` is a deployed service, not a crate in this workspace
 - [x] Rust builder uses capability names (`.with_graph_write()`, `.with_encryption()`, `.requires(Capability)`); `with_health_check` removed, health args derived from capabilities and `POLAR_HEALTH_DEP_ENDPOINTS`
 - [x] Shared-name test (`names_match_the_deployment_catalog`) fails in both directions
 - [x] Startup cross-check: catalog sets `POLAR_CAPABILITIES`; `AgentBuilder::build()` exits non-zero when requirements are not a subset (warns when unset)
@@ -123,7 +256,7 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
 
 ## Priority after the working cluster
 
-- [ ] Builder rollout (`polar-agent-builder`) across all agents (done: kube-observer, kube-consumer, jira-observer, jira-processor, credentials-agent consumer and observer; remaining: gitlab, git, scheduler, openapi, build-processor, resolver, ace)
+- [ ] Builder rollout (`polar-agent-builder`) across all agents (done: kube-observer, kube-consumer, jira-observer, jira-processor, credentials-agent consumer and observer; remaining: gitlab, git, scheduler, openapi, build-processor; resolver and the Cassini broker are done too, see "Builder migration and catalog")
 - [ ] No agent exits gracefully: always non-zero so Jobs restart (audit every agent `main`; jira and kube are clean, the rest are not yet audited)
 
 ## Credentials-agent and identity
@@ -254,7 +387,7 @@ Dev cluster `u7s`, images rebuilt from this branch (`up.nu local-minimal --dev`,
 - [ ] SELF-DESCRIBING AGENTS: the code is the source of truth, and the binary produces its own scaffold (decided 2026-10-09, David; design in `docs/architecture/configuration.md` section 9, what exists today and what is missing in `docs/architecture/configuration-flow.md`). The agent declares its needs once, in code (`Agent::new(..).needs(..).environment(..).shutdown_budget(..)`), the builder is constructed from that value, and a shared `main` answers `--help` (people), `--scaffold [--config FILE]` (the document as JSON: schema and defaults with empty values, or filled with sources and problems) and `--check --config FILE` (the agent\'s own startup judgement, offline). The resolver runs the binary (cargo locally, the built image for a deploy), fills the scaffold from the catalog\'s deployment facts (capability contributions, kind defaults, target facts, workload overrides), checks it, and renders it into a ConfigMap that the agent mounts and reads through a `FileEnv` beneath `polar-env`\'s `Config`; secrets stay references to `secretKeyRef` env. The catalog\'s `needs` and per-workload budget disappear for builder agents. Rejected: committed per-agent contract files and a hand-kept SPEC (copies to keep in step). Order: `polar-env` document, `FileEnv`, `Source::File` and `polar-healthcheck` first; the builder and `main` wrapper; kube-consumer end to end; the other five builder agents (and declare the Jira and Kubernetes variables, extend the `disallowed_methods` lint to them); catalog-bypassing workloads later. Closes: the agent cannot be asked what it needs, the two views do not meet, `needs` written twice, and the "check configuration and exit" item under the environment contract. PROGRESS 2026-10-09: step 1 done and committed: `polar-env` (feature `document`) has `Document` (scaffold, JSON, `problems`: a secret as a literal, a name declared twice, an empty reference), `FileEnv` (literals, and `{"env": NAME}` references resolved against the process environment), `Source::File`, `ConfigBuilder::source`, and `from_environment` (the document `POLAR_CONFIG` names if set, else the process environment; a named document that cannot be read is an error, never a fall back); `ProbeConfig::from_environment` makes the liveness probe read the same document. Next (David, 2026-10-09): the agent form is a TRAIT, `PolarAgent` (associated consts `NAME`, `PURPOSE`, `NEEDS`, `SHUTDOWN_BUDGET`, optional `SECTIONS` and `HELP`, and `start(ConfiguredAgent)`), with `run::<A>()` as the one `main`, so implementing it is hooking into the infrastructure and the compiler enforces the form; see section 9.2. STEP 2 DONE 2026-10-09: `polar_agent_builder::agent` has the `PolarAgent` trait (`NAME`, `PURPOSE`, `NEEDS`, `SHUTDOWN_BUDGET`, optional `SECTIONS`, `HELP`, `SELF_TEST`, and `start(Configured)`), `run::<A>()` (an agent that ends exits 1, whether `start` returned Ok or not), `--help`, `--scaffold [--config FILE]`, `--check --config FILE`, `declaration_problems` with the `polar_agent_tests!` macro for each agent crate, and `AgentBuilder::into_configured` so the builder takes what the trait declared and overrules a hand-written chain. `startup::prepare_from` keeps each problem apart and takes the source. 27 tests, a compile-fail doctest for a missing `NEEDS`, and a runnable `examples/hello_agent.rs` that was driven end to end (scaffold, fill, check, run on the document, and every problem reported for an empty environment). Not used by a real agent yet. Next: step 3, kube-consumer end to end (declare it, resolver runs `--scaffold` and fills it, ConfigMap, mount, `POLAR_CONFIG`, a cluster run). STEP 3 DONE 2026-10-09, kube-consumer end to end, verified on the dev cluster: the agent implements `PolarAgent` (`kube_consumer::agent::KubeConsumer`, `main` is `run::<KubeConsumer>()`; Cassini is implied for every agent), its catalog entry is `{ name, kind, image, config: "document" }` (no `needs`, no budget), and the resolver runs `cargo run -p kube-consumer -- --scaffold`, takes the capabilities and the least budget from it, fills it from the catalog (`infra/document.nu`, 10 tests), has the agent judge the result (`--check --config`), and renders the document into ConfigMap `kube-consumer-config` (a new `config_maps` list in the resources spec and a `config_map` volume in the agent spec) which the Job mounts at `/etc/polar`; the container environment is `POLAR_CONFIG` and `GRAPH_PASSWORD` (a secretKeyRef) and nothing else. On the cluster: the agent asked about the mounted document says no problems and shows `file` and `default` sources, the health file reads `healthy` with `cassini_connected` and `graph_connected` true, and after five minutes (the liveness probe, which reads the same document, has run since its 150 s delay) no restart and no probe failure. Notes: `POLAR_SCAFFOLD_DIR` makes the resolver read `<workload>.json` from a directory instead of running the binary (for checks that must not build anything; the agent check is skipped then); `resolve.nu check` runs each document agent own `--check` with dummy secrets; the resolver tests read a document agent values through `resolve.nu resources`; the scaffold is obtained with `cargo run` (about a second when built), the built-image route for deploys (section 9.7) is not done, so `up.nu --dev` renders from a cargo build and deploys an image built from the same tree. Next: step 4, the other builder agents. STEP 4 DONE 2026-10-09, verified on the cluster: kube-observer, jira-observer and jira-processor are PolarAgents in the catalog with `config: "document"` (no needs, no budget), and the credentials agent consumer and observer are PolarAgents that still read their environment (their charts are hand-written). The Jira variables (`JIRA_URL`, `JIRA_TOKEN` secret, `JIRA_EMAIL`, `JIRA_DEPLOYMENT`, `PROXY_CA_CERT`, `QUERY_DATE`) are a `polar-env` section in `jira/observe/src/settings.rs`, read from the snapshot (`JiraAuth::from_parts`, `JiraDeployment::resolve`, `query_date` passed to the issue observer), and the `disallowed_methods` lint (clippy.toml and the deny attribute) now covers kube-observer, kube-consumer, jira-observer and jira-processor. Found by it: `KUBE_TOKEN`, set by the `kube-api-read` capability, was read by nothing; removed. Also: jira-processor exited 0 when its supervisor stopped, now `run` exits 1; `render.nu` now fails when a manifest the catalog rendered (a workload or its `-resources.yaml`) is not in the target apply order or comes after its Job (the Jira ConfigMaps were missing from it), with tests. On the cluster all six agents ran five minutes with no restart and no probe failure, and the four document agents say `problems: None` about the document they mount (jira-observer was checked with the real binary against the live ConfigMap, because its pod ends in Error as before: the cluster cannot reach Jira). Not done: the credentials pair on a document (about ten undeclared variables in the consumer, hand-written charts), the agents not yet on the builder, rendering the scaffold from the built image instead of `cargo run`, the scaffolder for new agents (David, 2026-10-09: a `new-agent` that creates the crate with the trait implemented, tied to this), and the Jira poll interval is still a constant. A1 AGENT HALF DONE 2026-10-09 (not deployed; unit tests and the scaffold only): the credentials consumer declares its nine variables (`consume/src/settings.rs`: cert-issuer address and CA, event log path, escrow key path, bootstrap identity, Kubernetes issuers, the three introspection settings, the last a secret) and the observer its port (`observe/src/settings.rs`); both read them from the snapshot, no `std::env` read is left in either crate, both carry the `disallowed_methods` lint, and `--scaffold` lists every variable each reads. The mTLS paths come from the Cassini client declaration. One behaviour changed: a blank value now counts as unset for the issuers list too (before, blank gave an empty list, which accepted no Kubernetes token). The introspection triple still means all-or-none (a partial one switches introspection off, as before): it should probably be an error, say so if you agree. CHART HALF DONE 2026-10-09, deployed and verified: both are catalog workloads on a document (`config/workloads/credentials.nuon`), the hand charts are deleted. The catalog learned: capabilities `persistent-data` (claim, mount, PVC alongside), `pinned-ca`, `escrow-authority`; an `init` facet (polar-init environment and mounts); entry fields `provides`, `no_start_wait` and `service`; `{service.url}` placeholder; cluster `storage`. Rendered beside the old charts (compare-manifests) the Jobs, claim and Service are the same apart from the document, the observer now mounting the CA in its container, and polar-init's CA mount no longer read-only (InitMountEntry has no read_only: add one if that matters). A partial introspection setting is now a startup error. On the cluster: same 3-day-old claim reused, the ledger replayed its 12 events, escrow-key requests from the other agents served, six agents Running five minutes with no restart or warning event, probe passes (jira-observer errors on Jira as before). Not red-first: the partial-introspection test passed on first run (written with the code); no mutation check. The consumer and observer start without waiting for Cassini or Neo4j certificates, as their charts did (`no_start_wait`); the Capability list in polar-agent-builder keeps a DEPLOYMENT_ONLY list for the three pod-shape capabilities. BUILT-IMAGE SCAFFOLD ROUTE DONE 2026-10-09 (configuration.md 9.7), verified by a full `up.nu local-minimal --dev`: `POLAR_AGENT_SOURCE=images` makes the resolver pull the agent image from the registry it pushed to, read the command from the image configuration (nix images set a cmd, not an entrypoint, so `podman run <image> --scaffold` fails) and run it with --scaffold, or --check --config with the document mounted, no network; `resolve.nu document-images` lists the images to build; `up.nu --dev` has a new step 2, agent images, before the render and renders from them. Both routes give the same record (a test, skipped without podman and a pushed image). Six agents Running four minutes, no restart or warning event (jira-observer errors on Jira as before). Not red-first for the run-in-image code (only `image_command` was); the check route was proved by hand against an unfilled document (it reports the missing variables). Still true: `render.nu` alone uses `cargo run`; `up.nu` without --dev renders from whatever images are already in the registry and fails naming the one to push if one is missing; `polar-config-check` remains for the non-document workloads; `registry_flags` turns TLS verification off only for a localhost registry. POLAR-CONFIG-CHECK RETIRED 2026-10-09: the binary and its integration test (`tests/config_check.rs`) are deleted; `environment.rs` in polar-agent-builder lost `describe*`, `effective*` and the checker entry points (`check_environment`, `sections_provided_by`, `all_sections` survive as test helpers, since the tests of the sections' rules use them); `rules.nu` lost `environment_problems`; `resolve.nu` has one mode, the document: a catalog workload without `config: "document"` is an error saying it is a chart under infra/layers (the field is now only a guard, and could go). Coverage moved, not lost: the agent's own `--check` is tested in agent.rs and run by `resolve.nu check` on every document; the five rules tests that needed the binary and the leak test are gone. No test refuses a non-document workload (the resolver reads the real catalog; a test would need a fixture catalog). The `[x]` entries above that mention polar-config-check (`--describe --json`, `--effective`) are history: `<agent> --scaffold [--config FILE]` replaced them. `cargo check --workspace --all-targets` clean; nu tests rules 11, resolve 15, apply 16, secrets 7, document 12; `resolve.nu check` and a render from the images pass. Not redeployed: no agent code changed
 - [ ] NEW-AGENT SCAFFOLDER (idea from David, 2026-10-09, on seeing `hello_agent --help` and `--scaffold`): a tool that creates a new agent crate: a cargo project with the `PolarAgent` implementation, `polar_agent_builder::run::<A>()` as its main, the `polar_agent_tests!` macro, a `settings.rs` for its own variables, the `disallowed_methods` lint and `clippy.toml`, the image row in `images.nuon` and the nix package entry, and a catalog entry (`config: "document"`) so that it renders and deploys from the first commit. The facts it would start from are all in the code now (`examples/hello_agent.rs` is the smallest working agent, `kube-observer` the smallest real one). Questions for when it is taken up: where it lives (a `cargo xtask`, a nu command next to `resolve.nu`, a `cargo generate` template), whether it asks for capabilities and sections or takes flags, and how it keeps itself in step with the agents as they change (a test that scaffolds into a temp directory and builds it would do). Not the same as the older item below about a `resolve.nu new-workload` scaffolder for catalog entries, which this would absorb
 - [ ] Cassini follow-ups from the migration (2026-10-09), DONE except the last, verified on the cluster after a full `up.nu --dev`: (1) port 3000 removed (container port and Service port; nothing listened on it). (2) the broker's health check watches the CA certificate as well as its own (`watch: ["cert.pem", "ca.pem"]` on the capability's identity entry; agents still watch their own only). (3) the Service's `type: ClusterIP` is the default and is left out on purpose. (4) `infra/cassini-shutdown.nu` and `just cassini-shutdown [user]` ask the broker to shut down over the wire as a user, with the token read from its Secret, through a port-forward they start and stop; the dev constant `HEYTHERE` stays only in the local (non-cluster) harness, `example.env` and the flake shell. Found and fixed while doing it: (a) a shutdown request with a wrong token was acknowledged with `ShutdownInitiated` although it was refused, so an operator was told the broker was going down; it now answers `PermissionDenied`, and the tokens are compared in constant time (`tokens_match`); (b) the broker's trace endpoint pointed at Jaeger's UI port 16686, so no trace ever arrived and the exporter's shutdown timed out for 5 s on every exit; it now sends to the OTLP port 4318, `cassini-broker` appears in Jaeger's services, and the broker's process ends in the same second its shutdown completes (this closes the 5 s tracer-flush item for the broker); (c) the user's `.chain.pem` in `~/.config/polar-admin` is the CA chain, not the leaf, and the tool presents the `.crt`. The wire shutdown with the right token ran the five phases in about 100 ms and the Job started a new broker 19 s later; a wrong token was refused and the broker kept running. Tests: the over-the-wire tests and the token tests (the wrong-token reply test was red first); the resolver tests for port, OTLP endpoint and CA watch were red first; the shutdown tool's two tests were written with it. Still open: (6) giving the broker the crypto actor and policy actors, which come through the builder as it grows them: a service has no client, and the crypto actor works through the client, so `ServiceBuilder` refuses it today. Options are in the conversation of 2026-10-09 and want a decision. Also noted: the broker now exports every span at the debug level to Jaeger (RUST_LOG unset gives the exporter a debug filter); watch Jaeger's load, and consider a default filter and a sampler
-- [ ] WORKLOADS THAT BYPASS THE CATALOG (recorded 2026-10-09; not the focus now: first make the interaction right for the agents that use it). Only `kube-observer`, `kube-consumer`, `jira-observer` and `jira-processor` are in `infra/config/workloads/`. Hand-written charts under `infra/layers/`: the credentials agent consumer and observer (both on the builder, so they could move), the Cassini broker (not on `polar-env`; budget and grace margin written by hand in `deployment.dhall`), `polar-init` (an init container of every agent; its arguments are generated, its own environment is declared but it has no description mode), ace, cert-issuer, Neo4j, Postgres, Keycloak, Jaeger. The agents not on the builder (gitlab, git, scheduler, openapi, build-processor, resolver) are in neither the catalog nor the builder; their migration comes first. For each bypassing workload the cost is the same: its numbers and variables are tied to its code by convention or by the runtime check alone, so nothing at render time catches a mismatch
+- [ ] WORKLOADS THAT BYPASS THE CATALOG (recorded 2026-10-09; UPDATE 2026-10-10: the credentials pair, the Cassini broker and the OCI resolver have since moved into the catalog, so the list below is out of date for them; not the focus now: first make the interaction right for the agents that use it). Only `kube-observer`, `kube-consumer`, `jira-observer` and `jira-processor` are in `infra/config/workloads/`. Hand-written charts under `infra/layers/`: the credentials agent consumer and observer (both on the builder, so they could move), the Cassini broker (not on `polar-env`; budget and grace margin written by hand in `deployment.dhall`), `polar-init` (an init container of every agent; its arguments are generated, its own environment is declared but it has no description mode), ace, cert-issuer, Neo4j, Postgres, Keycloak, Jaeger. The agents not on the builder (gitlab, git, scheduler, openapi, build-processor, resolver) are in neither the catalog nor the builder; their migration comes first. For each bypassing workload the cost is the same: its numbers and variables are tied to its code by convention or by the runtime check alone, so nothing at render time catches a mismatch
 
 ## Stale text
 
