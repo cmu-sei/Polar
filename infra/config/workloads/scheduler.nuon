@@ -1,10 +1,19 @@
 # infra/config/workloads/scheduler.nuon
 #
 # The scheduler's observer: keeps a checkout of the schedules repository current and publishes each
-# schedule change to the scheduler. A PolarAgent: it says in its own code what it requires
-# (`polar-scheduler-observer --scaffold`). The processor is not migrated yet and is still the chart
-# in infra/layers/3-workloads/agents/scheduler.
+# schedule change to the scheduler. The processor receives those changes, records them in the graph
+# and notifies the agents they concern. Both are PolarAgents: each says in its own code what it
+# requires (`polar-scheduler-observer --scaffold`, `polar-scheduler --scaffold`).
 [
+  {
+    name: "polar-scheduler"
+    kind: "agent"
+    image: "scheduler-processor"
+    # The crate is not named for the image.
+    scaffold_package: "polar-scheduler"
+    config: "document"
+  }
+
   {
     name: "polar-scheduler-observer"
     kind: "agent"

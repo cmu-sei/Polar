@@ -1,6 +1,11 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
+/// Where the observer publishes each schedule change; the processor subscribes.
+pub const SCHEDULER_IN_TOPIC: &str = "scheduler.in";
+/// Where an ad-hoc agent announces itself with a default schedule; the processor subscribes.
+pub const SCHEDULER_ADHOC_TOPIC: &str = "scheduler.adhoc";
+
 // Time specification
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum TimeSpec {

@@ -14,9 +14,7 @@ def main [] {
         target_dir : $target_dir
         output_dir : ($repo_root | path join "manifests")
 
-        required_env : [
-            "POLAR_SCHEDULER_REMOTE_URL"
-        ]
+        required_env : []
 
         overrides : ($target_dir | path join "overrides.dhall")
 
@@ -29,7 +27,6 @@ def main [] {
             ($layers | path join "3-workloads/agents/gitlab/main.nu")
             ($layers | path join "3-workloads/agents/git/main.nu")
             ($layers | path join "3-workloads/agents/build-processor/main.nu")
-            ($layers | path join "3-workloads/agents/scheduler/main.nu")
             ($layers | path join "3-workloads/agents/openapi/main.nu")
         ]
 
@@ -74,13 +71,13 @@ def main [] {
             "polar-git-server.yaml"
             "polar-scheduler-observer-resources.yaml"
             "polar-scheduler-observer.yaml"
-            "scheduler-processor.yaml"
+            "polar-scheduler-resources.yaml"
+            "polar-scheduler.yaml"
             "openapi-observer.yaml"
             "openapi-processor.yaml"
         ]
 
         neo4j_bolt_addr       : "bolt+s://polar-db-svc.polar-graph.svc.cluster.local:7687"
-        scheduler_remote_url  : ($env.POLAR_SCHEDULER_REMOTE_URL? | default "https://github.com/daveman1010221/polar-schedules.git")
         identity_lifetime_overrides : [
             { identity: "graph.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
         ]

@@ -1,6 +1,6 @@
 use cassini_client::TcpClientMessage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use polar_scheduler_common::GitScheduleChange;
+use polar_scheduler_common::{GitScheduleChange, SCHEDULER_IN_TOPIC};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::path::Path;
 use tokio::sync::mpsc;
@@ -217,7 +217,7 @@ impl Actor for GitWatcherActor {
             GitWatcherMsg::PublishChange(change) => {
                 let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&change)?.to_vec();
                 state.tcp_client.cast(TcpClientMessage::publish(
-                    "scheduler.in".to_string(),
+                    SCHEDULER_IN_TOPIC.to_string(),
                     payload,
                     None,
                 ))?;

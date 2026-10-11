@@ -71,10 +71,11 @@ def main [] {
             "polar-git-server.yaml"
             "polar-scheduler-observer-resources.yaml"
             "polar-scheduler-observer.yaml"
+            "polar-scheduler-resources.yaml"
+            "polar-scheduler.yaml"
         ]
 
         neo4j_bolt_addr       : "bolt+s://polar-db-svc.polar-graph.svc.cluster.local:7687"
-        scheduler_remote_url  : ""
         enable_tls            : true
         cert_issuer_url       : "https://cert-issuer.polar.svc.cluster.local:8443"
         cert_issuer_audience  : "polar-cert-issuer.local"

@@ -62,10 +62,6 @@ in
   { imagePullSecrets = [] : List { name : Optional Text }
   , resolver = { image = registry ++ "oci-resolver:latest" }
   }
-, scheduler =
-  { imagePullSecrets = [] : List { name : Optional Text }
-  , processor = { image = registry ++ "scheduler-processor:latest" }
-  }
 , openapi =
   { imagePullSecrets = [] : List { name : Optional Text }
   , observer  = { image = registry ++ "openapi-observer:latest", openapiEndpoint = "http://localhost:3000/api-docs/openapi.json" }
