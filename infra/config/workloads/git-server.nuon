@@ -1,0 +1,30 @@
+# infra/config/workloads/git-server.nuon
+#
+# The Polar git server: hosts the configuration repositories (the schedules repo first) over git
+# smart HTTP, authenticating every caller by its mTLS certificate. A PolarAgent: it says in its own
+# code what it requires and how long it drains (`polar-git-server --scaffold`); the entry says what
+# the deployment gives it and which repositories it hosts. Design: docs/architecture/git-server.md.
+[
+  {
+    name: "polar-git-server"
+    kind: "agent"
+    image: "polar-git-server"
+    config: "document"
+    # The repositories are history that must survive the pod (persistent-data); the rest is its
+    # listener certificate and paths (git-server).
+    provides: ["git-server", "persistent-data", "pinned-ca"]
+    # What the git CLI connects to. Reached by port-forward in development; never terminated.
+    service: {
+      name: "{polar-git-server.name}"
+      ports: [ { name: "git-https", port: "{polar-git-server.port}" } ]
+    }
+    # The repositories it creates (and seeds, once) at start, and who may read and write each.
+    # Identities are the DNS SANs of the callers' certificates.
+    env: [
+      {
+        name: "POLAR_GIT_SERVER_REPOS"
+        value: '{"admins":[],"repos":[{"name":"polar-schedules","readers":["polar-scheduler-observer"],"writers":[]}]}'
+      }
+    ]
+  }
+]

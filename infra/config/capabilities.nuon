@@ -170,6 +170,27 @@
     resources: {}
   }
 
+  # The git server's identity and arrangements: a server certificate for its Service name, in
+  # a directory of its own (its Cassini client certificate is the baseline `cassini` one), the
+  # paths and port it reads, and the repositories' directory on the persistent volume
+  # `persistent-data` provides. The server declares these variables itself
+  # (`polar-git-server --scaffold`, section polar-git-server).
+  git-server: {
+    pod: {
+      env: [
+        { name: "POLAR_GIT_SERVER_CERT",      value: "/etc/tls/git-server/cert.pem" }
+        { name: "POLAR_GIT_SERVER_KEY",       value: "/etc/tls/git-server/key.pem" }
+        { name: "POLAR_GIT_SERVER_CA_CERT",   value: "/etc/tls/git-server/ca.pem" }
+        { name: "POLAR_GIT_SERVER_PORT",      value: "{polar-git-server.port}" }
+        { name: "POLAR_GIT_SERVER_REPO_ROOT", value: "/var/lib/{workload}/repos" }
+      ]
+    }
+    identity: { certs: [ { dir: "/etc/tls/git-server", volume: "git-server-certs", read_only: true, kind: "server", san: "{polar-git-server.dns}", watch: ["cert.pem", "ca.pem"] } ] }
+    dependency: {}
+    init: {}
+    resources: {}
+  }
+
   # Where the workload sends its traces: Jaeger's OTLP HTTP port. Every workload has it, from its
   # kind. How much it sends is its own: the `logging` section every agent declares (RUST_LOG for
   # the console, POLAR_TRACE_FILTER for what is exported, both info unless a workload says more).

@@ -204,6 +204,7 @@
           # ── Infrastructure containers ─────────────────────────────────────────
           nuInitImage = polarPkgs.nuInit.image;
           gitServerImage = polarPkgs.gitServer.image;
+          polarGitServerImage = polarPkgs.polarGitServer.image;
           polarInitImage = polarPkgs.polarInit.image;
 
           # ── ACE dashboard ────────────────────────────────────────────────────

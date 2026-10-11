@@ -134,6 +134,12 @@ let
       healthcheckDrv = healthcheck;
     };
 
+    polarGitServer = import ./polar-git-server/package.nix {
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
+      crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
+    };
+
     nuInit = import ./nu-init/package.nix {
       inherit pkgs nix-container-lib inputs system;
       certIssuerClient = certIssuer.client;
@@ -155,5 +161,5 @@ let
     };
 in
 {
-        inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer polarInit healthcheck credentialsAgent;
+        inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer polarGitServer polarInit healthcheck credentialsAgent;
 }

@@ -46,6 +46,7 @@
   {image: "openapi-processor",   tag: "latest", kind: "nix", attr: "polarPkgs.webAgent.processorImage"}
   {image: "scheduler-observer",  tag: "latest", kind: "nix", attr: "polarPkgs.scheduler.observerImage"}
   {image: "scheduler-processor", tag: "latest", kind: "nix", attr: "polarPkgs.scheduler.processorImage"}
+  {image: "polar-git-server",    tag: "latest", kind: "nix", attr: "polarPkgs.polarGitServer.image"}
   {image: "oci-resolver",        tag: "latest", kind: "nix", attr: "polarPkgs.ociResolver.resolverImage"}
   {image: "build-processor",     tag: "latest", kind: "nix", attr: "buildProcessorImage"}
 

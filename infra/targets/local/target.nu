@@ -70,6 +70,8 @@ def main [] {
             "build-processor.yaml"
             "oci-registry-resolver-resources.yaml"
             "oci-registry-resolver.yaml"
+            "polar-git-server-resources.yaml"
+            "polar-git-server.yaml"
             "scheduler-observer.yaml"
             "scheduler-processor.yaml"
             "openapi-observer.yaml"
