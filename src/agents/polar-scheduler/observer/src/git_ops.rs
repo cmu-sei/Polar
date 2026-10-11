@@ -1,109 +1,105 @@
-use git2::{FetchOptions, RemoteCallbacks, Repository};
-use std::path::Path;
+//! Keeping the schedules checkout in step with its remote, with the `git` command.
+//!
+//! The command, not libgit2: the Polar git server knows who is asking from the client
+//! certificate, and libgit2 cannot present one.
+
+use anyhow::{Context, anyhow};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use tracing::info;
 
-/// Clone a repository if it doesn't exist, otherwise open it.
-/// Attempts public access first; if that fails and credentials are provided, retry with credentials.
-pub fn ensure_repo(
-    local_path: &Path,
-    remote_url: &str,
-    username: Option<&str>,
-    password: Option<&str>,
-) -> Result<Repository, anyhow::Error> {
-    if local_path.exists() {
+/// The certificates git uses to reach the remote. All unset: git's usual trust, no client
+/// certificate.
+#[derive(Debug, Clone, Default)]
+pub struct GitTls {
+    pub ca_cert: Option<PathBuf>,
+    pub client_cert: Option<PathBuf>,
+    pub client_key: Option<PathBuf>,
+}
+
+impl GitTls {
+    fn command(&self) -> Command {
+        let mut cmd = Command::new("git");
+        cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0");
+        if let Some(ca) = &self.ca_cert {
+            cmd.arg("-c")
+                .arg(format!("http.sslCAInfo={}", ca.display()));
+        }
+        if let Some(cert) = &self.client_cert {
+            cmd.arg("-c")
+                .arg(format!("http.sslCert={}", cert.display()));
+        }
+        if let Some(key) = &self.client_key {
+            cmd.arg("-c").arg(format!("http.sslKey={}", key.display()));
+        }
+        cmd
+    }
+}
+
+fn run(mut cmd: Command, what: &str) -> Result<String, anyhow::Error> {
+    let out = cmd
+        .output()
+        .with_context(|| format!("cannot run git {what}"))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "git {what} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Leaves a checkout of `remote_url` at `local_path`: an existing one is used as it is, a missing
+/// one is cloned.
+pub fn ensure_repo(local_path: &Path, remote_url: &str, tls: &GitTls) -> Result<(), anyhow::Error> {
+    if local_path.join(".git").exists() {
         info!("Opening existing repo at {}", local_path.display());
-        return Ok(Repository::open(local_path)?);
+        return Ok(());
     }
-
     info!("Cloning {} into {}", remote_url, local_path.display());
-
-    // Try without credentials first (public)
-    let result = try_clone(remote_url, local_path, None);
-    if result.is_ok() {
-        return result;
-    }
-
-    // If we have credentials, try with them
-    if let (Some(user), Some(pass)) = (username, password) {
-        info!("Public clone failed, retrying with provided credentials");
-        try_clone(remote_url, local_path, Some((user, pass)))
-    } else {
-        result
-    }
+    let mut cmd = tls.command();
+    cmd.arg("clone").arg(remote_url).arg(local_path);
+    run(cmd, "clone").map(|_| ())
 }
 
-fn try_clone(
-    remote_url: &str,
-    local_path: &Path,
-    creds: Option<(&str, &str)>,
-) -> Result<Repository, anyhow::Error> {
-    let mut callbacks = RemoteCallbacks::new();
-    if let Some((user, pass)) = creds {
-        callbacks.credentials(move |_url, _username_from_url, _allowed| {
-            git2::Cred::userpass_plaintext(user, pass)
-        });
-    }
-    let mut fo = FetchOptions::new();
-    fo.remote_callbacks(callbacks);
-    let mut builder = git2::build::RepoBuilder::new();
-    builder.fetch_options(fo);
-    builder.clone(remote_url, local_path).map_err(Into::into)
-}
-
-/// Perform a `git pull` (fetch + fast-forward) on the repository.
-/// Attempts public first, then with credentials if provided.
-pub fn pull_repo(
-    repo: &Repository,
-    username: Option<&str>,
-    password: Option<&str>,
-) -> Result<(), anyhow::Error> {
+/// Brings the checkout up to its remote when that is a fast-forward. A history that has diverged
+/// is an error and is left alone.
+pub fn pull_repo(local_path: &Path, tls: &GitTls) -> Result<(), anyhow::Error> {
     info!("Pulling latest changes...");
-
-    // Try without credentials first
-    let result = try_pull(repo, None);
-    if result.is_ok() {
-        return result;
-    }
-
-    // If we have credentials, try with them
-    if let (Some(user), Some(pass)) = (username, password) {
-        info!("Public pull failed, retrying with provided credentials");
-        try_pull(repo, Some((user, pass)))
-    } else {
-        result
-    }
+    let mut cmd = tls.command();
+    cmd.current_dir(local_path).args(["pull", "--ff-only"]);
+    run(cmd, "pull").map(|_| ())
 }
 
-fn try_pull(repo: &Repository, creds: Option<(&str, &str)>) -> Result<(), anyhow::Error> {
-    let mut remote = repo.find_remote("origin")?;
-    let mut callbacks = RemoteCallbacks::new();
-    if let Some((user, pass)) = creds {
-        callbacks.credentials(move |_url, _username_from_url, _allowed| {
-            git2::Cred::userpass_plaintext(user, pass)
-        });
-    }
-    let mut fo = FetchOptions::new();
-    fo.remote_callbacks(callbacks);
-    remote.fetch(&[] as &[&str], Some(&mut fo), None)?;
+/// The repository a remote URL names: its last path segment without `.git`. A change announced
+/// for any other repository is not about this checkout.
+pub fn repo_name(remote_url: &str) -> Option<&str> {
+    let last = remote_url.trim_end_matches('/').rsplit(['/', ':']).next()?;
+    let name = last.strip_suffix(".git").unwrap_or(last);
+    (!name.is_empty()).then_some(name)
+}
 
-    // Merge the fetched branch (origin/main) into current branch
-    let fetch_head = repo.find_reference("FETCH_HEAD")?;
-    let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
-    let analysis = repo.merge_analysis(&[&fetch_commit])?;
-    if analysis.0.is_up_to_date() {
-        info!("Already up to date.");
-    } else if analysis.0.is_fast_forward() {
-        info!("Fast-forward possible. Performing merge...");
-        let refname = format!("refs/heads/{}", repo.head()?.shorthand().unwrap_or("main"));
-        repo.reference(
-            &refname,
-            fetch_commit.id(),
-            true,
-            "Fast-forward merge from origin",
-        )?;
-        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
-    } else {
-        info!("Merge required but not fast-forward. Skipping automatic merge.");
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_repository_is_the_last_path_segment() {
+        assert_eq!(
+            repo_name("https://polar-git-server.polar.svc.cluster.local:8443/polar-schedules.git"),
+            Some("polar-schedules")
+        );
+        assert_eq!(
+            repo_name("https://github.com/x/polar-schedules"),
+            Some("polar-schedules")
+        );
+        assert_eq!(
+            repo_name("git@github.com:x/polar-schedules.git"),
+            Some("polar-schedules")
+        );
+        assert_eq!(repo_name("file:///tmp/r/"), Some("r"));
+        assert_eq!(repo_name(""), None);
     }
-    Ok(())
 }

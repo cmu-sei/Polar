@@ -13,11 +13,7 @@ impl Actor for MockTcpClient {
     type State = ();
     type Arguments = ();
 
-    async fn pre_start(
-        &self,
-        _: ActorRef<Self::Msg>,
-        _: (),
-    ) -> Result<(), ActorProcessingErr> {
+    async fn pre_start(&self, _: ActorRef<Self::Msg>, _: ()) -> Result<(), ActorProcessingErr> {
         Ok(())
     }
 }
