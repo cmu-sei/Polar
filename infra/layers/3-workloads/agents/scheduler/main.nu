@@ -13,17 +13,10 @@ def main [context_nuon: string] {
     mkdir $output_dir
 
     let values_path = ($chart_dir | path join "values.dhall")
-    let merged      = "let v = " + $values_path + " in let o = (" + $overrides + ").scheduler in v // { imagePullSecrets = o.imagePullSecrets, observer = v.observer // o.observer, processor = v.processor // o.processor }"
+    let merged      = "let v = " + $values_path + " in let o = (" + $overrides + ").scheduler in v // { imagePullSecrets = o.imagePullSecrets, processor = v.processor // o.processor }"
     let base        = "let v = (" + $merged + ") in "
     let cert_args   = ", polarInitImage = \"" + $polar_init_image + "\", certIssuerUrl = \"" + $cert_issuer_url + "\", saTokenAudience = \"" + $sa_audience + "\", proxyCACert = v.proxyCACert }"
     let neo         = ", neo4jBoltAddr = \"" + $neo4j_addr + "\""
-
-    let tmp  = (mktemp --suffix ".dhall")
-    let expr = $base + $chart_dir + "/observer.dhall { name = v.observer.name, image = v.observer.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, syncInterval = v.observer.syncInterval, localPath = v.observer.localPath, remoteUrl = \"" + $remote_url + "\"" + $cert_args
-    $expr | save --force $tmp
-    print $"  rendering observer.dhall -> scheduler-observer.yaml"
-    dhall-to-yaml --documents --quoted --file $tmp | save --force ($output_dir | path join "scheduler-observer.yaml")
-    rm $tmp
 
     let tmp  = (mktemp --suffix ".dhall")
     let expr = $base + $chart_dir + "/processor.dhall { name = v.processor.name, image = v.processor.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets" + $neo + $cert_args

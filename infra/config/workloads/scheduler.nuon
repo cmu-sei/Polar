@@ -1,0 +1,31 @@
+# infra/config/workloads/scheduler.nuon
+#
+# The scheduler's observer: keeps a checkout of the schedules repository current and publishes each
+# schedule change to the scheduler. A PolarAgent: it says in its own code what it requires
+# (`polar-scheduler-observer --scaffold`). The processor is not migrated yet and is still the chart
+# in infra/layers/3-workloads/agents/scheduler.
+[
+  {
+    name: "polar-scheduler-observer"
+    kind: "agent"
+    image: "scheduler-observer"
+    # The crate is not named for the image.
+    scaffold_package: "polar-scheduler-observer"
+    config: "document"
+    provides: ["working-checkout"]
+    env: [
+      # The schedules repository on the Polar git server, read with the observer's own workload
+      # certificate (the same one it presents to Cassini). The server's access list names this
+      # workload (git-server.nuon). The first clone needs the server to be up; until it is, the
+      # observer stops and the Job starts it again.
+      { name: "POLAR_SCHEDULER_REMOTE_URL", value: "https://{polar-git-server.addr}/polar-schedules.git" }
+      { name: "POLAR_SCHEDULER_LOCAL_PATH", value: "/var/lib/{workload}/polar-schedules" }
+      { name: "POLAR_SCHEDULER_GIT_CA_CERT", value: "/etc/tls/certs/ca.pem" }
+      { name: "POLAR_SCHEDULER_GIT_CLIENT_CERT", value: "/etc/tls/certs/cert.pem" }
+      { name: "POLAR_SCHEDULER_GIT_CLIENT_KEY", value: "/etc/tls/certs/key.pem" }
+      # The git server announces every accepted push, so this is only a safety net for a missed
+      # announcement.
+      { name: "POLAR_SCHEDULER_SYNC_INTERVAL", value: "300" }
+    ]
+  }
+]

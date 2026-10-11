@@ -64,7 +64,6 @@ in
   }
 , scheduler =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , observer  = { image = registry ++ "scheduler-observer:latest" }
   , processor = { image = registry ++ "scheduler-processor:latest" }
   }
 , openapi =

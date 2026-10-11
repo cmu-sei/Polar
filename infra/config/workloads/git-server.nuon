@@ -19,11 +19,12 @@
       ports: [ { name: "git-https", port: "{polar-git-server.port}" } ]
     }
     # The repositories it creates (and seeds, once) at start, and who may read and write each.
-    # Identities are the DNS SANs of the callers' certificates.
+    # Identities are the DNS SANs of the callers' certificates; a workload's is
+    # <serviceaccount>.<namespace>.serviceaccount.<cluster domain> (cert-issuer's normalisation).
     env: [
       {
         name: "POLAR_GIT_SERVER_REPOS"
-        value: '{"admins":[],"repos":[{"name":"polar-schedules","readers":["polar-scheduler-observer"],"writers":[]}]}'
+        value: '{"admins":[],"repos":[{"name":"polar-schedules","readers":["polar-scheduler-observer.polar.serviceaccount.cluster.local"],"writers":[]}]}'
       }
     ]
   }

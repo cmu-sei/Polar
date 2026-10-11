@@ -191,6 +191,20 @@
     resources: {}
   }
 
+  # A directory the workload may write that need not outlive the pod: an emptyDir mounted at
+  # /var/lib/<workload>. The scheduler observer keeps its checkout of the schedules repository
+  # here; it clones again when the pod is replaced.
+  working-checkout: {
+    pod: {
+      volumes: [ { name: "{workload}-checkout" } ]
+      mounts: [ { name: "{workload}-checkout", path: "/var/lib/{workload}", read_only: false } ]
+    }
+    identity: {}
+    dependency: {}
+    init: {}
+    resources: {}
+  }
+
   # Where the workload sends its traces: Jaeger's OTLP HTTP port. Every workload has it, from its
   # kind. How much it sends is its own: the `logging` section every agent declares (RUST_LOG for
   # the console, POLAR_TRACE_FILTER for what is exported, both info unless a workload says more).

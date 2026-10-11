@@ -1,7 +1,7 @@
 -- infra/layers/3-workloads/agents/scheduler/values.dhall
 --
 -- Canonical defaults for the polar-scheduler chart.
--- Observer: syncs a GitOps schedules repo and publishes scheduling events.
+-- (The observer is a catalog workload: infra/config/workloads/scheduler.nuon.)
 -- Processor: reads scheduling events from Cassini and writes to graph.
 --
 -- The schedules repo credentials are injected at render time from secrets.
@@ -12,13 +12,6 @@ let Constants = ../../../../schema/constants.dhall
 in  { name            = "polar-scheduler"
     , imagePullPolicy = "IfNotPresent"
     , imagePullSecrets = [] : List { name : Optional Text }
-
-    , observer =
-      { name         = "polar-scheduler-observer"
-      , image        = "polar-scheduler-observer:latest"
-      , syncInterval = "120"
-      , localPath    = "/tmp/polar-schedules"
-      }
 
     , processor =
       { name  = "polar-scheduler"

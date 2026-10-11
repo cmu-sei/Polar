@@ -69,6 +69,8 @@ def main [] {
             "oci-registry-resolver.yaml"
             "polar-git-server-resources.yaml"
             "polar-git-server.yaml"
+            "polar-scheduler-observer-resources.yaml"
+            "polar-scheduler-observer.yaml"
         ]
 
         neo4j_bolt_addr       : "bolt+s://polar-db-svc.polar-graph.svc.cluster.local:7687"

@@ -41,7 +41,8 @@ let
     inherit system pkgs;
     inputs = healthcheckInputs;
     configNixPath    = ./container-observer.nix;
-    extraDerivations = [ observer ];
+    # The observer runs git to clone and pull the schedules repository.
+    extraDerivations = [ observer pkgs.git ];
   };
 in
 {
