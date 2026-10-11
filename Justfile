@@ -796,7 +796,7 @@ port-forwards-up *only:
     #!/usr/bin/env bash
     set -euo pipefail
     # No arguments: start every forward. Otherwise only the named ones
-    # (neo4j keycloak ace jaeger observer).
+    # (neo4j keycloak ace jaeger observer git).
     ONLY=" {{only}} "
     want() { [ "$ONLY" = "  " ] || [[ "$ONLY" == *" $1 "* ]]; }
     start_pf() {
@@ -811,7 +811,55 @@ port-forwards-up *only:
     start_pf ace      polar       ace-svc                      "8050:8050"             /tmp/pf-ace.log
     start_pf jaeger   polar       jaeger-svc                   "4318:4318 16686:16686" /tmp/pf-jaeger.log
     start_pf observer polar       credentials-agent-observer   "8081:8080"             /tmp/pf-credentials-observer.log
+    start_pf git      polar       polar-git-server             "8443:8443"             /tmp/pf-polar-git-server.log
     echo "Logs: /tmp/pf-*.log"
+
+# The polar-git-server, as the git CLI reaches it from this machine: the cluster's own name for it,
+# which is the name on its certificate, mapped to the port-forward (just port-forwards-up git).
+# git checks the certificate's name against the URL's host, so the URL keeps the cluster name and
+# curl is told where that name lives (http.curloptResolve, git 2.37 or newer).
+_git_host := "polar-git-server.polar.svc.cluster.local"
+
+# The git configuration that makes `git` present your Polar certificate to the Polar git server.
+# Prints it; changes nothing. GIT_SSL_CAINFO in the environment overrides http.sslCAInfo, so unset
+# it (in fish: set -e GIT_SSL_CAINFO) or use `just polar-git-clone`, which does it for one command.
+# Usage: just polar-git-config            (as djshepard)
+#        just polar-git-config alice
+polar-git-config user="djshepard":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DIR="$HOME/.config/polar-admin"
+    for f in "{{user}}.crt" "{{user}}.key" "ca.pem"; do
+        [ -f "$DIR/$f" ] || { echo "ERROR: missing $DIR/$f" >&2; exit 1; }
+    done
+    U="https://{{_git_host}}:8443/"
+    echo "git config --global 'http.$U.sslCAInfo' $DIR/ca.pem"
+    echo "git config --global 'http.$U.sslCert' $DIR/{{user}}.crt"
+    echo "git config --global 'http.$U.sslKey' $DIR/{{user}}.key"
+    echo "git config --global 'http.$U.curloptResolve' {{_git_host}}:8443:127.0.0.1"
+    echo
+    echo "Then: git clone ${U}polar-schedules.git"
+    if [ -n "${GIT_SSL_CAINFO:-}" ]; then
+        echo "NOTE: GIT_SSL_CAINFO is set ($GIT_SSL_CAINFO) and overrides http.sslCAInfo." >&2
+    fi
+
+# Clone a repository from the Polar git server with your Polar certificate, for this one command,
+# without touching your git configuration. Needs the port-forward (just port-forwards-up git).
+# Usage: just polar-git-clone polar-schedules
+#        just polar-git-clone polar-schedules ~/work/schedules alice
+polar-git-clone repo dest="" user="djshepard":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DIR="$HOME/.config/polar-admin"
+    for f in "{{user}}.crt" "{{user}}.key" "ca.pem"; do
+        [ -f "$DIR/$f" ] || { echo "ERROR: missing $DIR/$f" >&2; exit 1; }
+    done
+    env -u GIT_SSL_CAINFO -u SSL_CERT_FILE git \
+        -c "http.sslCAInfo=$DIR/ca.pem" \
+        -c "http.sslCert=$DIR/{{user}}.crt" \
+        -c "http.sslKey=$DIR/{{user}}.key" \
+        -c "http.curloptResolve={{_git_host}}:8443:127.0.0.1" \
+        clone "https://{{_git_host}}:8443/{{repo}}.git" {{dest}}
 
 # Ask the Cassini broker in the cluster to shut down in order, over the wire, with the shutdown token
 # from its Secret and your certificate (just user-cert-install). The Job starts a new broker.
@@ -828,6 +876,7 @@ port-forwards-down:
     pkill -f "port-forward -n polar svc/ace-svc" 2>/dev/null || true
     pkill -f "port-forward -n polar svc/jaeger-svc" 2>/dev/null || true
     pkill -f "port-forward -n polar svc/credentials-agent-observer" 2>/dev/null || true
+    pkill -f "port-forward -n polar svc/polar-git-server" 2>/dev/null || true
     echo "Port-forwards stopped."
 
 # Idempotent Keycloak bootstrap: realm, public client (PKCE, Authorization
