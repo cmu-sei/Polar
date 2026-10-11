@@ -117,7 +117,21 @@ the Dhall files listed above. Catalog-wide follow-ups (derive `apply_order`, rep
 
 ---
 
-### 3. Proposed order (for Dave to confirm or change)
+### 2a. Current plan (decided 2026-10-10, David): scheduler, then credentials-agent as its first user, then git
+
+The order in section 3 is superseded by this one; section 3 stays as the list of what is left afterwards.
+
+1. [ ] Scheduler agent (`polar-scheduler` observer and processor) properly migrated onto the builder and into the catalog
+2. [ ] An initial schedule for the credentials agent, with the overrides, policies and secrets it will consume (secrets encrypted to its escrow public key; see the ConfigurationActor and "Credentials agent as the main consumer of scheduled overrides" items under the environment contract)
+3. [ ] git-observer migrated onto the builder and into the catalog (PINNED until 1 and 2 are done; the git agent's design doc `docs/architecture/git/agents.md` needs updating with it, see the log)
+4. [ ] An initial schedule of repos for the git agent in the schedules repo; at least one repo needs a credential the git agent fetches from the credentials agent
+5. [ ] End to end: the git agent pulls a repo and a consumer is notified (git-processor or another)
+
+**Polar git server (David, 2026-10-10; direction, design not yet written):** the schedules repo is served by a new Polar component, replacing the development nginx/fcgiwrap server in `src/agents/git-server` (host-only, unauthenticated, read-only mounts; not reusable). It is a ractor `PolarAgent` on the builder and in the catalog, core infrastructure managed by the stack, that speaks git to the user's own `git` CLI over mTLS with the user's Polar certificate (reachable in development through a forwarded port). Its purpose is the system's configuration repositories; the repos it serves are declared in its deployment configuration (and can be pre-populated from `infra/` at deploy time). It works closely with the scheduler, credentials and git agents. It is optional: a user may point the scheduler at their own git remote, at the cost of being able to manage it, observe it and receive notifications from it. Design: `docs/architecture/git-server.md`. Decisions (David, 2026-10-10): crate `src/agents/polar-git-server`; mTLS only, no TLS termination, identity from the handshake (Cassini `listener.rs` pattern); port-forward only for now; scheduler observer is the only agent reader; static default ACL with a Cedar override hook; authorization per repo (no branch rules, folders separated by repos); repos declared in deployment config and also creatable at runtime by an admin; authorship proof travels in signed commits (`polar-sign`), the server push log is an extra layer; topics are constants in the agent's common crate, not catalog entries. Also confirmed: build ConfigurationActor in the builder, build signed-config verification, retire `git/scheduler` in favour of polar-scheduler, all AFTER a working git server with tests. **Progress (2026-10-10):** `src/agents/polar-git-server` core is built and tested (17 unit tests; 8 end-to-end tests drive the real `git` CLI over generated mTLS certificates: clone, no-anonymous, wrong-CA, per-repo read/write, tag push refused, history rewrite refused, `RepoChanged` announced only for refs that moved). Since then: the crate is split `polar-git-server/{common,server}`; the `PolarAgent` wrapper (settings, supervisor on the credentials-agent-observer pattern, drain on `PrepareShutdown`), the Cassini publisher (`RepoChangedEvent` on `polar-git-repo-changed`, topic constant in `polar-git-server-common`), catalog (`git-server` capability, `polar-git-server` in services.nuon, `workloads/git-server.nuon`, images.nuon row), Nix packaging (image includes `git`), and both local targets' apply order are in; `cargo check --workspace`, `nu infra/resolve.nu check`, `nu infra/tests/resolve.nu` and `nu infra/render.nu local-minimal` pass. NOT yet done: the Nix image has not been built and nothing has run on a cluster; no scheduler observer subscription to `RepoChanged` yet; seeds from `infra/` (the catalog declares `polar-schedules` empty, readable by `polar-scheduler-observer`, no writers); runtime `CreateRepo`; the push log; the old dev `src/agents/git-server` is still present (its removal awaits your word). Done since: `just port-forwards-up git`, `just polar-git-config` (prints the git config) and `just polar-git-clone`; the URL keeps the cluster DNS name on the certificate and git's `http.curloptResolve` maps it to the forwarded 127.0.0.1 (proven by an end-to-end test; the recipes themselves are untried against a cluster).
+
+Open questions are recorded in the log below as they are asked and answered.
+
+### 3. Proposed order (superseded by 2a; kept as the list of what is left)
 
 Rationale: observers have no graph and the smallest blast radius; processors add the graph rule; the
 two with open decisions come last.
@@ -155,6 +169,7 @@ cluster verification.
 - [ ] Whether `cargo clippy --workspace -- -D warnings` (AGENTS.md) is expected to pass: this file says it cannot today (about 19 findings in five crates); per-crate clippy is what I would run
 - [ ] How to treat `agent-task.json` / `Observer-Scheduler-Consumer.md` (you deleted them; the pull succeeded with them gone, so commit the deletion when ready)
 
+- 2026-10-10: git agent pinned (David): the plan in 2a puts the scheduler and the credentials agent's schedule first. `docs/architecture/git/agents.md` is conceptually sound but stale: its tree shows `GitObserverRoot` owning the client, it omits the `GIT_REPO_CONFIG_EVENTS` configuration path (the README describes `GIT_AGENT_CONFIG` JSON instead), topics, shutdown and `Registered` behaviour; update it in the migration commit.
 - 2026-10-10: section created from an inventory of the code after pulling `f249491b`. The first draft (a separate WORK.md, now deleted) wrongly listed jira, credentials-agent and the resolver as unmigrated.
 
 ## Health system rework (plan, decided 2026-10-06)
