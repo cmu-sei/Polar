@@ -552,7 +552,7 @@ user-cert-install username="djshepard":
     # Librewolf keeps profiles in ~/.librewolf, or under ~/.config/librewolf/librewolf on
     # newer versions and some packagings. The first profile found is used; with several, set
     # POLAR_NSS_DB.
-    NSS_DB="${POLAR_NSS_DB:-$(find "$HOME/.librewolf" "$HOME/.config/librewolf" -maxdepth 3 -name cert9.db -printf '%h\n' 2>/dev/null | head -1)}"
+    NSS_DB="${POLAR_NSS_DB:-$({ find "$HOME/.librewolf" "$HOME/.config/librewolf" -maxdepth 3 -name cert9.db -printf '%h\n' 2>/dev/null || true; } | head -1)}"
     [ -n "$NSS_DB" ] || { echo "ERROR: no Librewolf profile with cert9.db found under ~/.librewolf or ~/.config/librewolf (set POLAR_NSS_DB to the profile directory)" >&2; exit 1; }
     # Firefox-family browsers keep a `lock` symlink in the profile while running,
     # named "<ip>:+<pid>". A crash leaves it behind, so only a live pid counts.
