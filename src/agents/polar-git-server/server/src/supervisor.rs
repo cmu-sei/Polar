@@ -11,10 +11,11 @@
 //! 4. The infrastructure supervisor's termination makes this supervisor exit non-zero, so the
 //!    workload is restarted with fresh certificates.
 
+use crate::access::RuntimeAcl;
 use crate::config::ServerFile;
 use crate::git::GitRunner;
 use crate::http::{ServerState, router};
-use crate::notify::CassiniNotifier;
+use crate::notify::{CassiniNotifier, PushLog, Tee};
 use crate::settings::GitServerSettings;
 use crate::store::RepoStore;
 use crate::tls::{serve_tls, server_config};
@@ -96,17 +97,28 @@ impl Actor for GitServerSupervisor {
         let store = RepoStore::new(&settings.repo_root);
         std::fs::create_dir_all(&settings.repo_root)
             .map_err(|e| format!("cannot create {}: {e}", settings.repo_root))?;
-        file.provision(&store)
+        file.provision(&store, Path::new(&settings.seed_root))
             .await
             .map_err(|e| format!("cannot provision the declared repositories: {e}"))?;
 
+        // The access lists of repositories created while running are kept beside the repositories,
+        // as is the record of pushes.
+        let root = Path::new(&settings.repo_root);
+        let acl = Arc::new(RuntimeAcl::new(
+            file.acl(),
+            Some(root.join("runtime-acl.json")),
+        )?);
         let app = router(ServerState {
             store,
-            authorizer: Arc::new(file.acl()),
+            authorizer: acl.clone(),
+            runtime: acl,
             runner: GitRunner::default(),
-            notifier: Arc::new(CassiniNotifier::new(
-                resources.tcp_client.as_actor_ref().clone(),
-            )),
+            notifier: Arc::new(Tee(vec![
+                Arc::new(PushLog::new(root.join("push-log.jsonl"))),
+                Arc::new(CassiniNotifier::new(
+                    resources.tcp_client.as_actor_ref().clone(),
+                )),
+            ])),
             max_body: MAX_BODY,
         });
 

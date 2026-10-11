@@ -3,6 +3,7 @@
 //! Design: `docs/architecture/git-server.md`.
 
 pub mod access;
+pub mod admin;
 pub mod agent;
 pub mod config;
 pub mod git;

@@ -1,9 +1,9 @@
 //! The server against the real `git` CLI over real mTLS, with certificates minted for the test.
 
-use polar_git_server::access::{RepoAcl, StaticAcl};
+use polar_git_server::access::{RepoAcl, RuntimeAcl, StaticAcl};
 use polar_git_server::git::GitRunner;
 use polar_git_server::http::{ServerState, router};
-use polar_git_server::notify::{Recorder, RepoChanged};
+use polar_git_server::notify::{PushLog, Recorder, RepoChanged, Tee};
 use polar_git_server::store::RepoStore;
 use polar_git_server::tls::{serve_tls, server_config};
 use rcgen::{
@@ -105,7 +105,7 @@ impl Harness {
         store.seed(REPO, &seed).await.unwrap();
 
         let acl = StaticAcl {
-            admins: Default::default(),
+            admins: ["root".to_string()].into(),
             repos: [(
                 REPO.to_string(),
                 RepoAcl {
@@ -116,11 +116,18 @@ impl Harness {
             .into(),
         };
         let notes = Arc::new(Recorder::default());
+        let acl = Arc::new(
+            RuntimeAcl::new(acl, Some(dir.path().join("repos/runtime-acl.json"))).unwrap(),
+        );
         let app = router(ServerState {
             store,
-            authorizer: Arc::new(acl),
+            authorizer: acl.clone(),
+            runtime: acl,
             runner: GitRunner::default(),
-            notifier: notes.clone(),
+            notifier: Arc::new(Tee(vec![
+                Arc::new(PushLog::new(dir.path().join("repos/push-log.jsonl"))),
+                notes.clone(),
+            ])),
             max_body: 64 * 1024 * 1024,
         });
 
@@ -368,4 +375,128 @@ async fn the_cluster_name_works_through_a_local_forward() {
         )
         .await;
     assert!(!ok);
+}
+
+impl Harness {
+    /// Calls the admin interface as the holder of `creds` with curl, which can present a client
+    /// certificate; returns the HTTP status and body.
+    async fn admin_put(&self, creds: &(PathBuf, PathBuf), name: &str, body: &str) -> (u16, String) {
+        let out = tokio::process::Command::new("curl")
+            .args(["--silent", "--show-error", "--noproxy", "*"])
+            .args(["--cacert", self.ca_file.to_str().unwrap()])
+            .args(["--cert", creds.0.to_str().unwrap()])
+            .args(["--key", creds.1.to_str().unwrap()])
+            .args(["--request", "PUT", "--data", body])
+            .args(["--write-out", "\n%{http_code}"])
+            .arg(format!(
+                "https://127.0.0.1:{}/admin/repos/{name}",
+                self.port
+            ))
+            .output()
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let (body, code) = text.rsplit_once('\n').unwrap_or(("", "0"));
+        (code.trim().parse().unwrap_or(0), body.to_string())
+    }
+}
+
+#[tokio::test]
+async fn an_admin_creates_a_repository_that_its_writers_then_use() {
+    let h = Harness::start().await;
+    let root = client(&h.ca, h.dir.path(), "root");
+    let (status, body) = h
+        .admin_put(&root, "extra", r#"{"readers":["bob"],"writers":["carol"]}"#)
+        .await;
+    assert_eq!(status, 201, "{body}");
+    // Asking again is not an error, and does not say "created" a second time.
+    let (status, _) = h
+        .admin_put(&root, "extra", r#"{"readers":["bob"],"writers":["carol"]}"#)
+        .await;
+    assert_eq!(status, 200);
+
+    let carol = client(&h.ca, h.dir.path(), "carol");
+    let url = format!("https://127.0.0.1:{}/extra.git", h.port);
+    let work = h.dir.path().join("extra-work");
+    let (ok, text) = h
+        .git(
+            h.dir.path(),
+            Some(&carol),
+            &["clone", &url, work.to_str().unwrap()],
+        )
+        .await;
+    assert!(ok, "{text}");
+    h.commit(&work, "a.dhall", "1").await;
+    let (ok, text) = h
+        .git(&work, Some(&carol), &["push", "origin", "HEAD:main"])
+        .await;
+    assert!(ok, "{text}");
+
+    let bob = client(&h.ca, h.dir.path(), "bob");
+    let (ok, text) = h
+        .git(
+            h.dir.path(),
+            Some(&bob),
+            &["clone", &url, h.dir.path().join("bob").to_str().unwrap()],
+        )
+        .await;
+    assert!(ok, "{text}");
+    let mallory = client(&h.ca, h.dir.path(), "mallory");
+    let (ok, _) = h
+        .git(
+            h.dir.path(),
+            Some(&mallory),
+            &["clone", &url, h.dir.path().join("mal").to_str().unwrap()],
+        )
+        .await;
+    assert!(!ok);
+}
+
+#[tokio::test]
+async fn only_an_admin_may_create_and_a_declared_repository_is_not_reconfigured() {
+    let h = Harness::start().await;
+    let alice = client(&h.ca, h.dir.path(), "alice");
+    let (status, _) = h.admin_put(&alice, "mine", "{}").await;
+    assert_eq!(
+        status, 403,
+        "a writer of another repository is not an admin"
+    );
+
+    let root = client(&h.ca, h.dir.path(), "root");
+    let (status, _) = h.admin_put(&root, REPO, r#"{"writers":["mallory"]}"#).await;
+    assert_eq!(status, 409);
+    let (status, _) = h.admin_put(&root, "Bad..Name", "{}").await;
+    assert_eq!(status, 400);
+    let (status, _) = h.admin_put(&root, "ok", r#"{"writerz":[]}"#).await;
+    assert_eq!(status, 400, "a misspelled key is an error");
+
+    // The refusal left alice's access to the declared repository as it was.
+    let (ok, _, text) = h.clone_as(Some(&alice), "still").await;
+    assert!(ok, "{text}");
+}
+
+#[tokio::test]
+async fn accepted_pushes_are_recorded_and_refused_ones_are_not() {
+    let h = Harness::start().await;
+    let alice = client(&h.ca, h.dir.path(), "alice");
+    let (_, repo, _) = h.clone_as(Some(&alice), "log").await;
+    h.commit(&repo, "one.dhall", "1").await;
+    let (ok, t) = h
+        .git(&repo, Some(&alice), &["push", "origin", "HEAD:main"])
+        .await;
+    assert!(ok, "{t}");
+
+    let mallory = client(&h.ca, h.dir.path(), "mallory");
+    let (ok, _, _) = h.clone_as(Some(&mallory), "nope").await;
+    assert!(!ok);
+
+    let log = std::fs::read_to_string(h.dir.path().join("repos/push-log.jsonl")).unwrap();
+    let lines: Vec<serde_json::Value> = log
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1, "{log}");
+    assert_eq!(lines[0]["pusher"], "alice");
+    assert_eq!(lines[0]["repo"], REPO);
+    assert_eq!(lines[0]["ref"], "refs/heads/main");
 }

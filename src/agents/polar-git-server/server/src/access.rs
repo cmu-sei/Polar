@@ -2,8 +2,10 @@
 //! evaluator can replace or override the static default without touching the server.
 
 use crate::pktline::RefUpdate;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::RwLock;
 
 /// The peer identity taken from the verified TLS handshake.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -17,10 +19,14 @@ pub enum Access {
 
 pub trait Authorizer: Send + Sync {
     fn allows(&self, who: &Identity, repo: &str, access: Access) -> bool;
+
+    /// Whether `who` may administer the server (create repositories). Administrators may also do
+    /// anything to every repository.
+    fn is_admin(&self, who: &Identity) -> bool;
 }
 
 /// Who may do what to one repository.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RepoAcl {
     #[serde(default)]
     pub readers: HashSet<String>,
@@ -38,18 +44,126 @@ pub struct StaticAcl {
     pub repos: HashMap<String, RepoAcl>,
 }
 
+impl RepoAcl {
+    fn allows(&self, who: &Identity, access: Access) -> bool {
+        match access {
+            Access::Write => self.writers.contains(&who.0),
+            Access::Read => self.readers.contains(&who.0) || self.writers.contains(&who.0),
+        }
+    }
+}
+
 impl Authorizer for StaticAcl {
     fn allows(&self, who: &Identity, repo: &str, access: Access) -> bool {
-        if self.admins.contains(&who.0) {
+        self.is_admin(who)
+            || self
+                .repos
+                .get(repo)
+                .is_some_and(|acl| acl.allows(who, access))
+    }
+
+    fn is_admin(&self, who: &Identity) -> bool {
+        self.admins.contains(&who.0)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeclareError {
+    /// The deployment's configuration owns this repository's access list; runtime requests do not
+    /// change it.
+    Declared,
+    Persist(String),
+}
+
+impl std::fmt::Display for DeclareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeclareError::Declared => {
+                write!(
+                    f,
+                    "the deployment declares this repository; its access list is not changed here"
+                )
+            }
+            DeclareError::Persist(e) => write!(f, "cannot save the access lists: {e}"),
+        }
+    }
+}
+
+/// The deployment's access lists plus those of repositories created at runtime. The deployment's
+/// are the floor and always win; the runtime ones are saved to a file so they survive a restart.
+#[derive(Debug)]
+pub struct RuntimeAcl {
+    base: StaticAcl,
+    runtime: RwLock<HashMap<String, RepoAcl>>,
+    file: Option<PathBuf>,
+}
+
+impl RuntimeAcl {
+    /// `file` is where runtime access lists are kept; if it exists they are loaded from it.
+    pub fn new(base: StaticAcl, file: Option<PathBuf>) -> Result<Self, String> {
+        let runtime = match &file {
+            Some(path) if path.is_file() => {
+                let text = std::fs::read_to_string(path)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                serde_json::from_str(&text)
+                    .map_err(|e| format!("{} is not a set of access lists: {e}", path.display()))?
+            }
+            _ => HashMap::new(),
+        };
+        Ok(Self {
+            base,
+            runtime: RwLock::new(runtime),
+            file,
+        })
+    }
+
+    /// Sets the access list of a runtime repository, replacing any earlier one. Returns an error
+    /// for a repository the deployment declares.
+    pub fn declare(&self, repo: &str, acl: RepoAcl) -> Result<(), DeclareError> {
+        if self.base.repos.contains_key(repo) {
+            return Err(DeclareError::Declared);
+        }
+        let mut runtime = self.runtime.write().expect("acl lock");
+        let previous = runtime.insert(repo.to_string(), acl);
+        if let Err(e) = self.persist(&runtime) {
+            match previous {
+                Some(p) => runtime.insert(repo.to_string(), p),
+                None => runtime.remove(repo),
+            };
+            return Err(DeclareError::Persist(e));
+        }
+        Ok(())
+    }
+
+    fn persist(&self, runtime: &HashMap<String, RepoAcl>) -> Result<(), String> {
+        let Some(path) = &self.file else {
+            return Ok(());
+        };
+        let text = serde_json::to_string_pretty(runtime).map_err(|e| e.to_string())?;
+        let temp = path.with_extension("tmp");
+        std::fs::write(&temp, text)
+            .and_then(|()| std::fs::rename(&temp, path))
+            .map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
+
+impl Authorizer for RuntimeAcl {
+    fn allows(&self, who: &Identity, repo: &str, access: Access) -> bool {
+        if self.base.allows(who, repo, access) {
             return true;
         }
-        let Some(acl) = self.repos.get(repo) else {
-            return false;
-        };
-        match access {
-            Access::Write => acl.writers.contains(&who.0),
-            Access::Read => acl.readers.contains(&who.0) || acl.writers.contains(&who.0),
-        }
+        // The deployment's list for a declared repository is complete.
+        !self.base.repos.contains_key(repo)
+            && self
+                .runtime
+                .read()
+                .expect("acl lock")
+                .get(repo)
+                .is_some_and(|acl| acl.allows(who, access))
+    }
+
+    fn is_admin(&self, who: &Identity) -> bool {
+        self.base.is_admin(who)
     }
 }
 
@@ -155,5 +269,40 @@ mod tests {
             .is_ok()
         );
         assert!(authorize_push(&a, &who("mallory"), "polar-schedules", &[main]).is_err());
+    }
+
+    #[test]
+    fn a_runtime_repository_is_listed_survives_a_restart_and_never_overrides_the_deployment() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("runtime-acl.json");
+        let acl = RuntimeAcl::new(acl(), Some(file.clone())).unwrap();
+        let fresh = RepoAcl {
+            readers: ["bob".to_string()].into(),
+            writers: ["carol".to_string()].into(),
+        };
+        assert!(!acl.allows(&who("bob"), "scratch", Access::Read));
+        acl.declare("scratch", fresh.clone()).unwrap();
+        assert!(acl.allows(&who("bob"), "scratch", Access::Read));
+        assert!(!acl.allows(&who("bob"), "scratch", Access::Write));
+        assert!(acl.allows(&who("carol"), "scratch", Access::Write));
+        assert!(acl.allows(&who("root"), "scratch", Access::Write));
+
+        // Declaring again replaces; a restart reads it back.
+        acl.declare("scratch", RepoAcl::default()).unwrap();
+        assert!(!acl.allows(&who("bob"), "scratch", Access::Read));
+        acl.declare("scratch", fresh).unwrap();
+        let restarted = RuntimeAcl::new(acl_base(), Some(file)).unwrap();
+        assert!(restarted.allows(&who("carol"), "scratch", Access::Write));
+
+        // The deployment owns what it declares.
+        assert_eq!(
+            acl.declare("polar-schedules", RepoAcl::default()),
+            Err(DeclareError::Declared)
+        );
+        assert!(acl.allows(&who("alice"), "polar-schedules", Access::Write));
+    }
+
+    fn acl_base() -> StaticAcl {
+        acl()
     }
 }

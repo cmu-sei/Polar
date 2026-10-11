@@ -1,6 +1,10 @@
 # Polar git server
 
-Status: design, 2026-10-10. Nothing here is built yet. Crate: `src/agents/polar-git-server`.
+Status, 2026-10-10: built and tested (unit tests, and end-to-end tests that drive the real `git`
+CLI over generated mTLS certificates); not yet run on a cluster. Built: transport and identity, the
+read and write paths, push authorization, the `RepoChanged` topic, seeding, runtime repository
+creation, and the push log. Not built: the Cedar authorizer, `polar-sign` and signed-commit
+verification. Crates: `src/agents/polar-git-server/{common,server}`.
 
 ## Purpose
 
@@ -58,12 +62,19 @@ Two sources, one store.
    configuration repository for any agent entry that takes `config: "document"` once that
    convention is decided. Why the catalog: it is the one thing the check/render/apply pipeline
    reads, so a repository declared there is provisioned by the same apply that deploys the agent.
-2. **Created at runtime.** An admin-authorized `CreateRepo` request, idempotent, which the apply
-   step also calls for repos declared in the catalog. The server's list of repos is its own state
-   (a PVC of bare repositories); the catalog is the desired subset, not the whole list.
+2. **Created at runtime.** `PUT /admin/repos/<name>` with an optional JSON body
+   `{"readers": [..], "writers": [..]}`, allowed only to an administrator (identified by its client
+   certificate like every caller). Idempotent: 201 when created, 200 when it already existed, and
+   the access list is set to the body's either way. The deployment's declaration always wins: a
+   repository the catalog declares answers 409 and keeps its list. The access lists of runtime
+   repositories are kept in `runtime-acl.json` beside the repositories. The server's list of repos
+   is its own state (a PVC of bare repositories); the catalog is the desired subset, not the whole
+   list.
 
 Seeding happens once, only when the repository is empty, so redeploying never overwrites later
-edits.
+edits. A declared repository's `seed` names a directory under the seed root; the trees are in
+`infra/seeds/<repo>` and the Nix build puts them in the image (the server binary carries their
+store path as its default seed root, which is also what makes the image include them).
 
 ## Notifications
 
@@ -75,9 +86,11 @@ need not poll; against another remote it keeps polling.
 
 ## Authorship, and degraded mode
 
-The server's own record of pushes (an append-only signed push log in the style of the credentials
-ledger) says who pushed what and when. It is not the only proof, because it does not exist when
-the repo is hosted elsewhere.
+The server's own record of pushes says who pushed what and when: `push-log.jsonl` beside the
+repositories, one JSON line per accepted ref update (time, repo, ref, old, new, pusher), appended and
+synced. It is append-only by construction but not signed or chained, so it is a record, not proof;
+a signed log in the style of the credentials ledger is the later step. It is not the only proof,
+because it does not exist when the repo is hosted elsewhere.
 
 Authorship travels in the data: commits are signed with the author's Polar certificate key
 (`gpg.format=x509` with a signing program that Polar ships, `polar-sign`), and the consumer

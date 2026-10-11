@@ -5,7 +5,7 @@
 use crate::access::{RepoAcl, StaticAcl};
 use crate::store::{RepoStore, Seeded, StoreError};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -26,7 +26,8 @@ pub struct RepoSpec {
     pub readers: Vec<String>,
     #[serde(default)]
     pub writers: Vec<String>,
-    /// A directory committed as the first commit when the repository is empty.
+    /// A directory committed as the first commit when the repository is empty. A relative path is
+    /// resolved against the server's seed root.
     pub seed: Option<PathBuf>,
 }
 
@@ -56,11 +57,11 @@ impl ServerFile {
 
     /// Creates every declared repository that is missing and seeds the empty ones. Safe to run
     /// at every start: existing history is never touched.
-    pub async fn provision(&self, store: &RepoStore) -> Result<(), StoreError> {
+    pub async fn provision(&self, store: &RepoStore, seed_root: &Path) -> Result<(), StoreError> {
         for repo in &self.repos {
             let created = store.create(&repo.name).await?;
             let seeded = match &repo.seed {
-                Some(tree) => Some(store.seed(&repo.name, tree).await?),
+                Some(tree) => Some(store.seed(&repo.name, &seed_root.join(tree)).await?),
                 None => None,
             };
             info!(repo = %repo.name, ?created, ?seeded, "repository provisioned");
@@ -131,16 +132,52 @@ mod tests {
             ],
         };
         let store = RepoStore::new(root.path());
-        file.provision(&store).await.unwrap();
+        file.provision(&store, Path::new("/nowhere")).await.unwrap();
         assert!(store.has_history("seeded").await.unwrap());
         assert!(store.exists("bare"));
         assert!(!store.has_history("bare").await.unwrap());
 
         // A restart with the seed changed leaves the history alone.
         std::fs::write(seed.path().join("b.dhall"), "2").unwrap();
-        file.provision(&store).await.unwrap();
+        file.provision(&store, Path::new("/nowhere")).await.unwrap();
         let head = store.resolve_ref("seeded", "refs/heads/main").await;
-        file.provision(&store).await.unwrap();
+        file.provision(&store, Path::new("/nowhere")).await.unwrap();
         assert_eq!(store.resolve_ref("seeded", "refs/heads/main").await, head);
+    }
+
+    #[tokio::test]
+    async fn a_relative_seed_is_taken_from_the_seed_root() {
+        let root = tempfile::tempdir().unwrap();
+        let seeds = tempfile::tempdir().unwrap();
+        std::fs::create_dir(seeds.path().join("polar-schedules")).unwrap();
+        std::fs::write(seeds.path().join("polar-schedules/README.md"), "hi").unwrap();
+        let file = ServerFile::parse(
+            r#"{ "repos": [ { "name": "polar-schedules", "seed": "polar-schedules" } ] }"#,
+        )
+        .unwrap();
+        let store = RepoStore::new(root.path());
+        file.provision(&store, seeds.path()).await.unwrap();
+        assert!(store.has_history("polar-schedules").await.unwrap());
+    }
+
+    /// The trees the deployment ships (infra/seeds) are what the catalog's `seed` names refer to.
+    #[tokio::test]
+    async fn the_seeds_the_deployment_ships_provision_a_repository_each() {
+        let seeds = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../infra/seeds");
+        let names: Vec<String> = std::fs::read_dir(&seeds)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(names.contains(&"polar-schedules".to_string()), "{names:?}");
+        let root = tempfile::tempdir().unwrap();
+        let store = RepoStore::new(root.path());
+        for name in &names {
+            let file = ServerFile::parse(&format!(
+                r#"{{ "repos": [ {{ "name": "{name}", "seed": "{name}" }} ] }}"#
+            ))
+            .unwrap();
+            file.provision(&store, &seeds).await.unwrap();
+            assert!(store.has_history(name).await.unwrap(), "{name}");
+        }
     }
 }

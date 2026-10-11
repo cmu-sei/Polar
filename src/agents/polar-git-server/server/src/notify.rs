@@ -80,3 +80,120 @@ impl Notifier for CassiniNotifier {
         }
     }
 }
+
+/// An append-only record of accepted pushes, one JSON object per line: when, who, which ref moved
+/// from what to what. It is the server's own account of authorship; commits signed by their authors
+/// are the account that travels with the data.
+pub struct PushLog {
+    path: std::path::PathBuf,
+    // Serialises writers so a line is never interleaved with another.
+    write: tokio::sync::Mutex<()>,
+}
+
+impl PushLog {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            write: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    fn line(change: &RepoChanged, at_unix_secs: u64) -> String {
+        serde_json::json!({
+            "at": at_unix_secs,
+            "repo": change.repo,
+            "ref": change.refname,
+            "old": change.old,
+            "new": change.new,
+            "pusher": change.pusher,
+        })
+        .to_string()
+    }
+}
+
+#[async_trait]
+impl Notifier for PushLog {
+    async fn repo_changed(&self, change: RepoChanged) {
+        use tokio::io::AsyncWriteExt;
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let line = format!("{}\n", Self::line(&change, at));
+        let _guard = self.write.lock().await;
+        let result = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+                .await?;
+            file.write_all(line.as_bytes()).await?;
+            file.sync_data().await
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::error!(error = %e, path = %self.path.display(), "cannot record a push");
+        }
+    }
+}
+
+/// Hands each change to every notifier in turn.
+pub struct Tee(pub Vec<std::sync::Arc<dyn Notifier>>);
+
+#[async_trait]
+impl Notifier for Tee {
+    async fn repo_changed(&self, change: RepoChanged) {
+        for notifier in &self.0 {
+            notifier.repo_changed(change.clone()).await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn change(new: &str) -> RepoChanged {
+        RepoChanged {
+            repo: "polar-schedules".into(),
+            refname: "refs/heads/main".into(),
+            old: "0".repeat(40),
+            new: new.into(),
+            pusher: "alice.polar.serviceaccount.cluster.local".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn pushes_are_appended_one_line_each_and_kept_across_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("push-log.jsonl");
+        PushLog::new(&path)
+            .repo_changed(change(&"a".repeat(40)))
+            .await;
+        // A new log object on the same file appends rather than truncating.
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let tee = Tee(vec![
+            std::sync::Arc::new(PushLog::new(&path)),
+            recorder.clone(),
+        ]);
+        tee.repo_changed(change(&"b".repeat(40))).await;
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["new"], "a".repeat(40));
+        assert_eq!(lines[1]["new"], "b".repeat(40));
+        assert_eq!(lines[1]["repo"], "polar-schedules");
+        assert_eq!(lines[1]["ref"], "refs/heads/main");
+        assert_eq!(
+            lines[1]["pusher"],
+            "alice.polar.serviceaccount.cluster.local"
+        );
+        assert!(lines[1]["at"].as_u64().unwrap() > 1_700_000_000);
+        // The other notifier still heard it.
+        assert_eq!(recorder.0.lock().unwrap().len(), 1);
+    }
+}

@@ -2,7 +2,7 @@
 //! arrives as an extension set by the TLS listener; this module trusts nothing else about who is
 //! asking. Every request is authorized before a git process is started.
 
-use crate::access::{Access, Authorizer, Identity, authorize_push};
+use crate::access::{Access, Authorizer, Identity, RuntimeAcl, authorize_push};
 use crate::git::{GitError, GitRunner, Service};
 use crate::notify::{Notifier, RepoChanged};
 use crate::pktline::parse_ref_updates;
@@ -12,7 +12,7 @@ use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::io::Read;
@@ -27,6 +27,9 @@ pub struct PeerIdentity(pub String);
 pub struct ServerState {
     pub store: RepoStore,
     pub authorizer: Arc<dyn Authorizer>,
+    /// The access lists of repositories created at runtime; normally the same object as
+    /// `authorizer`.
+    pub runtime: Arc<RuntimeAcl>,
     pub runner: GitRunner,
     pub notifier: Arc<dyn Notifier>,
     /// The largest request body, compressed or not.
@@ -36,6 +39,7 @@ pub struct ServerState {
 pub fn router(state: ServerState) -> Router {
     let limit = state.max_body;
     Router::new()
+        .route("/admin/repos/:name", put(crate::admin::create_repo))
         .route("/:repo/info/refs", get(info_refs))
         .route("/:repo/git-upload-pack", post(upload_pack))
         .route("/:repo/git-receive-pack", post(receive_pack))
@@ -43,7 +47,7 @@ pub fn router(state: ServerState) -> Router {
         .with_state(state)
 }
 
-fn refuse(status: StatusCode, why: &str) -> Response {
+pub(crate) fn refuse(status: StatusCode, why: &str) -> Response {
     (status, format!("{why}\n")).into_response()
 }
 

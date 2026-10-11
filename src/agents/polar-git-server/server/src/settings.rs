@@ -15,6 +15,20 @@ pub static REPO_ROOT: Required<String> = Required::text(
     "the directory the bare repositories live in; it must be persistent storage",
 );
 
+/// The seeds the image was built with: the Nix build sets the variable to the store path holding
+/// `infra/seeds`. Elsewhere there are none unless the variable is set at run time.
+pub const DEFAULT_SEED_ROOT: &str = match option_env!("POLAR_GIT_SERVER_BUILT_SEED_ROOT") {
+    Some(path) => path,
+    None => "/nonexistent/polar-git-server-seeds",
+};
+
+pub static SEED_ROOT: Defaulted<String> = Defaulted::text(
+    "POLAR_GIT_SERVER_SEED_ROOT",
+    "the directory a relative `seed` in POLAR_GIT_SERVER_REPOS is resolved against; the image \
+     carries the deployment's seed trees here",
+    DEFAULT_SEED_ROOT,
+);
+
 pub static REPOS: Required<String> = Required::text(
     "POLAR_GIT_SERVER_REPOS",
     "JSON declaring the repositories, who may read and write each, and the directory each is \
@@ -37,7 +51,8 @@ pub static CA_CERT: Required<String> = Required::text(
     "path to the CA certificate (PEM) that clients' certificates must chain to",
 );
 
-static VARIABLES: &[&dyn Described] = &[&PORT, &REPO_ROOT, &REPOS, &CERT, &KEY, &CA_CERT];
+static VARIABLES: &[&dyn Described] =
+    &[&PORT, &REPO_ROOT, &SEED_ROOT, &REPOS, &CERT, &KEY, &CA_CERT];
 
 pub static SECTION: Section = Section {
     name: "polar-git-server",
@@ -48,6 +63,7 @@ pub static SECTION: Section = Section {
 pub struct GitServerSettings {
     pub port: u16,
     pub repo_root: String,
+    pub seed_root: String,
     pub repos: String,
     pub cert: String,
     pub key: String,
@@ -59,6 +75,7 @@ impl GitServerSettings {
         Ok(Self {
             port: config.read(&PORT)?,
             repo_root: config.read(&REPO_ROOT)?,
+            seed_root: config.read(&SEED_ROOT)?,
             repos: config.read(&REPOS)?,
             cert: config.read(&CERT)?,
             key: config.read(&KEY)?,

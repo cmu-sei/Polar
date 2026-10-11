@@ -24,7 +24,7 @@
     env: [
       {
         name: "POLAR_GIT_SERVER_REPOS"
-        value: '{"admins":[],"repos":[{"name":"polar-schedules","readers":["polar-scheduler-observer.polar.serviceaccount.cluster.local"],"writers":[]}]}'
+        value: '{"admins":[],"repos":[{"name":"polar-schedules","readers":["polar-scheduler-observer.polar.serviceaccount.cluster.local"],"writers":[],"seed":"polar-schedules"}]}'
       }
     ]
   }
