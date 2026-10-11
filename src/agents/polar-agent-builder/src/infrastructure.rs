@@ -27,6 +27,7 @@
 //! handshake: if the process is still alive when the shutdown budget runs out, it
 //! exits 1 regardless. See shutdown.rs for the decisions themselves.
 
+use crate::configuration::ConfigurationHandle;
 use crate::crypto::CryptoHandle;
 use crate::health::HealthHandle;
 use crate::shutdown::{self, Action, Child, Death, ProcessExit, ShutdownMachine};
@@ -212,6 +213,7 @@ struct ClientParts {
 
 pub struct InfrastructureSupervisorState {
     config: Arc<polar_env::Config>,
+    configuration: ConfigurationHandle,
     infrastructure_events: Arc<OutputPort<InfrastructureEvent>>,
     client: Option<ClientParts>,
     healthcheck: HealthHandle,
@@ -504,6 +506,15 @@ impl Actor for InfrastructureSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
+        // Owns the configuration the agent runs on from here, and takes updates to it. It needs
+        // nothing but the snapshot, so it starts before, and without, the Cassini client.
+        let configuration = ConfigurationHandle::spawn(
+            None,
+            (*args.config).clone(),
+            myself_cell.clone(),
+        )
+        .await?;
+
         let infrastructure_events = Arc::new(OutputPort::default());
 
         let (client, self_test) = if args.with_client {
@@ -534,6 +545,7 @@ impl Actor for InfrastructureSupervisor {
 
         Ok(InfrastructureSupervisorState {
             config: args.config,
+            configuration,
             infrastructure_events,
             client,
             healthcheck: HealthHandle::new(healthcheck),
@@ -626,6 +638,7 @@ impl Actor for InfrastructureSupervisor {
                     infrastructure_events: state.infrastructure_events.clone(),
                     infrastructure: myself.clone(),
                     config: state.config.clone(),
+                    configuration: state.configuration.clone(),
                 }));
             }
             InfrastructureSupervisorMessage::GetService { reply } => {
@@ -634,6 +647,7 @@ impl Actor for InfrastructureSupervisor {
                     infrastructure_events: state.infrastructure_events.clone(),
                     infrastructure: myself.clone(),
                     config: state.config.clone(),
+                    configuration: state.configuration.clone(),
                 });
             }
         }
@@ -1003,6 +1017,46 @@ mod tests {
                 )),
             Err(polar_env::ConfigError::Undeclared(_))
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_resources_carry_a_live_configuration_that_refuses_to_change_the_health_invariants() {
+        let rig = Rig::standard("infra-live-config").await;
+        let configuration = &rig.resources.configuration;
+        let name = polar_health::vars::CASSINI_DEADLINE_SECS.name();
+
+        // It starts as the snapshot.
+        assert_eq!(
+            configuration
+                .current()
+                .await
+                .unwrap()
+                .read(&polar_health::vars::CASSINI_DEADLINE_SECS)
+                .unwrap(),
+            100000
+        );
+        // A health safety invariant is static: an update to it is refused by name and the value
+        // in force is unchanged.
+        let outcome = configuration
+            .apply(1, vec![(name.to_string(), "1".to_string())])
+            .await
+            .unwrap();
+        let crate::configuration::ApplyOutcome::Refused(crate::configuration::Refusal::Invalid(
+            problems,
+        )) = outcome
+        else {
+            panic!("the health deadline must not be changeable at runtime");
+        };
+        assert!(problems.iter().any(|p| p.contains(name)), "{problems:?}");
+        assert_eq!(
+            configuration
+                .current()
+                .await
+                .unwrap()
+                .read(&polar_health::vars::CASSINI_DEADLINE_SECS)
+                .unwrap(),
+            100000
+        );
     }
 
     #[tokio::test(start_paused = true)]

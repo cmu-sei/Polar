@@ -164,6 +164,7 @@ impl<'e> ConfigBuilder<'e> {
     }
 }
 
+#[derive(Clone)]
 pub struct Config {
     sections: Vec<&'static Section>,
     snapshot: HashMap<&'static str, String>,

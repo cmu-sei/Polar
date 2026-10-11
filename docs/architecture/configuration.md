@@ -168,8 +168,17 @@ settings from the snapshot before it starts the actors that need them).
 `<agent> --scaffold --config FILE` shows what a document resolves to, value by value with its
 source, secrets hidden.
 
-Next, in order: the ConfigurationActor shell, then the scheduler integration, then the credentials agent's use of
-it. Every step is in `remaining-work.md`.
+The ConfigurationActor shell is built (`polar-agent-builder/src/configuration.rs`): an actor under the
+infrastructure supervisor that owns a `Config`, applies versioned overrides all or none, refuses a version that
+is not higher than the last applied (replay), keeps the latest 100 updates (names and reasons, never values), and
+announces a change on an output port; subscribers then read `ConfigurationHandle::current()` again. The handle
+is `AgentResources::configuration` (and `ServiceResources::configuration`), beside `config`, which stays the
+startup snapshot. Nothing yet sends it an update, no variable in the workspace is `Dynamic` apart from tests, and
+it does not decide who may send one.
+
+Next, in order: the scheduler integration (a subscriber on `agent.<id>.schedule` that turns a `ScheduleNotification`
+into an update), signed configuration in front of `apply`, then the credentials agent's use of it. Every step is
+in `remaining-work.md`.
 
 ## 9. The agent's own interface (decided 2026-10-09, not yet built)
 

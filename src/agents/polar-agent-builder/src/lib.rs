@@ -23,6 +23,8 @@ pub mod agent;
 pub use agent::{Configured, PolarAgent, StartError, run};
 pub mod capability;
 pub use capability::Capability;
+pub mod configuration;
+pub use configuration::{ConfigChanged, ConfigurationHandle};
 pub mod crypto;
 pub mod environment;
 pub use crypto::{CryptoClient, CryptoHandle};
@@ -112,6 +114,10 @@ pub struct AgentResources {
     /// components and this agent declared, and nothing else. Read a declared variable with
     /// `config.read(&VAR)`; one nobody declared is refused.
     pub config: Arc<polar_env::Config>,
+    /// The same configuration, live: it takes versioned updates to the variables the code
+    /// declared `Dynamic`, and tells subscribers when one changes. `config` above stays the
+    /// startup snapshot; read `configuration.current()` for what is in force now.
+    pub configuration: crate::configuration::ConfigurationHandle,
 }
 
 pub struct AgentBuilder<M: ractor::Message> {
@@ -375,6 +381,8 @@ pub struct ServiceResources {
     /// ask for the service to end (a shutdown requested over the wire, for example).
     pub infrastructure: ActorRef<crate::infrastructure::InfrastructureSupervisorMessage>,
     pub config: Arc<polar_env::Config>,
+    /// The configuration, live. See [`AgentResources::configuration`].
+    pub configuration: crate::configuration::ConfigurationHandle,
 }
 
 /// The infrastructure of a service that is not a Cassini client: the broker itself, or any
