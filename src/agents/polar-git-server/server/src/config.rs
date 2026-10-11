@@ -1,0 +1,146 @@
+//! The server's declaration of what it hosts: repositories, who may read and write them, and what
+//! each is seeded from. The deployment renders this file from the catalog; the server applies it at
+//! start. It is a floor, not the whole list: repositories created later at runtime are not in it.
+
+use crate::access::{RepoAcl, StaticAcl};
+use crate::store::{RepoStore, Seeded, StoreError};
+use serde::Deserialize;
+use std::path::PathBuf;
+use tracing::info;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerFile {
+    /// Identities that may do anything to every repository.
+    #[serde(default)]
+    pub admins: Vec<String>,
+    #[serde(default)]
+    pub repos: Vec<RepoSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepoSpec {
+    pub name: String,
+    #[serde(default)]
+    pub readers: Vec<String>,
+    #[serde(default)]
+    pub writers: Vec<String>,
+    /// A directory committed as the first commit when the repository is empty.
+    pub seed: Option<PathBuf>,
+}
+
+impl ServerFile {
+    pub fn parse(json: &str) -> Result<Self, String> {
+        serde_json::from_str(json).map_err(|e| format!("the git server's configuration file: {e}"))
+    }
+
+    pub fn acl(&self) -> StaticAcl {
+        StaticAcl {
+            admins: self.admins.iter().cloned().collect(),
+            repos: self
+                .repos
+                .iter()
+                .map(|r| {
+                    (
+                        r.name.clone(),
+                        RepoAcl {
+                            readers: r.readers.iter().cloned().collect(),
+                            writers: r.writers.iter().cloned().collect(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Creates every declared repository that is missing and seeds the empty ones. Safe to run
+    /// at every start: existing history is never touched.
+    pub async fn provision(&self, store: &RepoStore) -> Result<(), StoreError> {
+        for repo in &self.repos {
+            let created = store.create(&repo.name).await?;
+            let seeded = match &repo.seed {
+                Some(tree) => Some(store.seed(&repo.name, tree).await?),
+                None => None,
+            };
+            info!(repo = %repo.name, ?created, ?seeded, "repository provisioned");
+            let _: Option<Seeded> = seeded;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::access::{Access, Authorizer, Identity};
+
+    const FILE: &str = r#"{
+        "admins": ["root"],
+        "repos": [
+            { "name": "polar-schedules", "readers": ["polar-scheduler-observer"], "writers": ["alice"] },
+            { "name": "empty" }
+        ]
+    }"#;
+
+    #[test]
+    fn the_file_becomes_the_acl() {
+        let acl = ServerFile::parse(FILE).unwrap().acl();
+        let id = |s: &str| Identity(s.to_string());
+        assert!(acl.allows(
+            &id("polar-scheduler-observer"),
+            "polar-schedules",
+            Access::Read
+        ));
+        assert!(!acl.allows(
+            &id("polar-scheduler-observer"),
+            "polar-schedules",
+            Access::Write
+        ));
+        assert!(acl.allows(&id("alice"), "polar-schedules", Access::Write));
+        assert!(acl.allows(&id("root"), "empty", Access::Write));
+        assert!(!acl.allows(&id("alice"), "empty", Access::Read));
+    }
+
+    #[test]
+    fn a_misspelled_key_is_an_error_not_a_silent_default() {
+        assert!(ServerFile::parse(r#"{ "repoz": [] }"#).is_err());
+        assert!(ServerFile::parse(r#"{ "repos": [ { "name": "a", "writer": [] } ] }"#).is_err());
+    }
+
+    #[tokio::test]
+    async fn provisioning_creates_seeds_and_repeats_safely() {
+        let root = tempfile::tempdir().unwrap();
+        let seed = tempfile::tempdir().unwrap();
+        std::fs::write(seed.path().join("a.dhall"), "1").unwrap();
+        let file = ServerFile {
+            admins: vec![],
+            repos: vec![
+                RepoSpec {
+                    name: "seeded".into(),
+                    readers: vec![],
+                    writers: vec![],
+                    seed: Some(seed.path().to_path_buf()),
+                },
+                RepoSpec {
+                    name: "bare".into(),
+                    readers: vec![],
+                    writers: vec![],
+                    seed: None,
+                },
+            ],
+        };
+        let store = RepoStore::new(root.path());
+        file.provision(&store).await.unwrap();
+        assert!(store.has_history("seeded").await.unwrap());
+        assert!(store.exists("bare"));
+        assert!(!store.has_history("bare").await.unwrap());
+
+        // A restart with the seed changed leaves the history alone.
+        std::fs::write(seed.path().join("b.dhall"), "2").unwrap();
+        file.provision(&store).await.unwrap();
+        let head = store.resolve_ref("seeded", "refs/heads/main").await;
+        file.provision(&store).await.unwrap();
+        assert_eq!(store.resolve_ref("seeded", "refs/heads/main").await, head);
+    }
+}

@@ -1,0 +1,33 @@
+[package]
+name = "polar-git-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+axum = "0.7"
+bytes.workspace = true
+cassini-client.workspace = true
+cassini-types.workspace = true
+# git gzips large fetch request bodies; the server must inflate them to read them.
+flate2 = "1"
+hyper-util.workspace = true
+polar-agent-builder.workspace = true
+polar-env.workspace = true
+polar-git-server-common.workspace = true
+ractor.workspace = true
+rkyv.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tracing.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+tempfile.workspace = true

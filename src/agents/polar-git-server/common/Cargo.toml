@@ -1,0 +1,9 @@
+[package]
+name = "polar-git-server-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rkyv.workspace = true
+serde.workspace = true

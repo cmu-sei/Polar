@@ -64,6 +64,8 @@ members = [
     "openapi/observe",
     "polar-crypto",
     "polar-env",
+    "polar-git-server/common",
+    "polar-git-server/server",
     "polar-health",
     "polar-healthcheck",
     "polar-init",
@@ -181,6 +183,7 @@ libc = "0.2"
 uninit = "0.3"
 polar-crypto = { path = "polar-crypto" }
 polar-env = { path = "polar-env" }
+polar-git-server-common = { path = "polar-git-server/common" }
 polar-health = { path = "polar-health" }
 polar-kernel-keyring = { path = "polar-kernel-keyring" }
 polar-permissions = { path = "polar-permissions" }
