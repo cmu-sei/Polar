@@ -54,6 +54,15 @@ change what a type is. A document is **rejected whole, and the previous policy s
 
 The outcome is reported like every runtime document (applied, or refused with the reason and the signer).
 
+> **Under review, 2026-10-12.** Reading `polar-permissions` and `polar-policy` after this was written: they
+> deliberately keep *data about a principal* (what `PermissionsActor` resolves: the certificate's permissions
+> plus supplemental permissions pushed by gitops) apart from *rules over that data* (`PolicyActor`), and the
+> policy actor "derives a principal's own attributes exclusively from PermissionsActor ... there is no path, for
+> any caller, to supply or influence a principal's own entity data". The `entities` list below puts group
+> membership, which is data about a principal, into the policy document. Whether groups belong there, or in
+> `PermissionsActor` as another signed input of their own, is open; see the questions at the end of this file.
+> Nothing here is built.
+
 ### Where groups are stored
 
 Cedar has no store of its own: a group is an entity and membership is a `parents` entry on the member's entity,
@@ -224,3 +233,18 @@ agent and not asserted by the caller. Either way the entity is built by the agen
 - Whether the same `policy` document should also carry the rules other receivers evaluate (who may sign which
   runtime section, who may run which command), or each such receiver gets a section of its own. See "What is
   still open: policy for other receivers" in `git-controller.md`.
+
+## Questions raised by reading the existing design (2026-10-12), unanswered
+
+1. **Where do groups live?** In the policy document (as written above), or as supplemental data in
+   `PermissionsActor`, delivered by a signed section of their own? The second keeps the existing rule that rules
+   and principal data are separate, and lets "who may put people in groups" be a different authority from
+   "who may write rules". The first keeps rules and groups in one atomic version.
+2. **Where does data about a resource live?** `owner` comes from the ledger. What of `frozen`, and any attribute
+   that changes after a secret is stored: a ledger event, or an annotation in a signed document?
+3. **Where does the evaluator live for receivers other than the credentials agent?** See
+   `git-controller.md`, "What is still open: policy for other receivers".
+4. **Is the repository the only route for policy?** The admin action `PolicyUpdate` (signed, strictly ordered
+   by a global sequence, today refused as not yet supported) is the other route the earlier design named. The
+   earlier design also says certificate permissions act as automatic `permit`s with overrides on top, and that
+   policies name users by username.
