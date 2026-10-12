@@ -28,11 +28,14 @@
 #   forwards    just port-forwards-up <only what is needed>               credentials-agent (observer) or neo4j
 #   admin       admin-bootstrap / admin-provision / admin-claim           credentials-agent deployed
 #   browser     user-cert-install, then the Neo4j password                credentials-agent and neo4j deployed
+#   seed        sign the first policy and push it to polar-schedules      credentials-agent, polar-git-server and polar-scheduler-observer deployed
 
 const POLAR = "polar"
 const GRAPH = "polar-graph"
 
 use images.nu
+use seed.nu
+use plan.nu [build_forwards, build_plan, deployed_charts]
 use apply.nu [any_pod_ready, gate_after, job_verdict, jobs_in]
 
 def note [msg: string] { print $"  -- ($msg)" }
@@ -132,46 +135,6 @@ def wait_pods [waits: list, timeout: duration] {
     ok "required services are ready"
 }
 
-# What the target deploys, as chart directory names.
-def deployed_charts [config: record] {
-    $config.charts | each {|c| $c | path dirname | path basename }
-}
-
-# The plan: one record per step, with whether it runs and why not.
-def build_plan [config: record, dev: bool] {
-    let d = (deployed_charts $config)
-    let order = $config.apply_order
-    let ca_cm = ($config.cert_issuer_ca_configmap? | default "")
-    let has_ci = ("cert-issuer" in $d)
-    let has_ca_agent = ("credentials-agent" in $d)
-    let has_neo4j = ("neo4j" in $d)
-    let has_core = ($has_ci or ("cassini" in $d) or $has_ca_agent or $has_neo4j)
-
-    [
-        { id: "preflight", title: "preflight", on: true, why: "" }
-        { id: "agent-images", title: "agent images", on: $dev, why: "pass --dev to build the agents' images; without it the render asks the ones already in the local registry" }
-        { id: "render", title: "render", on: true, why: "" }
-        { id: "images", title: "images", on: $dev, why: "pass --dev to build and load images into the local registry" }
-        { id: "namespaces", title: "namespaces", on: ("namespaces.yaml" in $order), why: "target has no namespaces.yaml in its apply order" }
-        {
-            id: "ca"
-            title: "cluster CA"
-            on: ($has_ci and ($ca_cm | is-not-empty))
-            why: (if not $has_ci { "target does not deploy cert-issuer" } else { "target does not use a provisioned CA (cert_issuer_ca_configmap is empty)" })
-        }
-        { id: "infra", title: "secrets and infrastructure", on: true, why: "" }
-        { id: "pods", title: "waiting for core services", on: $has_core, why: "target deploys none of cert-issuer, cassini, credentials-agent, neo4j" }
-        { id: "forwards", title: "port-forwards", on: ($has_ca_agent or $has_neo4j), why: "target deploys neither credentials-agent nor neo4j" }
-        { id: "admin", title: "admin flow", on: $has_ca_agent, why: "target does not deploy credentials-agent" }
-        {
-            id: "browser"
-            title: "browser certificate and Neo4j password"
-            on: ($has_ca_agent and $has_neo4j)
-            why: (if not $has_neo4j { "target does not deploy neo4j" } else { "no credentials-agent, so no user certificate to import" })
-        }
-    ]
-}
-
 def print_plan [target: string, plan: list, dev: bool] {
     print $"=== Plan for target ($target) ==="
     for s in $plan {
@@ -208,19 +171,6 @@ def build_waits [config: record] {
         $w = ($w | append { kind: "statefulset", ns: $GRAPH, ref: "statefulset/polar-neo4j", label: "neo4j" })
     }
     $w
-}
-
-# Port-forwards needed by the admin and browser steps, and only those.
-def build_forwards [config: record] {
-    let d = (deployed_charts $config)
-    mut f = []
-    if "credentials-agent" in $d {
-        $f = ($f | append { name: "observer", svc: "credentials-agent-observer" })
-    }
-    if "neo4j" in $d {
-        $f = ($f | append { name: "neo4j", svc: "polar-db-svc" })
-    }
-    $f
 }
 
 def step_preflight [] {
@@ -352,6 +302,77 @@ def step_browser [username: string] {
     pause "Change the Neo4j password in the browser."
 }
 
+# What `just admin-provision` leaves for the seed: the signer's certificate must be one the git server
+# accepts as an administrator, and the credentials agent must be up to take the policy.
+def seed_waits [] {
+    [
+        { kind: "pods", ns: $POLAR, ref: "job-name=polar-git-server", label: "polar-git-server" }
+        { kind: "pods", ns: $POLAR, ref: "job-name=polar-scheduler-observer", label: "polar-scheduler-observer" }
+        { kind: "pods", ns: $POLAR, ref: "job-name=polar-scheduler", label: "polar-scheduler" }
+        { kind: "pods", ns: $POLAR, ref: "job-name=credentials-agent", label: "credentials-agent" }
+    ]
+}
+
+# git, for one command, presenting the user's Polar certificate (and not the environment's CA).
+def seed_git [username: string, args: list<string>] {
+    let config = (seed git_config $username (admin_dir))
+    ^env -u GIT_SSL_CAINFO -u SSL_CERT_FILE git ...$config ...$args
+}
+
+def step_seed [target: string, username: string, mail: string] {
+    wait_pods (seed_waits) 10min
+    let dir = (admin_dir)
+    let root = $env.PWD
+    let work = (mktemp -d)
+    let repo = ($work | path join "repo")
+
+    let cloned = (do { seed_git $username [clone (seed repo_url) $repo] } | complete)
+    if $cloned.exit_code != 0 {
+        let identity = (seed first_dns_name (^openssl x509 -in ($dir | path join $"($username).crt") -noout -ext subjectAltName))
+        if ($cloned.stderr | str contains "403") and ($identity != null) {
+            fail (seed refused_hint $identity $target)
+        }
+        fail $"cannot clone polar-schedules: ($cloned.stderr | str trim)"
+    }
+
+    let existing = (^git -C $repo ls-files | lines)
+    let todo = (seed missing (seed documents) $existing)
+    for d in $todo {
+        note $"signing ($d.section) for ($d.agent), version ($d.version)"
+        let signed = (seed body_json $d $root
+            | ^cargo run -q --manifest-path src/agents/Cargo.toml -p polar-sign -- runtime --agent $d.agent --section $d.section --version $d.version --body-file - --user $username)
+        if $env.LAST_EXIT_CODE != 0 { fail "polar-sign runtime failed" }
+        let target_file = ($repo | path join $d.path)
+        mkdir ($target_file | path dirname)
+        $signed | save --force $target_file
+    }
+    if ($todo | is-empty) {
+        ok "every seed document is already in polar-schedules"
+    } else {
+        ^git -C $repo add -A
+        ^git -C $repo -c $"user.name=($username)" -c $"user.email=($mail)" commit -q -m $"Seed the cluster: ($todo | get section | str join ', ')"
+        if $env.LAST_EXIT_CODE != 0 { fail "git commit failed" }
+        let pushed = (do { seed_git $username [-C $repo push -q origin HEAD] } | complete)
+        if $pushed.exit_code != 0 { fail $"cannot push to polar-schedules: ($pushed.stderr | str trim)" }
+        ok $"pushed: ($todo | get path | str join ', ')"
+    }
+    rm -rf $work
+
+    # The seed is part of the cluster being up: say so only when the credentials agent has the policy.
+    let deadline = ((date now) + 3min)
+    loop {
+        let pod = (^kubectl -n $POLAR get pods -l job-name=credentials-agent --field-selector=status.phase=Running -o name | lines | first)
+        let logs = (^kubectl -n $POLAR logs $pod --tail=5000 | complete | get stdout)
+        if (seed authority_published $logs "policy") { break }
+        if (date now) > $deadline {
+            fail "the credentials agent has not published the policy after 3 minutes: kubectl -n polar logs <credentials-agent pod> shows why"
+        }
+        print "  waiting for the credentials agent to apply the policy..."
+        sleep 5sec
+    }
+    ok "the credentials agent has applied and published the policy"
+}
+
 def main [
     target: string          # Target name, e.g. local-minimal
     --dev                   # Also build and load images (local development cluster)
@@ -374,7 +395,7 @@ def main [
     print_plan $target $plan $dev
 
     # Ask for what the plan needs up front, so nothing prompts mid-run.
-    let needs_admin = ($enabled | any {|s| $s.id == "admin" })
+    let needs_admin = ($enabled | any {|s| $s.id in ["admin" "seed"] })
     let username = if not $needs_admin { "" } else if $user == null { input "  username for the first admin: " } else { $user }
     let mail = if not $needs_admin { "" } else if $email == null { input "  email for the first admin: " } else { $email }
 
@@ -395,6 +416,7 @@ def main [
             "forwards" => { step_forwards $forwards }
             "admin" => { step_admin $username $mail }
             "browser" => { step_browser $username }
+            "seed" => { step_seed $target $username $mail }
         }
     }
 

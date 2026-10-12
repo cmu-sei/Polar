@@ -1,0 +1,126 @@
+#!/usr/bin/env nu
+# infra/tests/seed.nu
+#
+# Tests of the decisions in infra/seed.nu.
+#
+#   nu infra/tests/seed.nu
+
+use std/assert
+use ../seed.nu *
+
+def root [] { $env.FILE_PWD | path dirname | path dirname }
+
+def main [] {
+    let tests = [
+        {
+            name: "every seed document has a place of its own and a section it fills"
+            body: {
+                let docs = (documents)
+                assert (($docs | length) > 0)
+                assert equal ($docs | get path | uniq | length) ($docs | length)
+                for d in $docs {
+                    assert ($d.path | str ends-with ".dhall")
+                    assert equal $d.version 1
+                    assert (((root) | path join $d.file) | path exists) $"($d.file) is missing"
+                }
+            }
+        }
+        {
+            name: "the first policy is seeded for the credentials agent's policy section"
+            body: {
+                let p = (documents | where section == "policy" | first)
+                assert equal $p.agent "credentials-agent-consumer"
+                assert equal $p.field "source"
+            }
+        }
+        {
+            name: "a body holds the file's text exactly, in the one field"
+            body: {
+                let p = (documents | first)
+                let body = (body_json $p (root) | from json)
+                assert equal ($body | columns) [$p.field]
+                assert equal ($body | get $p.field) (open --raw ((root) | path join $p.file))
+            }
+        }
+        {
+            name: "a body with quotes, backslashes and newlines survives"
+            body: {
+                let dir = (mktemp -d)
+                "permit (principal == Identity::\"a\\\"b\", action, resource);\n// \\ done\n" | save ($dir | path join "p.cedar")
+                let doc = { field: "source", file: "p.cedar" }
+                let back = (body_json $doc $dir | from json)
+                assert equal $back.source (open --raw ($dir | path join "p.cedar"))
+            }
+        }
+        {
+            name: "only what is not in the repository yet is seeded"
+            body: {
+                let docs = (documents)
+                assert equal (missing $docs [] | length) ($docs | length)
+                assert equal (missing $docs ($docs | get path)) []
+                assert equal (missing $docs ["permanent/other.dhall"] | length) ($docs | length)
+            }
+        }
+        {
+            name: "git is given the user's own certificate, key and the CA, and told where the server's name lives"
+            body: {
+                let args = (git_config "alice" "/home/a/.config/polar-admin" | str join " ")
+                assert ($args | str contains "http.sslCert=/home/a/.config/polar-admin/alice.crt")
+                assert ($args | str contains "http.sslKey=/home/a/.config/polar-admin/alice.key")
+                assert ($args | str contains "http.sslCAInfo=/home/a/.config/polar-admin/ca.pem")
+                assert ($args | str contains "polar-git-server.polar.svc.cluster.local:8443:127.0.0.1")
+            }
+        }
+        {
+            name: "the repository is addressed by the cluster's own name for the server, which is on its certificate"
+            body: { assert equal (repo_url) "https://polar-git-server.polar.svc.cluster.local:8443/polar-schedules.git" }
+        }
+        {
+            name: "a refusal names the identity and the file to change"
+            body: {
+                let hint = (refused_hint "66b3f4c8-f024" "local-minimal")
+                assert ($hint | str contains "66b3f4c8-f024")
+                assert ($hint | str contains "POLAR_GIT_SERVER_ADMINS")
+                assert ($hint | str contains "infra/targets/local-minimal/config.nuon")
+            }
+        }
+        {
+            name: "an account is known to the git server by the first DNS name of its certificate"
+            body: {
+                let san = "X509v3 Subject Alternative Name:\n    DNS:66b3f4c8-f024-4207-b70b-9fadf7badc92, DNS:alice.example, email:alice@example.org"
+                assert equal (first_dns_name $san) "66b3f4c8-f024-4207-b70b-9fadf7badc92"
+                assert equal (first_dns_name "X509v3 Subject Alternative Name:\n    email:a@b.c") null
+                assert equal (first_dns_name "") null
+            }
+        }
+        {
+            name: "the credentials agent having published the policy is read from its log, and not from another kind or a refusal"
+            body: {
+                let said = "2026-10-12T10:00:00Z  INFO credentials_agent_consumer::authority_publisher: publishing an authority update kind=\"policy\" version=1 sequence=1"
+                assert (authority_published $said "policy")
+                assert (not (authority_published $said "groups"))
+                assert (not (authority_published "WARN not published: it would not replace what is held" "policy"))
+                assert (not (authority_published "" "policy"))
+                assert (authority_published $"noise\n($said)\nmore noise" "policy")
+            }
+        }
+    ]
+
+    let results = ($tests | each {|t|
+        let r = (try { do $t.body; null } catch {|e| $e.msg })
+        { name: $t.name, error: $r }
+    })
+    for r in $results {
+        if $r.error == null {
+            print $"  ok    ($r.name)"
+        } else {
+            print -e $"  FAIL  ($r.name): ($r.error)"
+        }
+    }
+    let failed = ($results | where error != null | length)
+    if $failed > 0 {
+        print -e $"($failed) of ($results | length) failed"
+        exit 1
+    }
+    print $"all ($results | length) passed"
+}

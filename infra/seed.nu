@@ -1,0 +1,81 @@
+#!/usr/bin/env nu
+# infra/seed.nu
+#
+# What a cluster is given before anyone has written anything of their own: signed documents in the
+# schedules repository. They are signed here, at setup, by the first administrator, and never
+# committed signed: a signature made once by a person would be baked into every cluster, and a
+# cluster's CA is its own. Design: docs/architecture/credentials-policy.md, "Seeding the cluster".
+#
+# This module is the decisions (what to seed, what a body is, what to skip, what the logs say). The
+# step that touches the cluster is `step_seed` in up.nu.
+
+export const REPO = "polar-schedules"
+export const GIT_HOST = "polar-git-server.polar.svc.cluster.local"
+export const GIT_PORT = "8443"
+
+# The documents a cluster starts with. `field` is the one field of the section's body that the file
+# fills; `version` is 1 because this is only ever the first: a path that already exists is left alone,
+# and a later change is an author's, at a higher version.
+export def documents [] {
+    [
+        {
+            path: "permanent/credentials-agent-policy.dhall"
+            agent: "credentials-agent-consumer"
+            section: "policy"
+            version: 1
+            field: "source"
+            file: "infra/seeds/signed/policy.cedar"
+        }
+    ]
+}
+
+# The body of a section, as the JSON `polar-sign runtime` takes: the file's text, exactly, in its field.
+export def body_json [doc: record, root: string] {
+    { ($doc.field): (open --raw ($root | path join $doc.file)) } | to json --raw
+}
+
+# The documents whose path is not in the repository yet.
+export def missing [docs: list, existing: list] {
+    $docs | where {|d| $d.path not-in $existing }
+}
+
+# `git -c ...` arguments that make git present the user's Polar certificate to the Polar git server,
+# for one command and without touching the user's configuration (the same as `just polar-git-clone`).
+export def git_config [user: string, dir: string] {
+    [
+        "-c" $"http.sslCAInfo=($dir)/ca.pem"
+        "-c" $"http.sslCert=($dir)/($user).crt"
+        "-c" $"http.sslKey=($dir)/($user).key"
+        "-c" $"http.curloptResolve=($GIT_HOST):($GIT_PORT):127.0.0.1"
+    ]
+}
+
+export def repo_url [] {
+    $"https://($GIT_HOST):($GIT_PORT)/($REPO).git"
+}
+
+# What to say when the git server refuses the administrator: who it is that the server must be told
+# about. The identity is the first DNS name in the user's certificate; the server learns its
+# administrators from POLAR_GIT_SERVER_ADMINS in the target's config.
+export def refused_hint [identity: string, target: string] {
+    $"the Polar git server does not know ($identity) as an administrator, so it will not take the seed. Add it to POLAR_GIT_SERVER_ADMINS for polar-git-server in infra/targets/($target)/config.nuon, then run this again."
+}
+
+# Whether the credentials agent has said it published `section`'s authority: its log line for the first
+# publication of anything it signs. The text is `publishing an authority update`, with the kind beside it.
+export def authority_published [logs: string, section: string] {
+    $logs
+    | lines
+    | any {|l|
+        let published = ($l | str contains "publishing an authority update")
+        let kind = (($l | str contains $"kind=\"($section)\"") or ($l | str contains $"kind=($section)"))
+        $published and $kind
+    }
+}
+
+# The first DNS name in `openssl x509 -noout -ext subjectAltName`, which is the identity the git server
+# knows an account by (the account id, for a user). Null when there is none.
+export def first_dns_name [san: string] {
+    let found = ($san | parse --regex 'DNS:(?<name>[^,\s]+)')
+    if ($found | is-empty) { null } else { $found | first | get name }
+}
