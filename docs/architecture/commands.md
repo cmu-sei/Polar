@@ -165,9 +165,31 @@ whatever the skew). The payload is read strictly: exactly its fields, an `id` an
 arguments of text or whole numbers only (no boolean, float, null or nesting), at most 32 of at most 4096 bytes,
 and `not_after` required. A float cannot be in a signed payload at all: the signer refuses it.
 
-Not built: the declaration of commands in the schema export, the agent's own checks (declared, arguments, seen,
-exclusive, draining), the handler registration, the outcome announcements, the scheduler's ledger and the
-unanswered sweep, the repository transport, and `polar-sign`.
+**The agent side (built).** An agent declares its commands as `PolarAgent::COMMANDS` (a list of `CommandSpec`:
+name, doc, arguments with their kind and whether required, `delivery` once or idempotent, `exclusive`, `timeout`),
+and registers a handler for each with `AgentBuilder::with_command(name, handler)`; the handler implements
+`CommandHandler::run(request) -> Result<String, String>` and is only the doing. The declarations appear in the
+schema export as a `commands` section, and `declaration_problems` (which every agent crate runs in its tests)
+and startup refuse a repeated or unsound name, a timeout of nothing or over a day, or commands on a service
+nothing can reach. The builder refuses to build if a declared command has no handler or a handler is registered
+for an undeclared one, naming each.
+
+Every Cassini-client agent has a `CommandActor` under its infrastructure and a built-in subscription to
+`agent.<name>.command`. A delivered document is verified (the command verifier above), then checked for what only
+the agent can know, in this order: declared, arguments suit the declaration (every problem by name and kind,
+never a value), the id not already received, not busy if exclusive, not draining. Only then does the handler run,
+under the declared timeout. A refusal consumes nothing (the same id, corrected and signed again, is accepted);
+an accepted id is remembered in a bounded set. The actor announces `accepted`, `started`, then `succeeded` or
+`failed` (an error, a panic, a timeout, in which case the handler is stopped, or an interruption by a shutdown),
+and `refused`, `expired` or `duplicate` for the others, on `polar-command-outcome`, through whichever Cassini
+client the infrastructure has. When the agent is told to shut down, nothing new is started. The topic is trusted
+for nothing: a forged command on it is refused like any other. Announcements carry names and reasons and never an
+argument; what a handler reports is capped, and keeping it free of secrets is the handler's job.
+
+Not built: the scheduler's side (receiving a command from the repository, the ledger that marks it dispatched and
+never dispatches an id twice, the unanswered sweep, and writing the outcomes to the graph: the processor writes
+a command document as unroutable, with the reason, for now), the repository transport, `polar-sign` and the typed
+template, and a command in any real agent (no agent declares one yet).
 
 ## Build order, tests first
 

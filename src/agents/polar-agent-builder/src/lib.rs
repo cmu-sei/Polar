@@ -26,7 +26,9 @@ pub use capability::Capability;
 pub mod configuration;
 pub use configuration::{ConfigChanged, ConfigurationHandle};
 pub mod command;
-pub use command::{CommandVerifier, VerifiedCommand};
+pub use command::{
+    ArgKind, ArgSpec, CommandSpec, CommandVerifier, Delivery, VerifiedCommand,
+};
 pub mod command_actor;
 pub use command_actor::{CommandHandle, CommandHandler, CommandRequest};
 pub mod crypto;
@@ -136,6 +138,49 @@ pub struct AgentBuilder<M: ractor::Message> {
     self_test: bool,
     shutdown_budget: Option<std::time::Duration>,
     environment: Vec<&'static polar_env::Section>,
+    /// The handlers the agent registered, by the command each runs.
+    commands: Vec<(&'static str, Arc<dyn CommandHandler>)>,
+    /// What the agent declared it accepts (`PolarAgent::COMMANDS`).
+    declared_commands: &'static [CommandSpec],
+}
+
+/// Pairs each command an agent declared with its handler, and says what does not pair: a declared command
+/// with no handler can be sent and never run, and a handler for an undeclared command can never be reached,
+/// so either is a startup failure rather than a surprise later.
+fn resolve_commands(
+    declared: &'static [CommandSpec],
+    registered: Vec<(&'static str, Arc<dyn CommandHandler>)>,
+) -> Result<Vec<(CommandSpec, Arc<dyn CommandHandler>)>, String> {
+    let mut problems = Vec::new();
+    let mut handlers: std::collections::HashMap<&'static str, Arc<dyn CommandHandler>> =
+        std::collections::HashMap::new();
+    for (name, handler) in registered {
+        if handlers.insert(name, handler).is_some() {
+            problems.push(format!("a handler for `{name}` is registered twice"));
+        }
+    }
+    let mut resolved = Vec::new();
+    for spec in declared {
+        match handlers.remove(spec.name) {
+            Some(handler) => resolved.push((*spec, handler)),
+            None => problems.push(format!(
+                "`{}` is declared in COMMANDS but has no handler: register one with with_command",
+                spec.name
+            )),
+        }
+    }
+    let mut undeclared: Vec<&str> = handlers.keys().copied().collect();
+    undeclared.sort_unstable();
+    for name in undeclared {
+        problems.push(format!(
+            "a handler is registered for `{name}`, which is not declared in COMMANDS"
+        ));
+    }
+    if problems.is_empty() {
+        Ok(resolved)
+    } else {
+        Err(problems.join("; "))
+    }
 }
 
 impl<M: ractor::Message> AgentBuilder<M> {
@@ -150,7 +195,18 @@ impl<M: ractor::Message> AgentBuilder<M> {
             self_test: false,
             shutdown_budget: None,
             environment: Vec::new(),
+            commands: Vec::new(),
+            declared_commands: &[],
         }
+    }
+
+    /// Registers the handler that runs the command `name`, which the agent must have declared in
+    /// `PolarAgent::COMMANDS`. The infrastructure verifies each signed command, checks its arguments against
+    /// the declaration, and runs the handler under the declared timeout, announcing every step; the handler
+    /// is only the doing. The agent does not start if what is declared and what is registered disagree.
+    pub fn with_command(mut self, name: &'static str, handler: Arc<dyn CommandHandler>) -> Self {
+        self.commands.push((name, handler));
+        self
     }
 
     /// Declares the variables this agent's own code reads. They join the builder's and its
@@ -282,6 +338,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
         self.requires = configured.required.clone();
         self.wants_crypto = configured.required.contains(&Capability::Encryption);
         self.self_test = configured.self_test;
+        self.declared_commands = configured.commands;
         ConfiguredAgent {
             builder: self,
             startup: configured.startup,
@@ -324,6 +381,9 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
         )
         .with_config(startup.health);
 
+        let commands = resolve_commands(this.declared_commands, this.commands)
+            .map_err(|problems| ActorProcessingErr::from(format!("the commands: {problems}")))?;
+
         let myself_cell = this.myself.get_cell();
 
         // The real, entire, foundational subtree -- HealthCheckActor,
@@ -346,6 +406,7 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
                 listen_for_signals: true,
                 process_exit: shutdown::real_process_exit(),
                 tcp_spawner: Arc::new(infrastructure::CassiniSpawner),
+                commands,
             },
             myself_cell,
         )
@@ -486,6 +547,7 @@ impl<M: ractor::Message> ConfiguredService<M> {
                 listen_for_signals: hooks.listen_for_signals,
                 process_exit: hooks.process_exit.clone(),
                 tcp_spawner: Arc::new(infrastructure::CassiniSpawner),
+                commands: Vec::new(),
             },
             this.myself.get_cell(),
         )
@@ -780,6 +842,91 @@ mod tests {
         );
         // Nothing was spawned: the client's name is not registered.
         assert!(ractor::registry::where_is("configure-test.tcp".to_string()).is_none());
+    }
+
+    // -- commands: what is declared and what is registered ----------------------------------
+
+    struct NoHandler;
+    #[ractor::async_trait]
+    impl CommandHandler for NoHandler {
+        async fn run(&self, _: CommandRequest) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    const ONE: CommandSpec = CommandSpec {
+        name: "one",
+        doc: "",
+        args: &[],
+        delivery: Delivery::Idempotent,
+        exclusive: false,
+        timeout: std::time::Duration::from_secs(1),
+    };
+    const TWO: CommandSpec = CommandSpec {
+        name: "two",
+        doc: "",
+        args: &[],
+        delivery: Delivery::Once,
+        exclusive: true,
+        timeout: std::time::Duration::from_secs(1),
+    };
+    static BOTH: [CommandSpec; 2] = [ONE, TWO];
+
+    fn handler() -> Arc<dyn CommandHandler> {
+        Arc::new(NoHandler)
+    }
+
+    #[test]
+    fn declared_commands_are_paired_with_their_handlers_in_the_order_declared() {
+        let resolved = resolve_commands(&BOTH, vec![("two", handler()), ("one", handler())]).unwrap();
+        let names: Vec<&str> = resolved.iter().map(|(spec, _)| spec.name).collect();
+        assert_eq!(names, ["one", "two"]);
+        assert!(resolve_commands(&[], vec![]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_declared_command_with_no_handler_and_a_handler_for_nothing_declared_are_both_refused() {
+        let missing = resolve_commands(&BOTH, vec![("one", handler())]).err().unwrap();
+        assert!(missing.contains("`two` is declared") && missing.contains("no handler"), "{missing}");
+
+        let stray = resolve_commands(&BOTH, vec![("one", handler()), ("two", handler()), ("three", handler())])
+            .err()
+            .unwrap();
+        assert!(stray.contains("`three`") && stray.contains("not declared"), "{stray}");
+
+        // Several problems are all said, and a handler registered twice is one of them.
+        let all = resolve_commands(&BOTH, vec![("one", handler()), ("one", handler()), ("ghost", handler())])
+            .err()
+            .unwrap();
+        assert!(all.contains("twice") && all.contains("`two`") && all.contains("`ghost`"), "{all}");
+
+        // Handlers and no declaration at all.
+        assert!(resolve_commands(&[], vec![("one", handler())]).is_err());
+    }
+
+    #[tokio::test]
+    async fn an_agent_whose_declared_commands_have_no_handlers_does_not_build_and_starts_nothing() {
+        let (idle, _) = Actor::spawn(None, Idle, ()).await.unwrap();
+        let env = map(environment::fixtures::CASSINI_ENV);
+        let required = vec![Capability::Cassini];
+        let startup = startup::prepare(&env, &[], &required, None).unwrap();
+        let configured = Configured {
+            startup,
+            required,
+            self_test: false,
+            commands: &BOTH,
+            hooks: crate::agent::Hooks::real(),
+        };
+        let error = AgentBuilder::new(idle, "no-handlers")
+            .into_configured(configured)
+            .build()
+            .await
+            .err()
+            .expect("it must not build");
+        let said = error.to_string();
+        assert!(said.contains("the commands") && said.contains("no handler"), "{said}");
+        // It stopped before it spawned anything.
+        assert!(ractor::registry::where_is("no-handlers.tcp".to_string()).is_none());
     }
 
     #[tokio::test]

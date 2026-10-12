@@ -96,6 +96,9 @@ pub enum InfrastructureSupervisorMessage {
     BeginShutdown { reason: String },
     /// Internal: time for the self-test to look.
     SelfTestTick,
+    /// Internal: the command actor says what it did with a command, published on Cassini if there is a
+    /// client.
+    CommandOutcome(polar_scheduler_common::CommandOutcome),
     /// Internal: the ConfigurationActor says what it did with a document. Published on Cassini, if there
     /// is a client; a service without one has nowhere to say it.
     Outcome(polar_scheduler_common::ConfigurationOutcome),
@@ -154,6 +157,11 @@ pub struct InfrastructureSupervisorArgs {
     pub(crate) listen_for_signals: bool,
     pub(crate) process_exit: ProcessExit,
     pub(crate) tcp_spawner: Arc<dyn TcpClientSpawner>,
+    /// The commands the agent declared, each with its handler: what the command actor will run.
+    pub(crate) commands: Vec<(
+        crate::command::CommandSpec,
+        Arc<dyn crate::command_actor::CommandHandler>,
+    )>,
     /// Publish probes to the agent itself and expect them back; see `selftest`.
     pub(crate) self_test: bool,
 }
@@ -205,6 +213,7 @@ struct ClientSetup {
     tcp_spawner: Arc<dyn TcpClientSpawner>,
     config: Arc<polar_env::Config>,
     configuration: ConfigurationHandle,
+    commands: crate::command_actor::CommandHandle,
 }
 
 /// What a Cassini client brings with it.
@@ -218,6 +227,7 @@ struct ClientParts {
 pub struct InfrastructureSupervisorState {
     config: Arc<polar_env::Config>,
     configuration: ConfigurationHandle,
+    commands: crate::command_actor::CommandHandle,
     infrastructure_events: Arc<OutputPort<InfrastructureEvent>>,
     client: Option<ClientParts>,
     healthcheck: HealthHandle,
@@ -245,6 +255,8 @@ impl InfrastructureSupervisor {
 
         tracing::warn!("InfrastructureSupervisor: beginning an orderly shutdown: {reason}");
         Self::start_watchdog(state.shutdown_budget, state.process_exit.clone(), &reason);
+        // Nothing new is started while the agent is going down.
+        state.commands.drain();
         state
             .infrastructure_events
             .send(InfrastructureEvent::PrepareShutdown);
@@ -331,10 +343,15 @@ impl InfrastructureSupervisor {
         .map_err(ActorProcessingErr::from)?;
 
         let mut subscriptions = setup.subscriptions;
-        // Every agent hears its own signed configuration, and the actor verifies it.
+        // Every agent hears its own signed configuration and its own signed commands, and the actors
+        // verify them.
         subscriptions.push(crate::configuration::subscription(
             service_name,
             setup.configuration.clone(),
+        ));
+        subscriptions.push(crate::command_actor::subscription(
+            service_name,
+            setup.commands.clone(),
         ));
         let self_test = if setup.self_test {
             let instance: [u8; 16] = rand::random();
@@ -529,6 +546,8 @@ impl Actor for InfrastructureSupervisor {
                     None
                 }
             };
+        // The same trust, clock and revocation check commands, with their own authority.
+        let command_verifier = verifier.as_ref().map(crate::signed::UpdateVerifier::commands);
         let configuration = ConfigurationHandle::spawn(
             None,
             args.service_name.clone(),
@@ -537,6 +556,17 @@ impl Actor for InfrastructureSupervisor {
             myself_cell.clone(),
         )
         .await?;
+        let commands = crate::command_actor::CommandHandle::spawn(
+            None,
+            args.service_name.clone(),
+            command_verifier,
+            args.commands,
+            myself_cell.clone(),
+        )
+        .await?;
+        commands.outcomes().subscribe(myself.clone(), |outcome| {
+            Some(InfrastructureSupervisorMessage::CommandOutcome(outcome))
+        });
         // What became of each signed document is announced for the scheduler to record. It goes through
         // this supervisor so that it uses the Cassini client as it is now, across a respawn.
         configuration.outcomes().subscribe(myself.clone(), |outcome| {
@@ -556,6 +586,7 @@ impl Actor for InfrastructureSupervisor {
                     tcp_spawner: args.tcp_spawner,
                     config: args.config.clone(),
                     configuration: configuration.clone(),
+                    commands: commands.clone(),
                 },
             )
             .await?;
@@ -575,6 +606,7 @@ impl Actor for InfrastructureSupervisor {
         Ok(InfrastructureSupervisorState {
             config: args.config,
             configuration,
+            commands,
             infrastructure_events,
             client,
             healthcheck: HealthHandle::new(healthcheck),
@@ -640,6 +672,32 @@ impl Actor for InfrastructureSupervisor {
                 Self::begin_shutdown(state, reason);
             }
             InfrastructureSupervisorMessage::SelfTestTick => Self::self_test_tick(state),
+            InfrastructureSupervisorMessage::CommandOutcome(outcome) => {
+                let Some(client) = &state.client else {
+                    tracing::debug!(
+                        "InfrastructureSupervisor: no Cassini client, command outcome not announced"
+                    );
+                    return Ok(());
+                };
+                match rkyv::to_bytes::<rkyv::rancor::Error>(&outcome) {
+                    Ok(bytes) => {
+                        if let Err(e) = client.tcp_client.as_actor_ref().send_message(
+                            cassini_client::TcpClientMessage::publish(
+                                polar_scheduler_common::COMMAND_OUTCOME_TOPIC.to_string(),
+                                bytes.to_vec(),
+                                None,
+                            ),
+                        ) {
+                            tracing::warn!(
+                                "InfrastructureSupervisor: cannot announce a command outcome: {e}"
+                            );
+                        }
+                    }
+                    Err(e) => tracing::error!(
+                        "InfrastructureSupervisor: cannot encode a command outcome: {e}"
+                    ),
+                }
+            }
             InfrastructureSupervisorMessage::Outcome(outcome) => {
                 let Some(client) = &state.client else {
                     tracing::debug!("InfrastructureSupervisor: no Cassini client, outcome not announced");
@@ -895,7 +953,37 @@ mod tests {
             health_env: &[(&str, &str)],
             listen_for_signals: bool,
         ) -> Self {
-            Self::build(service, budget, health_env, listen_for_signals, false, None).await
+            Self::build(
+                service,
+                budget,
+                health_env,
+                listen_for_signals,
+                false,
+                None,
+                vec![],
+            )
+            .await
+        }
+
+        /// A rig whose agent declares commands, each with its handler.
+        async fn with_commands(
+            service: &str,
+            health_env: &[(&str, &str)],
+            commands: Vec<(
+                crate::command::CommandSpec,
+                Arc<dyn crate::command_actor::CommandHandler>,
+            )>,
+        ) -> Self {
+            Self::build(
+                service,
+                Duration::from_secs(20),
+                health_env,
+                false,
+                false,
+                None,
+                commands,
+            )
+            .await
         }
 
         /// A rig whose agent tests itself. `echo` is whether its Cassini client hands the
@@ -908,6 +996,7 @@ mod tests {
                 false,
                 false,
                 Some(echo),
+                vec![],
             )
             .await
         }
@@ -915,7 +1004,16 @@ mod tests {
         /// A rig whose agent encrypts: it has a real certificate for the crypto actor to take
         /// its identity from.
         async fn with_crypto(service: &str) -> Self {
-            Self::build(service, Duration::from_secs(20), &[], false, true, None).await
+            Self::build(
+                service,
+                Duration::from_secs(20),
+                &[],
+                false,
+                true,
+                None,
+                vec![],
+            )
+            .await
         }
 
         async fn build(
@@ -925,6 +1023,10 @@ mod tests {
             listen_for_signals: bool,
             crypto: bool,
             self_test: Option<bool>,
+            commands: Vec<(
+                crate::command::CommandSpec,
+                Arc<dyn crate::command_actor::CommandHandler>,
+            )>,
         ) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let certificate = dir.path().join("cert.pem");
@@ -982,6 +1084,7 @@ mod tests {
                     listen_for_signals,
                     process_exit: Arc::new(move |code| recorded.lock().unwrap().push(code)),
                     tcp_spawner: spawner.clone(),
+                    commands,
                     self_test: self_test.is_some(),
                 },
             )
@@ -1229,6 +1332,134 @@ mod tests {
             rig.resources.configuration.submit(document).await.unwrap(),
             ApplyOutcome::Refused(Refusal::Unverified(Rejection::NotConfigured))
         );
+    }
+
+    /// Notes the ids of the commands it was asked to run.
+    struct Ran(Arc<Mutex<Vec<String>>>);
+
+    #[async_trait]
+    impl crate::command_actor::CommandHandler for Ran {
+        async fn run(
+            &self,
+            request: crate::command_actor::CommandRequest,
+        ) -> Result<String, String> {
+            self.0.lock().unwrap().push(request.id);
+            Ok("done".to_string())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_signed_command_reaches_its_handler_through_the_router_and_is_announced_and_refused_once_shutting_down()
+     {
+        use crate::command::{ArgSpec, CommandSpec, Delivery};
+        use polar_scheduler_common::{CommandOutcome, command_topic};
+        use polar_signing::testing::{Spec, root, signer};
+
+        const PING: CommandSpec = CommandSpec {
+            name: "ping",
+            doc: "answers",
+            args: &[] as &[ArgSpec],
+            delivery: Delivery::Idempotent,
+            exclusive: false,
+            timeout: Duration::from_secs(5),
+        };
+
+        let ca = root("Polar Internal CA");
+        let dir = tempfile::tempdir().unwrap();
+        let ca_file = dir.path().join("ca.pem");
+        std::fs::write(&ca_file, &ca.pem).unwrap();
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let rig = Rig::with_commands(
+            "infra-commands",
+            &[("TLS_CA_CERT", ca_file.to_str().unwrap())],
+            vec![(PING, Arc::new(Ran(ran.clone())))],
+        )
+        .await;
+        let s = signer(
+            &ca,
+            Spec {
+                capabilities: vec!["c:run-command"],
+                not_after_year: 2090,
+                ..Spec::default()
+            },
+        );
+        // The verifier reads the real clock, so the command is issued now.
+        let issued = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let command = |id: &str| {
+            polar_signing::sign(
+                serde_json::json!({
+                    "type": "command",
+                    "id": id,
+                    "target": {"agent": "infra-commands"},
+                    "command": "ping",
+                    "args": {},
+                    "issued_at": issued,
+                    "not_after": issued + 900
+                }),
+                std::slice::from_ref(&s.cert_pem),
+                &s.key_pem,
+            )
+            .unwrap()
+            .to_value()
+        };
+        let route = |rig: &Rig, document: serde_json::Value| {
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(
+                &polar_scheduler_common::CommandNotification {
+                    agent: "infra-commands".to_string(),
+                    document_json: document.to_string(),
+                },
+            )
+            .unwrap()
+            .to_vec();
+            rig.resources
+                .router
+                .send_message(polar_router::RouterMessage::Route(
+                    polar_router::IncomingMessage {
+                        topic: command_topic("infra-commands"),
+                        payload,
+                        published_by: None,
+                        trace_ctx: None,
+                    },
+                ))
+                .unwrap();
+        };
+        let announced = |rig: &Rig| -> Vec<CommandOutcome> {
+            rig.spawner
+                .published
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(topic, _)| topic == polar_scheduler_common::COMMAND_OUTCOME_TOPIC)
+                .map(|(_, payload)| {
+                    rkyv::from_bytes::<CommandOutcome, rkyv::rancor::Error>(payload).unwrap()
+                })
+                .collect()
+        };
+
+        // Through the router to the actor, verified, run, and announced on Cassini.
+        route(&rig, command("one"));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(*ran.lock().unwrap(), ["one"]);
+        let statuses: Vec<String> = announced(&rig).into_iter().map(|o| o.status).collect();
+        assert_eq!(statuses, ["accepted", "started", "succeeded"]);
+
+        // Once the agent is told to shut down, nothing new is started, and that is announced too.
+        rig.infra
+            .cast(InfrastructureSupervisorMessage::BeginShutdown {
+                reason: "a test".to_string(),
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        route(&rig, command("two"));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(*ran.lock().unwrap(), ["one"], "the second never ran");
+        let last = announced(&rig).pop().unwrap();
+        assert_eq!(last.status, "refused");
+        assert_eq!(last.id.as_deref(), Some("two"));
+        assert!(last.detail[0].contains("shutting down"), "{:?}", last.detail);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1637,6 +1868,7 @@ mod service_tests {
                     listen_for_signals: false,
                     process_exit: Arc::new(move |code| recorded.lock().unwrap().push(code)),
                     tcp_spawner: Arc::new(CassiniSpawner),
+                    commands: vec![],
                     self_test: false,
                 },
             )
