@@ -1,7 +1,8 @@
 # Authority distribution: policy and permissions pushed to the leaves
 
-Status, 2026-10-12: design, decided in part with David (marked) and open in part (the questions at the end).
-Nothing in it is built. It supersedes the placement questions in `credentials-policy.md` and the "policy for other
+Status, 2026-10-12: design, decided with David except the two questions at the end. Built so far: the
+three-valued decision in `polar-policy`, groups and principals in `polar-permissions`, and the `c:update-groups`
+capability (each marked below). The rest is not built. It supersedes the placement questions in `credentials-policy.md` and the "policy for other
 receivers" note in `git-controller.md`.
 
 ## The principle (David, 2026-10-12)
@@ -26,6 +27,25 @@ authoritative update is accepted, an **event is raised** to every consumer of it
    delivered to every agent, and each agent decides for itself whether a signer may change it or run a command on it.
 3. **An event signal for updates.** When the credentials agent accepts a policy or permissions update, it raises an
    event for the consumers, handled everywhere the update needs to be received.
+4. **The credentials agent signs what it publishes.** Every agent can already get its public key from the
+   credentials agent (the escrow key query, which the crypto actor fetches and caches), and it is sufficient for the
+   credentials agent to sign its own unique work. Leaves pin that key and verify the signature on each
+   `AuthorityUpdate`, so an update is believed because of who signed it and not because of who relayed it, and it
+   can be stored and replayed. This covers ledger-originated changes (a revocation), which have no author's
+   document to forward. Which key signs is the first open question below.
+5. **Cedar overrides the certificate; the certificate is the fallback.** Once a policy is loaded, a request goes to
+   the policy first. A `permit` admits a signer whatever the certificate says, and a `forbid` refuses one
+   whatever it says. If the policy does not speak to the request (no rule mentions it), the capabilities in the
+   certificate decide, as they did before there was a policy. This is the point of runtime configuration: it
+   overrides the static defaults. **Built**: `polar_policy::Decision` is now `Allow`, `Deny` or `NotDetermined`,
+   separating "a rule forbids this" from "no rule applies", and a rule that cannot be evaluated is a `Deny`, never
+   a way through.
+6. **`c:update-groups`** is a capability of its own, authoring group membership: not `c:grant` (which gives an
+   identity permissions) and not `c:update-policy` (which writes the rules). **Built.**
+7. **Cadence.** The credentials agent republishes the current policy and principal data every half hour, or when
+   something that must be known changes, whichever comes first, and the half-hour timer restarts whenever an update
+   is pushed. Changes set the cadence, and agents rejuvenate often enough that a quiet cluster repairs itself
+   at registration.
 
 ## Where things are decided
 
@@ -92,11 +112,14 @@ A Cedar-backed `Authority` plugs into the trait the verifier already has. For a 
   from the agent's own declarations;
 - context: the time, and what a rule needs.
 
-**The certificate capability stays the floor.** It is checked first, offline, with no policy loaded (the bootstrap
-case: the first policy and the first permissions are signed by someone holding the capability, and need no policy
-to be believed). When a policy is loaded, Cedar must **also** permit: policy tightens, and the capability is what
-admits a signer to be considered at all. Whether a policy may also *admit* a signer who lacks the capability is
-open (question 2).
+**Cedar first, the certificate as fallback.** With no policy loaded (a fresh cluster, the bootstrap case) the
+capability decides, as it does today. Once a policy is loaded the request goes to it: `Allow` admits the signer,
+`Deny` refuses them, and `NotDetermined` (no rule applies) falls back to the capabilities in the certificate. So the
+certificate stays the coarse default and policy overrides it in either direction.
+
+The principal's attributes, including its groups as parents and the capabilities its certificate carries, come only
+from `PermissionsActor` (**built**: `ResolvePrincipal`, `UpdateGroups`; a rule can say `principal in Group::"operators"`
+or read `principal.capabilities`).
 
 ## What the builder gains
 
@@ -129,15 +152,14 @@ open (question 2).
 
 ## Questions (open)
 
-1. **Trust in what is pushed.** Is the broker's statement of who published (the credentials agent's identity) plus
-   the author's signature on the untouched document enough? Or should the credentials agent sign what it
-   publishes with a key the leaves pin (which key: it has its escrow keypair and its mTLS certificate)? Ledger-originated
-   changes (a revocation) have no author document to forward, so they need one or the other.
-2. **Does policy only tighten, or may it admit?** The proposal above: the capability is the floor and Cedar tightens.
-   The alternative: once a policy is loaded, Cedar is the whole decision and a signer without the capability may be
-   admitted by it.
-3. **Which capability authors principal data?** `c:grant` exists ("grant permissions to an existing identity"),
-   and putting someone in a group is arguably a grant. A new capability costs a redeployment of the consumers; it
-   would let group editing and permission granting be separate authorities.
-4. **Catch-up cadence.** Republish on an interval so that a missed update is repaired: what interval is acceptable
-   for the worst case of a missed demotion, until delivery is acknowledged?
+1. **Which key signs?** The key every agent can fetch from the credentials agent is its **escrow** key, an RSA key
+   used for encryption (agents encrypt secrets to it; it is held in the credentials agent's process). Signing with
+   the same RSA key is possible (RSASSA-PSS) but it is generally better not to use one key for both encrypting and
+   signing. The alternative: the credentials agent holds a separate RSA **signing** keypair, published by the same
+   query beside the escrow key, with the same custody. RSA either way. Which?
+2. **Who may author the policy and groups documents themselves?** Cedar governs everything else. If it also governed
+   who may write policy, a mistaken `forbid` could lock out every policy author, and a `permit` could admit someone
+   to write policy, which is circular. The proposal: the `policy` and `groups` documents are checked against the
+   certificate capability alone (`c:update-policy`, `c:update-groups`), always; Cedar never governs its own authorship.
+   A policy author is demoted by revoking their certificate, which the same signal makes immediate at the leaves.
+   Agree?

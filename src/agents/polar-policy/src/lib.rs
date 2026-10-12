@@ -34,23 +34,21 @@
 use cedar_policy::{Authorizer, Context, Entities, EntityUid, PolicySet, Request};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, async_trait};
 
-/// The real, complete, permanently-narrow decision this crate ever
-/// returns -- deliberately not cedar_policy::Decision directly, so
-/// no caller of this crate ever needs its own, direct dependency on
-/// cedar-policy just to match on a result.
+/// What the rules say about a request, which is one of three things, not two.
+///
+/// Cedar denies by default, so "no rule mentions this" and "a rule forbids this" both come back as a denial
+/// from Cedar. They are different answers. The first means the policy does not speak to the request, and
+/// whoever asked falls back to what they had before policy (for a signer, the capabilities in the certificate);
+/// the second is the policy overriding it. A caller that has no fallback (a secret has none) treats anything
+/// but `Allow` as a refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
+    /// A rule permits it, and none forbids it.
     Allow,
+    /// A rule forbids it, or the rules could not be evaluated: refused, with no fallback.
     Deny,
-}
-
-impl From<cedar_policy::Decision> for Decision {
-    fn from(d: cedar_policy::Decision) -> Self {
-        match d {
-            cedar_policy::Decision::Allow => Decision::Allow,
-            cedar_policy::Decision::Deny => Decision::Deny,
-        }
-    }
+    /// No rule applies. Neither permitted nor forbidden.
+    NotDetermined,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -207,8 +205,8 @@ impl PolicyActor {
             .as_ref()
             .ok_or(PolicyError::NoPolicyLoaded)?;
 
-        let permissions = ractor::call!(state.permissions_actor, |reply| {
-            polar_permissions::PermissionsMessage::ResolvePermissions {
+        let principal = ractor::call!(state.permissions_actor, |reply| {
+            polar_permissions::PermissionsMessage::ResolvePrincipal {
                 identity: requester_identity.to_string(),
                 certificate_pem: requester_certificate_pem,
                 reply,
@@ -228,13 +226,20 @@ impl PolicyActor {
             .parse()
             .map_err(|e| PolicyError::RequestConstruction(format!("resource: {e}")))?;
 
+        // The principal is built from what PermissionsActor resolved and from nothing a caller said. Its
+        // groups are its parents, so a rule can say `principal in Group::"operators"`.
         let entities_json = serde_json::json!([
             {
                 "uid": { "type": "Identity", "id": requester_identity },
                 "attrs": {
-                    "permissions": permissions.iter().map(Self::permission_to_json).collect::<Vec<_>>()
+                    "permissions": principal.permissions.iter().map(Self::permission_to_json).collect::<Vec<_>>(),
+                    "capabilities": principal.capabilities.iter()
+                        .map(|c| c.to_san_string().trim_start_matches("c:").to_string())
+                        .collect::<Vec<_>>(),
                 },
-                "parents": []
+                "parents": principal.groups.iter()
+                    .map(|g| serde_json::json!({ "type": "Group", "id": g }))
+                    .collect::<Vec<_>>()
             }
         ]);
         let entities = Entities::from_json_value(entities_json, None)
@@ -248,7 +253,27 @@ impl PolicyActor {
             .authorizer
             .is_authorized(&request, policy_set, &entities);
 
-        Ok(response.decision().into())
+        Ok(Self::decide(&response))
+    }
+
+    /// The three answers out of Cedar's two. A rule that could not be evaluated is a denial: it may have
+    /// been the one that forbade the request, and Cedar would otherwise skip it. A denial with no rule
+    /// behind it is not a denial but silence.
+    fn decide(response: &cedar_policy::Response) -> Decision {
+        if response.diagnostics().errors().next().is_some() {
+            tracing::warn!(
+                "a policy rule could not be evaluated, so the request is denied: {:?}",
+                response.diagnostics().errors().collect::<Vec<_>>()
+            );
+            return Decision::Deny;
+        }
+        match response.decision() {
+            cedar_policy::Decision::Allow => Decision::Allow,
+            cedar_policy::Decision::Deny if response.diagnostics().reason().next().is_some() => {
+                Decision::Deny
+            }
+            cedar_policy::Decision::Deny => Decision::NotDetermined,
+        }
     }
 }
 
@@ -325,7 +350,8 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(decision, Decision::Deny);
+        // No rule mentions this principal: the rules have no answer, which is not a denial.
+        assert_eq!(decision, Decision::NotDetermined);
     }
 
     #[tokio::test]
@@ -342,7 +368,7 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(decision, Decision::Deny);
+        assert_eq!(decision, Decision::NotDetermined);
     }
 
     #[tokio::test]
@@ -406,7 +432,7 @@ mod tests {
         })
         .unwrap()
         .unwrap();
-        assert_eq!(old_decision, Decision::Deny);
+        assert_eq!(old_decision, Decision::NotDetermined);
 
         // The new policy's own principal must genuinely be permitted.
         let new_decision = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
@@ -485,6 +511,173 @@ mod tests {
         })
         .unwrap()
         .unwrap();
-        assert_eq!(denied, Decision::Deny);
+        assert_eq!(denied, Decision::NotDetermined);
+    }
+
+    // -- what a rule can say: forbid, groups, capabilities, and an answer that is not a denial -----
+
+    async fn load(actor: &ActorRef<PolicyMessage>, source: &str) {
+        ractor::call!(actor, |reply| PolicyMessage::UpdatePolicy {
+            policy_source: source.to_string(),
+            reply,
+        })
+        .unwrap()
+        .unwrap();
+    }
+
+    async fn ask(
+        actor: &ActorRef<PolicyMessage>,
+        identity: &str,
+        certificate_pem: Option<String>,
+        action: &str,
+        resource: &str,
+    ) -> Decision {
+        ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+            requester_identity: identity.to_string(),
+            requester_certificate_pem: certificate_pem,
+            action: action.to_string(),
+            resource: resource.to_string(),
+            reply,
+        })
+        .unwrap()
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_forbid_is_a_denial_that_beats_a_permit() {
+        let actor = spawn_policy_actor().await;
+        load(
+            &actor,
+            r#"
+            permit(principal, action == Action::"retrieve", resource);
+            forbid(principal, action == Action::"retrieve", resource == Secret::"frozen-one");
+            "#,
+        )
+        .await;
+        let allowed = ask(
+            &actor,
+            "a",
+            None,
+            r#"Action::"retrieve""#,
+            r#"Secret::"ordinary""#,
+        )
+        .await;
+        let forbidden = ask(
+            &actor,
+            "a",
+            None,
+            r#"Action::"retrieve""#,
+            r#"Secret::"frozen-one""#,
+        )
+        .await;
+        assert_eq!(allowed, Decision::Allow);
+        assert_eq!(
+            forbidden,
+            Decision::Deny,
+            "an explicit forbid is an answer, and it is no"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rule_that_cannot_be_evaluated_denies_and_never_lets_a_request_through() {
+        let actor = spawn_policy_actor().await;
+        // Reads an attribute the resource does not have: evaluating it is an error.
+        load(
+            &actor,
+            r#"
+            permit(principal, action, resource) when { resource.owner == principal };
+            permit(principal, action == Action::"retrieve", resource);
+            "#,
+        )
+        .await;
+        let decision = ask(&actor, "a", None, r#"Action::"retrieve""#, r#"Secret::"x""#).await;
+        assert_eq!(
+            decision,
+            Decision::Deny,
+            "a rule that errors might have been the one that forbade it"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_membership_is_data_about_the_principal_that_only_permissions_supplies() {
+        let permissions_actor = spawn_permissions_actor().await;
+        ractor::call!(permissions_actor, |reply| {
+            polar_permissions::PermissionsMessage::UpdateGroups {
+                memberships: [("alice".to_string(), vec!["credential-managers".to_string()])]
+                    .into(),
+                reply,
+            }
+        })
+        .unwrap();
+        let (actor, _) = Actor::spawn(None, PolicyActor, PolicyActorArgs { permissions_actor })
+            .await
+            .unwrap();
+        load(
+            &actor,
+            r#"permit(principal in Group::"credential-managers", action == Action::"retrieve", resource);"#,
+        )
+        .await;
+
+        let member = ask(
+            &actor,
+            "alice",
+            None,
+            r#"Action::"retrieve""#,
+            r#"Secret::"s""#,
+        )
+        .await;
+        let stranger = ask(
+            &actor,
+            "bob",
+            None,
+            r#"Action::"retrieve""#,
+            r#"Secret::"s""#,
+        )
+        .await;
+        assert_eq!(member, Decision::Allow);
+        assert_eq!(stranger, Decision::NotDetermined);
+    }
+
+    #[tokio::test]
+    async fn a_rule_can_read_the_capabilities_the_certificate_carries() {
+        use cert_issuer_common::capability::Capability;
+        let certificate = |capabilities: &[Capability]| {
+            let mut sans = vec!["x.polar.svc.cluster.local".to_string()];
+            sans.extend(capabilities.iter().map(Capability::to_san_string));
+            let mut rng = rand::rng();
+            let key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+            let pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&key, rsa::pkcs8::LineEnding::LF)
+                .unwrap();
+            rcgen::CertificateParams::new(sans)
+                .unwrap()
+                .self_signed(&rcgen::KeyPair::from_pem(&pem).unwrap())
+                .unwrap()
+                .pem()
+        };
+        let actor = spawn_policy_actor().await;
+        load(
+            &actor,
+            r#"permit(principal, action == Action::"update-runtime", resource)
+               when { principal.capabilities.contains("update-runtime") };"#,
+        )
+        .await;
+        let holder = ask(
+            &actor,
+            "alice",
+            Some(certificate(&[Capability::UpdateRuntime])),
+            r#"Action::"update-runtime""#,
+            r#"Section::"git-repo-controller/repositories""#,
+        )
+        .await;
+        let without = ask(
+            &actor,
+            "alice",
+            Some(certificate(&[Capability::Grant])),
+            r#"Action::"update-runtime""#,
+            r#"Section::"git-repo-controller/repositories""#,
+        )
+        .await;
+        assert_eq!(holder, Decision::Allow);
+        assert_eq!(without, Decision::NotDetermined);
     }
 }

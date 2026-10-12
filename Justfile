@@ -684,6 +684,7 @@ admin-provision username email signer="bootstrap-admin":
         --capability c:provision-account --capability c:grant \
         --capability c:update-configuration --capability c:run-command \
         --capability c:update-policy --capability c:update-runtime \
+        --capability c:update-groups \
         --reason user-onboarding
 
 # Step 3: claim the provisioned account. Generates the keypair locally (the

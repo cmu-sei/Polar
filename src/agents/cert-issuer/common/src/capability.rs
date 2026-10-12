@@ -47,6 +47,11 @@ pub enum Capability {
     /// keeps its meaning; a consumer built before it rejects a certificate that carries it as malformed, so
     /// the consumers are redeployed before any certificate does.
     UpdateRuntime,
+    /// Change who is in which group, by a signed membership document
+    /// (docs/architecture/authority-distribution.md). Not `Grant`, which gives an identity permissions, and
+    /// not `UpdatePolicy`, which writes the rules that refer to groups. Appended; consumers are redeployed
+    /// before any certificate carries it.
+    UpdateGroups,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -58,7 +63,7 @@ pub enum CapabilityParseError {
 }
 
 impl Capability {
-    pub const ALL: [Capability; 7] = [
+    pub const ALL: [Capability; 8] = [
         Capability::ProvisionAccount,
         Capability::Grant,
         Capability::Revoke,
@@ -66,6 +71,7 @@ impl Capability {
         Capability::RunCommand,
         Capability::UpdateConfiguration,
         Capability::UpdateRuntime,
+        Capability::UpdateGroups,
     ];
 
     fn name(self) -> &'static str {
@@ -77,6 +83,7 @@ impl Capability {
             Self::RunCommand => "run-command",
             Self::UpdateConfiguration => "update-configuration",
             Self::UpdateRuntime => "update-runtime",
+            Self::UpdateGroups => "update-groups",
         }
     }
 
@@ -183,11 +190,31 @@ mod tests {
         // earlier ones keeps its meaning.
         assert_eq!(Capability::ALL[6], Capability::UpdateRuntime);
         assert_eq!(Capability::ALL[5], Capability::UpdateConfiguration);
-        assert_eq!(Capability::ALL.len(), 7);
         // Changing what an agent works on is not changing how it runs, and not changing policy.
         assert_ne!(Capability::UpdateRuntime, Capability::UpdateConfiguration);
         assert_ne!(Capability::UpdateRuntime, Capability::UpdatePolicy);
         assert!(Capability::from_san_string("c:update-runtimes").is_err());
+    }
+
+    #[test]
+    fn update_groups_is_its_own_capability_and_comes_last() {
+        assert_eq!(
+            Capability::UpdateGroups.to_san_string(),
+            "c:update-groups"
+        );
+        assert_eq!(
+            Capability::from_san_string("c:update-groups"),
+            Ok(Capability::UpdateGroups)
+        );
+        // Appended after update-runtime, which keeps its place.
+        assert_eq!(Capability::ALL[7], Capability::UpdateGroups);
+        assert_eq!(Capability::ALL[6], Capability::UpdateRuntime);
+        assert_eq!(Capability::ALL.len(), 8);
+        // Putting someone in a group is not granting them permissions, and not writing the rules about
+        // groups: three authorities.
+        assert_ne!(Capability::UpdateGroups, Capability::Grant);
+        assert_ne!(Capability::UpdateGroups, Capability::UpdatePolicy);
+        assert!(Capability::from_san_string("c:update-group").is_err());
     }
 
     #[test]

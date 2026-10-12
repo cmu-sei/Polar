@@ -18,7 +18,15 @@
 //! gitops-driven path, mirroring PolicyActor's own UpdatePolicy
 //! shape, letting an operator genuinely grant something immediately
 //! without waiting for the next certificate reissuance.
+//!
+//! A *principal* is more than its permissions: also the capabilities its certificate
+//! carries (`c:` entries) and the groups it is in. Group membership is data about a
+//! principal, so it lives here and not in the policy rules
+//! (docs/architecture/authority-distribution.md): it is replaced whole by a signed
+//! document, and policy reads it as the principal's parents. Nothing but this actor ever
+//! supplies it.
 
+use cert_issuer_common::capability::{Capability, extract_capabilities};
 use cert_issuer_common::permission::{Permission, extract_permissions};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, async_trait};
 use std::collections::HashMap;
@@ -27,6 +35,17 @@ use std::collections::HashMap;
 pub enum PermissionsError {
     #[error("failed to extract permissions from the given certificate: {0}")]
     CertificateExtraction(String),
+}
+
+/// Everything the system holds about who a principal is, resolved by this actor and nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Principal {
+    pub permissions: Vec<Permission>,
+    /// The `c:` capabilities in the presented certificate. A policy may read them; the certificate is
+    /// the floor they come from.
+    pub capabilities: Vec<Capability>,
+    /// The groups the identity is in, as the latest signed membership says.
+    pub groups: Vec<String>,
 }
 
 pub enum PermissionsMessage {
@@ -39,6 +58,19 @@ pub enum PermissionsMessage {
         identity: String,
         certificate_pem: Option<String>,
         reply: RpcReplyPort<Result<Vec<Permission>, PermissionsError>>,
+    },
+    /// The principal in full: its permissions as `ResolvePermissions` gives them, the capabilities its
+    /// certificate carries, and the groups it is in.
+    ResolvePrincipal {
+        identity: String,
+        certificate_pem: Option<String>,
+        reply: RpcReplyPort<Result<Principal, PermissionsError>>,
+    },
+    /// Replaces group membership wholesale: for each identity, the groups it is in. The next version of the
+    /// signed membership document, never a patch, so a removal is simply an absence.
+    UpdateGroups {
+        memberships: HashMap<String, Vec<String>>,
+        reply: RpcReplyPort<()>,
     },
     /// Replaces `identity`'s own, real, cached supplemental
     /// permissions wholesale -- the real, gitops-driven update path.
@@ -56,6 +88,7 @@ pub struct PermissionsActor;
 
 pub struct PermissionsActorState {
     supplemental: HashMap<String, Vec<Permission>>,
+    groups: HashMap<String, Vec<String>>,
 }
 
 #[async_trait]
@@ -71,6 +104,7 @@ impl Actor for PermissionsActor {
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(PermissionsActorState {
             supplemental: HashMap::new(),
+            groups: HashMap::new(),
         })
     }
 
@@ -89,6 +123,18 @@ impl Actor for PermissionsActor {
                 let result = Self::resolve(state, &identity, certificate_pem.as_deref());
                 let _ = reply.send(result);
             }
+            PermissionsMessage::ResolvePrincipal {
+                identity,
+                certificate_pem,
+                reply,
+            } => {
+                let result = Self::resolve_principal(state, &identity, certificate_pem.as_deref());
+                let _ = reply.send(result);
+            }
+            PermissionsMessage::UpdateGroups { memberships, reply } => {
+                state.groups = memberships;
+                let _ = reply.send(());
+            }
             PermissionsMessage::UpdateSupplementalPermissions {
                 identity,
                 permissions,
@@ -103,6 +149,23 @@ impl Actor for PermissionsActor {
 }
 
 impl PermissionsActor {
+    fn resolve_principal(
+        state: &PermissionsActorState,
+        identity: &str,
+        certificate_pem: Option<&str>,
+    ) -> Result<Principal, PermissionsError> {
+        let capabilities = match certificate_pem {
+            Some(pem) => extract_capabilities(pem)
+                .map_err(|e| PermissionsError::CertificateExtraction(e.to_string()))?,
+            None => Vec::new(),
+        };
+        Ok(Principal {
+            permissions: Self::resolve(state, identity, certificate_pem)?,
+            capabilities,
+            groups: state.groups.get(identity).cloned().unwrap_or_default(),
+        })
+    }
+
     /// The real, synchronous resolution logic itself -- extracted so
     /// it's directly, genuinely unit-testable without needing a real
     /// spawned actor or a real RpcReplyPort round trip at all.
@@ -278,5 +341,87 @@ mod tests {
             result,
             Err(PermissionsError::CertificateExtraction(_))
         ));
+    }
+
+    // -- the principal: permissions, capabilities, and the groups it is in -----------------------
+
+    #[tokio::test]
+    async fn a_principal_is_its_permissions_its_capabilities_and_its_groups() {
+        use cert_issuer_common::capability::Capability;
+        let (actor, _) = Actor::spawn(None, PermissionsActor, ()).await.unwrap();
+        ractor::call!(actor, |reply| PermissionsMessage::UpdateGroups {
+            memberships: [(
+                "alice".to_string(),
+                vec!["credential-managers".to_string(), "operators".to_string()],
+            )]
+            .into(),
+            reply,
+        })
+        .unwrap();
+        let certificate_pem = build_test_certificate(vec![
+            "alice.polar.svc.cluster.local".to_string(),
+            Permission {
+                scope: PermissionScope::UserToService,
+                target: None,
+            }
+            .to_san_string(),
+            Capability::UpdateRuntime.to_san_string(),
+        ]);
+
+        let principal = ractor::call!(actor, |reply| PermissionsMessage::ResolvePrincipal {
+            identity: "alice".to_string(),
+            certificate_pem: Some(certificate_pem),
+            reply,
+        })
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(principal.permissions.len(), 1);
+        assert_eq!(principal.capabilities, vec![Capability::UpdateRuntime]);
+        assert_eq!(
+            principal.groups,
+            vec!["credential-managers".to_string(), "operators".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn groups_are_replaced_whole_and_belong_only_to_the_identity_they_name() {
+        let (actor, _) = Actor::spawn(None, PermissionsActor, ()).await.unwrap();
+        let groups = |actor: &ActorRef<PermissionsMessage>, who: &str| {
+            let (actor, who) = (actor.clone(), who.to_string());
+            async move {
+                ractor::call!(actor, |reply| PermissionsMessage::ResolvePrincipal {
+                    identity: who.clone(),
+                    certificate_pem: None,
+                    reply,
+                })
+                .unwrap()
+                .unwrap()
+                .groups
+            }
+        };
+        ractor::call!(actor, |reply| PermissionsMessage::UpdateGroups {
+            memberships: [
+                ("alice".to_string(), vec!["operators".to_string()]),
+                ("bob".to_string(), vec!["operators".to_string()]),
+            ]
+            .into(),
+            reply,
+        })
+        .unwrap();
+        assert_eq!(groups(&actor, "alice").await, ["operators"]);
+        assert!(
+            groups(&actor, "carol").await.is_empty(),
+            "no one else is in it"
+        );
+
+        // The next version replaces the membership whole: bob is no longer anywhere.
+        ractor::call!(actor, |reply| PermissionsMessage::UpdateGroups {
+            memberships: [("alice".to_string(), vec!["auditors".to_string()])].into(),
+            reply,
+        })
+        .unwrap();
+        assert_eq!(groups(&actor, "alice").await, ["auditors"]);
+        assert!(groups(&actor, "bob").await.is_empty());
     }
 }
