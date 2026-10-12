@@ -6,6 +6,12 @@ the rules for accepting one are signed repository content that the agents intere
 is the second of the three kinds in `scheduling-kinds.md` (configuration, proposal, command); the sequence is
 `sequences/general/proposal_flow.mmd`.
 
+**Amended 2026-10-12 (`git-controller.md`):** for the git agents the **receiver is the git controller**, not the
+observer (the observer keeps the host-binding check and the network guard, since it holds the credentials and
+opens the connections), and **admission specifications are the `admission` section of a `runtime` document**
+rather than a document type of their own. Everything else here stands. Where this file says "git observer" as the
+receiver, read "git controller".
+
 ## The case that drove it
 
 The Jira consumer finds a repository named in a Jira issue. It should be able to say so, and the git agent
