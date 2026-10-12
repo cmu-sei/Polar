@@ -54,7 +54,9 @@ change what a type is. A document is **rejected whole, and the previous policy s
 
 The outcome is reported like every runtime document (applied, or refused with the reason and the signer).
 
-> **Under review, 2026-10-12.** Reading `polar-permissions` and `polar-policy` after this was written: they
+> **Decided 2026-10-12 (`authority-distribution.md`): groups are principal data and live with `PermissionsActor`, not in the policy document, which carries rules only. The `entities` list below is therefore withdrawn for groups; read this file for the credentials agent's own use, and that one for how policy and permissions are pushed to every agent.**
+>
+> **Was under review, 2026-10-12.** Reading `polar-permissions` and `polar-policy` after this was written: they
 > deliberately keep *data about a principal* (what `PermissionsActor` resolves: the certificate's permissions
 > plus supplemental permissions pushed by gitops) apart from *rules over that data* (`PolicyActor`), and the
 > policy actor "derives a principal's own attributes exclusively from PermissionsActor ... there is no path, for

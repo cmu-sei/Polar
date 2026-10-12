@@ -352,7 +352,9 @@ an emptyDir meanwhile.
 6. **No more than one observer pod** until production shows the need; sharding and the PVC are decided together
    then.
 
-## What is still open: policy for other receivers
+## Policy for other receivers: decided
+
+Decided 2026-10-12 (David): every receiver evaluates locally, so the builder hosts the policy and permissions actors, and the credentials agent pushes updates to them with an event; see `authority-distribution.md`. The text below is the question as it was first posed.
 
 The credentials agent's policy decides who may have **a secret it holds**, and it evaluates that itself. There is
 a second kind of decision, made by every agent that receives a signed document or command: *may this signer make
