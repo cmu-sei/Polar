@@ -16,6 +16,8 @@ polar-env = { workspace = true }
 cassini-client = { workspace = true }
 cassini-types = { workspace = true }
 credentials_agent_common = { workspace = true }
+# The plaintext of a retrieved secret is wiped when dropped.
+zeroize = { version = "1.9.0", features = ["aarch64"] }
 thiserror.workspace = true
 rsa.workspace = true
 x25519-dalek = { version = "3.0.0", features = ["getrandom"] }

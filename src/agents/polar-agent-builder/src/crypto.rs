@@ -32,6 +32,13 @@ pub trait CryptoClient: Send + Sync {
 
     /// See CryptoMessage::EnsureBootstrapped's own doc comment.
     async fn ensure_bootstrapped(&self) -> Result<(), CryptoError>;
+
+    /// See CryptoMessage::RetrieveSecret's own doc comment. `Ok(None)` is a name nothing is stored
+    /// under; a secret this agent may not have is an error that says policy refused it.
+    async fn retrieve_secret(
+        &self,
+        name: String,
+    ) -> Result<Option<polar_crypto::Zeroizing<Vec<u8>>>, CryptoError>;
 }
 
 /// The real, live implementation of CryptoClient -- a thin wrapper
@@ -104,6 +111,17 @@ impl CryptoClient for CryptoHandle {
         flatten_call_result(result)
     }
 
+    async fn retrieve_secret(
+        &self,
+        name: String,
+    ) -> Result<Option<polar_crypto::Zeroizing<Vec<u8>>>, CryptoError> {
+        let result = ractor::call!(self.actor, |reply| CryptoMessage::RetrieveSecret {
+            name,
+            reply,
+        });
+        flatten_call_result(result)
+    }
+
     async fn ensure_bootstrapped(&self) -> Result<(), CryptoError> {
         // How the key ended up held matters to the init container, which reports it to the
         // workload; here the bootstrap is only needed to have happened.
@@ -118,6 +136,59 @@ impl CryptoClient for CryptoHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stands in for the CryptoActor: answers RetrieveSecret as it would, so what is checked is that
+    /// the handle asks for the right name and passes the answer back.
+    struct StubCrypto;
+
+    #[ractor::async_trait]
+    impl ractor::Actor for StubCrypto {
+        type Msg = CryptoMessage;
+        type State = ();
+        type Arguments = ();
+        async fn pre_start(
+            &self,
+            _: ActorRef<CryptoMessage>,
+            _: (),
+        ) -> Result<(), ractor::ActorProcessingErr> {
+            Ok(())
+        }
+        async fn handle(
+            &self,
+            _: ActorRef<CryptoMessage>,
+            message: CryptoMessage,
+            _: &mut (),
+        ) -> Result<(), ractor::ActorProcessingErr> {
+            if let CryptoMessage::RetrieveSecret { name, reply } = message {
+                let _ = reply.send(match name.as_str() {
+                    "known" => Ok(Some(polar_crypto::Zeroizing::new(b"value".to_vec()))),
+                    "forbidden" => Err(CryptoError::RetrieveSecretDenied("no".into())),
+                    _ => Ok(None),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_handle_retrieves_a_secret_by_name() {
+        let (actor, _) = ractor::Actor::spawn(None, StubCrypto, ()).await.unwrap();
+        let handle = CryptoHandle::new(actor);
+        let known = handle.retrieve_secret("known".into()).await.unwrap();
+        assert_eq!(known.as_deref().map(|v| v.as_slice()), Some(&b"value"[..]));
+        assert!(
+            handle
+                .retrieve_secret("unknown".into())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            handle.retrieve_secret("forbidden".into()).await,
+            Err(CryptoError::RetrieveSecretDenied(_))
+        ));
+    }
+
     use credentials_agent_common::agent_escrow_key::{AgentEscrowKeyReply, AgentEscrowKeyRequest};
     use polar::request_reply::Envelope;
     use ractor::Actor;

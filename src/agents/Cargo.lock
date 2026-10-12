@@ -5619,6 +5619,7 @@ dependencies = [
  "tracing",
  "uuid",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

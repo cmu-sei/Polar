@@ -145,6 +145,12 @@ mod tests {
         async fn ensure_bootstrapped(&self) -> Result<(), CryptoError> {
             Ok(())
         }
+        async fn retrieve_secret(
+            &self,
+            _name: String,
+        ) -> Result<Option<polar_crypto::Zeroizing<Vec<u8>>>, CryptoError> {
+            Ok(None)
+        }
     }
 
     struct FakeBroker {

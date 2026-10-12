@@ -86,6 +86,7 @@ use credentials_agent_common::{
     CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC, CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC,
     CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC, CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
     CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
+    CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC, CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
     CREDENTIALS_STORE_SECRET_REPLIES_TOPIC, CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
 };
 use polar::request_reply::{Envelope, ReplyRouter};
@@ -96,6 +97,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
 use x25519_dalek::{EphemeralSecret, PublicKey};
+pub use zeroize::Zeroizing;
 
 /// How long CryptoActor waits for a single correlated reply from the
 /// Credentials Agent before giving up -- generous relative to what a
@@ -142,6 +144,10 @@ pub enum CryptoError {
     KeyEncoding(String),
     #[error("decrypt failed: {0}")]
     DecryptFailed(String),
+    #[error("retrieving the secret was refused: {0:?}")]
+    RetrieveSecretRefused(credentials_agent_common::retrieve_secret::RetrieveRefusalReason),
+    #[error("policy does not let this agent have that secret: {0}")]
+    RetrieveSecretDenied(String),
     #[error("no usable escrow public key exists for identity {0:?} -- that agent may never have completed automated escrow-identity issuance")]
     RecipientKeyNotFound(String),
 }
@@ -239,6 +245,16 @@ pub enum CryptoMessage {
     EnsureBootstrapped {
         reply: RpcReplyPort<Result<Custody, CryptoError>>,
     },
+    /// Asks the credentials agent for a secret by name. It comes back encrypted to this identity's own
+    /// escrow public key and is decrypted here, with the key in custody, so the plaintext is only ever
+    /// in this process. `Ok(None)` means nothing is stored under the name. Whether this identity may
+    /// have the secret is the credentials agent's policy to decide: a denial is
+    /// `Err(RetrieveSecretDenied)`, and says nothing about whether the secret exists. The plaintext is
+    /// wiped when dropped.
+    RetrieveSecret {
+        name: String,
+        reply: RpcReplyPort<Result<Option<zeroize::Zeroizing<Vec<u8>>>, CryptoError>>,
+    },
     /// Internal: a raw, incoming message on one of this actor's own,
     /// registered reply topics, forwarded by RouterActor. Carries the
     /// topic alongside the payload -- unlike the earlier,
@@ -299,6 +315,8 @@ pub struct CryptoActorState {
     retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
     agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
     agent_escrow_key_reply_router: Arc<ReplyRouter<AgentEscrowKeyReply>>,
+    retrieve_secret_reply_router:
+        Arc<ReplyRouter<credentials_agent_common::retrieve_secret::RetrieveSecretReply>>,
     /// The Credentials Agent's own current escrow public key, learned
     /// on first use and reused afterward -- avoids re-querying on
     /// every single store, per credentials-agent-architecture.md's
@@ -383,6 +401,7 @@ impl Actor for CryptoActor {
             CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
             CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
             CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
+            CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC,
         ] {
             let myself_for_deliver = myself.clone();
             if let Err(e) = args
@@ -416,6 +435,7 @@ impl Actor for CryptoActor {
             retrieve_agent_escrow_keypair_reply_router: Arc::new(ReplyRouter::new()),
             agent_escrow_issuance_reply_router: Arc::new(ReplyRouter::new()),
             agent_escrow_key_reply_router: Arc::new(ReplyRouter::new()),
+            retrieve_secret_reply_router: Arc::new(ReplyRouter::new()),
             cached_credentials_agent_escrow_key: Arc::new(tokio::sync::Mutex::new(None)),
             escrow_keypair_handle: Arc::new(tokio::sync::Mutex::new(None)),
             cached_recipient_public_keys: Arc::new(tokio::sync::Mutex::new(
@@ -465,6 +485,7 @@ impl Actor for CryptoActor {
                     CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
                     CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
                     CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
+                    CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC,
                 ] {
                     if let Err(e) = state.tcp_client.send_message(TcpClientMessage::Subscribe {
                         topic: topic.to_string(),
@@ -472,6 +493,20 @@ impl Actor for CryptoActor {
                     }) {
                         error!("CryptoActor failed to subscribe to {topic}: {e}");
                     }
+                }
+            }
+            CryptoMessage::RoutedReply { topic, payload }
+                if topic == CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC =>
+            {
+                match rkyv::from_bytes::<
+                    Envelope<credentials_agent_common::retrieve_secret::RetrieveSecretReply>,
+                    rkyv::rancor::Error,
+                >(&payload)
+                {
+                    Ok(envelope) => state
+                        .retrieve_secret_reply_router
+                        .deliver(&envelope.correlation_id, envelope.payload),
+                    Err(e) => warn!("CryptoActor failed to deserialize retrieve-secret reply: {e}"),
                 }
             }
             CryptoMessage::RoutedReply { topic, payload }
@@ -627,6 +662,38 @@ impl Actor for CryptoActor {
                         cached_recipient_public_keys,
                         recipient_identity,
                         plaintext,
+                    )
+                    .await;
+                    let _ = reply.send(result);
+                });
+            }
+            CryptoMessage::RetrieveSecret { name, reply } => {
+                // Spawned, not awaited inline, for the same reason as StoreSecret above.
+                let tcp_client = state.tcp_client.clone();
+                let retrieve_secret_reply_router = state.retrieve_secret_reply_router.clone();
+                let retrieve_agent_escrow_keypair_reply_router =
+                    state.retrieve_agent_escrow_keypair_reply_router.clone();
+                let agent_escrow_issuance_reply_router =
+                    state.agent_escrow_issuance_reply_router.clone();
+                let escrow_key_reply_router = state.escrow_key_reply_router.clone();
+                let store_secret_reply_router = state.store_secret_reply_router.clone();
+                let cached_key = state.cached_credentials_agent_escrow_key.clone();
+                let escrow_keypair_handle = state.escrow_keypair_handle.clone();
+                let own_identity = state.own_identity.clone();
+                let paths = state.paths.clone();
+                tokio::spawn(async move {
+                    let result = handle_retrieve_secret(
+                        tcp_client,
+                        retrieve_secret_reply_router,
+                        retrieve_agent_escrow_keypair_reply_router,
+                        agent_escrow_issuance_reply_router,
+                        escrow_key_reply_router,
+                        store_secret_reply_router,
+                        cached_key,
+                        escrow_keypair_handle,
+                        own_identity,
+                        paths,
+                        name,
                     )
                     .await;
                     let _ = reply.send(result);
@@ -1110,6 +1177,76 @@ async fn handle_decrypt_own_message(
     }
 }
 
+/// The real handler behind CryptoMessage::RetrieveSecret: ask the credentials agent, and decrypt what
+/// comes back with this identity's own escrow key, which never leaves its custody. The key is bootstrapped
+/// first, because the reply is encrypted to the public half of the key the credentials agent holds a
+/// certificate for.
+#[allow(clippy::too_many_arguments)]
+async fn handle_retrieve_secret(
+    tcp_client: ActorRef<TcpClientMessage>,
+    retrieve_secret_reply_router: Arc<
+        ReplyRouter<credentials_agent_common::retrieve_secret::RetrieveSecretReply>,
+    >,
+    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
+    agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
+    escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
+    store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
+    cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
+    escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
+    own_identity: String,
+    paths: KeyPaths,
+    name: String,
+) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, CryptoError> {
+    use credentials_agent_common::retrieve_secret::{RetrieveSecretReply, RetrieveSecretRequest};
+
+    ensure_escrow_keypair_bootstrapped(
+        tcp_client.clone(),
+        retrieve_agent_escrow_keypair_reply_router,
+        agent_escrow_issuance_reply_router,
+        escrow_key_reply_router,
+        store_secret_reply_router,
+        cached_key,
+        escrow_keypair_handle.clone(),
+        own_identity,
+        paths,
+    )
+    .await?;
+
+    let reply = request_reply(
+        &tcp_client,
+        &retrieve_secret_reply_router,
+        CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
+        "retrieve secret",
+        RetrieveSecretRequest { name },
+        REPLY_TIMEOUT,
+    )
+    .await?;
+
+    match reply {
+        RetrieveSecretReply::NotFound => Ok(None),
+        RetrieveSecretReply::Refused { reason } => Err(CryptoError::RetrieveSecretRefused(reason)),
+        RetrieveSecretReply::Denied { reason } => Err(CryptoError::RetrieveSecretDenied(reason)),
+        RetrieveSecretReply::Failed { detail } => Err(CryptoError::RetrieveFailed(detail)),
+        RetrieveSecretReply::Found { secret } => {
+            let handle_guard = escrow_keypair_handle.lock().await;
+            let handle = handle_guard
+                .as_ref()
+                .expect("ensure_escrow_keypair_bootstrapped just populated this");
+            let plaintext = secret
+                .decrypt_with(|wrapped| match handle {
+                    EscrowKeypairHandle::KernelBacked(serial) => {
+                        polar_kernel_keyring::decrypt(*serial, wrapped).map_err(|e| e.to_string())
+                    }
+                    EscrowKeypairHandle::InMemory(private_key) => private_key
+                        .decrypt(rsa::Oaep::<sha2_011::Sha256>::new(), wrapped)
+                        .map_err(|e| e.to_string()),
+                })
+                .map_err(|e| CryptoError::DecryptFailed(e.to_string()))?;
+            Ok(Some(plaintext))
+        }
+    }
+}
+
 /// The real handler behind CryptoMessage::EnsureBootstrapped -- see
 /// that variant's own doc comment for the complete, intended
 /// behavior. Genuinely just the setup half of DecryptOwnMessage,
@@ -1373,6 +1510,11 @@ mod tests {
         /// specifically -- same reasoning as escrow_key_queries,
         /// above, but for EncryptForRecipient's own, separate cache.
         agent_escrow_key_queries: Arc<std::sync::atomic::AtomicUsize>,
+        /// Secrets the agent will hand back to RetrieveSecretRequests, by name, each encrypted to the
+        /// escrow key the actor under test holds (`stored_escrow_keypair_pem`), as the real one does.
+        retrievable_secrets: Vec<(String, Vec<u8>)>,
+        /// If true every RetrieveSecretRequest is answered Denied, as policy would.
+        deny_retrieval: bool,
     }
 
     #[async_trait]
@@ -1462,6 +1604,46 @@ mod tests {
                         .unwrap()
                         .to_vec();
                     route(CREDENTIALS_STORE_SECRET_REPLIES_TOPIC, bytes);
+                }
+            } else if topic == CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC {
+                if let Ok(envelope) = rkyv::from_bytes::<
+                    Envelope<credentials_agent_common::retrieve_secret::RetrieveSecretRequest>,
+                    rkyv::rancor::Error,
+                >(&payload)
+                {
+                    use credentials_agent_common::retrieve_secret::RetrieveSecretReply;
+                    let found = self
+                        .retrievable_secrets
+                        .iter()
+                        .find(|(name, _)| *name == envelope.payload.name);
+                    let answer = if self.deny_retrieval {
+                        RetrieveSecretReply::Denied {
+                            reason: "policy says no".to_string(),
+                        }
+                    } else if let (Some((_, plaintext)), Some(pem)) =
+                        (found, &self.stored_escrow_keypair_pem)
+                    {
+                        // To the actor's own escrow key, as the real agent does.
+                        let key = RsaPrivateKey::from_pkcs8_pem(pem).unwrap();
+                        let public = rsa::pkcs8::EncodePublicKey::to_public_key_pem(
+                            &key.to_public_key(),
+                            rsa::pkcs8::LineEnding::LF,
+                        )
+                        .unwrap();
+                        RetrieveSecretReply::Found {
+                            secret: EscrowedSecret::encrypt(plaintext, &public).unwrap(),
+                        }
+                    } else {
+                        RetrieveSecretReply::NotFound
+                    };
+                    let reply = Envelope {
+                        correlation_id: envelope.correlation_id,
+                        payload: answer,
+                    };
+                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
+                        .unwrap()
+                        .to_vec();
+                    route(CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC, bytes);
                 }
             } else if topic == CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC {
                 if let Ok(envelope) = rkyv::from_bytes::<
@@ -1582,6 +1764,10 @@ mod tests {
         escrow_key_handle_path: Option<String>,
         /// The identity in the actor's certificate; unique per actor when not given.
         identity: Option<String>,
+        /// Secrets the fake credentials agent will hand back, by name.
+        retrievable_secrets: Vec<(String, Vec<u8>)>,
+        /// Every retrieval is denied by policy.
+        deny_retrieval: bool,
     }
 
     /// A temporary file standing in for the in-cluster, mounted service-account token.
@@ -1650,6 +1836,8 @@ mod tests {
                 issue_agent_escrow_certificates: config.issue_agent_escrow_certificates,
                 recipient_public_key_pem: config.recipient_public_key_pem,
                 agent_escrow_key_queries: agent_escrow_key_queries.clone(),
+                retrievable_secrets: config.retrievable_secrets,
+                deny_retrieval: config.deny_retrieval,
             },
             (),
         )
@@ -1686,6 +1874,68 @@ mod tests {
             last_stored_secret_plaintext,
             agent_escrow_key_queries,
         )
+    }
+
+    async fn crypto_actor_holding_an_escrow_key(
+        secrets: &[(&str, &[u8])],
+        deny_retrieval: bool,
+    ) -> ActorRef<CryptoMessage> {
+        let mut rng = rand::rng();
+        let key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pem =
+            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&key, rsa::pkcs8::LineEnding::LF).unwrap();
+        let ((crypto_actor, _), _, _) =
+            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
+                stored_escrow_keypair_pem: Some(pem.to_string()),
+                issue_agent_escrow_certificates: false,
+                retrievable_secrets: secrets
+                    .iter()
+                    .map(|(n, v)| (n.to_string(), v.to_vec()))
+                    .collect(),
+                deny_retrieval,
+                ..Default::default()
+            })
+            .await;
+        crypto_actor
+    }
+
+    #[tokio::test]
+    async fn retrieve_secret_returns_what_the_credentials_agent_encrypted_to_the_escrow_key() {
+        let crypto = crypto_actor_holding_an_escrow_key(&[("github-sei", b"a token")], false).await;
+        let result = ractor::call!(crypto, |reply| CryptoMessage::RetrieveSecret {
+            name: "github-sei".to_string(),
+            reply,
+        })
+        .unwrap();
+        assert_eq!(
+            result.unwrap().as_deref().map(|v| v.as_slice()),
+            Some(&b"a token"[..])
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_secret_for_a_name_never_stored_is_none() {
+        let crypto = crypto_actor_holding_an_escrow_key(&[("github-sei", b"a token")], false).await;
+        let result = ractor::call!(crypto, |reply| CryptoMessage::RetrieveSecret {
+            name: "other".to_string(),
+            reply,
+        })
+        .unwrap();
+        assert!(matches!(result, Ok(None)), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn retrieve_secret_that_policy_denies_is_an_error_that_says_so() {
+        let crypto = crypto_actor_holding_an_escrow_key(&[("github-sei", b"a token")], true).await;
+        let result = ractor::call!(crypto, |reply| CryptoMessage::RetrieveSecret {
+            name: "github-sei".to_string(),
+            reply,
+        })
+        .unwrap();
+        assert!(
+            matches!(result, Err(CryptoError::RetrieveSecretDenied(_))),
+            "{result:?}"
+        );
     }
 
     #[tokio::test]

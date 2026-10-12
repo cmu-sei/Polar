@@ -294,8 +294,16 @@ connections:
   when it has. **The graph is never read for this**: it is a projection of what was observed, and a state
   rebuilt from it could disagree with the repository. (A first version read the stored documents back from the
   graph in the processor; David's rule that the graph is never authoritative removed it.)
-- **`CryptoMessage::RetrieveSecret { name }`.** The credentials agent can retrieve a named secret; the crypto
-  actor cannot ask it to. Needed for "ask the credentials agent at init".
+- **`CryptoMessage::RetrieveSecret { name }`: built 2026-10-12.** The crypto actor asks the credentials agent
+  for a named secret and decrypts the reply with the agent's own escrow key, which stays in custody
+  (`CryptoClient::retrieve_secret`, `Ok(None)` for a name nothing is stored under, the plaintext wiped on
+  drop). On the credentials agent `RetrieveSecret` now (1) refuses names that could end a policy resource early,
+  (2) asks policy (`Action::"retrieve"`, resource `Secret::"<name>"`) before saying anything about whether the
+  secret exists, failing closed, and (3) encrypts to the requester's **agent escrow key**, never its mTLS key.
+  Before this it returned any stored secret to any authenticated requester that knew its name. **A policy
+  has to be authored for each agent and secret**, or retrieval is denied (and with no policy loaded at all it is
+  a failure, so a client retries). `DecryptOnBehalfOf` still re-encrypts to the mTLS certificate key and has
+  the same problem; not touched.
 - **`c:update-runtime`**, and the redeployment of the capability consumers.
 - **The credentials agent's HTTP read-only endpoint for an agent's public escrow key**, which the author's tool
   needs to encrypt a `credentials` document. Not built (`signed-configuration.md`).

@@ -147,9 +147,21 @@ impl EscrowedSecret {
     /// requirement in "Secret escrow" (credentials-agent-architecture.md)
     /// that this can't be left to Rust's ordinary `Drop`.
     pub fn decrypt(&self, private_key: &RsaPrivateKey) -> Result<Zeroizing<Vec<u8>>, EscrowError> {
-        let aes_key_bytes = private_key
-            .decrypt(Oaep::<Sha256>::new(), &self.encrypted_key)
-            .map_err(|e| EscrowError::KeyUnwrap(e.to_string()))?;
+        self.decrypt_with(|wrapped| {
+            private_key
+                .decrypt(Oaep::<Sha256>::new(), wrapped)
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Decrypts when the private key cannot be handed over, as when it is held in the kernel keyring and
+    /// only the keyring can use it: `unwrap` is given the RSA-OAEP-wrapped AES key and returns it
+    /// unwrapped, and the rest happens here. The unwrapped key is wiped when this returns.
+    pub fn decrypt_with(
+        &self,
+        unwrap: impl FnOnce(&[u8]) -> Result<Vec<u8>, String>,
+    ) -> Result<Zeroizing<Vec<u8>>, EscrowError> {
+        let aes_key_bytes = unwrap(&self.encrypted_key).map_err(EscrowError::KeyUnwrap)?;
         let aes_key_bytes = Zeroizing::new(aes_key_bytes);
 
         let aes_key = AesKey::<Aes256Gcm>::try_from(aes_key_bytes.as_slice())
@@ -190,6 +202,32 @@ mod tests {
                 (private_key, public_key_pem)
             })
             .clone()
+    }
+
+    #[test]
+    fn a_secret_can_be_decrypted_by_a_holder_that_will_only_unwrap_the_key() {
+        // As with a key in the kernel keyring: the private key never leaves, only the unwrap is done.
+        let (private_key, public_key_pem) = test_recipient_keypair();
+        let secret = EscrowedSecret::encrypt(b"kept in custody", &public_key_pem).unwrap();
+        let mut unwrapped_for = 0;
+        let decrypted = secret
+            .decrypt_with(|wrapped| {
+                unwrapped_for += wrapped.len();
+                private_key
+                    .decrypt(Oaep::<Sha256>::new(), wrapped)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        assert_eq!(decrypted.as_slice(), b"kept in custody");
+        assert!(
+            unwrapped_for > 0,
+            "it was given the wrapped key, nothing else"
+        );
+        // And a custody that refuses is an unwrap failure, not a panic or a partial plaintext.
+        assert!(matches!(
+            secret.decrypt_with(|_| Err("not today".into())),
+            Err(EscrowError::KeyUnwrap(_))
+        ));
     }
 
     #[test]
