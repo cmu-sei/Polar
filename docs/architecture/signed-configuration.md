@@ -89,7 +89,7 @@ Until a receiver has what it needs to verify (the CA, a policy) it **fails close
 
 ## How it fits together
 
-Two sequence diagrams, in `docs/architecture/sequences/general/` (rendered as `asset_regeneration.md` describes):
+Three sequence diagrams, in `docs/architecture/sequences/general/` (rendered as `asset_regeneration.md` describes):
 
 - `signed_configuration_authoring.mmd` (and `.png`): the author's side. A typed template from the agent's
   schema export, `check`, `sign`, the commit (signed through git's x509 support with the same key) and
@@ -97,6 +97,10 @@ Two sequence diagrams, in `docs/architecture/sequences/general/` (rendered as `a
 - `signed_configuration_delivery.mmd` (and `.png`): the runtime side. The announcement, the observer's pull and
   evaluation, the scheduler's storage and notification, and the ConfigurationActor in the target agent
   verifying the whole document for itself before it applies anything.
+
+- `signed_configuration_secrets.mmd` (and `.png`): a secret travelling in a document: the author's tool
+  gets the target agent's public escrow key and encrypts to it, the target decrypts through its
+  CryptoActor, closes the loop with the credentials agent, and retrieves the secret later.
 
 **The schema export** is what `<agent> --scaffold` prints (`polar-env`'s document module): every
 declared variable with its type, whether it is required, whether it is secret, its default, its
@@ -115,6 +119,52 @@ refusal is recorded at the receiver, and the observer's early check can log, but
 author), and where an author's machine gets an agent's schema export (the agent's image can print it,
 but an author usually has no image; candidates are publishing it with each release, or committing it to
 the schedules repository from CI).
+
+## Secrets in a document
+
+A configuration item can carry credentials: the credentials agent's own item carries policy and
+permissions and the usernames and passwords to escrow for a named agent, and other agents' items can
+carry a new credential for that agent. A secret is never plaintext in the repository.
+
+**Which fields.** The schema export marks each variable `secret`. The typed template shows them, the
+tool encrypts them, `check` refuses a plaintext value for one, and the receiver refuses a secret field
+whose value is not ciphertext. The signature covers the ciphertext, so the signed document can be stored
+in the graph and passed over topics as it is.
+
+**Whose key it is encrypted to.**
+
+- *An item for the credentials agent itself* (policy, and secrets to escrow for a named agent): encrypted
+  to the credentials agent's own escrow public key (`EscrowKeyRequest`), which it stores directly
+  (`StoreSecret`).
+- *An item for any other agent*: encrypted to that agent's own escrow public key
+  (`AgentEscrowKeyRequest`). The agent decrypts it with its CryptoActor (`DecryptOwnMessage`; the private
+  key stays in custody), uses it, then **closes the loop** by escrowing it with the credentials agent
+  (`StoreSecret`) so it can be retrieved later (`RetrieveSecret`, re-encrypted to the agent's own
+  certificate). Closing the loop is retried until the credentials agent acknowledges it, and so depends on
+  the agent receiving the document again if it restarts first (the scheduler's reconciliation item).
+- *Noted alternative for other agents:* encrypt to the credentials agent's key and let the agent fetch with
+  `DecryptOnBehalfOf` (policy-checked), as kube-consumer's environment values already work. No re-escrow
+  step, at the cost of the per-agent compartmentalisation above.
+
+**Binding.** Each ciphertext is bound to its agent, field name and version as authenticated data, so it
+cannot be moved into another field or document. The signature already pins its place in the signed
+document; this pins it to its recipient.
+
+**At the receiver.** Decryption comes after every verification step, through the CryptoHandle the
+infrastructure already holds, and the plaintext is applied and never recorded: the ConfigurationActor's
+history and reports already keep names and never values, and a secret variable is hidden in reports.
+
+**The tool needs the recipient's public key.** The author's machine is not on Cassini, so it cannot ask for
+an escrow key. The credentials agent's HTTP front gets a read-only endpoint, "the public escrow key of agent
+X", authenticated by the author's user certificate and returning the public key only. Not built.
+
+**A property to keep in mind.** Ciphertext committed to git stays in its history, in every clone, and in the
+graph. It stays safe only while the private escrow key it was encrypted to stays private; a later
+compromise of that key exposes every secret ever pushed to it, because nothing here gives forward secrecy.
+So a secret in the repository is a delivery vehicle: change the credential's value after the agent has
+stored it, and prefer having the git server refuse unsigned pushes so a plaintext secret cannot be slipped
+in. The encryption scheme is the one the CryptoActor already uses (`EncryptForRecipient`); confirm its
+properties when this is built.
 
 ## Authority
 
