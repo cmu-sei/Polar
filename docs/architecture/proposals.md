@@ -1,6 +1,6 @@
 # Proposals
 
-Status, 2026-10-11: design, nothing built. Direction from David: a proposal is how one agent tells another
+Status, 2026-10-11: design, decided (see the end); the build has begun with the shared `type` in signed payloads. Direction from David: a proposal is how one agent tells another
 "here is something to add to what you handle", without an administrator editing configuration by hand, and
 the rules for accepting one are signed repository content that the agents interested in that kind read. This
 is the second of the three kinds in `scheduling-kinds.md` (configuration, proposal, command); the sequence is
@@ -181,7 +181,7 @@ verifiable without trusting the broker and would be kept in the graph as evidenc
 4. The builder helper and the git observer as the first receiver.
 5. The Jira side.
 
-## Decisions for David
+## Decisions (David, 2026-10-11: all four confirmed)
 
 1. **The receiver decides and the processor is the ledger**, as above, so that no relay is trusted. Confirm,
    or say if you would rather the processor decide.
