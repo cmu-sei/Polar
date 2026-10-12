@@ -861,21 +861,6 @@ impl Actor for ConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
-        let retrieve_secret_handler = RetrieveSecretHandler {
-            escrow_keypair: escrow_keypair.clone(),
-            ledger: ledger.clone(),
-        };
-        let (_retrieve_secret_actor, _) = RetrieveSecretActor::spawn_linked(
-            Some(RETRIEVE_SECRET_ACTOR_NAME.to_string()),
-            RetrieveSecretActor,
-            RetrieveSecretActorArgs {
-                handler: retrieve_secret_handler,
-            },
-            myself.get_cell(),
-        )
-        .await
-        .map_err(ActorProcessingErr::from)?;
-
         let agent_escrow_keypair_bootstrap_handler = AgentEscrowKeypairBootstrapHandler {
             escrow_keypair: escrow_keypair.clone(),
             ledger: ledger.clone(),
@@ -914,6 +899,22 @@ impl Actor for ConsumerSupervisor {
             None,
             polar_policy::PolicyActor,
             polar_policy::PolicyActorArgs { permissions_actor },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let retrieve_secret_handler = RetrieveSecretHandler {
+            escrow_keypair: escrow_keypair.clone(),
+            ledger: ledger.clone(),
+            policy_actor: policy_actor.clone(),
+        };
+        let (_retrieve_secret_actor, _) = RetrieveSecretActor::spawn_linked(
+            Some(RETRIEVE_SECRET_ACTOR_NAME.to_string()),
+            RetrieveSecretActor,
+            RetrieveSecretActorArgs {
+                handler: retrieve_secret_handler,
+            },
             myself.get_cell(),
         )
         .await
@@ -1816,63 +1817,19 @@ mod retrieve_secret_wiring_tests {
         .await
         .unwrap();
 
-        // Seed a real requester certificate.
-        let mut rng = rand::rng();
-        let requester_private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let requester_private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
-            &requester_private_key,
-            rsa::pkcs8::LineEnding::LF,
-        )
-        .unwrap();
-        let requester_key_pair = rcgen::KeyPair::from_pem(&requester_private_key_pem).unwrap();
-        let requester_params =
-            rcgen::CertificateParams::new(vec!["requester.polar.svc.cluster.local".to_string()])
-                .unwrap();
-        let requester_certificate_pem = requester_params
-            .self_signed(&requester_key_pair)
-            .unwrap()
-            .pem();
-        let _ = ractor::rpc::call(
-            &ledger,
-            |reply| LedgerMessage::Append {
-                event: credentials_agent_common::events::CredentialsEvent::IssuanceCompleted {
-                    identity: "requester".to_string(),
-                    instance_binding: "pod-uid-1".to_string(),
-                    serial: "requester-serial-1".to_string(),
-                    timestamp: 1000,
-                    certificate_pem: requester_certificate_pem,
-                },
-                reply,
-            },
-            None,
-        )
-        .await
-        .unwrap();
-
-        // Seed a real, stored secret.
+        // As in a real cluster: the requester's mTLS certificate cannot encrypt, its RSA agent escrow
+        // key can, and a policy permits it this one secret.
+        use crate::retrieve_secret::tests as fixtures;
+        fixtures::seed_mtls_certificate(&ledger, "requester").await;
+        let requester_private_key = fixtures::seed_escrow_certificate(&ledger, "requester").await;
         let escrow_keypair = crate::escrow::tests::test_keypair();
         let original_plaintext = b"a real secret via the real dispatch path";
-        let stored_secret =
-            EscrowedSecret::encrypt(original_plaintext, escrow_keypair.public_key_pem()).unwrap();
-        let _ = ractor::rpc::call(
-            &ledger,
-            |reply| LedgerMessage::Append {
-                event: credentials_agent_common::events::CredentialsEvent::SecretStored {
-                    name: "gitlab-token".to_string(),
-                    secret: stored_secret,
-                    stored_by: "some-storing-agent".to_string(),
-                    timestamp: 1000,
-                },
-                reply,
-            },
-            None,
-        )
-        .await
-        .unwrap();
+        fixtures::store_secret(&ledger, &escrow_keypair, "gitlab-token", original_plaintext).await;
 
         let handler = RetrieveSecretHandler {
             escrow_keypair,
             ledger: ledger.clone(),
+            policy_actor: fixtures::policy_actor(Some(("requester", "gitlab-token"))).await,
         };
         let (retrieve_secret_actor, _) = RetrieveSecretActor::spawn(
             Some(RETRIEVE_SECRET_ACTOR_NAME.to_string()),

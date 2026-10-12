@@ -74,7 +74,7 @@ impl AgentEscrowKeyHandler {
     }
 }
 
-async fn call_check_agent_escrow_key(
+pub(crate) async fn call_check_agent_escrow_key(
     ledger: &ActorRef<LedgerMessage>,
     identity: &str,
 ) -> Result<Option<crate::state::AgentEscrowCertificateRecord>, String> {

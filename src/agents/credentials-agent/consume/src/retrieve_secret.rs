@@ -28,11 +28,12 @@
 //! this document's own EscrowedSecret::decrypt was built for two
 //! weeks ago but never yet exercised in a real handler.
 
+use crate::agent_escrow_key::call_check_agent_escrow_key;
 use crate::escrow::EscrowKeypair;
 use crate::ledger::LedgerMessage;
 use credentials_agent_common::escrow_secret::EscrowedSecret;
 use credentials_agent_common::retrieve_secret::{
-    RetrieveRefusalReason, RetrieveSecretReply, RetrieveSecretRequest,
+    RetrieveRefusalReason, RetrieveSecretReply, RetrieveSecretRequest, is_valid_secret_name,
 };
 use ractor::ActorRef;
 use std::sync::Arc;
@@ -41,9 +42,20 @@ use tracing::error;
 pub struct RetrieveSecretHandler {
     pub escrow_keypair: Arc<EscrowKeypair>,
     pub ledger: ActorRef<LedgerMessage>,
+    pub policy_actor: ActorRef<polar_policy::PolicyMessage>,
 }
 
 impl RetrieveSecretHandler {
+    /// In order, refusing at the first failure, and saying nothing about whether a secret exists until the
+    /// requester is permitted it:
+    ///
+    /// 1. the publisher is known, and the name is one a secret can have;
+    /// 2. the requester's mTLS certificate is on record: policy reads the permissions in it;
+    /// 3. policy lets this identity retrieve this secret (fails closed: no rule, no secret);
+    /// 4. the requester has an agent escrow key, the RSA service identity key a secret is encrypted to.
+    ///    Never the mTLS key: that one signs, and is not for service operations;
+    /// 5. the secret exists, and is decrypted with this agent's escrow key and encrypted at once to the
+    ///    requester's.
     pub async fn handle(
         &self,
         request: RetrieveSecretRequest,
@@ -54,10 +66,12 @@ impl RetrieveSecretHandler {
                 reason: RetrieveRefusalReason::AnonymousPublisherNotAllowed,
             };
         };
+        if !is_valid_secret_name(&request.name) {
+            return RetrieveSecretReply::Refused {
+                reason: RetrieveRefusalReason::InvalidSecretName,
+            };
+        }
 
-        // Step 1: find the target to re-encrypt to -- always the
-        // requester's own, broker-verified identity's current mTLS
-        // certificate, never anything the request itself specifies.
         let requester_certificate = match call_check_certificate(&self.ledger, &requested_by).await
         {
             Ok(Some(record)) => record,
@@ -71,21 +85,68 @@ impl RetrieveSecretHandler {
                 return RetrieveSecretReply::Failed { detail: e };
             }
         };
+
+        let decision = match ractor::rpc::call(
+            &self.policy_actor,
+            |reply| polar_policy::PolicyMessage::CheckAuthorization {
+                requester_identity: requested_by.clone(),
+                requester_certificate_pem: Some(requester_certificate.certificate_pem.clone()),
+                action: r#"Action::"retrieve""#.to_string(),
+                resource: format!(r#"Secret::"{}""#, request.name),
+                reply,
+            },
+            None,
+        )
+        .await
+        {
+            Ok(ractor::rpc::CallResult::Success(Ok(decision))) => decision,
+            Ok(ractor::rpc::CallResult::Success(Err(e))) => {
+                error!("Policy evaluation failed for {requested_by}: {e}");
+                return RetrieveSecretReply::Failed {
+                    detail: e.to_string(),
+                };
+            }
+            Ok(other) => {
+                return RetrieveSecretReply::Failed {
+                    detail: format!("unexpected CallResult: {other:?}"),
+                };
+            }
+            Err(e) => {
+                return RetrieveSecretReply::Failed {
+                    detail: e.to_string(),
+                };
+            }
+        };
+        if decision != polar_policy::Decision::Allow {
+            return RetrieveSecretReply::Denied {
+                reason: "policy does not permit this identity to retrieve this secret".to_string(),
+            };
+        }
+
+        let escrow_record = match call_check_agent_escrow_key(&self.ledger, &requested_by).await {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                return RetrieveSecretReply::Refused {
+                    reason: RetrieveRefusalReason::RequesterEscrowKeyNotFound,
+                };
+            }
+            Err(e) => {
+                error!("Failed to check agent escrow key for {requested_by}: {e}");
+                return RetrieveSecretReply::Failed { detail: e };
+            }
+        };
         let target_public_key_pem = match cert_issuer_common::public_key::extract_public_key_pem(
-            &requester_certificate.certificate_pem,
+            &escrow_record.certificate_pem,
         ) {
             Ok(pem) => pem,
             Err(e) => {
-                error!(
-                    "Requester certificate for {requested_by} failed public-key extraction: {e}"
-                );
+                error!("Escrow certificate for {requested_by} failed public-key extraction: {e}");
                 return RetrieveSecretReply::Failed {
                     detail: e.to_string(),
                 };
             }
         };
 
-        // Step 2: find the stored secret itself.
         let stored_secret = match call_check_secret(&self.ledger, &request.name).await {
             Ok(Some(secret)) => secret,
             Ok(None) => return RetrieveSecretReply::NotFound,
@@ -95,13 +156,8 @@ impl RetrieveSecretHandler {
             }
         };
 
-        // Step 3: the actual relay -- decrypt with this agent's own
-        // escrow private key, immediately re-encrypt with the
-        // requester's own public key. The decrypted plaintext is
-        // Zeroizing (EscrowedSecret::decrypt's own return type) --
-        // explicitly wiped the instant re-encryption completes below,
-        // never left to Rust's ordinary Drop, per this document's own
-        // hard requirement.
+        // The decrypted plaintext is Zeroizing: wiped the instant re-encryption completes, never left
+        // to an ordinary drop.
         let plaintext = match stored_secret.decrypt(self.escrow_keypair.private_key()) {
             Ok(p) => p,
             Err(e) => {
@@ -111,24 +167,17 @@ impl RetrieveSecretHandler {
                 };
             }
         };
-
-        let reencrypted = match EscrowedSecret::encrypt(&plaintext, &target_public_key_pem) {
-            Ok(s) => s,
+        match EscrowedSecret::encrypt(&plaintext, &target_public_key_pem) {
+            Ok(secret) => RetrieveSecretReply::Found { secret },
             Err(e) => {
                 error!(
                     "Failed to re-encrypt secret {} for {requested_by}: {e}",
                     request.name
                 );
-                return RetrieveSecretReply::Failed {
+                RetrieveSecretReply::Failed {
                     detail: e.to_string(),
-                };
+                }
             }
-        };
-        // `plaintext` (Zeroizing<Vec<u8>>) goes out of scope here,
-        // genuinely wiped rather than merely deallocated.
-
-        RetrieveSecretReply::Found {
-            secret: reencrypted,
         }
     }
 }
@@ -174,7 +223,7 @@ async fn call_check_secret(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ledger::{LedgerActor, LedgerActorArgs};
     use credentials_agent_common::events::CredentialsEvent;
@@ -196,198 +245,311 @@ mod tests {
         ledger
     }
 
-    #[tokio::test]
-    async fn retrieve_secret_genuinely_reencrypts_to_the_requesters_own_key() {
+    /// A policy actor with one rule: `identity` may retrieve `Secret::"name"`. With none, nothing is.
+    pub(crate) async fn policy_actor(
+        permit: Option<(&str, &str)>,
+    ) -> ActorRef<polar_policy::PolicyMessage> {
+        let (permissions_actor, _) =
+            ractor::Actor::spawn(None, polar_permissions::PermissionsActor, ())
+                .await
+                .unwrap();
+        let (policy_actor, _) = ractor::Actor::spawn(
+            None,
+            polar_policy::PolicyActor,
+            polar_policy::PolicyActorArgs { permissions_actor },
+        )
+        .await
+        .unwrap();
+        if let Some((identity, name)) = permit {
+            let policy = format!(
+                r#"permit(principal == Identity::"{identity}", action == Action::"retrieve", resource == Secret::"{name}");"#
+            );
+            ractor::call!(policy_actor, |reply| {
+                polar_policy::PolicyMessage::UpdatePolicy {
+                    policy_source: policy,
+                    reply,
+                }
+            })
+            .unwrap()
+            .unwrap();
+        }
+        policy_actor
+    }
+
+    async fn append(ledger: &ActorRef<LedgerMessage>, event: CredentialsEvent) {
+        let _ = ractor::rpc::call(ledger, |reply| LedgerMessage::Append { event, reply }, None)
+            .await
+            .unwrap();
+    }
+
+    /// The requester's mTLS certificate, as workloads really have them: it signs and does not
+    /// encrypt (rcgen's default is ECDSA P-256), so a secret can never be encrypted to it.
+    pub(crate) async fn seed_mtls_certificate(ledger: &ActorRef<LedgerMessage>, identity: &str) {
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let certificate_pem =
+            rcgen::CertificateParams::new(vec![format!("{identity}.polar.svc.cluster.local")])
+                .unwrap()
+                .self_signed(&key_pair)
+                .unwrap()
+                .pem();
+        append(
+            ledger,
+            CredentialsEvent::IssuanceCompleted {
+                identity: identity.to_string(),
+                instance_binding: "pod-uid-1".to_string(),
+                serial: format!("{identity}-serial-1"),
+                timestamp: 1000,
+                certificate_pem,
+            },
+        )
+        .await;
+    }
+
+    /// The requester's agent escrow certificate: the RSA service identity. Returns the private key.
+    pub(crate) async fn seed_escrow_certificate(
+        ledger: &ActorRef<LedgerMessage>,
+        identity: &str,
+    ) -> rsa::RsaPrivateKey {
+        let mut rng = rand::rng();
+        let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pem =
+            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&private_key, rsa::pkcs8::LineEnding::LF)
+                .unwrap();
+        let key_pair = rcgen::KeyPair::from_pem(&pem).unwrap();
+        let certificate_pem =
+            rcgen::CertificateParams::new(vec![format!("{identity}.polar.svc.cluster.local")])
+                .unwrap()
+                .self_signed(&key_pair)
+                .unwrap()
+                .pem();
+        append(
+            ledger,
+            CredentialsEvent::AgentEscrowIssuanceCompleted {
+                identity: identity.to_string(),
+                instance_binding: "pod-uid-1".to_string(),
+                serial: format!("{identity}-escrow-serial-1"),
+                timestamp: 1000,
+                certificate_pem,
+            },
+        )
+        .await;
+        private_key
+    }
+
+    pub(crate) async fn store_secret(
+        ledger: &ActorRef<LedgerMessage>,
+        escrow_keypair: &EscrowKeypair,
+        name: &str,
+        plaintext: &[u8],
+    ) {
+        let secret = EscrowedSecret::encrypt(plaintext, escrow_keypair.public_key_pem()).unwrap();
+        append(
+            ledger,
+            CredentialsEvent::SecretStored {
+                name: name.to_string(),
+                secret,
+                stored_by: "some-storing-agent".to_string(),
+                timestamp: 1000,
+            },
+        )
+        .await;
+    }
+
+    fn request(name: &str) -> RetrieveSecretRequest {
+        RetrieveSecretRequest {
+            name: name.to_string(),
+        }
+    }
+
+    struct World {
+        handler: RetrieveSecretHandler,
+        ledger: ActorRef<LedgerMessage>,
+        escrow_keypair: Arc<EscrowKeypair>,
+    }
+
+    async fn world(permit: Option<(&str, &str)>) -> World {
         let ledger = spawn_test_ledger().await;
         let escrow_keypair = crate::escrow::tests::test_keypair();
-
-        // Seed a real certificate for the requester.
-        let mut rng = rand::rng();
-        let requester_private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let requester_private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
-            &requester_private_key,
-            rsa::pkcs8::LineEnding::LF,
-        )
-        .unwrap();
-        let requester_key_pair = rcgen::KeyPair::from_pem(&requester_private_key_pem).unwrap();
-        let requester_params =
-            rcgen::CertificateParams::new(vec!["requester.polar.svc.cluster.local".to_string()])
-                .unwrap();
-        let requester_certificate_pem = requester_params
-            .self_signed(&requester_key_pair)
-            .unwrap()
-            .pem();
-
-        let _ = ractor::rpc::call(
-            &ledger,
-            |reply| LedgerMessage::Append {
-                event: CredentialsEvent::IssuanceCompleted {
-                    identity: "requester".to_string(),
-                    instance_binding: "pod-uid-1".to_string(),
-                    serial: "requester-serial-1".to_string(),
-                    timestamp: 1000,
-                    certificate_pem: requester_certificate_pem,
-                },
-                reply,
-            },
-            None,
-        )
-        .await
-        .unwrap();
-
-        // Seed a real, stored secret -- encrypted to the Credentials
-        // Agent's own current escrow key, matching how
-        // StoreSecretHandler actually validates on the way in.
-        let original_plaintext = b"a real secret from a real agent";
-        let stored_secret =
-            EscrowedSecret::encrypt(original_plaintext, escrow_keypair.public_key_pem()).unwrap();
-        let _ = ractor::rpc::call(
-            &ledger,
-            |reply| LedgerMessage::Append {
-                event: CredentialsEvent::SecretStored {
-                    name: "gitlab-token".to_string(),
-                    secret: stored_secret,
-                    stored_by: "some-storing-agent".to_string(),
-                    timestamp: 1000,
-                },
-                reply,
-            },
-            None,
-        )
-        .await
-        .unwrap();
-
         let handler = RetrieveSecretHandler {
-            escrow_keypair,
-            ledger,
+            escrow_keypair: escrow_keypair.clone(),
+            ledger: ledger.clone(),
+            policy_actor: policy_actor(permit).await,
         };
+        World {
+            handler,
+            ledger,
+            escrow_keypair,
+        }
+    }
 
-        let reply = handler
-            .handle(
-                RetrieveSecretRequest {
-                    name: "gitlab-token".to_string(),
-                },
-                Some("requester".to_string()),
-            )
+    #[tokio::test]
+    async fn a_permitted_secret_is_reencrypted_to_the_requesters_escrow_key_not_its_mtls_key() {
+        let w = world(Some(("requester", "gitlab-token"))).await;
+        seed_mtls_certificate(&w.ledger, "requester").await;
+        let escrow_private_key = seed_escrow_certificate(&w.ledger, "requester").await;
+        store_secret(
+            &w.ledger,
+            &w.escrow_keypair,
+            "gitlab-token",
+            b"a real secret",
+        )
+        .await;
+
+        let reply = w
+            .handler
+            .handle(request("gitlab-token"), Some("requester".into()))
             .await;
 
         match reply {
             RetrieveSecretReply::Found { secret } => {
-                // The real proof: this decrypts with the REQUESTER's
-                // own private key, not the escrow key -- confirming
-                // genuine re-encryption happened, not merely a pass-
-                // through of the original ciphertext.
-                let decrypted = secret.decrypt(&requester_private_key).unwrap();
-                assert_eq!(&*decrypted, original_plaintext);
+                // Decrypts with the requester's escrow private key, so it was encrypted to that key
+                // and not passed through, and not encrypted to the mTLS key (which cannot encrypt).
+                let decrypted = secret.decrypt(&escrow_private_key).unwrap();
+                assert_eq!(&*decrypted, b"a real secret");
             }
             other => panic!("expected Found, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn anonymous_publisher_is_refused() {
-        let ledger = spawn_test_ledger().await;
-        let handler = RetrieveSecretHandler {
-            escrow_keypair: crate::escrow::tests::test_keypair(),
-            ledger,
-        };
+    async fn a_secret_policy_does_not_permit_is_denied_and_nothing_is_said_about_whether_it_exists()
+    {
+        // A rule for a different secret: policy is loaded and says no.
+        let w = world(Some(("requester", "something-else"))).await;
+        seed_mtls_certificate(&w.ledger, "requester").await;
+        seed_escrow_certificate(&w.ledger, "requester").await;
+        store_secret(&w.ledger, &w.escrow_keypair, "gitlab-token", b"x").await;
 
-        let reply = handler
-            .handle(
-                RetrieveSecretRequest {
-                    name: "gitlab-token".to_string(),
-                },
-                None,
-            )
+        let exists = w
+            .handler
+            .handle(request("gitlab-token"), Some("requester".into()))
             .await;
+        let absent = w
+            .handler
+            .handle(request("never-stored"), Some("requester".into()))
+            .await;
+        assert!(
+            matches!(exists, RetrieveSecretReply::Denied { .. }),
+            "{exists:?}"
+        );
+        assert_eq!(
+            exists, absent,
+            "a denial must not reveal which secrets exist"
+        );
+    }
 
-        assert!(matches!(
+    #[tokio::test]
+    async fn with_no_policy_loaded_yet_nothing_is_retrieved_and_it_is_a_failure_not_a_denial() {
+        // The credentials agent starts with no policy until one arrives. It fails closed, and as a
+        // failure so that a client knows to try again, and again says nothing about what exists.
+        let w = world(None).await;
+        seed_mtls_certificate(&w.ledger, "requester").await;
+        seed_escrow_certificate(&w.ledger, "requester").await;
+        store_secret(&w.ledger, &w.escrow_keypair, "gitlab-token", b"x").await;
+
+        let exists = w
+            .handler
+            .handle(request("gitlab-token"), Some("requester".into()))
+            .await;
+        let absent = w
+            .handler
+            .handle(request("never-stored"), Some("requester".into()))
+            .await;
+        assert!(
+            matches!(exists, RetrieveSecretReply::Failed { .. }),
+            "{exists:?}"
+        );
+        assert_eq!(exists, absent);
+    }
+
+    #[tokio::test]
+    async fn another_identity_is_not_permitted_by_a_rule_for_this_one() {
+        let w = world(Some(("someone-else", "gitlab-token"))).await;
+        seed_mtls_certificate(&w.ledger, "requester").await;
+        seed_escrow_certificate(&w.ledger, "requester").await;
+        store_secret(&w.ledger, &w.escrow_keypair, "gitlab-token", b"x").await;
+        let reply = w
+            .handler
+            .handle(request("gitlab-token"), Some("requester".into()))
+            .await;
+        assert!(
+            matches!(reply, RetrieveSecretReply::Denied { .. }),
+            "{reply:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_requester_with_no_escrow_key_is_refused_even_when_permitted() {
+        let w = world(Some(("requester", "gitlab-token"))).await;
+        seed_mtls_certificate(&w.ledger, "requester").await;
+        store_secret(&w.ledger, &w.escrow_keypair, "gitlab-token", b"x").await;
+        let reply = w
+            .handler
+            .handle(request("gitlab-token"), Some("requester".into()))
+            .await;
+        assert_eq!(
+            reply,
+            RetrieveSecretReply::Refused {
+                reason: RetrieveRefusalReason::RequesterEscrowKeyNotFound
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_permitted_secret_that_was_never_stored_is_not_found() {
+        let w = world(Some(("requester", "gitlab-token"))).await;
+        seed_mtls_certificate(&w.ledger, "requester").await;
+        seed_escrow_certificate(&w.ledger, "requester").await;
+        let reply = w
+            .handler
+            .handle(request("gitlab-token"), Some("requester".into()))
+            .await;
+        assert_eq!(reply, RetrieveSecretReply::NotFound);
+    }
+
+    #[tokio::test]
+    async fn anonymous_publisher_is_refused() {
+        let w = world(None).await;
+        let reply = w.handler.handle(request("gitlab-token"), None).await;
+        assert_eq!(
             reply,
             RetrieveSecretReply::Refused {
                 reason: RetrieveRefusalReason::AnonymousPublisherNotAllowed
             }
-        ));
+        );
     }
 
     #[tokio::test]
     async fn missing_requester_certificate_is_refused() {
-        let ledger = spawn_test_ledger().await;
-        let handler = RetrieveSecretHandler {
-            escrow_keypair: crate::escrow::tests::test_keypair(),
-            ledger,
-        };
-
-        let reply = handler
-            .handle(
-                RetrieveSecretRequest {
-                    name: "gitlab-token".to_string(),
-                },
-                Some("nobody-with-a-cert".to_string()),
-            )
+        let w = world(Some(("ghost", "gitlab-token"))).await;
+        let reply = w
+            .handler
+            .handle(request("gitlab-token"), Some("ghost".into()))
             .await;
-
-        assert!(matches!(
+        assert_eq!(
             reply,
             RetrieveSecretReply::Refused {
                 reason: RetrieveRefusalReason::RequesterCertificateNotFound
             }
-        ));
+        );
     }
 
     #[tokio::test]
-    async fn nonexistent_secret_returns_not_found() {
-        let ledger = spawn_test_ledger().await;
-
-        // Requester still needs a real certificate -- this test is
-        // specifically about the secret not existing, not about
-        // requester validation, so that earlier check must pass
-        // first.
-        let mut rng = rand::rng();
-        let requester_private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let requester_private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
-            &requester_private_key,
-            rsa::pkcs8::LineEnding::LF,
-        )
-        .unwrap();
-        let requester_key_pair = rcgen::KeyPair::from_pem(&requester_private_key_pem).unwrap();
-        let requester_params =
-            rcgen::CertificateParams::new(vec!["requester.polar.svc.cluster.local".to_string()])
-                .unwrap();
-        let requester_certificate_pem = requester_params
-            .self_signed(&requester_key_pair)
-            .unwrap()
-            .pem();
-        let _ = ractor::rpc::call(
-            &ledger,
-            |reply| LedgerMessage::Append {
-                event: CredentialsEvent::IssuanceCompleted {
-                    identity: "requester".to_string(),
-                    instance_binding: "pod-uid-1".to_string(),
-                    serial: "requester-serial-1".to_string(),
-                    timestamp: 1000,
-                    certificate_pem: requester_certificate_pem,
-                },
-                reply,
-            },
-            None,
-        )
-        .await
-        .unwrap();
-
-        let handler = RetrieveSecretHandler {
-            escrow_keypair: crate::escrow::tests::test_keypair(),
-            ledger,
-        };
-
-        let reply = handler
+    async fn a_name_that_could_end_the_policy_resource_early_is_refused_before_any_lookup() {
+        let w = world(None).await;
+        seed_mtls_certificate(&w.ledger, "requester").await;
+        let reply = w
+            .handler
             .handle(
-                RetrieveSecretRequest {
-                    name: "never-stored".to_string(),
-                },
-                Some("requester".to_string()),
+                request(r#"x"; permit(principal, action, resource); //"#),
+                Some("requester".into()),
             )
             .await;
-
-        assert!(matches!(reply, RetrieveSecretReply::NotFound));
+        assert_eq!(
+            reply,
+            RetrieveSecretReply::Refused {
+                reason: RetrieveRefusalReason::InvalidSecretName
+            }
+        );
     }
 }

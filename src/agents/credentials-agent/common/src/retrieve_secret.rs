@@ -65,6 +65,11 @@ pub enum RetrieveSecretReply {
     Refused {
         reason: RetrieveRefusalReason,
     },
+    /// The requester is known but policy does not let it have this secret. Checked before anything is
+    /// said about whether the secret exists, so a requester that may not have it learns nothing about it.
+    Denied {
+        reason: String,
+    },
     /// The request was genuinely valid -- a real secret exists, the
     /// requester's own identity was genuinely verified -- but a real
     /// infrastructure failure prevented the relay itself from
@@ -103,6 +108,22 @@ pub enum RetrieveRefusalReason {
     /// but named as its own, explicit refusal rather than silently
     /// falling through to Failed.
     RequesterCertificateNotFound,
+    /// The requester has no escrow key on record, so there is nothing to encrypt the secret to. A secret
+    /// is only ever re-encrypted to the requester's agent escrow key (its RSA service identity), never to
+    /// its mTLS key, which signs and does not encrypt.
+    RequesterEscrowKeyNotFound,
+    /// The name is not one a secret can have. Names become part of a policy resource, so they are
+    /// limited to letters, digits and `._:/-`, 1 to 128 of them.
+    InvalidSecretName,
+}
+
+/// Whether `name` can be the name of a secret: it is used to build a policy resource, so nothing in it
+/// may be able to end that resource early.
+pub fn is_valid_secret_name(name: &str) -> bool {
+    (1..=128).contains(&name.len())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-'))
 }
 
 #[cfg(test)]
@@ -194,6 +215,52 @@ mod tests {
         let restored_rkyv: RetrieveSecretReply =
             rkyv::from_bytes::<RetrieveSecretReply, rkyv::rancor::Error>(&bytes).unwrap();
         assert_eq!(original, restored_rkyv);
+    }
+
+    #[test]
+    fn secret_names_that_could_end_a_policy_resource_early_are_not_names() {
+        for good in ["gitlab-token", "github-sei", "a.b_c:d/e-1"] {
+            assert!(is_valid_secret_name(good), "{good}");
+        }
+        for bad in [
+            "",
+            "has space",
+            "quote\"",
+            "a\"; permit(",
+            "new\nline",
+            "ünï",
+            &"x".repeat(129),
+        ] {
+            assert!(!is_valid_secret_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn retrieve_secret_reply_denied_and_new_refusals_round_trip() {
+        for original in [
+            RetrieveSecretReply::Denied {
+                reason: "no".into(),
+            },
+            RetrieveSecretReply::Refused {
+                reason: RetrieveRefusalReason::RequesterEscrowKeyNotFound,
+            },
+            RetrieveSecretReply::Refused {
+                reason: RetrieveRefusalReason::InvalidSecretName,
+            },
+        ] {
+            let json = serde_json::to_string(&original).unwrap();
+            assert_eq!(
+                original,
+                serde_json::from_str::<RetrieveSecretReply>(&json).unwrap()
+            );
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original)
+                .unwrap()
+                .to_vec();
+            assert_eq!(
+                original,
+                rkyv::from_bytes::<RetrieveSecretReply, rkyv::rancor::Error>(&bytes).unwrap()
+            );
+        }
     }
 
     #[test]
