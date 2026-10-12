@@ -198,6 +198,7 @@ impl Rig {
 fn document(id: &str, agent: &str, version: u64) -> Value {
     json!({
         "payload": {
+            "type": "configuration",
             "id": id,
             "target": {"agent": agent},
             "version": version,
@@ -287,7 +288,8 @@ async fn items_are_followed_separately_and_each_goes_to_its_own_agent() {
 #[tokio::test]
 async fn a_document_that_cannot_be_routed_is_written_to_the_graph_and_goes_nowhere() {
     let rig = Rig::new().await;
-    let doc = json!({"payload": {"id": "c", "version": 1}, "signature": {}});
+    let doc =
+        json!({"payload": {"type": "configuration", "id": "c", "version": 1}, "signature": {}});
     rig.create("permanent/broken.dhall", &doc).await;
 
     let written = rig.graph();
@@ -299,6 +301,23 @@ async fn a_document_that_cannot_be_routed_is_written_to_the_graph_and_goes_nowhe
             .node
             .contains("unroutable:permanent/broken.dhall")
     );
+    assert!(rig.published().is_empty());
+}
+
+#[tokio::test]
+async fn a_command_or_an_admission_is_written_to_the_graph_but_not_forwarded_yet() {
+    let rig = Rig::new().await;
+    for kind in ["command", "admission"] {
+        let mut doc = document("c", "git-agent", 1);
+        doc["payload"]["type"] = json!(kind);
+        rig.create(&format!("{kind}.dhall"), &doc).await;
+    }
+    let written = rig.graph();
+    assert_eq!(written.len(), 2);
+    for w in &written {
+        assert_eq!(w.text("status").as_deref(), Some("unroutable"));
+        assert!(w.text("reason").unwrap().contains("not handled"));
+    }
     assert!(rig.published().is_empty());
 }
 

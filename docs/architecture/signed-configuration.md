@@ -95,8 +95,10 @@ exposes it.)
 8. Only then is the update applied. The ConfigurationActor still refuses a Static variable, a bad value and
    a result the sections' relations reject, whoever signed.
 
-**The payload of an update** is `{ id, target: { agent }, version, changes: [ { name, value } ] }`, all
-strings except the version, which is a whole number. `target.agent` is the receiving agent's own name (its
+**The payload of an update** is `{ type: "configuration", id, target: { agent }, version, changes: [ { name, value } ] }`, all
+strings except the version, which is a whole number. Every signed payload carries a `type` (`configuration`, `admission` or
+`command`; `scheduling-kinds.md`) and a receiver accepts only the kind it expects, checking it before it reads anything else of
+the payload, so a command cannot be taken for a configuration whatever else it says. A document with no `type` is refused. `target.agent` is the receiving agent's own name (its
 service name) for now; how a schedule's agent id and agent type map onto that, and where a `ScheduleNode`'s
 `config` becomes `changes`, are the addressing questions still open.
 

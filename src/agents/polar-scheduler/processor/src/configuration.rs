@@ -5,6 +5,7 @@
 //! forwards the document untouched. A document it cannot route is still written to the graph, so that it is
 //! seen, and goes nowhere.
 
+use polar_scheduler_common::document_type;
 use serde_json::Value;
 
 /// Where a document is going and what it is called, read from its payload without trusting any of it.
@@ -44,6 +45,14 @@ fn routing(payload: &Value) -> Result<Routing, String> {
             .map(str::to_string)
             .ok_or_else(|| format!("the payload has no text `{what}`"))
     };
+    // Only configuration is handled so far. A command or an admission is still written to the graph, as one
+    // that cannot be routed, so that it is seen.
+    let kind = text(&payload["type"], "type")?;
+    if kind != document_type::CONFIGURATION {
+        return Err(format!(
+            "a `{kind}` document is not handled by the scheduler yet"
+        ));
+    }
     Ok(Routing {
         id: text(&payload["id"], "id")?,
         agent: text(&payload["target"]["agent"], "target.agent")?,
@@ -60,7 +69,7 @@ mod tests {
 
     #[test]
     fn a_document_is_told_from_an_unsigned_schedule_by_its_two_fields() {
-        let signed = json!({"payload": {"id": "c", "target": {"agent": "a"}, "version": 3}, "signature": {}});
+        let signed = json!({"payload": {"type": "configuration", "id": "c", "target": {"agent": "a"}, "version": 3}, "signature": {}});
         assert_eq!(
             classify(&signed.to_string()),
             Shape::Document(Ok(Routing {
@@ -80,13 +89,27 @@ mod tests {
     #[test]
     fn a_document_that_cannot_be_routed_says_why() {
         for (payload, wanted) in [
-            (json!({"target": {"agent": "a"}, "version": 1}), "id"),
-            (json!({"id": "c", "version": 1}), "target.agent"),
             (
-                json!({"id": "c", "target": {"agent": "a"}, "version": "1"}),
+                json!({"type": "configuration", "target": {"agent": "a"}, "version": 1}),
+                "id",
+            ),
+            (
+                json!({"type": "configuration", "id": "c", "version": 1}),
+                "target.agent",
+            ),
+            (
+                json!({"type": "configuration", "id": "c", "target": {"agent": "a"}, "version": "1"}),
                 "version",
             ),
-            (json!([1]), "id"),
+            (json!([1]), "type"),
+            (
+                json!({"id": "c", "target": {"agent": "a"}, "version": 1}),
+                "type",
+            ),
+            (
+                json!({"type": "command", "id": "c", "target": {"agent": "a"}, "version": 1}),
+                "not handled",
+            ),
         ] {
             let doc = json!({"payload": payload, "signature": {}});
             match classify(&doc.to_string()) {

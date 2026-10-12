@@ -1150,6 +1150,7 @@ mod tests {
         let name = polar_health::vars::CASSINI_DEADLINE_SECS.name();
         let document = polar_signing::sign(
             serde_json::json!({
+                "type": "configuration",
                 "id": "u",
                 "target": {"agent": "infra-signed"},
                 "version": 1,

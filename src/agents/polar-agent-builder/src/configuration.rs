@@ -855,7 +855,7 @@ mod tests {
         fn update(&self, spec: Spec, version: u64, agent: &str, changes: Value) -> Value {
             let s = signer(&self.ca, spec);
             polar_signing::sign(
-                json!({"id": "u", "target": {"agent": agent}, "version": version, "changes": changes}),
+                json!({"type": "configuration", "id": "u", "target": {"agent": agent}, "version": version, "changes": changes}),
                 &[s.cert_pem],
                 &s.key_pem,
             )
@@ -903,7 +903,7 @@ mod tests {
         let signed = Signed::new();
         let (config, seen) = spawn_handle(Some(signed.verifier())).await;
         // What an unsigned update would look like: the payload, bare.
-        let bare = json!({"id": "u", "target": {"agent": AGENT}, "version": 1,
+        let bare = json!({"type": "configuration", "id": "u", "target": {"agent": AGENT}, "version": 1,
                           "changes": [{"name": "HIGH", "value": "20"}]});
         let outcome = config.submit(bare).await.unwrap();
         assert!(matches!(
@@ -1134,7 +1134,7 @@ mod tests {
         let sub = subscription(AGENT, config.clone());
 
         // Unsigned, and signed by a CA this agent does not trust: delivered, then refused.
-        let unsigned = json!({"payload": {"id": "u", "target": {"agent": AGENT}, "version": 1,
+        let unsigned = json!({"payload": {"type": "configuration", "id": "u", "target": {"agent": AGENT}, "version": 1,
                               "changes": [{"name": "HIGH", "value": "99"}]}, "signature": {}});
         (sub.deliver)(notification(AGENT, &unsigned));
         (sub.deliver)(notification(AGENT, &Signed::new().high(2, "99")));

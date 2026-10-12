@@ -19,6 +19,7 @@
 
 use cassini_client::TCPClientConfig;
 use polar_env::Config;
+use polar_scheduler_common::document_type;
 use polar_signing::{
     Authority, AuthorityRefusal, Document, LayoutError, RequireCapability, SignerInfo, Trust,
     VerifyError,
@@ -37,6 +38,11 @@ pub enum Rejection {
     Signature(VerifyError),
     /// Signed and verified, but not an update: the payload does not have the shape of one.
     Payload(String),
+    /// A signed document of another kind: a configuration is expected here, not a command or admission.
+    WrongType {
+        wanted: &'static str,
+        got: String,
+    },
     /// Signed for a different agent.
     WrongTarget {
         wanted: String,
@@ -58,6 +64,9 @@ impl std::fmt::Display for Rejection {
             Rejection::Layout(e) => write!(f, "not a signed document: {e}"),
             Rejection::Signature(e) => write!(f, "not signed by anyone this agent trusts: {e}"),
             Rejection::Payload(e) => write!(f, "not an update: {e}"),
+            Rejection::WrongType { wanted, got } => {
+                write!(f, "a `{got}` document, and a `{wanted}` is expected here")
+            }
             Rejection::WrongTarget { wanted, got } => {
                 write!(f, "signed for `{got}`, and this agent is `{wanted}`")
             }
@@ -81,6 +90,10 @@ pub struct Verified {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Payload {
+    /// Checked before this is read; here because the payload is read strictly.
+    #[serde(rename = "type")]
+    #[allow(dead_code)]
+    kind: String,
     id: String,
     target: Target,
     version: u64,
@@ -178,7 +191,19 @@ impl UpdateVerifier {
         let signer = polar_signing::verify(&document, &self.trust, (self.clock)())
             .map_err(Rejection::Signature)?;
 
-        // The signature held, so the payload is what the signer wrote. Now read it.
+        // The signature held, so the payload is what the signer wrote. Now read it: first what kind of
+        // document it is, since a command or an admission is not a configuration whatever else it says.
+        let kind = document
+            .payload
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Rejection::Payload("the payload has no text `type`".to_string()))?;
+        if kind != document_type::CONFIGURATION {
+            return Err(Rejection::WrongType {
+                wanted: document_type::CONFIGURATION,
+                got: kind.to_string(),
+            });
+        }
         let payload: Payload = serde_json::from_value(document.payload.clone())
             .map_err(|e| Rejection::Payload(e.to_string()))?;
         if payload.target.agent != self.agent {
@@ -232,6 +257,7 @@ mod tests {
 
     fn payload() -> Value {
         json!({
+            "type": "configuration",
             "id": "hello-greeting",
             "target": {"agent": AGENT},
             "version": 7,
@@ -373,11 +399,11 @@ mod tests {
     fn a_signed_payload_that_is_not_an_update_is_refused() {
         let rig = rig();
         for bad in [
-            json!({"id": "x"}),
-            json!({"id": "x", "target": {"agent": AGENT}, "version": "7", "changes": []}),
-            json!({"id": "x", "target": {"agent": AGENT}, "version": 1, "changes": [], "owner": "me"}),
-            json!({"id": "x", "target": {"agent": AGENT, "region": "eu"}, "version": 1, "changes": []}),
-            json!({"id": "x", "target": {"agent": AGENT}, "version": 1, "changes": [{"name": "A"}]}),
+            json!({"type": "configuration", "id": "x"}),
+            json!({"type": "configuration", "id": "x", "target": {"agent": AGENT}, "version": "7", "changes": []}),
+            json!({"type": "configuration", "id": "x", "target": {"agent": AGENT}, "version": 1, "changes": [], "owner": "me"}),
+            json!({"type": "configuration", "id": "x", "target": {"agent": AGENT, "region": "eu"}, "version": 1, "changes": []}),
+            json!({"type": "configuration", "id": "x", "target": {"agent": AGENT}, "version": 1, "changes": [{"name": "A"}]}),
         ] {
             let doc = document(&rig, Spec::default(), bad.clone());
             assert!(
@@ -385,6 +411,53 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn a_document_of_another_kind_or_with_no_kind_is_not_a_configuration() {
+        let rig = rig();
+        // Otherwise a perfectly good update, signed by an authorised signer, but a command or an admission.
+        for kind in ["command", "admission", "something-new"] {
+            let mut payload = payload();
+            payload["type"] = json!(kind);
+            let doc = document(&rig, Spec::default(), payload);
+            assert_eq!(
+                rig.verifier.verify(&doc),
+                Err(Rejection::WrongType {
+                    wanted: "configuration",
+                    got: kind.to_string()
+                }),
+                "{kind}"
+            );
+        }
+
+        // No type at all, or one that is not text: not read as an update.
+        for bad in [json!(null), json!(7), json!(["configuration"])] {
+            let mut payload = payload();
+            payload["type"] = bad;
+            let doc = document(&rig, Spec::default(), payload);
+            assert!(matches!(rig.verifier.verify(&doc), Err(Rejection::Payload(_))));
+        }
+        let mut payload = payload();
+        payload.as_object_mut().unwrap().remove("type");
+        let doc = document(&rig, Spec::default(), payload);
+        match rig.verifier.verify(&doc) {
+            Err(Rejection::Payload(why)) => assert!(why.contains("type"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_kind_is_checked_before_the_target_so_a_command_for_another_agent_is_a_wrong_kind() {
+        let rig = rig();
+        let mut elsewhere = payload();
+        elsewhere["type"] = json!("command");
+        elsewhere["target"]["agent"] = json!("another-agent");
+        let doc = document(&rig, Spec::default(), elsewhere);
+        assert!(matches!(
+            rig.verifier.verify(&doc),
+            Err(Rejection::WrongType { .. })
+        ));
     }
 
     #[test]
