@@ -888,6 +888,12 @@ polar-git-clone repo dest="" user="djshepard":
 cassini-shutdown user="djshepard":
     nu infra/cassini-shutdown.nu --user {{user}}
 
+# What the secret harness pods say about the credentials agent's secret policy, and whether it held
+# (src/agents/secret-harness). The owner needs two rounds (a minute apart) and the intruder starts after
+# 90 seconds, so run it a few minutes after the pods are up; it exits non-zero until the policy has held.
+secret-harness-results:
+    nu infra/harness.nu
+
 # Stop all detached port-forwards started by port-forwards-up.
 port-forwards-down:
     #!/usr/bin/env bash

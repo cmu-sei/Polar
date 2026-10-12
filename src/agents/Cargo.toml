@@ -84,7 +84,8 @@ members = [
     "polar-scheduler/tests/mock-agent",
     "polar-scheduler/tests/mock-adhoc-agent",
     "build-processor",
-    "cert-issuer/server","cert-issuer/client", "cert-issuer/common"
+    "cert-issuer/server","cert-issuer/client", "cert-issuer/common",
+    "secret-harness",
 ]
 
 [workspace.package]

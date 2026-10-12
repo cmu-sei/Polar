@@ -79,6 +79,10 @@ def main [] {
             "polar-scheduler-observer.yaml"
             "polar-scheduler-resources.yaml"
             "polar-scheduler.yaml"
+            "secret-harness-owner-resources.yaml"
+            "secret-harness-owner.yaml"
+            "secret-harness-intruder-resources.yaml"
+            "secret-harness-intruder.yaml"
         ]
 
         neo4j_bolt_addr       : "bolt+s://polar-db-svc.polar-graph.svc.cluster.local:7687"

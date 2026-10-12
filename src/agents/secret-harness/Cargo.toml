@@ -1,0 +1,22 @@
+[package]
+name = "secret-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cassini-types.workspace = true
+credentials_agent_common.workspace = true
+polar-agent-builder.workspace = true
+polar-crypto.workspace = true
+polar-env.workspace = true
+ractor.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[[bin]]
+name = "secret-harness"
+path = "src/main.rs"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

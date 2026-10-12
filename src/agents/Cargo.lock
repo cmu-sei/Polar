@@ -6919,6 +6919,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "secret-harness"
+version = "1.0.0"
+dependencies = [
+ "cassini-types",
+ "credentials_agent_common",
+ "polar-agent-builder",
+ "polar-crypto",
+ "polar-env",
+ "ractor",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "security-framework"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

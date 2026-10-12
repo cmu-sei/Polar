@@ -205,6 +205,7 @@
           nuInitImage = polarPkgs.nuInit.image;
           gitServerImage = polarPkgs.gitServer.image;
           polarGitServerImage = polarPkgs.polarGitServer.image;
+          secretHarnessImage = polarPkgs.secretHarness.image;
           polarInitImage = polarPkgs.polarInit.image;
 
           # ── ACE dashboard ────────────────────────────────────────────────────
