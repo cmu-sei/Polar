@@ -145,9 +145,17 @@ def pushed_image_ref [images: list, name: string, who: string] {
 # Runs the agent in its image, with no network, asking it `args`. `extra` is more `podman run`
 # options (a mounted file, environment). Returns the completed process.
 def run_in_image [ref: string, args: list<string>, extra: list<string> = []] {
+    # A pull of a tag that has moved leaves the image it replaced behind, untagged, and every
+    # `up.nu --dev` moves them all. Remember which it was, and remove it once the new one is here.
+    let before = (^podman image inspect --format '{{.Id}}' $ref | complete | get stdout | str trim)
     let pulled = (^podman pull -q ...(registry_flags) $ref | complete)
     if $pulled.exit_code != 0 {
         error make { msg: $"cannot pull ($ref): ($pulled.stderr | str trim). Build and push it first: nu infra/images.nu push <image>" }
+    }
+    let after = (^podman image inspect --format '{{.Id}}' $ref | str trim)
+    if ($before | is-not-empty) and $before != $after {
+        # Fails, harmlessly, if something still uses it.
+        ^podman rmi $before | complete | ignore
     }
     let config = (^podman image inspect --format '{{json .Config}}' $ref | from json)
     let entrypoint = (image_command $config | to json --raw)
