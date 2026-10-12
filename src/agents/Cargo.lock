@@ -2693,6 +2693,8 @@ dependencies = [
  "git-agent-common",
  "git2",
  "polar",
+ "polar-agent-builder",
+ "polar-env",
  "ractor",
  "rkyv",
  "serde",
