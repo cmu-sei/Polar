@@ -144,6 +144,8 @@ pub struct AgentBuilder<M: ractor::Message> {
     commands: Vec<(&'static str, Arc<dyn CommandHandler>)>,
     /// What the agent declared it accepts (`PolarAgent::COMMANDS`).
     declared_commands: &'static [CommandSpec],
+    /// The runtime sections the agent declared (`PolarAgent::RUNTIME`).
+    declared_runtime: &'static [&'static RuntimeSection],
 }
 
 /// Pairs each command an agent declared with its handler, and says what does not pair: a declared command
@@ -199,6 +201,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
             environment: Vec::new(),
             commands: Vec::new(),
             declared_commands: &[],
+            declared_runtime: &[],
         }
     }
 
@@ -341,6 +344,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
         self.wants_crypto = configured.required.contains(&Capability::Encryption);
         self.self_test = configured.self_test;
         self.declared_commands = configured.commands;
+        self.declared_runtime = configured.runtime;
         ConfiguredAgent {
             builder: self,
             startup: configured.startup,
@@ -409,6 +413,7 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
                 process_exit: shutdown::real_process_exit(),
                 tcp_spawner: Arc::new(infrastructure::CassiniSpawner),
                 commands,
+                runtime_sections: this.declared_runtime,
             },
             myself_cell,
         )
@@ -550,6 +555,7 @@ impl<M: ractor::Message> ConfiguredService<M> {
                 process_exit: hooks.process_exit.clone(),
                 tcp_spawner: Arc::new(infrastructure::CassiniSpawner),
                 commands: Vec::new(),
+                runtime_sections: &[],
             },
             this.myself.get_cell(),
         )
@@ -935,6 +941,7 @@ mod tests {
             required,
             self_test: false,
             commands: &BOTH,
+            runtime: &[],
             hooks: crate::agent::Hooks::real(),
         };
         let error = AgentBuilder::new(idle, "no-handlers")
@@ -963,6 +970,7 @@ mod tests {
             required: required.clone(),
             self_test: false,
             commands: &[],
+            runtime: &[],
             hooks: crate::agent::Hooks::real(),
         };
 

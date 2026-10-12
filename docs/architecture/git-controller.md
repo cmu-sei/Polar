@@ -90,6 +90,8 @@ so a replaced pod does not walk history it already published. The processor read
 
 ## The `runtime` document type
 
+**Built 2026-10-12** (the library; no agent declares a section yet): `document_type::RUNTIME`, the capability `c:update-runtime` (appended to the closed list), `UpdateVerifier::verify_document`, `PolarAgent::RUNTIME` with `RuntimeSection { name, doc, body, validate }`, handling in the existing ConfigurationActor (`runtime(section)`, `runtime_changes()`, the same history and outcome events), the `runtime` list in `--scaffold`, routing and per-section replay order in the polar scheduler. Not built: the typed Dhall templates generated from the declarations, and `polar-sign runtime`. `admin-provision` now grants the first admin `c:update-policy` and `c:update-runtime` as well.
+
 There are two kinds of configuration for these agents, and they need different authors:
 
 - **Deployment configuration** (`type: configuration`): the agent's own Dynamic variables, such as the log level.

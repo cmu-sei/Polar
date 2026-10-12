@@ -164,6 +164,8 @@ pub struct InfrastructureSupervisorArgs {
         crate::command::CommandSpec,
         Arc<dyn crate::command_actor::CommandHandler>,
     )>,
+    /// The runtime sections the agent declared: what its configuration actor will accept.
+    pub(crate) runtime_sections: &'static [&'static crate::runtime::RuntimeSection],
     /// Publish probes to the agent itself and expect them back; see `selftest`.
     pub(crate) self_test: bool,
 }
@@ -591,11 +593,12 @@ impl Actor for InfrastructureSupervisor {
         let command_verifier = verifier
             .as_ref()
             .map(crate::signed::UpdateVerifier::commands);
-        let configuration = ConfigurationHandle::spawn(
+        let configuration = ConfigurationHandle::spawn_with_runtime(
             None,
             args.service_name.clone(),
             (*args.config).clone(),
             verifier,
+            args.runtime_sections,
             myself_cell.clone(),
         )
         .await?;
@@ -1045,6 +1048,7 @@ mod tests {
                 false,
                 None,
                 vec![],
+                &[],
             )
             .await
         }
@@ -1066,6 +1070,7 @@ mod tests {
                 false,
                 None,
                 commands,
+                &[],
             )
             .await
         }
@@ -1081,6 +1086,26 @@ mod tests {
                 false,
                 Some(echo),
                 vec![],
+                &[],
+            )
+            .await
+        }
+
+        /// A rig whose agent declares runtime sections.
+        async fn with_runtime(
+            service: &str,
+            health_env: &[(&str, &str)],
+            sections: &'static [&'static crate::runtime::RuntimeSection],
+        ) -> Self {
+            Self::build(
+                service,
+                Duration::from_secs(20),
+                health_env,
+                false,
+                false,
+                None,
+                vec![],
+                sections,
             )
             .await
         }
@@ -1096,6 +1121,7 @@ mod tests {
                 true,
                 None,
                 vec![],
+                &[],
             )
             .await
         }
@@ -1111,6 +1137,7 @@ mod tests {
                 crate::command::CommandSpec,
                 Arc<dyn crate::command_actor::CommandHandler>,
             )>,
+            runtime: &'static [&'static crate::runtime::RuntimeSection],
         ) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let certificate = dir.path().join("cert.pem");
@@ -1169,6 +1196,7 @@ mod tests {
                     process_exit: Arc::new(move |code| recorded.lock().unwrap().push(code)),
                     tcp_spawner: spawner.clone(),
                     commands,
+                    runtime_sections: runtime,
                     self_test: self_test.is_some(),
                 },
             )
@@ -1357,6 +1385,105 @@ mod tests {
                 .read(&polar_health::vars::CASSINI_DEADLINE_SECS)
                 .unwrap(),
             100000
+        );
+    }
+
+    static INFRA_REPOS: crate::runtime::RuntimeSection = crate::runtime::RuntimeSection {
+        name: "repositories",
+        doc: "The repositories to observe.",
+        body: "{}",
+        validate: |_| Ok(()),
+    };
+    static INFRA_RUNTIME: [&crate::runtime::RuntimeSection; 1] = [&INFRA_REPOS];
+
+    #[tokio::test(start_paused = true)]
+    async fn a_runtime_document_for_a_section_the_agent_declared_reaches_it_through_the_router() {
+        use polar_signing::testing::{Spec, root, signer};
+
+        let ca = root("Polar Internal CA");
+        let dir = tempfile::tempdir().unwrap();
+        let ca_file = dir.path().join("ca.pem");
+        std::fs::write(&ca_file, &ca.pem).unwrap();
+        let rig = Rig::with_runtime(
+            "infra-runtime",
+            &[("TLS_CA_CERT", ca_file.to_str().unwrap())],
+            &INFRA_RUNTIME,
+        )
+        .await;
+        let s = signer(
+            &ca,
+            Spec {
+                capabilities: vec!["c:update-runtime"],
+                not_after_year: 2090,
+                ..Spec::default()
+            },
+        );
+        let document = polar_signing::sign(
+            serde_json::json!({
+                "type": "runtime", "id": "repos-1", "target": {"agent": "infra-runtime"},
+                "section": "repositories", "version": 1,
+                "body": {"repositories": [{"url": "https://example.org/r.git"}]}
+            }),
+            std::slice::from_ref(&s.cert_pem),
+            &s.key_pem,
+        )
+        .unwrap()
+        .to_value();
+        let notification = polar_scheduler_common::ConfigurationNotification {
+            agent: "infra-runtime".to_string(),
+            document_json: document.to_string(),
+        };
+        rig.resources
+            .router
+            .send_message(polar_router::RouterMessage::Route(
+                polar_router::IncomingMessage {
+                    topic: polar_scheduler_common::configuration_topic("infra-runtime"),
+                    payload: rkyv::to_bytes::<rkyv::rancor::Error>(&notification)
+                        .unwrap()
+                        .to_vec(),
+                    published_by: None,
+                    trace_ctx: None,
+                },
+            ))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let held = rig
+            .resources
+            .configuration
+            .runtime("repositories")
+            .await
+            .unwrap()
+            .expect("the section was replaced");
+        assert_eq!(held.version, 1);
+        assert_eq!(
+            held.body["repositories"][0]["url"],
+            "https://example.org/r.git"
+        );
+
+        // And an agent that declared nothing holds nothing, whoever signs.
+        let bare = Rig::with_runtime(
+            "infra-runtime-bare",
+            &[("TLS_CA_CERT", ca_file.to_str().unwrap())],
+            &[],
+        )
+        .await;
+        let mut for_bare = document.clone();
+        for_bare["payload"]["target"]["agent"] = serde_json::json!("infra-runtime-bare");
+        // (Altering the payload breaks the signature, so it is refused earlier still; either way nothing
+        // is held. The point is the declared agent above did hold it.)
+        let outcome = bare.resources.configuration.submit(for_bare).await.unwrap();
+        assert!(matches!(
+            outcome,
+            crate::configuration::ApplyOutcome::Refused(_)
+        ));
+        assert!(
+            bare.resources
+                .configuration
+                .runtime("repositories")
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -2015,6 +2142,7 @@ mod service_tests {
                     process_exit: Arc::new(move |code| recorded.lock().unwrap().push(code)),
                     tcp_spawner: Arc::new(CassiniSpawner),
                     commands: vec![],
+                    runtime_sections: &[],
                     self_test: false,
                 },
             )

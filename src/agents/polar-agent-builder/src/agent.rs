@@ -44,6 +44,7 @@
 use crate::capability::Capability;
 use crate::command::{CommandSpec, spec_problems};
 use crate::environment;
+use crate::runtime::RuntimeSection;
 use crate::startup::{self, Startup};
 use polar_env::{DocValue, Document, DocumentError, Env, FileEnv, ProcessEnv, Section, Source};
 use serde::{Deserialize, Serialize};
@@ -88,6 +89,12 @@ pub trait PolarAgent: Sized + 'static {
     /// registers a handler for each with `AgentBuilder::with_command`; it does not start if the two
     /// disagree. A command not declared here is refused however it is signed.
     const COMMANDS: &'static [CommandSpec] = &[];
+    /// The sections of runtime configuration the agent accepts (docs/architecture/git-controller.md): what
+    /// it works on, as opposed to how it runs. Each is replaced whole by a signed `runtime` document from
+    /// someone holding `c:update-runtime`, judged by the section's own check, and read with
+    /// `ConfigurationHandle::runtime`. They appear in the schema export beside the variable sections. A
+    /// section not declared here is refused however it is signed.
+    const RUNTIME: &'static [&'static RuntimeSection] = &[];
 
     /// The agent proper. It is given the configuration the infrastructure judged, and builds
     /// its infrastructure from it (see `AgentBuilder::into_configured`). It returns when the
@@ -103,6 +110,8 @@ pub struct Configured {
     pub(crate) self_test: bool,
     /// What the agent declared it accepts.
     pub(crate) commands: &'static [CommandSpec],
+    /// The runtime sections the agent declared.
+    pub(crate) runtime: &'static [&'static RuntimeSection],
     pub(crate) hooks: Hooks,
 }
 
@@ -167,6 +176,7 @@ impl Configured {
             required: Vec::new(),
             self_test: false,
             commands: &[],
+            runtime: &[],
             hooks: Hooks {
                 process_exit: Arc::new(move |code| exits.lock().unwrap().push(code)),
                 listen_for_signals: false,
@@ -190,11 +200,24 @@ pub struct AgentDocument {
     /// The commands the agent accepts, with their arguments: what a signed command may be.
     #[serde(default)]
     pub commands: Vec<CommandDocument>,
+    /// The sections of runtime configuration the agent accepts, with what each body may hold: beside
+    /// `sections`, which are the variables.
+    #[serde(default)]
+    pub runtime: Vec<RuntimeDocument>,
     #[serde(flatten)]
     pub document: Document,
     /// Every problem found, when the document was filled from a file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub problems: Vec<String>,
+}
+
+/// A runtime section an agent accepts, as the schema export shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeDocument {
+    pub name: String,
+    pub doc: String,
+    /// What the body may hold, field by field, as the agent declared it.
+    pub body: serde_json::Value,
 }
 
 /// A command an agent accepts, as the schema export shows it.
@@ -294,6 +317,16 @@ pub fn scaffold_document<A: PolarAgent>() -> AgentDocument {
                 timeout_secs: c.timeout.as_secs(),
             })
             .collect(),
+        runtime: A::RUNTIME
+            .iter()
+            .map(|section| RuntimeDocument {
+                name: section.name.to_string(),
+                doc: section.doc.to_string(),
+                // A body description that is not JSON is a declaration problem, reported by
+                // `declaration_problems`; the export shows null for it.
+                body: serde_json::from_str(section.body).unwrap_or(serde_json::Value::Null),
+            })
+            .collect(),
         document: Document::scaffold(&tagged),
         problems: Vec::new(),
     }
@@ -320,12 +353,20 @@ fn load(path: &Path, process: impl Env + 'static) -> Result<Loaded, String> {
 /// Every problem with a document, as `A` would find them starting on it: what is wrong with
 /// the document itself, what it sets that the agent does not declare, and everything the
 /// agent's own judgement of its configuration finds.
-/// What is wrong with the agent's own declarations of commands, whatever the configuration.
-fn command_problems<A: PolarAgent>() -> Vec<String> {
+/// What is wrong with what the agent offers to signed documents, its commands and its runtime sections,
+/// whatever the configuration.
+fn surface_problems<A: PolarAgent>() -> Vec<String> {
     let mut problems = spec_problems(A::COMMANDS);
     if !A::COMMANDS.is_empty() && !A::CASSINI_CLIENT {
         problems.push(format!(
             "{} declares commands but is not a Cassini client, so none can reach it",
+            A::NAME
+        ));
+    }
+    problems.extend(crate::runtime::check_declarations(A::RUNTIME));
+    if !A::RUNTIME.is_empty() && !A::CASSINI_CLIENT {
+        problems.push(format!(
+            "{} declares runtime sections but is not a Cassini client, so no document can reach it",
             A::NAME
         ));
     }
@@ -334,7 +375,7 @@ fn command_problems<A: PolarAgent>() -> Vec<String> {
 
 fn problems_of<A: PolarAgent>(loaded: &Loaded) -> Vec<String> {
     let mut problems = loaded.document.problems();
-    problems.extend(command_problems::<A>());
+    problems.extend(surface_problems::<A>());
 
     let declared: Vec<String> = scaffold_document::<A>()
         .document
@@ -557,7 +598,7 @@ pub fn declaration_problems<A: PolarAgent>() -> Vec<String> {
             );
         }
     }
-    problems.extend(command_problems::<A>());
+    problems.extend(surface_problems::<A>());
     let mut seen: Vec<Capability> = Vec::new();
     for capability in A::NEEDS {
         if seen.contains(capability) {
@@ -673,7 +714,7 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
             return 1;
         }
     };
-    let bad_commands = command_problems::<A>();
+    let bad_commands = surface_problems::<A>();
     if !bad_commands.is_empty() {
         for problem in &bad_commands {
             eprintln!("ERROR: {problem}");
@@ -685,6 +726,7 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
         required: needs_of::<A>(),
         self_test: A::SELF_TEST && A::CASSINI_CLIENT,
         commands: A::COMMANDS,
+        runtime: A::RUNTIME,
         hooks: Hooks::real(),
     };
 
@@ -1405,6 +1447,98 @@ mod tests {
         assert!(
             problems.iter().any(|p| p.contains("not a Cassini client")),
             "{problems:?}"
+        );
+    }
+
+    // -- runtime sections ------------------------------------------------------------------
+
+    static REPOS: crate::runtime::RuntimeSection = crate::runtime::RuntimeSection {
+        name: "repositories",
+        doc: "The repositories to observe.",
+        body: r#"{"repositories": {"list_of": {"url": {"type": "https URL", "required": true}}}}"#,
+        validate: |_| Ok(()),
+    };
+
+    static RUNTIME_ONE: [&crate::runtime::RuntimeSection; 1] = [&REPOS];
+    static RUNTIME_TWICE: [&crate::runtime::RuntimeSection; 2] = [&REPOS, &REPOS];
+
+    struct WithRuntime;
+    impl PolarAgent for WithRuntime {
+        const NAME: &'static str = "with-runtime";
+        const PURPOSE: &'static str = "Declares one runtime section";
+        const NEEDS: &'static [Capability] = &[Capability::Cassini];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
+        const RUNTIME: &'static [&'static crate::runtime::RuntimeSection] = &RUNTIME_ONE;
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_schema_export_lists_the_runtime_sections_an_agent_declares() {
+        let doc = scaffold_document::<WithRuntime>();
+        assert_eq!(doc.runtime.len(), 1);
+        assert_eq!(doc.runtime[0].name, "repositories");
+        assert_eq!(doc.runtime[0].doc, "The repositories to observe.");
+        assert_eq!(
+            doc.runtime[0].body["repositories"]["list_of"]["url"]["required"],
+            true
+        );
+
+        // Next to the variable sections, in the JSON a tool reads, and read back.
+        let json = serde_json::to_value(&doc).unwrap();
+        assert!(json["sections"].is_array());
+        assert_eq!(json["runtime"][0]["name"], "repositories");
+        let back: AgentDocument = serde_json::from_value(json).unwrap();
+        assert_eq!(back, doc);
+
+        // An agent with none says so, and an older document without the list still reads.
+        let none = serde_json::to_value(scaffold_document::<Example>()).unwrap();
+        assert_eq!(none["runtime"], serde_json::json!([]));
+        let mut older = none.clone();
+        older.as_object_mut().unwrap().remove("runtime");
+        let read: AgentDocument = serde_json::from_value(older).unwrap();
+        assert!(read.runtime.is_empty());
+    }
+
+    struct TwiceDeclared;
+    impl PolarAgent for TwiceDeclared {
+        const NAME: &'static str = "twice-declared";
+        const PURPOSE: &'static str = "Declares a section twice";
+        const NEEDS: &'static [Capability] = &[Capability::Cassini];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
+        const RUNTIME: &'static [&'static crate::runtime::RuntimeSection] = &RUNTIME_TWICE;
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
+    struct ServiceWithRuntime;
+    impl PolarAgent for ServiceWithRuntime {
+        const NAME: &'static str = "service-with-runtime";
+        const PURPOSE: &'static str = "Is not a client";
+        const NEEDS: &'static [Capability] = &[];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
+        const SELF_TEST: bool = false;
+        const CASSINI_CLIENT: bool = false;
+        const RUNTIME: &'static [&'static crate::runtime::RuntimeSection] = &RUNTIME_ONE;
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn runtime_declarations_are_judged_like_commands_are() {
+        assert!(declaration_problems::<WithRuntime>().is_empty());
+        let twice = declaration_problems::<TwiceDeclared>();
+        assert!(
+            twice.iter().any(|p| p.contains("more than once")),
+            "{twice:?}"
+        );
+        let service = declaration_problems::<ServiceWithRuntime>();
+        assert!(
+            service.iter().any(|p| p.contains("not a Cassini client")),
+            "{service:?}"
         );
     }
 
