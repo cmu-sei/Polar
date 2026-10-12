@@ -1,6 +1,6 @@
 {
   ai = null;
-  entrypoint = "scheduler";
+  entrypoint = "git-repo-scheduler";
   extraEnv = [
     {
       name = "SSL_CERT_FILE";

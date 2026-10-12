@@ -25,7 +25,6 @@ def main [] {
             ($layers | path join "2-services/jaeger/main.nu")
             ($layers | path join "2-services/neo4j/main.nu")
             ($layers | path join "3-workloads/agents/gitlab/main.nu")
-            ($layers | path join "3-workloads/agents/git/main.nu")
             ($layers | path join "3-workloads/agents/build-processor/main.nu")
             ($layers | path join "3-workloads/agents/openapi/main.nu")
         ]
@@ -59,8 +58,10 @@ def main [] {
             "kube-consumer.yaml"
             "git-repo-observer-resources.yaml"
             "git-repo-observer.yaml"
-            "git-consumer.yaml"
-            "git-scheduler.yaml"
+            "git-repo-processor-resources.yaml"
+            "git-repo-processor.yaml"
+            "git-repo-scheduler-resources.yaml"
+            "git-repo-scheduler.yaml"
             "jira-observer-resources.yaml"
             "jira-observer.yaml"
             "jira-processor-resources.yaml"

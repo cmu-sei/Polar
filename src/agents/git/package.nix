@@ -19,12 +19,12 @@ let
   consumer = craneLib.buildPackage (crateArgs // {
     pname = "git-repo-processor";
     cargoExtraArgs = "--bin git-repo-processor --locked";
-    src = workspaceFileset ./git/consume;
+    src = workspaceFileset ./git/process;
   });
 
   scheduler = craneLib.buildPackage (crateArgs // {
-    pname = "scheduler";
-    cargoExtraArgs = "--bin scheduler --locked";
+    pname = "git-repo-scheduler";
+    cargoExtraArgs = "--bin git-repo-scheduler --locked";
     src = workspaceFileset ./git/scheduler;
   });
 

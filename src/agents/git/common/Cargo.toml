@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+cassini-client.workspace = true
 git2.workspace = true
 rkyv = { workspace = true }
 polar.workspace = true

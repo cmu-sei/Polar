@@ -23,6 +23,8 @@ const BUDGETS = {
     cassini: 20
     oci-registry-resolver: 20
     git-repo-observer: 40
+    git-repo-processor: 45
+    git-repo-scheduler: 45
 }
 
 # The record the template takes, as the pipeline gets it.
@@ -267,6 +269,14 @@ def main [] {
             assert equal (env_value $r "POLAR_CACHE_ROOT") "/var/lib/git-repo-observer/cache"
             assert ($r.mounts | any {|m| $m.path == "/var/lib/git-repo-observer" and not $m.read_only })
             assert equal $r.service_account "git-repo-observer"
+        }
+
+        "the git processor and scheduler write to the graph and need no cache": {
+            for name in ["git-repo-processor" "git-repo-scheduler"] {
+                let r = (resolve $name)
+                assert ("graph-write" in $r.needs)
+                assert equal $r.service_account $name
+            }
         }
 
         "a volume that is not a Secret with items has none": {

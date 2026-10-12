@@ -2677,6 +2677,7 @@ dependencies = [
 name = "git-agent-common"
 version = "1.0.0"
 dependencies = [
+ "cassini-client",
  "git2",
  "polar",
  "rkyv",
@@ -2710,14 +2711,30 @@ dependencies = [
 name = "git-repo-processor"
 version = "1.0.0"
 dependencies = [
- "cassini-client",
  "cassini-types",
  "chrono",
  "git-agent-common",
- "neo4rs",
  "polar",
+ "polar-agent-builder",
  "ractor",
  "rkyv",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "git-repo-scheduler"
+version = "1.0.0"
+dependencies = [
+ "cassini-types",
+ "git-agent-common",
+ "neo4rs",
+ "polar",
+ "polar-agent-builder",
+ "ractor",
+ "rkyv",
+ "testcontainers",
+ "testcontainers-modules",
  "tokio",
  "tracing",
 ]
@@ -6818,23 +6835,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
 dependencies = [
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "scheduler"
-version = "1.0.0"
-dependencies = [
- "cassini-client",
- "cassini-types",
- "git-agent-common",
- "neo4rs",
- "polar",
- "ractor",
- "rkyv",
- "testcontainers",
- "testcontainers-modules",
- "tokio",
- "tracing",
 ]
 
 [[package]]

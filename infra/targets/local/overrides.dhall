@@ -47,11 +47,6 @@ in
   , observer = { image = registry ++ "gitlab-observer:latest" }
   , consumer = { image = registry ++ "gitlab-consumer:latest" }
   }
-, git =
-  { imagePullSecrets = [] : List { name : Optional Text }
-  , consumer  = { image = registry ++ "git-processor:latest" }
-  , scheduler = { image = registry ++ "git-scheduler:latest" }
-  }
 
 , build-processor =
   { imagePullSecrets = [] : List { name : Optional Text }

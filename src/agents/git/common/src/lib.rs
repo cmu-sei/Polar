@@ -172,3 +172,34 @@ pub enum GitRepositoryMessage {
         observed_at: String,
     },
 }
+
+/// Publishes an event on a topic, as every git agent does: rkyv bytes, identity shared, queued if
+/// the broker is away.
+pub fn publish_event<T>(
+    client: &polar::cassini::TcpClient,
+    topic: &str,
+    event: &T,
+) -> Result<(), String>
+where
+    T: for<'a> rkyv::Serialize<
+            rkyv::api::high::HighSerializer<
+                rkyv::util::AlignedVec,
+                rkyv::ser::allocator::ArenaHandle<'a>,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    use polar::cassini::CassiniClient;
+    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(event)
+        .map_err(|e| e.to_string())?
+        .to_vec();
+    client
+        .publish(cassini_client::PublishRequest {
+            topic: topic.to_string(),
+            payload,
+            trace_ctx: None,
+            offline_behavior: cassini_client::OfflineBehavior::default(),
+            share_identity: true,
+        })
+        .map_err(|e| e.to_string())
+}

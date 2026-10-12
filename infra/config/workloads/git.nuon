@@ -1,8 +1,11 @@
 # infra/config/workloads/git.nuon
 #
-# The git observer: watches the repositories it is told of and publishes their commits and ref
-# updates. A PolarAgent: it says in its own code what it needs and how long it takes to drain
-# (`git-repo-observer --scaffold`). It never touches the graph.
+# The git agents. Each is a PolarAgent: it says in its own code what it needs and how long it takes
+# to drain (`git-repo-observer --scaffold`, and so on).
+#
+# The observer watches the repositories it is told of and publishes their commits and ref updates;
+# it never touches the graph. The processor records those events in the graph. The scheduler
+# decides how a discovered repository is observed.
 [
   {
     # The Job and ServiceAccount keep the name the chart gave them.
@@ -18,5 +21,23 @@
     env: [
       { name: "POLAR_CACHE_ROOT", value: "/var/lib/{workload}/cache" }
     ]
+  }
+
+  {
+    name: "git-repo-processor"
+    kind: "agent"
+    image: "git-processor"
+    # The crate is not named for the image.
+    scaffold_package: "git-repo-processor"
+    config: "document"
+  }
+
+  {
+    name: "git-repo-scheduler"
+    kind: "agent"
+    image: "git-scheduler"
+    # The crate is not named for the image.
+    scaffold_package: "git-repo-scheduler"
+    config: "document"
   }
 ]

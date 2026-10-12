@@ -1,7 +1,8 @@
 #![deny(clippy::disallowed_methods)]
 
-use cassini_client::{OfflineBehavior, PublishRequest};
+use git_agent_common::GitHttpCredential;
 use git_agent_common::GitRepositoryMessage;
+use git_agent_common::RepoObservationConfig;
 use git2::{Cred, CredentialType, FetchOptions, Oid, RemoteCallbacks, Repository};
 use polar::cassini::{CassiniClient, TcpClient};
 use polar::graph::nodes::git::RepoId;
@@ -13,8 +14,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, trace, warn};
-use git_agent_common::RepoObservationConfig;
-use git_agent_common::GitHttpCredential;
 
 pub const SERVICE_NAME: &str = "polar.git.observer";
 pub const REPO_SUPERVISOR_NAME: &str = "polar.git.observer.repo.supervisor";
@@ -219,17 +218,7 @@ pub fn send_event(
     topic: String,
 ) -> Result<(), ActorProcessingErr> {
     info!("Forwarding event to topic {topic}");
-    let payload = to_bytes::<rancor::Error>(&event)?.to_vec();
-
-    let message = PublishRequest {
-        topic,
-        payload,
-        trace_ctx: None,
-        offline_behavior: OfflineBehavior::default(),
-        share_identity: true,
-    };
-
-    Ok(client.publish(message)?)
+    git_agent_common::publish_event(&client, &topic, &event).map_err(ActorProcessingErr::from)
 }
 
 /* ============================
