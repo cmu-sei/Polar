@@ -134,7 +134,7 @@ The order in section 3 is superseded by this one; section 3 stays as the list of
 
 1. [x] Scheduler agent (`polar-scheduler` observer and processor) properly migrated onto the builder and into the catalog (code, catalog and render done 2026-10-10; nothing run on a cluster yet)
 2. [ ] An initial schedule for the credentials agent, with the overrides, policies and secrets it will consume (secrets encrypted to its escrow public key; see the ConfigurationActor and "Credentials agent as the main consumer of scheduled overrides" items under the environment contract)
-3. [ ] git-observer migrated onto the builder and into the catalog (PINNED until 1 and 2 are done; the git agent's design doc `docs/architecture/git/agents.md` needs updating with it, see the log)
+3. [x] git-observer migrated onto the builder and into the catalog, verified on the cluster 2026-10-12: healthy, survives a broker restart (re-registers, restart count 0), drains on SIGTERM in about 1 s; its cache is an emptyDir (`working-checkout`), since the image has no writable /tmp for uid 1000 (it was not PINNED any longer; the git agent's design doc `docs/architecture/git/agents.md` needs updating with it, see the log)
 4. [ ] An initial schedule of repos for the git agent in the schedules repo; at least one repo needs a credential the git agent fetches from the credentials agent
 5. [ ] End to end: the git agent pulls a repo and a consumer is notified (git-processor or another)
 
@@ -162,7 +162,7 @@ cluster verification.
 
 | Agent | Rust | Catalog | Verified on cluster |
 |---|---|---|---|
-| git-observer | [ ] | [ ] | [ ] |
+| git-observer | [x] | [x] | [x] |
 | openapi-observer | [ ] | [ ] | [ ] |
 | polar-scheduler-observer | [ ] | [ ] | [ ] |
 | gitlab-observer | [ ] | [ ] | [ ] |

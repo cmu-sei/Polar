@@ -25,7 +25,7 @@ This system is structured as a **fact-emitting observer** coupled to **independe
 
 ### High-level structure
 
-The Git observer is an actor-based system with a strict supervision tree:
+The Git observer is an actor-based system with a strict supervision tree. It is a `PolarAgent` run by the agent builder (`git-repo-observer --help` lists its settings), a catalog workload (`infra/config/workloads/git.nuon`), and it keeps running when the broker restarts: the supervisor registers its workers again on every `Registered`, where it used to stop itself. Its clones live in an emptyDir and are fetched again when the pod is replaced.
 
 * **GitObserverRoot** is the root supervisor.
 * A single **TcpClientActor** owns the connection to the Cassini message broker.

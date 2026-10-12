@@ -12,9 +12,11 @@
     # The crate is not named for the image.
     scaffold_package: "git-repo-observer"
     config: "document"
-    # Clones can be fetched again, so the cache does not need to outlive the pod.
+    # Clones can be fetched again, so the cache does not need to outlive the pod; the image has no
+    # directory a non-root user may write, so it is an emptyDir.
+    provides: ["working-checkout"]
     env: [
-      { name: "POLAR_CACHE_ROOT", value: "/tmp/polar-cache" }
+      { name: "POLAR_CACHE_ROOT", value: "/var/lib/{workload}/cache" }
     ]
   }
 ]
