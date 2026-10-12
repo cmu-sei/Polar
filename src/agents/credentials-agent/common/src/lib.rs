@@ -27,6 +27,7 @@ pub mod admin_signing;
 pub mod agent_escrow_issuance;
 pub mod agent_escrow_key;
 pub mod agent_escrow_keypair_bootstrap;
+pub mod authority_book;
 pub mod authority_state;
 pub mod authority_update;
 pub mod certificate;
