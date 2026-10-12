@@ -1,6 +1,6 @@
 //! What the git server reads from its configuration, declared once.
 
-use polar_env::{Config, ConfigError, Defaulted, Described, Required, Section};
+use polar_env::{Config, ConfigError, Defaulted, Described, Optional, Required, Section};
 
 pub const DEFAULT_PORT: &str = "8443";
 
@@ -51,8 +51,17 @@ pub static CA_CERT: Required<String> = Required::text(
     "path to the CA certificate (PEM) that clients' certificates must chain to",
 );
 
-static VARIABLES: &[&dyn Described] =
-    &[&PORT, &REPO_ROOT, &SEED_ROOT, &REPOS, &CERT, &KEY, &CA_CERT];
+pub static ADMINS: Optional<Vec<String>> = Optional::list(
+    "POLAR_GIT_SERVER_ADMINS",
+    "identities, comma-separated, that may do anything to every repository and create new ones, \
+     in addition to the `admins` in POLAR_GIT_SERVER_REPOS: the DNS name in the certificate of \
+     each person (their account's identity) or workload. Kept apart from the repositories because \
+     who administers a server is a fact about the deployment, and the repositories are not",
+);
+
+static VARIABLES: &[&dyn Described] = &[
+    &PORT, &REPO_ROOT, &SEED_ROOT, &REPOS, &ADMINS, &CERT, &KEY, &CA_CERT,
+];
 
 pub static SECTION: Section = Section {
     name: "polar-git-server",
@@ -65,6 +74,7 @@ pub struct GitServerSettings {
     pub repo_root: String,
     pub seed_root: String,
     pub repos: String,
+    pub admins: Vec<String>,
     pub cert: String,
     pub key: String,
     pub ca_cert: String,
@@ -77,6 +87,7 @@ impl GitServerSettings {
             repo_root: config.read(&REPO_ROOT)?,
             seed_root: config.read(&SEED_ROOT)?,
             repos: config.read(&REPOS)?,
+            admins: config.read(&ADMINS)?.unwrap_or_default(),
             cert: config.read(&CERT)?,
             key: config.read(&KEY)?,
             ca_cert: config.read(&CA_CERT)?,
@@ -108,6 +119,20 @@ mod tests {
     #[test]
     fn the_section_is_sound_and_its_defaults_parse() {
         assert_eq!(SECTION.defaults_problems(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn no_administrators_are_named_unless_the_deployment_names_them() {
+        assert_eq!(
+            GitServerSettings::read(&config(&ALL)).unwrap().admins,
+            Vec::<String>::new()
+        );
+        let mut set = ALL.to_vec();
+        set.push(("POLAR_GIT_SERVER_ADMINS", "uuid-one, uuid-two"));
+        assert_eq!(
+            GitServerSettings::read(&config(&set)).unwrap().admins,
+            vec!["uuid-one", "uuid-two"]
+        );
     }
 
     #[test]

@@ -92,7 +92,7 @@ impl Actor for GitServerSupervisor {
                 }
             });
 
-        let file = ServerFile::parse(&settings.repos)?;
+        let file = ServerFile::parse(&settings.repos)?.with_admins(settings.admins.clone());
 
         let store = RepoStore::new(&settings.repo_root);
         std::fs::create_dir_all(&settings.repo_root)

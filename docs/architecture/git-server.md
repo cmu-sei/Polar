@@ -44,7 +44,7 @@ only then spawns `receive-pack`. No hook scripts, so nothing in git has to call 
 
 - Default policy is static and lives in the server's configuration: per repo, the identities (by
   permission SAN or uid) allowed to read and to write. By default the scheduler observer is the
-  only agent that may read, and admins write.
+  only agent that may read, and admins write. Who the admins are is a fact about the deployment, so `POLAR_GIT_SERVER_ADMINS` names them apart from the repository declaration (and in addition to the `admins` in it); in development the targets name the accounts `just admin-claim` made, by the DNS name in their certificates (their ledger identity, which changes when the cluster is reset).
 - The decision goes through one function behind a trait, so a Cedar evaluator (`polar-policy`)
   can replace or override it. Cedar-defined groups (for example "config policy authors") then
   extend who may push, with no change to the server.

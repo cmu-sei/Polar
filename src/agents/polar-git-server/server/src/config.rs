@@ -36,6 +36,16 @@ impl ServerFile {
         serde_json::from_str(json).map_err(|e| format!("the git server's configuration file: {e}"))
     }
 
+    /// The same file with more administrators: those the deployment names apart from the file.
+    pub fn with_admins(mut self, more: impl IntoIterator<Item = String>) -> Self {
+        for admin in more {
+            if !self.admins.contains(&admin) {
+                self.admins.push(admin);
+            }
+        }
+        self
+    }
+
     pub fn acl(&self) -> StaticAcl {
         StaticAcl {
             admins: self.admins.iter().cloned().collect(),
@@ -83,6 +93,16 @@ mod tests {
             { "name": "empty" }
         ]
     }"#;
+
+    #[test]
+    fn administrators_named_apart_from_the_file_are_added_to_its_own() {
+        let file = ServerFile::parse(r#"{ "admins": ["root"], "repos": [] }"#)
+            .unwrap()
+            .with_admins(["uuid-one".to_string(), "root".to_string()]);
+        let acl = file.acl();
+        assert!(acl.admins.contains("root") && acl.admins.contains("uuid-one"));
+        assert_eq!(acl.admins.len(), 2, "a name in both is one administrator");
+    }
 
     #[test]
     fn the_file_becomes_the_acl() {
