@@ -46,6 +46,8 @@ pub struct RuntimeChanged {
 pub struct RuntimeValue {
     pub version: u64,
     pub body: serde_json::Value,
+    /// Who signed it, as `name (serial xx)`: for the record, not what makes it believed.
+    pub signer: String,
 }
 
 /// Every problem with a set of declarations: a name that is empty or not lowercase letters, digits and

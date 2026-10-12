@@ -51,6 +51,25 @@ pub enum Decision {
     NotDetermined,
 }
 
+/// The most policy text the agents will take: more than any rule set should need, and a bound on what a
+/// signed document can ask every agent to parse.
+pub const MAX_POLICY_BYTES: usize = 256 * 1024;
+
+/// Whether `source` is Cedar policy this crate would load, with the reason if not. Pure: an agent checks a
+/// policy document with it when it arrives, before it is signed and sent to every other agent.
+pub fn validate_source(source: &str) -> Result<(), String> {
+    if source.len() > MAX_POLICY_BYTES {
+        return Err(format!(
+            "the policy is too large: {} bytes, and at most {MAX_POLICY_BYTES} are taken",
+            source.len()
+        ));
+    }
+    source
+        .parse::<PolicySet>()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PolicyError {
     #[error("failed to parse policy source: {0}")]
@@ -699,5 +718,20 @@ mod tests {
         let backslash_quote = ask(&actor, "a\\\"b", None, r#"Action::"x""#, r#"Thing::"t""#).await;
         assert_eq!(quote, Decision::Allow);
         assert_eq!(backslash_quote, Decision::NotDetermined);
+    }
+
+    #[test]
+    fn policy_source_is_checked_without_an_actor_and_with_every_problem_said() {
+        assert_eq!(
+            validate_source(r#"permit(principal, action, resource);"#),
+            Ok(())
+        );
+        // No rules is a policy that says nothing: valid, and every request is then undetermined.
+        assert_eq!(validate_source(""), Ok(()));
+        let problem = validate_source("this is not Cedar").unwrap_err();
+        assert!(!problem.is_empty());
+        // Larger than any rule set should be.
+        let huge = "// ".to_string() + &"x".repeat(MAX_POLICY_BYTES);
+        assert!(validate_source(&huge).unwrap_err().contains("too large"));
     }
 }

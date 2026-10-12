@@ -295,8 +295,14 @@ impl ConfigurationState {
                     match (declared.validate)(&body) {
                         Err(problems) => ApplyOutcome::Refused(Refusal::Invalid(problems)),
                         Ok(()) => {
-                            self.runtime
-                                .insert(section.to_string(), RuntimeValue { version, body });
+                            self.runtime.insert(
+                                section.to_string(),
+                                RuntimeValue {
+                                    version,
+                                    body,
+                                    signer: signer.clone(),
+                                },
+                            );
                             ApplyOutcome::Applied {
                                 changed: vec![section.to_string()],
                             }
@@ -1700,6 +1706,12 @@ mod tests {
         let held = config.runtime("repositories").await.unwrap().unwrap();
         assert_eq!(held.version, 1);
         assert_eq!(held.body, repos(&["https://a.example/r.git"]));
+        // Who signed it is kept with it, by name and certificate serial, for the record an update carries.
+        assert!(
+            held.signer.contains("alice") && held.signer.contains("serial"),
+            "{}",
+            held.signer
+        );
         settle().await;
         assert_eq!(
             *seen.lock().unwrap(),
