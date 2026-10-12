@@ -114,6 +114,31 @@ pub fn configuration_payload(
     })
 }
 
+/// The payload of a runtime document: `{ type, id, target: { agent }, section, version, body }`. The body is
+/// whatever the agent declared for that section; the receiver validates it.
+pub fn runtime_payload(agent: &str, section: &str, version: u64, id: &str, body: Value) -> Value {
+    json!({
+        "type": "runtime",
+        "id": id,
+        "target": { "agent": agent },
+        "section": section,
+        "version": version,
+        "body": body,
+    })
+}
+
+/// A body as given on a command line or in a file: JSON, and an object, since a section's body is a set of
+/// named fields.
+pub fn parse_body(text: &str) -> Result<Value, String> {
+    let value: Value =
+        serde_json::from_str(text).map_err(|e| format!("the body is not JSON: {e}"))?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err("the body must be a JSON object".to_string())
+    }
+}
+
 /// `NAME=VALUE`, as given on a command line.
 pub fn parse_change(arg: &str) -> Result<(String, String), String> {
     match arg.split_once('=') {
@@ -351,5 +376,52 @@ mod tests {
         let file = sign_to_dhall(payload(), &identity).unwrap();
         // a chain that carries the pinned root is trusted by the pin
         assert!(verify_source(&file, std::slice::from_ref(&ca.pem), now()).is_ok());
+    }
+
+    #[test]
+    fn a_runtime_payload_has_the_fields_the_receiver_reads() {
+        let body = json!({ "source": "permit (principal, action, resource);" });
+        let p = runtime_payload(
+            "credentials-agent-consumer",
+            "policy",
+            3,
+            "id-1",
+            body.clone(),
+        );
+        assert_eq!(p["type"], "runtime");
+        assert_eq!(p["target"]["agent"], "credentials-agent-consumer");
+        assert_eq!(p["section"], "policy");
+        assert_eq!(p["version"], 3);
+        assert_eq!(p["body"], body);
+        assert_eq!(
+            p.as_object().unwrap().len(),
+            6,
+            "no field the receiver does not know"
+        );
+    }
+
+    #[test]
+    fn a_body_is_a_json_object_and_nothing_else() {
+        assert_eq!(parse_body(r#"{"a": 1}"#).unwrap(), json!({ "a": 1 }));
+        for bad in ["", "[1]", "\"text\"", "7", "null", "{not json"] {
+            assert!(parse_body(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_first_policy_signs_and_verifies_back_word_for_word() {
+        let source = include_str!("../../../../infra/seeds/signed/policy.cedar");
+        let ca = root("Polar Internal CA");
+        let payload = runtime_payload(
+            "credentials-agent-consumer",
+            "policy",
+            1,
+            "id-1",
+            json!({ "source": source }),
+        );
+        let file = sign_to_dhall(payload.clone(), &identity_for(&ca)).unwrap();
+        let (_, back) = verify_source(&file, std::slice::from_ref(&ca.pem), now()).unwrap();
+        assert_eq!(back, payload);
+        assert_eq!(back["body"]["source"], source);
     }
 }
