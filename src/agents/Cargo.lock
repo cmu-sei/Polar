@@ -5815,6 +5815,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "polar-sign"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "polar-env",
+ "polar-signing",
+ "serde_dhall",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
 name = "polar-signing"
 version = "1.0.0"
 dependencies = [

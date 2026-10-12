@@ -71,6 +71,7 @@ members = [
     "polar-init",
     "polar-kernel-keyring",
     "polar-signing",
+    "polar-sign",
     "polar-agent-builder",
     "polar-permissions",
     "polar-policy",
