@@ -5573,6 +5573,7 @@ dependencies = [
  "async-trait",
  "cassini-client",
  "cassini-types",
+ "cert-issuer-common",
  "credentials_agent_common",
  "libc",
  "polar",

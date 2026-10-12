@@ -624,20 +624,22 @@ impl Actor for InfrastructureSupervisor {
         let command_verifier = verifier
             .as_ref()
             .map(crate::signed::UpdateVerifier::commands);
-        let configuration = ConfigurationHandle::spawn_with_runtime(
+        let configuration = ConfigurationHandle::spawn_full(
             None,
             args.service_name.clone(),
             (*args.config).clone(),
             verifier,
             args.runtime_sections,
+            authority.as_ref().map(|a| a.policy()),
             myself_cell.clone(),
         )
         .await?;
-        let commands = crate::command_actor::CommandHandle::spawn(
+        let commands = crate::command_actor::CommandHandle::spawn_with_policy(
             None,
             args.service_name.clone(),
             command_verifier,
             args.commands,
+            authority.as_ref().map(|a| a.policy()),
             myself_cell.clone(),
         )
         .await?;
@@ -1546,6 +1548,89 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_policy_from_the_credentials_agent_decides_who_may_change_a_section_before_the_certificate_does()
+     {
+        use crate::configuration::{ApplyOutcome, Refusal};
+        use crate::signed::Rejection;
+        use credentials_agent_common::authority_update::{AuthorityBody, AuthorityPayload};
+        use polar_signing::testing::{Spec, root, signer};
+
+        let ca = root("Polar Internal CA");
+        let dir = tempfile::tempdir().unwrap();
+        let ca_file = dir.path().join("ca.pem");
+        std::fs::write(&ca_file, &ca.pem).unwrap();
+        let rig = Rig::with_runtime(
+            "infra-policy-first",
+            &[("TLS_CA_CERT", ca_file.to_str().unwrap())],
+            &INFRA_RUNTIME,
+        )
+        .await;
+        // alice holds update-configuration only: the certificate does not admit her to a runtime section.
+        let s = signer(
+            &ca,
+            Spec {
+                not_after_year: 2090,
+                ..Spec::default()
+            },
+        );
+        let document = |version: u64| {
+            polar_signing::sign(
+                serde_json::json!({
+                    "type": "runtime", "id": format!("r-{version}"), "target": {"agent": "infra-policy-first"},
+                    "section": "repositories", "version": version, "body": {}
+                }),
+                std::slice::from_ref(&s.cert_pem),
+                &s.key_pem,
+            )
+            .unwrap()
+            .to_value()
+        };
+        let outcome = rig
+            .resources
+            .configuration
+            .submit(document(1))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                ApplyOutcome::Refused(Refusal::Unverified(Rejection::Unauthorized(_)))
+            ),
+            "before any policy: {outcome:?}"
+        );
+
+        // The credentials agent sends a policy that lets alice change that section.
+        let key = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        deliver_snapshot(
+            &rig,
+            &authority_snapshot(
+                &key,
+                &[AuthorityPayload {
+                    sequence: 1,
+                    version: 1,
+                    body: AuthorityBody::Policy {
+                        source: r#"permit(principal == Identity::"alice", action == Action::"update-runtime", resource == Section::"infra-policy-first/repositories");"#
+                            .into(),
+                    },
+                    authored_by: None,
+                }],
+            ),
+            Some(CREDENTIALS),
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let outcome = rig
+            .resources
+            .configuration
+            .submit(document(1))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, ApplyOutcome::Applied { .. }),
+            "once policy says so: {outcome:?}"
+        );
+    }
+
     // -- asking for the configuration the scheduler holds -------------------------------
 
     #[tokio::test]
@@ -2009,6 +2094,107 @@ mod tests {
             "{:?}",
             last.detail
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_policy_from_the_credentials_agent_decides_who_may_run_a_command_before_the_certificate_does()
+     {
+        use crate::command::{ArgSpec, CommandSpec, Delivery};
+        use credentials_agent_common::authority_update::{AuthorityBody, AuthorityPayload};
+        use polar_scheduler_common::command_topic;
+        use polar_signing::testing::{Spec, root, signer};
+
+        const PING: CommandSpec = CommandSpec {
+            name: "ping",
+            doc: "answers",
+            args: &[] as &[ArgSpec],
+            delivery: Delivery::Idempotent,
+            exclusive: false,
+            timeout: Duration::from_secs(5),
+        };
+        let ca = root("Polar Internal CA");
+        let dir = tempfile::tempdir().unwrap();
+        let ca_file = dir.path().join("ca.pem");
+        std::fs::write(&ca_file, &ca.pem).unwrap();
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let rig = Rig::with_commands(
+            "infra-command-policy",
+            &[("TLS_CA_CERT", ca_file.to_str().unwrap())],
+            vec![(PING, Arc::new(Ran(ran.clone())))],
+        )
+        .await;
+        // alice holds update-configuration, not run-command.
+        let s = signer(
+            &ca,
+            Spec {
+                not_after_year: 2090,
+                ..Spec::default()
+            },
+        );
+        let issued = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let run = |rig: &Rig, id: &str| {
+            let document = polar_signing::sign(
+                serde_json::json!({
+                    "type": "command", "id": id, "target": {"agent": "infra-command-policy"},
+                    "command": "ping", "args": {}, "issued_at": issued, "not_after": issued + 900
+                }),
+                std::slice::from_ref(&s.cert_pem),
+                &s.key_pem,
+            )
+            .unwrap()
+            .to_value();
+            let payload = rkyv::to_bytes::<rkyv::rancor::Error>(
+                &polar_scheduler_common::CommandNotification {
+                    agent: "infra-command-policy".to_string(),
+                    document_json: document.to_string(),
+                },
+            )
+            .unwrap()
+            .to_vec();
+            rig.resources
+                .router
+                .send_message(polar_router::RouterMessage::Route(
+                    polar_router::IncomingMessage {
+                        topic: command_topic("infra-command-policy"),
+                        payload,
+                        published_by: None,
+                        trace_ctx: None,
+                    },
+                ))
+                .unwrap();
+        };
+
+        run(&rig, "before");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            ran.lock().unwrap().is_empty(),
+            "the certificate alone does not admit her"
+        );
+
+        let key = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        deliver_snapshot(
+            &rig,
+            &authority_snapshot(
+                &key,
+                &[AuthorityPayload {
+                    sequence: 1,
+                    version: 1,
+                    body: AuthorityBody::Policy {
+                        source: r#"permit(principal == Identity::"alice", action == Action::"run-command", resource == Command::"infra-command-policy/ping");"#
+                            .into(),
+                    },
+                    authored_by: None,
+                }],
+            ),
+            Some(CREDENTIALS),
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        run(&rig, "after");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(*ran.lock().unwrap(), ["after"]);
     }
 
     #[tokio::test(start_paused = true)]

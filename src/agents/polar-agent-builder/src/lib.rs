@@ -43,6 +43,7 @@ pub use infrastructure::{
 };
 pub mod message;
 pub use message::{Encrypted, Outbound, Plaintext};
+pub mod policy_authority;
 pub mod runtime;
 pub use runtime::{RuntimeChanged, RuntimeSection, RuntimeValue};
 pub mod selftest;

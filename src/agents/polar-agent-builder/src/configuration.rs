@@ -26,6 +26,7 @@
 use crate::runtime::{RuntimeChanged, RuntimeSection, RuntimeValue};
 use crate::signed::{Rejection, UpdateVerifier, VerifiedDocument};
 use polar_env::{Config, Resolved};
+use polar_policy::PolicyMessage;
 use polar_scheduler_common::ConfigurationOutcome;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
 use std::collections::{HashMap, VecDeque};
@@ -136,6 +137,9 @@ pub struct ConfigurationArgs {
     pub runtime_sections: &'static [&'static RuntimeSection],
     /// Where a replaced runtime section is announced.
     pub runtime_changes: Arc<OutputPort<RuntimeChanged>>,
+    /// The agent's policy actor. When there is one with a policy loaded, it is asked before the signer's
+    /// certificate whether they may make a change (docs/architecture/authority-distribution.md).
+    pub policy: Option<ActorRef<PolicyMessage>>,
 }
 
 pub struct ConfigurationState {
@@ -153,6 +157,7 @@ pub struct ConfigurationState {
     runtime_changes: Arc<OutputPort<RuntimeChanged>>,
     /// The latest accepted body of each runtime section, by name. Versions are per section.
     runtime: HashMap<String, RuntimeValue>,
+    policy: Option<ActorRef<PolicyMessage>>,
 }
 
 /// The id and version a document says it has, read without trusting any of it: only to label an outcome.
@@ -198,11 +203,31 @@ fn describe_signer(signer: &polar_signing::SignerInfo) -> String {
 impl ConfigurationState {
     /// A signed document: verified first, applied only if it passes. A configuration document changes
     /// the agent's variables; a runtime document replaces a section of what it works on.
-    fn submit(&mut self, document: &serde_json::Value) -> ApplyOutcome {
+    ///
+    /// Verification is in stages with the question of authority in the middle: the signature and the shape
+    /// first, then whether this signer may make this change (the policy first and the certificate second, see
+    /// [`crate::policy_authority`]), then whether their certificate has been revoked.
+    async fn submit(&mut self, document: &serde_json::Value) -> ApplyOutcome {
         let Some(verifier) = &self.verifier else {
             return self.reject(claimed(document), Rejection::NotConfigured);
         };
-        match verifier.verify_document(document) {
+        let opened = match verifier.open(document) {
+            Ok(opened) => opened,
+            Err(rejection) => return self.reject(claimed(document), rejection),
+        };
+        let request = opened.request(&self.agent);
+        // The certificate's answer is cheap and does not change while we ask policy; it is what policy falls
+        // back to when it does not speak to the request.
+        let floor = verifier.floor(&opened);
+        let admitted =
+            crate::policy_authority::admit(self.policy.as_ref(), &request, || floor.clone()).await;
+        if let Err(refusal) = admitted {
+            return self.reject(claimed(document), Rejection::Unauthorized(refusal));
+        }
+        let Some(verifier) = &self.verifier else {
+            return self.reject(claimed(document), Rejection::NotConfigured);
+        };
+        match verifier.close(opened) {
             Ok(VerifiedDocument::Configuration(verified)) => {
                 let signer = describe_signer(&verified.signer);
                 info!(id = %verified.id, version = verified.version, %signer, "signed configuration verified");
@@ -397,6 +422,7 @@ impl Actor for ConfigurationActor {
             runtime_sections: args.runtime_sections,
             runtime_changes: args.runtime_changes,
             runtime: HashMap::new(),
+            policy: args.policy,
         })
     }
 
@@ -416,10 +442,10 @@ impl Actor for ConfigurationActor {
                 let _ = reply.send(outcome);
             }
             ConfigurationMessage::Deliver(document) => {
-                state.submit(&document);
+                state.submit(&document).await;
             }
             ConfigurationMessage::Submit { document, reply } => {
-                let outcome = state.submit(&document);
+                let outcome = state.submit(&document).await;
                 let _ = reply.send(outcome);
             }
             ConfigurationMessage::Current(reply) => {
@@ -467,6 +493,29 @@ impl ConfigurationHandle {
         runtime_sections: &'static [&'static RuntimeSection],
         supervisor: ractor::ActorCell,
     ) -> Result<Self, ActorProcessingErr> {
+        Self::spawn_full(
+            name,
+            agent,
+            config,
+            verifier,
+            runtime_sections,
+            None,
+            supervisor,
+        )
+        .await
+    }
+
+    /// Starts the actor with everything: runtime sections, and the policy actor to ask before the
+    /// signer's certificate whether a change is allowed.
+    pub async fn spawn_full(
+        name: Option<String>,
+        agent: impl Into<String>,
+        config: Config,
+        verifier: Option<UpdateVerifier>,
+        runtime_sections: &'static [&'static RuntimeSection],
+        policy: Option<ActorRef<PolicyMessage>>,
+        supervisor: ractor::ActorCell,
+    ) -> Result<Self, ActorProcessingErr> {
         let changes = Arc::new(OutputPort::default());
         let outcomes = Arc::new(OutputPort::default());
         let runtime_changes = Arc::new(OutputPort::default());
@@ -481,6 +530,7 @@ impl ConfigurationHandle {
                 outcomes: outcomes.clone(),
                 runtime_sections,
                 runtime_changes: runtime_changes.clone(),
+                policy,
             },
             supervisor,
         )
@@ -1782,5 +1832,180 @@ mod tests {
             matches!(outcome, ApplyOutcome::Refused(Refusal::Invalid(_))),
             "{outcome:?}"
         );
+    }
+
+    // -- policy first, the certificate second ------------------------------------------------------
+
+    async fn policy_handle(
+        verifier: UpdateVerifier,
+        policy_source: Option<&str>,
+    ) -> ConfigurationHandle {
+        use polar_permissions::PermissionsActor;
+        use polar_policy::{PolicyActor, PolicyActorArgs, PolicyMessage};
+        struct Parent;
+        #[ractor::async_trait]
+        impl Actor for Parent {
+            type Msg = ();
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(&self, _: ActorRef<()>, _: ()) -> Result<(), ActorProcessingErr> {
+                Ok(())
+            }
+        }
+        let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
+        let (permissions, _) = Actor::spawn(None, PermissionsActor, ()).await.unwrap();
+        let (policy, _) = Actor::spawn(
+            None,
+            PolicyActor,
+            PolicyActorArgs {
+                permissions_actor: permissions,
+            },
+        )
+        .await
+        .unwrap();
+        if let Some(source) = policy_source {
+            ractor::call!(policy, |reply| PolicyMessage::UpdatePolicy {
+                policy_source: source.to_string(),
+                reply,
+            })
+            .unwrap()
+            .unwrap();
+        }
+        ConfigurationHandle::spawn_full(
+            None,
+            AGENT,
+            config(),
+            Some(verifier),
+            &RUNTIME_SECTIONS,
+            Some(policy),
+            parent.get_cell(),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn is_unauthorized(outcome: &ApplyOutcome) -> bool {
+        matches!(
+            outcome,
+            ApplyOutcome::Refused(Refusal::Unverified(Rejection::Unauthorized(_)))
+        )
+    }
+
+    #[tokio::test]
+    async fn a_policy_that_permits_admits_a_runtime_signer_whose_certificate_would_not() {
+        let signed = Signed::new();
+        // alice holds update-configuration only (the default signer), and the policy lets her change a section.
+        let config = policy_handle(
+            signed.verifier(),
+            Some(&format!(
+                r#"permit(principal == Identity::"alice", action == Action::"update-runtime", resource == Section::"{AGENT}/repositories");"#
+            )),
+        )
+        .await;
+        let outcome = config
+            .submit(signed.runtime_by(
+                Spec::default(),
+                "repositories",
+                1,
+                repos(&["https://a.example/r.git"]),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, ApplyOutcome::Applied { .. }),
+            "{outcome:?}"
+        );
+        // The permit was for that section: another section is left to the certificate, which refuses.
+        let outcome = config
+            .submit(signed.runtime_by(Spec::default(), "admission", 1, json!({})))
+            .await
+            .unwrap();
+        assert!(is_unauthorized(&outcome), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn a_policy_that_forbids_refuses_a_signer_whose_certificate_would_admit() {
+        let signed = Signed::new();
+        let config = policy_handle(
+            signed.verifier(),
+            Some(&format!(
+                r#"forbid(principal == Identity::"alice", action == Action::"update-runtime", resource == Section::"{AGENT}/admission");"#
+            )),
+        )
+        .await;
+        // The runtime capability would admit her to every section; the policy takes one away.
+        let outcome = config
+            .submit(signed.runtime("admission", 1, json!({})))
+            .await
+            .unwrap();
+        assert!(is_unauthorized(&outcome), "{outcome:?}");
+        assert!(config.runtime("admission").await.unwrap().is_none());
+        let outcome = config
+            .submit(signed.runtime("repositories", 1, repos(&[])))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, ApplyOutcome::Applied { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_decides_configuration_per_variable_and_every_variable_must_be_admitted() {
+        let signed = Signed::new();
+        // Policy forbids alice from LOW; the certificate admits her to everything else.
+        let config = policy_handle(
+            signed.verifier(),
+            Some(&format!(
+                r#"forbid(principal == Identity::"alice", action == Action::"update-configuration", resource == Variable::"{AGENT}/LOW");"#
+            )),
+        )
+        .await;
+        let outcome = config.submit(signed.high(1, "20")).await.unwrap();
+        assert!(
+            matches!(outcome, ApplyOutcome::Applied { .. }),
+            "{outcome:?}"
+        );
+        let both = signed.update(
+            Spec::default(),
+            2,
+            AGENT,
+            json!([{"name": "HIGH", "value": "30"}, {"name": "LOW", "value": "1"}]),
+        );
+        let outcome = config.submit(both).await.unwrap();
+        assert!(is_unauthorized(&outcome), "{outcome:?}");
+        assert_eq!(
+            high(&config).await,
+            20,
+            "nothing of a refused document is applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_loaded_policy_or_one_that_is_silent_the_certificate_decides_as_before() {
+        let signed = Signed::new();
+        for source in [
+            None,
+            Some(r#"permit(principal == Identity::"nobody", action, resource);"#),
+        ] {
+            let config = policy_handle(signed.verifier(), source).await;
+            let outcome = config.submit(signed.high(1, "20")).await.unwrap();
+            assert!(
+                matches!(outcome, ApplyOutcome::Applied { .. }),
+                "{source:?} {outcome:?}"
+            );
+            // And a signer the certificate does not admit stays refused.
+            let no_capability = signed.update(
+                Spec {
+                    capabilities: vec!["c:grant"],
+                    ..Spec::default()
+                },
+                2,
+                AGENT,
+                json!([{"name": "HIGH", "value": "30"}]),
+            );
+            let outcome = config.submit(no_capability).await.unwrap();
+            assert!(is_unauthorized(&outcome), "{source:?} {outcome:?}");
+        }
     }
 }

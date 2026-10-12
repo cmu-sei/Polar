@@ -17,6 +17,7 @@
 
 use crate::signed::{Common, Rejection, Revocation, UpdateVerifier};
 use polar_scheduler_common::document_type;
+use polar_signing::authority::AuthorityRefusal;
 use polar_signing::{Authority, RequireCapability, SignerInfo};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -320,18 +321,46 @@ impl CommandVerifier {
         self
     }
 
+    /// All the checks against the certificate alone: the stages below in order.
     pub fn verify(&self, document: &Value) -> Result<VerifiedCommand, Rejection> {
+        let opened = self.open(document)?;
+        self.floor(&opened).map_err(Rejection::Unauthorized)?;
+        self.close(opened)
+    }
+
+    /// Stage one: the signature holds, the document is a command, its payload has the shape of one, and it is
+    /// for this agent. Whether the signer may run it is not decided here.
+    pub fn open(&self, document: &Value) -> Result<OpenedCommand, Rejection> {
         let (document, signer) = self.common.signed(document)?;
         self.common.expect_kind(&document, document_type::COMMAND)?;
 
         // The signature held, so the payload is what the signer wrote. Read it strictly.
         let command = parse(&document.payload).map_err(Rejection::Payload)?;
-        self.common.check_target(command.target)?;
-        self.authority
-            .authorize(&signer, &document.payload)
-            .map_err(Rejection::Unauthorized)?;
-        self.common.check_not_revoked(&signer)?;
+        self.common.check_target(command.target.clone())?;
+        let certificate_pem = document
+            .signature
+            .certificate_chain
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        Ok(OpenedCommand {
+            signer,
+            certificate_pem,
+            payload: document.payload,
+            command,
+        })
+    }
 
+    /// Stage two, the floor: the signer's certificate carries `c:run-command`. Where there is a policy it is
+    /// asked first, and this is only what it falls back to.
+    pub fn floor(&self, opened: &OpenedCommand) -> Result<(), AuthorityRefusal> {
+        self.authority.authorize(&opened.signer, &opened.payload)
+    }
+
+    /// Stage three: the certificate has not been revoked and the command is within its time.
+    pub fn close(&self, opened: OpenedCommand) -> Result<VerifiedCommand, Rejection> {
+        self.common.check_not_revoked(&opened.signer)?;
+        let command = opened.command;
         let now = u64::try_from(self.common.now()).unwrap_or(0);
         check_window(&command.window, &self.rules, now).map_err(Rejection::Window)?;
         Ok(VerifiedCommand {
@@ -339,8 +368,34 @@ impl CommandVerifier {
             command: command.command,
             args: command.args,
             window: command.window,
-            signer,
+            signer: opened.signer,
         })
+    }
+}
+
+/// A command whose signature and shape have been checked and whose signer has not yet been judged.
+pub struct OpenedCommand {
+    signer: SignerInfo,
+    certificate_pem: String,
+    payload: Value,
+    command: Parsed,
+}
+
+impl OpenedCommand {
+    /// What is being asked of policy: who, to run what.
+    pub fn request(&self, agent: &str) -> crate::policy_authority::AuthorityRequest {
+        let principal = self
+            .signer
+            .username
+            .clone()
+            .or_else(|| self.signer.identity.clone())
+            .unwrap_or_else(|| self.signer.serial.clone());
+        crate::policy_authority::AuthorityRequest {
+            principal,
+            certificate_pem: self.certificate_pem.clone(),
+            action: "run-command",
+            resources: vec![("Command", format!("{agent}/{}", self.command.command))],
+        }
     }
 }
 

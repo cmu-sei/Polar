@@ -15,6 +15,7 @@
 
 use crate::command::{Arg, CommandSpec, CommandVerifier, check_args};
 use crate::signed::Rejection;
+use polar_policy::PolicyMessage;
 use polar_scheduler_common::{CommandOutcome, command_status};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
 use serde_json::Value;
@@ -58,6 +59,8 @@ pub struct CommandArgs {
     pub outcomes: Arc<OutputPort<CommandOutcome>>,
     /// How many ids to remember having received (see [`SEEN_IDS`]).
     pub seen_capacity: usize,
+    /// The agent's policy actor, asked before the signer's certificate whether they may run a command.
+    pub policy: Option<ActorRef<PolicyMessage>>,
 }
 
 pub enum CommandMessage {
@@ -94,6 +97,7 @@ pub struct CommandState {
     outcomes: Arc<OutputPort<CommandOutcome>>,
     sequence: u64,
     seen_capacity: usize,
+    policy: Option<ActorRef<PolicyMessage>>,
 }
 
 fn label(text: &str) -> String {
@@ -161,7 +165,7 @@ impl CommandState {
         self.seen_order.push_back(id.to_string());
     }
 
-    fn deliver(&mut self, document: &Value, myself: &ActorRef<CommandMessage>) {
+    async fn deliver(&mut self, document: &Value, myself: &ActorRef<CommandMessage>) {
         let Some(verifier) = &self.verifier else {
             return self.refuse_unverified(
                 document,
@@ -169,7 +173,38 @@ impl CommandState {
                 Rejection::NotConfigured.to_string(),
             );
         };
-        let verified = match verifier.verify(document) {
+        // In stages with the question of authority in the middle: the signature and the shape, then whether
+        // this signer may run this command (the policy first, the certificate second), then revocation and
+        // the command's time.
+        let opened = match verifier.open(document) {
+            Ok(opened) => opened,
+            Err(rejection) => {
+                return self.refuse_unverified(
+                    document,
+                    command_status::REFUSED,
+                    rejection.to_string(),
+                );
+            }
+        };
+        let request = opened.request(&self.agent);
+        let floor = verifier.floor(&opened);
+        let admitted =
+            crate::policy_authority::admit(self.policy.as_ref(), &request, || floor.clone()).await;
+        if let Err(refusal) = admitted {
+            return self.refuse_unverified(
+                document,
+                command_status::REFUSED,
+                Rejection::Unauthorized(refusal).to_string(),
+            );
+        }
+        let Some(verifier) = &self.verifier else {
+            return self.refuse_unverified(
+                document,
+                command_status::REFUSED,
+                Rejection::NotConfigured.to_string(),
+            );
+        };
+        let verified = match verifier.close(opened) {
             Ok(verified) => verified,
             Err(rejection @ Rejection::Window(crate::command::WindowError::Expired { .. })) => {
                 return self.refuse_unverified(
@@ -329,6 +364,7 @@ impl Actor for CommandActor {
             outcomes: args.outcomes,
             sequence: 0,
             seen_capacity: args.seen_capacity,
+            policy: args.policy,
         })
     }
 
@@ -339,7 +375,7 @@ impl Actor for CommandActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            CommandMessage::Deliver(document) => state.deliver(&document, &myself),
+            CommandMessage::Deliver(document) => state.deliver(&document, &myself).await,
             CommandMessage::Finished(Finished { id, result }) => {
                 // An interrupted command was announced when the actor stopped, and is not here.
                 if let Some(running) = state.running.remove(&id) {
@@ -400,12 +436,25 @@ pub struct CommandHandle {
 }
 
 impl CommandHandle {
-    /// Starts the actor as a child of `supervisor`.
+    /// Starts the actor as a child of `supervisor`, with no policy: the certificate alone decides.
     pub async fn spawn(
         name: Option<String>,
         agent: impl Into<String>,
         verifier: Option<CommandVerifier>,
         commands: Vec<(CommandSpec, Arc<dyn CommandHandler>)>,
+        supervisor: ractor::ActorCell,
+    ) -> Result<Self, ActorProcessingErr> {
+        Self::spawn_with_policy(name, agent, verifier, commands, None, supervisor).await
+    }
+
+    /// Starts the actor with the agent's policy actor, which is asked before the signer's certificate
+    /// whether they may run a command.
+    pub async fn spawn_with_policy(
+        name: Option<String>,
+        agent: impl Into<String>,
+        verifier: Option<CommandVerifier>,
+        commands: Vec<(CommandSpec, Arc<dyn CommandHandler>)>,
+        policy: Option<ActorRef<PolicyMessage>>,
         supervisor: ractor::ActorCell,
     ) -> Result<Self, ActorProcessingErr> {
         let outcomes = Arc::new(OutputPort::default());
@@ -418,6 +467,7 @@ impl CommandHandle {
                 commands,
                 outcomes: outcomes.clone(),
                 seen_capacity: SEEN_IDS,
+                policy,
             },
             supervisor,
         )
@@ -660,6 +710,7 @@ mod tests {
                     commands,
                     outcomes: outcomes.clone(),
                     seen_capacity,
+                    policy: None,
                 },
             )
             .await
@@ -1195,5 +1246,125 @@ mod tests {
         // Only the forged one reached the actor, and it was refused.
         assert_eq!(rig.statuses(), ["refused"]);
         assert!(ran.lock().unwrap().is_empty());
+    }
+
+    // -- policy first, the certificate second ------------------------------------------------------
+
+    impl Rig {
+        /// A rig whose agent has a policy actor with `policy_source` loaded.
+        async fn with_policy(
+            commands: Vec<(CommandSpec, Arc<dyn CommandHandler>)>,
+            policy_source: &str,
+        ) -> Self {
+            use polar_permissions::PermissionsActor;
+            use polar_policy::{PolicyActor, PolicyActorArgs, PolicyMessage};
+            let ca = root("Polar Internal CA");
+            let verifier = UpdateVerifier::new(
+                Trust::from_pem(std::slice::from_ref(&ca.pem)).unwrap(),
+                AGENT,
+            )
+            .with_clock(now)
+            .commands();
+            let (permissions, _) = Actor::spawn(None, PermissionsActor, ()).await.unwrap();
+            let (policy, _) = Actor::spawn(
+                None,
+                PolicyActor,
+                PolicyActorArgs {
+                    permissions_actor: permissions,
+                },
+            )
+            .await
+            .unwrap();
+            ractor::call!(policy, |reply| PolicyMessage::UpdatePolicy {
+                policy_source: policy_source.to_string(),
+                reply,
+            })
+            .unwrap()
+            .unwrap();
+            let outcomes = Arc::new(OutputPort::default());
+            let (actor, _) = Actor::spawn(
+                None,
+                CommandActor,
+                CommandArgs {
+                    agent: AGENT.to_string(),
+                    verifier: Some(verifier),
+                    commands,
+                    outcomes: outcomes.clone(),
+                    seen_capacity: SEEN_IDS,
+                    policy: Some(policy),
+                },
+            )
+            .await
+            .unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let (sink, _) = Actor::spawn(None, Sink(seen.clone()), ()).await.unwrap();
+            outcomes.subscribe(sink, Some);
+            Self {
+                ca,
+                handle: CommandHandle { actor, outcomes },
+                seen,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_policy_that_permits_lets_a_signer_run_a_command_their_certificate_would_not() {
+        let (ran, handler) = recording();
+        let rig = Rig::with_policy(
+            vec![(PING, handler)],
+            r#"permit(principal == Identity::"alice", action == Action::"run-command", resource == Command::"git-agent/ping");"#,
+        )
+        .await;
+        // alice holds update-configuration only, not run-command.
+        rig.deliver(rig.document(
+            "c:update-configuration",
+            payload("by-policy", "ping", json!({})),
+        ));
+        rig.settle().await;
+        assert_eq!(rig.statuses(), ["accepted", "started", "succeeded"]);
+        assert_eq!(ran.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_policy_that_forbids_refuses_a_command_from_a_signer_whose_certificate_would_admit() {
+        let (ran, handler) = recording();
+        let rig = Rig::with_policy(
+            vec![(PING, handler)],
+            r#"forbid(principal == Identity::"alice", action == Action::"run-command", resource == Command::"git-agent/ping");"#,
+        )
+        .await;
+        rig.deliver(rig.command("forbidden", "ping", json!({})));
+        rig.settle().await;
+        assert_eq!(rig.statuses(), ["refused"]);
+        let detail = rig.outcomes()[0].detail.join(" ");
+        assert!(
+            detail.contains("policy") && detail.contains("ping"),
+            "{detail}"
+        );
+        assert!(ran.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_policy_that_does_not_mention_the_command_leaves_it_to_the_certificate() {
+        let (ran, handler) = recording();
+        let rig = Rig::with_policy(
+            vec![(PING, handler)],
+            r#"forbid(principal == Identity::"alice", action == Action::"run-command", resource == Command::"git-agent/something-else");"#,
+        )
+        .await;
+        rig.deliver(rig.command("by-certificate", "ping", json!({})));
+        // One at a time: the first runs on its own task, and its last outcome would otherwise race the
+        // second's refusal.
+        rig.settle().await;
+        rig.deliver(rig.document(
+            "c:update-configuration",
+            payload("neither", "ping", json!({})),
+        ));
+        rig.settle().await;
+        assert_eq!(
+            rig.statuses(),
+            ["accepted", "started", "succeeded", "refused"]
+        );
+        assert_eq!(ran.lock().unwrap().len(), 1);
     }
 }

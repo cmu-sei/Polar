@@ -301,75 +301,153 @@ impl UpdateVerifier {
 
     /// A configuration document only: anything else is refused as the wrong type.
     pub fn verify(&self, document: &Value) -> Result<Verified, Rejection> {
-        let (document, signer) = self.common.signed(document)?;
-        self.verify_configuration(&document, signer)
-    }
-
-    /// A signed document of either kind this verifier handles. The signature is checked first, so the
-    /// `type` that decides which rules apply is the signer's own and not an attacker's; each kind then
-    /// has its own payload shape and its own authority.
-    pub fn verify_document(&self, document: &Value) -> Result<VerifiedDocument, Rejection> {
-        let (document, signer) = self.common.signed(document)?;
-        match document.payload.get("type").and_then(Value::as_str) {
-            Some(document_type::RUNTIME) => self
-                .verify_runtime(&document, signer)
-                .map(VerifiedDocument::Runtime),
-            // A missing `type` and any other kind get the configuration path's own refusal, which says
-            // what is wrong with it.
-            _ => self
-                .verify_configuration(&document, signer)
-                .map(VerifiedDocument::Configuration),
+        let opened = self.open(document)?;
+        if let OpenedBody::Runtime(_) = opened.body {
+            return Err(Rejection::WrongType {
+                wanted: document_type::CONFIGURATION,
+                got: document_type::RUNTIME.to_string(),
+            });
+        }
+        self.floor(&opened).map_err(Rejection::Unauthorized)?;
+        match self.close(opened)? {
+            VerifiedDocument::Configuration(verified) => Ok(verified),
+            VerifiedDocument::Runtime(_) => unreachable!("refused above"),
         }
     }
 
-    fn verify_configuration(
-        &self,
-        document: &Document,
-        signer: SignerInfo,
-    ) -> Result<Verified, Rejection> {
-        // The signature held, so the payload is what the signer wrote. Now read it: first what kind of
-        // document it is, since a command or an admission is not a configuration whatever else it says.
-        self.common
-            .expect_kind(document, document_type::CONFIGURATION)?;
-        let payload: Payload = serde_json::from_value(document.payload.clone())
-            .map_err(|e| Rejection::Payload(e.to_string()))?;
-        self.common.check_target(payload.target.agent)?;
-        self.authority
-            .authorize(&signer, &document.payload)
-            .map_err(Rejection::Unauthorized)?;
-        self.common.check_not_revoked(&signer)?;
-        Ok(Verified {
-            id: payload.id,
-            version: payload.version,
-            changes: payload
-                .changes
-                .into_iter()
-                .map(|c| (c.name, c.value))
-                .collect(),
+    /// A signed document of either kind this verifier handles, checked against the certificate alone: the
+    /// stages below in order. The ConfigurationActor does not call this: it puts policy between `open` and
+    /// `close`.
+    pub fn verify_document(&self, document: &Value) -> Result<VerifiedDocument, Rejection> {
+        let opened = self.open(document)?;
+        self.floor(&opened).map_err(Rejection::Unauthorized)?;
+        self.close(opened)
+    }
+
+    /// Stage one: the signature holds, the document is of a kind this handles, its payload has the shape of
+    /// that kind, and it is for this agent. The signature is checked first, so the `type` that decides which
+    /// rules apply is the signer's own and not an attacker's. Whether the signer may make this change is not
+    /// decided here.
+    pub fn open(&self, document: &Value) -> Result<Opened, Rejection> {
+        let (document, signer) = self.common.signed(document)?;
+        let certificate_pem = document
+            .signature
+            .certificate_chain
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        let body = match document.payload.get("type").and_then(Value::as_str) {
+            Some(document_type::RUNTIME) => {
+                self.common.expect_kind(&document, document_type::RUNTIME)?;
+                let payload: RuntimePayload = serde_json::from_value(document.payload.clone())
+                    .map_err(|e| Rejection::Payload(e.to_string()))?;
+                self.common.check_target(payload.target.agent.clone())?;
+                OpenedBody::Runtime(payload)
+            }
+            // A missing `type` and any other kind get the configuration path's own refusal, which says
+            // what is wrong with it.
+            _ => {
+                self.common
+                    .expect_kind(&document, document_type::CONFIGURATION)?;
+                let payload: Payload = serde_json::from_value(document.payload.clone())
+                    .map_err(|e| Rejection::Payload(e.to_string()))?;
+                self.common.check_target(payload.target.agent.clone())?;
+                OpenedBody::Configuration(payload)
+            }
+        };
+        Ok(Opened {
             signer,
+            certificate_pem,
+            payload: document.payload,
+            body,
         })
     }
 
-    fn verify_runtime(
-        &self,
-        document: &Document,
-        signer: SignerInfo,
-    ) -> Result<VerifiedRuntime, Rejection> {
-        self.common.expect_kind(document, document_type::RUNTIME)?;
-        let payload: RuntimePayload = serde_json::from_value(document.payload.clone())
-            .map_err(|e| Rejection::Payload(e.to_string()))?;
-        self.common.check_target(payload.target.agent)?;
-        self.runtime_authority
-            .authorize(&signer, &document.payload)
-            .map_err(Rejection::Unauthorized)?;
-        self.common.check_not_revoked(&signer)?;
-        Ok(VerifiedRuntime {
-            id: payload.id,
-            version: payload.version,
-            section: payload.section,
-            body: payload.body,
-            signer,
+    /// Stage two, the floor: the signer's certificate carries the capability this kind of document needs.
+    /// Where there is a policy it is asked first, and this is only what it falls back to.
+    pub fn floor(&self, opened: &Opened) -> Result<(), AuthorityRefusal> {
+        let authority = match opened.body {
+            OpenedBody::Configuration(_) => &self.authority,
+            OpenedBody::Runtime(_) => &self.runtime_authority,
+        };
+        authority.authorize(&opened.signer, &opened.payload)
+    }
+
+    /// Stage three: the signer's certificate has not been revoked, and the document is what the agent acts on.
+    pub fn close(&self, opened: Opened) -> Result<VerifiedDocument, Rejection> {
+        self.common.check_not_revoked(&opened.signer)?;
+        let signer = opened.signer;
+        Ok(match opened.body {
+            OpenedBody::Configuration(payload) => VerifiedDocument::Configuration(Verified {
+                id: payload.id,
+                version: payload.version,
+                changes: payload
+                    .changes
+                    .into_iter()
+                    .map(|c| (c.name, c.value))
+                    .collect(),
+                signer,
+            }),
+            OpenedBody::Runtime(payload) => VerifiedDocument::Runtime(VerifiedRuntime {
+                id: payload.id,
+                version: payload.version,
+                section: payload.section,
+                body: payload.body,
+                signer,
+            }),
         })
+    }
+}
+
+enum OpenedBody {
+    Configuration(Payload),
+    Runtime(RuntimePayload),
+}
+
+/// A document whose signature and shape have been checked and whose signer has not yet been judged.
+pub struct Opened {
+    signer: SignerInfo,
+    certificate_pem: String,
+    payload: Value,
+    body: OpenedBody,
+}
+
+impl Opened {
+    pub fn signer(&self) -> &SignerInfo {
+        &self.signer
+    }
+
+    /// What is being asked of policy: who, to do what, to which things.
+    pub fn request(&self, agent: &str) -> crate::policy_authority::AuthorityRequest {
+        let principal = self
+            .signer
+            .username
+            .clone()
+            .or_else(|| self.signer.identity.clone())
+            .unwrap_or_else(|| self.signer.serial.clone());
+        let (action, resources) = match &self.body {
+            OpenedBody::Configuration(payload) if payload.changes.is_empty() => {
+                ("update-configuration", vec![("Agent", agent.to_string())])
+            }
+            OpenedBody::Configuration(payload) => (
+                "update-configuration",
+                payload
+                    .changes
+                    .iter()
+                    .map(|c| ("Variable", format!("{agent}/{}", c.name)))
+                    .collect(),
+            ),
+            OpenedBody::Runtime(payload) => (
+                "update-runtime",
+                vec![("Section", format!("{agent}/{}", payload.section))],
+            ),
+        };
+        crate::policy_authority::AuthorityRequest {
+            principal,
+            certificate_pem: self.certificate_pem.clone(),
+            action,
+            resources,
+        }
     }
 }
 

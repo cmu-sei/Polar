@@ -215,10 +215,14 @@ impl PolicyActor {
         .map_err(|e| PolicyError::PermissionsResolution(e.to_string()))?
         .map_err(|e| PolicyError::PermissionsResolution(e.to_string()))?;
 
-        let principal_uid_str = format!(r#"Identity::"{requester_identity}""#);
-        let principal_uid: EntityUid = principal_uid_str
-            .parse()
-            .map_err(|e| PolicyError::RequestConstruction(format!("principal: {e}")))?;
+        // Built from the type and the id as they are, never by formatting the id into text to be parsed: a
+        // name with a quote or a backslash in it is that name, and no other entity.
+        let principal_uid = EntityUid::from_type_name_and_id(
+            "Identity"
+                .parse::<cedar_policy::EntityTypeName>()
+                .map_err(|e| PolicyError::RequestConstruction(format!("principal: {e}")))?,
+            cedar_policy::EntityId::new(requester_identity),
+        );
         let action_uid: EntityUid = action
             .parse()
             .map_err(|e| PolicyError::RequestConstruction(format!("action: {e}")))?;
@@ -679,5 +683,21 @@ mod tests {
         .await;
         assert_eq!(holder, Decision::Allow);
         assert_eq!(without, Decision::NotDetermined);
+    }
+
+    #[tokio::test]
+    async fn a_name_is_exactly_the_entity_it_says_and_two_names_never_collapse_into_one() {
+        let actor = spawn_policy_actor().await;
+        // Permits the principal whose name is a"b, quote included.
+        load(
+            &actor,
+            r#"permit(principal == Identity::"a\"b", action == Action::"x", resource);"#,
+        )
+        .await;
+        let quote = ask(&actor, "a\"b", None, r#"Action::"x""#, r#"Thing::"t""#).await;
+        // A different name, backslash then quote: formatted without escaping it parsed as the same entity.
+        let backslash_quote = ask(&actor, "a\\\"b", None, r#"Action::"x""#, r#"Thing::"t""#).await;
+        assert_eq!(quote, Decision::Allow);
+        assert_eq!(backslash_quote, Decision::NotDetermined);
     }
 }
