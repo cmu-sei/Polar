@@ -1,8 +1,9 @@
 # Authority distribution: policy and permissions pushed to the leaves
 
-Status, 2026-10-12: design, decided with David except the two questions at the end. Built so far: the
-three-valued decision in `polar-policy`, groups and principals in `polar-permissions`, and the `c:update-groups`
-capability (each marked below). The rest is not built. It supersedes the placement questions in `credentials-policy.md` and the "policy for other
+Status, 2026-10-12: design, decided with David; no question is open. Built so far: the three-valued decision in
+`polar-policy`, groups and principals in `polar-permissions`, the `c:update-groups` capability, and in
+`credentials_agent_common` the `AuthorityUpdate` message with its signing and verification (`authority_update`) and
+the state a holder keeps (`authority_state`). The rest is not built. It supersedes the placement questions in `credentials-policy.md` and the "policy for other
 receivers" note in `git-controller.md`.
 
 ## The principle (David, 2026-10-12)
@@ -83,6 +84,8 @@ Three kinds of authoritative data, each replaced whole and versioned:
   and resource types that every agent has), so an author cannot change what a type is.
 
 ### The signal
+
+**Built 2026-10-12, in `credentials_agent_common`:** `authority_update` (the payload kinds `Policy`, `Groups`, `Revoked`; `sign` with a blinded RSASSA-PSS-SHA256 over the domain line and the payload bytes; `verify`, which checks the key fingerprint, then the signature, and reads the bytes only then, strictly) and `authority_state` (latest of each kind, stale by version, a jump in the credentials agent's sequence reported as a missed update, and what arrives as the answer to a catch-up request exempt from that). Each was written test first; dropping the domain line, the fingerprint check, the catch-up exemption or the stale rule each fails a test. The update carries the signed bytes, not a structure to be re-encoded.
 
 On accepting an update the credentials agent records it in its ledger with a **global sequence number** (the ledger
 already orders admin actions this way) and publishes it on a topic, `polar-authority-updates`:

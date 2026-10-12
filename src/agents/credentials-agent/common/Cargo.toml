@@ -23,6 +23,7 @@ license.workspace = true
 
 [dependencies]
 rkyv.workspace = true
+serde_json.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 neo4rs.workspace = true
@@ -57,5 +58,4 @@ ed25519-dalek.workspace = true
 p256.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 rcgen.workspace = true

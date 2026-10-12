@@ -198,10 +198,7 @@ mod tests {
 
     #[test]
     fn update_groups_is_its_own_capability_and_comes_last() {
-        assert_eq!(
-            Capability::UpdateGroups.to_san_string(),
-            "c:update-groups"
-        );
+        assert_eq!(Capability::UpdateGroups.to_san_string(), "c:update-groups");
         assert_eq!(
             Capability::from_san_string("c:update-groups"),
             Ok(Capability::UpdateGroups)
