@@ -24,6 +24,9 @@ pub enum Capability {
     Revoke,
     /// Submit a policy update.
     UpdatePolicy,
+    /// Run a signed command on an agent (docs/architecture/commands.md). Last, so that what was archived
+    /// with the earlier four keeps its meaning.
+    RunCommand,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -35,11 +38,12 @@ pub enum CapabilityParseError {
 }
 
 impl Capability {
-    pub const ALL: [Capability; 4] = [
+    pub const ALL: [Capability; 5] = [
         Capability::ProvisionAccount,
         Capability::Grant,
         Capability::Revoke,
         Capability::UpdatePolicy,
+        Capability::RunCommand,
     ];
 
     fn name(self) -> &'static str {
@@ -48,6 +52,7 @@ impl Capability {
             Self::Grant => "grant",
             Self::Revoke => "revoke",
             Self::UpdatePolicy => "update-policy",
+            Self::RunCommand => "run-command",
         }
     }
 
@@ -102,6 +107,21 @@ mod tests {
     fn san_string_matches_the_documented_format() {
         assert_eq!(Capability::ProvisionAccount.to_san_string(), "c:provision-account");
         assert_eq!(Capability::UpdatePolicy.to_san_string(), "c:update-policy");
+    }
+
+    #[test]
+    fn run_command_is_the_last_capability_and_has_its_own_san_string() {
+        assert_eq!(Capability::RunCommand.to_san_string(), "c:run-command");
+        assert_eq!(
+            Capability::from_san_string("c:run-command"),
+            Ok(Capability::RunCommand)
+        );
+        // Appended, never inserted: the four before it keep their places.
+        assert_eq!(Capability::ALL[4], Capability::RunCommand);
+        assert_eq!(Capability::ALL[3], Capability::UpdatePolicy);
+        // A close relative is not it.
+        assert!(Capability::from_san_string("c:run").is_err());
+        assert!(Capability::from_san_string("c:run-commands").is_err());
     }
 
     #[test]

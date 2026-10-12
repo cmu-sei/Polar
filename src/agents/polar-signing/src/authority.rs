@@ -26,6 +26,13 @@ impl RequireCapability {
     }
 }
 
+impl RequireCapability {
+    /// The capability meant for running commands.
+    pub fn run_command() -> Self {
+        Self(Capability::RunCommand)
+    }
+}
+
 impl Authority for RequireCapability {
     fn authorize(&self, signer: &SignerInfo, _payload: &Value) -> Result<(), AuthorityRefusal> {
         if signer.capabilities.contains(&self.0) {

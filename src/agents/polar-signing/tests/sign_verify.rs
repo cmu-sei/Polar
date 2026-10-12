@@ -468,3 +468,47 @@ fn a_document_with_a_field_the_signature_does_not_cover_is_refused_before_anythi
         Err(LayoutError::UnexpectedField("owner".into()))
     );
 }
+
+#[test]
+fn running_a_command_needs_its_own_capability_and_update_policy_does_not_give_it() {
+    let ca = root("Polar Internal CA");
+    let trust = trust(&ca.pem);
+    let rule = RequireCapability::run_command();
+
+    let (allowed, _) = signed(
+        &ca,
+        Spec {
+            capabilities: vec!["c:run-command"],
+            ..Spec::default()
+        },
+    );
+    let who = verify(&allowed, &trust, now()).unwrap();
+    assert_eq!(who.capabilities, vec![Capability::RunCommand]);
+    assert!(rule.authorize(&who, &allowed.payload).is_ok());
+
+    // The other capabilities, all together, are not it.
+    let (others, _) = signed(
+        &ca,
+        Spec {
+            capabilities: vec!["c:update-policy", "c:grant", "c:revoke", "c:provision-account"],
+            ..Spec::default()
+        },
+    );
+    let who = verify(&others, &trust, now()).unwrap();
+    let refusal = rule.authorize(&who, &others.payload).unwrap_err();
+    assert!(refusal.0.contains("c:run-command"), "{refusal}");
+
+    // And it does not stand in for update-policy either.
+    let (only_run, _) = signed(
+        &ca,
+        Spec {
+            capabilities: vec!["c:run-command"],
+            ..Spec::default()
+        },
+    );
+    let who = verify(&only_run, &trust, now()).unwrap();
+    assert!(RequireCapability::update_policy()
+        .authorize(&who, &only_run.payload)
+        .is_err());
+}
+
