@@ -22,7 +22,7 @@ sequenceDiagram
     Sign-->>Author: every problem at once, or OK
 
     Author->>Sign: sign item.dhall
-    Sign->>Sign: canonical JSON of payload, domain prefix, ECDSA P-256 with the user's key
+    Sign->>Sign: canonical JSON of payload, domain prefix, signed with the user's key
     Sign-->>Author: one file: payload and signature
 
     Note over Author,Git: Same key signs the commit, through git's x509 support (not a hook)

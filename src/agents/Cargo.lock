@@ -5813,6 +5813,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "polar-signing"
+version = "1.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "cert-issuer-common",
+ "ed25519-dalek",
+ "p256",
+ "rcgen",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "time",
+ "x509-parser",
+]
+
+[[package]]
 name = "polar-test-graph"
 version = "1.0.0"
 dependencies = [

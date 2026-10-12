@@ -1,6 +1,6 @@
 # Signed configuration
 
-Status, 2026-10-11: design, agreed with David (including the single-file form below); nothing here is built. It is the
+Status, 2026-10-11: design, agreed with David (including the single-file form below). Built so far: the `polar-signing` library (`src/agents/polar-signing`): the canonical encoding, the two-field document layout, sign, verify and the version-one authority rule, with tests. Not built: `polar-sign`, the Dhall rendering, the ConfigurationActor in front of `apply`, encryption of secrets, the git integration and everything else below. It is the
 "signed configuration" item in `docs/architecture/configuration.md` section 6, and it sits in front of
 `ConfigurationHandle::apply` (`polar-agent-builder/src/configuration.rs`).
 
@@ -34,12 +34,16 @@ Read from `cert-issuer` (`server/src/ca.rs`, `common/src/capability.rs`) and a r
   a **closed enum** (`ProvisionAccount`, `Grant`, `Revoke`, `UpdatePolicy`); `c:update-policy` is
   documented as "submit a policy update". The enum cannot carry names, so it cannot say "this agent"
   or "this variable".
-- **The key.** ECDSA P-256, key usage `digitalSignature`, extended key usage `clientAuth` only,
-  valid one year, issued by the Polar CA. There is no revocation anywhere yet.
+- **The key.** Key usage `digitalSignature`, extended key usage `clientAuth` only, valid one year, issued by
+  the Polar CA. A user's certificate seen so far has an ECDSA P-256 key; the bootstrap admin's has an
+  Ed25519 key. The credentials agent's `admin_signing` already signs administrative actions with either, so
+  this system accepts both. There is no revocation anywhere yet.
 
 ## The signed document (one file per configuration item)
 
-**Layout.** One Dhall file per item, a record with exactly two fields: `payload`, which is all of the
+**Layout.** One Dhall file per item, a record with exactly two fields (the signature block has exactly
+`algorithm`, `value` (base64) and `certificate_chain` (a list of PEM strings, the signer's first), and a
+document with any other field is refused): `payload`, which is all of the
 item (the schedule id, the target agent or agent type, the version, the changes, and the descriptive
 metadata), and `signature`, which holds only the signature value and the signer's certificate chain.
 A signature cannot cover its own bytes, so `signature` is the one thing excluded from what is signed;
@@ -59,7 +63,8 @@ that still contains an import is refused.
 **What is signed.** The canonical encoding of `payload` after evaluation: UTF-8 JSON, object keys
 sorted, no insignificant whitespace, preceded by the domain-separation line
 `polar-config-document-v1` so a signature made for this purpose cannot be replayed as anything else.
-The signature is ECDSA P-256 over SHA-256 of those bytes. (Dhall defines a standard semantic hash that
+The signature is Ed25519 over those bytes, or ECDSA P-256 over their SHA-256, whichever the signer's
+certificate has (both are deterministic, so the same input gives the same signature). (Dhall defines a standard semantic hash that
 would be the more natural thing to sign, but `serde_dhall` does not expose it, and using it would mean
 depending on the fork's internals. Canonical JSON is ours to define and to test. Revisit if the library
 exposes it.)
@@ -77,7 +82,8 @@ exposes it.)
 
 1. The document parses, has exactly the two fields, and contains no import.
 2. The signature block's chain verifies to the Polar CA the receiver already pins, and the signing
-   certificate is valid now, with `digitalSignature` key usage and an EC P-256 key.
+   certificate is valid now, with `digitalSignature` key usage and a key of a type this system signs with,
+   the one the document claims.
 3. The signature verifies over the canonical encoding of `payload`.
 4. The signer is authorised to make this change (below).
 5. The signer is not revoked (a seam only for now; see open question 1).
