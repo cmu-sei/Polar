@@ -42,6 +42,8 @@ pub use infrastructure::{
 };
 pub mod message;
 pub use message::{Encrypted, Outbound, Plaintext};
+pub mod runtime;
+pub use runtime::{RuntimeChanged, RuntimeSection, RuntimeValue};
 pub mod selftest;
 pub mod shutdown;
 pub mod signed;

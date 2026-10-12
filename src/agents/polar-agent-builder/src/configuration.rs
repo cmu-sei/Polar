@@ -23,11 +23,12 @@
 //! An agent with no CA to verify against refuses every document. It does not depend on Cassini: an agent
 //! runs on its environment alone until something submits an update.
 
-use crate::signed::{Rejection, UpdateVerifier};
+use crate::runtime::{RuntimeChanged, RuntimeSection, RuntimeValue};
+use crate::signed::{Rejection, UpdateVerifier, VerifiedDocument};
 use polar_env::{Config, Resolved};
 use polar_scheduler_common::ConfigurationOutcome;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -113,6 +114,11 @@ pub enum ConfigurationMessage {
     },
     Current(RpcReplyPort<Arc<Config>>),
     History(RpcReplyPort<Vec<ConfigEvent>>),
+    /// The latest accepted body of a runtime section, if any has arrived.
+    Runtime {
+        section: String,
+        reply: RpcReplyPort<Option<RuntimeValue>>,
+    },
 }
 
 pub struct ConfigurationActor;
@@ -126,6 +132,10 @@ pub struct ConfigurationArgs {
     pub changes: Arc<OutputPort<ConfigChanged>>,
     /// Where each outcome is announced, for whoever puts it on the wire.
     pub outcomes: Arc<OutputPort<ConfigurationOutcome>>,
+    /// The runtime sections this agent declares: only these are accepted, each judged by its own check.
+    pub runtime_sections: &'static [&'static RuntimeSection],
+    /// Where a replaced runtime section is announced.
+    pub runtime_changes: Arc<OutputPort<RuntimeChanged>>,
 }
 
 pub struct ConfigurationState {
@@ -139,6 +149,10 @@ pub struct ConfigurationState {
     outcomes: Arc<OutputPort<ConfigurationOutcome>>,
     /// Outcomes announced so far.
     sequence: u64,
+    runtime_sections: &'static [&'static RuntimeSection],
+    runtime_changes: Arc<OutputPort<RuntimeChanged>>,
+    /// The latest accepted body of each runtime section, by name. Versions are per section.
+    runtime: HashMap<String, RuntimeValue>,
 }
 
 /// The id and version a document says it has, read without trusting any of it: only to label an outcome.
@@ -182,13 +196,14 @@ fn describe_signer(signer: &polar_signing::SignerInfo) -> String {
 }
 
 impl ConfigurationState {
-    /// A signed document: verified first, applied only if it passes.
+    /// A signed document: verified first, applied only if it passes. A configuration document changes
+    /// the agent's variables; a runtime document replaces a section of what it works on.
     fn submit(&mut self, document: &serde_json::Value) -> ApplyOutcome {
         let Some(verifier) = &self.verifier else {
             return self.reject(claimed(document), Rejection::NotConfigured);
         };
-        match verifier.verify(document) {
-            Ok(verified) => {
+        match verifier.verify_document(document) {
+            Ok(VerifiedDocument::Configuration(verified)) => {
                 let signer = describe_signer(&verified.signer);
                 info!(id = %verified.id, version = verified.version, %signer, "signed configuration verified");
                 self.apply(
@@ -198,8 +213,69 @@ impl ConfigurationState {
                     Some(signer),
                 )
             }
+            Ok(VerifiedDocument::Runtime(verified)) => {
+                let signer = describe_signer(&verified.signer);
+                info!(id = %verified.id, section = %verified.section, version = verified.version, %signer, "signed runtime document verified");
+                self.apply_runtime(
+                    verified.id,
+                    verified.version,
+                    &verified.section,
+                    verified.body,
+                    signer,
+                )
+            }
             Err(rejection) => self.reject(claimed(document), rejection),
         }
+    }
+
+    /// Replaces a runtime section, if the agent declares it, the version is higher than the section's
+    /// last, and the body fits. Otherwise nothing changes, and a refused document does not spend its
+    /// version, so a corrected one can go under the same number.
+    fn apply_runtime(
+        &mut self,
+        id: String,
+        version: u64,
+        section: &str,
+        body: serde_json::Value,
+        signer: String,
+    ) -> ApplyOutcome {
+        let outcome = match self.runtime_sections.iter().find(|s| s.name == section) {
+            None => ApplyOutcome::Refused(Refusal::Invalid(vec![format!(
+                "{} declares no runtime section `{section}`",
+                self.agent
+            )])),
+            Some(declared) => {
+                let held = self.runtime.get(section).map(|v| v.version).unwrap_or(0);
+                if version <= held {
+                    ApplyOutcome::Refused(Refusal::Stale { applied: held })
+                } else {
+                    match (declared.validate)(&body) {
+                        Err(problems) => ApplyOutcome::Refused(Refusal::Invalid(problems)),
+                        Ok(()) => {
+                            self.runtime
+                                .insert(section.to_string(), RuntimeValue { version, body });
+                            ApplyOutcome::Applied {
+                                changed: vec![section.to_string()],
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        match &outcome {
+            ApplyOutcome::Applied { .. } => {
+                info!(section, version, "runtime section replaced");
+                self.runtime_changes.send(RuntimeChanged {
+                    section: section.to_string(),
+                    version,
+                });
+            }
+            ApplyOutcome::Refused(why) => {
+                warn!(section, version, ?why, "runtime document refused");
+            }
+        }
+        self.record(Some(id), Some(version), version, Some(signer), &outcome);
+        outcome
     }
 
     fn reject(
@@ -318,6 +394,9 @@ impl Actor for ConfigurationActor {
             changes: args.changes,
             outcomes: args.outcomes,
             sequence: 0,
+            runtime_sections: args.runtime_sections,
+            runtime_changes: args.runtime_changes,
+            runtime: HashMap::new(),
         })
     }
 
@@ -349,6 +428,9 @@ impl Actor for ConfigurationActor {
             ConfigurationMessage::History(reply) => {
                 let _ = reply.send(state.history.iter().cloned().collect());
             }
+            ConfigurationMessage::Runtime { section, reply } => {
+                let _ = reply.send(state.runtime.get(&section).cloned());
+            }
         }
         Ok(())
     }
@@ -360,10 +442,11 @@ pub struct ConfigurationHandle {
     actor: ActorRef<ConfigurationMessage>,
     changes: Arc<OutputPort<ConfigChanged>>,
     outcomes: Arc<OutputPort<ConfigurationOutcome>>,
+    runtime_changes: Arc<OutputPort<RuntimeChanged>>,
 }
 
 impl ConfigurationHandle {
-    /// Starts the actor on `config`, as a child of `supervisor`.
+    /// Starts the actor on `config`, as a child of `supervisor`, for an agent with no runtime sections.
     pub async fn spawn(
         name: Option<String>,
         agent: impl Into<String>,
@@ -371,8 +454,22 @@ impl ConfigurationHandle {
         verifier: Option<UpdateVerifier>,
         supervisor: ractor::ActorCell,
     ) -> Result<Self, ActorProcessingErr> {
+        Self::spawn_with_runtime(name, agent, config, verifier, &[], supervisor).await
+    }
+
+    /// Starts the actor on `config`, as a child of `supervisor`, accepting runtime documents for the
+    /// sections the agent declares.
+    pub async fn spawn_with_runtime(
+        name: Option<String>,
+        agent: impl Into<String>,
+        config: Config,
+        verifier: Option<UpdateVerifier>,
+        runtime_sections: &'static [&'static RuntimeSection],
+        supervisor: ractor::ActorCell,
+    ) -> Result<Self, ActorProcessingErr> {
         let changes = Arc::new(OutputPort::default());
         let outcomes = Arc::new(OutputPort::default());
+        let runtime_changes = Arc::new(OutputPort::default());
         let (actor, _) = Actor::spawn_linked(
             name,
             ConfigurationActor,
@@ -382,6 +479,8 @@ impl ConfigurationHandle {
                 agent: agent.into(),
                 changes: changes.clone(),
                 outcomes: outcomes.clone(),
+                runtime_sections,
+                runtime_changes: runtime_changes.clone(),
             },
             supervisor,
         )
@@ -391,7 +490,21 @@ impl ConfigurationHandle {
             actor,
             changes,
             outcomes,
+            runtime_changes,
         })
+    }
+
+    /// The latest accepted body of a runtime section and its version; none until one has arrived.
+    pub async fn runtime(&self, section: &str) -> Result<Option<RuntimeValue>, ConfigurationError> {
+        let section = section.to_string();
+        self.call(|reply| ConfigurationMessage::Runtime { section, reply })
+            .await
+    }
+
+    /// Where a replaced runtime section is announced. Subscribe with a mapping into your own message type,
+    /// then read [`runtime`](Self::runtime).
+    pub fn runtime_changes(&self) -> Arc<OutputPort<RuntimeChanged>> {
+        self.runtime_changes.clone()
     }
 
     /// The configuration as it stands now, with every override applied. Read again after a
@@ -1362,5 +1475,312 @@ mod tests {
         let everything = format!("{:?}", seen.lock().unwrap());
         assert!(!everything.contains("hunter2"), "{everything}");
         assert_eq!(seen.lock().unwrap().len(), 4);
+    }
+
+    // -- runtime documents ------------------------------------------------------------------------
+
+    fn validate_repositories(body: &Value) -> Result<(), Vec<String>> {
+        let Some(list) = body.get("repositories").and_then(Value::as_array) else {
+            return Err(vec!["`repositories` must be a list".to_string()]);
+        };
+        let problems: Vec<String> = list
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.get("url").and_then(Value::as_str).is_none())
+            .map(|(i, _)| format!("repositories[{i}].url must be text"))
+            .collect();
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems)
+        }
+    }
+
+    static REPOSITORIES: crate::runtime::RuntimeSection = crate::runtime::RuntimeSection {
+        name: "repositories",
+        doc: "The repositories to observe.",
+        body: "{}",
+        validate: validate_repositories,
+    };
+
+    static ADMISSION: crate::runtime::RuntimeSection = crate::runtime::RuntimeSection {
+        name: "admission",
+        doc: "Under what rules a proposal is accepted.",
+        body: "{}",
+        validate: |_| Ok(()),
+    };
+
+    static RUNTIME_SECTIONS: [&crate::runtime::RuntimeSection; 2] = [&REPOSITORIES, &ADMISSION];
+
+    async fn runtime_handle(
+        verifier: UpdateVerifier,
+    ) -> (
+        ConfigurationHandle,
+        Arc<Mutex<Vec<crate::runtime::RuntimeChanged>>>,
+    ) {
+        struct Parent;
+        #[ractor::async_trait]
+        impl Actor for Parent {
+            type Msg = ();
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(&self, _: ActorRef<()>, _: ()) -> Result<(), ActorProcessingErr> {
+                Ok(())
+            }
+        }
+        let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
+        let handle = ConfigurationHandle::spawn_with_runtime(
+            None,
+            AGENT,
+            config(),
+            Some(verifier),
+            &RUNTIME_SECTIONS,
+            parent.get_cell(),
+        )
+        .await
+        .unwrap();
+
+        struct Sink(Arc<Mutex<Vec<crate::runtime::RuntimeChanged>>>);
+        #[ractor::async_trait]
+        impl Actor for Sink {
+            type Msg = crate::runtime::RuntimeChanged;
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(
+                &self,
+                _: ActorRef<Self::Msg>,
+                _: (),
+            ) -> Result<(), ActorProcessingErr> {
+                Ok(())
+            }
+            async fn handle(
+                &self,
+                _: ActorRef<Self::Msg>,
+                message: Self::Msg,
+                _: &mut (),
+            ) -> Result<(), ActorProcessingErr> {
+                self.0.lock().unwrap().push(message);
+                Ok(())
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (sink, _) = Actor::spawn(None, Sink(seen.clone()), ()).await.unwrap();
+        handle.runtime_changes().subscribe(sink, Some);
+        (handle, seen)
+    }
+
+    impl Signed {
+        fn runtime(&self, section: &str, version: u64, body: Value) -> Value {
+            self.runtime_by(
+                Spec {
+                    capabilities: vec!["c:update-runtime"],
+                    ..Spec::default()
+                },
+                section,
+                version,
+                body,
+            )
+        }
+
+        fn runtime_by(&self, spec: Spec, section: &str, version: u64, body: Value) -> Value {
+            let s = signer(&self.ca, spec);
+            polar_signing::sign(
+                json!({"type": "runtime", "id": format!("{section}-{version}"), "target": {"agent": AGENT},
+                       "section": section, "version": version, "body": body}),
+                &[s.cert_pem],
+                &s.key_pem,
+            )
+            .unwrap()
+            .to_value()
+        }
+    }
+
+    fn repos(urls: &[&str]) -> Value {
+        json!({"repositories": urls.iter().map(|u| json!({"url": u})).collect::<Vec<_>>()})
+    }
+
+    #[tokio::test]
+    async fn a_runtime_document_is_held_whole_and_subscribers_are_told_which_section() {
+        let signed = Signed::new();
+        let (config, seen) = runtime_handle(signed.verifier()).await;
+        assert!(config.runtime("repositories").await.unwrap().is_none());
+
+        let outcome = config
+            .submit(signed.runtime("repositories", 1, repos(&["https://a.example/r.git"])))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Applied {
+                changed: vec!["repositories".to_string()]
+            }
+        );
+        let held = config.runtime("repositories").await.unwrap().unwrap();
+        assert_eq!(held.version, 1);
+        assert_eq!(held.body, repos(&["https://a.example/r.git"]));
+        settle().await;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [crate::runtime::RuntimeChanged {
+                section: "repositories".to_string(),
+                version: 1
+            }]
+        );
+
+        // The next version replaces the section whole: nothing of the first is left in it.
+        config
+            .submit(signed.runtime("repositories", 2, repos(&["https://b.example/r.git"])))
+            .await
+            .unwrap();
+        let held = config.runtime("repositories").await.unwrap().unwrap();
+        assert_eq!(held.version, 2);
+        assert_eq!(held.body, repos(&["https://b.example/r.git"]));
+    }
+
+    #[tokio::test]
+    async fn an_old_runtime_version_cannot_replace_a_newer_one_and_versions_are_per_section() {
+        let signed = Signed::new();
+        let (config, _) = runtime_handle(signed.verifier()).await;
+        config
+            .submit(signed.runtime("repositories", 5, repos(&["https://a.example/r.git"])))
+            .await
+            .unwrap();
+
+        // A replay, and an old one arriving late.
+        for old in [5, 3] {
+            let outcome = config
+                .submit(signed.runtime("repositories", old, repos(&["https://evil.example/r.git"])))
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome,
+                ApplyOutcome::Refused(Refusal::Stale { applied: 5 })
+            );
+        }
+        assert_eq!(
+            config.runtime("repositories").await.unwrap().unwrap().body,
+            repos(&["https://a.example/r.git"])
+        );
+
+        // Another section has a count of its own: its version 1 is not older than repositories 5.
+        let outcome = config
+            .submit(signed.runtime("admission", 1, json!({})))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, ApplyOutcome::Applied { .. }),
+            "{outcome:?}"
+        );
+
+        // And so do the agent's own configuration versions: runtime 5 does not make config 1 stale.
+        let outcome = config.submit(signed.high(1, "20")).await.unwrap();
+        assert!(
+            matches!(outcome, ApplyOutcome::Applied { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_section_the_agent_did_not_declare_is_refused_by_name_and_nothing_is_held() {
+        let signed = Signed::new();
+        let (config, seen) = runtime_handle(signed.verifier()).await;
+        let outcome = config
+            .submit(signed.runtime("credentials", 1, json!({})))
+            .await
+            .unwrap();
+        match outcome {
+            ApplyOutcome::Refused(Refusal::Invalid(problems)) => {
+                assert!(problems[0].contains("credentials"), "{problems:?}");
+                assert!(problems[0].contains(AGENT), "{problems:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(config.runtime("credentials").await.unwrap().is_none());
+        settle().await;
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_body_that_does_not_fit_is_refused_with_every_problem_and_the_version_is_not_spent() {
+        let signed = Signed::new();
+        let (config, _) = runtime_handle(signed.verifier()).await;
+        config
+            .submit(signed.runtime("repositories", 1, repos(&["https://a.example/r.git"])))
+            .await
+            .unwrap();
+
+        let bad = json!({"repositories": [{"url": 1}, {"nope": true}]});
+        match config
+            .submit(signed.runtime("repositories", 2, bad))
+            .await
+            .unwrap()
+        {
+            ApplyOutcome::Refused(Refusal::Invalid(problems)) => {
+                assert_eq!(
+                    problems.len(),
+                    2,
+                    "every problem, not the first: {problems:?}"
+                );
+                assert!(problems[0].contains("repositories[0].url"), "{problems:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // What was held stays, and the corrected document can go under the same number.
+        assert_eq!(
+            config
+                .runtime("repositories")
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            1
+        );
+        let outcome = config
+            .submit(signed.runtime("repositories", 2, repos(&["https://c.example/r.git"])))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, ApplyOutcome::Applied { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_runtime_capability_changes_a_runtime_section() {
+        let signed = Signed::new();
+        let (config, _) = runtime_handle(signed.verifier()).await;
+        // Holds update-configuration (the default signer): may change how the agent runs, not this.
+        let outcome = config
+            .submit(signed.runtime_by(
+                Spec::default(),
+                "repositories",
+                1,
+                repos(&["https://a.example/r.git"]),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                ApplyOutcome::Refused(Refusal::Unverified(Rejection::Unauthorized(_)))
+            ),
+            "{outcome:?}"
+        );
+        assert!(config.runtime("repositories").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_agent_with_no_runtime_sections_refuses_a_runtime_document() {
+        // The ordinary agent: nothing declared, so nothing to hold.
+        let signed = Signed::new();
+        let (config, _) = spawn_handle(Some(signed.verifier())).await;
+        let outcome = config
+            .submit(signed.runtime("repositories", 1, repos(&[])))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, ApplyOutcome::Refused(Refusal::Invalid(_))),
+            "{outcome:?}"
+        );
     }
 }

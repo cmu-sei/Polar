@@ -89,6 +89,39 @@ pub struct Verified {
     pub signer: SignerInfo,
 }
 
+/// A runtime document that passed every check here: the section of the agent's runtime configuration it
+/// is for, and the body to validate against what the agent declared for that section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedRuntime {
+    pub id: String,
+    pub version: u64,
+    pub section: String,
+    pub body: Value,
+    pub signer: SignerInfo,
+}
+
+/// A signed document that passed the checks for its own kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifiedDocument {
+    Configuration(Verified),
+    Runtime(VerifiedRuntime),
+}
+
+/// What a runtime document says. Strict, like [`Payload`]: a field this does not know is refused, since it
+/// would be signed but meaningless.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimePayload {
+    #[serde(rename = "type")]
+    #[allow(dead_code)]
+    kind: String,
+    id: String,
+    target: Target,
+    section: String,
+    version: u64,
+    body: Value,
+}
+
 /// What an update says. Strict: a field this does not know is refused, since it would be signed but
 /// meaningless.
 #[derive(Deserialize)]
@@ -204,6 +237,9 @@ impl Common {
 pub struct UpdateVerifier {
     pub(crate) common: Common,
     authority: Arc<dyn Authority>,
+    /// Who may sign a runtime document: a lower authority than configuration, since it cannot change how
+    /// the agent runs.
+    runtime_authority: Arc<dyn Authority>,
 }
 
 impl UpdateVerifier {
@@ -222,7 +258,13 @@ impl UpdateVerifier {
                 }),
             },
             authority: Arc::new(RequireCapability::update_configuration()),
+            runtime_authority: Arc::new(RequireCapability::update_runtime()),
         }
+    }
+
+    pub fn with_runtime_authority(mut self, authority: Arc<dyn Authority>) -> Self {
+        self.runtime_authority = authority;
+        self
     }
 
     pub fn with_authority(mut self, authority: Arc<dyn Authority>) -> Self {
@@ -257,13 +299,38 @@ impl UpdateVerifier {
         Ok(Self::new(trust, agent))
     }
 
+    /// A configuration document only: anything else is refused as the wrong type.
     pub fn verify(&self, document: &Value) -> Result<Verified, Rejection> {
         let (document, signer) = self.common.signed(document)?;
+        self.verify_configuration(&document, signer)
+    }
 
+    /// A signed document of either kind this verifier handles. The signature is checked first, so the
+    /// `type` that decides which rules apply is the signer's own and not an attacker's; each kind then
+    /// has its own payload shape and its own authority.
+    pub fn verify_document(&self, document: &Value) -> Result<VerifiedDocument, Rejection> {
+        let (document, signer) = self.common.signed(document)?;
+        match document.payload.get("type").and_then(Value::as_str) {
+            Some(document_type::RUNTIME) => self
+                .verify_runtime(&document, signer)
+                .map(VerifiedDocument::Runtime),
+            // A missing `type` and any other kind get the configuration path's own refusal, which says
+            // what is wrong with it.
+            _ => self
+                .verify_configuration(&document, signer)
+                .map(VerifiedDocument::Configuration),
+        }
+    }
+
+    fn verify_configuration(
+        &self,
+        document: &Document,
+        signer: SignerInfo,
+    ) -> Result<Verified, Rejection> {
         // The signature held, so the payload is what the signer wrote. Now read it: first what kind of
         // document it is, since a command or an admission is not a configuration whatever else it says.
         self.common
-            .expect_kind(&document, document_type::CONFIGURATION)?;
+            .expect_kind(document, document_type::CONFIGURATION)?;
         let payload: Payload = serde_json::from_value(document.payload.clone())
             .map_err(|e| Rejection::Payload(e.to_string()))?;
         self.common.check_target(payload.target.agent)?;
@@ -279,6 +346,28 @@ impl UpdateVerifier {
                 .into_iter()
                 .map(|c| (c.name, c.value))
                 .collect(),
+            signer,
+        })
+    }
+
+    fn verify_runtime(
+        &self,
+        document: &Document,
+        signer: SignerInfo,
+    ) -> Result<VerifiedRuntime, Rejection> {
+        self.common.expect_kind(document, document_type::RUNTIME)?;
+        let payload: RuntimePayload = serde_json::from_value(document.payload.clone())
+            .map_err(|e| Rejection::Payload(e.to_string()))?;
+        self.common.check_target(payload.target.agent)?;
+        self.runtime_authority
+            .authorize(&signer, &document.payload)
+            .map_err(Rejection::Unauthorized)?;
+        self.common.check_not_revoked(&signer)?;
+        Ok(VerifiedRuntime {
+            id: payload.id,
+            version: payload.version,
+            section: payload.section,
+            body: payload.body,
             signer,
         })
     }
@@ -359,6 +448,129 @@ mod tests {
             );
             assert_eq!(verified.signer.username.as_deref(), Some("alice"));
         }
+    }
+
+    // -- runtime documents ---------------------------------------------------------------------------
+
+    fn runtime_payload() -> Value {
+        json!({
+            "type": "runtime",
+            "id": "repos-0007",
+            "target": {"agent": AGENT},
+            "section": "repositories",
+            "version": 7,
+            "body": {"repositories": [{"url": "https://example.org/r.git"}]}
+        })
+    }
+
+    fn runtime_signer() -> Spec {
+        Spec {
+            capabilities: vec!["c:update-runtime"],
+            ..Spec::default()
+        }
+    }
+
+    #[test]
+    fn a_runtime_document_gives_its_section_its_body_and_who_signed_it() {
+        let rig = rig();
+        let doc = document(&rig, runtime_signer(), runtime_payload());
+        match rig.verifier.verify_document(&doc) {
+            Ok(VerifiedDocument::Runtime(runtime)) => {
+                assert_eq!(runtime.id, "repos-0007");
+                assert_eq!(runtime.version, 7);
+                assert_eq!(runtime.section, "repositories");
+                assert_eq!(
+                    runtime.body["repositories"][0]["url"],
+                    "https://example.org/r.git"
+                );
+                assert_eq!(runtime.signer.username.as_deref(), Some("alice"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_runtime_document_needs_the_runtime_capability_and_configuration_is_not_enough() {
+        let rig = rig();
+        // Holds update-configuration only (the default signer).
+        let doc = document(&rig, Spec::default(), runtime_payload());
+        assert!(matches!(
+            rig.verifier.verify_document(&doc),
+            Err(Rejection::Unauthorized(_))
+        ));
+        // And the reverse: update-runtime does not let a signer change how the agent runs.
+        let doc = document(&rig, runtime_signer(), payload());
+        assert!(matches!(
+            rig.verifier.verify_document(&doc),
+            Err(Rejection::Unauthorized(_))
+        ));
+    }
+
+    #[test]
+    fn a_configuration_document_still_verifies_as_a_configuration() {
+        let rig = rig();
+        let doc = document(&rig, Spec::default(), payload());
+        match rig.verifier.verify_document(&doc) {
+            Ok(VerifiedDocument::Configuration(verified)) => assert_eq!(verified.version, 7),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_runtime_document_for_another_agent_or_of_another_shape_is_refused() {
+        let rig = rig();
+        let mut elsewhere = runtime_payload();
+        elsewhere["target"]["agent"] = json!("another-agent");
+        assert!(matches!(
+            rig.verifier
+                .verify_document(&document(&rig, runtime_signer(), elsewhere)),
+            Err(Rejection::WrongTarget { .. })
+        ));
+
+        for (edit, wanted) in [
+            (
+                (|p: &mut Value| {
+                    p.as_object_mut().unwrap().remove("section");
+                }) as fn(&mut Value),
+                "section",
+            ),
+            (
+                |p: &mut Value| {
+                    p.as_object_mut().unwrap().remove("body");
+                },
+                "body",
+            ),
+            (|p: &mut Value| p["owner"] = json!("me"), "owner"),
+            (|p: &mut Value| p["changes"] = json!([]), "changes"),
+        ] {
+            let mut bad = runtime_payload();
+            edit(&mut bad);
+            match rig
+                .verifier
+                .verify_document(&document(&rig, runtime_signer(), bad))
+            {
+                Err(Rejection::Payload(why)) => assert!(why.contains(wanted), "{why}"),
+                other => panic!("{wanted}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_runtime_document_is_not_a_configuration_and_a_command_is_neither() {
+        let rig = rig();
+        // The configuration-only entry point refuses a runtime document.
+        assert!(matches!(
+            rig.verifier
+                .verify(&document(&rig, runtime_signer(), runtime_payload())),
+            Err(Rejection::WrongType { .. })
+        ));
+        let mut command = runtime_payload();
+        command["type"] = json!("command");
+        assert!(matches!(
+            rig.verifier
+                .verify_document(&document(&rig, runtime_signer(), command)),
+            Err(Rejection::WrongType { .. })
+        ));
     }
 
     #[test]
