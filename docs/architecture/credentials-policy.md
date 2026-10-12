@@ -78,11 +78,13 @@ completes** the two entities that carry facts it knows better than any document:
   A document can add attributes to a secret (`kind`, `frozen`) and cannot set or change `owner`, which is
   reserved and rejected.
 
-Identities in a document are named by what the broker names them. For an agent that is its workload name
-(`git-repo-observer`). For a person it is the account identity, which is a UUID; **open question**: let the
-document use the username and have the credentials agent resolve it to the identity from its account records
-(it holds the provisioned accounts), so that an author writes `alice`, not a UUID. Not verified that the records
-carry what is needed.
+Identities in a document are named the way their holders are known. An agent is its workload name
+(`git-repo-observer`). A person is their **username**, and the credentials agent resolves it to the account
+identity from its own records: the ledger's `AccountCertificateRecord` holds `username` and `account_id` (the
+UUID that is the first DNS name in the user's certificate), usernames are unique among accounts that are not
+revoked, and a revoked account re-provisioned under the same username gets the same `account_id` back. So an
+author writes `alice`, never a UUID, and the name keeps meaning the same account. A username that no account has
+is an error in the document (refused whole), not a silent no-match.
 
 ### What a request looks like to Cedar
 
@@ -146,6 +148,30 @@ as signed documents of their own. The credentials agent's design does not depend
 the capability check; it sits beside it: a signer still needs `c:update-policy` for a `policy` document, and
 that capability is the coarse gate. Cedar is the fine one for secrets.
 
+## Seeding the cluster
+
+Some policy has to be in force from the first minute, and the schedules repository starts empty (the Polar git
+server creates the bare repository; nothing puts content in it). The cluster setup (`infra/up.nu`) therefore
+gets a step that **seeds `polar-schedules`** with the cluster defaults, signed:
+
+- the credentials agent's baseline `policy` document (the two rules above, no groups);
+- anything else a cluster needs from its first minute (later: the credentials agent's own configuration item).
+
+The step needs a signer, and signing is the same as for any author: a user certificate holding the capability
+for the document type. Two consequences:
+
+- The first admin that `admin-provision` creates holds `c:provision-account`, `c:grant`,
+  `c:update-configuration` and `c:run-command`, and holds neither `c:update-policy` nor the new
+  `c:update-runtime`. It needs them, the same gap the first admin had for configuration. The seeding signer is
+  the operator account, made after the stack is up, so the step runs after the admin steps and the git server
+  and before anything that needs a secret.
+- A cluster whose seed has not been pushed has no policy, and every retrieval fails closed, which is the right
+  failure: the seed step is part of "the cluster is up", and `up.nu` waits for the credentials agent to report
+  the policy applied before it says so.
+
+The seed documents live in the repository (`seed/schedules/` next to the cluster targets) and are signed at
+setup, not committed signed: a signature made once by a person would otherwise be baked into every cluster.
+
 ## Explaining a decision
 
 Cedar reports which policies decided a request. The credentials agent should record, for every decision, the
@@ -171,13 +197,30 @@ or log. Never the secret or anything derived from it. A refusal then says why.
 6. **The first policy** in the schedules repository, and a cluster test: an agent stores a secret, retrieves it,
    and is denied another agent's.
 
+## Secrets carry labels from the moment they are stored
+
+Decided 2026-10-12 (David). A secret is stored with a name and ciphertext only today. `StoreSecretRequest` gains
+`labels` (a small map of text to text, bounded in count and size), recorded in the `SecretStored` ledger event
+beside `stored_by`, and they become the secret's Cedar attributes under the reserved prefix: a label `kind` is
+`resource.kind`. `owner` stays reserved and comes from `stored_by`. A label cannot be changed once stored (a
+store under an existing name is refused today, and stays refused); the `entities` list may still *annotate* a
+secret by name for what policy needs to change after the fact (`frozen`), but an annotation cannot replace a
+stored label. This is what lets "any `git-token`" be a rule from the first day.
+
+## `DecryptOnBehalfOf` and the resource it names
+
+The request carries the ciphertext itself and a `resource_id` the caller asserts. The agent does not resolve a
+reference to something it holds: it takes the caller's ciphertext and the caller's word for what the policy
+should treat it as. Nothing binds the two: `EscrowedSecret` has no authenticated data, so a requester holding
+the ciphertext of a secret it may not have can attach the `resource_id` of one it may. This is the same binding
+that `signed-configuration.md` already requires of secret fields (the ciphertext authenticated to its place), and
+it is not done here. Two ways to close it, to choose when `DecryptOnBehalfOf` is next touched: bind the
+`resource_id` into the ciphertext as authenticated data when it is encrypted, and verify it on decrypt; or
+make the request name a secret held by the agent, as `RetrieveSecret` does, so the reference is resolved by the
+agent and not asserted by the caller. Either way the entity is built by the agent, from a validated name.
+
 ## Open questions
 
-- Usernames or identities in `entities` (above).
-- Which attributes a secret carries beyond `owner`. A secret is stored with a name and ciphertext only. Declared
-  attributes in the document annotate it by name; whether a secret should instead carry labels from the moment
-  it is stored is for later.
-- `DecryptOnBehalfOf`'s resource is a caller-supplied Cedar reference, not a name the agent builds: it should
-  take a name and build the entity the same way, with the same name validation.
-- Whether the same `policy` document should also carry the rules other receivers evaluate, or each receiver
-  gets its own section (see "Trust and where it is enforced").
+- Whether the same `policy` document should also carry the rules other receivers evaluate (who may sign which
+  runtime section, who may run which command), or each such receiver gets a section of its own. See "What is
+  still open: policy for other receivers" in `git-controller.md`.

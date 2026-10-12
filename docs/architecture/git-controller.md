@@ -349,3 +349,20 @@ an emptyDir meanwhile.
 5. **The observer reports per-repository status**, and restores checkpoints by asking the processor over Cassini.
 6. **No more than one observer pod** until production shows the need; sharding and the PVC are decided together
    then.
+
+## What is still open: policy for other receivers
+
+The credentials agent's policy decides who may have **a secret it holds**, and it evaluates that itself. There is
+a second kind of decision, made by every agent that receives a signed document or command: *may this signer make
+this change to me?* Today that is the signer's certificate capability (`c:update-configuration`, soon
+`c:update-runtime`, `c:run-command`), which is coarse: a signer who may change one agent's runtime section may
+change any.
+
+Cedar could make it fine: "alice may change the `repositories` section of `git-repo-controller` but not the
+`credentials` section of `git-repo-observer`", "operators may run `refresh-repo` on the observer in dev but not in
+prod". There is no relay to trust, so **the agent receiving the document evaluates the rule itself**, which means
+each such agent needs the rules, and the groups they refer to, as signed data it holds. That raises the question
+this design leaves open: do those rules travel in the credentials agent's `policy` document (one document, which
+every agent would have to receive, though most of it concerns secrets they never hold), or does each receiving
+agent get its own `authority` section, or is there one `authority` document addressed to all agents? It does not
+block anything here; the capability check stays as the gate until it is decided.
