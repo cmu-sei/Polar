@@ -161,7 +161,7 @@ that capability is the coarse gate. Cedar is the fine one for secrets.
 
 ## Seeding the cluster
 
-**Built 2026-10-12** (`infra/seed.nu`, the `seed` step of `infra/up.nu`; not yet run on a cluster). The signer is the first administrator, who holds `c:update-policy`; the git server must list that account as an administrator (`POLAR_GIT_SERVER_ADMINS`) before a push is accepted. A document whose path is already in the repository is left alone, so a re-run never sends version 1 again.
+**Built 2026-10-12** (`infra/seed.nu`, the `seed` step of `infra/up.nu`; run on the dev cluster, where the credentials agent applied and published the policy; a secret retrieved under it has not yet been observed). The signer is the first administrator, who holds `c:update-policy`; the git server must list that account as an administrator (`POLAR_GIT_SERVER_ADMINS`) before a push is accepted. A document whose path is already in the repository is left alone, so a re-run never sends version 1 again.
 
 Some policy has to be in force from the first minute, and the schedules repository starts empty (the Polar git
 server creates the bare repository; nothing puts content in it). The cluster setup (`infra/up.nu`) therefore
