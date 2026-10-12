@@ -1,6 +1,6 @@
 # Signed configuration
 
-Status, 2026-10-11: design, agreed in outline with David; nothing here is built. It is the
+Status, 2026-10-11: design, agreed with David (including the single-file form below); nothing here is built. It is the
 "signed configuration" item in `docs/architecture/configuration.md` section 6, and it sits in front of
 `ConfigurationHandle::apply` (`polar-agent-builder/src/configuration.rs`).
 
@@ -13,9 +13,9 @@ the place that acts on it, so no relay in between has to be trusted.
 
 ## Decision (David, 2026-10-11): both forms
 
-1. **A signed update** is the trust root. The signature covers the update itself and travels with
-   it: in the repository next to the schedule, then through the observer, the processor and the
-   topic, to the ConfigurationActor, which verifies it.
+1. **A signed document** is the trust root. The signature covers the whole configuration item and
+   travels inside it: in the repository as one file, then through the observer, the processor and
+   the topic, to the ConfigurationActor, which verifies it. There are no signature files.
 2. **Signed git commits** are made with the same key, so the history shows who changed what and the
    repository contents carry signatures all the way to where they are needed. They are for audit
    and context, not the trust root: they are checked where the repository is read, and do not
@@ -37,34 +37,53 @@ Read from `cert-issuer` (`server/src/ca.rs`, `common/src/capability.rs`) and a r
 - **The key.** ECDSA P-256, key usage `digitalSignature`, extended key usage `clientAuth` only,
   valid one year, issued by the Polar CA. There is no revocation anywhere yet.
 
-## The signed update
+## The signed document (one file per configuration item)
 
-**Payload.** What the ConfigurationActor would apply, and nothing else: the schedule id, the target
-(agent id or agent type), the version, and the changes (variable name and value). It is encoded
-canonically: UTF-8 JSON, object keys sorted, no insignificant whitespace, preceded by a fixed
-domain-separation line (`polar-config-update-v1`) so a signature made for this purpose cannot be
-replayed as anything else.
+**Layout.** One Dhall file per item, a record with exactly two fields: `payload`, which is all of the
+item (the schedule id, the target agent or agent type, the version, the changes, and the descriptive
+metadata), and `signature`, which holds only the signature value and the signer's certificate chain.
+A signature cannot cover its own bytes, so `signature` is the one thing excluded from what is signed;
+it carries no behaviour. Nothing that changes what happens sits outside the signed part, so a pusher
+with write access cannot redirect a signed item to another agent or replay it under another version
+without invalidating it. Transport encryption (mTLS to the git server, mTLS to Cassini) protects each
+hop; the signature is what says who authored the content and that it is unchanged, at every hop and
+on a remote we do not host.
 
-**Envelope.** The payload, an ECDSA P-256 SHA-256 signature over the canonical bytes, and the
-signer's certificate chain (PEM). Stored as `<schedule>.sig` beside `<schedule>.dhall`.
+**Authoring and rendering.** The user writes the item in Dhall, using the agent's template and any
+imports they like. `polar-sign` then evaluates it to normal form, which has no imports, checks it,
+signs it, and writes the final single file. What is committed is that rendered file. The observer
+evaluates a file with nothing left to resolve, so the signer's and the observer's evaluations cannot
+differ, and the scheduler sends only a document that has already been verified once. A committed file
+that still contains an import is refused.
 
-**Why the evaluated form.** A schedule is a Dhall file, but the observer evaluates it and what travels
-is JSON. A signature over the source could not be checked by a receiver that never sees the source.
-So `polar-sign` evaluates the file with the same engine the observer uses (`serde_dhall`) and signs
-the canonical result. The observer evaluates again and attaches the envelope; if the two evaluations
-differ, verification fails, which is the safe outcome. Imports are the way they could differ, so see
-open question 1.
+**What is signed.** The canonical encoding of `payload` after evaluation: UTF-8 JSON, object keys
+sorted, no insignificant whitespace, preceded by the domain-separation line
+`polar-config-document-v1` so a signature made for this purpose cannot be replayed as anything else.
+The signature is ECDSA P-256 over SHA-256 of those bytes. (Dhall defines a standard semantic hash that
+would be the more natural thing to sign, but `serde_dhall` does not expose it, and using it would mean
+depending on the fork's internals. Canonical JSON is ours to define and to test. Revisit if the library
+exposes it.)
+
+**Failing early.** Users should not find out later that an item was rejected. Two things serve this:
+
+- *Typed templates.* A Dhall record type is generated for each agent from its schema export
+  (`<agent> --scaffold`), listing only its `Dynamic` variables, so a wrong name or type fails in
+  Dhall's own type checker before anything is signed.
+- *`polar-sign check`.* Tests the rendered payload against the agent's declarations (the same
+  parsing the ConfigurationActor uses), the version against the last known, and the signer's
+  certificate (valid, `digitalSignature`, carries the capability), and reports every problem.
 
 **What the receiver checks, in this order, refusing on the first failure and recording it:**
 
-1. The envelope parses and its payload is the canonical form (re-encoding it gives the same bytes).
-2. The certificate chain verifies to the Polar CA the receiver already pins, and the certificate is
-   valid now, with `digitalSignature` key usage and an EC P-256 key.
-3. The signature verifies over the payload.
+1. The document parses, has exactly the two fields, and contains no import.
+2. The signature block's chain verifies to the Polar CA the receiver already pins, and the signing
+   certificate is valid now, with `digitalSignature` key usage and an EC P-256 key.
+3. The signature verifies over the canonical encoding of `payload`.
 4. The signer is authorised to make this change (below).
-5. The version is higher than the last applied: this is the ConfigurationActor's existing check.
-6. Only then is `apply` called. The ConfigurationActor still refuses a Static variable, a bad value
-   and a result the sections' relations reject, whoever signed.
+5. The signer is not revoked (a seam only for now; see open question 1).
+6. The version is higher than the last applied: the ConfigurationActor's existing check.
+7. Only then is `apply` called. The ConfigurationActor still refuses a Static variable, a bad value and
+   a result the sections' relations reject, whoever signed.
 
 Until a receiver has what it needs to verify (the CA, a policy) it **fails closed**: it refuses.
 
@@ -102,8 +121,9 @@ warning at first, an error if configured so.
 
 - **`polar-signing` (library).** Canonical encoding, sign, verify, chain and key-usage checks, and the
   authority trait. Used by the ConfigurationActor (verify) and the tools (sign).
-- **`polar-sign` (binary).** Git signing mode; `sign` and `verify` for updates (usable as CI on the
-  schedules repository); `setup`. Good `--help`, and an optional configuration file for the key and
+- **`polar-sign` (binary).** Git signing mode; `sign`, `check` and `verify` for configuration documents
+  (`check` and `verify` usable as CI on the schedules repository); `template` (generate an agent's
+  typed template); `setup`. Good `--help`, and an optional configuration file for the key and
   certificate paths, in the platform's standard configuration directory, so no `just` is needed.
 - **`polar-admin-grant` stays as it is.** Binaries are named `polar-<name>` so an umbrella `polar`
   command can dispatch to them later, as `git` and `cargo` do, if the set of tools keeps growing.
@@ -113,25 +133,30 @@ warning at first, an error if configured so.
 
 ## Open questions
 
-1. **Imports in signed Dhall.** Forbid them, or require frozen (hash-pinned) imports? Either keeps
-   the two evaluations identical.
-2. **Revocation.** A signer removed tomorrow still has valid old signatures, and their certificate is
-   valid for a year. Options: a revocation list the receiver consults, or a maximum age for a signed
-   update. Not needed for the first version; needed before this is relied on.
-3. **Git server enforcement.** Should the git server refuse a push whose commits are not signed by the
-   pusher? Later, and independent of the above.
+1. **Revocation (planned, not in the first version).** A signer removed tomorrow still has valid old
+   signatures, and their certificate is valid for a year. The verifier consults a revocation source at
+   step 5; the first version has none and says so. Options for the source: a list the credentials
+   agent publishes, and a maximum age for a signed document.
+2. **Imports (decided).** Imports are allowed when authoring and are resolved away by rendering; a
+   committed document may contain none.
+3. **Git server enforcement (decided, to build later).** A per-repository setting on the git server
+   that refuses a push whose commits are not signed by the pusher: the signing certificate's identity
+   must be the TLS peer's. On for `polar-schedules`, off by default, because a git server we do not
+   run cannot enforce it. There the consumer's own verification of the embedded signature is what
+   protects.
 4. **Mapping a `ScheduleNode`'s `config` to variable names.** Shared with the scheduler integration
    in the ConfigurationActor item.
-5. **Wire types.** `GitScheduleChange` and `ScheduleNotification` must carry the envelope; the
-   processor passes it through untouched.
+5. **Wire types.** `GitScheduleChange` and `ScheduleNotification` must carry the whole document
+   (payload and signature), and the processor passes it through untouched.
 
 ## Build order, tests first
 
-1. `polar-signing`: canonical encoding and its stability (key order, whitespace, unicode, numbers).
+1. `polar-signing`: canonical encoding and its stability (key order, whitespace, unicode, numbers), and
+   the document layout (exactly two fields, no import).
 2. Sign and verify: a valid signature; an altered payload; a wrong key; a certificate from another CA;
    an expired certificate; a certificate without `digitalSignature`; the wrong domain prefix.
 3. Authority: a signer with `c:update-policy` is accepted, one without is refused.
 4. The ConfigurationActor in front of `apply`: unsigned, wrongly signed, unauthorized signer and an
    old version are all refused and leave the value as it was.
-5. `polar-sign` update signing and `setup`; then the git program mode against the installed git.
-6. The wire types and the observer attaching the envelope; then the nix targets.
+5. `polar-sign` render, check and sign, then `setup`; then the git program mode against the installed git.
+6. The wire types, and the observer sending the verified document; then the nix targets.
