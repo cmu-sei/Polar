@@ -1,7 +1,7 @@
 # What the scheduler carries: three kinds
 
-Status, 2026-10-11: direction agreed with David; the configuration kind is being built, the other two are
-designs still to be written.
+Status, 2026-10-11: direction agreed with David; the configuration kind is built, and the other two have designs
+(`proposals.md`, `commands.md`) that are waiting on a few decisions, listed at the end of each.
 
 The scheduler began with three directories in the schedules repository (`permanent`, `adhoc`, `ephemeral`).
 What they were meant to express is three different things, which differ in who authors them, what authority
@@ -79,5 +79,5 @@ agent declares which commands it accepts, in the same schema export that lists i
    `HAD_OUTCOME`, keeping `reported_by` (the broker's identity for the publisher) apart from the agent the
    outcome names. A refusal is therefore visible, with its reason and signer. Outcomes for a proposal or a
    command will use the same path. Not verified on a cluster.
-3. **Proposal design and Command design,** each as its own document with a diagram, then their code.
+3. **Proposal design and Command design. Written 2026-10-11, awaiting David's decisions:** `proposals.md` (with `sequences/general/proposal_flow`) and `commands.md` (with `sequences/general/command_flow`). Then their code, each tests first.
 4. Retire the old `adhoc` and `ephemeral` handling and samples when 3 has replaced them.

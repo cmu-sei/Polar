@@ -1,0 +1,39 @@
+sequenceDiagram
+    actor Admin
+    participant Sign as polar-sign
+    participant Processor as Scheduler processor
+    participant Graph as Neo4j
+    participant Cassini
+    participant Agent as Target agent
+    participant Handler as Command handler
+
+    Admin->>Sign: build and sign backup-now for the agent
+    Sign-->>Admin: signed command with an id and an expiry
+    Admin->>Processor: submit, by repository first, front door later
+    Processor->>Graph: write a Command node and its status
+    Processor->>Graph: mark it dispatched
+    Processor-)Cassini: command on agent.name.command
+    Cassini-)Agent: command
+
+    Agent->>Agent: verify signer, target, authority and time
+    Agent->>Agent: declared, arguments valid, not seen, not draining
+    alt any check fails
+        Agent-)Cassini: CommandOutcome refused and the step
+    else every check passes
+        Agent-)Cassini: CommandOutcome accepted
+        Agent->>Handler: run with the declared timeout
+        Agent-)Cassini: CommandOutcome started
+        alt it finishes
+            Handler-->>Agent: done
+            Agent-)Cassini: CommandOutcome succeeded and how long
+        else it fails or times out
+            Handler-->>Agent: error
+            Agent-)Cassini: CommandOutcome failed and why
+        end
+    end
+    Cassini-)Processor: CommandOutcome
+    Processor->>Graph: write an outcome node, linked to the command
+
+    Note over Processor,Graph: Dispatched, but no outcome by the expiry
+    Processor->>Graph: write unanswered, with no retry
+    Admin->>Sign: a new command has a new id

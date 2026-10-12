@@ -1,0 +1,44 @@
+sequenceDiagram
+    actor Admin
+    participant Proposer as Jira consumer
+    participant Cassini
+    participant Receiver as Git observer
+    participant Processor as Scheduler processor
+    participant Graph as Neo4j
+    participant Creds as Credentials agent
+
+    Note over Admin,Receiver: Admission rules first, signed and delivered like configuration
+    Admin->>Processor: signed admission spec for observe-repo
+    Processor-)Cassini: admission spec
+    Cassini-)Receiver: admission spec
+    Receiver->>Receiver: verify for itself, until then accept nothing
+
+    Note over Proposer,Graph: A proposal
+    Proposer-)Cassini: Proposal kind, subject, evidence
+    Cassini-)Processor: Proposal, publisher named by the broker
+    Processor->>Graph: write a Proposal node
+    Cassini-)Receiver: Proposal, publisher named by the broker
+    Receiver->>Receiver: normalise, then apply the rules in order
+    alt rejected
+        Receiver-)Cassini: ProposalDecision rejected and the rule
+    else pending
+        Receiver-)Cassini: ProposalDecision pending and what for
+    else accepted
+        Receiver->>Creds: RetrieveSecret for the bound name
+        Creds-->>Receiver: re-encrypted to the agent's certificate
+        Receiver->>Receiver: add the repository to its set
+        Receiver-)Cassini: ProposalDecision accepted
+    end
+    Cassini-)Processor: ProposalDecision
+    Processor->>Graph: write a decision node, linked to the proposal
+
+    Note over Admin,Receiver: Approval and credentials are edits to the signed rules
+    Admin->>Processor: a new signed admission spec
+    Processor-)Cassini: admission spec
+    Cassini-)Receiver: admission spec
+    Receiver->>Receiver: re-evaluate every pending proposal
+
+    Note over Processor,Receiver: A restarted receiver gets them again
+    Processor-)Cassini: replay the kind's proposals
+    Cassini-)Receiver: Proposal
+    Receiver->>Receiver: re-evaluate against the current rules
