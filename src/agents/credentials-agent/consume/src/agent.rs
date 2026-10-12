@@ -23,6 +23,10 @@ impl PolarAgent for CredentialsConsumer {
         &polar::graph::environment::SECTION,
         &crate::settings::SECTION,
     ];
+    const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] = &[
+        &crate::authority_sections::POLICY,
+        &crate::authority_sections::GROUPS,
+    ];
     const HELP: Option<&'static str> = Some(
         "The credentials agent consumer answers the certificate, identity, account, secret and \
          escrow-key requests the cluster's agents make over Cassini. The ledger is its source of \

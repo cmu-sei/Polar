@@ -76,6 +76,7 @@ use credentials_agent_common::retrieve_secret::RetrieveSecretRequest;
 use credentials_agent_common::secret::StoreSecretRequest;
 
 // ---- Local: shared infrastructure ----
+use crate::authority_publisher::{AuthorityPublisher, PublisherArgs, PublisherMessage};
 use crate::introspection::IntrospectionClient;
 use crate::ledger::{LedgerActor, LedgerActorArgs, LedgerMessage};
 use crate::projection::{ProjectionActor, ProjectionActorArgs, ProjectionMessage};
@@ -188,6 +189,10 @@ pub enum ConsumerSupervisorMessage {
     DrainElapsed,
     /// Time to say how many requests have arrived since the last time.
     ReportActivity,
+    /// A runtime section was replaced: if it is one that is published, read it and hand it on.
+    RuntimeChanged { section: String },
+    /// An agent asked for the current authority.
+    AuthorityRequested,
 }
 
 /// How often the consumer says how many requests it has seen.
@@ -206,6 +211,10 @@ pub struct ConsumerSupervisorState {
     /// append in progress.
     ledger: ActorRef<LedgerMessage>,
     healthcheck: HealthHandle,
+    /// Signs, numbers and publishes the policy, the groups and the revoked certificates.
+    publisher: ActorRef<PublisherMessage>,
+    /// Where the policy and groups sections are read from when one changes.
+    configuration: polar_agent_builder::ConfigurationHandle,
     /// Used only to unsubscribe at shutdown; replaced when the builder
     /// respawns the client.
     broker_client: TcpClient,
@@ -543,6 +552,40 @@ impl ConsumerSupervisor {
             .collect()
     }
 
+    /// Agents ask for the current authority on this topic; this agent is the only one that answers.
+    fn authority_request_subscription(
+        supervisor: &ActorRef<ConsumerSupervisorMessage>,
+    ) -> Subscription {
+        let supervisor = supervisor.clone();
+        Subscription::new(
+            credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC,
+            move |_| {
+                if let Err(e) =
+                    supervisor.send_message(ConsumerSupervisorMessage::AuthorityRequested)
+                {
+                    warn!("could not pass on a request for the authority: {e}");
+                }
+            },
+        )
+    }
+
+    /// Reads a replaced section and hands it to the publisher. A section that cannot be read says so and is
+    /// left for the next republish; it is never published half-read.
+    async fn pass_on_section(state: &ConsumerSupervisorState, section: &str) {
+        match state.configuration.runtime(section).await {
+            Ok(Some(value)) => {
+                let _ = state.publisher.cast(PublisherMessage::SectionChanged {
+                    section: section.to_string(),
+                    version: value.version,
+                    body: value.body,
+                    authored_by: Some(value.signer),
+                });
+            }
+            Ok(None) => {}
+            Err(e) => warn!(%section, "could not read the section to publish it: {e}"),
+        }
+    }
+
     /// Routes one request to its handler actor. Four topics carry the
     /// broker-verified `published_by`, which the shared `Supervisor` trait
     /// cannot (it is cross-cutting and cannot gain a parameter for one
@@ -604,6 +647,37 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
+        // Made before the builder, which keeps them current from the credentials agent's own
+        // published authority (`with_authority_actors`): the handlers below decide with them.
+        // PermissionsActor is the sole, real, authoritative source of
+        // what permissions an identity actually holds -- PolicyActor
+        // must never itself resolve permissions, only consume this
+        // actor's own, real resolutions. See polar-permissions's own
+        // crate documentation for the complete, real reasoning.
+        let (permissions_actor, _) = polar_permissions::PermissionsActor::spawn_linked(
+            None,
+            polar_permissions::PermissionsActor,
+            (),
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        // PolicyActor never exists without a real PermissionsActor --
+        // construction requires one, structurally, not optionally.
+        // See polar-policy's own crate documentation for the
+        // complete, real reasoning behind this coupling.
+        let (policy_actor, _) = polar_policy::PolicyActor::spawn_linked(
+            None,
+            polar_policy::PolicyActor,
+            polar_policy::PolicyActorArgs {
+                permissions_actor: permissions_actor.clone(),
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
         // The environment is read and judged first, before any actor is spawned, and the
         // agent's own settings come from that one snapshot. Declaring the graph section here
         // rather than requiring the graph-write capability is deliberate: this agent
@@ -615,7 +689,9 @@ impl Actor for ConsumerSupervisor {
         // bootstrap against itself). The dependency endpoints (Cassini and Neo4j
         // certificates) come from POLAR_HEALTH_DEP_ENDPOINTS in the deployment.
         let mut builder = AgentBuilder::new(myself.clone(), SERVICE_NAME)
-            .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }));
+            .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }))
+            .with_authority_actors(permissions_actor.clone(), policy_actor.clone());
+        builder = builder.with_subscription(Self::authority_request_subscription(&myself));
         for subscription in Self::request_subscriptions(&myself) {
             builder = builder.with_subscription(subscription);
         }
@@ -877,33 +953,6 @@ impl Actor for ConsumerSupervisor {
             .await
             .map_err(ActorProcessingErr::from)?;
 
-        // PermissionsActor is the sole, real, authoritative source of
-        // what permissions an identity actually holds -- PolicyActor
-        // must never itself resolve permissions, only consume this
-        // actor's own, real resolutions. See polar-permissions's own
-        // crate documentation for the complete, real reasoning.
-        let (permissions_actor, _) = polar_permissions::PermissionsActor::spawn_linked(
-            None,
-            polar_permissions::PermissionsActor,
-            (),
-            myself.get_cell(),
-        )
-        .await
-        .map_err(ActorProcessingErr::from)?;
-
-        // PolicyActor never exists without a real PermissionsActor --
-        // construction requires one, structurally, not optionally.
-        // See polar-policy's own crate documentation for the
-        // complete, real reasoning behind this coupling.
-        let (policy_actor, _) = polar_policy::PolicyActor::spawn_linked(
-            None,
-            polar_policy::PolicyActor,
-            polar_policy::PolicyActorArgs { permissions_actor },
-            myself.get_cell(),
-        )
-        .await
-        .map_err(ActorProcessingErr::from)?;
-
         let retrieve_secret_handler = RetrieveSecretHandler {
             escrow_keypair: escrow_keypair.clone(),
             ledger: ledger.clone(),
@@ -939,6 +988,10 @@ impl Actor for ConsumerSupervisor {
         // The health check, the router, the request subscriptions and the Cassini
         // client come from the agent builder, spawned last so every handler
         // actor exists before a request can arrive. It was configured first, above.
+        let configured_authority_publisher = configured
+            .config()
+            .read(&polar_agent_builder::environment::AUTHORITY_PUBLISHER)
+            .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
         let resources = configured.build().await?;
 
         // The "infrastructure -> domain" half of the respawn/shutdown protocol.
@@ -952,6 +1005,65 @@ impl Actor for ConsumerSupervisor {
                 }
             });
 
+        // The authority publisher. The sections it publishes arrive as signed documents, so it is told when
+        // one is replaced, and once now for any already held; the ledger tells it when a certificate is
+        // revoked.
+        let own_identity = configured_authority_publisher;
+        let broker = BROKER_CLIENT_NAME.to_string();
+        let (publisher, _) = AuthorityPublisher::spawn_linked(
+            None,
+            AuthorityPublisher,
+            PublisherArgs {
+                ledger: ledger.clone(),
+                key: escrow_keypair.private_key().clone(),
+                publish: std::sync::Arc::new(move |topic: &str, payload: Vec<u8>| {
+                    match where_is(broker.clone()) {
+                        Some(client) => {
+                            if let Err(e) =
+                                client.send_message(cassini_client::TcpClientMessage::publish(
+                                    topic.to_string(),
+                                    payload,
+                                    None,
+                                ))
+                            {
+                                error!("could not publish on '{topic}': {e}");
+                            }
+                        }
+                        None => error!("no broker client to publish on '{topic}'"),
+                    }
+                }),
+                local: resources.authority.clone(),
+                own_identity,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+        match ractor::call!(ledger, LedgerMessage::RevocationChanges) {
+            Ok(port) => port.subscribe(publisher.clone(), |_| {
+                Some(PublisherMessage::RevocationsChanged)
+            }),
+            Err(e) => {
+                return Err(ActorProcessingErr::from(format!(
+                    "the ledger did not give its revocation port: {e}"
+                )));
+            }
+        }
+        resources
+            .configuration
+            .runtime_changes()
+            .subscribe(myself.clone(), |changed| {
+                Some(ConsumerSupervisorMessage::RuntimeChanged {
+                    section: changed.section,
+                })
+            });
+        for section in ["policy", "groups"] {
+            let _ = myself.cast(ConsumerSupervisorMessage::RuntimeChanged {
+                section: section.to_string(),
+            });
+        }
+        publisher.cast(PublisherMessage::Start)?;
+
         drop(myself.send_interval(ACTIVITY_REPORT_EVERY, || {
             ConsumerSupervisorMessage::ReportActivity
         }));
@@ -960,6 +1072,8 @@ impl Actor for ConsumerSupervisor {
             projection_actor,
             ledger,
             healthcheck: resources.healthcheck,
+            publisher,
+            configuration: resources.configuration,
             broker_client: resources.tcp_client,
             infrastructure: resources.infrastructure,
             activity: crate::activity::Activity::new(),
@@ -995,6 +1109,14 @@ impl Actor for ConsumerSupervisor {
                 }
             }
 
+            ConsumerSupervisorMessage::RuntimeChanged { section } => {
+                Self::pass_on_section(state, &section).await;
+            }
+
+            ConsumerSupervisorMessage::AuthorityRequested => {
+                let _ = state.publisher.cast(PublisherMessage::SnapshotRequested);
+            }
+
             ConsumerSupervisorMessage::ReportActivity => {
                 let report = state.activity.take_report(std::time::Instant::now());
                 info!("CONSUMER_SUPERVISOR: {report}");
@@ -1002,6 +1124,11 @@ impl Actor for ConsumerSupervisor {
 
             ConsumerSupervisorMessage::DrainElapsed => {
                 warn!("CONSUMER_SUPERVISOR: drain window elapsed, beginning shutdown");
+
+                // Nothing more is published once the drain is over.
+                state
+                    .publisher
+                    .stop(Some("supervisor shutting down".into()));
 
                 // The ledger first: it is the source of truth, and stopping it
                 // waits for the append in progress. The projection is derived
