@@ -28,6 +28,7 @@ use polar_agent_builder::{
     InfrastructureSupervisorMessage, Subscription,
 };
 use polar_git_server_common::{POLAR_GIT_REPO_CHANGED_TOPIC, RepoChangedEvent};
+use polar_scheduler_common::{CONFIGURATION_REPLAY_TOPIC, ConfigurationReplayRequest};
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -44,6 +45,8 @@ pub enum SchedulerObserverMessage {
     },
     /// The Polar git server says a ref of one of its repositories moved.
     RepoChanged(RepoChangedEvent),
+    /// An agent that has just registered asks for the signed configuration held for it.
+    ReplayRequested(String),
     PrepareShutdown,
 }
 
@@ -68,6 +71,23 @@ pub fn repo_changed_subscription(supervisor: ActorRef<SchedulerObserverMessage>)
     )
 }
 
+/// The subscription to agents' requests for the configuration held for them. The checkout is what
+/// answers, so the request comes here and not to the processor, which only writes the ledger. One that
+/// does not decode is dropped.
+pub fn replay_request_subscription(supervisor: ActorRef<SchedulerObserverMessage>) -> Subscription {
+    Subscription::new(
+        CONFIGURATION_REPLAY_TOPIC,
+        move |incoming| match rkyv::from_bytes::<ConfigurationReplayRequest, rkyv::rancor::Error>(
+            &incoming.payload,
+        ) {
+            Ok(request) => {
+                let _ = supervisor.cast(SchedulerObserverMessage::ReplayRequested(request.agent));
+            }
+            Err(e) => warn!("failed to deserialize a configuration replay request: {e}"),
+        },
+    )
+}
+
 pub struct SchedulerObserverSupervisor;
 
 pub struct SchedulerObserverSupervisorState {
@@ -79,6 +99,8 @@ pub struct SchedulerObserverSupervisorState {
     watched_repo: Option<String>,
     sync: Option<ActorRef<SyncMessage>>,
     watcher: Option<ActorRef<GitWatcherMsg>>,
+    /// Agents that asked before the watcher existed; handed to it when it does.
+    waiting_replays: Vec<String>,
 }
 
 #[async_trait]
@@ -98,6 +120,7 @@ impl Actor for SchedulerObserverSupervisor {
         let resources = AgentBuilder::new(myself.clone(), SERVICE_NAME)
             .with_lifecycle_handler(|event| Some(SchedulerObserverMessage::ClientEvent { event }))
             .with_subscription(repo_changed_subscription(myself.clone()))
+            .with_subscription(replay_request_subscription(myself.clone()))
             .into_configured(configured)
             .build()
             .await?;
@@ -159,6 +182,7 @@ impl Actor for SchedulerObserverSupervisor {
             watched_repo,
             sync,
             watcher: None,
+            waiting_replays: Vec::new(),
         })
     }
 
@@ -182,6 +206,9 @@ impl Actor for SchedulerObserverSupervisor {
                         .await?;
                         info!("Client registered, triggering initial scan");
                         watcher.cast(GitWatcherMsg::PerformInitialScan)?;
+                        for agent in std::mem::take(&mut state.waiting_replays) {
+                            watcher.cast(GitWatcherMsg::Replay { agent })?;
+                        }
                         state.watcher = Some(watcher);
                     } else {
                         debug!("Watcher already running; not starting another on reconnect");
@@ -201,6 +228,10 @@ impl Actor for SchedulerObserverSupervisor {
                     sync.cast(SyncMessage::Now)?;
                 }
             }
+            SchedulerObserverMessage::ReplayRequested(agent) => match &state.watcher {
+                Some(watcher) => watcher.cast(GitWatcherMsg::Replay { agent })?,
+                None => state.waiting_replays.push(agent),
+            },
             SchedulerObserverMessage::PrepareShutdown => {
                 info!(
                     "PrepareShutdown received: stopping the watcher and the sync before infrastructure"
@@ -291,6 +322,58 @@ mod tests {
                 published_by: None,
                 trace_ctx: None,
             });
+        });
+    }
+
+    #[test]
+    fn a_replay_request_reaches_the_supervisor_as_the_agent_that_asked_and_garbage_is_dropped() {
+        use std::sync::{Arc, Mutex};
+        struct Sink;
+        #[ractor::async_trait]
+        impl Actor for Sink {
+            type Msg = SchedulerObserverMessage;
+            type State = Arc<Mutex<Vec<String>>>;
+            type Arguments = Self::State;
+            async fn pre_start(
+                &self,
+                _: ActorRef<Self::Msg>,
+                seen: Self::State,
+            ) -> Result<Self::State, ActorProcessingErr> {
+                Ok(seen)
+            }
+            async fn handle(
+                &self,
+                _: ActorRef<Self::Msg>,
+                message: Self::Msg,
+                seen: &mut Self::State,
+            ) -> Result<(), ActorProcessingErr> {
+                if let SchedulerObserverMessage::ReplayRequested(agent) = message {
+                    seen.lock().unwrap().push(agent);
+                }
+                Ok(())
+            }
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let (sink, _) = Actor::spawn(None, Sink, seen.clone()).await.unwrap();
+            let sub = replay_request_subscription(sink);
+            assert_eq!(sub.topic, CONFIGURATION_REPLAY_TOPIC);
+            let message = |payload: Vec<u8>| polar_router::IncomingMessage {
+                topic: CONFIGURATION_REPLAY_TOPIC.to_string(),
+                payload,
+                published_by: None,
+                trace_ctx: None,
+            };
+            let request = rkyv::to_bytes::<rkyv::rancor::Error>(&ConfigurationReplayRequest {
+                agent: "agent-a".into(),
+            })
+            .unwrap()
+            .to_vec();
+            (sub.deliver)(message(request));
+            (sub.deliver)(message(vec![9, 9]));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(*seen.lock().unwrap(), ["agent-a"]);
         });
     }
 }

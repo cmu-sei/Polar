@@ -12,24 +12,10 @@ use std::collections::HashMap;
 use tracing::{error, info};
 
 // Import local types
-use crate::configuration::{self, Routing, Shape, StoredDocument};
+use crate::configuration::{self, Routing, Shape};
 use crate::types::ProcessorMsg;
 
 pub struct ScheduleInfoProcessor;
-
-/// The highest version of each item among documents read from the graph.
-fn latest_of(stored: Vec<StoredDocument>) -> HashMap<String, StoredDocument> {
-    let mut latest: HashMap<String, StoredDocument> = HashMap::new();
-    for document in stored {
-        if latest
-            .get(&document.id)
-            .is_none_or(|held| document.version > held.version)
-        {
-            latest.insert(document.id.clone(), document);
-        }
-    }
-    latest
-}
 
 pub struct ProcessorState {
     tcp_client: ActorRef<TcpClientMessage>,
@@ -37,10 +23,9 @@ pub struct ProcessorState {
     permanent_versions: HashMap<String, u64>,
     adhoc_versions: HashMap<String, u64>,
     ephemeral_patterns: HashMap<String, String>, // pattern -> agent_type
-    /// The latest signed document of each configuration item, by item id: what the graph held when the
-    /// processor started, and what has arrived since. It is what an agent that asks is sent, and it keeps an
-    /// older document from passing for the latest. The receiver still checks versions for itself.
-    documents: HashMap<String, StoredDocument>,
+    /// The highest version of each signed configuration item forwarded so far, by item id. It only saves
+    /// forwarding what the receiver would refuse as stale; the receiver does the checking.
+    configuration_versions: HashMap<String, u64>,
 }
 
 impl ScheduleInfoProcessor {
@@ -165,72 +150,46 @@ impl ScheduleInfoProcessor {
         let received_at = chrono::Utc::now().to_rfc3339();
         match routing {
             Ok(routing) => {
+                state
+                    .graph_controller
+                    .cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                        key: ScheduleKey::Configuration {
+                            id: routing.id.clone(),
+                        }
+                        .into_key(),
+                        props: vec![
+                            Property("document".to_string(), GraphValue::String(json.clone())),
+                            Property(
+                                "target".to_string(),
+                                GraphValue::String(routing.agent.clone()),
+                            ),
+                            Property(
+                                "version".to_string(),
+                                GraphValue::I64(routing.version as i64),
+                            ),
+                            Property("source_path".to_string(), GraphValue::String(path)),
+                            Property(
+                                "status".to_string(),
+                                GraphValue::String("received".to_string()),
+                            ),
+                            Property("received_at".to_string(), GraphValue::String(received_at)),
+                        ],
+                    }))?;
+
                 let newer = state
-                    .documents
+                    .configuration_versions
                     .get(&routing.id)
-                    .is_none_or(|held| routing.version > held.version);
-                let key = ScheduleKey::Configuration {
-                    id: routing.id.clone(),
-                }
-                .into_key();
+                    .is_none_or(|seen| routing.version > *seen);
                 if newer {
                     state
-                        .graph_controller
-                        .cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                            key,
-                            props: vec![
-                                Property("document".to_string(), GraphValue::String(json.clone())),
-                                Property(
-                                    "target".to_string(),
-                                    GraphValue::String(routing.agent.clone()),
-                                ),
-                                Property(
-                                    "version".to_string(),
-                                    GraphValue::I64(routing.version as i64),
-                                ),
-                                Property("source_path".to_string(), GraphValue::String(path)),
-                                Property(
-                                    "status".to_string(),
-                                    GraphValue::String("received".to_string()),
-                                ),
-                                Property(
-                                    "received_at".to_string(),
-                                    GraphValue::String(received_at),
-                                ),
-                            ],
-                        }))?;
-                    state.documents.insert(
-                        routing.id.clone(),
-                        StoredDocument {
-                            id: routing.id.clone(),
-                            agent: routing.agent.clone(),
-                            version: routing.version,
-                            document: json.clone(),
-                        },
-                    );
+                        .configuration_versions
+                        .insert(routing.id.clone(), routing.version);
                     publish_configuration(state, &routing.agent, json).await?;
                 } else {
-                    // Seen, and said so, but the node keeps the latest document and its version: this
-                    // one must not pass for it.
-                    state
-                        .graph_controller
-                        .cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
-                            key,
-                            props: vec![
-                                Property(
-                                    "stale_version_received".to_string(),
-                                    GraphValue::I64(routing.version as i64),
-                                ),
-                                Property(
-                                    "stale_received_at".to_string(),
-                                    GraphValue::String(received_at),
-                                ),
-                            ],
-                        }))?;
                     info!(
                         id = %routing.id,
                         version = routing.version,
-                        "configuration is not newer than the one held; recorded, not forwarded"
+                        "configuration is not newer than one already forwarded; recorded, not forwarded"
                     );
                 }
             }
@@ -255,27 +214,6 @@ impl ScheduleInfoProcessor {
                         ],
                     }))?;
             }
-        }
-        Ok(())
-    }
-
-    /// An agent that has just registered asks for what is held for it: its documents go out again on its
-    /// own topic, oldest first, so that an agent that applies versions in order ends at the latest. It
-    /// verifies each like any other, and one it has already applied is refused as no newer.
-    async fn handle_replay(
-        state: &mut ProcessorState,
-        agent: String,
-    ) -> Result<(), ActorProcessingErr> {
-        let mut held: Vec<&StoredDocument> = state
-            .documents
-            .values()
-            .filter(|d| d.agent == agent)
-            .collect();
-        held.sort_by_key(|d| (d.version, d.id.clone()));
-        let documents: Vec<String> = held.into_iter().map(|d| d.document.clone()).collect();
-        info!(agent = %agent, count = documents.len(), "replaying held configuration");
-        for document in documents {
-            publish_configuration(state, &agent, document).await?;
         }
         Ok(())
     }
@@ -432,17 +370,12 @@ async fn publish_notification(
 impl Actor for ScheduleInfoProcessor {
     type Msg = ProcessorMsg;
     type State = ProcessorState;
-    /// The Cassini client, the graph controller, and the documents the graph already held.
-    type Arguments = (
-        ActorRef<TcpClientMessage>,
-        ActorRef<GraphControllerMsg>,
-        Vec<StoredDocument>,
-    );
+    type Arguments = (ActorRef<TcpClientMessage>, ActorRef<GraphControllerMsg>);
 
     async fn pre_start(
         &self,
         _myself: ActorRef<Self::Msg>,
-        (tcp_client, graph_controller, stored): Self::Arguments,
+        (tcp_client, graph_controller): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
         info!("ScheduleInfoProcessor starting");
         Ok(ProcessorState {
@@ -451,7 +384,7 @@ impl Actor for ScheduleInfoProcessor {
             permanent_versions: HashMap::new(),
             adhoc_versions: HashMap::new(),
             ephemeral_patterns: HashMap::new(),
-            documents: latest_of(stored),
+            configuration_versions: HashMap::new(),
         })
     }
 
@@ -487,7 +420,6 @@ impl Actor for ScheduleInfoProcessor {
                 outcome,
                 reported_by,
             } => Self::handle_outcome(state, outcome, reported_by)?,
-            ProcessorMsg::ReplayRequest { agent } => Self::handle_replay(state, agent).await?,
         }
         Ok(())
     }

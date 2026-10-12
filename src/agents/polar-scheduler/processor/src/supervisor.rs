@@ -24,9 +24,8 @@ use polar_agent_builder::{
     InfrastructureSupervisorMessage, Subscription, spawn_graph_controller, stop_graph_controller,
 };
 use polar_scheduler_common::{
-    AdhocAgentAnnouncement, CONFIGURATION_OUTCOME_TOPIC, CONFIGURATION_REPLAY_TOPIC,
-    ConfigurationOutcome, ConfigurationReplayRequest, GitScheduleChange, SCHEDULER_ADHOC_TOPIC,
-    SCHEDULER_IN_TOPIC,
+    AdhocAgentAnnouncement, CONFIGURATION_OUTCOME_TOPIC, ConfigurationOutcome, GitScheduleChange,
+    SCHEDULER_ADHOC_TOPIC, SCHEDULER_IN_TOPIC,
 };
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
@@ -58,8 +57,6 @@ pub enum SchedulerSupervisorMessage {
         outcome: ConfigurationOutcome,
         reported_by: Option<String>,
     },
-    /// An agent that has just registered asks for the signed configuration held for it.
-    ReplayRequested(String),
     GraphSignal(GraphSignal),
     /// The health check ended the pod's life; the infrastructure waits for
     /// `ProceedWithShutdown`.
@@ -75,7 +72,6 @@ pub fn subscriptions(supervisor: &ActorRef<SchedulerSupervisorMessage>) -> Vec<S
     let for_changes = supervisor.clone();
     let for_announcements = supervisor.clone();
     let for_outcomes = supervisor.clone();
-    let for_replays = supervisor.clone();
     vec![
         Subscription::new(SCHEDULER_IN_TOPIC, move |incoming| {
             match rkyv::from_bytes::<GitScheduleChange, rkyv::rancor::Error>(&incoming.payload) {
@@ -118,21 +114,6 @@ pub fn subscriptions(supervisor: &ActorRef<SchedulerSupervisorMessage>) -> Vec<S
                     }
                 }
                 Err(e) => error!("failed to deserialize a configuration outcome: {e:?}"),
-            },
-        ),
-        Subscription::new(
-            CONFIGURATION_REPLAY_TOPIC,
-            move |incoming| match rkyv::from_bytes::<ConfigurationReplayRequest, rkyv::rancor::Error>(
-                &incoming.payload,
-            ) {
-                Ok(request) => {
-                    if let Err(e) =
-                        for_replays.cast(SchedulerSupervisorMessage::ReplayRequested(request.agent))
-                    {
-                        error!("failed to hand a replay request to the supervisor: {e}");
-                    }
-                }
-                Err(e) => error!("failed to deserialize a configuration replay request: {e:?}"),
             },
         ),
     ]
@@ -187,22 +168,10 @@ impl Actor for SchedulerSupervisor {
         .await?;
 
         let tcp_client = resources.tcp_client.as_actor_ref().clone();
-        // What the graph already holds, so that a restart of this agent forgets nothing an agent that
-        // starts later is owed. The graph must be reachable: an agent that cannot read it would replay
-        // nothing and let an old document pass for the latest, so it does not start.
-        let stored = crate::configuration::load_stored_documents(&graph_controller)
-            .await
-            .map_err(|e| {
-                ActorProcessingErr::from(format!("cannot read the stored configuration: {e}"))
-            })?;
-        info!(
-            "{} stored configuration document(s) read from the graph",
-            stored.len()
-        );
         let (processor, _) = Actor::spawn_linked(
             Some(format!("{SERVICE_NAME}.processor")),
             ScheduleInfoProcessor,
-            (tcp_client, graph_controller.clone(), stored),
+            (tcp_client, graph_controller.clone()),
             myself.get_cell(),
         )
         .await?;
@@ -269,13 +238,6 @@ impl Actor for SchedulerSupervisor {
                         outcome,
                         reported_by,
                     })?;
-                }
-            }
-            SchedulerSupervisorMessage::ReplayRequested(agent) => {
-                if state.drain.is_draining() {
-                    warn!("draining -- a replay request will be lost on exit");
-                } else if let Some(processor) = &state.processor {
-                    processor.cast(ProcessorMsg::ReplayRequest { agent })?;
                 }
             }
             SchedulerSupervisorMessage::PrepareShutdown => {
@@ -368,9 +330,6 @@ mod tests {
             let kind = match message {
                 SchedulerSupervisorMessage::ScheduleChanged(_) => "change",
                 SchedulerSupervisorMessage::Announced(_) => "announcement",
-                SchedulerSupervisorMessage::ReplayRequested(agent) if agent == "asking-agent" => {
-                    "replay request"
-                }
                 SchedulerSupervisorMessage::Outcome { reported_by, .. } => {
                     if reported_by.as_deref() == Some("the-broker-says") {
                         "outcome from the broker's identity"
@@ -407,8 +366,7 @@ mod tests {
             [
                 SCHEDULER_IN_TOPIC,
                 SCHEDULER_ADHOC_TOPIC,
-                CONFIGURATION_OUTCOME_TOPIC,
-                CONFIGURATION_REPLAY_TOPIC
+                CONFIGURATION_OUTCOME_TOPIC
             ]
         );
 
@@ -449,22 +407,13 @@ mod tests {
         (subs[2].deliver)(from_broker);
         (subs[2].deliver)(message(CONFIGURATION_OUTCOME_TOPIC, vec![7, 7]));
 
-        let asking = rkyv::to_bytes::<rkyv::rancor::Error>(&ConfigurationReplayRequest {
-            agent: "asking-agent".into(),
-        })
-        .unwrap()
-        .to_vec();
-        (subs[3].deliver)(message(CONFIGURATION_REPLAY_TOPIC, asking));
-        (subs[3].deliver)(message(CONFIGURATION_REPLAY_TOPIC, vec![5]));
-
         tokio::time::sleep(StdDuration::from_millis(100)).await;
         assert_eq!(
             *got.lock().unwrap(),
             [
                 "change",
                 "announcement",
-                "outcome from the broker's identity",
-                "replay request"
+                "outcome from the broker's identity"
             ]
         );
     }

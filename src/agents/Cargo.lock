@@ -5786,7 +5786,6 @@ dependencies = [
  "polar-agent-builder",
  "polar-router",
  "polar-scheduler-common",
- "polar-test-graph",
  "proptest",
  "ractor",
  "reqwest 0.12.28",

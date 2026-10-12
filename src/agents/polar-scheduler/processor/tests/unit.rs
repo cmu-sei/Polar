@@ -164,7 +164,7 @@ fn test_compile_update_state() {
 async fn spawn_processor() -> (ActorRef<ProcessorMsg>, tokio::task::JoinHandle<()>) {
     let (tcp, _) = Actor::spawn(None, MockTcpClient, ()).await.unwrap();
     let (graph, _) = Actor::spawn(None, MockGraphController, ()).await.unwrap();
-    let (processor, handle) = Actor::spawn(None, ScheduleInfoProcessor, (tcp, graph, vec![]))
+    let (processor, handle) = Actor::spawn(None, ScheduleInfoProcessor, (tcp, graph))
         .await
         .unwrap();
     (processor, handle)

@@ -8,6 +8,8 @@ pub const SCHEDULER_ADHOC_TOPIC: &str = "scheduler.adhoc";
 
 /// The kinds of signed document, as the `type` field of a payload says (see docs/architecture/scheduling-kinds.md).
 /// Every signed payload carries one, and a receiver accepts only the kind it expects.
+pub mod routing;
+
 pub mod document_type {
     /// Desired state for an agent: values for the variables its code declared Dynamic.
     pub const CONFIGURATION: &str = "configuration";

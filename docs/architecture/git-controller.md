@@ -284,10 +284,16 @@ connections:
 
 ## What has to exist first
 
-- **Replay to an agent that has just started.** A restarted controller needs the current `repositories` and
-  `admission` back, and a restarted observer needs its `credentials` to close the loop. I believe the scheduler
-  processor does not replay yet (`signed-configuration.md` calls it the reconciliation item). To be confirmed,
-  and then built, before anything here is useful past the first run.
+- **Replay to an agent that has just started: built 2026-10-12.** A restarted controller needs the current
+  `repositories` and `admission` back, and a restarted observer needs its `credentials` to close the loop.
+  Every builder agent publishes a `ConfigurationReplayRequest` on `polar-configuration-replay` each time it
+  registers. The **polar scheduler's observer** answers from its checkout of the schedules repository, which
+  is the repository as last pulled, by republishing the documents that name the asking agent on that agent's
+  own configuration topic, oldest version first. The agent verifies them like any other and refuses what it
+  has already applied. A request that arrives before the observer's initial scan has finished is answered once,
+  when it has. **The graph is never read for this**: it is a projection of what was observed, and a state
+  rebuilt from it could disagree with the repository. (A first version read the stored documents back from the
+  graph in the processor; David's rule that the graph is never authoritative removed it.)
 - **`CryptoMessage::RetrieveSecret { name }`.** The credentials agent can retrieve a named secret; the crypto
   actor cannot ask it to. Needed for "ask the credentials agent at init".
 - **`c:update-runtime`**, and the redeployment of the capability consumers.

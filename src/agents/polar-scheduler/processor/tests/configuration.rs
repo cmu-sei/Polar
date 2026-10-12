@@ -2,7 +2,6 @@
 
 use cassini_client::TcpClientMessage;
 use polar::graph::controller::{GraphControllerMsg, GraphOp, GraphValue};
-use polar_scheduler::configuration::StoredDocument;
 use polar_scheduler::processor::ScheduleInfoProcessor;
 use polar_scheduler::types::ProcessorMsg;
 use polar_scheduler_common::{
@@ -142,21 +141,15 @@ struct Rig {
 
 impl Rig {
     async fn new() -> Self {
-        Self::holding(vec![]).await
-    }
-
-    /// A processor that starts holding documents the graph already had, as after a restart.
-    async fn holding(stored: Vec<StoredDocument>) -> Self {
         let graph = Arc::new(Mutex::new(Captured::default()));
         let published = Arc::new(Mutex::new(Vec::new()));
         let (cassini, _) = Actor::spawn(None, Cassini(published.clone()), ())
             .await
             .unwrap();
         let (graph_actor, _) = Actor::spawn(None, Graph(graph.clone()), ()).await.unwrap();
-        let (processor, _) =
-            Actor::spawn(None, ScheduleInfoProcessor, (cassini, graph_actor, stored))
-                .await
-                .unwrap();
+        let (processor, _) = Actor::spawn(None, ScheduleInfoProcessor, (cassini, graph_actor))
+            .await
+            .unwrap();
         Self {
             processor,
             graph,
@@ -192,16 +185,6 @@ impl Rig {
             .cast(ProcessorMsg::Outcome {
                 outcome,
                 reported_by: reported_by.map(str::to_string),
-            })
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    /// An agent that has just registered asks for what is held for it.
-    async fn replay(&self, agent: &str) {
-        self.processor
-            .cast(ProcessorMsg::ReplayRequest {
-                agent: agent.to_string(),
             })
             .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -456,85 +439,4 @@ async fn an_outcome_that_names_no_item_is_still_written_and_links_to_nothing() {
     );
     assert!(written[0].text("claimed_id").is_none());
     assert!(rig.edges().is_empty());
-}
-
-// -- replay to an agent that has just started --------------------------------------------------------
-
-#[tokio::test]
-async fn an_agent_that_asks_is_sent_the_latest_document_held_for_it_and_no_one_elses() {
-    let rig = Rig::new().await;
-    let newest = document("one", "agent-a", 3);
-    rig.create("a.dhall", &document("one", "agent-a", 2)).await;
-    rig.create("a.dhall", &newest).await;
-    rig.create("b.dhall", &document("two", "agent-b", 1)).await;
-    let before = rig.published().len();
-
-    rig.replay("agent-a").await;
-
-    let sent: Vec<_> = rig.published().into_iter().skip(before).collect();
-    assert_eq!(sent.len(), 1, "{sent:?}");
-    assert_eq!(sent[0].0, configuration_topic("agent-a"));
-    let forwarded: Value = serde_json::from_str(&decode(&sent[0].1).document_json).unwrap();
-    assert_eq!(
-        forwarded, newest,
-        "the document untouched, at its latest version"
-    );
-}
-
-#[tokio::test]
-async fn an_agent_with_nothing_held_for_it_is_sent_nothing() {
-    let rig = Rig::new().await;
-    rig.create("a.dhall", &document("one", "agent-a", 1)).await;
-    let before = rig.published().len();
-    rig.replay("agent-z").await;
-    assert_eq!(rig.published().len(), before);
-}
-
-#[tokio::test]
-async fn documents_the_graph_held_before_a_restart_are_replayed() {
-    let doc = document("one", "agent-a", 4);
-    let rig = Rig::holding(vec![StoredDocument {
-        id: "one".into(),
-        agent: "agent-a".into(),
-        version: 4,
-        document: doc.to_string(),
-    }])
-    .await;
-    rig.replay("agent-a").await;
-    let sent = rig.published();
-    assert_eq!(sent.len(), 1);
-    let forwarded: Value = serde_json::from_str(&decode(&sent[0].1).document_json).unwrap();
-    assert_eq!(forwarded, doc);
-}
-
-#[tokio::test]
-async fn a_stale_document_does_not_replace_the_one_held() {
-    // After a restart the processor knows the stored version from the graph, so an older document
-    // pushed later is neither forwarded nor allowed to overwrite what the graph holds.
-    let held = document("one", "agent-a", 5);
-    let rig = Rig::holding(vec![StoredDocument {
-        id: "one".into(),
-        agent: "agent-a".into(),
-        version: 5,
-        document: held.to_string(),
-    }])
-    .await;
-    rig.create("a.dhall", &document("one", "agent-a", 2)).await;
-
-    assert!(
-        rig.published().is_empty(),
-        "an older version is not forwarded"
-    );
-    let written = rig.graph();
-    assert_eq!(written.len(), 1, "it is still seen in the graph");
-    assert!(
-        written[0].text("document").is_none() && written[0].number("version").is_none(),
-        "but it does not overwrite the stored document or its version: {:?}",
-        written[0]
-    );
-
-    rig.replay("agent-a").await;
-    let sent = rig.published();
-    let forwarded: Value = serde_json::from_str(&decode(&sent[0].1).document_json).unwrap();
-    assert_eq!(forwarded, held);
 }
