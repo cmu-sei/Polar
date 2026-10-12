@@ -45,7 +45,7 @@ use tracing::error;
 pub struct DecryptOnBehalfOfHandler {
     pub escrow_keypair: Arc<EscrowKeypair>,
     pub ledger: ActorRef<LedgerMessage>,
-    pub policy_actor: ActorRef<polar_policy::PolicyMessage>,
+    pub policy: polar_agent_builder::PolicyLookup,
 }
 
 impl DecryptOnBehalfOfHandler {
@@ -80,35 +80,21 @@ impl DecryptOnBehalfOfHandler {
 
         // Step 2: the real, genuine policy decision -- before ever
         // touching the escrow private key at all.
-        let decision = match ractor::rpc::call(
-            &self.policy_actor,
-            |reply| polar_policy::PolicyMessage::CheckAuthorization {
-                requester_identity: requested_by.clone(),
-                requester_certificate_pem: Some(requester_certificate.certificate_pem.clone()),
-                action: r#"Action::"decrypt""#.to_string(),
-                resource: request.resource_id.clone(),
-                reply,
-            },
-            None,
-        )
-        .await
+        // No decision (the policy is not running yet, or failed) is never a grant.
+        let decision = match self
+            .policy
+            .check(
+                &requested_by,
+                Some(requester_certificate.certificate_pem.clone()),
+                r#"Action::"decrypt""#,
+                &request.resource_id,
+            )
+            .await
         {
-            Ok(ractor::rpc::CallResult::Success(Ok(decision))) => decision,
-            Ok(ractor::rpc::CallResult::Success(Err(e))) => {
-                error!("Policy evaluation failed for {requested_by}: {e}");
-                return DecryptOnBehalfOfReply::Failed {
-                    detail: e.to_string(),
-                };
-            }
-            Ok(other) => {
-                return DecryptOnBehalfOfReply::Failed {
-                    detail: format!("unexpected CallResult: {other:?}"),
-                };
-            }
-            Err(e) => {
-                return DecryptOnBehalfOfReply::Failed {
-                    detail: e.to_string(),
-                };
+            Ok(decision) => decision,
+            Err(detail) => {
+                error!("Policy could not decide for {requested_by}: {detail}");
+                return DecryptOnBehalfOfReply::Failed { detail };
             }
         };
 
@@ -170,7 +156,7 @@ impl DecryptOnBehalfOfHandler {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ledger::{LedgerActor, LedgerActorArgs};
     use credentials_agent_common::events::CredentialsEvent;
@@ -192,41 +178,14 @@ mod tests {
         ledger
     }
 
-    async fn spawn_policy_actor_permitting(
+    pub(crate) async fn spawn_policy_actor_permitting(
         identity: &str,
         resource_id: &str,
-    ) -> ActorRef<polar_policy::PolicyMessage> {
-        let (permissions_actor, _) =
-            ractor::Actor::spawn(None, polar_permissions::PermissionsActor, ())
-                .await
-                .unwrap();
-        let (policy_actor, _) = ractor::Actor::spawn(
-            None,
-            polar_policy::PolicyActor,
-            polar_policy::PolicyActorArgs { permissions_actor },
-        )
+    ) -> polar_agent_builder::PolicyLookup {
+        crate::retrieve_secret::tests::registered_policy(Some(format!(
+            r#"permit(principal == Identity::"{identity}", action == Action::"decrypt", resource == {resource_id});"#
+        )))
         .await
-        .unwrap();
-
-        let policy = format!(
-            r#"
-            permit(
-                principal == Identity::"{identity}",
-                action == Action::"decrypt",
-                resource == {resource_id}
-            );
-            "#
-        );
-        let result = ractor::call!(policy_actor, |reply| {
-            polar_policy::PolicyMessage::UpdatePolicy {
-                policy_source: policy,
-                reply,
-            }
-        })
-        .unwrap();
-        result.unwrap();
-
-        policy_actor
     }
 
     async fn seed_requester_certificate(
@@ -286,7 +245,7 @@ mod tests {
         let handler = DecryptOnBehalfOfHandler {
             escrow_keypair,
             ledger,
-            policy_actor,
+            policy: policy_actor,
         };
 
         let reply = handler
@@ -309,6 +268,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn with_no_policy_running_nothing_is_decrypted_and_the_reply_is_a_failure() {
+        let ledger = spawn_test_ledger().await;
+        let escrow_keypair = crate::escrow::tests::test_keypair();
+        let resource_id = r#"KubeSecret::"namespace/pod/ENV_VAR""#;
+        seed_requester_certificate(&ledger, "requester").await;
+        let ciphertext =
+            EscrowedSecret::encrypt(b"secret", escrow_keypair.public_key_pem()).unwrap();
+
+        let handler = DecryptOnBehalfOfHandler {
+            escrow_keypair,
+            ledger,
+            policy: polar_agent_builder::PolicyLookup::named("no-such-policy-actor"),
+        };
+        let reply = handler
+            .handle(
+                DecryptOnBehalfOfRequest {
+                    ciphertext,
+                    resource_id: resource_id.to_string(),
+                },
+                Some("requester".to_string()),
+            )
+            .await;
+
+        match reply {
+            DecryptOnBehalfOfReply::Failed { detail } => {
+                assert!(detail.contains("not running yet"))
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn a_genuinely_denied_requester_never_receives_the_secret() {
         let ledger = spawn_test_ledger().await;
         let escrow_keypair = crate::escrow::tests::test_keypair();
@@ -326,7 +317,7 @@ mod tests {
         let handler = DecryptOnBehalfOfHandler {
             escrow_keypair,
             ledger,
-            policy_actor,
+            policy: policy_actor,
         };
 
         let reply = handler
@@ -355,7 +346,7 @@ mod tests {
         let handler = DecryptOnBehalfOfHandler {
             escrow_keypair,
             ledger,
-            policy_actor,
+            policy: policy_actor,
         };
 
         let reply = handler
@@ -389,7 +380,7 @@ mod tests {
         let handler = DecryptOnBehalfOfHandler {
             escrow_keypair,
             ledger,
-            policy_actor,
+            policy: policy_actor,
         };
 
         let reply = handler

@@ -288,6 +288,15 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
+    /// Actor names are process-wide, and the tests run side by side.
+    fn unique_service() -> String {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        format!(
+            "publisher-test-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        )
+    }
+
     async fn ledger_at(path: &str) -> ActorRef<LedgerMessage> {
         let (ledger, _) = Actor::spawn(
             None,
@@ -327,7 +336,7 @@ mod tests {
         }
         let ledger = ledger_at(path).await;
         let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
-        let local = AuthorityHandle::spawn(OWN, parent.get_cell())
+        let local = AuthorityHandle::spawn(&unique_service(), OWN, parent.get_cell())
             .await
             .unwrap();
         let published = Arc::new(Mutex::new(Vec::new()));

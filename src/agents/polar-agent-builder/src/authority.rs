@@ -403,6 +403,73 @@ impl Actor for AuthorityActor {
     }
 }
 
+/// The registry name of an agent's policy actor, the way the Cassini client is "<service>.tcp".
+pub fn policy_actor_name(service: &str) -> String {
+    format!("{service}.policy")
+}
+
+/// The registry name of an agent's permissions actor.
+pub fn permissions_actor_name(service: &str) -> String {
+    format!("{service}.permissions")
+}
+
+/// How code that enforces policy reaches the agent's policy actor: by registry name, on every decision, so it
+/// can be built before the infrastructure exists and follows an actor that is respawned. Until the actor is
+/// there it decides nothing, and an asker that gets an error must not grant: it fails closed.
+#[derive(Clone, Debug)]
+pub struct PolicyLookup {
+    name: String,
+}
+
+impl PolicyLookup {
+    /// The policy actor of the agent named `service`.
+    pub fn for_service(service: &str) -> Self {
+        Self::named(policy_actor_name(service))
+    }
+
+    /// The policy actor registered as `name`.
+    pub fn named(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+
+    pub fn actor(&self) -> Option<ActorRef<PolicyMessage>> {
+        ractor::registry::where_is(self.name.clone()).map(ActorRef::from)
+    }
+
+    /// What policy says about `action` on `resource` for the requester. An error means no decision was
+    /// reached (no policy actor yet, it did not answer, or it failed), never a decision: a caller that
+    /// is told this must refuse.
+    pub async fn check(
+        &self,
+        requester_identity: &str,
+        requester_certificate_pem: Option<String>,
+        action: &str,
+        resource: &str,
+    ) -> Result<polar_policy::Decision, String> {
+        let Some(policy) = self.actor() else {
+            return Err("the policy is not running yet, so nothing can be decided".to_string());
+        };
+        match ractor::rpc::call(
+            &policy,
+            |reply| PolicyMessage::CheckAuthorization {
+                requester_identity: requester_identity.to_string(),
+                requester_certificate_pem,
+                action: action.to_string(),
+                resource: resource.to_string(),
+                reply,
+            },
+            None,
+        )
+        .await
+        {
+            Ok(ractor::rpc::CallResult::Success(Ok(decision))) => Ok(decision),
+            Ok(ractor::rpc::CallResult::Success(Err(e))) => Err(e.to_string()),
+            Ok(other) => Err(format!("unexpected CallResult: {other:?}")),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
 /// How the rest of an agent uses authority, without touching ractor: the actors it evaluates with, the
 /// revoked serials, and the ports its own actors listen on.
 #[derive(Clone)]
@@ -417,15 +484,24 @@ pub struct AuthorityHandle {
 
 impl AuthorityHandle {
     /// Starts the permissions actor, the policy actor over it, and the actor that keeps both current, all as
-    /// children of `supervisor`. `publisher` is the identity the broker gives the credentials agent.
+    /// children of `supervisor`. `publisher` is the identity the broker gives the credentials agent. The
+    /// policy and permissions actors are registered under the names [`policy_actor_name`] and
+    /// [`permissions_actor_name`] give for `service`, so code built before the infrastructure (handlers that
+    /// enforce policy) finds them with a [`PolicyLookup`] when it needs them.
     pub async fn spawn(
+        service: &str,
         publisher: impl Into<String>,
         supervisor: ActorCell,
     ) -> Result<Self, ActorProcessingErr> {
-        let (permissions, _) =
-            Actor::spawn_linked(None, PermissionsActor, (), supervisor.clone()).await?;
+        let (permissions, _) = Actor::spawn_linked(
+            Some(permissions_actor_name(service)),
+            PermissionsActor,
+            (),
+            supervisor.clone(),
+        )
+        .await?;
         let (policy, _) = Actor::spawn_linked(
-            None,
+            Some(policy_actor_name(service)),
             PolicyActor,
             PolicyActorArgs {
                 permissions_actor: permissions.clone(),
@@ -433,19 +509,6 @@ impl AuthorityHandle {
             supervisor.clone(),
         )
         .await?;
-        Self::spawn_over(publisher, permissions, policy, supervisor).await
-    }
-
-    /// The same, over a permissions actor and a policy actor the agent already made: for an agent that needs
-    /// its policy before the builder exists (the credentials agent builds the handlers that enforce policy
-    /// first). The actors are kept current exactly as ones the handle made would be. They are not stopped
-    /// by this handle, nor linked to `supervisor`: they are the agent's.
-    pub async fn spawn_over(
-        publisher: impl Into<String>,
-        permissions: ActorRef<PermissionsMessage>,
-        policy: ActorRef<PolicyMessage>,
-        supervisor: ActorCell,
-    ) -> Result<Self, ActorProcessingErr> {
         let revoked = RevokedSerials::default();
         let changes = Arc::new(OutputPort::default());
         let asks = Arc::new(OutputPort::default());
@@ -807,8 +870,6 @@ mod tests {
 mod actor_tests {
     use super::*;
     use credentials_agent_common::authority_update::{AuthorityPayload, sign};
-    use polar_permissions::PermissionsActor;
-    use polar_policy::{PolicyActor, PolicyActorArgs};
     use ractor::{Actor, ActorRef};
     use rsa::RsaPrivateKey;
     use rsa::pkcs8::EncodePublicKey;
@@ -841,10 +902,6 @@ mod actor_tests {
             body,
             authored_by: None,
         }
-    }
-
-    fn policy_payload(sequence: u64, version: u64, source: &str) -> AuthorityPayload {
-        policy(sequence, version, source)
     }
 
     fn policy(sequence: u64, version: u64, source: &str) -> AuthorityPayload {
@@ -880,6 +937,7 @@ mod actor_tests {
     }
 
     struct Rig {
+        service: String,
         handle: AuthorityHandle,
         changes: Arc<Mutex<Vec<AuthorityChanged>>>,
         asks: Arc<Mutex<Vec<AuthorityAsk>>>,
@@ -901,7 +959,8 @@ mod actor_tests {
             }
         }
         let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
-        let handle = AuthorityHandle::spawn(CREDENTIALS, parent.get_cell())
+        let service = unique_service();
+        let handle = AuthorityHandle::spawn(&service, CREDENTIALS, parent.get_cell())
             .await
             .unwrap();
         let changes = Arc::new(Mutex::new(Vec::new()));
@@ -911,6 +970,7 @@ mod actor_tests {
         handle.changes().subscribe(c, Some);
         handle.asks().subscribe(a, Some);
         Rig {
+            service,
             handle,
             changes,
             asks,
@@ -919,6 +979,88 @@ mod actor_tests {
 
     async fn settle() {
         tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+
+    /// Actor names are process-wide, and the tests run side by side.
+    fn unique_service() -> String {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        format!(
+            "authority-test-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        )
+    }
+
+    #[tokio::test]
+    async fn the_actors_the_handle_makes_are_found_by_the_name_of_the_service() {
+        struct Parent;
+        #[ractor::async_trait]
+        impl Actor for Parent {
+            type Msg = ();
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(
+                &self,
+                _: ActorRef<()>,
+                _: (),
+            ) -> Result<(), ractor::ActorProcessingErr> {
+                Ok(())
+            }
+        }
+        let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
+        let service = unique_service();
+        let lookup = PolicyLookup::for_service(&service);
+        assert!(lookup.actor().is_none());
+        let handle = AuthorityHandle::spawn(&service, CREDENTIALS, parent.get_cell())
+            .await
+            .unwrap();
+        assert_eq!(lookup.actor().unwrap().get_id(), handle.policy().get_id());
+        assert_eq!(
+            ractor::registry::where_is(permissions_actor_name(&service))
+                .unwrap()
+                .get_id(),
+            handle.permissions().get_id()
+        );
+        // Another agent's name finds nothing.
+        assert!(
+            PolicyLookup::for_service("some-other-agent")
+                .actor()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn asking_before_the_policy_exists_is_an_error_and_never_a_decision() {
+        let lookup = PolicyLookup::for_service("nobody-has-started-this");
+        let answer = lookup
+            .check("alice", None, r#"Action::"x""#, r#"Thing::"t""#)
+            .await;
+        assert!(answer.unwrap_err().contains("not running yet"));
+    }
+
+    #[tokio::test]
+    async fn asking_a_running_policy_gives_its_decision_through_the_lookup() {
+        let rig = rig().await;
+        let lookup = PolicyLookup::named(rig.service.clone() + ".policy");
+        rig.handle.snapshot(
+            snapshot(&[policy(
+                1,
+                1,
+                r#"permit(principal == Identity::"alice", action == Action::"x", resource);"#,
+            )]),
+            Some(CREDENTIALS.into()),
+        );
+        settle().await;
+        let ask = |who: &'static str| {
+            let lookup = lookup.clone();
+            async move {
+                lookup
+                    .check(who, None, r#"Action::"x""#, r#"Thing::"t""#)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(ask("alice").await, polar_policy::Decision::Allow);
+        assert_ne!(ask("mallory").await, polar_policy::Decision::Allow);
     }
 
     async fn decision(
@@ -968,70 +1110,6 @@ mod actor_tests {
         .await;
         assert_eq!(allowed, polar_policy::Decision::Allow);
         assert_eq!(silent, polar_policy::Decision::NotDetermined);
-    }
-
-    #[tokio::test]
-    async fn a_handle_over_actors_an_agent_already_made_keeps_those_same_actors_current() {
-        // An agent that needs its policy before the builder exists (the credentials agent, whose handlers
-        // are built first) makes the actors itself and hands them over.
-        struct Parent;
-        #[ractor::async_trait]
-        impl Actor for Parent {
-            type Msg = ();
-            type State = ();
-            type Arguments = ();
-            async fn pre_start(
-                &self,
-                _: ActorRef<()>,
-                _: (),
-            ) -> Result<(), ractor::ActorProcessingErr> {
-                Ok(())
-            }
-        }
-        let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
-        let (permissions, _) = Actor::spawn(None, PermissionsActor, ()).await.unwrap();
-        let (policy, _) = Actor::spawn(
-            None,
-            PolicyActor,
-            PolicyActorArgs {
-                permissions_actor: permissions.clone(),
-            },
-        )
-        .await
-        .unwrap();
-        let handle = AuthorityHandle::spawn_over(
-            CREDENTIALS,
-            permissions.clone(),
-            policy.clone(),
-            parent.get_cell(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(handle.policy().get_id(), policy.get_id());
-        assert_eq!(handle.permissions().get_id(), permissions.get_id());
-
-        handle.snapshot(
-            snapshot(&[policy_payload(
-                1,
-                1,
-                r#"permit(principal == Identity::"alice", action == Action::"x", resource);"#,
-            )]),
-            Some(CREDENTIALS.into()),
-        );
-        settle().await;
-        // Asked of the actor the agent made, not of one the handle made.
-        let decision = ractor::call!(policy, |reply| {
-            polar_policy::PolicyMessage::CheckAuthorization {
-                requester_identity: "alice".to_string(),
-                requester_certificate_pem: None,
-                action: r#"Action::"x""#.to_string(),
-                resource: r#"Thing::"t""#.to_string(),
-                reply,
-            }
-        })
-        .unwrap()
-        .unwrap();
-        assert_eq!(decision, polar_policy::Decision::Allow);
     }
 
     #[tokio::test]

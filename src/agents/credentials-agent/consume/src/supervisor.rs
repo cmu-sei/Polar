@@ -647,37 +647,6 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        // Made before the builder, which keeps them current from the credentials agent's own
-        // published authority (`with_authority_actors`): the handlers below decide with them.
-        // PermissionsActor is the sole, real, authoritative source of
-        // what permissions an identity actually holds -- PolicyActor
-        // must never itself resolve permissions, only consume this
-        // actor's own, real resolutions. See polar-permissions's own
-        // crate documentation for the complete, real reasoning.
-        let (permissions_actor, _) = polar_permissions::PermissionsActor::spawn_linked(
-            None,
-            polar_permissions::PermissionsActor,
-            (),
-            myself.get_cell(),
-        )
-        .await
-        .map_err(ActorProcessingErr::from)?;
-
-        // PolicyActor never exists without a real PermissionsActor --
-        // construction requires one, structurally, not optionally.
-        // See polar-policy's own crate documentation for the
-        // complete, real reasoning behind this coupling.
-        let (policy_actor, _) = polar_policy::PolicyActor::spawn_linked(
-            None,
-            polar_policy::PolicyActor,
-            polar_policy::PolicyActorArgs {
-                permissions_actor: permissions_actor.clone(),
-            },
-            myself.get_cell(),
-        )
-        .await
-        .map_err(ActorProcessingErr::from)?;
-
         // The environment is read and judged first, before any actor is spawned, and the
         // agent's own settings come from that one snapshot. Declaring the graph section here
         // rather than requiring the graph-write capability is deliberate: this agent
@@ -689,8 +658,7 @@ impl Actor for ConsumerSupervisor {
         // bootstrap against itself). The dependency endpoints (Cassini and Neo4j
         // certificates) come from POLAR_HEALTH_DEP_ENDPOINTS in the deployment.
         let mut builder = AgentBuilder::new(myself.clone(), SERVICE_NAME)
-            .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }))
-            .with_authority_actors(permissions_actor.clone(), policy_actor.clone());
+            .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }));
         builder = builder.with_subscription(Self::authority_request_subscription(&myself));
         for subscription in Self::request_subscriptions(&myself) {
             builder = builder.with_subscription(subscription);
@@ -956,7 +924,7 @@ impl Actor for ConsumerSupervisor {
         let retrieve_secret_handler = RetrieveSecretHandler {
             escrow_keypair: escrow_keypair.clone(),
             ledger: ledger.clone(),
-            policy_actor: policy_actor.clone(),
+            policy: polar_agent_builder::PolicyLookup::for_service(SERVICE_NAME),
         };
         let (_retrieve_secret_actor, _) = RetrieveSecretActor::spawn_linked(
             Some(RETRIEVE_SECRET_ACTOR_NAME.to_string()),
@@ -972,7 +940,7 @@ impl Actor for ConsumerSupervisor {
         let decrypt_on_behalf_of_handler = DecryptOnBehalfOfHandler {
             escrow_keypair: escrow_keypair.clone(),
             ledger: ledger.clone(),
-            policy_actor,
+            policy: polar_agent_builder::PolicyLookup::for_service(SERVICE_NAME),
         };
         let (_decrypt_on_behalf_of_actor, _) = DecryptOnBehalfOfActor::spawn_linked(
             Some(DECRYPT_ON_BEHALF_OF_ACTOR_NAME.to_string()),
@@ -1956,7 +1924,7 @@ mod retrieve_secret_wiring_tests {
         let handler = RetrieveSecretHandler {
             escrow_keypair,
             ledger: ledger.clone(),
-            policy_actor: fixtures::policy_actor(Some(("requester", "gitlab-token"))).await,
+            policy: fixtures::policy_actor(Some(("requester", "gitlab-token"))).await,
         };
         let (retrieve_secret_actor, _) = RetrieveSecretActor::spawn(
             Some(RETRIEVE_SECRET_ACTOR_NAME.to_string()),
@@ -2300,42 +2268,7 @@ mod decrypt_on_behalf_of_wiring_tests {
         }
     }
 
-    async fn spawn_policy_actor_permitting(
-        identity: &str,
-        resource_id: &str,
-    ) -> ActorRef<polar_policy::PolicyMessage> {
-        let (permissions_actor, _) =
-            ractor::Actor::spawn(None, polar_permissions::PermissionsActor, ())
-                .await
-                .unwrap();
-        let (policy_actor, _) = ractor::Actor::spawn(
-            None,
-            polar_policy::PolicyActor,
-            polar_policy::PolicyActorArgs { permissions_actor },
-        )
-        .await
-        .unwrap();
-
-        let policy = format!(
-            r#"
-            permit(
-                principal == Identity::"{identity}",
-                action == Action::"decrypt",
-                resource == {resource_id}
-            );
-            "#
-        );
-        let result = ractor::call!(policy_actor, |reply| {
-            polar_policy::PolicyMessage::UpdatePolicy {
-                policy_source: policy,
-                reply,
-            }
-        })
-        .unwrap();
-        result.unwrap();
-
-        policy_actor
-    }
+    use crate::decrypt_on_behalf_of::tests::spawn_policy_actor_permitting;
 
     #[tokio::test]
     async fn full_pipeline_from_raw_bytes_through_the_special_dispatch_path_to_a_real_allowed_reply()
@@ -2419,7 +2352,7 @@ mod decrypt_on_behalf_of_wiring_tests {
         let handler = DecryptOnBehalfOfHandler {
             escrow_keypair,
             ledger: ledger.clone(),
-            policy_actor,
+            policy: policy_actor,
         };
         let (decrypt_on_behalf_of_actor, _) = DecryptOnBehalfOfActor::spawn(
             Some(DECRYPT_ON_BEHALF_OF_ACTOR_NAME.to_string()),

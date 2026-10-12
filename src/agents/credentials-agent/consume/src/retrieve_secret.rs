@@ -42,7 +42,7 @@ use tracing::error;
 pub struct RetrieveSecretHandler {
     pub escrow_keypair: Arc<EscrowKeypair>,
     pub ledger: ActorRef<LedgerMessage>,
-    pub policy_actor: ActorRef<polar_policy::PolicyMessage>,
+    pub policy: polar_agent_builder::PolicyLookup,
 }
 
 impl RetrieveSecretHandler {
@@ -86,35 +86,21 @@ impl RetrieveSecretHandler {
             }
         };
 
-        let decision = match ractor::rpc::call(
-            &self.policy_actor,
-            |reply| polar_policy::PolicyMessage::CheckAuthorization {
-                requester_identity: requested_by.clone(),
-                requester_certificate_pem: Some(requester_certificate.certificate_pem.clone()),
-                action: r#"Action::"retrieve""#.to_string(),
-                resource: format!(r#"Secret::"{}""#, request.name),
-                reply,
-            },
-            None,
-        )
-        .await
+        // No decision (the policy is not running yet, or failed) is never a grant.
+        let decision = match self
+            .policy
+            .check(
+                &requested_by,
+                Some(requester_certificate.certificate_pem.clone()),
+                r#"Action::"retrieve""#,
+                &format!(r#"Secret::"{}""#, request.name),
+            )
+            .await
         {
-            Ok(ractor::rpc::CallResult::Success(Ok(decision))) => decision,
-            Ok(ractor::rpc::CallResult::Success(Err(e))) => {
-                error!("Policy evaluation failed for {requested_by}: {e}");
-                return RetrieveSecretReply::Failed {
-                    detail: e.to_string(),
-                };
-            }
-            Ok(other) => {
-                return RetrieveSecretReply::Failed {
-                    detail: format!("unexpected CallResult: {other:?}"),
-                };
-            }
-            Err(e) => {
-                return RetrieveSecretReply::Failed {
-                    detail: e.to_string(),
-                };
+            Ok(decision) => decision,
+            Err(detail) => {
+                error!("Policy could not decide for {requested_by}: {detail}");
+                return RetrieveSecretReply::Failed { detail };
             }
         };
         if decision != polar_policy::Decision::Allow {
@@ -245,35 +231,51 @@ pub(crate) mod tests {
         ledger
     }
 
-    /// A policy actor with one rule: `identity` may retrieve `Secret::"name"`. With none, nothing is.
-    pub(crate) async fn policy_actor(
-        permit: Option<(&str, &str)>,
-    ) -> ActorRef<polar_policy::PolicyMessage> {
+    /// A running policy actor, registered under a name of its own (names are process-wide and tests run
+    /// side by side), holding `policy_source` if there is any, and the lookup that finds it. With none,
+    /// nothing is permitted.
+    pub(crate) async fn registered_policy(
+        policy_source: Option<String>,
+    ) -> polar_agent_builder::PolicyLookup {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let name = format!(
+            "credentials-test-policy-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        );
         let (permissions_actor, _) =
             ractor::Actor::spawn(None, polar_permissions::PermissionsActor, ())
                 .await
                 .unwrap();
         let (policy_actor, _) = ractor::Actor::spawn(
-            None,
+            Some(name.clone()),
             polar_policy::PolicyActor,
             polar_policy::PolicyActorArgs { permissions_actor },
         )
         .await
         .unwrap();
-        if let Some((identity, name)) = permit {
-            let policy = format!(
-                r#"permit(principal == Identity::"{identity}", action == Action::"retrieve", resource == Secret::"{name}");"#
-            );
+        if let Some(policy_source) = policy_source {
             ractor::call!(policy_actor, |reply| {
                 polar_policy::PolicyMessage::UpdatePolicy {
-                    policy_source: policy,
+                    policy_source,
                     reply,
                 }
             })
             .unwrap()
             .unwrap();
         }
-        policy_actor
+        polar_agent_builder::PolicyLookup::named(name)
+    }
+
+    /// A policy with one rule: `identity` may retrieve `Secret::"name"`. With none, nothing is.
+    pub(crate) async fn policy_actor(
+        permit: Option<(&str, &str)>,
+    ) -> polar_agent_builder::PolicyLookup {
+        registered_policy(permit.map(|(identity, name)| {
+            format!(
+                r#"permit(principal == Identity::"{identity}", action == Action::"retrieve", resource == Secret::"{name}");"#
+            )
+        }))
+        .await
     }
 
     async fn append(ledger: &ActorRef<LedgerMessage>, event: CredentialsEvent) {
@@ -373,7 +375,7 @@ pub(crate) mod tests {
         let handler = RetrieveSecretHandler {
             escrow_keypair: escrow_keypair.clone(),
             ledger: ledger.clone(),
-            policy_actor: policy_actor(permit).await,
+            policy: policy_actor(permit).await,
         };
         World {
             handler,
@@ -408,6 +410,25 @@ pub(crate) mod tests {
                 assert_eq!(&*decrypted, b"a real secret");
             }
             other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn with_no_policy_running_a_secret_is_never_released_and_the_reply_is_a_failure() {
+        let mut w = world(Some(("requester", "gitlab-token"))).await;
+        // The agent's policy actor has not started (or is gone): nothing is registered under the name.
+        w.handler.policy = polar_agent_builder::PolicyLookup::named("no-such-policy-actor");
+        seed_mtls_certificate(&w.ledger, "requester").await;
+        seed_escrow_certificate(&w.ledger, "requester").await;
+        store_secret(&w.ledger, &w.escrow_keypair, "gitlab-token", b"x").await;
+
+        let reply = w
+            .handler
+            .handle(request("gitlab-token"), Some("requester".into()))
+            .await;
+        match reply {
+            RetrieveSecretReply::Failed { detail } => assert!(detail.contains("not running yet")),
+            other => panic!("expected Failed, got {other:?}"),
         }
     }
 
