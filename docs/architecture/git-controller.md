@@ -124,11 +124,13 @@ Rules:
   generation that gives an author a Dhall record type for the Dynamic variables gives one for each section's
   body, so a misspelt field fails before anything is signed. A body that does not fit is refused, with the
   field named, and nothing is applied.
-- **Secret fields** are marked in the declaration, are ciphertext in the document, and are bound to the recipient
+- **Secret fields** are marked in the declaration, are ciphertext in the document, and are bound to the target
   agent, section, field and version as authenticated data (`signed-configuration.md`, "Secrets in a document").
-  A secret field names its recipient, so a document for the controller can carry ciphertext for the observer
-  that the controller passes on without being able to read it. This design avoids that: credentials get a
-  document of their own, addressed to the observer.
+  A secret field is always encrypted to the document's own target agent: a document for one agent cannot carry
+  ciphertext for another. That is why credentials for the observer get a document of their own, addressed to it,
+  and are not tucked into the controller's `repositories` section. (Passing ciphertext through a second agent
+  would need a document with two recipients, and the observer would refuse a document whose target is the
+  controller. No use case justifies that machinery.)
 - **The authority rule** for `runtime` is the capability `c:update-runtime`. It is a new variant of the closed
   capability list, so every consumer of cert-issuer capabilities has to be redeployed before a certificate
   carries it (old consumers reject an unknown variant as malformed).
