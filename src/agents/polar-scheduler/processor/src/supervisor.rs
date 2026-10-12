@@ -18,20 +18,17 @@
 use crate::processor::ScheduleInfoProcessor;
 use crate::types::ProcessorMsg;
 use cassini_types::ClientEvent;
-use polar::graph::controller::{
-    GraphControllerActor, GraphControllerArgs, GraphControllerMsg, GraphSignal,
-};
+use polar::graph::controller::{GraphControllerMsg, GraphSignal};
 use polar_agent_builder::{
-    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
-    InfrastructureSupervisorMessage, Subscription,
+    AgentBuilder, Configured, Drain, HealthClient, HealthHandle, InfrastructureEvent,
+    InfrastructureSupervisorMessage, Subscription, spawn_graph_controller, stop_graph_controller,
 };
 use polar_scheduler_common::{
     AdhocAgentAnnouncement, CONFIGURATION_OUTCOME_TOPIC, ConfigurationOutcome, GitScheduleChange,
     SCHEDULER_ADHOC_TOPIC, SCHEDULER_IN_TOPIC,
 };
 use ractor::concurrency::Duration;
-use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
-use std::sync::Arc;
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use tracing::{debug, error, info, warn};
 
 pub const SERVICE_NAME: &str = "polar.scheduler";
@@ -42,6 +39,10 @@ const GRAPH_STOP_SECS: u64 = 30;
 /// How long the infrastructure supervisor gives this agent to drain: the drain window and the
 /// graph controller's stop, plus a margin. Past it the process exits 1 regardless.
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(DRAIN_WINDOW_SECS + GRAPH_STOP_SECS + 10);
+
+fn drain_window() -> Duration {
+    Duration::from_secs(DRAIN_WINDOW_SECS)
+}
 
 pub enum SchedulerSupervisorMessage {
     ClientEvent {
@@ -122,30 +123,7 @@ pub struct SchedulerSupervisorState {
     infrastructure: ActorRef<InfrastructureSupervisorMessage>,
     graph_controller: Option<ActorRef<GraphControllerMsg>>,
     processor: Option<ActorRef<ProcessorMsg>>,
-    /// True once a drain window has begun. Messages that arrive in it are logged, not processed,
-    /// since whatever failed (likely the graph controller) cannot be trusted.
-    draining: bool,
-    /// True when the drain was begun by `PrepareShutdown`, so its end completes the handshake
-    /// instead of exiting directly.
-    rejuvenating: bool,
-}
-
-impl SchedulerSupervisor {
-    fn schedule_drain_end(myself: &ActorRef<SchedulerSupervisorMessage>) {
-        let _ = myself.send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
-            SchedulerSupervisorMessage::DrainElapsed
-        });
-    }
-
-    fn begin_drain(
-        myself: &ActorRef<SchedulerSupervisorMessage>,
-        state: &mut SchedulerSupervisorState,
-        rejuvenating: bool,
-    ) {
-        state.draining = true;
-        state.rejuvenating = rejuvenating;
-        Self::schedule_drain_end(myself);
-    }
+    drain: Drain,
 }
 
 #[async_trait]
@@ -178,23 +156,13 @@ impl Actor for SchedulerSupervisor {
                 }
             });
 
-        // The graph controller only builds pool configuration here; `GraphAvailable` is what
-        // proves connectivity, so it does not wait for Cassini.
-        let graph_signal_port = Arc::new(OutputPort::<GraphSignal>::default());
-        graph_signal_port.subscribe(myself.clone(), |signal| {
-            Some(SchedulerSupervisorMessage::GraphSignal(signal))
-        });
-        let (graph_controller, _) = GraphControllerActor::spawn_linked(
-            Some(format!("{SERVICE_NAME}.graph_controller")),
-            GraphControllerActor,
-            GraphControllerArgs::new(graph_signal_port).with_settings(
-                polar::graph::environment::GraphSettings::from_env(&*resources.config)
-                    .map_err(ActorProcessingErr::from)?,
-            ),
-            myself.get_cell(),
+        let graph_controller = spawn_graph_controller(
+            &myself,
+            format!("{SERVICE_NAME}.graph_controller"),
+            &resources.config,
+            SchedulerSupervisorMessage::GraphSignal,
         )
-        .await
-        .map_err(ActorProcessingErr::from)?;
+        .await?;
 
         let tcp_client = resources.tcp_client.as_actor_ref().clone();
         let (processor, _) = Actor::spawn_linked(
@@ -210,8 +178,7 @@ impl Actor for SchedulerSupervisor {
             infrastructure: resources.infrastructure,
             graph_controller: Some(graph_controller),
             processor: Some(processor),
-            draining: false,
-            rejuvenating: false,
+            drain: Drain::default(),
         })
     }
 
@@ -244,14 +211,14 @@ impl Actor for SchedulerSupervisor {
                 _ => {}
             },
             SchedulerSupervisorMessage::ScheduleChanged(change) => {
-                if state.draining {
+                if state.drain.is_draining() {
                     warn!("draining -- a schedule change will be lost on exit");
                 } else if let Some(processor) = &state.processor {
                     processor.cast(ProcessorMsg::GitChange(change))?;
                 }
             }
             SchedulerSupervisorMessage::Announced(announcement) => {
-                if state.draining {
+                if state.drain.is_draining() {
                     warn!("draining -- an ad-hoc announcement will be lost on exit");
                 } else if let Some(processor) = &state.processor {
                     processor.cast(ProcessorMsg::Announcement(announcement))?;
@@ -261,7 +228,7 @@ impl Actor for SchedulerSupervisor {
                 outcome,
                 reported_by,
             } => {
-                if state.draining {
+                if state.drain.is_draining() {
                     warn!("draining -- a configuration outcome will be lost on exit");
                 } else if let Some(processor) = &state.processor {
                     processor.cast(ProcessorMsg::Outcome {
@@ -271,13 +238,14 @@ impl Actor for SchedulerSupervisor {
                 }
             }
             SchedulerSupervisorMessage::PrepareShutdown => {
-                if state.draining {
+                if state.drain.begin(&myself, drain_window(), true, || {
+                    SchedulerSupervisorMessage::DrainElapsed
+                }) {
+                    info!("PrepareShutdown received (rejuvenation); entering the drain window");
+                } else {
                     warn!(
                         "PrepareShutdown while already draining; the pending exit ends the process"
                     );
-                } else {
-                    info!("PrepareShutdown received (rejuvenation); entering the drain window");
-                    Self::begin_drain(&myself, state, true);
                 }
             }
             SchedulerSupervisorMessage::DrainElapsed => {
@@ -286,33 +254,9 @@ impl Actor for SchedulerSupervisor {
                     processor.stop(Some("supervisor shutting down".into()));
                 }
                 if let Some(controller) = state.graph_controller.take() {
-                    match controller
-                        .stop_and_wait(
-                            Some("supervisor shutting down".into()),
-                            Some(Duration::from_secs(GRAPH_STOP_SECS)),
-                        )
-                        .await
-                    {
-                        Ok(()) => info!("graph controller stopped cleanly"),
-                        Err(e) => error!(
-                            "graph controller did not stop cleanly within {GRAPH_STOP_SECS}s, \
-                             exiting anyway: {e:?}"
-                        ),
-                    }
+                    stop_graph_controller(controller, Duration::from_secs(GRAPH_STOP_SECS)).await;
                 }
-                if state.rejuvenating {
-                    info!("domain shutdown complete, releasing infrastructure");
-                    if let Err(e) = state
-                        .infrastructure
-                        .cast(InfrastructureSupervisorMessage::ProceedWithShutdown)
-                    {
-                        error!("could not tell infrastructure to proceed ({e}); exiting now");
-                        std::process::exit(1);
-                    }
-                } else {
-                    warn!("exiting now");
-                    std::process::exit(1);
-                }
+                state.drain.complete(&state.infrastructure);
             }
         }
         Ok(())
@@ -337,9 +281,10 @@ impl Actor for SchedulerSupervisor {
             }
             SupervisionEvent::ActorFailed(actor, err) => {
                 error!("Actor {:?} failed: {err:?}", actor.get_name());
-                if !state.draining {
+                if state.drain.begin(&myself, drain_window(), false, || {
+                    SchedulerSupervisorMessage::DrainElapsed
+                }) {
                     warn!("entering drain window before exit");
-                    Self::begin_drain(&myself, state, false);
                 }
             }
             _ => {}
@@ -353,7 +298,7 @@ mod tests {
     use super::*;
     use polar_router::IncomingMessage;
     use polar_scheduler_common::{AdhocAgentAnnouncement, GitScheduleChange};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration as StdDuration;
 
     /// Collects what the subscriptions hand to the supervisor.

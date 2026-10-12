@@ -34,6 +34,8 @@ pub use command_actor::{CommandHandle, CommandHandler, CommandRequest};
 pub mod crypto;
 pub mod environment;
 pub use crypto::{CryptoClient, CryptoHandle};
+pub mod graph;
+pub use graph::{Drain, spawn_graph_controller, stop_graph_controller};
 pub mod health;
 pub use health::{HealthClient, HealthHandle};
 pub mod infrastructure;
