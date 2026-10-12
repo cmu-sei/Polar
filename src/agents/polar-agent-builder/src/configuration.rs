@@ -28,6 +28,7 @@ use crate::signed::{Rejection, UpdateVerifier, VerifiedDocument};
 use polar_env::{Config, Resolved};
 use polar_policy::PolicyMessage;
 use polar_scheduler_common::ConfigurationOutcome;
+use polar_signing::Authority;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -215,12 +216,29 @@ impl ConfigurationState {
             Ok(opened) => opened,
             Err(rejection) => return self.reject(claimed(document), rejection),
         };
-        let request = opened.request(&self.agent);
-        // The certificate's answer is cheap and does not change while we ask policy; it is what policy falls
-        // back to when it does not speak to the request.
-        let floor = verifier.floor(&opened);
-        let admitted =
-            crate::policy_authority::admit(self.policy.as_ref(), &request, || floor.clone()).await;
+        // A section that is made of policy answers to its own capability and to nothing else; policy is not
+        // asked, because a rule that governed its own authorship could lock out every author.
+        let capability_only = opened.runtime_section().and_then(|name| {
+            self.runtime_sections
+                .iter()
+                .find(|section| section.name == name)
+                .and_then(|section| match section.authority {
+                    crate::runtime::SectionAuthority::Capability(capability) => Some(capability),
+                    crate::runtime::SectionAuthority::Runtime => None,
+                })
+        });
+        let admitted = match capability_only {
+            Some(capability) => polar_signing::RequireCapability(capability)
+                .authorize(opened.signer(), opened.payload()),
+            None => {
+                let request = opened.request(&self.agent);
+                // The certificate's answer is cheap and does not change while we ask policy; it is what
+                // policy falls back to when it does not speak to the request.
+                let floor = verifier.floor(&opened);
+                crate::policy_authority::admit(self.policy.as_ref(), &request, || floor.clone())
+                    .await
+            }
+        };
         if let Err(refusal) = admitted {
             return self.reject(claimed(document), Rejection::Unauthorized(refusal));
         }
@@ -1547,6 +1565,7 @@ mod tests {
     }
 
     static REPOSITORIES: crate::runtime::RuntimeSection = crate::runtime::RuntimeSection {
+        authority: crate::runtime::SectionAuthority::Runtime,
         name: "repositories",
         doc: "The repositories to observe.",
         body: "{}",
@@ -1554,13 +1573,26 @@ mod tests {
     };
 
     static ADMISSION: crate::runtime::RuntimeSection = crate::runtime::RuntimeSection {
+        authority: crate::runtime::SectionAuthority::Runtime,
         name: "admission",
         doc: "Under what rules a proposal is accepted.",
         body: "{}",
         validate: |_| Ok(()),
     };
 
-    static RUNTIME_SECTIONS: [&crate::runtime::RuntimeSection; 2] = [&REPOSITORIES, &ADMISSION];
+    static RUNTIME_SECTIONS: [&crate::runtime::RuntimeSection; 3] =
+        [&REPOSITORIES, &ADMISSION, &RULES];
+
+    /// A section only a holder of one capability may change, and that policy never governs.
+    static RULES: crate::runtime::RuntimeSection = crate::runtime::RuntimeSection {
+        authority: crate::runtime::SectionAuthority::Capability(
+            cert_issuer_common::capability::Capability::UpdatePolicy,
+        ),
+        name: "rules",
+        doc: "The rules.",
+        body: "{}",
+        validate: |_| Ok(()),
+    };
 
     async fn runtime_handle(
         verifier: UpdateVerifier,
@@ -2007,5 +2039,55 @@ mod tests {
             let outcome = config.submit(no_capability).await.unwrap();
             assert!(is_unauthorized(&outcome), "{source:?} {outcome:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_section_declared_for_one_capability_needs_exactly_that_and_policy_cannot_change_it()
+    {
+        let signed = Signed::new();
+        let by = |capability: &'static str| Spec {
+            capabilities: vec![capability],
+            ..Spec::default()
+        };
+        // Policy forbids alice every section, and permits alice the rules section; neither counts for it.
+        let config = policy_handle(
+            signed.verifier(),
+            Some(&format!(
+                r#"forbid(principal == Identity::"alice", action == Action::"update-runtime", resource == Section::"{AGENT}/rules");
+                   permit(principal == Identity::"alice", action == Action::"update-runtime", resource == Section::"{AGENT}/rules");"#
+            )),
+        )
+        .await;
+
+        // The holder of the section's own capability is admitted, whatever policy says of her.
+        let outcome = config
+            .submit(signed.runtime_by(by("c:update-policy"), "rules", 1, json!({})))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, ApplyOutcome::Applied { .. }),
+            "{outcome:?}"
+        );
+
+        // The runtime capability, which admits the other sections, does not admit this one.
+        let outcome = config
+            .submit(signed.runtime_by(by("c:update-runtime"), "rules", 2, json!({})))
+            .await
+            .unwrap();
+        assert!(is_unauthorized(&outcome), "{outcome:?}");
+
+        // And a policy permit cannot stand in for the capability.
+        let permit_only = policy_handle(
+            signed.verifier(),
+            Some(&format!(
+                r#"permit(principal == Identity::"alice", action, resource == Section::"{AGENT}/rules");"#
+            )),
+        )
+        .await;
+        let outcome = permit_only
+            .submit(signed.runtime_by(Spec::default(), "rules", 1, json!({})))
+            .await
+            .unwrap();
+        assert!(is_unauthorized(&outcome), "{outcome:?}");
     }
 }

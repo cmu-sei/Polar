@@ -1453,6 +1453,7 @@ mod tests {
     // -- runtime sections ------------------------------------------------------------------
 
     static REPOS: crate::runtime::RuntimeSection = crate::runtime::RuntimeSection {
+        authority: crate::runtime::SectionAuthority::Runtime,
         name: "repositories",
         doc: "The repositories to observe.",
         body: r#"{"repositories": {"list_of": {"url": {"type": "https URL", "required": true}}}}"#,

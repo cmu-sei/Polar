@@ -417,6 +417,19 @@ impl Opened {
         &self.signer
     }
 
+    /// The payload the signer signed, for an authority rule that reads it.
+    pub fn payload(&self) -> &Value {
+        &self.payload
+    }
+
+    /// The runtime section this document is for; none for a configuration document.
+    pub fn runtime_section(&self) -> Option<&str> {
+        match &self.body {
+            OpenedBody::Runtime(payload) => Some(&payload.section),
+            OpenedBody::Configuration(_) => None,
+        }
+    }
+
     /// What is being asked of policy: who, to do what, to which things.
     pub fn request(&self, agent: &str) -> crate::policy_authority::AuthorityRequest {
         let principal = self

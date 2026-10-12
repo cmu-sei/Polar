@@ -7,8 +7,22 @@
 //! configuration document does and are handled by the same actor; they differ in being replaced whole per
 //! section, and in a body the agent itself declares the shape of.
 
+/// Who may change a section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionAuthority {
+    /// The ordinary case: a signer holding `c:update-runtime`, with the policy asked first and the certificate
+    /// as the fallback (docs/architecture/authority-distribution.md).
+    Runtime,
+    /// A signer holding this capability and no other will do, and policy is never consulted: the section is
+    /// the one policy itself is made of (the rules, the groups), and a rule that governed its own authorship
+    /// could lock out every author.
+    Capability(cert_issuer_common::capability::Capability),
+}
+
 /// A section of an agent's runtime configuration, as the agent declares it.
 pub struct RuntimeSection {
+    /// Who may change it.
+    pub authority: SectionAuthority,
     /// The name a document addresses: unique among the agent's sections.
     pub name: &'static str,
     /// What the section is for, in a sentence.
@@ -72,6 +86,7 @@ mod tests {
 
     fn section(name: &'static str, body: &'static str) -> RuntimeSection {
         RuntimeSection {
+            authority: SectionAuthority::Runtime,
             name,
             doc: "",
             body,

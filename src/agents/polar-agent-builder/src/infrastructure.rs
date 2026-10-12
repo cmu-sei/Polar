@@ -1750,6 +1750,7 @@ mod tests {
     }
 
     static INFRA_REPOS: crate::runtime::RuntimeSection = crate::runtime::RuntimeSection {
+        authority: crate::runtime::SectionAuthority::Runtime,
         name: "repositories",
         doc: "The repositories to observe.",
         body: "{}",
