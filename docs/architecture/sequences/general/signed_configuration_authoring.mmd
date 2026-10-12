@@ -12,8 +12,8 @@ sequenceDiagram
     Schema-->>Sign: every variable: type, default, secret, static or dynamic
     Sign-->>Author: Dhall record type of the Dynamic variables only
 
-    Note over Author,Sign: Authoring: imports and templates are fine here
-    Author->>Author: write item.dhall using the template
+    Note over Author,Sign: Imports are fine while authoring
+    Author->>Author: write item.dhall
 
     Author->>Sign: check item.dhall
     Sign->>Sign: evaluate to normal form (no imports left)
@@ -23,13 +23,13 @@ sequenceDiagram
 
     Author->>Sign: sign item.dhall
     Sign->>Sign: canonical JSON of payload, domain prefix, ECDSA P-256 with the user's key
-    Sign-->>Author: item.dhall rewritten as one file: payload and signature (signature and chain only)
+    Sign-->>Author: one file: payload and signature
 
     Note over Author,Git: Same key signs the commit, through git's x509 support (not a hook)
     Author->>Git: git commit
     Git->>Sign: gpg.x509.program: sign the commit object
     Sign-->>Git: detached signature
-    Note right of Sign: setup wrote user.email from the certificate's mail
+    Note over Sign: email from the cert
 
     Author->>Server: git push (mTLS with the user certificate)
     Server->>Server: authorise the pusher for this repository and branch

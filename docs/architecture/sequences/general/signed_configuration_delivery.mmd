@@ -10,9 +10,9 @@ sequenceDiagram
     Server-)Cassini: RepoChanged
     Cassini-)Observer: RepoChanged (for its repository)
     Observer->>Server: git pull --ff-only (mTLS, workload certificate)
-    Observer->>Observer: evaluate changed item, refuse any file with an import or without exactly payload and signature
+    Observer->>Observer: evaluate the item, refuse an import
     opt early check, same rules as the target's
-        Observer->>Observer: verify signature, signer, version, drop and log an invalid item
+        Observer->>Observer: verify, drop and log if invalid
     end
     Observer-)Cassini: GitScheduleChange {whole document}
     Cassini-)Processor: GitScheduleChange
@@ -21,19 +21,19 @@ sequenceDiagram
     Cassini-)Target: ScheduleNotification
     Target->>CA: apply(document)
 
-    Note over CA: the receiver never trusts the relay: it verifies for itself, in order
-    CA->>CA: 1. exactly payload and signature, no import
-    CA->>CA: 2. chain to the pinned Polar CA, certificate valid, digitalSignature, P-256
-    CA->>CA: 3. signature over canonical JSON of payload
-    CA->>CA: 4. signer holds c:update-policy (Cedar later)
-    CA->>CA: 5. signer not revoked (a hook only, for now)
-    CA->>CA: 6. version above the last applied
+    Note over Target,CA: verifies for itself, in order
+    CA->>CA: 1. two fields only, no import
+    CA->>CA: 2. chain to pinned CA, cert valid
+    CA->>CA: 3. signature over the payload
+    CA->>CA: 4. signer holds c:update-policy
+    CA->>CA: 5. not revoked (hook only)
+    CA->>CA: 6. version above the last
     alt every check passes
-        CA->>CA: apply_overrides: Dynamic only, values parse, section relations hold
+        CA->>CA: apply: all or none
         CA-)Target: ConfigChanged {version, names}
         Target->>CA: current() and use the new values
-        CA->>CA: record the update (names, never values)
+        CA->>CA: record names, never values
     else any check fails
-        CA->>CA: refuse whole, old values stay, record the reason and version
-        Note over CA: telling the author is not designed yet
+        CA->>CA: refuse whole, keep old values
+        Note over CA: author not told yet (open)
     end

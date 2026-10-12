@@ -89,12 +89,12 @@ Until a receiver has what it needs to verify (the CA, a policy) it **fails close
 
 ## How it fits together
 
-Two sequence diagrams, in `docs/architecture/sequences/config/`:
+Two sequence diagrams, in `docs/architecture/sequences/general/` (rendered as `asset_regeneration.md` describes):
 
-- `signed_config_authoring.mmd` (and `.png`): the author's side. A typed template from the agent's
+- `signed_configuration_authoring.mmd` (and `.png`): the author's side. A typed template from the agent's
   schema export, `check`, `sign`, the commit (signed through git's x509 support with the same key) and
   the push, ending with the git server announcing the change.
-- `signed_config_delivery.mmd` (and `.png`): the runtime side. The announcement, the observer's pull and
+- `signed_configuration_delivery.mmd` (and `.png`): the runtime side. The announcement, the observer's pull and
   evaluation, the scheduler's storage and notification, and the ConfigurationActor in the target agent
   verifying the whole document for itself before it applies anything.
 
