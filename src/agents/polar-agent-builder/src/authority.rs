@@ -433,6 +433,19 @@ impl AuthorityHandle {
             supervisor.clone(),
         )
         .await?;
+        Self::spawn_over(publisher, permissions, policy, supervisor).await
+    }
+
+    /// The same, over a permissions actor and a policy actor the agent already made: for an agent that needs
+    /// its policy before the builder exists (the credentials agent builds the handlers that enforce policy
+    /// first). The actors are kept current exactly as ones the handle made would be. They are not stopped
+    /// by this handle, nor linked to `supervisor`: they are the agent's.
+    pub async fn spawn_over(
+        publisher: impl Into<String>,
+        permissions: ActorRef<PermissionsMessage>,
+        policy: ActorRef<PolicyMessage>,
+        supervisor: ActorCell,
+    ) -> Result<Self, ActorProcessingErr> {
         let revoked = RevokedSerials::default();
         let changes = Arc::new(OutputPort::default());
         let asks = Arc::new(OutputPort::default());
@@ -794,6 +807,8 @@ mod tests {
 mod actor_tests {
     use super::*;
     use credentials_agent_common::authority_update::{AuthorityPayload, sign};
+    use polar_permissions::PermissionsActor;
+    use polar_policy::{PolicyActor, PolicyActorArgs};
     use ractor::{Actor, ActorRef};
     use rsa::RsaPrivateKey;
     use rsa::pkcs8::EncodePublicKey;
@@ -826,6 +841,10 @@ mod actor_tests {
             body,
             authored_by: None,
         }
+    }
+
+    fn policy_payload(sequence: u64, version: u64, source: &str) -> AuthorityPayload {
+        policy(sequence, version, source)
     }
 
     fn policy(sequence: u64, version: u64, source: &str) -> AuthorityPayload {
@@ -949,6 +968,70 @@ mod actor_tests {
         .await;
         assert_eq!(allowed, polar_policy::Decision::Allow);
         assert_eq!(silent, polar_policy::Decision::NotDetermined);
+    }
+
+    #[tokio::test]
+    async fn a_handle_over_actors_an_agent_already_made_keeps_those_same_actors_current() {
+        // An agent that needs its policy before the builder exists (the credentials agent, whose handlers
+        // are built first) makes the actors itself and hands them over.
+        struct Parent;
+        #[ractor::async_trait]
+        impl Actor for Parent {
+            type Msg = ();
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(
+                &self,
+                _: ActorRef<()>,
+                _: (),
+            ) -> Result<(), ractor::ActorProcessingErr> {
+                Ok(())
+            }
+        }
+        let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
+        let (permissions, _) = Actor::spawn(None, PermissionsActor, ()).await.unwrap();
+        let (policy, _) = Actor::spawn(
+            None,
+            PolicyActor,
+            PolicyActorArgs {
+                permissions_actor: permissions.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let handle = AuthorityHandle::spawn_over(
+            CREDENTIALS,
+            permissions.clone(),
+            policy.clone(),
+            parent.get_cell(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(handle.policy().get_id(), policy.get_id());
+        assert_eq!(handle.permissions().get_id(), permissions.get_id());
+
+        handle.snapshot(
+            snapshot(&[policy_payload(
+                1,
+                1,
+                r#"permit(principal == Identity::"alice", action == Action::"x", resource);"#,
+            )]),
+            Some(CREDENTIALS.into()),
+        );
+        settle().await;
+        // Asked of the actor the agent made, not of one the handle made.
+        let decision = ractor::call!(policy, |reply| {
+            polar_policy::PolicyMessage::CheckAuthorization {
+                requester_identity: "alice".to_string(),
+                requester_certificate_pem: None,
+                action: r#"Action::"x""#.to_string(),
+                resource: r#"Thing::"t""#.to_string(),
+                reply,
+            }
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(decision, polar_policy::Decision::Allow);
     }
 
     #[tokio::test]

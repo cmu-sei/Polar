@@ -169,6 +169,12 @@ pub struct InfrastructureSupervisorArgs {
     )>,
     /// The runtime sections the agent declared: what its configuration actor will accept.
     pub(crate) runtime_sections: &'static [&'static crate::runtime::RuntimeSection],
+    /// A permissions actor and a policy actor the agent made itself, to be kept current in place of ones the
+    /// infrastructure would make.
+    pub(crate) authority_actors: Option<(
+        ActorRef<polar_permissions::PermissionsMessage>,
+        ActorRef<polar_policy::PolicyMessage>,
+    )>,
     /// Publish probes to the agent itself and expect them back; see `selftest`.
     pub(crate) self_test: bool,
 }
@@ -595,8 +601,20 @@ impl Actor for InfrastructureSupervisor {
                 .config
                 .read(&crate::environment::AUTHORITY_PUBLISHER)
                 .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
-            let authority =
-                crate::authority::AuthorityHandle::spawn(publisher, myself_cell.clone()).await?;
+            let authority = match args.authority_actors.clone() {
+                Some((permissions, policy)) => {
+                    crate::authority::AuthorityHandle::spawn_over(
+                        publisher,
+                        permissions,
+                        policy,
+                        myself_cell.clone(),
+                    )
+                    .await?
+                }
+                None => {
+                    crate::authority::AuthorityHandle::spawn(publisher, myself_cell.clone()).await?
+                }
+            };
             authority.asks().subscribe(myself.clone(), |_| {
                 Some(InfrastructureSupervisorMessage::AuthorityAsk)
             });
@@ -1120,6 +1138,7 @@ mod tests {
                 None,
                 vec![],
                 &[],
+                None,
             )
             .await
         }
@@ -1142,6 +1161,7 @@ mod tests {
                 None,
                 commands,
                 &[],
+                None,
             )
             .await
         }
@@ -1158,6 +1178,27 @@ mod tests {
                 Some(echo),
                 vec![],
                 &[],
+                None,
+            )
+            .await
+        }
+
+        /// A rig whose agent supplied its own policy and permissions actors.
+        async fn with_adopted_authority(
+            service: &str,
+            permissions: ActorRef<polar_permissions::PermissionsMessage>,
+            policy: ActorRef<polar_policy::PolicyMessage>,
+        ) -> Self {
+            Self::build(
+                service,
+                Duration::from_secs(20),
+                &[],
+                false,
+                false,
+                None,
+                vec![],
+                &[],
+                Some((permissions, policy)),
             )
             .await
         }
@@ -1177,6 +1218,7 @@ mod tests {
                 None,
                 vec![],
                 sections,
+                None,
             )
             .await
         }
@@ -1193,6 +1235,7 @@ mod tests {
                 None,
                 vec![],
                 &[],
+                None,
             )
             .await
         }
@@ -1209,6 +1252,10 @@ mod tests {
                 Arc<dyn crate::command_actor::CommandHandler>,
             )>,
             runtime: &'static [&'static crate::runtime::RuntimeSection],
+            adopt: Option<(
+                ActorRef<polar_permissions::PermissionsMessage>,
+                ActorRef<polar_policy::PolicyMessage>,
+            )>,
         ) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let certificate = dir.path().join("cert.pem");
@@ -1268,6 +1315,7 @@ mod tests {
                     tcp_spawner: spawner.clone(),
                     commands,
                     runtime_sections: runtime,
+                    authority_actors: adopt,
                     self_test: self_test.is_some(),
                 },
             )
@@ -1396,6 +1444,58 @@ mod tests {
                     == credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC
             })
             .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_that_supplied_its_own_policy_actors_has_those_kept_current() {
+        use credentials_agent_common::authority_update::{AuthorityBody, AuthorityPayload};
+        let (permissions, _) = Actor::spawn(None, polar_permissions::PermissionsActor, ())
+            .await
+            .unwrap();
+        let (policy, _) = Actor::spawn(
+            None,
+            polar_policy::PolicyActor,
+            polar_policy::PolicyActorArgs {
+                permissions_actor: permissions.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let rig =
+            Rig::with_adopted_authority("infra-adopted", permissions.clone(), policy.clone()).await;
+        assert_eq!(rig.resources.authority.policy().get_id(), policy.get_id());
+
+        let key = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        deliver_snapshot(
+            &rig,
+            &authority_snapshot(
+                &key,
+                &[AuthorityPayload {
+                    sequence: 1,
+                    version: 1,
+                    body: AuthorityBody::Policy {
+                        source: r#"permit(principal == Identity::"alice", action, resource);"#
+                            .into(),
+                    },
+                    authored_by: None,
+                }],
+            ),
+            Some(CREDENTIALS),
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The agent's own actor, not one the infrastructure made, now decides by what arrived.
+        let decision = ractor::call!(policy, |reply| {
+            polar_policy::PolicyMessage::CheckAuthorization {
+                requester_identity: "alice".to_string(),
+                requester_certificate_pem: None,
+                action: r#"Action::"x""#.to_string(),
+                resource: r#"Thing::"t""#.to_string(),
+                reply,
+            }
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(decision, polar_policy::Decision::Allow);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2606,6 +2706,7 @@ mod service_tests {
                     tcp_spawner: Arc::new(CassiniSpawner),
                     commands: vec![],
                     runtime_sections: &[],
+                    authority_actors: None,
                     self_test: false,
                 },
             )

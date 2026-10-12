@@ -151,6 +151,11 @@ pub struct AgentBuilder<M: ractor::Message> {
     declared_commands: &'static [CommandSpec],
     /// The runtime sections the agent declared (`PolarAgent::RUNTIME`).
     declared_runtime: &'static [&'static RuntimeSection],
+    /// Policy and permissions actors the agent made itself; see `with_authority_actors`.
+    authority_actors: Option<(
+        ActorRef<polar_permissions::PermissionsMessage>,
+        ActorRef<polar_policy::PolicyMessage>,
+    )>,
 }
 
 /// Pairs each command an agent declared with its handler, and says what does not pair: a declared command
@@ -207,7 +212,21 @@ impl<M: ractor::Message> AgentBuilder<M> {
             commands: Vec::new(),
             declared_commands: &[],
             declared_runtime: &[],
+            authority_actors: None,
         }
+    }
+
+    /// Keeps these policy and permissions actors current from the credentials agent, in place of ones the
+    /// infrastructure would make. For an agent that must have its policy before the builder exists: the
+    /// credentials agent builds the handlers that enforce policy first, and they need the actors the
+    /// updates will reach.
+    pub fn with_authority_actors(
+        mut self,
+        permissions: ActorRef<polar_permissions::PermissionsMessage>,
+        policy: ActorRef<polar_policy::PolicyMessage>,
+    ) -> Self {
+        self.authority_actors = Some((permissions, policy));
+        self
     }
 
     /// Registers the handler that runs the command `name`, which the agent must have declared in
@@ -419,6 +438,7 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
                 tcp_spawner: Arc::new(infrastructure::CassiniSpawner),
                 commands,
                 runtime_sections: this.declared_runtime,
+                authority_actors: this.authority_actors,
             },
             myself_cell,
         )
@@ -561,6 +581,7 @@ impl<M: ractor::Message> ConfiguredService<M> {
                 tcp_spawner: Arc::new(infrastructure::CassiniSpawner),
                 commands: Vec::new(),
                 runtime_sections: &[],
+                authority_actors: None,
             },
             this.myself.get_cell(),
         )
