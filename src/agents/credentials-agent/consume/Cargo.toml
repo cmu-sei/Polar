@@ -41,6 +41,7 @@ reqwest.workspace = true
 rkyv.workspace = true
 rsa.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -49,9 +50,10 @@ uuid.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+polar-signing.workspace = true
 polar-router.workspace = true
 rcgen.workspace = true
-serde_json.workspace = true
 time.workspace = true
 wiremock.workspace = true
 x25519-dalek = { version = "3.0.0", features = ["getrandom"] }

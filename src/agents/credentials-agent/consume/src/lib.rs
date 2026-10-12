@@ -34,6 +34,7 @@ pub mod agent_escrow_key;
 pub mod agent_escrow_key_actor;
 pub mod agent_escrow_keypair_bootstrap;
 pub mod agent_escrow_keypair_bootstrap_actor;
+pub mod authority_publisher;
 pub mod certificate;
 pub mod certificate_actor;
 pub mod credential;

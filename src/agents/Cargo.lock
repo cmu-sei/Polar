@@ -1435,6 +1435,7 @@ dependencies = [
  "polar-permissions",
  "polar-policy",
  "polar-router",
+ "polar-signing",
  "ractor",
  "rand 0.10.3",
  "rcgen",
