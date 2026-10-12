@@ -10,8 +10,8 @@ use crate::authority_update::{
     AuthorityBody, AuthorityKind, AuthorityPayload, AuthoritySnapshot, AuthorityUpdate,
     AuthorityUpdateError, sign,
 };
-use rsa::pkcs8::EncodePublicKey;
 use rsa::RsaPrivateKey;
+use rsa::pkcs8::EncodePublicKey;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -144,7 +144,9 @@ mod tests {
     #[test]
     fn what_is_published_is_signed_by_the_key_and_a_holder_believes_it() {
         let mut book = AuthorityBook::new(key(), 0);
-        let update = book.publish(policy("// v1"), 1, 1, Some("alice".into())).unwrap();
+        let update = book
+            .publish(policy("// v1"), 1, 1, Some("alice".into()))
+            .unwrap();
         let payload = verify(&update, &key().to_public_key()).unwrap();
         assert_eq!(payload.sequence, 1);
         assert_eq!(payload.version, 1);
@@ -165,7 +167,10 @@ mod tests {
         assert!(book.would_replace(AuthorityKind::Groups, 1));
         assert_eq!(
             book.publish(policy("// again"), 2, 2, None),
-            Err(BookError::Stale { offered: 2, held: 2 })
+            Err(BookError::Stale {
+                offered: 2,
+                held: 2
+            })
         );
         assert_eq!(book.last_sequence(), 1, "the sequence was not spent");
     }
@@ -203,7 +208,10 @@ mod tests {
             .collect();
         // Policy v1 was replaced by v2, so what remains is groups (2) then policy v2 (3).
         assert_eq!(
-            payloads.iter().map(|p| (p.sequence, p.version)).collect::<Vec<_>>(),
+            payloads
+                .iter()
+                .map(|p| (p.sequence, p.version))
+                .collect::<Vec<_>>(),
             [(2, 1), (3, 2)]
         );
     }

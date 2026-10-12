@@ -316,6 +316,16 @@ pub enum CredentialsEvent {
         timestamp: i64,
         certificate_pem: String,
     },
+    /// The credentials agent signed and published an update of its policy, group membership or revoked
+    /// certificates (docs/architecture/authority-distribution.md). Recorded so that the sequence number it
+    /// carries is durable: the agent restarts, and the numbering has to go on rising for the agents that hold
+    /// the last number they saw. `kind` is `policy`, `groups` or `revoked`.
+    AuthorityPublished {
+        sequence: u64,
+        kind: String,
+        version: u64,
+        timestamp: i64,
+    },
     /// One accepted, signature-verified admin action -- the only way an
     /// admin's provision/grant/revoke reaches the ledger. Carries the
     /// whole signed action, so anyone holding the ledger can re-verify

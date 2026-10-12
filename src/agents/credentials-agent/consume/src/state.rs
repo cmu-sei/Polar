@@ -22,7 +22,7 @@
 */
 
 use credentials_agent_common::events::{CredentialsEvent, GrantReason, RevocationReason};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// A grant currently available to be consumed by a matching issuance.
 #[derive(Debug, Clone, PartialEq)]
@@ -185,11 +185,30 @@ pub struct CredentialsState {
     /// Hex hashes of every admin-action payload already recorded --
     /// what refuses a replayed signed action. Rebuilt by replay.
     admin_action_hashes: HashSet<String>,
+
+    /// The serial of every certificate an explicit `Revoke` named, whether or not a current record matches
+    /// it. Kept apart from the records because a reissue replaces a record, and a revoked certificate must
+    /// go on being refused for as long as it would otherwise be valid. Not a certificate replaced by a
+    /// reissue: that is superseded, not revoked.
+    revoked_serials: BTreeSet<String>,
+
+    /// The highest sequence number published to the agents (`AuthorityPublished`).
+    last_authority_sequence: u64,
 }
 
 impl CredentialsState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The serial of every certificate that was explicitly revoked, in order.
+    pub fn revoked_serials(&self) -> Vec<String> {
+        self.revoked_serials.iter().cloned().collect()
+    }
+
+    /// The highest sequence number published to the agents; 0 before any.
+    pub fn last_authority_sequence(&self) -> u64 {
+        self.last_authority_sequence
     }
 
     /// Rebuilds state by folding a full, ordered sequence of events --
@@ -289,6 +308,7 @@ impl CredentialsState {
                 revoked_by,
                 timestamp,
             } => {
+                self.revoked_serials.insert(serial.clone());
                 if let Some(key) = self.serial_index.get(serial)
                     && let Some(record) = self.valid_certificates.get_mut(key)
                 {
@@ -306,6 +326,9 @@ impl CredentialsState {
                     record.revoked_by = Some(revoked_by.clone());
                     record.revoked_at = Some(*timestamp);
                 }
+            }
+            CredentialsEvent::AuthorityPublished { sequence, .. } => {
+                self.last_authority_sequence = self.last_authority_sequence.max(*sequence);
             }
             CredentialsEvent::SecretStored { name, secret, .. } => {
                 // Overwrites any prior entry for this name -- the
@@ -593,6 +616,51 @@ mod tests {
             revoked_by: "admin".to_string(),
             timestamp: 3000,
         }
+    }
+
+    #[test]
+    fn an_explicit_revocation_is_remembered_by_serial_even_when_no_certificate_matches_it() {
+        let mut state = CredentialsState::new();
+        assert!(state.revoked_serials().is_empty());
+        // A certificate that was replaced since (or never seen here) is still revoked: the leaves must go on
+        // refusing it for as long as it would otherwise be valid.
+        state.apply(&revoked("0a"));
+        state.apply(&issued("alice", "pod-1", "0b"));
+        state.apply(&revoked("0b"));
+        state.apply(&issued("alice", "pod-2", "0c"));
+        assert_eq!(state.revoked_serials(), ["0a", "0b"]);
+        // Revoking twice is one entry.
+        state.apply(&revoked("0a"));
+        assert_eq!(state.revoked_serials().len(), 2);
+    }
+
+    #[test]
+    fn a_certificate_replaced_by_a_reissue_is_not_an_explicit_revocation() {
+        let mut state = CredentialsState::new();
+        state.apply(&issued("alice", "pod-1", "0b"));
+        state.apply(&issued("alice", "pod-2", "0c"));
+        assert!(
+            state.revoked_serials().is_empty(),
+            "superseded is not revoked"
+        );
+    }
+
+    #[test]
+    fn the_last_authority_sequence_is_the_highest_published_and_never_falls() {
+        let published = |sequence| CredentialsEvent::AuthorityPublished {
+            sequence,
+            kind: "policy".to_string(),
+            version: 1,
+            timestamp: 4000,
+        };
+        let mut state = CredentialsState::new();
+        assert_eq!(state.last_authority_sequence(), 0);
+        state.apply(&published(3));
+        state.apply(&published(2));
+        assert_eq!(state.last_authority_sequence(), 3);
+        // Replay reaches the same place.
+        let replayed = CredentialsState::from_events(&[published(1), published(5), published(4)]);
+        assert_eq!(replayed.last_authority_sequence(), 5);
     }
 
     #[test]

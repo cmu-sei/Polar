@@ -53,7 +53,8 @@ use crate::projection::ProjectionMessage;
 use crate::state::{CertificateRecord, CredentialsState, GrantRecord};
 use credentials_agent_common::events::CredentialsEvent;
 use polar::event_log::EventLog;
-use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, async_trait};
+use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort, async_trait};
+use std::sync::Arc;
 
 pub struct LedgerActor;
 
@@ -66,6 +67,15 @@ pub struct LedgerActorState {
     event_log: EventLog<CredentialsEvent>,
     credentials_state: CredentialsState,
     projection_actor: ActorRef<ProjectionMessage>,
+    /// Told when an event adds a revoked serial, for whoever publishes the set to the agents.
+    revocation_changes: Arc<OutputPort<RevokedChanged>>,
+}
+
+/// An event added to the set of revoked certificate serials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokedChanged {
+    /// How many serials are revoked now.
+    pub count: usize,
 }
 
 pub enum LedgerMessage {
@@ -79,6 +89,20 @@ pub enum LedgerMessage {
         event: CredentialsEvent,
         reply: RpcReplyPort<Result<(), String>>,
     },
+    /// Assigns the next sequence number to an update of `kind` at `version` that is about to be published, and
+    /// records that it was, in one append. The numbering is the ledger's so that it goes on rising across
+    /// restarts. Replies with the sequence.
+    PublishAuthority {
+        kind: String,
+        version: u64,
+        reply: RpcReplyPort<Result<u64, String>>,
+    },
+    /// The highest sequence number published so far; 0 before any.
+    AuthoritySequence(RpcReplyPort<u64>),
+    /// The serial of every certificate an explicit revocation named, in order.
+    RevokedSerials(RpcReplyPort<Vec<String>>),
+    /// The port on which a newly revoked serial is announced.
+    RevocationChanges(RpcReplyPort<Arc<OutputPort<RevokedChanged>>>),
     /// Fire-and-forget variant for callers with no synchronous reply
     /// possible -- grant/revocation events arriving from Cassini via
     /// deserialize_and_dispatch, a plain synchronous function that
@@ -210,6 +234,7 @@ impl Actor for LedgerActor {
             event_log,
             credentials_state,
             projection_actor: args.projection_actor,
+            revocation_changes: Arc::new(OutputPort::default()),
         })
     }
 
@@ -223,6 +248,33 @@ impl Actor for LedgerActor {
             LedgerMessage::Append { event, reply } => {
                 let result = append_and_project(state, &event);
                 let _ = reply.send(result);
+            }
+            LedgerMessage::PublishAuthority {
+                kind,
+                version,
+                reply,
+            } => {
+                let sequence = state.credentials_state.last_authority_sequence() + 1;
+                let result = append_and_project(
+                    state,
+                    &CredentialsEvent::AuthorityPublished {
+                        sequence,
+                        kind,
+                        version,
+                        timestamp: polar::time::now_millis(),
+                    },
+                )
+                .map(|()| sequence);
+                let _ = reply.send(result);
+            }
+            LedgerMessage::AuthoritySequence(reply) => {
+                let _ = reply.send(state.credentials_state.last_authority_sequence());
+            }
+            LedgerMessage::RevokedSerials(reply) => {
+                let _ = reply.send(state.credentials_state.revoked_serials());
+            }
+            LedgerMessage::RevocationChanges(reply) => {
+                let _ = reply.send(state.revocation_changes.clone());
             }
             LedgerMessage::AppendNoReply(event) => {
                 if let Err(e) = append_and_project(state, &event) {
@@ -320,7 +372,14 @@ fn append_and_project(
     event: &CredentialsEvent,
 ) -> Result<(), String> {
     state.event_log.append(event).map_err(|e| e.to_string())?;
+    let revoked_before = state.credentials_state.revoked_serials().len();
     let superseded_serials = state.credentials_state.apply(event);
+    let revoked_after = state.credentials_state.revoked_serials().len();
+    if revoked_after > revoked_before {
+        state.revocation_changes.send(RevokedChanged {
+            count: revoked_after,
+        });
+    }
     let hash = state.event_log.current_hash().to_string();
     let _ = state
         .projection_actor
@@ -464,6 +523,137 @@ pub(crate) mod tests {
             ractor::rpc::CallResult::Success(result) => result,
             other => panic!("expected Success, got {other:?}"),
         }
+    }
+
+    async fn publish_authority(
+        ledger: &ActorRef<LedgerMessage>,
+        kind: &str,
+        version: u64,
+    ) -> Result<u64, String> {
+        match ractor::rpc::call(
+            ledger,
+            |reply| LedgerMessage::PublishAuthority {
+                kind: kind.to_string(),
+                version,
+                reply,
+            },
+            None,
+        )
+        .await
+        .expect("call should succeed")
+        {
+            ractor::rpc::CallResult::Success(result) => result,
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    async fn last_authority_sequence(ledger: &ActorRef<LedgerMessage>) -> u64 {
+        match ractor::rpc::call(ledger, LedgerMessage::AuthoritySequence, None)
+            .await
+            .expect("call should succeed")
+        {
+            ractor::rpc::CallResult::Success(result) => result,
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn authority_sequences_are_assigned_in_order_and_go_on_rising_across_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let ledger = spawn_ledger(path.to_str().unwrap()).await;
+        assert_eq!(last_authority_sequence(&ledger).await, 0);
+        assert_eq!(publish_authority(&ledger, "policy", 1).await, Ok(1));
+        assert_eq!(publish_authority(&ledger, "groups", 1).await, Ok(2));
+        assert_eq!(last_authority_sequence(&ledger).await, 2);
+        ledger.stop_and_wait(None, None).await.unwrap();
+
+        // The agent restarts: the ledger remembers where the numbering was.
+        let ledger = spawn_ledger(path.to_str().unwrap()).await;
+        assert_eq!(last_authority_sequence(&ledger).await, 2);
+        assert_eq!(publish_authority(&ledger, "policy", 2).await, Ok(3));
+        ledger.stop(None);
+    }
+
+    #[tokio::test]
+    async fn the_revoked_serials_are_asked_of_the_ledger_and_a_change_is_announced() {
+        use ractor::OutputPort;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let ledger = spawn_ledger(path.to_str().unwrap()).await;
+
+        let port: std::sync::Arc<OutputPort<RevokedChanged>> =
+            match ractor::rpc::call(&ledger, LedgerMessage::RevocationChanges, None)
+                .await
+                .unwrap()
+            {
+                ractor::rpc::CallResult::Success(port) => port,
+                other => panic!("{other:?}"),
+            };
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<RevokedChanged>>>);
+        #[async_trait]
+        impl Actor for Sink {
+            type Msg = RevokedChanged;
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(
+                &self,
+                _: ActorRef<Self::Msg>,
+                _: (),
+            ) -> Result<(), ActorProcessingErr> {
+                Ok(())
+            }
+            async fn handle(
+                &self,
+                _: ActorRef<Self::Msg>,
+                message: Self::Msg,
+                _: &mut (),
+            ) -> Result<(), ActorProcessingErr> {
+                self.0.lock().unwrap().push(message);
+                Ok(())
+            }
+        }
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (sink, _) = Actor::spawn(None, Sink(heard.clone()), ()).await.unwrap();
+        port.subscribe(sink, Some);
+
+        let revoke = |serial: &str| CredentialsEvent::Revoke {
+            serial: serial.to_string(),
+            reason: credentials_agent_common::events::RevocationReason::Compromised,
+            revoked_by: "admin".to_string(),
+            timestamp: 1000,
+        };
+        append(&ledger, revoke("0a")).await.unwrap();
+        append(&ledger, revoke("0a")).await.unwrap(); // again: nothing new
+        append(&ledger, revoke("0b")).await.unwrap();
+        // An event that changes nothing about revocation announces nothing.
+        append(
+            &ledger,
+            CredentialsEvent::AuthorityPublished {
+                sequence: 1,
+                kind: "policy".into(),
+                version: 1,
+                timestamp: 1,
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let serials = match ractor::rpc::call(&ledger, LedgerMessage::RevokedSerials, None)
+            .await
+            .unwrap()
+        {
+            ractor::rpc::CallResult::Success(serials) => serials,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(serials, ["0a", "0b"]);
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            2,
+            "one announcement per new serial"
+        );
+        ledger.stop(None);
     }
 
     #[tokio::test]

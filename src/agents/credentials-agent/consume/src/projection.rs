@@ -299,6 +299,9 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
         // full cert PEM does. Lookup goes through LedgerActor's own
         // CredentialsState directly, not the graph.
         CredentialsEvent::SecretStored { .. } => vec![],
+        // That an update was published is recorded in the ledger for its sequence number, and the graph has
+        // nothing to say about it.
+        CredentialsEvent::AuthorityPublished { .. } => vec![],
         // An admin action projects exactly what its derived effect
         // does: the same single derivation state folds.
         CredentialsEvent::AdminActionRecorded { .. } => match event.admin_effect() {
@@ -519,6 +522,7 @@ fn event_timestamp(event: &CredentialsEvent) -> i64 {
         | CredentialsEvent::AgentEscrowIssuanceCompleted { timestamp, .. }
         | CredentialsEvent::AccountProvisioned { timestamp, .. }
         | CredentialsEvent::AccountCertificateIssued { timestamp, .. }
+        | CredentialsEvent::AuthorityPublished { timestamp, .. }
         | CredentialsEvent::AdminActionRecorded { timestamp, .. } => *timestamp,
     }
 }
