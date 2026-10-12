@@ -669,11 +669,14 @@ admin-bootstrap:
 # agents act on: a configuration (c:update-configuration) and a command (c:run-command). Capabilities
 # are fixed when the certificate is issued, so an account provisioned before one was added to this
 # list does not have it; provision another, or reissue.
+# The bootstrap certificate is spent by the first provisioning, so a later account is provisioned
+# by an account that already holds c:provision-account: name it as the signer.
 # Usage: just admin-provision djshepard djshepard@sei.cmu.edu
-admin-provision username email:
+#        just admin-provision operator ops@example.org djshepard
+admin-provision username email signer="bootstrap-admin":
     cd src/agents && cargo run -q -p polar-admin-grant -- \
-        --cert {{_admin_dir}}/bootstrap-admin.crt \
-        --key  {{_admin_dir}}/bootstrap-admin.key \
+        --cert {{_admin_dir}}/{{signer}}.crt \
+        --key  {{_admin_dir}}/{{signer}}.key \
         --observer-url {{_observer_url}} provision-account \
         --username {{username}} --email {{email}} \
         --permission p:u2s:polar-db-svc.polar-graph.svc.cluster.local \
