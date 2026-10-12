@@ -790,6 +790,13 @@ _u7s_kubeconf := _u7s_dir + "/kubeconfig"
 cluster-reset:
     just -f {{_u7s_dir}}/Justfile reset
 
+# Delete the pods that failed. A Job with restartPolicy Never and a large backoffLimit keeps every
+# failed pod for as long as it runs, so an agent that cannot start (the Jira observer with no Jira
+# to reach) leaves hundreds in a weekend, and their logs and records fill the node until it taints
+# itself with disk pressure and nothing schedules. Safe to run at any time: running pods are untouched.
+cluster-prune-failed:
+    kubectl delete pods -A --field-selector=status.phase=Failed --wait=false
+
 # Show cluster status. Respects whatever KUBECONFIG is already set.
 cluster-status:
     kubectl get nodes
