@@ -264,7 +264,8 @@ def main [] {
         "the git observer is a plain agent: Cassini only, its cache in the pod, and no graph": {
             let r = (resolve "git-repo-observer")
             assert ("graph-write" not-in $r.needs)
-            assert equal (env_value $r "POLAR_CACHE_ROOT") "/tmp/polar-cache"
+            assert equal (env_value $r "POLAR_CACHE_ROOT") "/var/lib/git-repo-observer/cache"
+            assert ($r.mounts | any {|m| $m.path == "/var/lib/git-repo-observer" and not $m.read_only })
             assert equal $r.service_account "git-repo-observer"
         }
 
