@@ -207,7 +207,7 @@ pub struct UpdateVerifier {
 }
 
 impl UpdateVerifier {
-    /// Verifies for `agent` against `trust`, accepting signers who hold `c:update-policy`.
+    /// Verifies for `agent` against `trust`, accepting signers who hold `c:update-configuration`.
     pub fn new(trust: Trust, agent: impl Into<String>) -> Self {
         Self {
             common: Common {
@@ -221,7 +221,7 @@ impl UpdateVerifier {
                         .unwrap_or(0)
                 }),
             },
-            authority: Arc::new(RequireCapability::update_policy()),
+            authority: Arc::new(RequireCapability::update_configuration()),
         }
     }
 
@@ -429,6 +429,28 @@ mod tests {
                 got: "another-agent".into()
             })
         );
+    }
+
+    #[test]
+    fn a_signer_who_may_only_change_policy_may_not_change_configuration() {
+        let rig = rig();
+        let doc = document(
+            &rig,
+            Spec {
+                capabilities: vec!["c:update-policy"],
+                ..Spec::default()
+            },
+            payload(),
+        );
+        assert!(matches!(
+            rig.verifier.verify(&doc),
+            Err(Rejection::Unauthorized(_))
+        ));
+        // The default signer holds update-configuration, and may.
+        assert!(rig
+            .verifier
+            .verify(&document(&rig, Spec::default(), payload()))
+            .is_ok());
     }
 
     #[test]

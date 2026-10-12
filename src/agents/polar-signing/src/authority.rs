@@ -27,6 +27,11 @@ impl RequireCapability {
 }
 
 impl RequireCapability {
+    /// The capability meant for changing configuration. Not `update-policy`: that is for Cedar policy.
+    pub fn update_configuration() -> Self {
+        Self(Capability::UpdateConfiguration)
+    }
+
     /// The capability meant for running commands.
     pub fn run_command() -> Self {
         Self(Capability::RunCommand)

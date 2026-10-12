@@ -24,9 +24,13 @@ pub enum Capability {
     Revoke,
     /// Submit a policy update.
     UpdatePolicy,
-    /// Run a signed command on an agent (docs/architecture/commands.md). Last, so that what was archived
-    /// with the earlier four keeps its meaning.
+    /// Run a signed command on an agent (docs/architecture/commands.md).
     RunCommand,
+    /// Change the configuration of agents, by a signed configuration document
+    /// (docs/architecture/signed-configuration.md). Not needed to change Cedar policy: that is
+    /// `UpdatePolicy`, and a repository holds both only if it holds both kinds of content. Appended, so that
+    /// what was archived with the earlier ones keeps its meaning.
+    UpdateConfiguration,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -38,12 +42,13 @@ pub enum CapabilityParseError {
 }
 
 impl Capability {
-    pub const ALL: [Capability; 5] = [
+    pub const ALL: [Capability; 6] = [
         Capability::ProvisionAccount,
         Capability::Grant,
         Capability::Revoke,
         Capability::UpdatePolicy,
         Capability::RunCommand,
+        Capability::UpdateConfiguration,
     ];
 
     fn name(self) -> &'static str {
@@ -53,6 +58,7 @@ impl Capability {
             Self::Revoke => "revoke",
             Self::UpdatePolicy => "update-policy",
             Self::RunCommand => "run-command",
+            Self::UpdateConfiguration => "update-configuration",
         }
     }
 
@@ -122,6 +128,24 @@ mod tests {
         // A close relative is not it.
         assert!(Capability::from_san_string("c:run").is_err());
         assert!(Capability::from_san_string("c:run-commands").is_err());
+    }
+
+    #[test]
+    fn update_configuration_is_its_own_capability_and_comes_last() {
+        assert_eq!(
+            Capability::UpdateConfiguration.to_san_string(),
+            "c:update-configuration"
+        );
+        assert_eq!(
+            Capability::from_san_string("c:update-configuration"),
+            Ok(Capability::UpdateConfiguration)
+        );
+        assert_eq!(Capability::ALL[5], Capability::UpdateConfiguration);
+        // Appended after run-command, which keeps its place, as the policy capability does.
+        assert_eq!(Capability::ALL[4], Capability::RunCommand);
+        assert_eq!(Capability::ALL[3], Capability::UpdatePolicy);
+        assert_ne!(Capability::UpdateConfiguration, Capability::UpdatePolicy);
+        assert!(Capability::from_san_string("c:update-config").is_err());
     }
 
     #[test]

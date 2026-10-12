@@ -589,6 +589,7 @@ mod tests {
         // Every other capability, and none.
         for capability in [
             "c:update-policy",
+            "c:update-configuration",
             "c:grant",
             "c:revoke",
             "c:provision-account",

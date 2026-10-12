@@ -31,9 +31,10 @@ Read from `cert-issuer` (`server/src/ca.rs`, `common/src/capability.rs`) and a r
   optional and come from the request. The first DNS SAN is a per-cluster UUID, the machine-facing
   identity the git server and Cassini use.
 - **What it may do.** Permissions (`p:`) and capabilities (`c:`) ride as URI SANs. Capabilities are
-  a **closed enum** (`ProvisionAccount`, `Grant`, `Revoke`, `UpdatePolicy`); `c:update-policy` is
-  documented as "submit a policy update". The enum cannot carry names, so it cannot say "this agent"
-  or "this variable".
+  a **closed enum** (`ProvisionAccount`, `Grant`, `Revoke`, `UpdatePolicy`, and since this design
+  `RunCommand` and `UpdateConfiguration`); `c:update-policy` is for Cedar policy updates. The enum cannot carry
+  names, so it cannot say "this agent" or "this variable". Capabilities are ours to define: they are how Polar
+  gives a user privilege according to their credential.
 - **The key.** Key usage `digitalSignature`, extended key usage `clientAuth` only, valid one year, issued by
   the Polar CA. A user's certificate seen so far has an ECDSA P-256 key; the bootstrap admin's has an
   Ed25519 key. The credentials agent's `admin_signing` already signs administrative actions with either, so
@@ -200,9 +201,11 @@ properties when this is built.
 
 ## Authority
 
-**Version one:** the signer's certificate must carry `c:update-policy`. That is coarse: it permits
-signing any update, to any agent. It is the one existing capability meant for this, needs no new
-issuance mechanism, and is checked by a small pure function with tests.
+**Version one:** the signer's certificate must carry `c:update-configuration`. That is coarse: it permits
+signing any update, to any agent. It is a capability of its own, decided with David (2026-10-11): `c:update-policy`
+is for Cedar policy updates, so a person who changes configuration needs no policy privilege and the reverse, unless
+the repository holds both. It is checked by a small pure function with tests, which also check that
+`c:update-policy` alone is refused for configuration.
 
 **Later:** "may this signer set this variable on this agent" is finer than the closed capability enum
 can say, so it becomes a policy question for `polar-policy` (Cedar), asked through a trait so a
@@ -266,7 +269,8 @@ warning at first, an error if configured so.
    the document layout (exactly two fields, no import).
 2. Sign and verify: a valid signature; an altered payload; a wrong key; a certificate from another CA;
    an expired certificate; a certificate without `digitalSignature`; the wrong domain prefix.
-3. Authority: a signer with `c:update-policy` is accepted, one without is refused.
+3. Authority: a signer with `c:update-configuration` is accepted, one without (including one who holds only
+   `c:update-policy`) is refused.
 4. The ConfigurationActor in front of `apply`: unsigned, wrongly signed, unauthorized signer and an
    old version are all refused and leave the value as it was.
 5. `polar-sign` render, check and sign, then `setup`; then the git program mode against the installed git.

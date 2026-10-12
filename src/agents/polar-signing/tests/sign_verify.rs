@@ -48,7 +48,7 @@ fn a_signature_verifies_for_either_key_type_and_says_who_signed() {
             who.identity.as_deref(),
             Some("d983a3d2-9b61-41c5-88a0-d123fb50ba33")
         );
-        assert_eq!(who.capabilities, vec![Capability::UpdatePolicy]);
+        assert_eq!(who.capabilities, vec![Capability::UpdateConfiguration]);
         assert!(!who.serial.is_empty());
         assert_eq!(
             document.signature.algorithm,
@@ -425,10 +425,10 @@ fn a_chain_that_is_not_certificates_is_refused() {
 }
 
 #[test]
-fn a_signer_with_the_update_policy_capability_is_authorised_and_one_without_is_not() {
+fn a_signer_with_the_update_configuration_capability_is_authorised_and_one_without_is_not() {
     let ca = root("Polar Internal CA");
     let trust = trust(&ca.pem);
-    let rule = RequireCapability::update_policy();
+    let rule = RequireCapability::update_configuration();
 
     let (allowed, _) = signed(&ca, Spec::default());
     let who = verify(&allowed, &trust, now()).unwrap();
@@ -444,7 +444,7 @@ fn a_signer_with_the_update_policy_capability_is_authorised_and_one_without_is_n
     let who = verify(&denied, &trust, now()).unwrap();
     let refusal = rule.authorize(&who, &denied.payload).unwrap_err();
     assert!(refusal.0.contains("alice"), "{refusal}");
-    assert!(refusal.0.contains("c:update-policy"), "{refusal}");
+    assert!(refusal.0.contains("c:update-configuration"), "{refusal}");
 
     let (none, _) = signed(
         &ca,
@@ -490,7 +490,13 @@ fn running_a_command_needs_its_own_capability_and_update_policy_does_not_give_it
     let (others, _) = signed(
         &ca,
         Spec {
-            capabilities: vec!["c:update-policy", "c:grant", "c:revoke", "c:provision-account"],
+            capabilities: vec![
+                "c:update-policy",
+                "c:update-configuration",
+                "c:grant",
+                "c:revoke",
+                "c:provision-account",
+            ],
             ..Spec::default()
         },
     );
@@ -498,7 +504,7 @@ fn running_a_command_needs_its_own_capability_and_update_policy_does_not_give_it
     let refusal = rule.authorize(&who, &others.payload).unwrap_err();
     assert!(refusal.0.contains("c:run-command"), "{refusal}");
 
-    // And it does not stand in for update-policy either.
+    // And it does not stand in for update-policy or update-configuration either.
     let (only_run, _) = signed(
         &ca,
         Spec {
@@ -510,5 +516,40 @@ fn running_a_command_needs_its_own_capability_and_update_policy_does_not_give_it
     assert!(RequireCapability::update_policy()
         .authorize(&who, &only_run.payload)
         .is_err());
+    assert!(RequireCapability::update_configuration()
+        .authorize(&who, &only_run.payload)
+        .is_err());
 }
 
+#[test]
+fn changing_configuration_and_changing_policy_are_separate_privileges() {
+    let ca = root("Polar Internal CA");
+    let trust = trust(&ca.pem);
+
+    // A holder of update-policy alone may not change configuration: a repository that holds no Cedar policy
+    // updates needs no such privilege.
+    let (policy_only, _) = signed(
+        &ca,
+        Spec {
+            capabilities: vec!["c:update-policy"],
+            ..Spec::default()
+        },
+    );
+    let who = verify(&policy_only, &trust, now()).unwrap();
+    assert!(RequireCapability::update_policy()
+        .authorize(&who, &policy_only.payload)
+        .is_ok());
+    assert!(RequireCapability::update_configuration()
+        .authorize(&who, &policy_only.payload)
+        .is_err());
+
+    // And the other way round.
+    let (config_only, _) = signed(&ca, Spec::default());
+    let who = verify(&config_only, &trust, now()).unwrap();
+    assert!(RequireCapability::update_configuration()
+        .authorize(&who, &config_only.payload)
+        .is_ok());
+    assert!(RequireCapability::update_policy()
+        .authorize(&who, &config_only.payload)
+        .is_err());
+}

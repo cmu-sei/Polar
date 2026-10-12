@@ -26,7 +26,7 @@ sequenceDiagram
     CA->>CA: 2. chain to pinned CA, cert valid
     CA->>CA: 3. signature over the payload, then read it
     CA->>CA: 4. addressed to this agent
-    CA->>CA: 5. signer holds c:update-policy
+    CA->>CA: 5. signer may update config
     CA->>CA: 6. not revoked (hook only)
     CA->>CA: 7. version above the last
     alt every check passes

@@ -70,7 +70,7 @@ impl Default for Spec {
             username: "alice",
             email: "alice@example.org",
             identity: "d983a3d2-9b61-41c5-88a0-d123fb50ba33",
-            capabilities: vec!["c:update-policy"],
+            capabilities: vec!["c:update-configuration"],
             key_usages: vec![KeyUsagePurpose::DigitalSignature],
             not_before_year: 2026,
             not_after_year: 2030,
