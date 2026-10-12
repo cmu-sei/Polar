@@ -67,6 +67,8 @@ def main [] {
             "jira-processor.yaml"
             "oci-registry-resolver-resources.yaml"
             "oci-registry-resolver.yaml"
+            "git-repo-observer-resources.yaml"
+            "git-repo-observer.yaml"
             "polar-git-server-resources.yaml"
             "polar-git-server.yaml"
             "polar-scheduler-observer-resources.yaml"

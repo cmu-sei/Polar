@@ -1,17 +1,8 @@
-use git_repo_observer::{SERVICE_NAME, supervisor::RootSupervisor};
-use ractor::Actor;
+use git_repo_observer::agent::GitObserver;
+use std::process::ExitCode;
 
-#[tokio::main]
-async fn main() {
-    polar::init_logging(SERVICE_NAME.to_string());
-
-    //introspect invironment to generate args
-    let (_agent, handle) = Actor::spawn(
-        Some(format!("{SERVICE_NAME}.supervisor")),
-        RootSupervisor,
-        (),
-    )
-    .await
-    .expect("Expected agent to start");
-    handle.await.unwrap();
+// The one `main` every agent has: it answers `--help`, `--scaffold` and `--check`, judges the
+// configuration, and starts the observer. An agent that ends has failed, so it exits 1.
+fn main() -> ExitCode {
+    polar_agent_builder::run::<GitObserver>()
 }

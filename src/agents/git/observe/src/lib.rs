@@ -1,3 +1,5 @@
+#![deny(clippy::disallowed_methods)]
+
 use cassini_client::{OfflineBehavior, PublishRequest};
 use git_agent_common::GitRepositoryMessage;
 use git2::{Cred, CredentialType, FetchOptions, Oid, RemoteCallbacks, Repository};
@@ -17,6 +19,8 @@ use git_agent_common::GitHttpCredential;
 pub const SERVICE_NAME: &str = "polar.git.observer";
 pub const REPO_SUPERVISOR_NAME: &str = "polar.git.observer.repo.supervisor";
 
+pub mod agent;
+pub mod settings;
 pub mod supervisor;
 
 fn git_time_to_epoch_ms(t: &git2::Time) -> i64 {

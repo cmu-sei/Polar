@@ -1,0 +1,20 @@
+# infra/config/workloads/git.nuon
+#
+# The git observer: watches the repositories it is told of and publishes their commits and ref
+# updates. A PolarAgent: it says in its own code what it needs and how long it takes to drain
+# (`git-repo-observer --scaffold`). It never touches the graph.
+[
+  {
+    # The Job and ServiceAccount keep the name the chart gave them.
+    name: "git-repo-observer"
+    kind: "agent"
+    image: "git-observer"
+    # The crate is not named for the image.
+    scaffold_package: "git-repo-observer"
+    config: "document"
+    # Clones can be fetched again, so the cache does not need to outlive the pod.
+    env: [
+      { name: "POLAR_CACHE_ROOT", value: "/tmp/polar-cache" }
+    ]
+  }
+]

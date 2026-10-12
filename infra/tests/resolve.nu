@@ -22,6 +22,7 @@ const BUDGETS = {
     credentials-agent-observer: 40
     cassini: 20
     oci-registry-resolver: 20
+    git-repo-observer: 40
 }
 
 # The record the template takes, as the pipeline gets it.
@@ -258,6 +259,13 @@ def main [] {
             let r = (resolve "oci-registry-resolver")
             let cluster = (open ($RESOLVER | path dirname | path join "config/cluster.nuon"))
             assert ((env_value $r "OCI_INSECURE_REGISTRIES") | str contains $cluster.registry)
+        }
+
+        "the git observer is a plain agent: Cassini only, its cache in the pod, and no graph": {
+            let r = (resolve "git-repo-observer")
+            assert ("graph-write" not-in $r.needs)
+            assert equal (env_value $r "POLAR_CACHE_ROOT") "/tmp/polar-cache"
+            assert equal $r.service_account "git-repo-observer"
         }
 
         "a volume that is not a Secret with items has none": {

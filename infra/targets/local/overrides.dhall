@@ -49,7 +49,6 @@ in
   }
 , git =
   { imagePullSecrets = [] : List { name : Optional Text }
-  , observer  = { image = registry ++ "git-observer:latest" }
   , consumer  = { image = registry ++ "git-processor:latest" }
   , scheduler = { image = registry ++ "git-scheduler:latest" }
   }

@@ -1,232 +1,258 @@
+//! The git observer's supervisor: the builder's infrastructure (health, the Cassini client and the
+//! subscription), the repository supervisor, and the order they come down in.
+//!
+//! The repository supervisor is started once, here, before the client has registered. It used to be
+//! started when the client registered, and a registration that came again (after a dropped
+//! connection) tried to start it a second time and ended the agent.
+
+use crate::settings::ObserverSettings;
 use crate::{
     GitAgentConfig, GitRepoSupervisor, GitRepoSupervisorArgs, REPO_SUPERVISOR_NAME,
-    RepoSupervisorMessage, SERVICE_NAME,
+    RepoSupervisorMessage,
 };
-use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS};
 use cassini_types::ClientEvent;
-use polar::SupervisorMessage;
-use polar::cassini::TcpClient;
-use polar::cassini::CassiniClient;
-use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
+use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS, RepoObservationConfig};
+use polar::cassini::{CassiniClient, TcpClient, UnsubscribeRequest};
+use polar_agent_builder::{
+    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
+    InfrastructureSupervisorMessage, Subscription,
+};
+use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
-use rkyv::from_bytes;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, info, warn};
 
-const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
-const DRAIN_WINDOW_SECS: u64 = 5;
+/// What the observer needs to drain: the fetch in flight (up to 30 s; a worker fetches inside its
+/// handler, so stopping it waits for the fetch) and a margin. If it is not done by then the
+/// process exits 1 regardless.
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(30 + 10);
+
+/// How long the repository supervisor, and the workers under it, are given to stop.
+const WORKERS_GRACE: Duration = Duration::from_secs(30);
+
+pub enum RootSupervisorMessage {
+    /// Lifecycle events from the Cassini client.
+    ClientEvent { event: ClientEvent },
+    /// A repository to observe, decoded from the configuration topic.
+    Observe(Box<RepoObservationConfig>),
+    /// The infrastructure has decided the agent should end: finish, then say so.
+    PrepareShutdown,
+}
 
 pub struct RootSupervisor;
 
 pub struct RootSupervisorState {
     tcp_client: TcpClient,
     repo_supervisor: Option<ActorRef<RepoSupervisorMessage>>,
-    git_agent_config: GitAgentConfig,
-    cache_root: std::path::PathBuf,
-    healthcheck: ActorRef<HealthCheckMessage>,
-    draining: bool,
+    healthcheck: HealthHandle,
+    infrastructure: ActorRef<InfrastructureSupervisorMessage>,
+    shutting_down: bool,
 }
 
 impl RootSupervisor {
-    pub fn deserialize_and_dispatch(
-        topic: String,
-        payload: Vec<u8>,
-        state: &mut RootSupervisorState,
-    ) -> Result<(), ActorProcessingErr> {
-        debug!("Received message from topic {topic}");
-        if let Ok(ev) = from_bytes::<ConfigurationEvent, rkyv::rancor::Error>(&payload) {
-            if let Some(s) = &state.repo_supervisor {
-                Ok(s.cast(RepoSupervisorMessage::SpawnWorker { config: ev.config })?)
-            } else {
-                Err("Failed to find repo supervisor".into())
+    /// What was published on the configuration topic. Anything that does not decode is logged and
+    /// dropped, never fatal.
+    pub fn decode(payload: &[u8]) -> Option<RepoObservationConfig> {
+        match rkyv::from_bytes::<ConfigurationEvent, rkyv::rancor::Error>(payload) {
+            Ok(event) => Some(event.config),
+            Err(e) => {
+                warn!("Failed to deserialize a repository configuration event: {e}");
+                None
             }
-        } else {
-            warn!("Failed to deserialize event");
-            Ok(())
         }
-    }
-
-    #[instrument(skip_all, level = "debug")]
-    async fn init(
-        myself: ActorRef<SupervisorMessage>,
-        state: &mut RootSupervisorState,
-    ) -> Result<(), ActorProcessingErr> {
-        let (repo_supervisor, _) = Actor::spawn_linked(
-            Some(REPO_SUPERVISOR_NAME.to_string()),
-            GitRepoSupervisor,
-            GitRepoSupervisorArgs {
-                tcp_client: state.tcp_client.clone(),
-                cache_root: state.cache_root.clone(),
-            },
-            myself.into(),
-        )
-        .await?;
-
-        state.repo_supervisor = Some(repo_supervisor);
-
-        state.tcp_client.subscribe(polar::cassini::SubscribeRequest {
-            topic: GIT_REPO_CONFIG_EVENTS.to_string(),
-            trace_ctx: None,
-        })?;
-
-        Ok(())
     }
 }
 
 #[async_trait]
 impl Actor for RootSupervisor {
-    type Msg = SupervisorMessage;
+    type Msg = RootSupervisorMessage;
     type State = RootSupervisorState;
-    type Arguments = ();
+    /// The configuration `run` judged; the builder is made from it.
+    type Arguments = Configured;
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        _: (),
+        configured: Configured,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
+        let settings = ObserverSettings::read(configured.config())?;
 
-        let dep_cert_endpoints = vec![
-            DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
-        ];
+        // Startup validation: fail fast if the credential config is malformed. NOTE: not
+        // currently threaded into the forwarding of a repository's configuration; whether per-repo
+        // credential injection happens elsewhere is still to be settled with whoever wrote
+        // GitAgentConfig.
+        let config_path = settings.agent_config.clone();
+        let _git_agent_config = GitAgentConfig::load(&config_path).map_err(|e| {
+            ActorProcessingErr::from(format!("failed to load {}: {e}", config_path.display()))
+        })?;
+        let cache_root = settings
+            .absolute_cache_root()
+            .map_err(|_| ActorProcessingErr::from("Failed to determine cache root"))?;
+        debug!("Using cache root at {}", cache_root.display());
 
-        let (healthcheck, _) = HealthCheckActor::spawn_linked(
-            Some(HEALTHCHECK_ACTOR_NAME.to_string()),
-            HealthCheckActor,
-            HealthCheckArgs::new(false, 300, dep_cert_endpoints),
+        let deliver_to = myself.clone();
+        let configuration = Subscription::new(GIT_REPO_CONFIG_EVENTS, move |incoming| {
+            if let Some(config) = Self::decode(&incoming.payload)
+                && let Err(e) =
+                    deliver_to.send_message(RootSupervisorMessage::Observe(Box::new(config)))
+            {
+                warn!("failed to hand a repository to the supervisor: {e}");
+            }
+        });
+
+        // The observer never touches the graph: Cassini only.
+        let resources = AgentBuilder::new(myself.clone(), crate::agent::AGENT_NAME)
+            .with_subscription(configuration)
+            .with_lifecycle_handler(|event| Some(RootSupervisorMessage::ClientEvent { event }))
+            .into_configured(configured)
+            .build()
+            .await?;
+
+        resources
+            .infrastructure_events
+            .subscribe(myself.clone(), |event| match event {
+                InfrastructureEvent::PrepareShutdown => Some(RootSupervisorMessage::PrepareShutdown),
+            });
+
+        let (repo_supervisor, _) = Actor::spawn_linked(
+            Some(REPO_SUPERVISOR_NAME.to_string()),
+            GitRepoSupervisor,
+            GitRepoSupervisorArgs {
+                tcp_client: resources.tcp_client.clone(),
+                cache_root,
+            },
             myself.get_cell(),
         )
-        .await
-        .map_err(|e| ActorProcessingErr::from(e))?;
-
-        // Startup validation: fail fast if the credential config is
-        // missing/malformed. NOTE: not currently threaded into
-        // deserialize_and_dispatch's RepoObservationConfig forwarding --
-        // worth confirming with whoever wrote GitAgentConfig whether
-        // per-repo credential injection happens elsewhere (inside
-        // GitRepoSupervisor or its workers) or is still a TODO.
-        let config_path =
-            std::env::var("POLAR_GIT_AGENT_CONFIG").unwrap_or_else(|_| "git.yaml".to_string());
-        let git_agent_config = GitAgentConfig::load(std::path::Path::new(&config_path))
-            .map_err(|e| ActorProcessingErr::from(format!("failed to load {config_path}: {e}")))?;
-
-        let cache_root = match std::env::var("POLAR_CACHE_ROOT") {
-            Ok(path) => {
-                debug!("Using cache root at {}", path);
-                std::path::PathBuf::from(path)
-            }
-            Err(_) => {
-                let default_dir = ".polar/cache";
-                debug!(
-                    "No POLAR_CACHE_ROOT set, using default cache directory {}",
-                    default_dir
-                );
-                std::env::current_dir()
-                    .map(|d| d.join(default_dir))
-                    .map_err(|_| ActorProcessingErr::from("Failed to determine cache root"))?
-            }
-        };
-
-        let tcp_client = TcpClient::spawn(SERVICE_NAME, myself, |event| {
-            Some(SupervisorMessage::ClientEvent { event })
-        })
         .await?;
 
         Ok(RootSupervisorState {
-            tcp_client,
-            repo_supervisor: None,
-            git_agent_config,
-            cache_root,
-            healthcheck,
-            draining: false,
+            tcp_client: resources.tcp_client,
+            repo_supervisor: Some(repo_supervisor),
+            healthcheck: resources.healthcheck,
+            infrastructure: resources.infrastructure,
+            shutting_down: false,
         })
-    }
-
-    async fn handle_supervisor_evt(
-        &self,
-        myself: ActorRef<Self::Msg>,
-        msg: SupervisionEvent,
-        state: &mut Self::State,
-    ) -> Result<(), ActorProcessingErr> {
-        match msg {
-            SupervisionEvent::ActorStarted(_) => (),
-            SupervisionEvent::ActorTerminated(actor_cell, _, reason) => {
-                let actor_name = actor_cell.get_name().unwrap_or_default();
-                debug!(
-                    "{0:?}:{1:?} terminated. {reason:?}",
-                    actor_name,
-                    actor_cell.get_id()
-                );
-                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
-                    state.draining = true;
-                    info!("entering drain window before exiting for rejuvenation");
-                    let _ = myself
-                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                            SupervisorMessage::ForceExit
-                        })
-                        .await;
-                }
-            }
-            SupervisionEvent::ActorFailed(actor_cell, e) => {
-                error!(
-                    "{0:?}:{1:?} failed! {e:?}",
-                    actor_cell.get_name(),
-                    actor_cell.get_id()
-                );
-                if !state.draining {
-                    state.draining = true;
-                    warn!("entering drain window before exit");
-                    let _ = myself
-                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                            SupervisorMessage::ForceExit
-                        })
-                        .await;
-                }
-            }
-            SupervisionEvent::ProcessGroupChanged(..) => todo!(),
-        }
-        Ok(())
     }
 
     async fn handle(
         &self,
-        myself: ActorRef<Self::Msg>,
+        _myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            SupervisorMessage::Heartbeat => {}
-            SupervisorMessage::GraphSignal(_) => {}
-            SupervisorMessage::ForceExit => {
-                warn!("drain window elapsed, exiting now");
-                std::process::exit(1);
-            }
-            SupervisorMessage::ClientEvent { event } => match event {
+            RootSupervisorMessage::ClientEvent { event } => match event {
+                // Registered fires on every registration, including a resume after a dropped
+                // connection, so it does health and nothing else.
                 ClientEvent::Registered { .. } => {
-                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
-                    if let Err(e) = Self::init(myself.clone(), state).await {
-                        myself.stop(Some(e.to_string()));
-                    }
-                }
-                ClientEvent::MessagePublished { topic, payload, .. } => {
-                    if state.draining {
-                        warn!(
-                            "draining -- logging message on topic '{topic}' \
-                             ({} bytes) instead of dispatching; will be lost on exit",
-                            payload.len()
-                        );
-                    } else {
-                        Self::deserialize_and_dispatch(topic, payload, state)?
-                    }
+                    let _ = state.healthcheck.cassini_connected();
                 }
                 ClientEvent::TransportError { reason } => {
                     warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
-                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
+                    let _ = state.healthcheck.cassini_disconnected();
                 }
-                ClientEvent::PublishAcknowledged { .. } => trace!("{event:?}"),
                 _ => (),
             },
+            RootSupervisorMessage::Observe(config) => {
+                if state.shutting_down {
+                    warn!(
+                        "shutting down -- not starting to observe {}",
+                        config.repo_url
+                    );
+                } else if let Some(repo_supervisor) = &state.repo_supervisor {
+                    repo_supervisor.cast(RepoSupervisorMessage::SpawnWorker { config: *config })?;
+                } else {
+                    return Err("Failed to find repo supervisor".into());
+                }
+            }
+            RootSupervisorMessage::PrepareShutdown => {
+                info!(
+                    "ROOT_SUPERVISOR: PrepareShutdown received -- unsubscribing and stopping the workers"
+                );
+                state.shutting_down = true;
+                if let Err(e) = state.tcp_client.unsubscribe(UnsubscribeRequest {
+                    topic: GIT_REPO_CONFIG_EVENTS.to_string(),
+                    trace_ctx: None,
+                }) {
+                    warn!("unsubscribe from '{GIT_REPO_CONFIG_EVENTS}' failed (continuing): {e}");
+                }
+                if let Some(repo_supervisor) = state.repo_supervisor.take()
+                    && let Err(e) = repo_supervisor
+                        .stop_and_wait(Some("supervisor shutting down".into()), Some(WORKERS_GRACE))
+                        .await
+                {
+                    error!(
+                        "the repository supervisor did not stop within {}s, continuing: {e:?}",
+                        WORKERS_GRACE.as_secs()
+                    );
+                }
+                let _ = state
+                    .infrastructure
+                    .cast(InfrastructureSupervisorMessage::ProceedWithShutdown);
+            }
         }
         Ok(())
+    }
+
+    async fn handle_supervisor_evt(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        event: SupervisionEvent,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match event {
+            SupervisionEvent::ActorStarted(actor) => debug!("{actor:?} started!"),
+            SupervisionEvent::ActorTerminated(actor, _, reason) => {
+                info!("ROOT_SUPERVISOR: {actor:?} terminated. {reason:?}");
+                // The infrastructure is this supervisor's linked child from build(); its ending
+                // means the shutdown handshake is done, or that it failed. Either way exit
+                // non-zero so the Job creates a new pod with fresh certificates.
+                if actor.get_id() == state.infrastructure.get_id() {
+                    info!("ROOT_SUPERVISOR: infrastructure is down, exiting");
+                    std::process::exit(1);
+                }
+                if !state.shutting_down {
+                    error!("ROOT_SUPERVISOR: the repository supervisor ended unexpectedly; exiting");
+                    std::process::exit(1);
+                }
+            }
+            SupervisionEvent::ActorFailed(actor, reason) => {
+                error!("ROOT_SUPERVISOR: {actor:?} failed! {reason:?}");
+                if !state.shutting_down {
+                    std::process::exit(1);
+                }
+            }
+            _ => (),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polar::graph::nodes::git::RepoId;
+
+    #[test]
+    fn a_payload_that_is_not_an_event_is_dropped_not_fatal() {
+        assert!(RootSupervisor::decode(b"not an archived event").is_none());
+        assert!(RootSupervisor::decode(&[]).is_none());
+    }
+
+    #[test]
+    fn a_repository_event_decodes_to_the_repository_it_named() {
+        let id = RepoId::from_url("https://example.org/org/repo.git");
+        let config = RepoObservationConfig::new(
+            id,
+            "https://example.org/org/repo.git".into(),
+            Vec::new(),
+            Some(50),
+            vec!["refs/heads/main".into()],
+        );
+        let bytes =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&ConfigurationEvent { config }).unwrap();
+        let decoded = RootSupervisor::decode(&bytes).expect("it decodes");
+        assert_eq!(decoded.repo_url, "https://example.org/org/repo.git");
+        assert_eq!(decoded.refs, vec!["refs/heads/main".to_string()]);
     }
 }

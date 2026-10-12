@@ -3,6 +3,9 @@ name = "git-repo-observer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# The crate also builds a discovery harness; `cargo run -p git-repo-observer` (the resolver asks the
+# agent for its scaffold that way) means the agent.
+default-run = "git-repo-observer"
 
 [dependencies]
 cassini-client.workspace = true
@@ -10,6 +13,8 @@ cassini-types.workspace = true
 git2.workspace = true
 git-agent-common.workspace = true
 polar.workspace = true
+polar-agent-builder.workspace = true
+polar-env.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
 serde_json.workspace = true
