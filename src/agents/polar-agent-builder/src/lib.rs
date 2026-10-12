@@ -129,6 +129,9 @@ pub struct AgentResources {
     /// declared `Dynamic`, and tells subscribers when one changes. `config` above stays the
     /// startup snapshot; read `configuration.current()` for what is in force now.
     pub configuration: crate::configuration::ConfigurationHandle,
+    /// What the credentials agent says about policy, groups and revoked certificates, kept current: the
+    /// policy and permissions actors to decide with, and a port that announces when it changes.
+    pub authority: crate::authority::AuthorityHandle,
 }
 
 pub struct AgentBuilder<M: ractor::Message> {

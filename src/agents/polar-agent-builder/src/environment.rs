@@ -16,7 +16,7 @@
 //! Kubernetes API read) moves onto `polar-env`.
 
 use crate::capability::Capability;
-use polar_env::{Described, Optional, Section};
+use polar_env::{Defaulted, Described, Optional, Section};
 
 /// The capabilities the deployment provides.
 pub const CAPABILITIES: Optional<Vec<String>> = Optional::list(
@@ -32,6 +32,15 @@ pub const SHUTDOWN_BUDGET_SECS: Optional<u64> = Optional::new(
     parse_budget,
 );
 
+/// The identity the broker gives the credentials agent: the only publisher whose policy and permissions
+/// updates this agent listens to. The default is its service account in the `polar` namespace; a deployment in
+/// another namespace names it.
+pub static AUTHORITY_PUBLISHER: Defaulted<String> = Defaulted::text(
+    "POLAR_AUTHORITY_PUBLISHER",
+    "the identity the broker gives the credentials agent (its service account), the only publisher this agent believes policy and permissions updates from",
+    "credentials-agent.polar.serviceaccount.cluster.local",
+);
+
 fn parse_budget(raw: &str) -> Result<u64, String> {
     raw.trim()
         .parse::<u64>()
@@ -40,7 +49,7 @@ fn parse_budget(raw: &str) -> Result<u64, String> {
         .ok_or_else(|| "must be a whole number of seconds, at least 1".to_string())
 }
 
-static VARIABLES: &[&dyn Described] = &[&CAPABILITIES, &SHUTDOWN_BUDGET_SECS];
+static VARIABLES: &[&dyn Described] = &[&CAPABILITIES, &SHUTDOWN_BUDGET_SECS, &AUTHORITY_PUBLISHER];
 
 /// The variables the builder itself reads.
 pub static BUILDER: Section = Section {
@@ -136,6 +145,26 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn the_credentials_agents_identity_defaults_to_its_service_account_and_can_be_named() {
+        use polar_env::Config;
+        let default = Config::builder(&env(&[])).register(&BUILDER).build();
+        assert_eq!(
+            default.read(&AUTHORITY_PUBLISHER).unwrap(),
+            "credentials-agent.polar.serviceaccount.cluster.local"
+        );
+        let named = Config::builder(&env(&[(
+            "POLAR_AUTHORITY_PUBLISHER",
+            "credentials-agent.other.serviceaccount.cluster.local",
+        )]))
+        .register(&BUILDER)
+        .build();
+        assert_eq!(
+            named.read(&AUTHORITY_PUBLISHER).unwrap(),
+            "credentials-agent.other.serviceaccount.cluster.local"
+        );
     }
 
     #[test]

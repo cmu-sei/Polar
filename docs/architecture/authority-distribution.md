@@ -3,7 +3,7 @@
 Status, 2026-10-12: design, decided with David; no question is open. Built so far: the three-valued decision in
 `polar-policy`, groups and principals in `polar-permissions`, the `c:update-groups` capability, and in
 `credentials_agent_common` the `AuthorityUpdate` message with its signing and verification (`authority_update`) and
-the state a holder keeps (`authority_state`). The rest is not built. It supersedes the placement questions in `credentials-policy.md` and the "policy for other
+the state a holder keeps (`authority_state`). The builder now hosts the actors and keeps them current (below). The rest is not built. It supersedes the placement questions in `credentials-policy.md` and the "policy for other
 receivers" note in `git-controller.md`.
 
 ## The principle (David, 2026-10-12)
@@ -84,6 +84,8 @@ Three kinds of authoritative data, each replaced whole and versioned:
   and resource types that every agent has), so an author cannot change what a type is.
 
 ### The signal
+
+**The leaf's side is built (2026-10-12), in `polar-agent-builder`.** Every Cassini client agent starts an `AuthorityHandle` (a `PermissionsActor`, a `PolicyActor` over it, and an `AuthorityActor` that keeps both current), subscribes to `polar-authority-updates` and to the snapshot replies, and exposes `resources.authority` with `changes()` (an `AuthorityChanged` per applied update) and the two actors. `AuthorityCore` is the pure decision: only the credentials agent's identity as the broker names it (`POLAR_AUTHORITY_PUBLISHER`, default `credentials-agent.polar.serviceaccount.cluster.local`, read from the graph's `reported_by` on real outcomes) is listened to; the signing key is **pinned from the first snapshot from that identity and never replaced** (a snapshot naming another key is refused and reported); each update is verified then applied; a jump in the sequence asks for a snapshot, never more than once in five seconds; revoked serials feed the signer verification, so a revoked signer's next document is refused. A snapshot (the key and the latest signed update of each kind) has its own request and reply topics because the router allows one handler per topic and the escrow-key replies already belong to the crypto actor. Not built: the credentials agent publishing and answering, and the Cedar-first `Authority`.
 
 **Built 2026-10-12, in `credentials_agent_common`:** `authority_update` (the payload kinds `Policy`, `Groups`, `Revoked`; `sign` with a blinded RSASSA-PSS-SHA256 over the domain line and the payload bytes; `verify`, which checks the key fingerprint, then the signature, and reads the bytes only then, strictly) and `authority_state` (latest of each kind, stale by version, a jump in the credentials agent's sequence reported as a missed update, and what arrives as the answer to a catch-up request exempt from that). Each was written test first; dropping the domain line, the fingerprint check, the catch-up exemption or the stale rule each fails a test. The update carries the signed bytes, not a structure to be re-encoded.
 

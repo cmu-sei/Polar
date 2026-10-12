@@ -104,6 +104,9 @@ pub enum InfrastructureSupervisorMessage {
     Outcome(polar_scheduler_common::ConfigurationOutcome),
     /// The configuration changed: if it was a log filter, the logging follows.
     ConfigurationChanged(crate::configuration::ConfigChanged),
+    /// The agent wants the current authority from the credentials agent: publish the request on the client as
+    /// it is now.
+    AuthorityAsk,
 }
 
 /// The lifecycle callback the Cassini client is given.
@@ -218,6 +221,7 @@ struct ClientSetup {
     config: Arc<polar_env::Config>,
     configuration: ConfigurationHandle,
     commands: crate::command_actor::CommandHandle,
+    authority: crate::authority::AuthorityHandle,
 }
 
 /// What a Cassini client brings with it.
@@ -232,6 +236,7 @@ pub struct InfrastructureSupervisorState {
     config: Arc<polar_env::Config>,
     configuration: ConfigurationHandle,
     commands: crate::command_actor::CommandHandle,
+    authority: Option<crate::authority::AuthorityHandle>,
     infrastructure_events: Arc<OutputPort<InfrastructureEvent>>,
     client: Option<ClientParts>,
     healthcheck: HealthHandle,
@@ -395,6 +400,9 @@ impl InfrastructureSupervisor {
             service_name,
             setup.commands.clone(),
         ));
+        // And the credentials agent's policy and permissions: a live update, and a snapshot (asked for or
+        // republished). Whether either is believed, and from whom, is the authority actor's to decide.
+        subscriptions.extend(crate::authority::subscriptions(&setup.authority));
         let self_test = if setup.self_test {
             let instance: [u8; 16] = rand::random();
             let topic = self_test_topic(service_name);
@@ -579,9 +587,32 @@ impl Actor for InfrastructureSupervisor {
         // nothing but the snapshot, so it starts before, and without, the Cassini client.
         // Signed documents are checked against the CA this agent already pins for Cassini. Without a
         // readable one there is nothing to verify against and every document is refused.
+        // What the credentials agent says about policy, groups and revoked certificates, kept current for this
+        // agent to decide by. Only a Cassini client hears it. It starts first, because signer verification
+        // consults its revoked serials.
+        let authority = if args.with_client {
+            let publisher = args
+                .config
+                .read(&crate::environment::AUTHORITY_PUBLISHER)
+                .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
+            let authority =
+                crate::authority::AuthorityHandle::spawn(publisher, myself_cell.clone()).await?;
+            authority.asks().subscribe(myself.clone(), |_| {
+                Some(InfrastructureSupervisorMessage::AuthorityAsk)
+            });
+            Some(authority)
+        } else {
+            None
+        };
         let verifier =
             match crate::signed::UpdateVerifier::from_config(&args.config, &args.service_name) {
-                Ok(verifier) => Some(verifier),
+                Ok(verifier) => {
+                    let verifier = match &authority {
+                        Some(authority) => verifier.with_revocation(Arc::new(authority.revoked())),
+                        None => verifier,
+                    };
+                    Some(verifier)
+                }
                 Err(why) => {
                     tracing::warn!(
                         "InfrastructureSupervisor: signed configuration will be refused: {why}"
@@ -640,6 +671,9 @@ impl Actor for InfrastructureSupervisor {
                     config: args.config.clone(),
                     configuration: configuration.clone(),
                     commands: commands.clone(),
+                    authority: authority
+                        .clone()
+                        .expect("a Cassini client has an authority actor"),
                 },
             )
             .await?;
@@ -660,6 +694,7 @@ impl Actor for InfrastructureSupervisor {
             config: args.config,
             configuration,
             commands,
+            authority,
             infrastructure_events,
             client,
             healthcheck: HealthHandle::new(healthcheck),
@@ -708,6 +743,9 @@ impl Actor for InfrastructureSupervisor {
                     }
                     if let ClientEvent::Registered { .. } = &event {
                         Self::ask_for_configuration(&state.service_name, client);
+                        if let Some(authority) = &state.authority {
+                            authority.registered();
+                        }
                     }
                     client.events_output.send(event);
                 }
@@ -752,6 +790,31 @@ impl Actor for InfrastructureSupervisor {
                     Err(e) => tracing::error!(
                         "InfrastructureSupervisor: cannot encode a command outcome: {e}"
                     ),
+                }
+            }
+            InfrastructureSupervisorMessage::AuthorityAsk => {
+                if let Some(client) = &state.client {
+                    match rkyv::to_bytes::<rkyv::rancor::Error>(
+                        &credentials_agent_common::authority_update::AuthoritySnapshotRequest,
+                    ) {
+                        Ok(bytes) => {
+                            if let Err(e) = client.tcp_client.as_actor_ref().send_message(
+                                cassini_client::TcpClientMessage::publish(
+                                    credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC
+                                        .to_string(),
+                                    bytes.to_vec(),
+                                    None,
+                                ),
+                            ) {
+                                tracing::warn!(
+                                    "InfrastructureSupervisor: cannot ask for the authority: {e}"
+                                );
+                            }
+                        }
+                        Err(e) => tracing::error!(
+                            "InfrastructureSupervisor: cannot encode a request for the authority: {e}"
+                        ),
+                    }
                 }
             }
             InfrastructureSupervisorMessage::ConfigurationChanged(change) => {
@@ -823,16 +886,22 @@ impl Actor for InfrastructureSupervisor {
                 myself.stop(Some("infrastructure shutdown complete".to_string()));
             }
             InfrastructureSupervisorMessage::GetResources { reply } => {
-                let _ = reply.send(state.client.as_ref().map(|client| AgentResources {
-                    router: client.router.clone(),
-                    tcp_client: client.tcp_client.clone(),
-                    healthcheck: state.healthcheck.clone(),
-                    crypto: client.crypto.clone(),
-                    events_output: client.events_output.clone(),
-                    infrastructure_events: state.infrastructure_events.clone(),
-                    infrastructure: myself.clone(),
-                    config: state.config.clone(),
-                    configuration: state.configuration.clone(),
+                let _ = reply.send(state.client.as_ref().map(|client| {
+                    AgentResources {
+                        router: client.router.clone(),
+                        tcp_client: client.tcp_client.clone(),
+                        healthcheck: state.healthcheck.clone(),
+                        crypto: client.crypto.clone(),
+                        events_output: client.events_output.clone(),
+                        infrastructure_events: state.infrastructure_events.clone(),
+                        infrastructure: myself.clone(),
+                        config: state.config.clone(),
+                        configuration: state.configuration.clone(),
+                        authority: state
+                            .authority
+                            .clone()
+                            .expect("a Cassini client has an authority actor"),
+                    }
                 }));
             }
             InfrastructureSupervisorMessage::GetService { reply } => {
@@ -1268,6 +1337,213 @@ mod tests {
         async fn settle(&self) {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    // -- authority from the credentials agent -----------------------------------------------------
+
+    const CREDENTIALS: &str = "credentials-agent.polar.serviceaccount.cluster.local";
+
+    /// The credentials agent's key and a snapshot it signed.
+    fn authority_snapshot(
+        key: &rsa::RsaPrivateKey,
+        payloads: &[credentials_agent_common::authority_update::AuthorityPayload],
+    ) -> credentials_agent_common::authority_update::AuthoritySnapshot {
+        use rsa::pkcs8::EncodePublicKey;
+        credentials_agent_common::authority_update::AuthoritySnapshot {
+            public_key_pem: key
+                .to_public_key()
+                .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+                .unwrap(),
+            updates: payloads
+                .iter()
+                .map(|p| credentials_agent_common::authority_update::sign(p, key).unwrap())
+                .collect(),
+        }
+    }
+
+    fn deliver_snapshot(
+        rig: &Rig,
+        snapshot: &credentials_agent_common::authority_update::AuthoritySnapshot,
+        published_by: Option<&str>,
+    ) {
+        rig.resources
+            .router
+            .send_message(polar_router::RouterMessage::Route(
+                polar_router::IncomingMessage {
+                    topic:
+                        credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REPLIES_TOPIC
+                            .to_string(),
+                    payload: rkyv::to_bytes::<rkyv::rancor::Error>(snapshot)
+                        .unwrap()
+                        .to_vec(),
+                    published_by: published_by.map(str::to_string),
+                    trace_ctx: None,
+                },
+            ))
+            .unwrap();
+    }
+
+    fn requests_for_authority(rig: &Rig) -> usize {
+        rig.spawner
+            .published
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(topic, _)| {
+                topic
+                    == credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC
+            })
+            .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_asks_the_credentials_agent_for_the_current_authority_when_it_registers() {
+        let rig = Rig::standard("infra-authority-ask").await;
+        assert_eq!(
+            requests_for_authority(&rig),
+            0,
+            "nothing before it registers"
+        );
+        rig.registered().await;
+        rig.settle().await;
+        assert_eq!(requests_for_authority(&rig), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_snapshot_from_the_credentials_agent_reaches_the_agents_policy_and_permissions() {
+        use credentials_agent_common::authority_update::{
+            AuthorityBody, AuthorityKind, AuthorityPayload,
+        };
+        let rig = Rig::standard("infra-authority-snapshot").await;
+        let key = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        let snapshot = authority_snapshot(
+            &key,
+            &[AuthorityPayload {
+                sequence: 1,
+                version: 4,
+                body: AuthorityBody::Policy {
+                    source: r#"permit(principal == Identity::"alice", action, resource);"#.into(),
+                },
+                authored_by: None,
+            }],
+        );
+
+        // From anyone else it is ignored.
+        deliver_snapshot(&rig, &snapshot, Some("some-other-agent"));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(rig.resources.authority.versions().await.unwrap().is_empty());
+
+        // From the credentials agent it is believed and applied.
+        deliver_snapshot(&rig, &snapshot, Some(CREDENTIALS));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            rig.resources.authority.versions().await.unwrap()[&AuthorityKind::Policy],
+            4
+        );
+        let decision = ractor::call!(rig.resources.authority.policy(), |reply| {
+            polar_policy::PolicyMessage::CheckAuthorization {
+                requester_identity: "alice".to_string(),
+                requester_certificate_pem: None,
+                action: r#"Action::"anything""#.to_string(),
+                resource: r#"Thing::"x""#.to_string(),
+                reply,
+            }
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(decision, polar_policy::Decision::Allow);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_signer_the_credentials_agent_revoked_is_refused_by_the_next_document() {
+        use crate::configuration::{ApplyOutcome, Refusal};
+        use crate::signed::Rejection;
+        use credentials_agent_common::authority_update::{AuthorityBody, AuthorityPayload};
+        use polar_signing::testing::{Spec, root, signer};
+
+        let ca = root("Polar Internal CA");
+        let dir = tempfile::tempdir().unwrap();
+        let ca_file = dir.path().join("ca.pem");
+        std::fs::write(&ca_file, &ca.pem).unwrap();
+        let rig = Rig::with_runtime(
+            "infra-revoked",
+            &[("TLS_CA_CERT", ca_file.to_str().unwrap())],
+            &INFRA_RUNTIME,
+        )
+        .await;
+        let s = signer(
+            &ca,
+            Spec {
+                capabilities: vec!["c:update-runtime"],
+                not_after_year: 2090,
+                ..Spec::default()
+            },
+        );
+        let document = |version: u64| {
+            polar_signing::sign(
+                serde_json::json!({
+                    "type": "runtime", "id": format!("r-{version}"), "target": {"agent": "infra-revoked"},
+                    "section": "repositories", "version": version, "body": {}
+                }),
+                std::slice::from_ref(&s.cert_pem),
+                &s.key_pem,
+            )
+            .unwrap()
+            .to_value()
+        };
+
+        // The first is accepted, and the history says whose certificate signed it.
+        let outcome = rig
+            .resources
+            .configuration
+            .submit(document(1))
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, ApplyOutcome::Applied { .. }),
+            "{outcome:?}"
+        );
+        let history = rig.resources.configuration.history().await.unwrap();
+        let signer_text = history.last().unwrap().signer.clone().unwrap();
+        let serial = signer_text
+            .split("serial ")
+            .nth(1)
+            .unwrap()
+            .trim_end_matches(')')
+            .to_string();
+
+        // The credentials agent says that certificate is revoked.
+        let key = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        deliver_snapshot(
+            &rig,
+            &authority_snapshot(
+                &key,
+                &[AuthorityPayload {
+                    sequence: 1,
+                    version: 1,
+                    body: AuthorityBody::Revoked {
+                        serials: vec![serial],
+                    },
+                    authored_by: None,
+                }],
+            ),
+            Some(CREDENTIALS),
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let outcome = rig
+            .resources
+            .configuration
+            .submit(document(2))
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                ApplyOutcome::Refused(Refusal::Unverified(Rejection::Revoked(_)))
+            ),
+            "{outcome:?}"
+        );
     }
 
     // -- asking for the configuration the scheduler holds -------------------------------

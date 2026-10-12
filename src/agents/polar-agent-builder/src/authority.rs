@@ -210,6 +210,33 @@ impl Revocation for RevokedSerials {
     }
 }
 
+/// The two subscriptions every Cassini client agent has to the credentials agent's authority: a live update, and
+/// a snapshot (asked for, or republished). Each is handed to the authority actor with who the broker says
+/// published it; one that does not decode is dropped.
+pub fn subscriptions(authority: &AuthorityHandle) -> Vec<crate::Subscription> {
+    use credentials_agent_common::authority_update::{
+        AUTHORITY_SNAPSHOT_REPLIES_TOPIC, AUTHORITY_UPDATES_TOPIC,
+    };
+    let for_updates = authority.clone();
+    let for_snapshots = authority.clone();
+    vec![
+        crate::Subscription::new(
+            AUTHORITY_UPDATES_TOPIC,
+            move |incoming| match rkyv::from_bytes::<Update, rkyv::rancor::Error>(&incoming.payload)
+            {
+                Ok(update) => for_updates.update(update, incoming.published_by),
+                Err(e) => warn!("a message on the authority updates topic is not an update: {e}"),
+            },
+        ),
+        crate::Subscription::new(AUTHORITY_SNAPSHOT_REPLIES_TOPIC, move |incoming| {
+            match rkyv::from_bytes::<AuthoritySnapshot, rkyv::rancor::Error>(&incoming.payload) {
+                Ok(snapshot) => for_snapshots.snapshot(snapshot, incoming.published_by),
+                Err(e) => warn!("a message on the authority snapshot topic is not a snapshot: {e}"),
+            }
+        }),
+    ]
+}
+
 /// The least time between two requests for the current authority: an agent that keeps seeing updates it cannot
 /// check, or a jump it keeps seeing, asks once, not once per message.
 const ASK_INTERVAL: Duration = Duration::from_secs(5);

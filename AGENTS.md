@@ -116,3 +116,7 @@ pub type GraphController<T> = ActorRef<GraphControllerMsg<T>>;
 - If `cargo check` fails after a change, fix it before moving on — do not accumulate broken state.
 - If a test requires external services (Neo4j, broker), note it and skip rather than fail silently.
 - Do not add dependencies to `Cargo.toml` without a clear reason tied to the task.
+
+## Git
+- Conventional commits are enforced by a githook.
+- Prefer a summary with a detailed body for commit messages.
