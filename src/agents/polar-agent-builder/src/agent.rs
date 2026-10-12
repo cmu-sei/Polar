@@ -42,6 +42,7 @@
 //! ```
 
 use crate::capability::Capability;
+use crate::command::{CommandSpec, spec_problems};
 use crate::environment;
 use crate::startup::{self, Startup};
 use polar_env::{DocValue, Document, DocumentError, Env, FileEnv, ProcessEnv, Section, Source};
@@ -82,6 +83,11 @@ pub trait PolarAgent: Sized + 'static {
     /// health check, the signals and the shutdown handshake, and no router, client or
     /// subscriptions. It must also turn `SELF_TEST` off and not list `Cassini` in `NEEDS`.
     const CASSINI_CLIENT: bool = true;
+    /// The commands the agent accepts (docs/architecture/commands.md): each with its arguments, how long it
+    /// may run and how the scheduler may deliver it. They appear in the schema export, and the agent
+    /// registers a handler for each with `AgentBuilder::with_command`; it does not start if the two
+    /// disagree. A command not declared here is refused however it is signed.
+    const COMMANDS: &'static [CommandSpec] = &[];
 
     /// The agent proper. It is given the configuration the infrastructure judged, and builds
     /// its infrastructure from it (see `AgentBuilder::into_configured`). It returns when the
@@ -95,6 +101,8 @@ pub struct Configured {
     pub(crate) startup: Startup,
     pub(crate) required: Vec<Capability>,
     pub(crate) self_test: bool,
+    /// What the agent declared it accepts.
+    pub(crate) commands: &'static [CommandSpec],
     pub(crate) hooks: Hooks,
 }
 
@@ -161,6 +169,7 @@ impl Configured {
             startup,
             required: Vec::new(),
             self_test: false,
+            commands: &[],
             hooks: Hooks {
                 process_exit: Arc::new(move |code| exits.lock().unwrap().push(code)),
                 listen_for_signals: false,
@@ -181,11 +190,35 @@ pub struct AgentDocument {
     pub requires: Vec<String>,
     /// The least the deployment may give the agent to drain, in seconds.
     pub shutdown_budget_minimum_secs: u64,
+    /// The commands the agent accepts, with their arguments: what a signed command may be.
+    #[serde(default)]
+    pub commands: Vec<CommandDocument>,
     #[serde(flatten)]
     pub document: Document,
     /// Every problem found, when the document was filled from a file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub problems: Vec<String>,
+}
+
+/// A command an agent accepts, as the schema export shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandDocument {
+    pub name: String,
+    pub doc: String,
+    pub args: Vec<ArgDocument>,
+    /// `once` or `idempotent`.
+    pub delivery: String,
+    pub exclusive: bool,
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgDocument {
+    pub name: String,
+    /// `text` or `number`.
+    pub kind: String,
+    pub required: bool,
+    pub doc: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,6 +277,26 @@ pub fn scaffold_document<A: PolarAgent>() -> AgentDocument {
             .map(|c| c.as_str().to_string())
             .collect(),
         shutdown_budget_minimum_secs: A::SHUTDOWN_BUDGET.as_secs(),
+        commands: A::COMMANDS
+            .iter()
+            .map(|c| CommandDocument {
+                name: c.name.to_string(),
+                doc: c.doc.to_string(),
+                args: c
+                    .args
+                    .iter()
+                    .map(|a| ArgDocument {
+                        name: a.name.to_string(),
+                        kind: a.kind.as_str().to_string(),
+                        required: a.required,
+                        doc: a.doc.to_string(),
+                    })
+                    .collect(),
+                delivery: c.delivery.as_str().to_string(),
+                exclusive: c.exclusive,
+                timeout_secs: c.timeout.as_secs(),
+            })
+            .collect(),
         document: Document::scaffold(&tagged),
         problems: Vec::new(),
     }
@@ -270,8 +323,21 @@ fn load(path: &Path, process: impl Env + 'static) -> Result<Loaded, String> {
 /// Every problem with a document, as `A` would find them starting on it: what is wrong with
 /// the document itself, what it sets that the agent does not declare, and everything the
 /// agent's own judgement of its configuration finds.
+/// What is wrong with the agent's own declarations of commands, whatever the configuration.
+fn command_problems<A: PolarAgent>() -> Vec<String> {
+    let mut problems = spec_problems(A::COMMANDS);
+    if !A::COMMANDS.is_empty() && !A::CASSINI_CLIENT {
+        problems.push(format!(
+            "{} declares commands but is not a Cassini client, so none can reach it",
+            A::NAME
+        ));
+    }
+    problems
+}
+
 fn problems_of<A: PolarAgent>(loaded: &Loaded) -> Vec<String> {
     let mut problems = loaded.document.problems();
+    problems.extend(command_problems::<A>());
 
     let declared: Vec<String> = scaffold_document::<A>()
         .document
@@ -490,6 +556,7 @@ pub fn declaration_problems<A: PolarAgent>() -> Vec<String> {
             );
         }
     }
+    problems.extend(command_problems::<A>());
     let mut seen: Vec<Capability> = Vec::new();
     for capability in A::NEEDS {
         if seen.contains(capability) {
@@ -605,10 +672,18 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
             return 1;
         }
     };
+    let bad_commands = command_problems::<A>();
+    if !bad_commands.is_empty() {
+        for problem in &bad_commands {
+            eprintln!("ERROR: {problem}");
+        }
+        return 1;
+    }
     let configured = Configured {
         startup,
         required: needs_of::<A>(),
         self_test: A::SELF_TEST && A::CASSINI_CLIENT,
+        commands: A::COMMANDS,
         hooks: Hooks::real(),
     };
 
@@ -1206,6 +1281,120 @@ mod tests {
         let status = run_with::<Watched>(&[], |_: &str| None::<String>);
         assert_eq!(status, 1);
         assert!(!WATCHED_STARTED.load(Ordering::SeqCst));
+    }
+
+    // -- commands ---------------------------------------------------------------------------
+
+    const BACKUP_ARGS: &[crate::command::ArgSpec] = &[crate::command::ArgSpec {
+        name: "destination",
+        kind: crate::command::ArgKind::Text,
+        required: true,
+        doc: "where the backup goes",
+    }];
+
+    const BACKUP: CommandSpec = CommandSpec {
+        name: "backup-now",
+        doc: "Back up the data now",
+        args: BACKUP_ARGS,
+        delivery: crate::command::Delivery::Once,
+        exclusive: true,
+        timeout: Duration::from_secs(900),
+    };
+
+    struct Commanding;
+    impl PolarAgent for Commanding {
+        const NAME: &'static str = "commanding";
+        const PURPOSE: &'static str = "Declares one command";
+        const NEEDS: &'static [Capability] = &[Capability::Cassini];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
+        const COMMANDS: &'static [CommandSpec] = &[BACKUP];
+        async fn start(_: Configured) -> Result<(), StartError> {
+            COMMANDING_STARTED.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    static COMMANDING_STARTED: AtomicBool = AtomicBool::new(false);
+
+    #[test]
+    fn the_schema_export_lists_the_commands_an_agent_declares() {
+        let doc = scaffold_document::<Commanding>();
+        assert_eq!(doc.commands.len(), 1);
+        let command = &doc.commands[0];
+        assert_eq!(command.name, "backup-now");
+        assert_eq!(command.delivery, "once");
+        assert!(command.exclusive);
+        assert_eq!(command.timeout_secs, 900);
+        assert_eq!(command.args.len(), 1);
+        assert_eq!(command.args[0].name, "destination");
+        assert_eq!(command.args[0].kind, "text");
+        assert!(command.args[0].required);
+
+        // As the JSON a tool reads, and read back.
+        let json = serde_json::to_value(&doc).unwrap();
+        assert_eq!(json["commands"][0]["name"], "backup-now");
+        assert_eq!(json["commands"][0]["args"][0]["kind"], "text");
+        let back: AgentDocument = serde_json::from_value(json).unwrap();
+        assert_eq!(back, doc);
+
+        // An agent with none says so, and an older document without the section still reads.
+        let none = serde_json::to_value(scaffold_document::<Example>()).unwrap();
+        assert_eq!(none["commands"], serde_json::json!([]));
+        let mut older = none.clone();
+        older.as_object_mut().unwrap().remove("commands");
+        let read: AgentDocument = serde_json::from_value(older).unwrap();
+        assert!(read.commands.is_empty());
+    }
+
+    #[test]
+    fn a_sound_command_declaration_has_no_problems() {
+        assert!(declaration_problems::<Commanding>().is_empty());
+    }
+
+    struct BadCommands;
+    impl PolarAgent for BadCommands {
+        const NAME: &'static str = "bad-commands";
+        const PURPOSE: &'static str = "Declares commands badly";
+        const NEEDS: &'static [Capability] = &[Capability::Cassini];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
+        const COMMANDS: &'static [CommandSpec] = &[BACKUP, BACKUP];
+        async fn start(_: Configured) -> Result<(), StartError> {
+            BAD_COMMANDS_STARTED.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    static BAD_COMMANDS_STARTED: AtomicBool = AtomicBool::new(false);
+
+    #[test]
+    fn an_agent_that_declares_its_commands_badly_says_so_and_is_not_started() {
+        let problems = declaration_problems::<BadCommands>();
+        assert!(problems.iter().any(|p| p.contains("declared twice")), "{problems:?}");
+        BAD_COMMANDS_STARTED.store(false, Ordering::SeqCst);
+        let status = run_with::<BadCommands>(&[], with_secrets());
+        assert_eq!(status, 1);
+        assert!(!BAD_COMMANDS_STARTED.load(Ordering::SeqCst));
+    }
+
+    struct ServiceWithCommands;
+    impl PolarAgent for ServiceWithCommands {
+        const NAME: &'static str = "service-with-commands";
+        const PURPOSE: &'static str = "Is not a client";
+        const NEEDS: &'static [Capability] = &[];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
+        const SELF_TEST: bool = false;
+        const CASSINI_CLIENT: bool = false;
+        const COMMANDS: &'static [CommandSpec] = &[BACKUP];
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn commands_cannot_be_declared_by_a_service_that_nothing_can_reach() {
+        let problems = declaration_problems::<ServiceWithCommands>();
+        assert!(
+            problems.iter().any(|p| p.contains("not a Cassini client")),
+            "{problems:?}"
+        );
     }
 
     // -- the declaration -----------------------------------------------------------------------

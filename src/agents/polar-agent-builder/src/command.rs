@@ -40,6 +40,152 @@ pub enum Arg {
     Number(i64),
 }
 
+/// What kind of value an argument takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgKind {
+    Text,
+    Number,
+}
+
+impl ArgKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArgKind::Text => "text",
+            ArgKind::Number => "number",
+        }
+    }
+
+    fn of(arg: &Arg) -> Self {
+        match arg {
+            Arg::Text(_) => ArgKind::Text,
+            Arg::Number(_) => ArgKind::Number,
+        }
+    }
+}
+
+/// An argument a command declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArgSpec {
+    pub name: &'static str,
+    pub kind: ArgKind,
+    pub required: bool,
+    pub doc: &'static str,
+}
+
+/// How the scheduler may deliver a command (the agent itself never runs an id twice either way).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// It must never run twice: the scheduler dispatches an id at most once, and never again.
+    Once,
+    /// Running it again is safe, so a redelivery is acceptable.
+    Idempotent,
+}
+
+impl Delivery {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Delivery::Once => "once",
+            Delivery::Idempotent => "idempotent",
+        }
+    }
+}
+
+/// A command an agent declares it accepts, in the schema export (`--scaffold`). The same declaration drives
+/// the typed template, the checks before a handler runs, and the timeout it runs under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandSpec {
+    pub name: &'static str,
+    pub doc: &'static str,
+    pub args: &'static [ArgSpec],
+    pub delivery: Delivery,
+    /// Only one at a time: a second is refused as busy while one runs.
+    pub exclusive: bool,
+    /// How long the handler may run before it is stopped and reported as failed. A deployment's shutdown
+    /// budget must cover the longest of these.
+    pub timeout: std::time::Duration,
+}
+
+/// The longest timeout a declaration may ask for.
+pub const MAX_TIMEOUT_SECS: u64 = 24 * 60 * 60;
+
+/// Whether `args` suit `spec`: no argument it does not declare, every required one present, each of its
+/// kind. Every problem, not the first, and by name and kind only: a value is never repeated.
+pub fn check_args(spec: &CommandSpec, args: &BTreeMap<String, Arg>) -> Result<(), Vec<String>> {
+    let mut problems = Vec::new();
+    for (name, arg) in args {
+        match spec.args.iter().find(|a| a.name == name) {
+            None => problems.push(format!("`{}` takes no argument `{name}`", spec.name)),
+            Some(declared) if declared.kind != ArgKind::of(arg) => problems.push(format!(
+                "argument `{name}` is {}, and `{}` expects {}",
+                ArgKind::of(arg).as_str(),
+                spec.name,
+                declared.kind.as_str()
+            )),
+            Some(_) => {}
+        }
+    }
+    for declared in spec.args.iter().filter(|a| a.required) {
+        if !args.contains_key(declared.name) {
+            problems.push(format!(
+                "`{}` needs the argument `{}`",
+                spec.name, declared.name
+            ));
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+/// What is wrong with an agent's own declarations: the names sound and not repeated, a timeout that is
+/// neither nothing nor more than a day. Checked when the agent starts, and by `--check`, so a malformed
+/// declaration is a startup failure and not a command that cannot be sent.
+pub fn spec_problems(specs: &[CommandSpec]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for spec in specs {
+        if !name_is_sound(spec.name, '-') {
+            problems.push(format!(
+                "command `{}`: a name is a lower-case word of at most {MAX_NAME} letters, digits and hyphens",
+                spec.name
+            ));
+        }
+        if !seen.insert(spec.name) {
+            problems.push(format!("command `{}` is declared twice", spec.name));
+        }
+        if spec.timeout.is_zero() || spec.timeout.as_secs() > MAX_TIMEOUT_SECS {
+            problems.push(format!(
+                "command `{}`: a timeout is more than nothing and at most {MAX_TIMEOUT_SECS} seconds",
+                spec.name
+            ));
+        }
+        if spec.args.len() > MAX_ARGS {
+            problems.push(format!(
+                "command `{}` declares more than {MAX_ARGS} arguments",
+                spec.name
+            ));
+        }
+        let mut names = std::collections::HashSet::new();
+        for arg in spec.args {
+            if !name_is_sound(arg.name, '_') {
+                problems.push(format!(
+                    "command `{}`, argument `{}`: a name is a lower-case word of at most {MAX_NAME} letters, digits and underscores",
+                    spec.name, arg.name
+                ));
+            }
+            if !names.insert(arg.name) {
+                problems.push(format!(
+                    "command `{}` declares the argument `{}` twice",
+                    spec.name, arg.name
+                ));
+            }
+        }
+    }
+    problems
+}
+
 /// When a command may run, as its document says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
@@ -905,5 +1051,133 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    // -- declarations and arguments ----------------------------------------------------------
+
+    const ARGS: &[ArgSpec] = &[
+        ArgSpec {
+            name: "destination",
+            kind: ArgKind::Text,
+            required: true,
+            doc: "where to put it",
+        },
+        ArgSpec {
+            name: "keep",
+            kind: ArgKind::Number,
+            required: false,
+            doc: "how many to keep",
+        },
+    ];
+
+    const BACKUP: CommandSpec = CommandSpec {
+        name: "backup-now",
+        doc: "back up now",
+        args: ARGS,
+        delivery: Delivery::Once,
+        exclusive: true,
+        timeout: std::time::Duration::from_secs(600),
+    };
+
+    fn args(pairs: &[(&str, Arg)]) -> BTreeMap<String, Arg> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn arguments_that_suit_the_declaration_are_accepted() {
+        let ok = args(&[("destination", Arg::Text("nightly".into()))]);
+        assert_eq!(check_args(&BACKUP, &ok), Ok(()));
+        let with_optional = args(&[
+            ("destination", Arg::Text("nightly".into())),
+            ("keep", Arg::Number(7)),
+        ]);
+        assert_eq!(check_args(&BACKUP, &with_optional), Ok(()));
+    }
+
+    #[test]
+    fn every_problem_with_the_arguments_is_reported_by_name_and_never_by_value() {
+        // Unknown, the wrong kind, and a required one missing, all at once.
+        let bad = args(&[
+            ("keep", Arg::Text("hunter2-a-secret".into())),
+            ("surprise", Arg::Number(1)),
+        ]);
+        let problems = check_args(&BACKUP, &bad).unwrap_err();
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(problems.iter().any(|p| p.contains("surprise")));
+        assert!(problems.iter().any(|p| p.contains("`keep` is text")));
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("needs the argument `destination`"))
+        );
+        assert!(!format!("{problems:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn a_command_with_no_arguments_takes_none() {
+        const PING: CommandSpec = CommandSpec {
+            name: "ping",
+            doc: "",
+            args: &[],
+            delivery: Delivery::Idempotent,
+            exclusive: false,
+            timeout: std::time::Duration::from_secs(5),
+        };
+        assert_eq!(check_args(&PING, &BTreeMap::new()), Ok(()));
+        assert!(check_args(&PING, &args(&[("x", Arg::Number(1))])).is_err());
+    }
+
+    #[test]
+    fn sound_declarations_have_no_problems_and_unsound_ones_say_what() {
+        assert!(spec_problems(&[BACKUP]).is_empty());
+        assert!(spec_problems(&[]).is_empty());
+
+        let mut bad = BACKUP;
+        bad.name = "Backup Now";
+        assert_eq!(spec_problems(&[bad]).len(), 1);
+
+        assert!(
+            spec_problems(&[BACKUP, BACKUP])
+                .iter()
+                .any(|p| p.contains("declared twice"))
+        );
+
+        let mut none = BACKUP;
+        none.timeout = std::time::Duration::ZERO;
+        assert_eq!(spec_problems(&[none]).len(), 1);
+        let mut long = BACKUP;
+        long.timeout = std::time::Duration::from_secs(MAX_TIMEOUT_SECS + 1);
+        assert_eq!(spec_problems(&[long]).len(), 1);
+        let mut limit = BACKUP;
+        limit.timeout = std::time::Duration::from_secs(MAX_TIMEOUT_SECS);
+        assert!(spec_problems(&[limit]).is_empty());
+
+        const DUPLICATED: &[ArgSpec] = &[
+            ArgSpec {
+                name: "a",
+                kind: ArgKind::Text,
+                required: false,
+                doc: "",
+            },
+            ArgSpec {
+                name: "a",
+                kind: ArgKind::Text,
+                required: false,
+                doc: "",
+            },
+            ArgSpec {
+                name: "Bad",
+                kind: ArgKind::Text,
+                required: false,
+                doc: "",
+            },
+        ];
+        let mut dup = BACKUP;
+        dup.args = DUPLICATED;
+        let problems = spec_problems(&[dup]);
+        assert_eq!(problems.len(), 2, "{problems:?}");
     }
 }

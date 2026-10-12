@@ -32,6 +32,63 @@ pub struct ConfigurationNotification {
     pub document_json: String,
 }
 
+/// The topic a signed command for `agent` is delivered on. Every builder agent subscribes to its own; the
+/// scheduler processor publishes to it (docs/architecture/commands.md).
+pub fn command_topic(agent: &str) -> String {
+    format!("agent.{agent}.command")
+}
+
+/// A signed command document on its way to the agent it is for, carried as it was read from the repository,
+/// untouched: the receiver verifies it for itself.
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+pub struct CommandNotification {
+    pub agent: String,
+    pub document_json: String,
+}
+
+/// Where an agent says what became of each signed command it was given.
+pub const COMMAND_OUTCOME_TOPIC: &str = "polar-command-outcome";
+
+/// The values of [`CommandOutcome::status`]: one per step an agent takes. (`dispatched` and `unanswered` are
+/// the scheduler's, not an agent's.)
+pub mod command_status {
+    /// Not accepted: unsigned, untrusted, altered, not allowed, for another agent, not declared, bad
+    /// arguments, busy, or the agent is draining. The detail says which.
+    pub const REFUSED: &str = "refused";
+    /// Verified, but past its expiry.
+    pub const EXPIRED: &str = "expired";
+    /// This agent has already received this id.
+    pub const DUPLICATE: &str = "duplicate";
+    /// Every check passed and it will run.
+    pub const ACCEPTED: &str = "accepted";
+    /// The handler has begun.
+    pub const STARTED: &str = "started";
+    pub const SUCCEEDED: &str = "succeeded";
+    /// The handler returned an error, panicked, timed out, or was interrupted by a shutdown.
+    pub const FAILED: &str = "failed";
+}
+
+/// One step an agent took with a signed command. Carries names and reasons, never an argument value.
+/// `id` and `command` are as the document claims them, and mean something only when `signer` is set, which
+/// it is only for a document that was verified.
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+pub struct CommandOutcome {
+    pub agent: String,
+    pub id: Option<String>,
+    pub command: Option<String>,
+    /// One of the [`command_status`] values.
+    pub status: String,
+    /// Why not, for anything that was not carried out; and for a success, what the handler reported.
+    pub detail: Vec<String>,
+    /// Who signed it (username or identity, and certificate serial), for a verified document.
+    pub signer: Option<String>,
+    /// How long the handler ran, for `succeeded` and `failed` after it started.
+    pub duration_ms: Option<u64>,
+    pub at_unix_secs: u64,
+    /// Counts this agent's command outcomes since it started.
+    pub sequence: u64,
+}
+
 /// Where an agent says what became of each signed configuration document it was given. The scheduler
 /// processor subscribes and writes each to the graph.
 pub const CONFIGURATION_OUTCOME_TOPIC: &str = "polar-configuration-outcome";

@@ -27,6 +27,8 @@ pub mod configuration;
 pub use configuration::{ConfigChanged, ConfigurationHandle};
 pub mod command;
 pub use command::{CommandVerifier, VerifiedCommand};
+pub mod command_actor;
+pub use command_actor::{CommandHandle, CommandHandler, CommandRequest};
 pub mod crypto;
 pub mod environment;
 pub use crypto::{CryptoClient, CryptoHandle};
@@ -790,6 +792,7 @@ mod tests {
             startup,
             required: required.clone(),
             self_test: false,
+            commands: &[],
             hooks: crate::agent::Hooks::real(),
         };
 
