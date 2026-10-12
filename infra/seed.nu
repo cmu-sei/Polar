@@ -23,6 +23,7 @@ export def documents [] {
             agent: "credentials-agent-consumer"
             section: "policy"
             version: 1
+            capability: "c:update-policy"
             field: "source"
             file: "infra/seeds/signed/policy.cedar"
         }
@@ -78,4 +79,16 @@ export def authority_published [logs: string, section: string] {
 export def first_dns_name [san: string] {
     let found = ($san | parse --regex 'DNS:(?<name>[^,\s]+)')
     if ($found | is-empty) { null } else { $found | first | get name }
+}
+
+# The capabilities the documents need that the certificate does not carry, from its
+# `openssl x509 -noout -ext subjectAltName` (a capability is a URI name, `URI:c:update-policy`). A document
+# signed without one is refused by whoever receives it, so the step says so before it signs.
+export def lacks [san: string, docs: list] {
+    let held = ($san | parse --regex 'URI:(?<uri>[^,\s]+)' | get uri)
+    $docs | get capability | uniq | where {|c| $c not-in $held }
+}
+
+export def lacks_hint [user: string, missing: list] {
+    $"($user)'s certificate does not carry ($missing | str join ', '), so the credentials agent would refuse the policy. Provision an account that does \(just admin-provision gives every new administrator these\), and run this again with --user."
 }

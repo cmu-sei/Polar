@@ -48,11 +48,14 @@ def main [] {
             }
         }
         {
-            name: "the seed comes after the admin flow, which makes the account that signs it"
+            name: "the seed comes after the admin flow, which makes the account that signs it, and before the browser, which waits for a person"
             body: {
                 let plan = (build_plan (config [] ["credentials-agent.yaml" "polar-git-server.yaml" "polar-scheduler-observer.yaml"]) false)
                 let ids = ($plan | get id)
-                assert (($ids | enumerate | where item == "seed" | first | get index) > ($ids | enumerate | where item == "admin" | first | get index))
+                let at = {|id| $ids | enumerate | where item == $id | first | get index }
+                assert ((do $at "seed") > (do $at "admin"))
+                let full = (build_plan (config ["neo4j"] ["credentials-agent.yaml" "polar-git-server.yaml" "polar-scheduler-observer.yaml"]) false | get id)
+                assert (($full | enumerate | where item == "seed" | first | get index) < ($full | enumerate | where item == "browser" | first | get index))
             }
         }
         {

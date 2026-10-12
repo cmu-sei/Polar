@@ -27,8 +27,8 @@
 #   pods        wait for the deployed core services                       any of cert-issuer, cassini, credentials-agent, neo4j
 #   forwards    just port-forwards-up <only what is needed>               credentials-agent (observer) or neo4j
 #   admin       admin-bootstrap / admin-provision / admin-claim           credentials-agent deployed
-#   browser     user-cert-install, then the Neo4j password                credentials-agent and neo4j deployed
 #   seed        sign the first policy and push it to polar-schedules      credentials-agent, polar-git-server and polar-scheduler-observer deployed
+#   browser     user-cert-install, then the Neo4j password                credentials-agent and neo4j deployed
 
 const POLAR = "polar"
 const GRAPH = "polar-graph"
@@ -326,9 +326,13 @@ def step_seed [target: string, username: string, mail: string] {
     let work = (mktemp -d)
     let repo = ($work | path join "repo")
 
+    let san = (^openssl x509 -in ($dir | path join $"($username).crt") -noout -ext subjectAltName)
+    let missing = (seed lacks $san (seed documents))
+    if ($missing | is-not-empty) { fail (seed lacks_hint $username $missing) }
+
     let cloned = (do { seed_git $username [clone (seed repo_url) $repo] } | complete)
     if $cloned.exit_code != 0 {
-        let identity = (seed first_dns_name (^openssl x509 -in ($dir | path join $"($username).crt") -noout -ext subjectAltName))
+        let identity = (seed first_dns_name $san)
         if ($cloned.stderr | str contains "403") and ($identity != null) {
             fail (seed refused_hint $identity $target)
         }

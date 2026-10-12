@@ -94,6 +94,23 @@ def main [] {
             }
         }
         {
+            name: "a seed document is signed for the capability its section needs, and every one of them has one"
+            body: {
+                for d in (documents) { assert ($d.capability | str starts-with "c:") }
+                assert equal (documents | where section == "policy" | first | get capability) "c:update-policy"
+            }
+        }
+        {
+            name: "a certificate without the capability is told so before anything is signed, one with it is not"
+            body: {
+                let without = "X509v3 Subject Alternative Name:\n    DNS:abc, URI:p:u2s:x, URI:c:provision-account, URI:c:grant"
+                let with = "X509v3 Subject Alternative Name:\n    DNS:abc, URI:c:grant, URI:c:update-policy, URI:c:update-runtime"
+                assert equal (lacks $without (documents)) ["c:update-policy"]
+                assert equal (lacks $with (documents)) []
+                assert ((lacks_hint "djshepard" ["c:update-policy"]) | str contains "c:update-policy")
+            }
+        }
+        {
             name: "the credentials agent having published the policy is read from its log, and not from another kind or a refusal"
             body: {
                 let said = "2026-10-12T10:00:00Z  INFO credentials_agent_consumer::authority_publisher: publishing an authority update kind=\"policy\" version=1 sequence=1"

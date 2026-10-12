@@ -40,16 +40,16 @@ export def build_plan [config: record, dev: bool] {
         { id: "forwards", title: "port-forwards", on: ($has_ca_agent or $has_neo4j), why: "target deploys neither credentials-agent nor neo4j" }
         { id: "admin", title: "admin flow", on: $has_ca_agent, why: "target does not deploy credentials-agent" }
         {
-            id: "browser"
-            title: "browser certificate and Neo4j password"
-            on: ($has_ca_agent and $has_neo4j)
-            why: (if not $has_neo4j { "target does not deploy neo4j" } else { "no credentials-agent, so no user certificate to import" })
-        }
-        {
             id: "seed"
             title: "seed the schedules repository"
             on: $has_seed
             why: "target does not deploy all of credentials-agent, polar-git-server and polar-scheduler-observer"
+        }
+        {
+            id: "browser"
+            title: "browser certificate and Neo4j password"
+            on: ($has_ca_agent and $has_neo4j)
+            why: (if not $has_neo4j { "target does not deploy neo4j" } else { "no credentials-agent, so no user certificate to import" })
         }
     ]
 }
