@@ -27,12 +27,19 @@ authoritative update is accepted, an **event is raised** to every consumer of it
    delivered to every agent, and each agent decides for itself whether a signer may change it or run a command on it.
 3. **An event signal for updates.** When the credentials agent accepts a policy or permissions update, it raises an
    event for the consumers, handled everywhere the update needs to be received.
-4. **The credentials agent signs what it publishes.** Every agent can already get its public key from the
-   credentials agent (the escrow key query, which the crypto actor fetches and caches), and it is sufficient for the
-   credentials agent to sign its own unique work. Leaves pin that key and verify the signature on each
-   `AuthorityUpdate`, so an update is believed because of who signed it and not because of who relayed it, and it
-   can be stored and replayed. This covers ledger-originated changes (a revocation), which have no author's
-   document to forward. Which key signs is the first open question below.
+4. **The credentials agent signs what it publishes, with its escrow key.** Every agent can already get its public
+   key from the credentials agent (the escrow key query, which the crypto actor fetches and caches), and it is
+   sufficient for the credentials agent to sign its own unique work. Leaves pin that key and verify the signature
+   on each `AuthorityUpdate`, so an update is believed because of who signed it and not because of who relayed it,
+   and it can be stored and replayed. This covers ledger-originated changes (a revocation), which have no
+   author's document to forward. **One key, not two** (David, 2026-10-12): this key is already the identity whose
+   loss is catastrophic and whose custody and recovery are designed accordingly; a second key would add a second
+   thing to persist and recover for no gain, since the argument for separating them (a different rotation) does
+   not apply to keys that are not rotated, and a leaked private key ends the model whichever uses it. The
+   signature is RSASSA-PSS with SHA-256 over the payload prefixed with a fixed domain line
+   (`polar-authority-update-v1`), so that nothing signed for another purpose can be replayed as an update and the
+   decryption (OAEP) and signing (PSS) uses are kept apart in the message. The update carries the fingerprint of the
+   key that signed it, so a key that ever changed would be noticed.
 5. **Cedar overrides the certificate; the certificate is the fallback.** Once a policy is loaded, a request goes to
    the policy first. A `permit` admits a signer whatever the certificate says, and a `forbid` refuses one
    whatever it says. If the policy does not speak to the request (no rule mentions it), the capabilities in the
@@ -155,10 +162,4 @@ or read `principal.capabilities`).
 6. The seed policy and permissions in the schedules repository, and a cluster test: a demotion reaches a leaf and
    is refused there within a second.
 
-## Question (open)
-
-1. **Which key signs?** The key every agent can fetch from the credentials agent is its **escrow** key, an RSA key
-   used for encryption (agents encrypt secrets to it; it is held in the credentials agent's process). Signing with
-   the same RSA key is possible (RSASSA-PSS) but it is generally better not to use one key for both encrypting and
-   signing. The alternative: the credentials agent holds a separate RSA **signing** keypair, published by the same
-   query beside the escrow key, with the same custody. RSA either way. Which?
+No question is open. Next: the `AuthorityUpdate` message and its verification at a leaf.
