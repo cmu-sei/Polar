@@ -87,6 +87,35 @@ exposes it.)
 
 Until a receiver has what it needs to verify (the CA, a policy) it **fails closed**: it refuses.
 
+## How it fits together
+
+Two sequence diagrams, in `docs/architecture/sequences/config/`:
+
+- `signed_config_authoring.mmd` (and `.png`): the author's side. A typed template from the agent's
+  schema export, `check`, `sign`, the commit (signed through git's x509 support with the same key) and
+  the push, ending with the git server announcing the change.
+- `signed_config_delivery.mmd` (and `.png`): the runtime side. The announcement, the observer's pull and
+  evaluation, the scheduler's storage and notification, and the ConfigurationActor in the target agent
+  verifying the whole document for itself before it applies anything.
+
+**The schema export** is what `<agent> --scaffold` prints (`polar-env`'s document module): every
+declared variable with its type, whether it is required, whether it is secret, its default, its
+`static` or `dynamic` mutability and its description, by section, plus what the agent requires and its
+minimum shutdown budget. A schedule may set only the `dynamic` ones, so the generated template lists
+only those. Today no variable in the workspace is declared dynamic outside tests, so a generated
+template would be empty until agents declare some.
+
+**Verification happens twice, on purpose.** The observer checks a document early, with the same rules,
+and drops and logs an invalid one, so the scheduler only ever carries documents that were good when they
+were read. The ConfigurationActor checks again, because it must not trust the relay. The two use the
+same library, so they cannot disagree about the rules.
+
+**Not designed yet:** how the author learns that a document was refused after it was pushed (the
+refusal is recorded at the receiver, and the observer's early check can log, but nothing notifies the
+author), and where an author's machine gets an agent's schema export (the agent's image can print it,
+but an author usually has no image; candidates are publishing it with each release, or committing it to
+the schedules repository from CI).
+
 ## Authority
 
 **Version one:** the signer's certificate must carry `c:update-policy`. That is coarse: it permits

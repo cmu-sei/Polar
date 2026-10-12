@@ -1,0 +1,40 @@
+sequenceDiagram
+    actor Author
+    participant Sign as polar-sign
+    participant Schema as Agent schema (--scaffold)
+    participant Git as Git (policy clone)
+    participant Server as Polar git server
+    participant Cassini
+
+    Note over Author,Schema: Once per agent: a typed template from the agent's own declarations
+    Author->>Sign: template <agent>
+    Sign->>Schema: read the agent's schema export
+    Schema-->>Sign: every variable: type, default, secret, static or dynamic
+    Sign-->>Author: Dhall record type of the Dynamic variables only
+
+    Note over Author,Sign: Authoring: imports and templates are fine here
+    Author->>Author: write item.dhall using the template
+
+    Author->>Sign: check item.dhall
+    Sign->>Sign: evaluate to normal form (no imports left)
+    Sign->>Sign: parse each value with the agent's own declaration
+    Sign->>Sign: version is above the last known, signing certificate valid and authorised
+    Sign-->>Author: every problem at once, or OK
+
+    Author->>Sign: sign item.dhall
+    Sign->>Sign: canonical JSON of payload, domain prefix, ECDSA P-256 with the user's key
+    Sign-->>Author: item.dhall rewritten as one file: payload and signature (signature and chain only)
+
+    Note over Author,Git: Same key signs the commit, through git's x509 support (not a hook)
+    Author->>Git: git commit
+    Git->>Sign: gpg.x509.program: sign the commit object
+    Sign-->>Git: detached signature
+    Note right of Sign: setup wrote user.email from the certificate's mail
+
+    Author->>Server: git push (mTLS with the user certificate)
+    Server->>Server: authorise the pusher for this repository and branch
+    opt repository requires signed commits
+        Server->>Server: every pushed commit signed by the pusher's certificate, else refuse
+    end
+    Server-->>Author: accepted
+    Server-)Cassini: RepoChanged {repo, ref, old, new, pusher}
