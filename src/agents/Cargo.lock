@@ -5579,6 +5579,8 @@ dependencies = [
  "polar-crypto",
  "polar-env",
  "polar-health",
+ "polar-permissions",
+ "polar-policy",
  "polar-router",
  "polar-scheduler-common",
  "polar-signing",
