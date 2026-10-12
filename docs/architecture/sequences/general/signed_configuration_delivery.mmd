@@ -36,5 +36,8 @@ sequenceDiagram
         CA->>CA: record names, never values
     else any check fails
         CA->>CA: refuse whole, keep old values
-        Note over CA: author not told yet (open)
     end
+    Note over CA,Processor: Either way it says what it did
+    CA-)Cassini: ConfigurationOutcome (status and why)
+    Cassini-)Processor: ConfigurationOutcome
+    Processor->>Graph: write an outcome node, linked to the item

@@ -6,6 +6,8 @@ pub enum ScheduleKey {
     Ephemeral { agent_type: String },
     /// A signed configuration item (see docs/architecture/scheduling-kinds.md), keyed by its id.
     Configuration { id: String },
+    /// What an agent did with a configuration document: one node per outcome, kept as a trail.
+    ConfigurationOutcome { key: String },
 }
 
 impl crate::graph::controller::GraphNodeKey for ScheduleKey {
@@ -26,6 +28,10 @@ impl crate::graph::controller::GraphNodeKey for ScheduleKey {
             ScheduleKey::Configuration { id } => (
                 format!("(n:Schedule:Configuration {{ id: ${prefix}_id }})"),
                 vec![(format!("{prefix}_id"), id.clone().into())],
+            ),
+            ScheduleKey::ConfigurationOutcome { key } => (
+                format!("(n:Schedule:ConfigurationOutcome {{ key: ${prefix}_key }})"),
+                vec![(format!("{prefix}_key"), key.clone().into())],
             ),
         }
     }

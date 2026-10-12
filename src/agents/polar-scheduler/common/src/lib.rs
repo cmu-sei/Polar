@@ -21,6 +21,45 @@ pub struct ConfigurationNotification {
     pub document_json: String,
 }
 
+/// Where an agent says what became of each signed configuration document it was given. The scheduler
+/// processor subscribes and writes each to the graph.
+pub const CONFIGURATION_OUTCOME_TOPIC: &str = "polar-configuration-outcome";
+
+/// The values of [`ConfigurationOutcome::status`].
+pub mod outcome {
+    pub const APPLIED: &str = "applied";
+    /// Verified and valid, but it changed nothing.
+    pub const UNCHANGED: &str = "unchanged";
+    /// Verified, but its version is not higher than the last applied.
+    pub const STALE: &str = "stale";
+    /// Verified, but what it asks is not acceptable (a variable that is static, a value that does not
+    /// parse, a relation that would break).
+    pub const INVALID: &str = "invalid";
+    /// Not accepted as a signed document: unsigned, altered, untrusted, not allowed, or for another agent.
+    pub const UNVERIFIED: &str = "unverified";
+}
+
+/// What an agent did with one signed configuration document. Carries names and reasons, never values.
+/// `id` and `version` are as the document claims them, and mean something only when `signer` is set,
+/// which it is only for a document that was verified.
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+pub struct ConfigurationOutcome {
+    pub agent: String,
+    pub id: Option<String>,
+    pub version: Option<u64>,
+    /// One of the [`outcome`] values.
+    pub status: String,
+    /// The variables whose value changed, for an applied update.
+    pub changed: Vec<String>,
+    /// Why not, for anything that was not applied: problems, or the reason it was refused.
+    pub detail: Vec<String>,
+    /// Who signed it (username or identity, and certificate serial), for a verified document.
+    pub signer: Option<String>,
+    pub at_unix_secs: u64,
+    /// Counts this agent's outcomes since it started, so two in the same second are two events.
+    pub sequence: u64,
+}
+
 // Time specification
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum TimeSpec {

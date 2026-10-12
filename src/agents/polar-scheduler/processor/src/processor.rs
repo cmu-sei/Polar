@@ -6,8 +6,8 @@ use polar::graph::{
     nodes::schedule::ScheduleKey,
 };
 use polar_scheduler_common::{
-    AdhocAgentAnnouncement, ConfigurationNotification, GitScheduleChange, ScheduleKind,
-    ScheduleNode, ScheduleNotification, configuration_topic,
+    AdhocAgentAnnouncement, ConfigurationNotification, ConfigurationOutcome, GitScheduleChange,
+    ScheduleKind, ScheduleNode, ScheduleNotification, configuration_topic,
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
@@ -208,6 +208,68 @@ impl ScheduleInfoProcessor {
         Ok(())
     }
 
+    /// What an agent did with a signed configuration document, written to the graph as one more node in
+    /// a trail, and linked to the item it is about when it says which that was. `reported_by` is who the
+    /// broker says published it: an outcome is only a claim by whoever sent it, so the graph keeps both.
+    fn handle_outcome(
+        state: &mut ProcessorState,
+        outcome: ConfigurationOutcome,
+        reported_by: Option<String>,
+    ) -> Result<(), ActorProcessingErr> {
+        let at = chrono::DateTime::from_timestamp(outcome.at_unix_secs as i64, 0)
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
+        let key = format!(
+            "{}|{}|{}|{}|{}",
+            outcome.agent,
+            outcome.id.as_deref().unwrap_or("?"),
+            outcome.version.map_or("?".to_string(), |v| v.to_string()),
+            at,
+            outcome.sequence
+        );
+        let text = |value: String| GraphValue::String(value);
+        let list = |values: &[String]| {
+            GraphValue::List(values.iter().cloned().map(GraphValue::String).collect())
+        };
+        let mut props = vec![
+            Property("agent".to_string(), text(outcome.agent.clone())),
+            Property("status".to_string(), text(outcome.status.clone())),
+            Property("changed".to_string(), list(&outcome.changed)),
+            Property("detail".to_string(), list(&outcome.detail)),
+            Property("at".to_string(), text(at)),
+            Property("sequence".to_string(), GraphValue::I64(outcome.sequence as i64)),
+        ];
+        if let Some(id) = &outcome.id {
+            props.push(Property("claimed_id".to_string(), text(id.clone())));
+        }
+        if let Some(version) = outcome.version {
+            props.push(Property("claimed_version".to_string(), GraphValue::I64(version as i64)));
+        }
+        if let Some(signer) = &outcome.signer {
+            props.push(Property("signer".to_string(), text(signer.clone())));
+        }
+        if let Some(who) = reported_by {
+            props.push(Property("reported_by".to_string(), text(who)));
+        }
+        state
+            .graph_controller
+            .cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                key: ScheduleKey::ConfigurationOutcome { key: key.clone() }.into_key(),
+                props,
+            }))?;
+        if let Some(id) = outcome.id {
+            state
+                .graph_controller
+                .cast(GraphControllerMsg::Op(GraphOp::EnsureEdge {
+                    from: ScheduleKey::Configuration { id }.into_key(),
+                    to: ScheduleKey::ConfigurationOutcome { key }.into_key(),
+                    rel_type: "HAD_OUTCOME".to_string(),
+                    props: vec![],
+                }))?;
+        }
+        Ok(())
+    }
+
     async fn handle_adhoc_announcement(
         state: &mut ProcessorState,
         ann: AdhocAgentAnnouncement,
@@ -340,6 +402,10 @@ impl Actor for ScheduleInfoProcessor {
                 info!("Processor received Event on {}", topic);
                 Self::handle_event(state, topic, payload).await?
             }
+            ProcessorMsg::Outcome {
+                outcome,
+                reported_by,
+            } => Self::handle_outcome(state, outcome, reported_by)?,
         }
         Ok(())
     }

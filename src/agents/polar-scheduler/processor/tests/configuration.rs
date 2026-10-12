@@ -4,7 +4,9 @@ use cassini_client::TcpClientMessage;
 use polar::graph::controller::{GraphControllerMsg, GraphOp, GraphValue};
 use polar_scheduler::processor::ScheduleInfoProcessor;
 use polar_scheduler::types::ProcessorMsg;
-use polar_scheduler_common::{ConfigurationNotification, GitScheduleChange, configuration_topic};
+use polar_scheduler_common::{
+    ConfigurationNotification, ConfigurationOutcome, GitScheduleChange, configuration_topic,
+};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -18,6 +20,21 @@ struct Written {
 }
 
 impl Written {
+    fn list(&self, name: &str) -> Option<Vec<String>> {
+        self.props.iter().find_map(|(n, v)| match v {
+            GraphValue::List(items) if n == name => Some(
+                items
+                    .iter()
+                    .filter_map(|i| match i {
+                        GraphValue::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+    }
+
     fn text(&self, name: &str) -> Option<String> {
         self.props.iter().find_map(|(n, v)| match v {
             GraphValue::String(s) if n == name => Some(s.clone()),
@@ -33,12 +50,19 @@ impl Written {
     }
 }
 
-struct Graph(Arc<Mutex<Vec<Written>>>);
+/// What the graph was asked to do: nodes written, and edges ensured (from, relationship, to).
+#[derive(Default)]
+struct Captured {
+    nodes: Vec<Written>,
+    edges: Vec<(String, String, String)>,
+}
+
+struct Graph(Arc<Mutex<Captured>>);
 
 #[ractor::async_trait]
 impl Actor for Graph {
     type Msg = GraphControllerMsg;
-    type State = Arc<Mutex<Vec<Written>>>;
+    type State = Arc<Mutex<Captured>>;
     type Arguments = ();
     async fn pre_start(
         &self,
@@ -53,13 +77,27 @@ impl Actor for Graph {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        if let GraphControllerMsg::Op(GraphOp::UpsertNode { key, props }) = message {
+        let describe = |key: &dyn polar::graph::controller::GraphNodeKey| {
             let (node, params) = key.cypher_match("n");
-            let node = format!("{node} {params:?}");
-            state.lock().unwrap().push(Written {
-                node,
-                props: props.into_iter().map(|p| (p.0, p.1)).collect(),
-            });
+            format!("{node} {params:?}")
+        };
+        match message {
+            GraphControllerMsg::Op(GraphOp::UpsertNode { key, props }) => {
+                state.lock().unwrap().nodes.push(Written {
+                    node: describe(key.as_ref()),
+                    props: props.into_iter().map(|p| (p.0, p.1)).collect(),
+                });
+            }
+            GraphControllerMsg::Op(GraphOp::EnsureEdge {
+                from, to, rel_type, ..
+            }) => {
+                state.lock().unwrap().edges.push((
+                    describe(from.as_ref()),
+                    rel_type,
+                    describe(to.as_ref()),
+                ));
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -97,13 +135,13 @@ impl Actor for Cassini {
 
 struct Rig {
     processor: ActorRef<ProcessorMsg>,
-    graph: Arc<Mutex<Vec<Written>>>,
+    graph: Arc<Mutex<Captured>>,
     published: Published,
 }
 
 impl Rig {
     async fn new() -> Self {
-        let graph = Arc::new(Mutex::new(Vec::new()));
+        let graph = Arc::new(Mutex::new(Captured::default()));
         let published = Arc::new(Mutex::new(Vec::new()));
         let (cassini, _) = Actor::spawn(None, Cassini(published.clone()), ())
             .await
@@ -135,7 +173,21 @@ impl Rig {
     }
 
     fn graph(&self) -> Vec<Written> {
-        self.graph.lock().unwrap().clone()
+        self.graph.lock().unwrap().nodes.clone()
+    }
+
+    fn edges(&self) -> Vec<(String, String, String)> {
+        self.graph.lock().unwrap().edges.clone()
+    }
+
+    async fn outcome(&self, outcome: ConfigurationOutcome, reported_by: Option<&str>) {
+        self.processor
+            .cast(ProcessorMsg::Outcome {
+                outcome,
+                reported_by: reported_by.map(str::to_string),
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     fn published(&self) -> Vec<(String, Vec<u8>)> {
@@ -270,4 +322,102 @@ async fn an_unsigned_schedule_still_takes_the_old_path() {
     let published = rig.published();
     assert_eq!(published.len(), 1);
     assert_eq!(published[0].0, "agent.x.schedule");
+}
+
+fn outcome(status: &str, id: Option<&str>, sequence: u64) -> ConfigurationOutcome {
+    ConfigurationOutcome {
+        agent: "git-agent".into(),
+        id: id.map(str::to_string),
+        version: id.map(|_| 3),
+        status: status.into(),
+        changed: if status == "applied" {
+            vec!["HIGH".into()]
+        } else {
+            vec![]
+        },
+        detail: if status == "applied" {
+            vec![]
+        } else {
+            vec!["why not".into()]
+        },
+        signer: (status != "unverified").then(|| "alice (serial 1f)".to_string()),
+        at_unix_secs: 1_800_000_000,
+        sequence,
+    }
+}
+
+#[tokio::test]
+async fn an_outcome_is_written_as_a_node_and_linked_to_the_item_it_is_about() {
+    let rig = Rig::new().await;
+    rig.outcome(
+        outcome("applied", Some("config/git-agent"), 1),
+        Some("git-agent.polar.serviceaccount.cluster.local"),
+    )
+    .await;
+
+    let written = rig.graph();
+    assert_eq!(written.len(), 1);
+    let node = &written[0];
+    assert!(
+        node.node.contains("Schedule:ConfigurationOutcome"),
+        "{}",
+        node.node
+    );
+    assert_eq!(node.text("agent").as_deref(), Some("git-agent"));
+    assert_eq!(node.text("status").as_deref(), Some("applied"));
+    assert_eq!(node.list("changed"), Some(vec!["HIGH".to_string()]));
+    assert_eq!(node.text("signer").as_deref(), Some("alice (serial 1f)"));
+    assert_eq!(node.text("claimed_id").as_deref(), Some("config/git-agent"));
+    assert_eq!(node.number("claimed_version"), Some(3));
+    assert_eq!(node.number("sequence"), Some(1));
+    assert!(
+        node.text("at").unwrap().starts_with("2027-"),
+        "{:?}",
+        node.text("at")
+    );
+    // Who the broker says reported it is kept apart from who the outcome says it is about.
+    assert_eq!(
+        node.text("reported_by").as_deref(),
+        Some("git-agent.polar.serviceaccount.cluster.local")
+    );
+
+    let edges = rig.edges();
+    assert_eq!(edges.len(), 1);
+    assert!(edges[0].0.contains("Schedule:Configuration"), "{edges:?}");
+    assert!(edges[0].0.contains("config/git-agent"), "{edges:?}");
+    assert_eq!(edges[0].1, "HAD_OUTCOME");
+    assert!(
+        edges[0].2.contains("Schedule:ConfigurationOutcome"),
+        "{edges:?}"
+    );
+}
+
+#[tokio::test]
+async fn every_outcome_is_a_node_of_its_own_so_the_trail_is_kept() {
+    let rig = Rig::new().await;
+    rig.outcome(outcome("applied", Some("c"), 1), None).await;
+    rig.outcome(outcome("stale", Some("c"), 2), None).await;
+    rig.outcome(outcome("stale", Some("c"), 3), None).await;
+    let written = rig.graph();
+    assert_eq!(written.len(), 3);
+    let keys: std::collections::HashSet<&String> = written.iter().map(|w| &w.node).collect();
+    assert_eq!(keys.len(), 3, "each outcome has its own key: {keys:?}");
+    assert_eq!(rig.edges().len(), 3);
+    assert_eq!(written[1].list("detail"), Some(vec!["why not".to_string()]));
+}
+
+#[tokio::test]
+async fn an_outcome_that_names_no_item_is_still_written_and_links_to_nothing() {
+    let rig = Rig::new().await;
+    rig.outcome(outcome("unverified", None, 1), Some("someone"))
+        .await;
+    let written = rig.graph();
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0].text("status").as_deref(), Some("unverified"));
+    assert!(
+        written[0].text("signer").is_none(),
+        "an unverified document has no signer"
+    );
+    assert!(written[0].text("claimed_id").is_none());
+    assert!(rig.edges().is_empty());
 }

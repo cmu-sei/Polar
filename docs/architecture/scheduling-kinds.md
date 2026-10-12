@@ -73,6 +73,11 @@ agent declares which commands it accepts, in the same schema export that lists i
    and not forwarded again. The unsigned schedule shape still takes the old path, untouched. The observer
    still reads only the `permanent`, `adhoc` and `ephemeral` directories, so a configuration item lives in one
    of them until the repository layout changes. Not verified on a cluster.
-2. **Outcome events.** The ConfigurationActor publishes what it did, and the processor writes it to the graph.
+2. **Outcome events. Built.** The ConfigurationActor announces every document it handles on an output port; the
+   infrastructure supervisor puts each on Cassini (`polar-configuration-outcome`) through whichever client it
+   currently has; the processor writes a `ConfigurationOutcome` node per event and links it to the item with
+   `HAD_OUTCOME`, keeping `reported_by` (the broker's identity for the publisher) apart from the agent the
+   outcome names. A refusal is therefore visible, with its reason and signer. Outcomes for a proposal or a
+   command will use the same path. Not verified on a cluster.
 3. **Proposal design and Command design,** each as its own document with a diagram, then their code.
 4. Retire the old `adhoc` and `ephemeral` handling and samples when 3 has replaced them.

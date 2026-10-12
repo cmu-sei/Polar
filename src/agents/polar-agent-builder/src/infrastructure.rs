@@ -96,6 +96,9 @@ pub enum InfrastructureSupervisorMessage {
     BeginShutdown { reason: String },
     /// Internal: time for the self-test to look.
     SelfTestTick,
+    /// Internal: the ConfigurationActor says what it did with a document. Published on Cassini, if there
+    /// is a client; a service without one has nowhere to say it.
+    Outcome(polar_scheduler_common::ConfigurationOutcome),
 }
 
 /// The lifecycle callback the Cassini client is given.
@@ -526,9 +529,19 @@ impl Actor for InfrastructureSupervisor {
                     None
                 }
             };
-        let configuration =
-            ConfigurationHandle::spawn(None, (*args.config).clone(), verifier, myself_cell.clone())
-                .await?;
+        let configuration = ConfigurationHandle::spawn(
+            None,
+            args.service_name.clone(),
+            (*args.config).clone(),
+            verifier,
+            myself_cell.clone(),
+        )
+        .await?;
+        // What became of each signed document is announced for the scheduler to record. It goes through
+        // this supervisor so that it uses the Cassini client as it is now, across a respawn.
+        configuration.outcomes().subscribe(myself.clone(), |outcome| {
+            Some(InfrastructureSupervisorMessage::Outcome(outcome))
+        });
 
         let infrastructure_events = Arc::new(OutputPort::default());
 
@@ -627,6 +640,26 @@ impl Actor for InfrastructureSupervisor {
                 Self::begin_shutdown(state, reason);
             }
             InfrastructureSupervisorMessage::SelfTestTick => Self::self_test_tick(state),
+            InfrastructureSupervisorMessage::Outcome(outcome) => {
+                let Some(client) = &state.client else {
+                    tracing::debug!("InfrastructureSupervisor: no Cassini client, outcome not announced");
+                    return Ok(());
+                };
+                match rkyv::to_bytes::<rkyv::rancor::Error>(&outcome) {
+                    Ok(bytes) => {
+                        if let Err(e) = client.tcp_client.as_actor_ref().send_message(
+                            cassini_client::TcpClientMessage::publish(
+                                polar_scheduler_common::CONFIGURATION_OUTCOME_TOPIC.to_string(),
+                                bytes.to_vec(),
+                                None,
+                            ),
+                        ) {
+                            tracing::warn!("InfrastructureSupervisor: cannot announce an outcome: {e}");
+                        }
+                    }
+                    Err(e) => tracing::error!("InfrastructureSupervisor: cannot encode an outcome: {e}"),
+                }
+            }
             InfrastructureSupervisorMessage::ProceedWithShutdown => {
                 if !state.shutdown.proceed() {
                     tracing::info!(
@@ -699,11 +732,16 @@ mod tests {
 
     // -- a Cassini client that needs no broker ---------------------------------
 
+    /// What a fake client was asked to publish: the topic and the payload.
+    type Published = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
     struct FakeTcp {
         fail_on_message: bool,
         /// If set, whatever is published comes straight back through the router, as a broker
         /// would deliver it to a subscriber of the topic.
         echo_to: Option<ActorRef<polar_router::RouterMessage>>,
+        /// Every topic and payload published, in order.
+        published: Published,
     }
 
     #[async_trait]
@@ -726,17 +764,21 @@ mod tests {
             message: Self::Msg,
             _state: &mut Self::State,
         ) -> Result<(), ActorProcessingErr> {
-            if let (Some(router), TcpClientMessage::Publish { topic, payload, .. }) =
-                (&self.echo_to, message)
-            {
-                let _ = router.send_message(polar_router::RouterMessage::Route(
-                    polar_router::IncomingMessage {
-                        topic,
-                        payload,
-                        published_by: None,
-                        trace_ctx: None,
-                    },
-                ));
+            if let TcpClientMessage::Publish { topic, payload, .. } = message {
+                self.published
+                    .lock()
+                    .unwrap()
+                    .push((topic.clone(), payload.clone()));
+                if let Some(router) = &self.echo_to {
+                    let _ = router.send_message(polar_router::RouterMessage::Route(
+                        polar_router::IncomingMessage {
+                            topic,
+                            payload,
+                            published_by: None,
+                            trace_ctx: None,
+                        },
+                    ));
+                }
             }
             if self.fail_on_message {
                 Err(ActorProcessingErr::from("the fake client was made to fail"))
@@ -755,6 +797,8 @@ mod tests {
         clients_echo: AtomicBool,
         /// The configuration each client was started with, in order.
         configs: Mutex<Vec<TCPClientConfig>>,
+        /// What every client published.
+        published: Published,
     }
 
     #[async_trait]
@@ -782,6 +826,7 @@ mod tests {
                         .clients_echo
                         .load(Ordering::SeqCst)
                         .then(|| router.clone()),
+                    published: self.published.clone(),
                 },
                 (),
                 supervisor.get_cell(),
@@ -1153,6 +1198,23 @@ mod tests {
             matches!(outcome, ApplyOutcome::Refused(Refusal::Invalid(_))),
             "{outcome:?}"
         );
+
+        // And it says so on Cassini, for the scheduler to record: two documents have been handled (the
+        // one that came over the router, and the one submitted), each refused for what it asks.
+        let published = rig.spawner.published.lock().unwrap().clone();
+        let outcomes: Vec<polar_scheduler_common::ConfigurationOutcome> = published
+            .iter()
+            .filter(|(topic, _)| topic == polar_scheduler_common::CONFIGURATION_OUTCOME_TOPIC)
+            .map(|(_, payload)| {
+                rkyv::from_bytes::<polar_scheduler_common::ConfigurationOutcome, rkyv::rancor::Error>(
+                    payload,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+        assert!(outcomes.iter().all(|o| o.agent == "infra-signed" && o.status == "invalid"));
+        assert_eq!(outcomes[0].sequence + 1, outcomes[1].sequence);
 
         // An agent whose CA file is not there refuses the very same document, and says why.
         let rig = Rig::new(

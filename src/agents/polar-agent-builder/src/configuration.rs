@@ -25,6 +25,7 @@
 
 use crate::signed::{Rejection, UpdateVerifier};
 use polar_env::{Config, Resolved};
+use polar_scheduler_common::ConfigurationOutcome;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -120,16 +121,52 @@ pub struct ConfigurationArgs {
     pub config: Config,
     /// How signed documents are checked. `None` refuses every document.
     pub verifier: Option<UpdateVerifier>,
+    /// This agent's name, which its outcome events carry.
+    pub agent: String,
     pub changes: Arc<OutputPort<ConfigChanged>>,
+    /// Where each outcome is announced, for whoever puts it on the wire.
+    pub outcomes: Arc<OutputPort<ConfigurationOutcome>>,
 }
 
 pub struct ConfigurationState {
     config: Config,
     verifier: Option<UpdateVerifier>,
+    agent: String,
     current: Arc<Config>,
     last_version: u64,
     history: VecDeque<ConfigEvent>,
     changes: Arc<OutputPort<ConfigChanged>>,
+    outcomes: Arc<OutputPort<ConfigurationOutcome>>,
+    /// Outcomes announced so far.
+    sequence: u64,
+}
+
+/// The id and version a document says it has, read without trusting any of it: only to label an outcome.
+fn claimed(document: &serde_json::Value) -> (Option<String>, Option<u64>) {
+    let payload = &document["payload"];
+    (
+        payload["id"].as_str().map(str::to_string),
+        payload["version"].as_u64(),
+    )
+}
+
+/// What an outcome is called in an event, and the reasons that go with it. No value appears in either:
+/// the reasons are names and problems, which never repeat a secret.
+fn describe_outcome(outcome: &ApplyOutcome) -> (&'static str, Vec<String>, Vec<String>) {
+    use polar_scheduler_common::outcome::{APPLIED, INVALID, STALE, UNCHANGED, UNVERIFIED};
+    match outcome {
+        ApplyOutcome::Applied { changed } if changed.is_empty() => (UNCHANGED, vec![], vec![]),
+        ApplyOutcome::Applied { changed } => (APPLIED, changed.clone(), vec![]),
+        ApplyOutcome::Refused(Refusal::Stale { applied }) => (
+            STALE,
+            vec![],
+            vec![format!("the version in force is {applied}")],
+        ),
+        ApplyOutcome::Refused(Refusal::Invalid(problems)) => (INVALID, vec![], problems.clone()),
+        ApplyOutcome::Refused(Refusal::Unverified(rejection)) => {
+            (UNVERIFIED, vec![], vec![rejection.to_string()])
+        }
+    }
 }
 
 fn describe_signer(signer: &polar_signing::SignerInfo) -> String {
@@ -148,38 +185,74 @@ impl ConfigurationState {
     /// A signed document: verified first, applied only if it passes.
     fn submit(&mut self, document: &serde_json::Value) -> ApplyOutcome {
         let Some(verifier) = &self.verifier else {
-            return self.reject(Rejection::NotConfigured);
+            return self.reject(claimed(document), Rejection::NotConfigured);
         };
         match verifier.verify(document) {
             Ok(verified) => {
                 let signer = describe_signer(&verified.signer);
                 info!(id = %verified.id, version = verified.version, %signer, "signed configuration verified");
-                self.apply(verified.version, &verified.changes, Some(signer))
+                self.apply(
+                    Some(verified.id),
+                    verified.version,
+                    &verified.changes,
+                    Some(signer),
+                )
             }
-            Err(rejection) => self.reject(rejection),
+            Err(rejection) => self.reject(claimed(document), rejection),
         }
     }
 
-    fn reject(&mut self, rejection: Rejection) -> ApplyOutcome {
+    fn reject(
+        &mut self,
+        (id, version): (Option<String>, Option<u64>),
+        rejection: Rejection,
+    ) -> ApplyOutcome {
         warn!(%rejection, "signed configuration refused");
         let outcome = ApplyOutcome::Refused(Refusal::Unverified(rejection));
-        self.record(0, None, &outcome);
+        self.record(id, version, 0, None, &outcome);
         outcome
     }
 
-    fn record(&mut self, version: u64, signer: Option<String>, outcome: &ApplyOutcome) {
+    /// Keeps the outcome in the history and announces it. `version` is what the history keeps; the
+    /// event carries `claimed_version`, which is only meaningful for a verified document.
+    fn record(
+        &mut self,
+        id: Option<String>,
+        claimed_version: Option<u64>,
+        version: u64,
+        signer: Option<String>,
+        outcome: &ApplyOutcome,
+    ) {
         if self.history.len() == HISTORY {
             self.history.pop_front();
         }
         self.history.push_back(ConfigEvent {
             version,
             outcome: outcome.clone(),
+            signer: signer.clone(),
+        });
+
+        let (status, changed, detail) = describe_outcome(outcome);
+        self.sequence += 1;
+        self.outcomes.send(ConfigurationOutcome {
+            agent: self.agent.clone(),
+            id,
+            version: claimed_version,
+            status: status.to_string(),
+            changed,
+            detail,
             signer,
+            at_unix_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            sequence: self.sequence,
         });
     }
 
     fn apply(
         &mut self,
+        id: Option<String>,
         version: u64,
         changes: &[(String, String)],
         signer: Option<String>,
@@ -219,7 +292,7 @@ impl ConfigurationState {
                 warn!(version, ?why, "configuration update refused");
             }
         }
-        self.record(version, signer, &outcome);
+        self.record(id, Some(version), version, signer, &outcome);
         outcome
     }
 }
@@ -239,9 +312,12 @@ impl Actor for ConfigurationActor {
             current: Arc::new(args.config.clone()),
             config: args.config,
             verifier: args.verifier,
+            agent: args.agent,
             last_version: 0,
             history: VecDeque::new(),
             changes: args.changes,
+            outcomes: args.outcomes,
+            sequence: 0,
         })
     }
 
@@ -257,7 +333,7 @@ impl Actor for ConfigurationActor {
                 changes,
                 reply,
             } => {
-                let outcome = state.apply(version, &changes, None);
+                let outcome = state.apply(None, version, &changes, None);
                 let _ = reply.send(outcome);
             }
             ConfigurationMessage::Deliver(document) => {
@@ -283,30 +359,39 @@ impl Actor for ConfigurationActor {
 pub struct ConfigurationHandle {
     actor: ActorRef<ConfigurationMessage>,
     changes: Arc<OutputPort<ConfigChanged>>,
+    outcomes: Arc<OutputPort<ConfigurationOutcome>>,
 }
 
 impl ConfigurationHandle {
     /// Starts the actor on `config`, as a child of `supervisor`.
     pub async fn spawn(
         name: Option<String>,
+        agent: impl Into<String>,
         config: Config,
         verifier: Option<UpdateVerifier>,
         supervisor: ractor::ActorCell,
     ) -> Result<Self, ActorProcessingErr> {
         let changes = Arc::new(OutputPort::default());
+        let outcomes = Arc::new(OutputPort::default());
         let (actor, _) = Actor::spawn_linked(
             name,
             ConfigurationActor,
             ConfigurationArgs {
                 config,
                 verifier,
+                agent: agent.into(),
                 changes: changes.clone(),
+                outcomes: outcomes.clone(),
             },
             supervisor,
         )
         .await
         .map_err(ActorProcessingErr::from)?;
-        Ok(Self { actor, changes })
+        Ok(Self {
+            actor,
+            changes,
+            outcomes,
+        })
     }
 
     /// The configuration as it stands now, with every override applied. Read again after a
@@ -358,6 +443,12 @@ impl ConfigurationHandle {
     /// The latest updates, applied and refused, oldest first.
     pub async fn history(&self) -> Result<Vec<ConfigEvent>, ConfigurationError> {
         self.call(ConfigurationMessage::History).await
+    }
+
+    /// Where each outcome is announced: every document handled, applied or refused, with the reason.
+    /// The infrastructure puts these on Cassini for the scheduler to record.
+    pub fn outcomes(&self) -> Arc<OutputPort<ConfigurationOutcome>> {
+        self.outcomes.clone()
     }
 
     /// Where changes are announced. Subscribe with a mapping into your own message type, as
@@ -470,7 +561,7 @@ mod tests {
             }
         }
         let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
-        let handle = ConfigurationHandle::spawn(None, config(), verifier, parent.get_cell())
+        let handle = ConfigurationHandle::spawn(None, AGENT, config(), verifier, parent.get_cell())
             .await
             .unwrap();
 
@@ -1086,5 +1177,190 @@ mod tests {
         // None of them reached the actor, so nothing is recorded and the value is as it was.
         assert!(config.history().await.unwrap().is_empty());
         assert_eq!(high(&config).await, 10);
+    }
+
+    // -- outcomes -----------------------------------------------------------------------------
+
+    struct OutcomeSink(Arc<Mutex<Vec<ConfigurationOutcome>>>);
+
+    #[ractor::async_trait]
+    impl Actor for OutcomeSink {
+        type Msg = ConfigurationOutcome;
+        type State = Arc<Mutex<Vec<ConfigurationOutcome>>>;
+        type Arguments = ();
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            _: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(self.0.clone())
+        }
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            state.lock().unwrap().push(message);
+            Ok(())
+        }
+    }
+
+    async fn watch(config: &ConfigurationHandle) -> Arc<Mutex<Vec<ConfigurationOutcome>>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (sink, _) = Actor::spawn(None, OutcomeSink(seen.clone()), ())
+            .await
+            .unwrap();
+        config.outcomes().subscribe(sink, Some);
+        seen
+    }
+
+    fn statuses(seen: &Arc<Mutex<Vec<ConfigurationOutcome>>>) -> Vec<String> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .map(|o| o.status.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn every_document_is_announced_with_what_became_of_it() {
+        let signed = Signed::new();
+        let (config, _) = spawn_handle(Some(signed.verifier())).await;
+        let seen = watch(&config).await;
+
+        config.submit(signed.high(1, "20")).await.unwrap(); // applied
+        config.submit(signed.high(2, "20")).await.unwrap(); // verified, changes nothing
+        config.submit(signed.high(2, "30")).await.unwrap(); // not newer
+        config
+            .submit(signed.update(
+                Spec::default(),
+                3,
+                AGENT,
+                json!([{"name": "HOST", "value": "elsewhere"}]),
+            ))
+            .await
+            .unwrap(); // static
+        let mut tampered = signed.high(4, "40");
+        tampered["payload"]["version"] = json!(9);
+        config.submit(tampered).await.unwrap(); // altered
+        settle().await;
+
+        assert_eq!(
+            statuses(&seen),
+            ["applied", "unchanged", "stale", "invalid", "unverified"]
+        );
+        let all = seen.lock().unwrap().clone();
+
+        // Applied: names what changed, says who signed it, and what it claimed.
+        assert_eq!(all[0].agent, AGENT);
+        assert_eq!(all[0].id.as_deref(), Some("u"));
+        assert_eq!(all[0].version, Some(1));
+        assert_eq!(all[0].changed, vec!["HIGH".to_string()]);
+        assert!(all[0].signer.as_deref().unwrap().contains("alice"));
+        assert!(all[0].at_unix_secs > 1_700_000_000);
+
+        // Refused for what it asks: the reason names the variable.
+        assert!(
+            all[3].detail.iter().any(|d| d.contains("HOST")),
+            "{:?}",
+            all[3].detail
+        );
+        assert!(all[3].signer.is_some());
+
+        // Not verified: no signer, and the reason says why. What it claimed is only a label.
+        assert!(all[4].signer.is_none());
+        assert_eq!(all[4].version, Some(9));
+        assert!(!all[4].detail.is_empty());
+
+        // Counted, so two in the same second are two events.
+        assert_eq!(
+            all.iter().map(|o| o.sequence).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_document_delivered_on_the_topic_is_announced_too() {
+        let signed = Signed::new();
+        let (config, _) = spawn_handle(Some(signed.verifier())).await;
+        let seen = watch(&config).await;
+        let sub = subscription(AGENT, config.clone());
+        (sub.deliver)(notification(AGENT, &signed.high(1, "20")));
+        // Garbage and unsigned: the unsigned one is announced, the garbage never reached the actor.
+        (sub.deliver)(polar_router::IncomingMessage {
+            topic: sub.topic.clone(),
+            payload: vec![1, 2],
+            published_by: None,
+            trace_ctx: None,
+        });
+        (sub.deliver)(notification(
+            AGENT,
+            &json!({"payload": {"id": "x"}, "signature": {}}),
+        ));
+        settle().await;
+        assert_eq!(statuses(&seen), ["applied", "unverified"]);
+        assert_eq!(seen.lock().unwrap()[1].id.as_deref(), Some("x"));
+    }
+
+    #[tokio::test]
+    async fn an_agent_with_no_ca_announces_that_it_refused_everything() {
+        let signed = Signed::new();
+        let (config, _) = spawn_handle(None).await;
+        let seen = watch(&config).await;
+        config.submit(signed.high(1, "20")).await.unwrap();
+        settle().await;
+        assert_eq!(statuses(&seen), ["unverified"]);
+        assert!(seen.lock().unwrap()[0].detail[0].contains("no CA"));
+    }
+
+    #[tokio::test]
+    async fn no_outcome_ever_holds_a_secret_value() {
+        let signed = Signed::new();
+        let (config, _) = spawn_handle(Some(signed.verifier())).await;
+        let seen = watch(&config).await;
+        let secret = "hunter2-the-secret-value";
+
+        // Applied, refused after tampering, refused for another agent, and refused for a bad
+        // companion value in the same document: none repeats the secret.
+        config
+            .submit(signed.update(
+                Spec::default(),
+                1,
+                AGENT,
+                json!([{"name": "TOKEN", "value": secret}]),
+            ))
+            .await
+            .unwrap();
+        let mut tampered = signed.update(
+            Spec::default(),
+            2,
+            AGENT,
+            json!([{"name": "TOKEN", "value": secret}]),
+        );
+        tampered["payload"]["version"] = json!(9);
+        config.submit(tampered).await.unwrap();
+        config
+            .submit(signed.update(
+                Spec::default(),
+                3,
+                "another-agent",
+                json!([{"name": "TOKEN", "value": secret}]),
+            ))
+            .await
+            .unwrap();
+        config
+            .submit(signed.update(
+                Spec::default(),
+                4,
+                AGENT,
+                json!([{"name": "TOKEN", "value": secret}, {"name": "LOW", "value": "99"}]),
+            ))
+            .await
+            .unwrap();
+        settle().await;
+        let everything = format!("{:?}", seen.lock().unwrap());
+        assert!(!everything.contains("hunter2"), "{everything}");
+        assert_eq!(seen.lock().unwrap().len(), 4);
     }
 }

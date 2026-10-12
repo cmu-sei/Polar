@@ -26,7 +26,8 @@ use polar_agent_builder::{
     InfrastructureSupervisorMessage, Subscription,
 };
 use polar_scheduler_common::{
-    AdhocAgentAnnouncement, GitScheduleChange, SCHEDULER_ADHOC_TOPIC, SCHEDULER_IN_TOPIC,
+    AdhocAgentAnnouncement, CONFIGURATION_OUTCOME_TOPIC, ConfigurationOutcome, GitScheduleChange,
+    SCHEDULER_ADHOC_TOPIC, SCHEDULER_IN_TOPIC,
 };
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
@@ -50,6 +51,11 @@ pub enum SchedulerSupervisorMessage {
     ScheduleChanged(GitScheduleChange),
     /// An ad-hoc agent announced itself with a default schedule.
     Announced(AdhocAgentAnnouncement),
+    /// An agent says what it did with a signed configuration document.
+    Outcome {
+        outcome: ConfigurationOutcome,
+        reported_by: Option<String>,
+    },
     GraphSignal(GraphSignal),
     /// The health check ended the pod's life; the infrastructure waits for
     /// `ProceedWithShutdown`.
@@ -64,6 +70,7 @@ pub enum SchedulerSupervisorMessage {
 pub fn subscriptions(supervisor: &ActorRef<SchedulerSupervisorMessage>) -> Vec<Subscription> {
     let for_changes = supervisor.clone();
     let for_announcements = supervisor.clone();
+    let for_outcomes = supervisor.clone();
     vec![
         Subscription::new(SCHEDULER_IN_TOPIC, move |incoming| {
             match rkyv::from_bytes::<GitScheduleChange, rkyv::rancor::Error>(&incoming.payload) {
@@ -92,6 +99,19 @@ pub fn subscriptions(supervisor: &ActorRef<SchedulerSupervisorMessage>) -> Vec<S
                 Err(e) => error!("failed to deserialize an ad-hoc announcement: {e:?}"),
             },
         ),
+        Subscription::new(CONFIGURATION_OUTCOME_TOPIC, move |incoming| {
+            match rkyv::from_bytes::<ConfigurationOutcome, rkyv::rancor::Error>(&incoming.payload) {
+                Ok(outcome) => {
+                    if let Err(e) = for_outcomes.cast(SchedulerSupervisorMessage::Outcome {
+                        outcome,
+                        reported_by: incoming.published_by,
+                    }) {
+                        error!("failed to hand a configuration outcome to the supervisor: {e}");
+                    }
+                }
+                Err(e) => error!("failed to deserialize a configuration outcome: {e:?}"),
+            }
+        }),
     ]
 }
 
@@ -237,6 +257,19 @@ impl Actor for SchedulerSupervisor {
                     processor.cast(ProcessorMsg::Announcement(announcement))?;
                 }
             }
+            SchedulerSupervisorMessage::Outcome {
+                outcome,
+                reported_by,
+            } => {
+                if state.draining {
+                    warn!("draining -- a configuration outcome will be lost on exit");
+                } else if let Some(processor) = &state.processor {
+                    processor.cast(ProcessorMsg::Outcome {
+                        outcome,
+                        reported_by,
+                    })?;
+                }
+            }
             SchedulerSupervisorMessage::PrepareShutdown => {
                 if state.draining {
                     warn!(
@@ -349,6 +382,13 @@ mod tests {
             let kind = match message {
                 SchedulerSupervisorMessage::ScheduleChanged(_) => "change",
                 SchedulerSupervisorMessage::Announced(_) => "announcement",
+                SchedulerSupervisorMessage::Outcome { reported_by, .. } => {
+                    if reported_by.as_deref() == Some("the-broker-says") {
+                        "outcome from the broker's identity"
+                    } else {
+                        "outcome"
+                    }
+                }
                 _ => "other",
             };
             state.lock().unwrap().push(kind);
@@ -373,7 +413,10 @@ mod tests {
             .unwrap();
         let subs = subscriptions(&sink);
         let topics: Vec<&str> = subs.iter().map(|s| s.topic.as_str()).collect();
-        assert_eq!(topics, [SCHEDULER_IN_TOPIC, SCHEDULER_ADHOC_TOPIC]);
+        assert_eq!(
+            topics,
+            [SCHEDULER_IN_TOPIC, SCHEDULER_ADHOC_TOPIC, CONFIGURATION_OUTCOME_TOPIC]
+        );
 
         let change = rkyv::to_bytes::<rkyv::rancor::Error>(&GitScheduleChange::Delete {
             path: "a.dhall".into(),
@@ -393,7 +436,29 @@ mod tests {
         (subs[0].deliver)(message(SCHEDULER_IN_TOPIC, vec![1, 2, 3]));
         (subs[1].deliver)(message(SCHEDULER_ADHOC_TOPIC, vec![9]));
 
+        // An outcome keeps the identity the broker gave for whoever published it.
+        let outcome = rkyv::to_bytes::<rkyv::rancor::Error>(&ConfigurationOutcome {
+            agent: "a".into(),
+            id: None,
+            version: None,
+            status: "applied".into(),
+            changed: vec![],
+            detail: vec![],
+            signer: None,
+            at_unix_secs: 1,
+            sequence: 1,
+        })
+        .unwrap()
+        .to_vec();
+        let mut from_broker = message(CONFIGURATION_OUTCOME_TOPIC, outcome);
+        from_broker.published_by = Some("the-broker-says".into());
+        (subs[2].deliver)(from_broker);
+        (subs[2].deliver)(message(CONFIGURATION_OUTCOME_TOPIC, vec![7, 7]));
+
         tokio::time::sleep(StdDuration::from_millis(100)).await;
-        assert_eq!(*got.lock().unwrap(), ["change", "announcement"]);
+        assert_eq!(
+            *got.lock().unwrap(),
+            ["change", "announcement", "outcome from the broker's identity"]
+        );
     }
 }

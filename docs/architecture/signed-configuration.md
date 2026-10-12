@@ -136,9 +136,17 @@ and drops and logs an invalid one, so the scheduler only ever carries documents 
 were read. The ConfigurationActor checks again, because it must not trust the relay. The two use the
 same library, so they cannot disagree about the rules.
 
-**Not designed yet:** how the author learns that a document was refused after it was pushed (the
-refusal is recorded at the receiver, and the observer's early check can log, but nothing notifies the
-author), and where an author's machine gets an agent's schema export (the agent's image can print it,
+**What the author sees (built).** Every document an agent handles, applied or refused, produces a
+`ConfigurationOutcome` event on `polar-configuration-outcome`: the agent, the id and version the document
+claims, a status (`applied`, `unchanged`, `stale`, `invalid` or `unverified`), the names that changed or the
+reasons it was not applied, who signed it (only if it verified), a time and a sequence number. Never a value.
+The scheduler processor writes each as a `(:Schedule:ConfigurationOutcome)` node, one per event so the trail is
+kept, linked `(:Schedule:Configuration)-[:HAD_OUTCOME]->` to the item it names, with the identity the broker
+gives for whoever published it as `reported_by` (an outcome is only a claim by its sender, so the graph keeps
+who sent it apart from who it says it is about). So an author can see in the graph that a pushed document was
+refused and why. A tool that asks the graph for this on the author's behalf is not built.
+
+**Not designed yet:** where an author's machine gets an agent's schema export (the agent's image can print it,
 but an author usually has no image; candidates are publishing it with each release, or committing it to
 the schedules repository from CI).
 
