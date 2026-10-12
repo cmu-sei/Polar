@@ -225,7 +225,7 @@ pub(crate) mod tests {
     use crate::ledger::{LedgerActor, LedgerActorArgs};
     use credentials_agent_common::events::CredentialsEvent;
 
-    async fn spawn_test_ledger() -> ActorRef<LedgerMessage> {
+    pub(crate) async fn spawn_test_ledger() -> ActorRef<LedgerMessage> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
         std::mem::forget(dir);

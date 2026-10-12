@@ -93,6 +93,11 @@ pub enum StoreRefusalReason {
     /// depends on knowing who stored what; an anonymous store would
     /// be an unattributable entry the audit trail can never explain.
     AnonymousPublisherNotAllowed,
+    /// A secret by this name is held, and it was stored by another identity. Only the identity that
+    /// stored a secret may replace it: the owner is what policy speaks of (`resource.owner`), and a store
+    /// that could change it would let any agent take a secret over, or lock its owner out of it, by
+    /// storing the same name.
+    NameTaken,
 }
 
 #[cfg(test)]

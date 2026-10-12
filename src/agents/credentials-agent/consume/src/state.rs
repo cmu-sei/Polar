@@ -513,6 +513,14 @@ impl CredentialsState {
     /// The current, escrowed secret stored under `name`, if any --
     /// always the most recently stored one; a superseded prior value
     /// remains in the event log but is no longer returned here.
+    /// Whether `by` may store a secret under `name`: it may if no secret is held by that name, or if the
+    /// one held was stored by `by`. The identity that stored a secret owns it, and only it replaces it.
+    pub fn may_store_secret(&self, name: &str, by: &str) -> bool {
+        self.stored_secrets
+            .get(name)
+            .is_none_or(|held| held.stored_by == by)
+    }
+
     pub fn secret_for(&self, name: &str) -> Option<&StoredSecret> {
         self.stored_secrets.get(name)
     }
@@ -584,6 +592,33 @@ impl CredentialsState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_identity_that_stored_a_secret_may_store_that_name_again() {
+        let keypair = crate::escrow::tests::test_keypair();
+        let mut state = CredentialsState::default();
+        assert!(
+            state.may_store_secret("github-sei", "anyone"),
+            "a free name is anyones"
+        );
+        state.apply(&CredentialsEvent::SecretStored {
+            name: "github-sei".to_string(),
+            secret: credentials_agent_common::escrow_secret::EscrowedSecret::encrypt(
+                b"one",
+                keypair.public_key_pem(),
+            )
+            .unwrap(),
+            stored_by: "git-repo-observer".to_string(),
+            timestamp: 1,
+        });
+        assert!(state.may_store_secret("github-sei", "git-repo-observer"));
+        assert!(!state.may_store_secret("github-sei", "someone-else"));
+        assert!(
+            !state.may_store_secret("github-sei", "git-repo-observer "),
+            "the name is exact"
+        );
+        assert!(state.may_store_secret("another-name", "someone-else"));
+    }
 
     #[test]
     fn a_stored_secret_remembers_who_stored_it_and_a_later_store_replaces_both() {

@@ -71,6 +71,15 @@ pub struct LedgerActorState {
     revocation_changes: Arc<OutputPort<RevokedChanged>>,
 }
 
+/// Why a secret was not stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretStoreError {
+    /// Another identity stored a secret by this name.
+    NameTaken,
+    /// The ledger could not append it.
+    Ledger(String),
+}
+
 /// An event added to the set of revoked certificate serials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokedChanged {
@@ -190,6 +199,12 @@ pub enum LedgerMessage {
     /// stored -- backs the general secret-retrieve mechanism.
     /// Mirrors CheckCertificate/CheckAgentEscrowKey's own
     /// Option<T> shape.
+    /// Stores a secret, if its name is free or already the storing identity's own: checked and appended in
+    /// one step, so two identities racing for a fresh name cannot both win.
+    StoreSecret {
+        event: CredentialsEvent,
+        reply: RpcReplyPort<Result<(), SecretStoreError>>,
+    },
     CheckSecret {
         name: String,
         reply: RpcReplyPort<Option<crate::state::StoredSecret>>,
@@ -245,6 +260,23 @@ impl Actor for LedgerActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            LedgerMessage::StoreSecret { event, reply } => {
+                let result = match &event {
+                    CredentialsEvent::SecretStored {
+                        name, stored_by, ..
+                    } => {
+                        if state.credentials_state.may_store_secret(name, stored_by) {
+                            append_and_project(state, &event).map_err(SecretStoreError::Ledger)
+                        } else {
+                            Err(SecretStoreError::NameTaken)
+                        }
+                    }
+                    _ => Err(SecretStoreError::Ledger(
+                        "not a SecretStored event".to_string(),
+                    )),
+                };
+                let _ = reply.send(result);
+            }
             LedgerMessage::Append { event, reply } => {
                 let result = append_and_project(state, &event);
                 let _ = reply.send(result);
