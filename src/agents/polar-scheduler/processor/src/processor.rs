@@ -6,13 +6,15 @@ use polar::graph::{
     nodes::schedule::ScheduleKey,
 };
 use polar_scheduler_common::{
-    AdhocAgentAnnouncement, GitScheduleChange, ScheduleKind, ScheduleNode, ScheduleNotification,
+    AdhocAgentAnnouncement, ConfigurationNotification, GitScheduleChange, ScheduleKind,
+    ScheduleNode, ScheduleNotification, configuration_topic,
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::collections::HashMap;
 use tracing::{error, info};
 
 // Import local types
+use crate::configuration::{self, Routing, Shape};
 use crate::types::ProcessorMsg;
 
 pub struct ScheduleInfoProcessor;
@@ -23,6 +25,9 @@ pub struct ProcessorState {
     permanent_versions: HashMap<String, u64>,
     adhoc_versions: HashMap<String, u64>,
     ephemeral_patterns: HashMap<String, String>, // pattern -> agent_type
+    /// The highest version of each signed configuration item forwarded so far, by item id. It only saves
+    /// forwarding what the receiver would refuse as stale; the receiver does the checking.
+    configuration_versions: HashMap<String, u64>,
 }
 
 impl ScheduleInfoProcessor {
@@ -32,6 +37,9 @@ impl ScheduleInfoProcessor {
     ) -> Result<(), ActorProcessingErr> {
         match change {
             GitScheduleChange::Create { path, json } | GitScheduleChange::Update { path, json } => {
+                if let Shape::Document(routing) = configuration::classify(&json) {
+                    return Self::handle_configuration(state, path, json, routing).await;
+                }
                 let schedule_node: ScheduleNode = match serde_json::from_str(&json) {
                     Ok(node) => node,
                     Err(e) => {
@@ -132,6 +140,74 @@ impl ScheduleInfoProcessor {
         Ok(())
     }
 
+    /// A signed configuration document. It is written to the graph first, so it is seen whatever becomes
+    /// of it, and then forwarded to the agent it is for, untouched. The processor does not verify it: the
+    /// receiving agent does.
+    async fn handle_configuration(
+        state: &mut ProcessorState,
+        path: String,
+        json: String,
+        routing: Result<Routing, String>,
+    ) -> Result<(), ActorProcessingErr> {
+        let received_at = chrono::Utc::now().to_rfc3339();
+        match routing {
+            Ok(routing) => {
+                state
+                    .graph_controller
+                    .cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                        key: ScheduleKey::Configuration {
+                            id: routing.id.clone(),
+                        }
+                        .into_key(),
+                        props: vec![
+                            Property("document".to_string(), GraphValue::String(json.clone())),
+                            Property("target".to_string(), GraphValue::String(routing.agent.clone())),
+                            Property("version".to_string(), GraphValue::I64(routing.version as i64)),
+                            Property("source_path".to_string(), GraphValue::String(path)),
+                            Property("status".to_string(), GraphValue::String("received".to_string())),
+                            Property("received_at".to_string(), GraphValue::String(received_at)),
+                        ],
+                    }))?;
+
+                let newer = state
+                    .configuration_versions
+                    .get(&routing.id)
+                    .is_none_or(|seen| routing.version > *seen);
+                if newer {
+                    state
+                        .configuration_versions
+                        .insert(routing.id.clone(), routing.version);
+                    publish_configuration(state, &routing.agent, json).await?;
+                } else {
+                    info!(
+                        id = %routing.id,
+                        version = routing.version,
+                        "configuration is not newer than one already forwarded; recorded, not forwarded"
+                    );
+                }
+            }
+            Err(why) => {
+                error!("Cannot route the configuration document at {path}: {why}");
+                state
+                    .graph_controller
+                    .cast(GraphControllerMsg::Op(GraphOp::UpsertNode {
+                        key: ScheduleKey::Configuration {
+                            id: format!("unroutable:{path}"),
+                        }
+                        .into_key(),
+                        props: vec![
+                            Property("document".to_string(), GraphValue::String(json)),
+                            Property("source_path".to_string(), GraphValue::String(path)),
+                            Property("status".to_string(), GraphValue::String("unroutable".to_string())),
+                            Property("reason".to_string(), GraphValue::String(why)),
+                            Property("received_at".to_string(), GraphValue::String(received_at)),
+                        ],
+                    }))?;
+            }
+        }
+        Ok(())
+    }
+
     async fn handle_adhoc_announcement(
         state: &mut ProcessorState,
         ann: AdhocAgentAnnouncement,
@@ -182,6 +258,24 @@ impl ScheduleInfoProcessor {
     }
 }
 
+async fn publish_configuration(
+    state: &ProcessorState,
+    agent: &str,
+    document_json: String,
+) -> Result<(), ActorProcessingErr> {
+    let notification = ConfigurationNotification {
+        agent: agent.to_string(),
+        document_json,
+    };
+    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&notification)?.to_vec();
+    state.tcp_client.cast(TcpClientMessage::publish(
+        configuration_topic(agent),
+        payload,
+        None,
+    ))?;
+    Ok(())
+}
+
 async fn publish_notification(
     state: &ProcessorState,
     topic: &str,
@@ -214,6 +308,7 @@ impl Actor for ScheduleInfoProcessor {
             permanent_versions: HashMap::new(),
             adhoc_versions: HashMap::new(),
             ephemeral_patterns: HashMap::new(),
+            configuration_versions: HashMap::new(),
         })
     }
 

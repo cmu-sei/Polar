@@ -16,6 +16,7 @@ polar-env = { workspace = true, features = ["document"] }
 serde.workspace = true
 polar-health = { path = "../polar-health" }
 polar-router.workspace = true
+polar-scheduler-common.workspace = true
 polar-signing.workspace = true
 rand.workspace = true
 ractor.workspace = true

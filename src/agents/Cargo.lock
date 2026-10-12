@@ -5562,6 +5562,7 @@ dependencies = [
  "polar-env",
  "polar-health",
  "polar-router",
+ "polar-scheduler-common",
  "polar-signing",
  "ractor",
  "rand 0.10.3",

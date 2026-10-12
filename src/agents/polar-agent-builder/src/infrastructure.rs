@@ -201,6 +201,7 @@ struct ClientSetup {
     self_test: bool,
     tcp_spawner: Arc<dyn TcpClientSpawner>,
     config: Arc<polar_env::Config>,
+    configuration: ConfigurationHandle,
 }
 
 /// What a Cassini client brings with it.
@@ -327,6 +328,11 @@ impl InfrastructureSupervisor {
         .map_err(ActorProcessingErr::from)?;
 
         let mut subscriptions = setup.subscriptions;
+        // Every agent hears its own signed configuration, and the actor verifies it.
+        subscriptions.push(crate::configuration::subscription(
+            service_name,
+            setup.configuration.clone(),
+        ));
         let self_test = if setup.self_test {
             let instance: [u8; 16] = rand::random();
             let topic = self_test_topic(service_name);
@@ -536,6 +542,7 @@ impl Actor for InfrastructureSupervisor {
                     self_test: args.self_test,
                     tcp_spawner: args.tcp_spawner,
                     config: args.config.clone(),
+                    configuration: configuration.clone(),
                 },
             )
             .await?;
@@ -1108,6 +1115,33 @@ mod tests {
         )
         .unwrap()
         .to_value();
+        // The agent hears its own configuration topic through the real router, and the document goes to
+        // the same checks.
+        let notification = polar_scheduler_common::ConfigurationNotification {
+            agent: "infra-signed".to_string(),
+            document_json: document.to_string(),
+        };
+        rig.resources
+            .router
+            .send_message(polar_router::RouterMessage::Route(
+                polar_router::IncomingMessage {
+                    topic: polar_scheduler_common::configuration_topic("infra-signed"),
+                    payload: rkyv::to_bytes::<rkyv::rancor::Error>(&notification)
+                        .unwrap()
+                        .to_vec(),
+                    published_by: None,
+                    trace_ctx: None,
+                },
+            ))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let history = rig.resources.configuration.history().await.unwrap();
+        assert_eq!(history.len(), 1, "{history:?}");
+        assert!(
+            history[0].signer.is_some(),
+            "it was verified, then refused for what it asks"
+        );
+
         let outcome = rig
             .resources
             .configuration

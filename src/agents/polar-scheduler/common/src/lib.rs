@@ -6,6 +6,21 @@ pub const SCHEDULER_IN_TOPIC: &str = "scheduler.in";
 /// Where an ad-hoc agent announces itself with a default schedule; the processor subscribes.
 pub const SCHEDULER_ADHOC_TOPIC: &str = "scheduler.adhoc";
 
+/// The topic a signed configuration document for `agent` is delivered on. Every builder agent subscribes
+/// to its own; the scheduler processor publishes to it.
+pub fn configuration_topic(agent: &str) -> String {
+    format!("agent.{agent}.configuration")
+}
+
+/// A signed configuration document on its way to the agent it is for. The document is carried as it was
+/// read from the repository (`{ "payload": .., "signature": .. }`), untouched: the receiver verifies it for
+/// itself, and nothing in between is trusted.
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+pub struct ConfigurationNotification {
+    pub agent: String,
+    pub document_json: String,
+}
+
 // Time specification
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum TimeSpec {

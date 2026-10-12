@@ -102,6 +102,9 @@ pub enum ConfigurationMessage {
         changes: Vec<(String, String)>,
         reply: RpcReplyPort<ApplyOutcome>,
     },
+    /// A signed document delivered on the agent's configuration topic: verified, then applied, with no
+    /// reply. Handled in the order delivered; what became of it is in the history and the log.
+    Deliver(serde_json::Value),
     /// A signed document from outside: verified, then applied.
     Submit {
         document: serde_json::Value,
@@ -257,6 +260,9 @@ impl Actor for ConfigurationActor {
                 let outcome = state.apply(version, &changes, None);
                 let _ = reply.send(outcome);
             }
+            ConfigurationMessage::Deliver(document) => {
+                state.submit(&document);
+            }
             ConfigurationMessage::Submit { document, reply } => {
                 let outcome = state.submit(&document);
                 let _ = reply.send(outcome);
@@ -325,6 +331,14 @@ impl ConfigurationHandle {
             .await
     }
 
+    /// Hands over a signed document without waiting for the outcome, in order with the others. The
+    /// outcome is recorded in the history and the log.
+    pub fn deliver(&self, document: serde_json::Value) {
+        if let Err(e) = self.actor.cast(ConfigurationMessage::Deliver(document)) {
+            warn!("the configuration actor did not take a delivered document: {e}");
+        }
+    }
+
     /// Applies an update without checking who sent it. Only for this crate's own tests: nothing
     /// outside may change the configuration without a verified signature.
     #[cfg(test)]
@@ -367,6 +381,41 @@ impl ConfigurationHandle {
             Err(e) => Err(ConfigurationError::Unavailable(e.to_string())),
         }
     }
+}
+
+/// The built-in subscription every agent has to its own configuration topic: the scheduler processor
+/// publishes a signed document for `agent` there, and it goes to the verifying actor. A message that is not
+/// a configuration notification, or is for another agent, is dropped; one that is for this agent is verified
+/// by the actor like any other, whoever published it.
+pub fn subscription(agent: &str, configuration: ConfigurationHandle) -> crate::Subscription {
+    let agent = agent.to_string();
+    crate::Subscription::new(
+        polar_scheduler_common::configuration_topic(&agent),
+        move |incoming| {
+            let notification = match rkyv::from_bytes::<
+                polar_scheduler_common::ConfigurationNotification,
+                rkyv::rancor::Error,
+            >(&incoming.payload)
+            {
+                Ok(notification) => notification,
+                Err(e) => {
+                    warn!("a message on the configuration topic is not a notification: {e}");
+                    return;
+                }
+            };
+            if notification.agent != agent {
+                warn!(
+                    "a configuration notification for `{}` reached `{agent}`; dropped",
+                    notification.agent
+                );
+                return;
+            }
+            match serde_json::from_str::<serde_json::Value>(&notification.document_json) {
+                Ok(document) => configuration.deliver(document),
+                Err(e) => warn!("a delivered configuration document is not JSON: {e}"),
+            }
+        },
+    )
 }
 
 #[cfg(test)]
@@ -945,5 +994,97 @@ mod tests {
                 .as_deref(),
             Some(secret)
         );
+    }
+
+    // -- delivery on the agent's configuration topic ----------------------------------------
+
+    fn notification(agent: &str, document: &Value) -> polar_router::IncomingMessage {
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(
+            &polar_scheduler_common::ConfigurationNotification {
+                agent: agent.to_string(),
+                document_json: document.to_string(),
+            },
+        )
+        .unwrap()
+        .to_vec();
+        polar_router::IncomingMessage {
+            topic: polar_scheduler_common::configuration_topic(agent),
+            payload,
+            published_by: None,
+            trace_ctx: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_document_delivered_on_the_topic_is_verified_and_applied_in_order() {
+        let signed = Signed::new();
+        let (config, seen) = spawn_handle(Some(signed.verifier())).await;
+        let sub = subscription(AGENT, config.clone());
+        assert_eq!(sub.topic, "agent.hello-agent.configuration");
+
+        // Delivered back to back: both are applied, the later last.
+        (sub.deliver)(notification(AGENT, &signed.high(1, "20")));
+        (sub.deliver)(notification(AGENT, &signed.high(2, "30")));
+        settle().await;
+        assert_eq!(high(&config).await, 30);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        let history = config.history().await.unwrap();
+        assert_eq!(
+            history.iter().map(|e| e.version).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert!(history.iter().all(|e| e.signer.is_some()));
+    }
+
+    #[tokio::test]
+    async fn what_arrives_on_the_topic_is_verified_whoever_published_it() {
+        let signed = Signed::new();
+        let (config, _) = spawn_handle(Some(signed.verifier())).await;
+        let sub = subscription(AGENT, config.clone());
+
+        // Unsigned, and signed by a CA this agent does not trust: delivered, then refused.
+        let unsigned = json!({"payload": {"id": "u", "target": {"agent": AGENT}, "version": 1,
+                              "changes": [{"name": "HIGH", "value": "99"}]}, "signature": {}});
+        (sub.deliver)(notification(AGENT, &unsigned));
+        (sub.deliver)(notification(AGENT, &Signed::new().high(2, "99")));
+        settle().await;
+        assert_eq!(high(&config).await, 10);
+        let history = config.history().await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(
+            history
+                .iter()
+                .all(|e| matches!(e.outcome, ApplyOutcome::Refused(Refusal::Unverified(_))))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_notification_for_another_agent_or_that_is_not_one_is_dropped() {
+        let signed = Signed::new();
+        let (config, _) = spawn_handle(Some(signed.verifier())).await;
+        let sub = subscription(AGENT, config.clone());
+
+        (sub.deliver)(notification("another-agent", &signed.high(1, "20")));
+        (sub.deliver)(polar_router::IncomingMessage {
+            topic: sub.topic.clone(),
+            payload: vec![1, 2, 3],
+            published_by: None,
+            trace_ctx: None,
+        });
+        // A notification whose document is not JSON.
+        let mut bad = notification(AGENT, &json!({}));
+        bad.payload = rkyv::to_bytes::<rkyv::rancor::Error>(
+            &polar_scheduler_common::ConfigurationNotification {
+                agent: AGENT.to_string(),
+                document_json: "not json".to_string(),
+            },
+        )
+        .unwrap()
+        .to_vec();
+        (sub.deliver)(bad);
+        settle().await;
+        // None of them reached the actor, so nothing is recorded and the value is as it was.
+        assert!(config.history().await.unwrap().is_empty());
+        assert_eq!(high(&config).await, 10);
     }
 }

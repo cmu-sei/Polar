@@ -16,9 +16,9 @@ sequenceDiagram
     end
     Observer-)Cassini: GitScheduleChange {whole document}
     Cassini-)Processor: GitScheduleChange
-    Processor->>Graph: upsert the schedule node (document stored as received)
-    Processor-)Cassini: ScheduleNotification {whole document} on agent.<id>.schedule
-    Cassini-)Target: ScheduleNotification
+    Processor->>Graph: write a Configuration node, document as received
+    Processor-)Cassini: ConfigurationNotification on agent.name.configuration
+    Cassini-)Target: ConfigurationNotification (every agent subscribes to its own)
     Target->>CA: submit(document)
 
     Note over Target,CA: verifies for itself, in order
