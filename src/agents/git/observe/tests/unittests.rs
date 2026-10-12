@@ -354,3 +354,19 @@ fn task_provider_resolves_with_username_override() {
     );
     assert!(result.is_ok());
 }
+
+// One repository that cannot be started (an unreachable host, bad credentials) must not end the
+// supervisor of all the others: its failure is logged and the supervisor carries on.
+#[test]
+fn a_worker_that_fails_to_start_does_not_fail_the_supervisor() {
+    let repo = RepoId::new("unreachable".into());
+    let failed = ractor::SpawnErr::StartupFailed("failed to resolve address".into());
+    assert!(git_repo_observer::tolerate_spawn_failure(&repo, failed).is_ok());
+}
+
+#[test]
+fn a_worker_that_is_already_running_is_not_an_error() {
+    let repo = RepoId::new("again".into());
+    let dup = ractor::SpawnErr::ActorAlreadyRegistered("worker".into());
+    assert!(git_repo_observer::tolerate_spawn_failure(&repo, dup).is_ok());
+}

@@ -136,6 +136,9 @@ The order in section 3 is superseded by this one; section 3 stays as the list of
 2. [ ] An initial schedule for the credentials agent, with the overrides, policies and secrets it will consume (secrets encrypted to its escrow public key; see the ConfigurationActor and "Credentials agent as the main consumer of scheduled overrides" items under the environment contract)
 3. [x] git-observer migrated onto the builder and into the catalog, verified on the cluster 2026-10-12: healthy, survives a broker restart (re-registers, restart count 0), drains on SIGTERM in about 1 s; its cache is an emptyDir (`working-checkout`), since the image has no writable /tmp for uid 1000 (it was not PINNED any longer; the git agent's design doc `docs/architecture/git/agents.md` needs updating with it, see the log)
 4. [ ] An initial schedule of repos for the git agent in the schedules repo; at least one repo needs a credential the git agent fetches from the credentials agent
+   Done 2026-10-12: git-processor and git-scheduler migrated like the observer, with the graph start, stop and drain shared in polar-agent-builder (`graph.rs`). Verified on the cluster: both healthy with graph=true, all three survive deleting the broker pod, both drain on SIGTERM in 5 s. End to end: a discovery event reached the scheduler, which published a configuration the observer acted on (the cluster has no DNS egress, so it could not clone github.com); synthetic commit and ref events (`git-discovery-harness <url> --synthetic`) produced GitRepository, GitCommit (with PARENT) and GitRef POINTS_TO in the graph. Bugs fixed: a worker that cannot start used to fail the repo supervisor and end the observer; `StopWorker` was a `todo!()`; the scheduler panicked on a discovery with no HTTP URL; the processor spawned its graph controller on every registration.
+   Querying the graph from outside: port-forward `pod/polar-neo4j-0 17473:7473`, then curl -sk with an admin client cert (`~/.config/polar-admin/<user>.crt/.key`) and basic auth `neo4j` / the `polar-graph-pw` secret against `/db/neo4j/tx/commit`.
+   Left for the scheduler redesign: the stored `max_depth` is handed on as the shallow fetch depth; the scheduler reads `RepoObservationConfig` nodes nothing writes; credentials are always None.
    Git observer state, decided 2026-10-12 (not built):
    - Checkpoints (`last_seen` per ref) are restored from the graph at worker start, so a replaced pod does not re-emit history. Today `last_seen` starts empty and the first tick re-walks up to `max_depth` commits per ref and emits `RefUpdated` with `old: None`. Decided: the observer has no graph access (by design); it asks the processor over Cassini (request and reply) and the processor reads the graph. The latest tip per ref is the newest `POINTS_TO` edge (`observed_at` is stored as a String, so compare as numbers).
    - Repository storage goes on a PVC so clones are not repeated. emptyDir for now. A PVC is one claim per pod, so it does not scale to many repos by itself.
@@ -167,6 +170,8 @@ cluster verification.
 | Agent | Rust | Catalog | Verified on cluster |
 |---|---|---|---|
 | git-observer | [x] | [x] | [x] |
+| git-processor | [x] | [x] | [x] |
+| git-scheduler (migrated as it was; redesign pending) | [x] | [x] | [x] |
 | openapi-observer | [ ] | [ ] | [ ] |
 | polar-scheduler-observer | [ ] | [ ] | [ ] |
 | gitlab-observer | [ ] | [ ] | [ ] |

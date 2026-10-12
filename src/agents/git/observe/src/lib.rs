@@ -253,6 +253,26 @@ pub enum RepoSupervisorMessage {
     StopWorker { repo_id: RepoId },
 }
 
+/// What a failed attempt to start a repository's worker means for the supervisor of all of them.
+///
+/// A worker already running (the repository was announced twice) is expected. A worker that cannot
+/// start (an unreachable host, bad credentials) is that repository's problem and is logged: it
+/// used to fail the supervisor, which ended the whole agent. Nothing starts it again until the
+/// repository is announced again.
+pub fn tolerate_spawn_failure(repo_id: &RepoId, error: SpawnErr) -> Result<(), ActorProcessingErr> {
+    match error {
+        SpawnErr::ActorAlreadyRegistered(name) => {
+            debug!("worker {name} already running, ignoring duplicate discovery event");
+            Ok(())
+        }
+        SpawnErr::StartupFailed(reason) => {
+            error!("the worker for {repo_id} could not start, so it is not observed: {reason}");
+            Ok(())
+        }
+        other => Err(other.into()),
+    }
+}
+
 #[async_trait]
 impl Actor for GitRepoSupervisor {
     type Msg = RepoSupervisorMessage;
@@ -310,21 +330,15 @@ impl Actor for GitRepoSupervisor {
                     Ok((worker, _)) => {
                         state.workers.insert(repo_id, worker);
                     }
-                    Err(SpawnErr::ActorAlreadyRegistered(name)) => {
-                        debug!("worker {name} already running, ignoring duplicate discovery event");
-                        // Worth a TODO, not a blocker.
-                        // One product question worth a comment-but-not-now: is "ignore the duplicate" actually the right long-term behavior,
-                        // or should a rediscovery event for an already-running repo trigger the existing worker to refresh its config
-                        // (e.g. if credentials changed in git.yaml and the agent got restarted/reloaded,
-                        // or if max_depth/refs changed)? Right now "ignore" is correct and safe for today's test,
-                        // but if discovery events are meant to be re-emitted periodically by the gitlab processor (not just once at first sight),
-                        // silently ignoring them forever means config changes never propagate to already-running workers without a full agent restart.
-                    }
-                    Err(e) => return Err(e.into()),
+                    Err(e) => tolerate_spawn_failure(&repo_id, e)?,
                 }
             }
-            RepoSupervisorMessage::StopWorker { .. } => {
-                todo!("Implement cleanup logic for the filesystem");
+            RepoSupervisorMessage::StopWorker { repo_id } => {
+                // The clone stays in the cache: it is reused if the repository is observed again.
+                match state.workers.remove(&repo_id) {
+                    Some(worker) => worker.stop(Some("asked to stop".into())),
+                    None => warn!("asked to stop the worker for {repo_id}, which is not running"),
+                }
             }
         }
         Ok(())
