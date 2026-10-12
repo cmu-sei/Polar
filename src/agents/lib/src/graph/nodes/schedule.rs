@@ -14,25 +14,67 @@ impl crate::graph::controller::GraphNodeKey for ScheduleKey {
     fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, neo4rs::BoltType)>) {
         match self {
             ScheduleKey::Permanent { agent_id } => (
-                format!("(n:Schedule:Permanent {{ agent_id: ${prefix}_agent_id }})"),
+                format!("({prefix}:Schedule:Permanent {{ agent_id: ${prefix}_agent_id }})"),
                 vec![(format!("{prefix}_agent_id"), agent_id.clone().into())],
             ),
             ScheduleKey::Adhoc { agent_type } => (
-                format!("(n:Schedule:Adhoc {{ agent_type: ${prefix}_agent_type }})"),
+                format!("({prefix}:Schedule:Adhoc {{ agent_type: ${prefix}_agent_type }})"),
                 vec![(format!("{prefix}_agent_type"), agent_type.clone().into())],
             ),
             ScheduleKey::Ephemeral { agent_type } => (
-                format!("(n:Schedule:Ephemeral {{ agent_type: ${prefix}_agent_type }})"),
+                format!("({prefix}:Schedule:Ephemeral {{ agent_type: ${prefix}_agent_type }})"),
                 vec![(format!("{prefix}_agent_type"), agent_type.clone().into())],
             ),
             ScheduleKey::Configuration { id } => (
-                format!("(n:Schedule:Configuration {{ id: ${prefix}_id }})"),
+                format!("({prefix}:Schedule:Configuration {{ id: ${prefix}_id }})"),
                 vec![(format!("{prefix}_id"), id.clone().into())],
             ),
             ScheduleKey::ConfigurationOutcome { key } => (
-                format!("(n:Schedule:ConfigurationOutcome {{ key: ${prefix}_key }})"),
+                format!("({prefix}:Schedule:ConfigurationOutcome {{ key: ${prefix}_key }})"),
                 vec![(format!("{prefix}_key"), key.clone().into())],
             ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::controller::GraphNodeKey;
+
+    fn keys() -> Vec<ScheduleKey> {
+        vec![
+            ScheduleKey::Permanent { agent_id: "a".into() },
+            ScheduleKey::Adhoc { agent_type: "t".into() },
+            ScheduleKey::Ephemeral { agent_type: "t".into() },
+            ScheduleKey::Configuration { id: "i".into() },
+            ScheduleKey::ConfigurationOutcome { key: "k".into() },
+        ]
+    }
+
+    /// An edge matches its two ends in one statement, one as `n` and one as `m`; a key that
+    /// ignores the variable it is told to use declares `n` twice, and Neo4j refuses the statement.
+    #[test]
+    fn every_key_names_its_node_by_the_variable_it_is_given() {
+        for key in keys() {
+            for variable in ["n", "m", "n0", "n1"] {
+                let (pattern, params) = key.cypher_match(variable);
+                assert!(
+                    pattern.starts_with(&format!("({variable}:")),
+                    "{key:?} with `{variable}` wrote {pattern}"
+                );
+                assert!(!params.is_empty());
+                // one property map, in Cypher's own braces
+                assert_eq!(pattern.matches('{').count(), 1, "{pattern}");
+                assert_eq!(pattern.matches('}').count(), 1, "{pattern}");
+                for (name, _) in &params {
+                    assert!(
+                        name.starts_with(&format!("{variable}_")),
+                        "{key:?} with `{variable}` has a parameter named {name}, which {pattern} would not use"
+                    );
+                    assert!(pattern.contains(&format!("${name}")), "{pattern} does not use ${name}");
+                }
+            }
         }
     }
 }
