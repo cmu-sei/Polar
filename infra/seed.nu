@@ -65,7 +65,9 @@ export def refused_hint [identity: string, target: string] {
 # Whether the credentials agent has said it published `section`'s authority: its log line for the first
 # publication of anything it signs. The text is `publishing an authority update`, with the kind beside it.
 export def authority_published [logs: string, section: string] {
+    # The agent's log is coloured, and the colour codes sit inside `kind="policy"`.
     $logs
+    | ansi strip
     | lines
     | any {|l|
         let published = ($l | str contains "publishing an authority update")

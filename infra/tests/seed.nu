@@ -118,6 +118,11 @@ def main [] {
                 assert (not (authority_published $said "groups"))
                 assert (not (authority_published "WARN not published: it would not replace what is held" "policy"))
                 assert (not (authority_published "" "policy"))
+                # As the agent really writes it: coloured, the field name in italics and the = dimmed.
+                let esc = (char --integer 27)
+                let coloured = $"($esc)[2m2026-10-12T20:50:53Z($esc)[0m ($esc)[32m INFO($esc)[0m publishing an authority update ($esc)[3mkind($esc)[0m($esc)[2m=($esc)[0m\"policy\" ($esc)[3mversion($esc)[0m($esc)[2m=($esc)[0m1"
+                assert (authority_published $coloured "policy")
+                assert (not (authority_published $coloured "groups"))
                 assert (authority_published $"noise\n($said)\nmore noise" "policy")
             }
         }

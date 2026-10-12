@@ -354,7 +354,7 @@ def step_seed [target: string, username: string, mail: string] {
         ok "every seed document is already in polar-schedules"
     } else {
         ^git -C $repo add -A
-        ^git -C $repo -c $"user.name=($username)" -c $"user.email=($mail)" commit -q -m $"Seed the cluster: ($todo | get section | str join ', ')"
+        ^git -C $repo -c $"user.name=($username)" -c $"user.email=($mail)" commit -q -m $"feat\(seed\): the cluster's first ($todo | get section | str join ', ')"
         if $env.LAST_EXIT_CODE != 0 { fail "git commit failed" }
         let pushed = (do { seed_git $username [-C $repo push -q origin HEAD] } | complete)
         if $pushed.exit_code != 0 { fail $"cannot push to polar-schedules: ($pushed.stderr | str trim)" }

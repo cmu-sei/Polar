@@ -7,12 +7,12 @@
   cluster: {}
   workloads: {
     # Who administers the git server in development: the DNS names in the certificates of the
-    # accounts `just admin-claim` made on this cluster (djshepard, operator). They belong to this
+    # accounts `just admin-claim` made on this cluster (djshepard, operator, seeder). They belong to this
     # cluster's ledger and change when it is reset: read them with
     #   openssl x509 -in ~/.config/polar-admin/<user>.crt -noout -ext subjectAltName
     polar-git-server: {
       env: [
-        { name: "POLAR_GIT_SERVER_ADMINS", value: "66b3f4c8-f024-4207-b70b-9fadf7badc92,8db96072-25c2-46fc-9705-e72c0b6f4461" }
+        { name: "POLAR_GIT_SERVER_ADMINS", value: "66b3f4c8-f024-4207-b70b-9fadf7badc92,8db96072-25c2-46fc-9705-e72c0b6f4461,24aa97c4-80eb-454e-8f67-feedf6349277" }
       ]
     }
     # The cluster pulls from the development registry over plain http, and so must the resolver.
