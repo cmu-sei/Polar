@@ -5,6 +5,7 @@
 //! forwards the document untouched. A document it cannot route is still written to the graph, so that it is
 //! seen, and goes nowhere.
 
+use polar::graph::controller::{GraphController, GraphControllerMsg};
 use polar_scheduler_common::document_type;
 use serde_json::Value;
 
@@ -60,6 +61,59 @@ fn routing(payload: &Value) -> Result<Routing, String> {
             .as_u64()
             .ok_or_else(|| "the payload has no whole-number `version`".to_string())?,
     })
+}
+
+/// A signed document the processor holds for an agent: the latest of one item, as it was received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredDocument {
+    pub id: String,
+    pub agent: String,
+    pub version: u64,
+    /// The document exactly as it was read from the repository.
+    pub document: String,
+}
+
+/// The documents the graph holds, read when the processor starts so that what it knows does not depend on
+/// having been up when they arrived: an agent that starts after a restart of the processor is still sent
+/// them, and an older document pushed later cannot pass for the latest. Nodes that could not be routed have
+/// no target or version, and are not documents to send anywhere.
+pub async fn load_stored_documents(
+    controller: &GraphController,
+) -> Result<Vec<StoredDocument>, String> {
+    let query = neo4rs::Query::new(STORED_DOCUMENTS_QUERY.to_string());
+    let rows = match ractor::rpc::call(
+        controller,
+        |reply| GraphControllerMsg::Query(query, reply),
+        None,
+    )
+    .await
+    {
+        Ok(ractor::rpc::CallResult::Success(Ok(rows))) => rows,
+        Ok(ractor::rpc::CallResult::Success(Err(e))) => return Err(e),
+        other => return Err(format!("the graph controller did not answer: {other:?}")),
+    };
+    documents_from_rows(&rows)
+}
+
+/// What [`load_stored_documents`] asks the graph.
+pub const STORED_DOCUMENTS_QUERY: &str = "MATCH (c:Schedule:Configuration) \
+     WHERE c.target IS NOT NULL AND c.version IS NOT NULL AND c.document IS NOT NULL \
+     RETURN c.id AS id, c.target AS target, c.version AS version, c.document AS document";
+
+/// The documents in the rows [`STORED_DOCUMENTS_QUERY`] returned.
+pub fn documents_from_rows(rows: &[neo4rs::Row]) -> Result<Vec<StoredDocument>, String> {
+    rows.iter()
+        .map(|row| {
+            let get = |e: neo4rs::DeError| e.to_string();
+            let version: i64 = row.get("version").map_err(get)?;
+            Ok(StoredDocument {
+                id: row.get("id").map_err(get)?,
+                agent: row.get("target").map_err(get)?,
+                version: u64::try_from(version).map_err(|e| e.to_string())?,
+                document: row.get("document").map_err(get)?,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

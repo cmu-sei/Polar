@@ -84,7 +84,11 @@ impl Actor for Harness {
                     };
                     let topic = polar::topics::GIT_REPOSITORY_EVENTS;
                     publish_event(&state.tcp_client, topic, &commit("aaaa", vec![]))?;
-                    publish_event(&state.tcp_client, topic, &commit("bbbb", vec!["aaaa".into()]))?;
+                    publish_event(
+                        &state.tcp_client,
+                        topic,
+                        &commit("bbbb", vec!["aaaa".into()]),
+                    )?;
                     publish_event(
                         &state.tcp_client,
                         topic,

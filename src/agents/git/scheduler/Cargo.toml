@@ -16,5 +16,4 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-testcontainers.workspace = true
-testcontainers-modules.workspace = true
+polar-test-graph.workspace = true

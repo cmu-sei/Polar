@@ -29,19 +29,7 @@ pub async fn fetch_repo_observation_config(
     controller: &GraphController,
     repo_id: &RepoId,
 ) -> Result<Option<RepoObservationConfig>, String> {
-    let query = neo4rs::query(
-        r#"
-        MATCH (c:RepoObservationConfig { repo_id: $repo_id })
-        RETURN
-            c.repo_id        AS repo_id,
-            c.repo_url       AS repo_url,
-            c.remotes        AS remotes,
-            c.max_depth      AS max_depth,
-            c.tracked_refs   AS tracked_refs
-        LIMIT 1
-    "#,
-    )
-    .param("repo_id", repo_id.to_string());
+    let query = neo4rs::query(REPO_CONFIG_QUERY).param("repo_id", repo_id.to_string());
 
     let rows = match ractor::rpc::call(
         controller,
@@ -54,7 +42,23 @@ pub async fn fetch_repo_observation_config(
         Ok(ractor::rpc::CallResult::Success(Err(e))) => return Err(e),
         other => return Err(format!("the graph controller did not answer: {other:?}")),
     };
+    config_from_rows(&rows)
+}
 
+/// What [`fetch_repo_observation_config`] asks the graph; `$repo_id` is the repository's.
+pub const REPO_CONFIG_QUERY: &str = r#"
+        MATCH (c:RepoObservationConfig { repo_id: $repo_id })
+        RETURN
+            c.repo_id        AS repo_id,
+            c.repo_url       AS repo_url,
+            c.remotes        AS remotes,
+            c.max_depth      AS max_depth,
+            c.tracked_refs   AS tracked_refs
+        LIMIT 1
+    "#;
+
+/// The configuration in the rows [`REPO_CONFIG_QUERY`] returned, if there is one.
+pub fn config_from_rows(rows: &[neo4rs::Row]) -> Result<Option<RepoObservationConfig>, String> {
     let Some(row) = rows.first() else {
         return Ok(None);
     };

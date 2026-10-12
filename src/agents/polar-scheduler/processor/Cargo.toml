@@ -22,6 +22,7 @@ url.workspace = true
 polar-scheduler-common = { path = "../common" }
 
 [dev-dependencies]
+polar-test-graph.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 futures.workspace = true

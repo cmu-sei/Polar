@@ -15,4 +15,8 @@ pub enum ProcessorMsg {
         outcome: ConfigurationOutcome,
         reported_by: Option<String>,
     },
+    /// An agent that has just registered asks for the signed configuration held for it.
+    ReplayRequest {
+        agent: String,
+    },
 }

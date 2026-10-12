@@ -272,6 +272,35 @@ impl InfrastructureSupervisor {
             .send(InfrastructureEvent::PrepareShutdown);
     }
 
+    /// Asks the scheduler for the signed configuration it holds for this agent. Sent on every
+    /// registration: an agent that restarts has forgotten what it was given, and one that reconnects
+    /// may have missed what was sent while it was away. What comes back is the stored documents on the
+    /// agent's own configuration topic, where they are verified like any other, and one it has already
+    /// applied is refused as no newer.
+    fn ask_for_configuration(service_name: &str, client: &ClientParts) {
+        let request = polar_scheduler_common::ConfigurationReplayRequest {
+            agent: service_name.to_string(),
+        };
+        match rkyv::to_bytes::<rkyv::rancor::Error>(&request) {
+            Ok(bytes) => {
+                if let Err(e) = client.tcp_client.as_actor_ref().send_message(
+                    cassini_client::TcpClientMessage::publish(
+                        polar_scheduler_common::CONFIGURATION_REPLAY_TOPIC.to_string(),
+                        bytes.to_vec(),
+                        None,
+                    ),
+                ) {
+                    tracing::warn!(
+                        "InfrastructureSupervisor: cannot ask for the stored configuration: {e}"
+                    );
+                }
+            }
+            Err(e) => tracing::error!(
+                "InfrastructureSupervisor: cannot encode a configuration request: {e}"
+            ),
+        }
+    }
+
     /// Looks at what has come back, then at the clock, and does what the self-test says.
     fn self_test_tick(state: &mut InfrastructureSupervisorState) {
         use crate::health::HealthClient;
@@ -673,6 +702,9 @@ impl Actor for InfrastructureSupervisor {
                             .send_message(polar_crypto::CryptoMessage::ClientRegistered)
                     {
                         tracing::warn!("failed to tell CryptoActor the client registered: {e}");
+                    }
+                    if let ClientEvent::Registered { .. } = &event {
+                        Self::ask_for_configuration(&state.service_name, client);
                     }
                     client.events_output.send(event);
                 }
@@ -1210,6 +1242,44 @@ mod tests {
         }
     }
 
+    // -- asking for the configuration the scheduler holds -------------------------------
+
+    #[tokio::test]
+    async fn an_agent_asks_for_its_configuration_each_time_it_registers() {
+        let rig = Rig::standard("infra-replay").await;
+        let asked = |rig: &Rig| -> Vec<String> {
+            rig.spawner
+                .published
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(topic, _)| topic == polar_scheduler_common::CONFIGURATION_REPLAY_TOPIC)
+                .map(|(_, payload)| {
+                    rkyv::from_bytes::<
+                        polar_scheduler_common::ConfigurationReplayRequest,
+                        rkyv::rancor::Error,
+                    >(payload)
+                    .unwrap()
+                    .agent
+                })
+                .collect()
+        };
+        assert!(
+            asked(&rig).is_empty(),
+            "nothing is asked before it registers"
+        );
+
+        rig.registered().await;
+        rig.settle().await;
+        assert_eq!(asked(&rig), ["infra-replay"]);
+
+        // A reconnect registers again and asks again: what the scheduler sent while it was away is
+        // not otherwise replayed.
+        rig.registered().await;
+        rig.settle().await;
+        assert_eq!(asked(&rig), ["infra-replay", "infra-replay"]);
+    }
+
     // -- the funnel ----------------------------------------------------------------------
 
     #[test]
@@ -1373,18 +1443,17 @@ mod tests {
         // And it says so on Cassini, for the scheduler to record: two documents have been handled (the
         // one that came over the router, and the one submitted), each refused for what it asks.
         let published = rig.spawner.published.lock().unwrap().clone();
-        let outcomes: Vec<polar_scheduler_common::ConfigurationOutcome> =
-            published
-                .iter()
-                .filter(|(topic, _)| topic == polar_scheduler_common::CONFIGURATION_OUTCOME_TOPIC)
-                .map(|(_, payload)| {
-                    rkyv::from_bytes::<
+        let outcomes: Vec<polar_scheduler_common::ConfigurationOutcome> = published
+            .iter()
+            .filter(|(topic, _)| topic == polar_scheduler_common::CONFIGURATION_OUTCOME_TOPIC)
+            .map(|(_, payload)| {
+                rkyv::from_bytes::<
                         polar_scheduler_common::ConfigurationOutcome,
                         rkyv::rancor::Error,
                     >(payload)
                     .unwrap()
-                })
-                .collect();
+            })
+            .collect();
         assert_eq!(outcomes.len(), 2, "{outcomes:?}");
         assert!(
             outcomes

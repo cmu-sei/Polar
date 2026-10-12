@@ -34,6 +34,20 @@ pub struct ConfigurationNotification {
     pub document_json: String,
 }
 
+/// Where an agent that has just registered with Cassini asks for the signed configuration the scheduler
+/// holds for it. The scheduler processor subscribes and republishes the stored documents on the agent's
+/// own configuration topic. Anyone can ask, and what comes back is only what the agent would have been
+/// sent anyway, signed and idempotent by version, so the request needs no authority.
+pub const CONFIGURATION_REPLAY_TOPIC: &str = "polar-configuration-replay";
+
+/// "I am `agent` and I have just started or reconnected: send me what you hold for me."
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
+pub struct ConfigurationReplayRequest {
+    pub agent: String,
+}
+
 /// The topic a signed command for `agent` is delivered on. Every builder agent subscribes to its own; the
 /// scheduler processor publishes to it (docs/architecture/commands.md).
 pub fn command_topic(agent: &str) -> String {
