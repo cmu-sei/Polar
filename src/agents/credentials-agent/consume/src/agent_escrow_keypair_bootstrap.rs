@@ -63,14 +63,15 @@ impl AgentEscrowKeypairBootstrapHandler {
         // ephemeral public key (carried in the request itself) is
         // the only target this flow ever re-encrypts to.
         let secret_name = agent_escrow_keypair_secret_name(&requested_by);
-        let stored_secret = match call_check_secret(&self.ledger, &secret_name).await {
-            Ok(Some(secret)) => secret,
-            Ok(None) => return RetrieveAgentEscrowKeypairReply::NotFound,
-            Err(e) => {
-                error!("Failed to check stored agent escrow keypair for {requested_by}: {e}");
-                return RetrieveAgentEscrowKeypairReply::Failed { detail: e };
-            }
-        };
+        let stored_secret =
+            match crate::retrieve_secret::call_check_secret(&self.ledger, &secret_name).await {
+                Ok(Some(stored)) => stored.secret,
+                Ok(None) => return RetrieveAgentEscrowKeypairReply::NotFound,
+                Err(e) => {
+                    error!("Failed to check stored agent escrow keypair for {requested_by}: {e}");
+                    return RetrieveAgentEscrowKeypairReply::Failed { detail: e };
+                }
+            };
 
         // Same relay logic as RetrieveSecretHandler's own Step 3:
         // decrypt with this agent's own escrow private key. The
@@ -100,26 +101,6 @@ impl AgentEscrowKeypairBootstrapHandler {
         // `plaintext` goes out of scope here, genuinely wiped.
 
         RetrieveAgentEscrowKeypairReply::Found { payload }
-    }
-}
-
-async fn call_check_secret(
-    ledger: &ActorRef<LedgerMessage>,
-    name: &str,
-) -> Result<Option<EscrowedSecret>, String> {
-    match ractor::rpc::call(
-        ledger,
-        |reply| LedgerMessage::CheckSecret {
-            name: name.to_string(),
-            reply,
-        },
-        None,
-    )
-    .await
-    {
-        Ok(ractor::rpc::CallResult::Success(result)) => Ok(result),
-        Ok(other) => Err(format!("unexpected CallResult: {other:?}")),
-        Err(e) => Err(e.to_string()),
     }
 }
 

@@ -445,6 +445,7 @@ impl PolicyLookup {
         requester_certificate_pem: Option<String>,
         action: &str,
         resource: &str,
+        facts: polar_policy::Facts,
     ) -> Result<polar_policy::Decision, String> {
         let Some(policy) = self.actor() else {
             return Err("the policy is not running yet, so nothing can be decided".to_string());
@@ -456,6 +457,7 @@ impl PolicyLookup {
                 requester_certificate_pem,
                 action: action.to_string(),
                 resource: resource.to_string(),
+                facts,
                 reply,
             },
             None,
@@ -1032,7 +1034,13 @@ mod actor_tests {
     async fn asking_before_the_policy_exists_is_an_error_and_never_a_decision() {
         let lookup = PolicyLookup::for_service("nobody-has-started-this");
         let answer = lookup
-            .check("alice", None, r#"Action::"x""#, r#"Thing::"t""#)
+            .check(
+                "alice",
+                None,
+                r#"Action::"x""#,
+                r#"Thing::"t""#,
+                Default::default(),
+            )
             .await;
         assert!(answer.unwrap_err().contains("not running yet"));
     }
@@ -1054,7 +1062,13 @@ mod actor_tests {
             let lookup = lookup.clone();
             async move {
                 lookup
-                    .check(who, None, r#"Action::"x""#, r#"Thing::"t""#)
+                    .check(
+                        who,
+                        None,
+                        r#"Action::"x""#,
+                        r#"Thing::"t""#,
+                        Default::default(),
+                    )
                     .await
                     .unwrap()
             }
@@ -1071,6 +1085,7 @@ mod actor_tests {
     ) -> polar_policy::Decision {
         ractor::call!(rig.handle.policy(), |reply| {
             polar_policy::PolicyMessage::CheckAuthorization {
+                facts: Default::default(),
                 requester_identity: who.to_string(),
                 requester_certificate_pem: None,
                 action: action.to_string(),

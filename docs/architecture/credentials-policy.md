@@ -180,7 +180,7 @@ for the document type. Two consequences:
   failure: the seed step is part of "the cluster is up", and `up.nu` waits for the credentials agent to report
   the policy applied before it says so.
 
-The seed documents live in the repository (`seed/schedules/` next to the cluster targets) and are signed at
+The seed documents live in the repository (`infra/seeds/signed/`, beside the seed the git server commits unsigned) and are signed at
 setup, not committed signed: a signature made once by a person would otherwise be baked into every cluster.
 
 ## Explaining a decision

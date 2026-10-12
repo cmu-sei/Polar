@@ -88,6 +88,7 @@ impl DecryptOnBehalfOfHandler {
                 Some(requester_certificate.certificate_pem.clone()),
                 r#"Action::"decrypt""#,
                 &request.resource_id,
+                Default::default(),
             )
             .await
         {

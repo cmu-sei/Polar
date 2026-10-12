@@ -192,7 +192,7 @@ pub enum LedgerMessage {
     /// Option<T> shape.
     CheckSecret {
         name: String,
-        reply: RpcReplyPort<Option<credentials_agent_common::escrow_secret::EscrowedSecret>>,
+        reply: RpcReplyPort<Option<crate::state::StoredSecret>>,
     },
     /// Full (hash, event) history, re-read from the log -- used by
     /// ProjectionActor for catch-up: replaying and re-folding through

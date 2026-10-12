@@ -104,8 +104,21 @@ pub enum PolicyMessage {
         requester_certificate_pem: Option<String>,
         action: String,
         resource: String,
+        /// What the asker knows about the resource that no rule document may say.
+        facts: Facts,
         reply: RpcReplyPort<Result<Decision, PolicyError>>,
     },
+}
+
+/// What the asker knows about the resource from its own records, handed to the rules as the resource's
+/// attributes. They are reserved: a policy document cannot set them, because the evaluator is given them
+/// by the asker and by nothing else. The principal has no counterpart; its facts come from PermissionsActor
+/// only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Facts {
+    /// The identity that owns the resource (for a secret, the one that escrowed it), as `Identity::"owner"`
+    /// in the attribute `owner`, so `resource.owner == principal` says "the requester owns it".
+    pub owner: Option<String>,
 }
 
 pub struct PolicyActorArgs {
@@ -162,6 +175,7 @@ impl Actor for PolicyActor {
                 requester_certificate_pem,
                 action,
                 resource,
+                facts,
                 reply,
             } => {
                 let result = Self::evaluate(
@@ -170,6 +184,7 @@ impl Actor for PolicyActor {
                     requester_certificate_pem,
                     &action,
                     &resource,
+                    &facts,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -218,6 +233,7 @@ impl PolicyActor {
         requester_certificate_pem: Option<String>,
         action: &str,
         resource: &str,
+        facts: &Facts,
     ) -> Result<Decision, PolicyError> {
         let policy_set = state
             .policy_set
@@ -251,24 +267,40 @@ impl PolicyActor {
 
         // The principal is built from what PermissionsActor resolved and from nothing a caller said. Its
         // groups are its parents, so a rule can say `principal in Group::"operators"`.
-        let entities_json = serde_json::json!([
-            {
-                "uid": { "type": "Identity", "id": requester_identity },
-                "attrs": {
-                    "permissions": principal.permissions.iter().map(Self::permission_to_json).collect::<Vec<_>>(),
-                    "capabilities": principal.capabilities.iter()
-                        .map(|c| c.to_san_string().trim_start_matches("c:").to_string())
-                        .collect::<Vec<_>>(),
+        let mut entities_json = vec![serde_json::json!({
+            "uid": { "type": "Identity", "id": requester_identity },
+            "attrs": {
+                "permissions": principal.permissions.iter().map(Self::permission_to_json).collect::<Vec<_>>(),
+                "capabilities": principal.capabilities.iter()
+                    .map(|c| c.to_san_string().trim_start_matches("c:").to_string())
+                    .collect::<Vec<_>>(),
+            },
+            "parents": principal.groups.iter()
+                .map(|g| serde_json::json!({ "type": "Group", "id": g }))
+                .collect::<Vec<_>>()
+        })];
+        // The resource, with the attributes its owner's records give it. Built from the parsed id and not
+        // from the text, like the principal.
+        if let Some(owner) = &facts.owner {
+            entities_json.push(serde_json::json!({
+                "uid": {
+                    "type": resource_uid.type_name().to_string(),
+                    "id": resource_uid.id().unescaped(),
                 },
-                "parents": principal.groups.iter()
-                    .map(|g| serde_json::json!({ "type": "Group", "id": g }))
-                    .collect::<Vec<_>>()
-            }
-        ]);
-        let entities = Entities::from_json_value(entities_json, None)
+                "attrs": { "owner": { "__entity": { "type": "Identity", "id": owner } } },
+                "parents": []
+            }));
+        }
+        let entities = Entities::from_json_value(serde_json::Value::Array(entities_json), None)
             .map_err(|e| PolicyError::RequestConstruction(format!("entities: {e}")))?;
 
-        let context = Context::empty();
+        // The time is this actor's own, never a caller's.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let context = Context::from_json_value(serde_json::json!({ "now_secs": now_secs }), None)
+            .map_err(|e| PolicyError::RequestConstruction(format!("context: {e}")))?;
         let request = Request::new(principal_uid, action_uid, resource_uid, context, None)
             .map_err(|e| PolicyError::RequestConstruction(e.to_string()))?;
 
@@ -347,6 +379,7 @@ mod tests {
         let actor = spawn_with_real_policy().await;
 
         let decision = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+            facts: Default::default(),
             requester_identity: "kube-consumer".to_string(),
             requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
@@ -364,6 +397,7 @@ mod tests {
         let actor = spawn_with_real_policy().await;
 
         let decision = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+            facts: Default::default(),
             requester_identity: "some-other-agent".to_string(),
             requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
@@ -382,6 +416,7 @@ mod tests {
         let actor = spawn_with_real_policy().await;
 
         let decision = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+            facts: Default::default(),
             requester_identity: "kube-consumer".to_string(),
             requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
@@ -399,6 +434,7 @@ mod tests {
         let actor = spawn_policy_actor().await;
 
         let result = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+            facts: Default::default(),
             requester_identity: "kube-consumer".to_string(),
             requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
@@ -447,6 +483,7 @@ mod tests {
         // The original policy's own principal must no longer be
         // permitted at all.
         let old_decision = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+            facts: Default::default(),
             requester_identity: "kube-consumer".to_string(),
             requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
@@ -459,6 +496,7 @@ mod tests {
 
         // The new policy's own principal must genuinely be permitted.
         let new_decision = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+            facts: Default::default(),
             requester_identity: "a-new-agent".to_string(),
             requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
@@ -512,6 +550,7 @@ mod tests {
         result.unwrap();
 
         let allowed = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+            facts: Default::default(),
             requester_identity: "kube-consumer".to_string(),
             requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
@@ -526,6 +565,7 @@ mod tests {
         // has no real, resolved permissions for at all -- must be
         // denied, proving this isn't accidentally permitting anyone.
         let denied = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+            facts: Default::default(),
             requester_identity: "some-unrelated-agent".to_string(),
             requester_certificate_pem: None,
             action: r#"Action::"decrypt""#.to_string(),
@@ -556,6 +596,7 @@ mod tests {
         resource: &str,
     ) -> Decision {
         ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+            facts: Default::default(),
             requester_identity: identity.to_string(),
             requester_certificate_pem: certificate_pem,
             action: action.to_string(),
@@ -733,5 +774,139 @@ mod tests {
         // Larger than any rule set should be.
         let huge = "// ".to_string() + &"x".repeat(MAX_POLICY_BYTES);
         assert!(validate_source(&huge).unwrap_err().contains("too large"));
+    }
+
+    async fn ask_with(
+        actor: &ActorRef<PolicyMessage>,
+        identity: &str,
+        action: &str,
+        resource: &str,
+        facts: Facts,
+    ) -> Decision {
+        ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+            requester_identity: identity.to_string(),
+            requester_certificate_pem: None,
+            action: action.to_string(),
+            resource: resource.to_string(),
+            facts,
+            reply,
+        })
+        .unwrap()
+        .unwrap()
+    }
+
+    fn owned_by(owner: &str) -> Facts {
+        Facts {
+            owner: Some(owner.to_string()),
+        }
+    }
+
+    const BASELINE: &str = r#"
+        permit (principal, action == Action::"retrieve", resource) when { resource.owner == principal };
+        forbid (principal, action, resource) when { resource has frozen && resource.frozen };
+    "#;
+
+    #[tokio::test]
+    async fn the_owner_of_a_secret_may_retrieve_it_and_another_identity_may_not() {
+        let actor = spawn_policy_actor().await;
+        load(&actor, BASELINE).await;
+        let secret = r#"Secret::"github-sei""#;
+        assert_eq!(
+            ask_with(
+                &actor,
+                "git-repo-observer",
+                r#"Action::"retrieve""#,
+                secret,
+                owned_by("git-repo-observer")
+            )
+            .await,
+            Decision::Allow
+        );
+        // A rule applied and found no match: silence, which a secret treats as a refusal.
+        assert_eq!(
+            ask_with(
+                &actor,
+                "someone-else",
+                r#"Action::"retrieve""#,
+                secret,
+                owned_by("git-repo-observer")
+            )
+            .await,
+            Decision::NotDetermined
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owner_is_the_ledgers_word_and_a_rule_cannot_be_satisfied_without_one() {
+        let actor = spawn_policy_actor().await;
+        load(&actor, BASELINE).await;
+        // No owner given: `resource.owner` cannot be evaluated, which is a denial and never an allow.
+        let decision = ask_with(
+            &actor,
+            "git-repo-observer",
+            r#"Action::"retrieve""#,
+            r#"Secret::"github-sei""#,
+            Facts::default(),
+        )
+        .await;
+        assert_eq!(decision, Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn an_owner_whose_name_has_quotes_is_that_name_and_no_other() {
+        let actor = spawn_policy_actor().await;
+        load(&actor, BASELINE).await;
+        let secret = r#"Secret::"s""#;
+        let tricky = r#"a"b\c"#;
+        assert_eq!(
+            ask_with(
+                &actor,
+                tricky,
+                r#"Action::"retrieve""#,
+                secret,
+                owned_by(tricky)
+            )
+            .await,
+            Decision::Allow
+        );
+        assert_eq!(
+            ask_with(
+                &actor,
+                "a",
+                r#"Action::"retrieve""#,
+                secret,
+                owned_by(tricky)
+            )
+            .await,
+            Decision::NotDetermined
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rule_can_be_limited_in_time_by_the_actors_own_clock() {
+        let actor = spawn_policy_actor().await;
+        load(
+            &actor,
+            r#"
+            permit (principal == Identity::"early", action, resource) when { context.now_secs < 1000 };
+            permit (principal == Identity::"late", action, resource) when { context.now_secs > 1000 };
+            "#,
+        )
+        .await;
+        let go = |who: &'static str| {
+            let actor = actor.clone();
+            async move {
+                ask_with(
+                    &actor,
+                    who,
+                    r#"Action::"retrieve""#,
+                    r#"Secret::"s""#,
+                    Facts::default(),
+                )
+                .await
+            }
+        };
+        assert_eq!(go("late").await, Decision::Allow);
+        assert_eq!(go("early").await, Decision::NotDetermined);
     }
 }

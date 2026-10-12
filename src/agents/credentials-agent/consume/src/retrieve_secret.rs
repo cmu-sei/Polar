@@ -86,6 +86,20 @@ impl RetrieveSecretHandler {
             }
         };
 
+        // The ledger's own record of the secret: its owner is what policy speaks of. Whether it exists is
+        // not said to anyone policy does not permit, since an absent secret simply has no owner and every
+        // refusal below is the same reply.
+        let stored = match call_check_secret(&self.ledger, &request.name).await {
+            Ok(stored) => stored,
+            Err(e) => {
+                error!("Failed to check stored secret {}: {e}", request.name);
+                return RetrieveSecretReply::Failed { detail: e };
+            }
+        };
+        let facts = polar_policy::Facts {
+            owner: stored.as_ref().map(|s| s.stored_by.clone()),
+        };
+
         // No decision (the policy is not running yet, or failed) is never a grant.
         let decision = match self
             .policy
@@ -94,6 +108,7 @@ impl RetrieveSecretHandler {
                 Some(requester_certificate.certificate_pem.clone()),
                 r#"Action::"retrieve""#,
                 &format!(r#"Secret::"{}""#, request.name),
+                facts,
             )
             .await
         {
@@ -133,14 +148,10 @@ impl RetrieveSecretHandler {
             }
         };
 
-        let stored_secret = match call_check_secret(&self.ledger, &request.name).await {
-            Ok(Some(secret)) => secret,
-            Ok(None) => return RetrieveSecretReply::NotFound,
-            Err(e) => {
-                error!("Failed to check stored secret {}: {e}", request.name);
-                return RetrieveSecretReply::Failed { detail: e };
-            }
+        let Some(stored) = stored else {
+            return RetrieveSecretReply::NotFound;
         };
+        let stored_secret = stored.secret;
 
         // The decrypted plaintext is Zeroizing: wiped the instant re-encryption completes, never left
         // to an ordinary drop.
@@ -188,10 +199,10 @@ pub(crate) async fn call_check_certificate(
     }
 }
 
-async fn call_check_secret(
+pub(crate) async fn call_check_secret(
     ledger: &ActorRef<LedgerMessage>,
     name: &str,
-) -> Result<Option<EscrowedSecret>, String> {
+) -> Result<Option<crate::state::StoredSecret>, String> {
     match ractor::rpc::call(
         ledger,
         |reply| LedgerMessage::CheckSecret {
@@ -344,13 +355,30 @@ pub(crate) mod tests {
         name: &str,
         plaintext: &[u8],
     ) {
+        store_secret_by(
+            ledger,
+            escrow_keypair,
+            name,
+            plaintext,
+            "some-storing-agent",
+        )
+        .await
+    }
+
+    pub(crate) async fn store_secret_by(
+        ledger: &ActorRef<LedgerMessage>,
+        escrow_keypair: &EscrowKeypair,
+        name: &str,
+        plaintext: &[u8],
+        stored_by: &str,
+    ) {
         let secret = EscrowedSecret::encrypt(plaintext, escrow_keypair.public_key_pem()).unwrap();
         append(
             ledger,
             CredentialsEvent::SecretStored {
                 name: name.to_string(),
                 secret,
-                stored_by: "some-storing-agent".to_string(),
+                stored_by: stored_by.to_string(),
                 timestamp: 1000,
             },
         )
@@ -411,6 +439,70 @@ pub(crate) mod tests {
             }
             other => panic!("expected Found, got {other:?}"),
         }
+    }
+
+    /// The first policy of a cluster (`infra/seeds/signed`): an owner may retrieve what it escrowed, and a frozen
+    /// secret is retrievable by nobody.
+    const BASELINE: &str = include_str!("../../../../../infra/seeds/signed/policy.cedar");
+
+    async fn baseline_world() -> World {
+        let mut w = world(None).await;
+        w.handler.policy = registered_policy(Some(BASELINE.to_string())).await;
+        w
+    }
+
+    #[tokio::test]
+    async fn under_the_first_policy_an_agent_retrieves_what_it_escrowed_itself() {
+        let w = baseline_world().await;
+        seed_mtls_certificate(&w.ledger, "git-repo-observer").await;
+        let key = seed_escrow_certificate(&w.ledger, "git-repo-observer").await;
+        store_secret_by(
+            &w.ledger,
+            &w.escrow_keypair,
+            "github-sei",
+            b"token",
+            "git-repo-observer",
+        )
+        .await;
+        match w
+            .handler
+            .handle(request("github-sei"), Some("git-repo-observer".into()))
+            .await
+        {
+            RetrieveSecretReply::Found { secret } => {
+                assert_eq!(&*secret.decrypt(&key).unwrap(), b"token")
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn under_the_first_policy_another_agents_secret_is_denied_the_same_as_one_that_is_not_there()
+     {
+        let w = baseline_world().await;
+        seed_mtls_certificate(&w.ledger, "intruder").await;
+        seed_escrow_certificate(&w.ledger, "intruder").await;
+        store_secret_by(
+            &w.ledger,
+            &w.escrow_keypair,
+            "github-sei",
+            b"token",
+            "git-repo-observer",
+        )
+        .await;
+        let theirs = w
+            .handler
+            .handle(request("github-sei"), Some("intruder".into()))
+            .await;
+        let absent = w
+            .handler
+            .handle(request("never-stored"), Some("intruder".into()))
+            .await;
+        assert!(
+            matches!(theirs, RetrieveSecretReply::Denied { .. }),
+            "{theirs:?}"
+        );
+        assert_eq!(theirs, absent);
     }
 
     #[tokio::test]

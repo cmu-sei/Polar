@@ -121,6 +121,14 @@ pub struct AccountCertificateRecord {
     pub revoked_at: Option<i64>,
 }
 
+/// A secret as the ledger holds it: the ciphertext, and the identity that escrowed it, which is the owner
+/// policy speaks of. Both are the ledger's word; nothing a request says changes either.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredSecret {
+    pub secret: credentials_agent_common::escrow_secret::EscrowedSecret,
+    pub stored_by: String,
+}
+
 /// The Credentials Agent's derived state -- entirely a function of
 /// folding `credentials_agent_common::events::CredentialsEvent`
 /// through `apply()`, in order, from an empty state. Never itself
@@ -152,7 +160,7 @@ pub struct CredentialsState {
     /// same name overwrites the entry here (derived state only; the
     /// event log itself never rewrites history, so the superseded
     /// EscrowedSecret remains recoverable by replay regardless).
-    stored_secrets: HashMap<String, credentials_agent_common::escrow_secret::EscrowedSecret>,
+    stored_secrets: HashMap<String, StoredSecret>,
 
     /// Every currently-issued agent escrow-identity certificate,
     /// keyed on identity alone -- see AgentEscrowCertificateRecord's
@@ -330,12 +338,23 @@ impl CredentialsState {
             CredentialsEvent::AuthorityPublished { sequence, .. } => {
                 self.last_authority_sequence = self.last_authority_sequence.max(*sequence);
             }
-            CredentialsEvent::SecretStored { name, secret, .. } => {
+            CredentialsEvent::SecretStored {
+                name,
+                secret,
+                stored_by,
+                ..
+            } => {
                 // Overwrites any prior entry for this name -- the
                 // event log itself still holds the superseded
                 // SecretStored event in full, so nothing is ever
                 // truly lost, only no longer current.
-                self.stored_secrets.insert(name.clone(), secret.clone());
+                self.stored_secrets.insert(
+                    name.clone(),
+                    StoredSecret {
+                        secret: secret.clone(),
+                        stored_by: stored_by.clone(),
+                    },
+                );
             }
             CredentialsEvent::AgentEscrowIssuanceCompleted {
                 identity,
@@ -494,10 +513,7 @@ impl CredentialsState {
     /// The current, escrowed secret stored under `name`, if any --
     /// always the most recently stored one; a superseded prior value
     /// remains in the event log but is no longer returned here.
-    pub fn secret_for(
-        &self,
-        name: &str,
-    ) -> Option<&credentials_agent_common::escrow_secret::EscrowedSecret> {
+    pub fn secret_for(&self, name: &str) -> Option<&StoredSecret> {
         self.stored_secrets.get(name)
     }
 
@@ -568,6 +584,33 @@ impl CredentialsState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stored_secret_remembers_who_stored_it_and_a_later_store_replaces_both() {
+        let keypair = crate::escrow::tests::test_keypair();
+        let stored = |by: &str, plaintext: &[u8]| CredentialsEvent::SecretStored {
+            name: "github-sei".to_string(),
+            secret: credentials_agent_common::escrow_secret::EscrowedSecret::encrypt(
+                plaintext,
+                keypair.public_key_pem(),
+            )
+            .unwrap(),
+            stored_by: by.to_string(),
+            timestamp: 1,
+        };
+        let mut state = CredentialsState::default();
+        assert!(state.secret_for("github-sei").is_none());
+        state.apply(&stored("git-repo-observer", b"one"));
+        assert_eq!(
+            state.secret_for("github-sei").unwrap().stored_by,
+            "git-repo-observer"
+        );
+        state.apply(&stored("someone-else", b"two"));
+        assert_eq!(
+            state.secret_for("github-sei").unwrap().stored_by,
+            "someone-else"
+        );
+    }
 
     fn grant(identity: &str) -> CredentialsEvent {
         CredentialsEvent::Grant {

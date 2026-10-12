@@ -1448,6 +1448,7 @@ mod tests {
         );
         let decision = ractor::call!(rig.resources.authority.policy(), |reply| {
             polar_policy::PolicyMessage::CheckAuthorization {
+                facts: Default::default(),
                 requester_identity: "alice".to_string(),
                 requester_certificate_pem: None,
                 action: r#"Action::"anything""#.to_string(),

@@ -441,6 +441,7 @@ mod tests {
         // And this agent's own policy actor now decides by it, the same as everyone's.
         let decision = ractor::call!(rig.local.policy(), |reply| {
             polar_policy::PolicyMessage::CheckAuthorization {
+                facts: Default::default(),
                 requester_identity: "alice".to_string(),
                 requester_certificate_pem: None,
                 action: r#"Action::"retrieve""#.to_string(),

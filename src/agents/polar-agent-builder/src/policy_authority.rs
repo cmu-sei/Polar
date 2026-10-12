@@ -64,6 +64,7 @@ pub async fn admit(
             continue;
         };
         let answer = ractor::call!(policy, |reply| PolicyMessage::CheckAuthorization {
+            facts: Default::default(),
             requester_identity: request.principal.clone(),
             requester_certificate_pem: Some(request.certificate_pem.clone()),
             action,
