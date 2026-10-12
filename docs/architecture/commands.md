@@ -151,6 +151,24 @@ dangerous.
 - `--scaffold` and the typed templates: the `commands` section.
 - `polar-sign`: build and sign a command from the template.
 
+## Built so far (2026-10-11)
+
+The verifier, `CommandVerifier` in `polar-agent-builder/src/command.rs`, which `UpdateVerifier::commands()` gives
+with the same trust, clock, revocation and agent and its own authority (`c:run-command`). It runs checks 1 to 4
+above (layout and signature, `type` is `command`, the payload read strictly, addressed to this agent), then the
+authority, the revocation hook, and the time. The time rules are a pure function, `check_window`: a window that
+contradicts itself (expires before it is issued, starts before it is issued, starts at or after it expires) or is
+longer than a ceiling (a day by default) is refused before the clock is looked at; then, **the start is lenient
+by the skew** (a clock a little behind does not refuse a command that is due, and a command issued in the future
+beyond the skew is refused) and **expiry is strict** (at `not_after` it may run, a second later it may not,
+whatever the skew). The payload is read strictly: exactly its fields, an `id` and a name of a sound shape,
+arguments of text or whole numbers only (no boolean, float, null or nesting), at most 32 of at most 4096 bytes,
+and `not_after` required. A float cannot be in a signed payload at all: the signer refuses it.
+
+Not built: the declaration of commands in the schema export, the agent's own checks (declared, arguments, seen,
+exclusive, draining), the handler registration, the outcome announcements, the scheduler's ledger and the
+unanswered sweep, the repository transport, and `polar-sign`.
+
 ## Build order, tests first
 
 1. The command verifier and the time rules as pure functions: a window, skew at both ends, a missing

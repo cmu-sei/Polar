@@ -25,6 +25,8 @@ pub mod capability;
 pub use capability::Capability;
 pub mod configuration;
 pub use configuration::{ConfigChanged, ConfigurationHandle};
+pub mod command;
+pub use command::{CommandVerifier, VerifiedCommand};
 pub mod crypto;
 pub mod environment;
 pub use crypto::{CryptoClient, CryptoHandle};

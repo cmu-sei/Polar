@@ -43,6 +43,9 @@ pub enum Rejection {
         wanted: &'static str,
         got: String,
     },
+    /// A command that is not within its time: it has expired, has not started, or claims a window that
+    /// is inconsistent or too long. Only commands have one.
+    Window(crate::command::WindowError),
     /// Signed for a different agent.
     WrongTarget {
         wanted: String,
@@ -67,6 +70,7 @@ impl std::fmt::Display for Rejection {
             Rejection::WrongType { wanted, got } => {
                 write!(f, "a `{got}` document, and a `{wanted}` is expected here")
             }
+            Rejection::Window(e) => write!(f, "outside its time: {e}"),
             Rejection::WrongTarget { wanted, got } => {
                 write!(f, "signed for `{got}`, and this agent is `{wanted}`")
             }
@@ -129,28 +133,95 @@ impl Revocation for NoRevocation {
 
 type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
-pub struct UpdateVerifier {
-    trust: Trust,
-    authority: Arc<dyn Authority>,
+/// What every kind of signed document is checked against, shared so that a configuration and a command are
+/// held to the same trust, the same clock and the same revocation: the pinned CA, who revokes, which agent
+/// this is, and what time it is.
+#[derive(Clone)]
+pub(crate) struct Common {
+    trust: Arc<Trust>,
     revocation: Arc<dyn Revocation>,
-    agent: String,
+    pub(crate) agent: String,
     clock: Clock,
+}
+
+impl Common {
+    pub(crate) fn now(&self) -> i64 {
+        (self.clock)()
+    }
+
+    pub(crate) fn set_revocation(&mut self, revocation: Arc<dyn Revocation>) {
+        self.revocation = revocation;
+    }
+
+    /// The first stage of every document: it has exactly its two fields, and the signature holds (the chain
+    /// to the pinned CA, the certificate's validity and use, the signature over the payload). Until it has,
+    /// nothing in the payload is to be believed.
+    pub(crate) fn signed(&self, document: &Value) -> Result<(Document, SignerInfo), Rejection> {
+        let document = Document::from_value(document).map_err(Rejection::Layout)?;
+        let signer = polar_signing::verify(&document, &self.trust, self.now())
+            .map_err(Rejection::Signature)?;
+        Ok((document, signer))
+    }
+
+    /// What kind of document this says it is, and a refusal if it is not `wanted`.
+    pub(crate) fn expect_kind(
+        &self,
+        document: &Document,
+        wanted: &'static str,
+    ) -> Result<(), Rejection> {
+        let kind = document
+            .payload
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Rejection::Payload("the payload has no text `type`".to_string()))?;
+        if kind != wanted {
+            return Err(Rejection::WrongType {
+                wanted,
+                got: kind.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_target(&self, got: String) -> Result<(), Rejection> {
+        if got != self.agent {
+            return Err(Rejection::WrongTarget {
+                wanted: self.agent.clone(),
+                got,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_not_revoked(&self, signer: &SignerInfo) -> Result<(), Rejection> {
+        if self.revocation.is_revoked(signer) {
+            return Err(Rejection::Revoked(signer.serial.clone()));
+        }
+        Ok(())
+    }
+}
+
+pub struct UpdateVerifier {
+    pub(crate) common: Common,
+    authority: Arc<dyn Authority>,
 }
 
 impl UpdateVerifier {
     /// Verifies for `agent` against `trust`, accepting signers who hold `c:update-policy`.
     pub fn new(trust: Trust, agent: impl Into<String>) -> Self {
         Self {
-            trust,
+            common: Common {
+                trust: Arc::new(trust),
+                revocation: Arc::new(NoRevocation),
+                agent: agent.into(),
+                clock: Arc::new(|| {
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0)
+                }),
+            },
             authority: Arc::new(RequireCapability::update_policy()),
-            revocation: Arc::new(NoRevocation),
-            agent: agent.into(),
-            clock: Arc::new(|| {
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0)
-            }),
         }
     }
 
@@ -160,13 +231,13 @@ impl UpdateVerifier {
     }
 
     pub fn with_revocation(mut self, revocation: Arc<dyn Revocation>) -> Self {
-        self.revocation = revocation;
+        self.common.revocation = revocation;
         self
     }
 
     /// For tests, which check at a time of their own choosing.
     pub fn with_clock(mut self, clock: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
-        self.clock = Arc::new(clock);
+        self.common.clock = Arc::new(clock);
         self
     }
 
@@ -187,37 +258,19 @@ impl UpdateVerifier {
     }
 
     pub fn verify(&self, document: &Value) -> Result<Verified, Rejection> {
-        let document = Document::from_value(document).map_err(Rejection::Layout)?;
-        let signer = polar_signing::verify(&document, &self.trust, (self.clock)())
-            .map_err(Rejection::Signature)?;
+        let (document, signer) = self.common.signed(document)?;
 
         // The signature held, so the payload is what the signer wrote. Now read it: first what kind of
         // document it is, since a command or an admission is not a configuration whatever else it says.
-        let kind = document
-            .payload
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Rejection::Payload("the payload has no text `type`".to_string()))?;
-        if kind != document_type::CONFIGURATION {
-            return Err(Rejection::WrongType {
-                wanted: document_type::CONFIGURATION,
-                got: kind.to_string(),
-            });
-        }
+        self.common
+            .expect_kind(&document, document_type::CONFIGURATION)?;
         let payload: Payload = serde_json::from_value(document.payload.clone())
             .map_err(|e| Rejection::Payload(e.to_string()))?;
-        if payload.target.agent != self.agent {
-            return Err(Rejection::WrongTarget {
-                wanted: self.agent.clone(),
-                got: payload.target.agent,
-            });
-        }
+        self.common.check_target(payload.target.agent)?;
         self.authority
             .authorize(&signer, &document.payload)
             .map_err(Rejection::Unauthorized)?;
-        if self.revocation.is_revoked(&signer) {
-            return Err(Rejection::Revoked(signer.serial.clone()));
-        }
+        self.common.check_not_revoked(&signer)?;
         Ok(Verified {
             id: payload.id,
             version: payload.version,
@@ -436,7 +489,10 @@ mod tests {
             let mut payload = payload();
             payload["type"] = bad;
             let doc = document(&rig, Spec::default(), payload);
-            assert!(matches!(rig.verifier.verify(&doc), Err(Rejection::Payload(_))));
+            assert!(matches!(
+                rig.verifier.verify(&doc),
+                Err(Rejection::Payload(_))
+            ));
         }
         let mut payload = payload();
         payload.as_object_mut().unwrap().remove("type");
