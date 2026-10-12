@@ -42,7 +42,12 @@ authoritative update is accepted, an **event is raised** to every consumer of it
    a way through.
 6. **`c:update-groups`** is a capability of its own, authoring group membership: not `c:grant` (which gives an
    identity permissions) and not `c:update-policy` (which writes the rules). **Built.**
-7. **Cadence.** The credentials agent republishes the current policy and principal data every half hour, or when
+7. **Policy and groups are authored by capability alone.** The `policy` and `groups` documents are checked
+   against `c:update-policy` and `c:update-groups` and nothing else, always. Cedar never governs its own
+   authorship, which avoids a mistaken `forbid` locking out every author and a rule admitting someone to write
+   rules. A policy author is demoted by revoking their certificate, which the update signal makes immediate at
+   the leaves. (David, 2026-10-12.)
+8. **Cadence.** The credentials agent republishes the current policy and principal data every half hour, or when
    something that must be known changes, whichever comes first, and the half-hour timer restarts whenever an update
    is pushed. Changes set the cadence, and agents rejuvenate often enough that a quiet cluster repairs itself
    at registration.
@@ -150,16 +155,10 @@ or read `principal.capabilities`).
 6. The seed policy and permissions in the schedules repository, and a cluster test: a demotion reaches a leaf and
    is refused there within a second.
 
-## Questions (open)
+## Question (open)
 
 1. **Which key signs?** The key every agent can fetch from the credentials agent is its **escrow** key, an RSA key
    used for encryption (agents encrypt secrets to it; it is held in the credentials agent's process). Signing with
    the same RSA key is possible (RSASSA-PSS) but it is generally better not to use one key for both encrypting and
    signing. The alternative: the credentials agent holds a separate RSA **signing** keypair, published by the same
    query beside the escrow key, with the same custody. RSA either way. Which?
-2. **Who may author the policy and groups documents themselves?** Cedar governs everything else. If it also governed
-   who may write policy, a mistaken `forbid` could lock out every policy author, and a `permit` could admit someone
-   to write policy, which is circular. The proposal: the `policy` and `groups` documents are checked against the
-   certificate capability alone (`c:update-policy`, `c:update-groups`), always; Cedar never governs its own authorship.
-   A policy author is demoted by revoking their certificate, which the same signal makes immediate at the leaves.
-   Agree?
