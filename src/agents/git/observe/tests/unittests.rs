@@ -3,9 +3,9 @@
  * ============================
  */
 
+use git_agent_common::{GitHttpCredential, RepoObservationConfig};
 use git_repo_observer::*;
 use git2::{Commit, CredentialType, Oid, Repository};
-use git_agent_common::{GitHttpCredential, RepoObservationConfig};
 use polar::graph::nodes::git::RepoId;
 use std::collections::HashMap;
 use std::sync::Arc;

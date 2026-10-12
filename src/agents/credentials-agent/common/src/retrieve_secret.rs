@@ -43,12 +43,16 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub struct RetrieveSecretRequest {
     pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub enum RetrieveSecretReply {
     Found {
         secret: crate::escrow_secret::EscrowedSecret,
@@ -73,7 +77,16 @@ pub enum RetrieveSecretReply {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    Archive,
+    SerdeDeserialize,
+    SerdeSerialize,
 )]
 pub enum RetrieveRefusalReason {
     /// The publish carrying this request opted out of sharing its

@@ -126,10 +126,7 @@ impl HandshakeClient {
     /// `ca_path` unset: the degraded self-bootstrap mode. Fetch the CA
     /// once from `GET /ca` without verifying the server, then trust only
     /// what came back.
-    pub async fn for_trust_mode(
-        base_url: String,
-        ca_path: Option<&str>,
-    ) -> Result<Self, String> {
+    pub async fn for_trust_mode(base_url: String, ca_path: Option<&str>) -> Result<Self, String> {
         let pem = match ca_path {
             Some(path) => std::fs::read(path)
                 .map_err(|e| format!("reading CA certificate from {path}: {e}"))?,
@@ -184,7 +181,10 @@ impl HandshakeClient {
         if !response.status().is_success() {
             return Err(format!("GET /ca returned {}", response.status()));
         }
-        response.text().await.map_err(|e| format!("reading /ca body: {e}"))
+        response
+            .text()
+            .await
+            .map_err(|e| format!("reading /ca body: {e}"))
     }
 
     /// Execute the issuance handshake: POST the CSR with the SA token
@@ -343,6 +343,10 @@ mod identity_build_tests {
             identity.as_bytes(),
         );
 
-        assert!(built.is_ok(), "client with identity did not build: {:?}", built.err());
+        assert!(
+            built.is_ok(),
+            "client with identity did not build: {:?}",
+            built.err()
+        );
     }
 }

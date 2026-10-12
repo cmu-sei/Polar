@@ -21,21 +21,21 @@ use polar::Supervisor;
 use polar::SupervisorMessage;
 use polar::cassini::TcpClient;
 use polar::graph::controller::{GraphControllerActor, GraphControllerMsg};
-use polar::polar_health::{HealthCheckActor, HealthCheckArgs, HealthCheckMessage, DepCertEndpoint};
-use std::sync::Arc;
+use polar::polar_health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use ractor::Actor;
 use ractor::ActorCell;
 use ractor::ActorProcessingErr;
-use ractor::concurrency::Duration;
 use ractor::ActorRef;
+use ractor::OutputPort;
 use ractor::SupervisionEvent;
 use ractor::async_trait;
+use ractor::concurrency::Duration;
+use std::sync::Arc;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
 use tracing::{instrument, trace};
-use ractor::OutputPort;
 
 pub struct ConsumerSupervisor;
 
@@ -212,7 +212,9 @@ impl Actor for ConsumerSupervisor {
                     info!("Initializing agent.");
                     let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
 
-                    let graph_signal_port = std::sync::Arc::new(ractor::OutputPort::<polar::graph::controller::GraphSignal>::default());
+                    let graph_signal_port = std::sync::Arc::new(ractor::OutputPort::<
+                        polar::graph::controller::GraphSignal,
+                    >::default());
                     graph_signal_port.subscribe(myself.clone(), |signal| {
                         Some(SupervisorMessage::GraphSignal(signal))
                     });
@@ -254,17 +256,21 @@ impl Actor for ConsumerSupervisor {
                 }
                 ClientEvent::TransportError { reason } => {
                     warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
-                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
+                    let _ = state
+                        .healthcheck
+                        .cast(HealthCheckMessage::CassiniDisconnected);
                 }
                 ClientEvent::ControlResponse { .. } => {}
                 _ => (),
-            }
+            },
             SupervisorMessage::GraphSignal(signal) => match signal {
                 polar::graph::controller::GraphSignal::Available => {
                     let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
                 }
                 polar::graph::controller::GraphSignal::OpFailed(reason) => {
-                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphOpFailed(reason));
+                    let _ = state
+                        .healthcheck
+                        .cast(HealthCheckMessage::GraphOpFailed(reason));
                 }
             },
             SupervisorMessage::ForceExit => {

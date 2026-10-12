@@ -172,14 +172,19 @@ impl PolicyActor {
     /// source: "JSON null, which is never valid"). `target` is
     /// therefore omitted entirely when absent -- a real Cedar policy
     /// can check for it with `has`, rather than ever receiving null.
-    fn permission_to_json(permission: &cert_issuer_common::permission::Permission) -> serde_json::Value {
+    fn permission_to_json(
+        permission: &cert_issuer_common::permission::Permission,
+    ) -> serde_json::Value {
         let mut attrs = serde_json::Map::new();
         attrs.insert(
             "scope".to_string(),
             serde_json::Value::String(format!("{:?}", permission.scope)),
         );
         if let Some(target) = &permission.target {
-            attrs.insert("target".to_string(), serde_json::Value::String(target.clone()));
+            attrs.insert(
+                "target".to_string(),
+                serde_json::Value::String(target.clone()),
+            );
         }
         serde_json::Value::Object(attrs)
     }
@@ -239,7 +244,9 @@ impl PolicyActor {
         let request = Request::new(principal_uid, action_uid, resource_uid, context, None)
             .map_err(|e| PolicyError::RequestConstruction(e.to_string()))?;
 
-        let response = state.authorizer.is_authorized(&request, policy_set, &entities);
+        let response = state
+            .authorizer
+            .is_authorized(&request, policy_set, &entities);
 
         Ok(response.decision().into())
     }
@@ -268,13 +275,9 @@ mod tests {
 
     async fn spawn_policy_actor() -> ActorRef<PolicyMessage> {
         let permissions_actor = spawn_permissions_actor().await;
-        let (actor, _) = Actor::spawn(
-            None,
-            PolicyActor,
-            PolicyActorArgs { permissions_actor },
-        )
-        .await
-        .unwrap();
+        let (actor, _) = Actor::spawn(None, PolicyActor, PolicyActorArgs { permissions_actor })
+            .await
+            .unwrap();
         actor
     }
 
@@ -439,13 +442,9 @@ mod tests {
         })
         .unwrap();
 
-        let (actor, _) = Actor::spawn(
-            None,
-            PolicyActor,
-            PolicyActorArgs { permissions_actor },
-        )
-        .await
-        .unwrap();
+        let (actor, _) = Actor::spawn(None, PolicyActor, PolicyActorArgs { permissions_actor })
+            .await
+            .unwrap();
 
         let policy = r#"
             permit(

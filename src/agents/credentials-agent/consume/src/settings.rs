@@ -9,9 +9,7 @@ use crate::account::DEFAULT_BOOTSTRAP_IDENTITY;
 use crate::credential::KUBERNETES_ISSUERS_DEFAULT;
 use crate::escrow::CREDENTIALS_ESCROW_KEY_PATH_DEFAULT;
 use cassini_client::environment::{TLS_CLIENT_CERT, TLS_CLIENT_KEY};
-use polar_env::{
-    Config, ConfigError, Defaulted, Described, Env, Optional, Required, Section,
-};
+use polar_env::{Config, ConfigError, Defaulted, Described, Env, Optional, Required, Section};
 
 pub const CREDENTIALS_EVENT_LOG_PATH_DEFAULT: &str = "/var/lib/credentials-agent/events.jsonl";
 
@@ -200,9 +198,15 @@ mod tests {
         assert_eq!(settings.cert_issuer_url, "https://cert-issuer");
         assert_eq!(settings.ca_cert, None);
         assert_eq!(settings.event_log_path, CREDENTIALS_EVENT_LOG_PATH_DEFAULT);
-        assert_eq!(settings.escrow_key_path, CREDENTIALS_ESCROW_KEY_PATH_DEFAULT);
+        assert_eq!(
+            settings.escrow_key_path,
+            CREDENTIALS_ESCROW_KEY_PATH_DEFAULT
+        );
         assert_eq!(settings.bootstrap_identity, DEFAULT_BOOTSTRAP_IDENTITY);
-        assert_eq!(settings.kubernetes_issuers, vec![KUBERNETES_ISSUERS_DEFAULT]);
+        assert_eq!(
+            settings.kubernetes_issuers,
+            vec![KUBERNETES_ISSUERS_DEFAULT]
+        );
         assert_eq!(settings.introspection, None);
         assert_eq!(settings.own_cert_path, "/c/cert.pem");
         assert_eq!(settings.own_key_path, "/c/key.pem");
@@ -234,7 +238,10 @@ mod tests {
             ("CREDENTIALS_AGENT_CA_CERT", "/etc/polar-ca/ca.pem"),
             ("CREDENTIALS_EVENT_LOG_PATH", "/data/events.jsonl"),
             ("CREDENTIALS_ESCROW_KEY_PATH", "/data/escrow.pem"),
-            ("CREDENTIALS_AGENT_BOOTSTRAP_IDENTITY", "system:serviceaccount:x:y"),
+            (
+                "CREDENTIALS_AGENT_BOOTSTRAP_IDENTITY",
+                "system:serviceaccount:x:y",
+            ),
             (
                 "CREDENTIALS_AGENT_KUBERNETES_ISSUERS",
                 "https://a.example.com, https://b.example.com",
@@ -254,7 +261,10 @@ mod tests {
     #[test]
     fn introspection_is_off_without_its_settings() {
         let all = ConsumerSettings::read(&config(&with(&[
-            ("CREDENTIALS_AGENT_INTROSPECTION_ENDPOINT", "https://idp/introspect"),
+            (
+                "CREDENTIALS_AGENT_INTROSPECTION_ENDPOINT",
+                "https://idp/introspect",
+            ),
             ("CREDENTIALS_AGENT_INTROSPECTION_CLIENT_ID", "agent"),
             ("CREDENTIALS_AGENT_INTROSPECTION_CLIENT_SECRET", "s3cret"),
         ])))
@@ -272,7 +282,10 @@ mod tests {
     #[test]
     fn a_partial_introspection_setting_is_a_problem_that_names_what_is_missing() {
         let problems = config(&with(&[
-            ("CREDENTIALS_AGENT_INTROSPECTION_ENDPOINT", "https://idp/introspect"),
+            (
+                "CREDENTIALS_AGENT_INTROSPECTION_ENDPOINT",
+                "https://idp/introspect",
+            ),
             ("CREDENTIALS_AGENT_INTROSPECTION_CLIENT_ID", "agent"),
         ]))
         .check();

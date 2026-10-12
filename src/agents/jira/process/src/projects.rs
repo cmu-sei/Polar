@@ -48,10 +48,7 @@ fn build_ops_for_projects(projects: &[JiraProject]) -> GraphOp {
             }
             .into_key();
             let props = vec![
-                Property(
-                    "name".into(),
-                    GraphValue::String(project.name.to_string()),
-                ),
+                Property("name".into(), GraphValue::String(project.name.to_string())),
                 Property("key".into(), GraphValue::String(project.key.to_string())),
                 Property(
                     "projectTypeKey".into(),

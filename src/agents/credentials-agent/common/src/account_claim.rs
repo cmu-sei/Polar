@@ -21,7 +21,9 @@ use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 /// How the claimant proves who they are.
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub enum Claimant {
     /// A native user: username and email must match what the admin
     /// provisioned. There is no out-of-band secret.
@@ -39,18 +41,33 @@ pub enum AccountRequest {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
 pub enum AccountReply {
     /// Reply to Begin: build the CSR with this as its SAN.
-    Offered { account_id: String },
+    Offered {
+        account_id: String,
+    },
     /// Reply to Complete.
     Issued {
         certificate_pem: String,
         ca_chain_pem: String,
     },
-    Refused { reason: AccountRefusal },
+    Refused {
+        reason: AccountRefusal,
+    },
 }
 
 /// Deliberately coarse: a native claim that matches nothing doesn't say
 /// whether the username or the email was wrong.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Archive,
+    Serialize,
+    Deserialize,
+    SerdeSerialize,
+    SerdeDeserialize,
+)]
 pub enum AccountRefusal {
     /// No pending provisioning matches the claimant.
     NoMatchingProvisioning,

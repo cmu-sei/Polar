@@ -21,8 +21,7 @@
    DM24-0470
 */
 use crate::{
-    Command, JiraDeployment, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
-    publish_data,
+    Command, JiraDeployment, JiraObserverArgs, JiraObserverMessage, JiraObserverState, publish_data,
 };
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraField, JsonString};
@@ -312,7 +311,10 @@ mod tests {
         });
 
         assert!(rename_fields(&mut issue, &names()));
-        assert_eq!(issue["fields"], json!({ "Sprint": "S1", "Summary": "hello" }));
+        assert_eq!(
+            issue["fields"],
+            json!({ "Sprint": "S1", "Summary": "hello" })
+        );
     }
 
     #[test]

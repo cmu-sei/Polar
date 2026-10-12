@@ -19,7 +19,9 @@
 //! from a colocated orchestrator — without rewriting the
 //! validation logic.
 
-use crate::handler::{Handler, HandlerBody, HandlerResponse, ValidateHandlerBody, ValidateHandlerResponse};
+use crate::handler::{
+    Handler, HandlerBody, HandlerResponse, ValidateHandlerBody, ValidateHandlerResponse,
+};
 use axum::Router;
 use axum::extract::{Extension, Json, State};
 use axum::http::{HeaderMap, StatusCode};

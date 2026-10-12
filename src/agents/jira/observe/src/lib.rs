@@ -196,9 +196,7 @@ impl JiraObserverState {
 
         let status = response.status();
         if !status.is_success() {
-            return Err(ActorProcessingErr::from(format!(
-                "{url} returned {status}"
-            )));
+            return Err(ActorProcessingErr::from(format!("{url} returned {status}")));
         }
 
         response.json::<T>().await.map_err(|e| {

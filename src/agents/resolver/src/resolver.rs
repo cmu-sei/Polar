@@ -51,7 +51,8 @@ impl ResolverAgent {
 
         debug!("Attempting to resolve image: {image_ref}");
         let reference = Reference::from_str(image_ref)?;
-        let auth = auth::registry_auth(state.docker_config.as_deref(), reference.resolve_registry())?;
+        let auth =
+            auth::registry_auth(state.docker_config.as_deref(), reference.resolve_registry())?;
 
         match state.oci_client.pull_manifest(&reference, &auth).await {
             Ok(response) => Ok(Some(response)),
@@ -170,7 +171,11 @@ mod tests {
             ("polar-nu-init:latest", None),
             ("ubuntu", None),
         ] {
-            assert_eq!(ResolverAgent::registry_from_image_ref(uri).as_deref(), registry, "{uri}");
+            assert_eq!(
+                ResolverAgent::registry_from_image_ref(uri).as_deref(),
+                registry,
+                "{uri}"
+            );
         }
     }
 }

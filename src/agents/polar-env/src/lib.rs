@@ -50,8 +50,8 @@ mod var;
 pub use config::{Config, ConfigBuilder, ConfigError, Resolved, Source};
 #[cfg(feature = "document")]
 pub use document::{
-    from_environment, DocSection, DocValue, DocVariable, Document, DocumentError, FileEnv,
-    CONFIG_PATH_VARIABLE, FORMAT as DOCUMENT_FORMAT,
+    CONFIG_PATH_VARIABLE, DocSection, DocValue, DocVariable, Document, DocumentError,
+    FORMAT as DOCUMENT_FORMAT, FileEnv, from_environment,
 };
 pub use env::{Env, ProcessEnv};
 pub use error::{EnvError, Problem};

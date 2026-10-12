@@ -122,11 +122,10 @@ pub fn verify(signed: &SignedAdminAction, author_cert_pem: &str) -> Result<(), S
     }
     match info.alg {
         Alg::Ed25519 => {
-            let bytes: [u8; 32] = info
-                .public_key
-                .as_slice()
-                .try_into()
-                .map_err(|_| SigningError::BadCertificate("Ed25519 key is not 32 bytes".into()))?;
+            let bytes: [u8; 32] =
+                info.public_key.as_slice().try_into().map_err(|_| {
+                    SigningError::BadCertificate("Ed25519 key is not 32 bytes".into())
+                })?;
             let key = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
                 .map_err(|e| SigningError::BadCertificate(e.to_string()))?;
             let signature = ed25519_dalek::Signature::from_slice(&signed.signature)
@@ -191,7 +190,10 @@ mod tests {
         let (cert, key) = identity(&PKCS_ED25519);
         let mut signed = sign(&body(), &cert, &key).unwrap();
         signed.payload[0] ^= 0xff;
-        assert!(matches!(verify(&signed, &cert), Err(SigningError::BadSignature)));
+        assert!(matches!(
+            verify(&signed, &cert),
+            Err(SigningError::BadSignature)
+        ));
     }
 
     #[test]

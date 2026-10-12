@@ -1,5 +1,6 @@
 use crate::graph::controller::{
-    GraphNodeKey, GraphOp, GraphValue, IntoGraphKey, Property, handle_op, validate_cypher_identifier, CypherIdentifierError, DynamicNodeKey, handle_query,
+    CypherIdentifierError, DynamicNodeKey, GraphNodeKey, GraphOp, GraphValue, IntoGraphKey,
+    Property, handle_op, handle_query, validate_cypher_identifier,
 };
 use crate::graph::nodes::builds::{BackendJobIdentity, BuildNodeKey};
 
@@ -172,7 +173,9 @@ async fn dynamic_node_key_construction_rejects_unsafe_label() {
 
 #[tokio::test]
 async fn backend_job_identity_construction_rejects_unsafe_input() {
-    assert!(BackendJobIdentity::new("GitLabRunner", vec![("runner_id".into(), "42".into())]).is_ok());
+    assert!(
+        BackendJobIdentity::new("GitLabRunner", vec![("runner_id".into(), "42".into())]).is_ok()
+    );
     assert!(
         BackendJobIdentity::new("}) DROP //", vec![("runner_id".into(), "42".into())]).is_err()
     );
@@ -927,10 +930,7 @@ async fn raw_merge_write_rejects_disallowed_keywords_before_touching_the_graph()
             },
         )
         .await;
-        assert!(
-            result.is_err(),
-            "expected rejection for: {dangerous}"
-        );
+        assert!(result.is_err(), "expected rejection for: {dangerous}");
     }
 
     assert_eq!(

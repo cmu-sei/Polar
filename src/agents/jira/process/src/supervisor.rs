@@ -11,8 +11,8 @@ use polar::graph::controller::{
     GraphController, GraphControllerActor, GraphControllerArgs, GraphSignal,
 };
 use polar_agent_builder::{
-    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent, InfrastructureSupervisorMessage,
-    Subscription,
+    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
+    InfrastructureSupervisorMessage, Subscription,
 };
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;

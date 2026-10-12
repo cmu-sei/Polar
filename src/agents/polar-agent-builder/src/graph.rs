@@ -95,7 +95,8 @@ impl Drain {
     pub fn complete(&self, infrastructure: &ActorRef<InfrastructureSupervisorMessage>) {
         if self.rejuvenating {
             info!("domain shutdown complete, releasing infrastructure");
-            if let Err(e) = infrastructure.cast(InfrastructureSupervisorMessage::ProceedWithShutdown)
+            if let Err(e) =
+                infrastructure.cast(InfrastructureSupervisorMessage::ProceedWithShutdown)
             {
                 error!("could not tell infrastructure to proceed ({e}); exiting now");
                 std::process::exit(1);

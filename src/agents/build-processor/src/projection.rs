@@ -6,7 +6,7 @@ use polar::{
             GraphController, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
             rel::{BUILT_BY, IS},
         },
-        nodes::builds::{BuildNodeKey,BackendJobIdentity},
+        nodes::builds::{BackendJobIdentity, BuildNodeKey},
         nodes::git::GitNodeKey,
     },
 };

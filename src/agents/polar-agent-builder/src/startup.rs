@@ -53,7 +53,10 @@ impl PrepareError {
     pub(crate) fn message(&self) -> String {
         match self {
             PrepareError::Unsound(problems) => {
-                format!("this agent's environment is not sound: {}", problems.join("; "))
+                format!(
+                    "this agent's environment is not sound: {}",
+                    problems.join("; ")
+                )
             }
             PrepareError::Mismatch(message) => message.clone(),
         }

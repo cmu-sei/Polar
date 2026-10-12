@@ -1,13 +1,23 @@
 // Graph node keys (processor‑specific)
 #[derive(Debug, Clone)]
 pub enum ScheduleKey {
-    Permanent { agent_id: String },
-    Adhoc { agent_type: String },
-    Ephemeral { agent_type: String },
+    Permanent {
+        agent_id: String,
+    },
+    Adhoc {
+        agent_type: String,
+    },
+    Ephemeral {
+        agent_type: String,
+    },
     /// A signed configuration item (see docs/architecture/scheduling-kinds.md), keyed by its id.
-    Configuration { id: String },
+    Configuration {
+        id: String,
+    },
     /// What an agent did with a configuration document: one node per outcome, kept as a trail.
-    ConfigurationOutcome { key: String },
+    ConfigurationOutcome {
+        key: String,
+    },
 }
 
 impl crate::graph::controller::GraphNodeKey for ScheduleKey {
@@ -44,9 +54,15 @@ mod tests {
 
     fn keys() -> Vec<ScheduleKey> {
         vec![
-            ScheduleKey::Permanent { agent_id: "a".into() },
-            ScheduleKey::Adhoc { agent_type: "t".into() },
-            ScheduleKey::Ephemeral { agent_type: "t".into() },
+            ScheduleKey::Permanent {
+                agent_id: "a".into(),
+            },
+            ScheduleKey::Adhoc {
+                agent_type: "t".into(),
+            },
+            ScheduleKey::Ephemeral {
+                agent_type: "t".into(),
+            },
             ScheduleKey::Configuration { id: "i".into() },
             ScheduleKey::ConfigurationOutcome { key: "k".into() },
         ]
@@ -72,7 +88,10 @@ mod tests {
                         name.starts_with(&format!("{variable}_")),
                         "{key:?} with `{variable}` has a parameter named {name}, which {pattern} would not use"
                     );
-                    assert!(pattern.contains(&format!("${name}")), "{pattern} does not use ${name}");
+                    assert!(
+                        pattern.contains(&format!("${name}")),
+                        "{pattern} does not use ${name}"
+                    );
                 }
             }
         }

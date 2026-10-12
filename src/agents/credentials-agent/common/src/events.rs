@@ -39,8 +39,17 @@ use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 /// IssuedInError has no clean RFC 5280 equivalent at all -- noted
 /// honestly rather than forcing a strained mapping.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Archive, SerdeDeserialize,
-    SerdeSerialize, clap::ValueEnum,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    Archive,
+    SerdeDeserialize,
+    SerdeSerialize,
+    clap::ValueEnum,
 )]
 pub enum RevocationReason {
     /// The private key or certificate is suspected or confirmed
@@ -107,8 +116,17 @@ pub enum RevocationReason {
 /// RFC to anchor against -- genuinely Polar-specific, but held to the
 /// same discipline: a deliberately closed set, not free text.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Archive, SerdeDeserialize,
-    SerdeSerialize, clap::ValueEnum,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    Archive,
+    SerdeDeserialize,
+    SerdeSerialize,
+    clap::ValueEnum,
 )]
 pub enum GrantReason {
     /// A new human user being set up for the first time.
@@ -157,7 +175,9 @@ pub enum GrantReason {
 /// automatically on append (when the consumer actually wrote this
 /// entry) -- these can genuinely differ in an async system with real
 /// network/queueing latency between the two.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub enum CredentialsEvent {
     /// Published by an admin's tool to the `credentials-grants` topic.
     /// `target_identity` must be the exact claim value the relevant
@@ -489,7 +509,10 @@ mod tests {
         assert_eq!(original, restored);
     }
 
-    fn recorded(action: crate::admin_action::AdminAction, minted: Option<&str>) -> CredentialsEvent {
+    fn recorded(
+        action: crate::admin_action::AdminAction,
+        minted: Option<&str>,
+    ) -> CredentialsEvent {
         use crate::admin_action::{AdminActionBody, SignedAdminAction};
         let payload = AdminActionBody {
             nonce: "n1".to_string(),
@@ -585,7 +608,10 @@ mod tests {
             }) => {
                 assert_eq!(account_id, "acct-9");
                 assert_eq!(provisioned_by, "admin-acct");
-                assert!(!via_bootstrap, "only the internal bootstrap path may set this");
+                assert!(
+                    !via_bootstrap,
+                    "only the internal bootstrap path may set this"
+                );
                 assert_eq!(capabilities.len(), 1);
             }
             other => panic!("expected AccountProvisioned, got {other:?}"),

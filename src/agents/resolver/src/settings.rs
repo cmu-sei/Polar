@@ -81,7 +81,10 @@ mod tests {
         let settings = ResolverSettings::read(&config(&[])).unwrap();
         assert_eq!(settings.proxy_ca_cert, None);
         assert_eq!(settings.docker_config, None);
-        assert_eq!(settings.insecure_registries, vec![DEFAULT_INSECURE_REGISTRIES.to_string()]);
+        assert_eq!(
+            settings.insecure_registries,
+            vec![DEFAULT_INSECURE_REGISTRIES.to_string()]
+        );
         assert!(config(&[]).check().is_empty());
     }
 
@@ -93,8 +96,14 @@ mod tests {
             ("OCI_INSECURE_REGISTRIES", "10.0.2.2:5000, reg.local:5000"),
         ]))
         .unwrap();
-        assert_eq!(settings.insecure_registries, vec!["10.0.2.2:5000", "reg.local:5000"]);
+        assert_eq!(
+            settings.insecure_registries,
+            vec!["10.0.2.2:5000", "reg.local:5000"]
+        );
         assert_eq!(settings.proxy_ca_cert.as_deref(), Some("/etc/proxy/ca.pem"));
-        assert_eq!(settings.docker_config.as_deref(), Some("/etc/oci-registry-auth"));
+        assert_eq!(
+            settings.docker_config.as_deref(),
+            Some("/etc/oci-registry-auth")
+        );
     }
 }

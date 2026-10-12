@@ -25,7 +25,10 @@ fn test_wire_trace_ctx_create_child() {
 
 #[test]
 fn test_wire_trace_ctx_from_span_context_valid() {
-    let trace_id = TraceId::from_bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    let trace_id = TraceId::from_bytes([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
+    ]);
     let span_id = SpanId::from_bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
     let span_context = SpanContext::new(
         trace_id,
@@ -44,7 +47,10 @@ fn test_wire_trace_ctx_from_span_context_valid() {
 
 #[test]
 fn test_wire_trace_ctx_from_span_context_invalid() {
-    let trace_id = TraceId::from_bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    let trace_id = TraceId::from_bytes([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01,
+    ]);
     let span_id = SpanId::from_bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]);
     let span_context = SpanContext::new(
         trace_id,
@@ -86,7 +92,8 @@ fn test_wire_trace_ctx_to_opentelemetry_context() {
 fn test_wire_trace_ctx_serialize_deserialize() {
     let original = WireTraceCtx::new_for_message();
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
-    let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
+    let deserialized: WireTraceCtx =
+        rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
 
     assert_eq!(original.trace_id, deserialized.trace_id);
     assert_eq!(original.span_id, deserialized.span_id);
@@ -108,7 +115,8 @@ fn test_wire_trace_ctx_serde_serialize_deserialize() {
 fn test_wire_trace_ctx_rkyv_roundtrip() {
     let original = WireTraceCtx::new_for_message();
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
-    let deserialized: WireTraceCtx = rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
+    let deserialized: WireTraceCtx =
+        rkyv::from_bytes::<WireTraceCtx, rkyv::rancor::Error>(&bytes).unwrap();
 
     // Verify roundtrip produces identical output
     assert_eq!(original.trace_id, deserialized.trace_id);

@@ -61,8 +61,8 @@ use crate::config::IssuerConfig;
 use dashmap::DashMap;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -185,14 +185,23 @@ impl Validator {
         // still governed by each fetch's own server max-age / clamp,
         // same as v1.
         let cache = JwksCache::new(
-            issuers.first().map(|c| c.jwks_cache_ttl_min).unwrap_or(Duration::from_secs(300)),
-            issuers.first().map(|c| c.jwks_cache_ttl_max).unwrap_or(Duration::from_secs(3600)),
+            issuers
+                .first()
+                .map(|c| c.jwks_cache_ttl_min)
+                .unwrap_or(Duration::from_secs(300)),
+            issuers
+                .first()
+                .map(|c| c.jwks_cache_ttl_max)
+                .unwrap_or(Duration::from_secs(3600)),
         );
 
         let mut allowed_algorithms = HashMap::new();
         let mut issuer_map = HashMap::new();
         for cfg in issuers {
-            allowed_algorithms.insert(cfg.issuer.clone(), parse_allowed_algorithms(&cfg.allowed_algorithms));
+            allowed_algorithms.insert(
+                cfg.issuer.clone(),
+                parse_allowed_algorithms(&cfg.allowed_algorithms),
+            );
             issuer_map.insert(cfg.issuer.clone(), cfg);
         }
 
@@ -341,7 +350,11 @@ impl Validator {
         let mut validation = Validation::new(header.alg);
         validation.set_issuer(&[&issuer_cfg.issuer]);
         validation.set_audience(
-            &issuer_cfg.audience.iter().map(|s| s.as_str()).collect::<Vec<_>>()
+            &issuer_cfg
+                .audience
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>(),
         );
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
         // We don't tighten `validation.algorithms` further here

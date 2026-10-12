@@ -29,9 +29,7 @@ mod publish;
 use cert_issuer_common::capability::Capability;
 use cert_issuer_common::permission::Permission;
 use clap::{Parser, Subcommand};
-use credentials_agent_common::admin_action::{
-    AdminAction, AdminActionBody, AdminActionReply,
-};
+use credentials_agent_common::admin_action::{AdminAction, AdminActionBody, AdminActionReply};
 use credentials_agent_common::admin_signing;
 use credentials_agent_common::events::{GrantReason, RevocationReason};
 use std::path::PathBuf;
@@ -245,7 +243,9 @@ fn action_from_command(command: Command) -> AdminAction {
             telephone_number,
         },
         Command::BootstrapCa { .. } | Command::Bootstrap { .. } | Command::Claim { .. } => {
-            unreachable!("bootstrap, bootstrap-ca and claim are not admin actions; run() dispatches them first")
+            unreachable!(
+                "bootstrap, bootstrap-ca and claim are not admin actions; run() dispatches them first"
+            )
         }
     }
 }

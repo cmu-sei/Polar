@@ -38,11 +38,11 @@
 use crate::ca::{CaClient, CaError, CaIssueRequest};
 use crate::csr;
 use crate::oidc::{ValidationError, Validator};
-use cert_issuer_common::{
-    InternalIssueRequest, IssueError, IssueOutcome, IssueRequest, IssueResponse,
-    identity::normalize_identity, ValidateRequest,
-};
 use cert_issuer_common::ValidateResponse;
+use cert_issuer_common::{
+    InternalIssueRequest, IssueError, IssueOutcome, IssueRequest, IssueResponse, ValidateRequest,
+    identity::normalize_identity,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, instrument, warn};
@@ -382,7 +382,7 @@ impl Handler {
     /// it has anything to embed into a CSR's SAN set, since permitted
     /// SANs come from the grant, not known upfront.
     #[instrument(skip_all)]
-        pub async fn handle_validate(
+    pub async fn handle_validate(
         &self,
         bearer_token: &str,
         request: ValidateRequest,
@@ -561,7 +561,9 @@ fn validate_account_subject(subject: &cert_issuer_common::AccountSubject) -> Res
         || email.starts_with('@')
         || email.ends_with('@')
     {
-        return Err("email must be ASCII, without whitespace, with exactly one interior '@'".to_string());
+        return Err(
+            "email must be ASCII, without whitespace, with exactly one interior '@'".to_string(),
+        );
     }
     Ok(())
 }

@@ -10,7 +10,9 @@ use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use sha2::{Digest, Sha256};
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub enum AdminAction {
     ProvisionAccount {
         username: String,
@@ -39,13 +41,17 @@ pub enum AdminAction {
 /// What is actually signed. The nonce makes two otherwise-identical
 /// actions (grant, revoke, grant again) distinct, so hash-based replay
 /// refusal never blocks a legitimate repeat.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub struct AdminActionBody {
     pub nonce: String,
     pub action: AdminAction,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub struct SignedAdminAction {
     /// rkyv bytes of an `AdminActionBody`. Kept as raw bytes so the
     /// signature never depends on re-serialization.
@@ -99,24 +105,34 @@ impl AdminAction {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub enum AdminActionReply {
     /// Verified and recorded on the ledger.
     Recorded,
-    Refused { reason: AdminActionRefusal },
+    Refused {
+        reason: AdminActionRefusal,
+    },
     /// The action was valid, but a real infrastructure failure (the
     /// ledger append) prevented recording it. Retrying may succeed.
-    Failed { detail: String },
+    Failed {
+        detail: String,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub enum AdminActionRefusal {
     /// No account certificate with the claimed serial is on the ledger.
     UnknownAuthor,
     AuthorRevoked,
     BadSignature,
     MalformedPayload,
-    MissingCapability { required: Capability },
+    MissingCapability {
+        required: Capability,
+    },
     /// This exact signed payload was already recorded.
     Replay,
     /// The username already belongs to an account with a valid certificate.
@@ -165,7 +181,9 @@ mod tests {
     #[test]
     fn signed_action_round_trips_through_rkyv_and_json() {
         let original = signed(&body("n1"));
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap().to_vec();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original)
+            .unwrap()
+            .to_vec();
         let from_rkyv = rkyv::from_bytes::<SignedAdminAction, rkyv::rancor::Error>(&bytes).unwrap();
         assert_eq!(from_rkyv, original);
         let from_json: SignedAdminAction =
@@ -175,17 +193,27 @@ mod tests {
 
     #[test]
     fn identical_actions_with_different_nonces_have_different_hashes() {
-        assert_ne!(signed(&body("n1")).payload_hash(), signed(&body("n2")).payload_hash());
+        assert_ne!(
+            signed(&body("n1")).payload_hash(),
+            signed(&body("n2")).payload_hash()
+        );
     }
 
     #[test]
     fn same_payload_hashes_the_same() {
-        assert_eq!(signed(&body("n1")).payload_hash(), signed(&body("n1")).payload_hash());
+        assert_eq!(
+            signed(&body("n1")).payload_hash(),
+            signed(&body("n1")).payload_hash()
+        );
     }
 
     #[test]
     fn garbage_payload_is_a_decode_error_not_a_panic() {
-        let bad = SignedAdminAction { payload: vec![9, 9, 9], author_serial: String::new(), signature: vec![] };
+        let bad = SignedAdminAction {
+            payload: vec![9, 9, 9],
+            author_serial: String::new(),
+            signature: vec![],
+        };
         assert!(bad.decode_body().is_err());
     }
 
@@ -200,7 +228,10 @@ mod tests {
             Capability::Revoke
         );
         assert_eq!(
-            AdminAction::PolicyUpdate { document: String::new() }.required_capability(),
+            AdminAction::PolicyUpdate {
+                document: String::new()
+            }
+            .required_capability(),
             Capability::UpdatePolicy
         );
         assert_eq!(

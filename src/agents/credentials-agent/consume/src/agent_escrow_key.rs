@@ -120,11 +120,9 @@ mod tests {
     fn real_self_signed_cert_pem() -> String {
         let mut rng = rand::rng();
         let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
-            &private_key,
-            rsa::pkcs8::LineEnding::LF,
-        )
-        .unwrap();
+        let private_key_pem =
+            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&private_key, rsa::pkcs8::LineEnding::LF)
+                .unwrap();
         let key_pair = rcgen::KeyPair::from_pem(&private_key_pem).unwrap();
         let params =
             rcgen::CertificateParams::new(vec!["git-observer.polar.svc.cluster.local".to_string()])

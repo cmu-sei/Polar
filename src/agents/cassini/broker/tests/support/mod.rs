@@ -306,9 +306,8 @@ where
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     let _only = serial().await;
-    let broker = Arc::new(
-        TestBroker::start_guarded(None, Duration::from_secs(20), Some(token)).await,
-    );
+    let broker =
+        Arc::new(TestBroker::start_guarded(None, Duration::from_secs(20), Some(token)).await);
     let outcome = tokio::spawn(test(broker.clone())).await;
     broker.stop().await;
     if let Err(failure) = outcome {

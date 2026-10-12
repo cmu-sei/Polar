@@ -117,19 +117,17 @@ impl Actor for RouterActor {
                     state.registrations.insert(topic, deliver);
                 }
             }
-            RouterMessage::Route(incoming) => {
-                match state.registrations.get(&incoming.topic) {
-                    Some(deliver) => deliver(incoming),
-                    None => {
-                        warn!(
-                            "RouterActor: no registered handler for topic '{}' ({} bytes), \
+            RouterMessage::Route(incoming) => match state.registrations.get(&incoming.topic) {
+                Some(deliver) => deliver(incoming),
+                None => {
+                    warn!(
+                        "RouterActor: no registered handler for topic '{}' ({} bytes), \
                              dropping",
-                            incoming.topic,
-                            incoming.payload.len()
-                        );
-                    }
+                        incoming.topic,
+                        incoming.payload.len()
+                    );
                 }
-            }
+            },
         }
         Ok(())
     }
@@ -177,7 +175,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let got = received.lock().unwrap().clone();
-        assert!(got.is_some(), "the registered closure must have genuinely received the message");
+        assert!(
+            got.is_some(),
+            "the registered closure must have genuinely received the message"
+        );
         assert_eq!(got.unwrap().payload, b"hello");
     }
 
@@ -188,7 +189,10 @@ mod tests {
         // No registration at all -- must not panic, just log and
         // drop, matching this crate's own, documented behavior.
         router
-            .send_message(RouterMessage::Route(test_message("never-registered", b"orphaned")))
+            .send_message(RouterMessage::Route(test_message(
+                "never-registered",
+                b"orphaned",
+            )))
             .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

@@ -60,7 +60,9 @@ pub fn agent_escrow_keypair_secret_name(identity: &str) -> String {
     format!("agent-escrow-keypair:{identity}")
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub struct RetrieveAgentEscrowKeypairRequest {
     /// This agent's own, throwaway X25519 public key, generated
     /// solely for this one exchange -- see ephemeral_exchange.rs's
@@ -68,7 +70,9 @@ pub struct RetrieveAgentEscrowKeypairRequest {
     pub ephemeral_public_key: [u8; 32],
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub enum RetrieveAgentEscrowKeypairReply {
     Found {
         payload: crate::ephemeral_exchange::EphemeralEncryptedPayload,
@@ -86,13 +90,20 @@ pub enum RetrieveAgentEscrowKeypairReply {
     /// A real infrastructure failure, mirroring RetrieveSecretReply::
     /// Failed/StoreSecretReply::Failed's own distinction from a
     /// deterministic rejection.
-    Failed {
-        detail: String,
-    },
+    Failed { detail: String },
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    Archive,
+    SerdeDeserialize,
+    SerdeSerialize,
 )]
 pub enum RetrieveAgentEscrowKeypairRefusalReason {
     /// The publish carrying this request opted out of sharing its
@@ -117,7 +128,8 @@ mod tests {
     fn sample_payload() -> EphemeralEncryptedPayload {
         let requester_secret = EphemeralSecret::random();
         let requester_public_key = PublicKey::from(&requester_secret).to_bytes();
-        EphemeralEncryptedPayload::encrypt(b"a real escrowed keypair", &requester_public_key).unwrap()
+        EphemeralEncryptedPayload::encrypt(b"a real escrowed keypair", &requester_public_key)
+            .unwrap()
     }
 
     #[test]
@@ -151,7 +163,8 @@ mod tests {
             .unwrap()
             .to_vec();
         let restored: RetrieveAgentEscrowKeypairRequest =
-            rkyv::from_bytes::<RetrieveAgentEscrowKeypairRequest, rkyv::rancor::Error>(&bytes).unwrap();
+            rkyv::from_bytes::<RetrieveAgentEscrowKeypairRequest, rkyv::rancor::Error>(&bytes)
+                .unwrap();
         assert_eq!(original, restored);
     }
 
@@ -169,7 +182,8 @@ mod tests {
             .unwrap()
             .to_vec();
         let restored_rkyv: RetrieveAgentEscrowKeypairReply =
-            rkyv::from_bytes::<RetrieveAgentEscrowKeypairReply, rkyv::rancor::Error>(&bytes).unwrap();
+            rkyv::from_bytes::<RetrieveAgentEscrowKeypairReply, rkyv::rancor::Error>(&bytes)
+                .unwrap();
         assert_eq!(original, restored_rkyv);
     }
 
@@ -185,7 +199,8 @@ mod tests {
             .unwrap()
             .to_vec();
         let restored_rkyv: RetrieveAgentEscrowKeypairReply =
-            rkyv::from_bytes::<RetrieveAgentEscrowKeypairReply, rkyv::rancor::Error>(&bytes).unwrap();
+            rkyv::from_bytes::<RetrieveAgentEscrowKeypairReply, rkyv::rancor::Error>(&bytes)
+                .unwrap();
         assert_eq!(original, restored_rkyv);
     }
 
@@ -203,7 +218,8 @@ mod tests {
             .unwrap()
             .to_vec();
         let restored_rkyv: RetrieveAgentEscrowKeypairReply =
-            rkyv::from_bytes::<RetrieveAgentEscrowKeypairReply, rkyv::rancor::Error>(&bytes).unwrap();
+            rkyv::from_bytes::<RetrieveAgentEscrowKeypairReply, rkyv::rancor::Error>(&bytes)
+                .unwrap();
         assert_eq!(original, restored_rkyv);
     }
 
@@ -221,7 +237,8 @@ mod tests {
             .unwrap()
             .to_vec();
         let restored_rkyv: RetrieveAgentEscrowKeypairReply =
-            rkyv::from_bytes::<RetrieveAgentEscrowKeypairReply, rkyv::rancor::Error>(&bytes).unwrap();
+            rkyv::from_bytes::<RetrieveAgentEscrowKeypairReply, rkyv::rancor::Error>(&bytes)
+                .unwrap();
         assert_eq!(original, restored_rkyv);
     }
 }

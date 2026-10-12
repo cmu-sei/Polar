@@ -42,14 +42,20 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub struct CertificateRequest {
     pub identity: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub enum CertificateReply {
-    Found { certificate_pem: String },
+    Found {
+        certificate_pem: String,
+    },
     /// Never issued, or its only certificate has since been revoked
     /// -- these two cases are deliberately not distinguished here.
     /// The caller only ever needs "do I have a usable cert to encrypt

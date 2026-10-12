@@ -29,8 +29,8 @@
 
 mod observer_client;
 
-use cert_issuer_common::keypair::{self, KeyAlgorithm};
 use cert_client::output::{self, OutputBundle};
+use cert_issuer_common::keypair::{self, KeyAlgorithm};
 use clap::Parser;
 use credentials_agent_common::identity::IdentityNormalizationReply;
 use credentials_agent_common::issuance::IssuanceReply;

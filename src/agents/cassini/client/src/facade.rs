@@ -664,7 +664,11 @@ mod tests {
         rig.spawner.latest().0.kill();
         tokio::time::sleep(Duration::from_millis(1100)).await;
         assert_eq!(
-            rig.spawner.registration_ids_asked_for.lock().unwrap().last(),
+            rig.spawner
+                .registration_ids_asked_for
+                .lock()
+                .unwrap()
+                .last(),
             Some(&Some("reg-2".to_string()))
         );
     }
@@ -679,7 +683,12 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1100)).await;
         rig.spawner.latest().0.kill();
         tokio::time::sleep(Duration::from_millis(2100)).await;
-        let asked = rig.spawner.registration_ids_asked_for.lock().unwrap().clone();
+        let asked = rig
+            .spawner
+            .registration_ids_asked_for
+            .lock()
+            .unwrap()
+            .clone();
         assert_eq!(asked.last(), Some(&Some("reg-1".to_string())));
     }
 }

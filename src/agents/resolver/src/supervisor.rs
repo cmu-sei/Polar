@@ -5,8 +5,8 @@ use crate::resolver::{ResolverAgent, ResolverAgentState};
 use crate::settings::ResolverSettings;
 use crate::{BROKER_CLIENT_NAME, RESOLVER_SUPERVISOR_NAME};
 use cassini_types::ClientEvent;
-use oci_client::client::{Certificate, CertificateEncoding, ClientConfig, ClientProtocol};
 use oci_client::Client as OciClient;
+use oci_client::client::{Certificate, CertificateEncoding, ClientConfig, ClientProtocol};
 use polar::ProvenanceEvent;
 use polar::cassini::{CassiniClient, UnsubscribeRequest};
 use polar::topics::PROVENANCE_DISCOVERY;
@@ -43,7 +43,10 @@ pub fn client_config(insecure_registries: &[String], certs: Vec<Certificate>) ->
     if certs.is_empty() {
         debug!("Initializing OCI client without extra certificates");
     } else {
-        debug!("Initializing OCI client with {} extra root certificates", certs.len());
+        debug!(
+            "Initializing OCI client with {} extra root certificates",
+            certs.len()
+        );
     }
     ClientConfig {
         protocol: ClientProtocol::HttpsExcept(insecure_registries.to_vec()),
@@ -77,7 +80,10 @@ impl ResolverSupervisor {
             });
         }
 
-        Ok(OciClient::new(client_config(&settings.insecure_registries, certs)))
+        Ok(OciClient::new(client_config(
+            &settings.insecure_registries,
+            certs,
+        )))
     }
 
     /// Decodes what was published on the discovery topic. Anything that does not decode is logged
@@ -114,7 +120,8 @@ impl Actor for ResolverSupervisor {
         let deliver_to = myself.clone();
         let discovery = Subscription::new(PROVENANCE_DISCOVERY, move |incoming| {
             if let Some(event) = Self::decode(&incoming.payload)
-                && let Err(e) = deliver_to.send_message(ResolverSupervisorMessage::Discovered(event))
+                && let Err(e) =
+                    deliver_to.send_message(ResolverSupervisorMessage::Discovered(event))
             {
                 warn!("failed to hand a discovered image to the supervisor: {e}");
             }
@@ -187,7 +194,9 @@ impl Actor for ResolverSupervisor {
                 }
             }
             ResolverSupervisorMessage::PrepareShutdown => {
-                info!("RESOLVER_SUPERVISOR: PrepareShutdown received -- unsubscribing and letting the resolution in flight finish");
+                info!(
+                    "RESOLVER_SUPERVISOR: PrepareShutdown received -- unsubscribing and letting the resolution in flight finish"
+                );
                 state.shutting_down = true;
                 if let Err(e) = state.tcp_client.unsubscribe(UnsubscribeRequest {
                     topic: PROVENANCE_DISCOVERY.to_string(),
@@ -197,7 +206,10 @@ impl Actor for ResolverSupervisor {
                 }
                 if let Some(resolver) = state.resolver.take()
                     && let Err(e) = resolver
-                        .stop_and_wait(Some("supervisor shutting down".into()), Some(IN_FLIGHT_GRACE))
+                        .stop_and_wait(
+                            Some("supervisor shutting down".into()),
+                            Some(IN_FLIGHT_GRACE),
+                        )
                         .await
                 {
                     error!(
@@ -253,10 +265,16 @@ mod tests {
 
     #[test]
     fn registries_named_as_insecure_are_spoken_to_over_http_and_no_other() {
-        let config = client_config(&["10.0.2.2:5000".to_string(), "reg.local:5000".to_string()], Vec::new());
+        let config = client_config(
+            &["10.0.2.2:5000".to_string(), "reg.local:5000".to_string()],
+            Vec::new(),
+        );
         match config.protocol {
             ClientProtocol::HttpsExcept(except) => {
-                assert_eq!(except, vec!["10.0.2.2:5000".to_string(), "reg.local:5000".to_string()])
+                assert_eq!(
+                    except,
+                    vec!["10.0.2.2:5000".to_string(), "reg.local:5000".to_string()]
+                )
             }
             other => panic!("expected https except the named ones, got {other:?}"),
         }
@@ -269,7 +287,10 @@ mod tests {
 
     #[test]
     fn extra_certificates_do_not_change_which_registries_are_insecure() {
-        let cert = Certificate { encoding: CertificateEncoding::Pem, data: b"x".to_vec() };
+        let cert = Certificate {
+            encoding: CertificateEncoding::Pem,
+            data: b"x".to_vec(),
+        };
         let config = client_config(&["10.0.2.2:5000".to_string()], vec![cert]);
         assert_eq!(config.extra_root_certificates.len(), 1);
         assert!(matches!(config.protocol, ClientProtocol::HttpsExcept(ref e) if e.len() == 1));
@@ -292,7 +313,9 @@ mod tests {
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&event).unwrap();
         let decoded = ResolverSupervisor::decode(&bytes).expect("it decodes");
         match decoded {
-            ProvenanceEvent::OCIArtifactDiscovered { uri, .. } => assert_eq!(uri, "ghcr.io/org/app:1"),
+            ProvenanceEvent::OCIArtifactDiscovered { uri, .. } => {
+                assert_eq!(uri, "ghcr.io/org/app:1")
+            }
             other => panic!("expected the discovery, got {other:?}"),
         }
     }

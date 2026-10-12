@@ -9,19 +9,29 @@ use polar::graph::controller::GraphNodeKey;
 /// change what identifies a node, only how that identity is expressed.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum JiraNodeKey {
-    Group { name: String },
-    Project { project_id: String },
-    User { key: String },
+    Group {
+        name: String,
+    },
+    Project {
+        project_id: String,
+    },
+    User {
+        key: String,
+    },
 
     /// The issue itself. Referenced as an edge target by nearly every
     /// other variant here (assignee/reporter/creator, type, project,
     /// parent, changelog entries, and every dynamic custom-field node).
-    Issue { key: String },
+    Issue {
+        key: String,
+    },
 
     /// An issue type (e.g. "Bug", "Story"). Keyed on name -- Jira's
     /// issue type payloads don't reliably include a stable id the way
     /// project references do.
-    IssueType { name: String },
+    IssueType {
+        name: String,
+    },
 
     /// A single changelog entry. Composite-keyed on (base_id, index)
     /// matching the pre-migration code's own identity exactly.
@@ -34,7 +44,10 @@ pub enum JiraNodeKey {
     /// retroactively reordered between two processings of "the same"
     /// history. Preserved as-is rather than redesigned; a genuinely
     /// stable identity here is a separate, bigger question.
-    ChangeLog { base_id: String, index: u32 },
+    ChangeLog {
+        base_id: String,
+        index: u32,
+    },
 }
 
 impl GraphNodeKey for JiraNodeKey {
@@ -79,9 +92,7 @@ impl GraphNodeKey for JiraNodeKey {
                 let bk = format!("{prefix}_base_id");
                 let ik = format!("{prefix}_index");
                 (
-                    format!(
-                        "({prefix}:JiraIssueChangeLog {{ baseId: ${bk}, id: ${ik} }})"
-                    ),
+                    format!("({prefix}:JiraIssueChangeLog {{ baseId: ${bk}, id: ${ik} }})"),
                     vec![
                         (bk, BoltType::String(base_id.clone().into())),
                         (ik, BoltType::Integer((*index as i64).into())),

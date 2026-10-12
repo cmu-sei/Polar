@@ -1,8 +1,8 @@
 pub use cassini_tracing::{init_tracing, shutdown_tracing};
 pub use cassini_tracing::{try_set_parent_otel, try_set_parent_wire};
+mod connect;
 pub mod environment;
 pub mod facade;
-mod connect;
 
 use cassini_types::{ClientEvent, ClientMessage, ControlOp, WireTraceCtx};
 use ractor::concurrency::{Duration, sleep};
@@ -520,7 +520,9 @@ impl TcpClientActor {
             }
         })
         .await
-        .map_err(|last| ActorProcessingErr::from(format!("Failed to connect after retries: {last}")))
+        .map_err(|last| {
+            ActorProcessingErr::from(format!("Failed to connect after retries: {last}"))
+        })
     }
 
     fn spawn_reader(
@@ -538,73 +540,76 @@ impl TcpClientActor {
         let read_loop_span =
             info_span!("cassini.tcp_client.read_loop", broker_addr = %broker_addr,);
 
-        let abort = tokio::spawn(async move {
-            let mut msg_count = 0;
-            let mut buf_reader = tokio::io::BufReader::new(reader);
-            loop {
-                msg_count += 1;
-                trace!("TCP client read loop iteration {}", msg_count);
-                match buf_reader.read_u32().await {
-                    Ok(incoming_msg_length) => {
-                        if incoming_msg_length > 0 {
-                            let mut buffer = vec![0; incoming_msg_length as usize];
+        let abort = tokio::spawn(
+            async move {
+                let mut msg_count = 0;
+                let mut buf_reader = tokio::io::BufReader::new(reader);
+                loop {
+                    msg_count += 1;
+                    trace!("TCP client read loop iteration {}", msg_count);
+                    match buf_reader.read_u32().await {
+                        Ok(incoming_msg_length) => {
+                            if incoming_msg_length > 0 {
+                                let mut buffer = vec![0; incoming_msg_length as usize];
 
-                            trace!("Reading {incoming_msg_length} byte(s).");
-                            if buf_reader.read_exact(&mut buffer).await.is_ok() {
-                                let _fg = trace_span!(
-                                    "tcp_client.read_frame",
-                                    len = incoming_msg_length,
-                                    first_16 = ?&buffer[..buffer.len().min(16)],
-                                )
-                                .entered();
+                                trace!("Reading {incoming_msg_length} byte(s).");
+                                if buf_reader.read_exact(&mut buffer).await.is_ok() {
+                                    let _fg = trace_span!(
+                                        "tcp_client.read_frame",
+                                        len = incoming_msg_length,
+                                        first_16 = ?&buffer[..buffer.len().min(16)],
+                                    )
+                                    .entered();
 
-                                trace!(
-                                    len = incoming_msg_length,
-                                    first_16 = ?&buffer[..buffer.len().min(16)],
-                                    "Received frame"
-                                );
+                                    trace!(
+                                        len = incoming_msg_length,
+                                        first_16 = ?&buffer[..buffer.len().min(16)],
+                                        "Received frame"
+                                    );
 
-                                match rkyv::from_bytes::<ClientMessage, Error>(&buffer) {
-                                    Ok(message) => {
-                                        TcpClientActor::process_client_message(
-                                            myself.clone(),
-                                            &delivery,
-                                            message,
-                                        );
-                                    }
-                                    Err(e) => {
-                                        error!(
-                                            len = buffer.len(),
-                                            first_8 = ?&buffer[..buffer.len().min(8)],
-                                            "{e} Received raw frame"
-                                        );
-                                        continue;
+                                    match rkyv::from_bytes::<ClientMessage, Error>(&buffer) {
+                                        Ok(message) => {
+                                            TcpClientActor::process_client_message(
+                                                myself.clone(),
+                                                &delivery,
+                                                message,
+                                            );
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                len = buffer.len(),
+                                                first_8 = ?&buffer[..buffer.len().min(8)],
+                                                "{e} Received raw frame"
+                                            );
+                                            continue;
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "TCP reader terminating");
-                        let event = ClientEvent::TransportError {
-                            reason: format!("{UNEXPECTED_DISCONNECT} {e}")
-                        };
-                        TcpClientActor::dispatch_event(&delivery, event);
-                        match reconnect {
-                            // Instead of breaking, send Reconnect to self
-                            ReconnectMode::InPlace => {
-                                let _ = myself.send_message(TcpClientMessage::Reconnect);
+                        Err(e) => {
+                            warn!(error = %e, "TCP reader terminating");
+                            let event = ClientEvent::TransportError {
+                                reason: format!("{UNEXPECTED_DISCONNECT} {e}"),
+                            };
+                            TcpClientActor::dispatch_event(&delivery, event);
+                            match reconnect {
+                                // Instead of breaking, send Reconnect to self
+                                ReconnectMode::InPlace => {
+                                    let _ = myself.send_message(TcpClientMessage::Reconnect);
+                                }
+                                // The supervisor brings a new transport; this one is done.
+                                ReconnectMode::LeaveToSupervisor => {
+                                    myself.stop(Some(format!("{UNEXPECTED_DISCONNECT} {e}")));
+                                }
                             }
-                            // The supervisor brings a new transport; this one is done.
-                            ReconnectMode::LeaveToSupervisor => {
-                                myself.stop(Some(format!("{UNEXPECTED_DISCONNECT} {e}")));
-                            }
+                            break;
                         }
-                        break;
                     }
                 }
             }
-        }.instrument(read_loop_span))
+            .instrument(read_loop_span),
+        )
         .abort_handle();
 
         state.abort_handle = Some(abort);
@@ -651,7 +656,10 @@ impl TcpClientActor {
             } => {
                 let span = trace_span!("client.handle_publish_response");
                 if let Some(wire_ctx) = trace_ctx {
-                    tracing::trace!("Received PublishResponse with trace_id: {:02x?}", wire_ctx.trace_id);
+                    tracing::trace!(
+                        "Received PublishResponse with trace_id: {:02x?}",
+                        wire_ctx.trace_id
+                    );
                 }
                 try_set_parent_wire(&span, trace_ctx);
                 let _g = span.enter();
@@ -670,7 +678,11 @@ impl TcpClientActor {
                     warn!("Failed to publish message to topic: {topic}");
                 }
             }
-            ClientMessage::SubscribeAcknowledgment { topic, result, trace_ctx } => {
+            ClientMessage::SubscribeAcknowledgment {
+                topic,
+                result,
+                trace_ctx,
+            } => {
                 let span = trace_span!("client.handle_subscribe_ack");
                 try_set_parent_wire(&span, trace_ctx);
                 let _g = span.enter();
@@ -682,7 +694,11 @@ impl TcpClientActor {
                 }
             }
 
-            ClientMessage::UnsubscribeAcknowledgment { topic, result, trace_ctx } => {
+            ClientMessage::UnsubscribeAcknowledgment {
+                topic,
+                result,
+                trace_ctx,
+            } => {
                 let span = trace_span!("client.handle_unsubscribe_ack");
                 try_set_parent_wire(&span, trace_ctx);
                 let _g = span.enter();
@@ -717,12 +733,19 @@ impl TcpClientActor {
                 let event = ClientEvent::PublishAcknowledged { topic };
                 TcpClientActor::dispatch_event(delivery, event);
             }
-            ClientMessage::ControlResponse { registration_id, result, trace_ctx } => {
+            ClientMessage::ControlResponse {
+                registration_id,
+                result,
+                trace_ctx,
+            } => {
                 let span = trace_span!("client.handle_control_response");
                 try_set_parent_wire(&span, trace_ctx);
                 let _g = span.enter();
 
-                trace!("Received control response for registration: {registration_id}, result: {:?}", result);
+                trace!(
+                    "Received control response for registration: {registration_id}, result: {:?}",
+                    result
+                );
 
                 let current_trace_ctx = WireTraceCtx::from_current_span();
                 let event = ClientEvent::ControlResponse {
@@ -791,7 +814,12 @@ impl TcpClientActor {
         reason: String,
     ) {
         let _g = warn_span!("tcp_client.transport_error", error = %reason).entered();
-        Self::dispatch_event(&state.delivery, ClientEvent::TransportError { reason: reason.clone() });
+        Self::dispatch_event(
+            &state.delivery,
+            ClientEvent::TransportError {
+                reason: reason.clone(),
+            },
+        );
         drop(_g);
         myself.stop(Some(reason));
     }
@@ -1355,7 +1383,13 @@ impl Actor for TcpClientActor {
                         share_identity,
                     } => {
                         self.handle_publish(
-                            myself, state, &reg_id, topic, payload, trace_ctx, share_identity,
+                            myself,
+                            state,
+                            &reg_id,
+                            topic,
+                            payload,
+                            trace_ctx,
+                            share_identity,
                         )
                         .await?;
                     }
@@ -1438,7 +1472,10 @@ mod process_client_message_tests {
         }
     }
 
-    async fn spawn_fake_tcp_client() -> (ActorRef<TcpClientMessage>, Arc<Mutex<Vec<TcpClientMessage>>>) {
+    async fn spawn_fake_tcp_client() -> (
+        ActorRef<TcpClientMessage>,
+        Arc<Mutex<Vec<TcpClientMessage>>>,
+    ) {
         let received = Arc::new(Mutex::new(Vec::new()));
         let (actor, _) = Actor::spawn(
             None,
@@ -1519,7 +1556,12 @@ mod process_client_message_tests {
         let events = captured.lock().unwrap().clone();
         assert_eq!(events.len(), 1, "expected exactly one dispatched event");
         match &events[0] {
-            ClientEvent::MessagePublished { topic, payload, published_by, .. } => {
+            ClientEvent::MessagePublished {
+                topic,
+                payload,
+                published_by,
+                ..
+            } => {
                 assert_eq!(topic, "a-real-topic");
                 assert_eq!(payload, b"real payload");
                 assert_eq!(published_by, &Some("some-agent".to_string()));

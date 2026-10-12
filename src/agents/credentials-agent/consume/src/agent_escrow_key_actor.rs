@@ -26,6 +26,7 @@
 //! identical reason (a genuine ledger RPC needs an async handle()).
 
 use crate::agent_escrow_key::AgentEscrowKeyHandler;
+use crate::supervisor::BROKER_CLIENT_NAME;
 use cassini_client::TcpClientMessage;
 use credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC;
 use credentials_agent_common::agent_escrow_key::AgentEscrowKeyRequest;
@@ -33,7 +34,6 @@ use polar::request_reply::Envelope;
 use ractor::registry::where_is;
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::error;
-use crate::supervisor::BROKER_CLIENT_NAME;
 
 pub struct AgentEscrowKeyActor;
 
@@ -94,7 +94,9 @@ impl Actor for AgentEscrowKeyActor {
                 }
             }
             None => {
-                error!("Broker client not found while attempting to publish agent escrow-key reply");
+                error!(
+                    "Broker client not found while attempting to publish agent escrow-key reply"
+                );
             }
         }
 

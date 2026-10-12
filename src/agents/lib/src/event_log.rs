@@ -38,9 +38,7 @@ pub enum EventLogError {
         #[source]
         source: serde_json::Error,
     },
-    #[error(
-        "failed to deserialize event at line {line} into its expected type: {source}"
-    )]
+    #[error("failed to deserialize event at line {line} into its expected type: {source}")]
     EventDeserialize {
         line: usize,
         #[source]
@@ -68,8 +66,7 @@ pub enum EventLogError {
 
 /// The `prev_hash` used for the very first entry in a log -- there is
 /// no prior entry to chain from.
-const GENESIS_HASH: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// On-disk shape used for writing -- `event: &E`, so append() can hash
 /// and serialize without an extra clone.
@@ -275,8 +272,14 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     enum TestEvent {
-        Grant { identity: String, permissions: Vec<String> },
-        Revoke { serial: String, reason: String },
+        Grant {
+            identity: String,
+            permissions: Vec<String>,
+        },
+        Revoke {
+            serial: String,
+            reason: String,
+        },
     }
 
     #[test]
@@ -508,7 +511,9 @@ mod tests {
         // A stale or corrupted checkpoint pointing at a hash that
         // genuinely isn't in this log at all -- must fail safe to a
         // full catch-up, not silently return nothing or error.
-        let since = log.events_since("some-hash-that-was-never-actually-appended").unwrap();
+        let since = log
+            .events_since("some-hash-that-was-never-actually-appended")
+            .unwrap();
         assert_eq!(since, vec![e1]);
     }
 

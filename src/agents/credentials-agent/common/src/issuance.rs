@@ -78,7 +78,9 @@ pub enum IssuanceReply {
 /// only whether the Kubernetes credential itself validates. Accepted
 /// as-is rather than split into two enums for one context-dependent
 /// variant.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub enum IssuanceRefusalReason {
     TokenInvalid,
     TokenIntrospectionFailed,
@@ -101,7 +103,8 @@ mod tests {
 
     fn sample_request() -> IssuanceRequest {
         IssuanceRequest {
-            csr_pem: "-----BEGIN CERTIFICATE REQUEST-----\n...\n-----END CERTIFICATE REQUEST-----".to_string(),
+            csr_pem: "-----BEGIN CERTIFICATE REQUEST-----\n...\n-----END CERTIFICATE REQUEST-----"
+                .to_string(),
             credential: "some-token-or-k8s-credential".to_string(),
         }
     }

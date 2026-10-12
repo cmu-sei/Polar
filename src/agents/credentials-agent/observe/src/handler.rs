@@ -35,18 +35,18 @@ use axum::response::{IntoResponse, Response};
 use cassini_client::TcpClientMessage;
 use credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC;
-use credentials_agent_common::admin_action::{
-    AdminActionRefusal, AdminActionReply, SignedAdminAction,
-};
-use credentials_agent_common::CREDENTIALS_ISSUANCE_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC;
+use credentials_agent_common::CREDENTIALS_ISSUANCE_REQUESTS_TOPIC;
 use credentials_agent_common::account_claim::{
     AccountRefusal, AccountReply, AccountRequest, Claimant,
 };
-use credentials_agent_common::identity::{
-    IdentityNormalizationReply, IdentityNormalizationRefusalReason, IdentityNormalizationRequest,
+use credentials_agent_common::admin_action::{
+    AdminActionRefusal, AdminActionReply, SignedAdminAction,
 };
-use credentials_agent_common::issuance::{IssuanceReply, IssuanceRefusalReason, IssuanceRequest};
+use credentials_agent_common::identity::{
+    IdentityNormalizationRefusalReason, IdentityNormalizationReply, IdentityNormalizationRequest,
+};
+use credentials_agent_common::issuance::{IssuanceRefusalReason, IssuanceReply, IssuanceRequest};
 use credentials_agent_common::observer::ObserverRejection;
 use polar::request_reply::{Envelope, ReplyError, ReplyRouter};
 use ractor::ActorRef;
@@ -165,7 +165,11 @@ where
         }
         Err(ReplyError::PublishFailed(e)) => {
             error!(%correlation_id, %topic, "failed to publish the {what} request: {e}");
-            Err((StatusCode::SERVICE_UNAVAILABLE, "failed to reach the broker").into_response())
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "failed to reach the broker",
+            )
+                .into_response())
         }
         Err(ReplyError::ChannelClosed) => {
             warn!(%correlation_id, "the reply channel for the {what} request closed with no reply");
@@ -694,8 +698,10 @@ mod tests {
             _state: &mut Self::State,
         ) -> Result<(), ActorProcessingErr> {
             if let TcpClientMessage::Publish { payload, .. } = message
-                && let Ok(envelope) =
-                    rkyv::from_bytes::<Envelope<IdentityNormalizationRequest>, rkyv::rancor::Error>(&payload)
+                && let Ok(envelope) = rkyv::from_bytes::<
+                    Envelope<IdentityNormalizationRequest>,
+                    rkyv::rancor::Error,
+                >(&payload)
             {
                 self.reply_router
                     .deliver(&envelope.correlation_id, self.canned_reply.clone());
@@ -1025,11 +1031,20 @@ mod account_tests {
     async fn each_refusal_maps_to_its_status() {
         for (reason, expected) in [
             (AccountRefusal::TokenInvalid, StatusCode::UNAUTHORIZED),
-            (AccountRefusal::NoMatchingProvisioning, StatusCode::FORBIDDEN),
-            (AccountRefusal::NotTheBootstrapIdentity, StatusCode::FORBIDDEN),
+            (
+                AccountRefusal::NoMatchingProvisioning,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                AccountRefusal::NotTheBootstrapIdentity,
+                StatusCode::FORBIDDEN,
+            ),
             (AccountRefusal::BootstrapAlreadyDone, StatusCode::FORBIDDEN),
             (AccountRefusal::CsrInvalid, StatusCode::BAD_REQUEST),
-            (AccountRefusal::SigningFailed, StatusCode::SERVICE_UNAVAILABLE),
+            (
+                AccountRefusal::SigningFailed,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
             (AccountRefusal::Unavailable, StatusCode::SERVICE_UNAVAILABLE),
         ] {
             let (broker, router) = broker_replying(AccountReply::Refused { reason }).await;
@@ -1083,22 +1098,48 @@ mod admin_action_status_tests {
         for (reply, expected) in [
             (AdminActionReply::Recorded, StatusCode::OK),
             (
-                AdminActionReply::Failed { detail: "x".to_string() },
+                AdminActionReply::Failed {
+                    detail: "x".to_string(),
+                },
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
-            (refused(AdminActionRefusal::UnknownAuthor), StatusCode::UNAUTHORIZED),
-            (refused(AdminActionRefusal::BadSignature), StatusCode::UNAUTHORIZED),
-            (refused(AdminActionRefusal::AuthorRevoked), StatusCode::FORBIDDEN),
-            (refused(AdminActionRefusal::ReservedUsername), StatusCode::FORBIDDEN),
+            (
+                refused(AdminActionRefusal::UnknownAuthor),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                refused(AdminActionRefusal::BadSignature),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                refused(AdminActionRefusal::AuthorRevoked),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                refused(AdminActionRefusal::ReservedUsername),
+                StatusCode::FORBIDDEN,
+            ),
             (
                 refused(AdminActionRefusal::BootstrapCertificateSpent),
                 StatusCode::FORBIDDEN,
             ),
-            (refused(AdminActionRefusal::MalformedPayload), StatusCode::BAD_REQUEST),
+            (
+                refused(AdminActionRefusal::MalformedPayload),
+                StatusCode::BAD_REQUEST,
+            ),
             (refused(AdminActionRefusal::Replay), StatusCode::CONFLICT),
-            (refused(AdminActionRefusal::AccountAlreadyExists), StatusCode::CONFLICT),
-            (refused(AdminActionRefusal::AccountAlreadyPending), StatusCode::CONFLICT),
-            (refused(AdminActionRefusal::NotYetSupported), StatusCode::NOT_IMPLEMENTED),
+            (
+                refused(AdminActionRefusal::AccountAlreadyExists),
+                StatusCode::CONFLICT,
+            ),
+            (
+                refused(AdminActionRefusal::AccountAlreadyPending),
+                StatusCode::CONFLICT,
+            ),
+            (
+                refused(AdminActionRefusal::NotYetSupported),
+                StatusCode::NOT_IMPLEMENTED,
+            ),
         ] {
             let label = format!("{reply:?}");
             assert_eq!(

@@ -31,7 +31,6 @@
 
 use serde::Deserialize;
 
-
 #[derive(Debug, thiserror::Error)]
 pub enum IntrospectionError {
     #[error("introspection endpoint unreachable: {0}")]

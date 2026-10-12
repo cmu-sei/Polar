@@ -84,8 +84,9 @@ mod tests {
 
         let private_key_pem = private_key.to_pkcs8_pem(LineEnding::LF).unwrap();
         let key_pair = rcgen::KeyPair::from_pem(&private_key_pem).unwrap();
-        let params = rcgen::CertificateParams::new(vec!["test.polar.svc.cluster.local".to_string()])
-            .unwrap();
+        let params =
+            rcgen::CertificateParams::new(vec!["test.polar.svc.cluster.local".to_string()])
+                .unwrap();
         let cert = params.self_signed(&key_pair).unwrap();
         let certificate_pem = cert.pem();
 
@@ -97,6 +98,9 @@ mod tests {
     #[test]
     fn malformed_certificate_pem_is_a_real_error_not_a_panic() {
         let result = extract_public_key_pem("not a real certificate");
-        assert!(matches!(result, Err(PublicKeyExtractionError::InvalidPem(_))));
+        assert!(matches!(
+            result,
+            Err(PublicKeyExtractionError::InvalidPem(_))
+        ));
     }
 }

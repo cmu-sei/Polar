@@ -30,7 +30,7 @@
 use cert_client::handshake::HandshakeClient;
 use cert_issuer_common::ValidateRequest;
 use credentials_agent_common::identity::{
-    IdentityNormalizationReply, IdentityNormalizationRefusalReason, IdentityNormalizationRequest,
+    IdentityNormalizationRefusalReason, IdentityNormalizationReply, IdentityNormalizationRequest,
 };
 
 pub struct IdentityNormalizationHandler {
@@ -38,7 +38,10 @@ pub struct IdentityNormalizationHandler {
 }
 
 impl IdentityNormalizationHandler {
-    pub async fn handle(&self, request: IdentityNormalizationRequest) -> IdentityNormalizationReply {
+    pub async fn handle(
+        &self,
+        request: IdentityNormalizationRequest,
+    ) -> IdentityNormalizationReply {
         let result = self
             .cert_issuer
             .validate(

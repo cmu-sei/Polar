@@ -52,7 +52,11 @@ pub static BUILDER: Section = Section {
 /// The sections every agent built by the builder has, whatever it does: the builder's, the
 /// health actor's, and how it logs and traces.
 pub fn base_sections() -> [&'static Section; 3] {
-    [&BUILDER, &polar_health::vars::SECTION, &polar::logging::SECTION]
+    [
+        &BUILDER,
+        &polar_health::vars::SECTION,
+        &polar::logging::SECTION,
+    ]
 }
 
 /// The sections of the components a capability brings. A capability whose components are not

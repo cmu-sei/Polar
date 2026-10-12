@@ -52,7 +52,12 @@ fn filters_parse(env: &dyn polar_env::Env) -> Vec<String> {
             let value = var.read(env).ok()?;
             tracing_subscriber::filter::EnvFilter::try_new(&value)
                 .err()
-                .map(|e| format!("{} is \"{value}\", which is not a log filter: {e}", var.name()))
+                .map(|e| {
+                    format!(
+                        "{} is \"{value}\", which is not a log filter: {e}",
+                        var.name()
+                    )
+                })
         })
         .collect()
 }
@@ -87,7 +92,8 @@ impl LoggingSettings {
             console_filter: filter.clone(),
             trace_filter: filter,
             otlp_endpoint: enabled.then(|| {
-                std::env::var("JAEGER_OTLP_ENDPOINT").unwrap_or_else(|_| DEFAULT_ENDPOINT.to_string())
+                std::env::var("JAEGER_OTLP_ENDPOINT")
+                    .unwrap_or_else(|_| DEFAULT_ENDPOINT.to_string())
             }),
         }
     }
@@ -110,12 +116,15 @@ struct Handles {
 
 static HANDLES: std::sync::OnceLock<Handles> = std::sync::OnceLock::new();
 
-fn reloader<S>(handle: tracing_subscriber::reload::Handle<tracing_subscriber::filter::EnvFilter, S>) -> Reload
+fn reloader<S>(
+    handle: tracing_subscriber::reload::Handle<tracing_subscriber::filter::EnvFilter, S>,
+) -> Reload
 where
     S: 'static,
 {
     Box::new(move |text| {
-        let filter = tracing_subscriber::filter::EnvFilter::try_new(text).map_err(|e| e.to_string())?;
+        let filter =
+            tracing_subscriber::filter::EnvFilter::try_new(text).map_err(|e| e.to_string())?;
         handle.reload(filter).map_err(|e| e.to_string())
     })
 }
@@ -124,7 +133,9 @@ where
 /// when traces are exported. The endpoint cannot change; it is where the exporter was built to
 /// send. Fails, changing nothing, if logging was never set up or a filter does not parse.
 pub fn reload(settings: &LoggingSettings) -> Result<(), String> {
-    let handles = HANDLES.get().ok_or("logging has not been set up in this process")?;
+    let handles = HANDLES
+        .get()
+        .ok_or("logging has not been set up in this process")?;
     // Both parse first, so one bad filter does not leave the other changed.
     for text in [&settings.console_filter, &settings.trace_filter] {
         tracing_subscriber::filter::EnvFilter::try_new(text.as_str())
@@ -163,7 +174,8 @@ pub fn init_with(service_name: String, settings: &LoggingSettings) {
                 .ok()
         });
 
-    let (console_filter, console_handle) = reload::Layer::new(filter_or_default(&settings.console_filter));
+    let (console_filter, console_handle) =
+        reload::Layer::new(filter_or_default(&settings.console_filter));
 
     let (initialised, handles) = if let Some(exporter) = exporter {
         let tracer_provider = trace::SdkTracerProvider::builder()
@@ -285,7 +297,10 @@ mod tests {
         .unwrap();
         assert_eq!(settings.console_filter, "warn,polar=debug");
         assert_eq!(settings.trace_filter, "polar=info");
-        assert_eq!(settings.otlp_endpoint.as_deref(), Some("http://jaeger:4318/v1/traces"));
+        assert_eq!(
+            settings.otlp_endpoint.as_deref(),
+            Some("http://jaeger:4318/v1/traces")
+        );
     }
 
     #[test]

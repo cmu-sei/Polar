@@ -593,9 +593,18 @@ mod token_tests {
     fn the_right_token_matches_and_nothing_else_does() {
         assert!(tokens_match(Some("s3cret"), Some("s3cret")));
         assert!(!tokens_match(Some("s3cret"), Some("s3creT")));
-        assert!(!tokens_match(Some("s3cret"), Some("s3cre")), "a prefix is not it");
-        assert!(!tokens_match(Some("s3cret"), Some("s3crets")), "nor is a longer one");
+        assert!(
+            !tokens_match(Some("s3cret"), Some("s3cre")),
+            "a prefix is not it"
+        );
+        assert!(
+            !tokens_match(Some("s3cret"), Some("s3crets")),
+            "nor is a longer one"
+        );
         assert!(!tokens_match(Some("s3cret"), Some("")));
-        assert!(!tokens_match(Some("s3cret"), None), "none given where one is needed");
+        assert!(
+            !tokens_match(Some("s3cret"), None),
+            "none given where one is needed"
+        );
     }
 }

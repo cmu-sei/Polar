@@ -6,7 +6,11 @@
 //! the health check, the signal listener and the shutdown handshake with its budget and watchdog
 //! come from the builder, and the five-phase drain stays the broker's own.
 
-use crate::{BROKER_NAME, broker::{Broker, BrokerArgs}, settings};
+use crate::{
+    BROKER_NAME,
+    broker::{Broker, BrokerArgs},
+    settings,
+};
 use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
 use polar_env::Section;
 use ractor::Actor;

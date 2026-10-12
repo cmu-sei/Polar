@@ -13,8 +13,7 @@ pub struct CredentialsConsumer;
 
 impl PolarAgent for CredentialsConsumer {
     const NAME: &'static str = "credentials-agent-consumer";
-    const PURPOSE: &'static str =
-        "Issues certificates and keeps the credentials ledger: the cluster's certificate authority front end";
+    const PURPOSE: &'static str = "Issues certificates and keeps the credentials ledger: the cluster's certificate authority front end";
     // The graph is declared as a section of its own, not required as a capability: this agent
     // projects to the graph but its health must not depend on Neo4j (the ledger is its source of
     // truth and the graph only a projection).

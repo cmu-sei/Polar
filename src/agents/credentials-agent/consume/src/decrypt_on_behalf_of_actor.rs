@@ -109,7 +109,9 @@ impl Actor for DecryptOnBehalfOfActor {
                 }
             }
             None => {
-                error!("Broker client not found while attempting to publish decrypt-on-behalf-of reply");
+                error!(
+                    "Broker client not found while attempting to publish decrypt-on-behalf-of reply"
+                );
             }
         }
 

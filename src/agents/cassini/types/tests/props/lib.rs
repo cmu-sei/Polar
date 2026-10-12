@@ -13,10 +13,10 @@ proptest! {
             registration_id: "test-id".to_string(),
             subscriptions: std::collections::HashSet::new(),
         };
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&details).unwrap();
         let deserialized: SessionDetails = rkyv::from_bytes::<SessionDetails, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         // Compare fields individually since PartialEq is not implemented
         prop_assert_eq!(details.registration_id, deserialized.registration_id);
         prop_assert_eq!(details.subscriptions, deserialized.subscriptions);
@@ -28,10 +28,10 @@ proptest! {
             registration_id: "test-id".to_string(),
             subscriptions: std::collections::HashSet::new(),
         };
-        
+
         let json = serde_json::to_string(&details).unwrap();
         let deserialized: SessionDetails = serde_json::from_str(&json).unwrap();
-        
+
         prop_assert_eq!(details.registration_id, deserialized.registration_id);
         prop_assert_eq!(details.subscriptions, deserialized.subscriptions);
     }
@@ -42,10 +42,10 @@ proptest! {
             registration_id: "".to_string(),
             subscriptions: std::collections::HashSet::new(),
         };
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&details).unwrap();
         let deserialized: SessionDetails = rkyv::from_bytes::<SessionDetails, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         prop_assert_eq!(details.registration_id, deserialized.registration_id);
     }
 
@@ -55,10 +55,10 @@ proptest! {
             registration_id: "a".repeat(1000).to_string(),
             subscriptions: std::collections::HashSet::new(),
         };
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&details).unwrap();
         let deserialized: SessionDetails = rkyv::from_bytes::<SessionDetails, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         prop_assert_eq!(details.registration_id, deserialized.registration_id);
     }
 
@@ -68,10 +68,10 @@ proptest! {
             registration_id: String::from_utf8(payload.clone()).unwrap_or_else(|_| "fallback".to_string()),
             subscriptions: std::collections::HashSet::new(),
         };
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&details).unwrap();
         let deserialized: SessionDetails = rkyv::from_bytes::<SessionDetails, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         prop_assert_eq!(details.registration_id, deserialized.registration_id);
     }
 
@@ -81,10 +81,10 @@ proptest! {
             registration_id: String::from_utf8(payload.clone()).unwrap_or_else(|_| "fallback".to_string()),
             subscriptions: std::collections::HashSet::new(),
         };
-        
+
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&details).unwrap();
         let deserialized: SessionDetails = rkyv::from_bytes::<SessionDetails, rkyv::rancor::Error>(&bytes).unwrap();
-        
+
         prop_assert_eq!(details.registration_id, deserialized.registration_id);
     }
 }

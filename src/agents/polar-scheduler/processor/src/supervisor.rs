@@ -100,8 +100,11 @@ pub fn subscriptions(supervisor: &ActorRef<SchedulerSupervisorMessage>) -> Vec<S
                 Err(e) => error!("failed to deserialize an ad-hoc announcement: {e:?}"),
             },
         ),
-        Subscription::new(CONFIGURATION_OUTCOME_TOPIC, move |incoming| {
-            match rkyv::from_bytes::<ConfigurationOutcome, rkyv::rancor::Error>(&incoming.payload) {
+        Subscription::new(
+            CONFIGURATION_OUTCOME_TOPIC,
+            move |incoming| match rkyv::from_bytes::<ConfigurationOutcome, rkyv::rancor::Error>(
+                &incoming.payload,
+            ) {
                 Ok(outcome) => {
                     if let Err(e) = for_outcomes.cast(SchedulerSupervisorMessage::Outcome {
                         outcome,
@@ -111,8 +114,8 @@ pub fn subscriptions(supervisor: &ActorRef<SchedulerSupervisorMessage>) -> Vec<S
                     }
                 }
                 Err(e) => error!("failed to deserialize a configuration outcome: {e:?}"),
-            }
-        }),
+            },
+        ),
     ]
 }
 
@@ -360,7 +363,11 @@ mod tests {
         let topics: Vec<&str> = subs.iter().map(|s| s.topic.as_str()).collect();
         assert_eq!(
             topics,
-            [SCHEDULER_IN_TOPIC, SCHEDULER_ADHOC_TOPIC, CONFIGURATION_OUTCOME_TOPIC]
+            [
+                SCHEDULER_IN_TOPIC,
+                SCHEDULER_ADHOC_TOPIC,
+                CONFIGURATION_OUTCOME_TOPIC
+            ]
         );
 
         let change = rkyv::to_bytes::<rkyv::rancor::Error>(&GitScheduleChange::Delete {
@@ -403,7 +410,11 @@ mod tests {
         tokio::time::sleep(StdDuration::from_millis(100)).await;
         assert_eq!(
             *got.lock().unwrap(),
-            ["change", "announcement", "outcome from the broker's identity"]
+            [
+                "change",
+                "announcement",
+                "outcome from the broker's identity"
+            ]
         );
     }
 }

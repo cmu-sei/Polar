@@ -185,7 +185,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/identity"))
-            .respond_with(ResponseTemplate::new(504).set_body_string("timed out waiting for a reply"))
+            .respond_with(
+                ResponseTemplate::new(504).set_body_string("timed out waiting for a reply"),
+            )
             .mount(&server)
             .await;
 
@@ -200,11 +202,13 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/issue"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(IssuanceReply::Issued {
-                certificate_pem: "fake-cert".to_string(),
-                ca_chain_pem: "fake-chain".to_string(),
-                escrow_public_key_pem: "fake-key".to_string(),
-            }))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(IssuanceReply::Issued {
+                    certificate_pem: "fake-cert".to_string(),
+                    ca_chain_pem: "fake-chain".to_string(),
+                    escrow_public_key_pem: "fake-key".to_string(),
+                }),
+            )
             .mount(&server)
             .await;
 
@@ -219,9 +223,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/issue"))
-            .respond_with(ResponseTemplate::new(403).set_body_json(IssuanceReply::Refused {
-                reason: credentials_agent_common::issuance::IssuanceRefusalReason::NoGrantFound,
-            }))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(IssuanceReply::Refused {
+                    reason: credentials_agent_common::issuance::IssuanceRefusalReason::NoGrantFound,
+                }),
+            )
             .mount(&server)
             .await;
 

@@ -513,12 +513,16 @@ fn running_a_command_needs_its_own_capability_and_update_policy_does_not_give_it
         },
     );
     let who = verify(&only_run, &trust, now()).unwrap();
-    assert!(RequireCapability::update_policy()
-        .authorize(&who, &only_run.payload)
-        .is_err());
-    assert!(RequireCapability::update_configuration()
-        .authorize(&who, &only_run.payload)
-        .is_err());
+    assert!(
+        RequireCapability::update_policy()
+            .authorize(&who, &only_run.payload)
+            .is_err()
+    );
+    assert!(
+        RequireCapability::update_configuration()
+            .authorize(&who, &only_run.payload)
+            .is_err()
+    );
 }
 
 #[test]
@@ -536,20 +540,28 @@ fn changing_configuration_and_changing_policy_are_separate_privileges() {
         },
     );
     let who = verify(&policy_only, &trust, now()).unwrap();
-    assert!(RequireCapability::update_policy()
-        .authorize(&who, &policy_only.payload)
-        .is_ok());
-    assert!(RequireCapability::update_configuration()
-        .authorize(&who, &policy_only.payload)
-        .is_err());
+    assert!(
+        RequireCapability::update_policy()
+            .authorize(&who, &policy_only.payload)
+            .is_ok()
+    );
+    assert!(
+        RequireCapability::update_configuration()
+            .authorize(&who, &policy_only.payload)
+            .is_err()
+    );
 
     // And the other way round.
     let (config_only, _) = signed(&ca, Spec::default());
     let who = verify(&config_only, &trust, now()).unwrap();
-    assert!(RequireCapability::update_configuration()
-        .authorize(&who, &config_only.payload)
-        .is_ok());
-    assert!(RequireCapability::update_policy()
-        .authorize(&who, &config_only.payload)
-        .is_err());
+    assert!(
+        RequireCapability::update_configuration()
+            .authorize(&who, &config_only.payload)
+            .is_ok()
+    );
+    assert!(
+        RequireCapability::update_policy()
+            .authorize(&who, &config_only.payload)
+            .is_err()
+    );
 }

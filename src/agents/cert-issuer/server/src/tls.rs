@@ -47,17 +47,17 @@
 
 use crate::ca::CaClient;
 use cert_issuer_common::CertType;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder;
+use hyper_util::service::TowerToHyperService;
 use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use std::sync::Arc;
-use tokio_rustls::server::TlsStream;
-use tokio::net::TcpStream;
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder;
-use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 use tokio_rustls::TlsAcceptor;
+use tokio_rustls::server::TlsStream;
 use tracing::{debug, warn};
 
 /// Mint cert-issuer's own TLS server certificate from its own
@@ -102,9 +102,10 @@ pub async fn build_server_config(
         .await
         .map_err(|e| format!("failed to self-issue cert-issuer's own TLS cert: {e:?}"))?;
 
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut issued.certificate_pem.as_bytes())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("failed to parse own issued cert PEM: {e}"))?;
+    let certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut issued.certificate_pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("failed to parse own issued cert PEM: {e}"))?;
     let private_key = rustls_pemfile::private_key(&mut csr_output.private_key_pem.as_bytes())
         .map_err(|e| format!("failed to parse own generated key PEM: {e}"))?
         .ok_or_else(|| "no private key found in own generated key PEM".to_string())?;
@@ -143,7 +144,8 @@ pub fn extract_peer_identity(stream: &TlsStream<TcpStream>) -> Option<String> {
     let leaf_cert = peer_certs.first()?;
 
     use x509_parser::prelude::FromDer;
-    let (_, parsed) = match x509_parser::certificate::X509Certificate::from_der(leaf_cert.as_ref()) {
+    let (_, parsed) = match x509_parser::certificate::X509Certificate::from_der(leaf_cert.as_ref())
+    {
         Ok(v) => v,
         Err(e) => {
             warn!(error = ?e, "Failed to parse peer certificate for identity extraction");
@@ -164,7 +166,6 @@ pub fn extract_peer_identity(stream: &TlsStream<TcpStream>) -> Option<String> {
     }
     None
 }
-
 
 /// Serve `app` over TLS, forever. Every connection completes a TLS
 /// handshake; a client certificate is optional (see build_server_config).

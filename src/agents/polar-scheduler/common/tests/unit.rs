@@ -1,9 +1,9 @@
 use polar_scheduler_common::{
-    ScheduleNode, ScheduleKind, ScheduleMetadata, TimeSpec, TimeUnit, Weekday,
-    GitScheduleChange, AdhocAgentAnnouncement, ScheduleNotification,
+    AdhocAgentAnnouncement, GitScheduleChange, ScheduleKind, ScheduleMetadata, ScheduleNode,
+    ScheduleNotification, TimeSpec, TimeUnit, Weekday,
 };
+use rkyv::{from_bytes, to_bytes};
 use serde_json::json;
-use rkyv::{to_bytes, from_bytes};
 
 #[test]
 fn test_serde_time_spec_periodic() {
@@ -301,7 +301,8 @@ fn test_rkyv_git_schedule_change_create() {
         json: r#"{"id": "1"}"#.to_string(),
     };
     let bytes = to_bytes::<rkyv::rancor::Error>(&change).unwrap();
-    let roundtrip: GitScheduleChange = from_bytes::<GitScheduleChange, rkyv::rancor::Error>(&bytes).unwrap();
+    let roundtrip: GitScheduleChange =
+        from_bytes::<GitScheduleChange, rkyv::rancor::Error>(&bytes).unwrap();
     assert_eq!(change, roundtrip);
 }
 
@@ -312,7 +313,8 @@ fn test_rkyv_git_schedule_change_update() {
         json: r#"{"id": "2"}"#.to_string(),
     };
     let bytes = to_bytes::<rkyv::rancor::Error>(&change).unwrap();
-    let roundtrip: GitScheduleChange = from_bytes::<GitScheduleChange, rkyv::rancor::Error>(&bytes).unwrap();
+    let roundtrip: GitScheduleChange =
+        from_bytes::<GitScheduleChange, rkyv::rancor::Error>(&bytes).unwrap();
     assert_eq!(change, roundtrip);
 }
 
@@ -322,7 +324,8 @@ fn test_rkyv_git_schedule_change_delete() {
         path: "schedules/worker.yaml".to_string(),
     };
     let bytes = to_bytes::<rkyv::rancor::Error>(&change).unwrap();
-    let roundtrip: GitScheduleChange = from_bytes::<GitScheduleChange, rkyv::rancor::Error>(&bytes).unwrap();
+    let roundtrip: GitScheduleChange =
+        from_bytes::<GitScheduleChange, rkyv::rancor::Error>(&bytes).unwrap();
     assert_eq!(change, roundtrip);
 }
 
@@ -334,7 +337,8 @@ fn test_rkyv_adhoc_agent_announcement() {
         default_schedule_json: r#"{"id": "1"}"#.to_string(),
     };
     let bytes = to_bytes::<rkyv::rancor::Error>(&announcement).unwrap();
-    let roundtrip: AdhocAgentAnnouncement = from_bytes::<AdhocAgentAnnouncement, rkyv::rancor::Error>(&bytes).unwrap();
+    let roundtrip: AdhocAgentAnnouncement =
+        from_bytes::<AdhocAgentAnnouncement, rkyv::rancor::Error>(&bytes).unwrap();
     assert_eq!(announcement, roundtrip);
 }
 
@@ -345,7 +349,8 @@ fn test_rkyv_schedule_notification_permanent() {
         schedule_json: r#"{"id": "1"}"#.to_string(),
     };
     let bytes = to_bytes::<rkyv::rancor::Error>(&notification).unwrap();
-    let roundtrip: ScheduleNotification = from_bytes::<ScheduleNotification, rkyv::rancor::Error>(&bytes).unwrap();
+    let roundtrip: ScheduleNotification =
+        from_bytes::<ScheduleNotification, rkyv::rancor::Error>(&bytes).unwrap();
     assert_eq!(notification, roundtrip);
 }
 
@@ -356,7 +361,8 @@ fn test_rkyv_schedule_notification_adhoc() {
         schedule_json: r#"{"id": "2"}"#.to_string(),
     };
     let bytes = to_bytes::<rkyv::rancor::Error>(&notification).unwrap();
-    let roundtrip: ScheduleNotification = from_bytes::<ScheduleNotification, rkyv::rancor::Error>(&bytes).unwrap();
+    let roundtrip: ScheduleNotification =
+        from_bytes::<ScheduleNotification, rkyv::rancor::Error>(&bytes).unwrap();
     assert_eq!(notification, roundtrip);
 }
 
@@ -367,6 +373,7 @@ fn test_rkyv_schedule_notification_ephemeral() {
         schedule_json: r#"{"id": "3"}"#.to_string(),
     };
     let bytes = to_bytes::<rkyv::rancor::Error>(&notification).unwrap();
-    let roundtrip: ScheduleNotification = from_bytes::<ScheduleNotification, rkyv::rancor::Error>(&bytes).unwrap();
+    let roundtrip: ScheduleNotification =
+        from_bytes::<ScheduleNotification, rkyv::rancor::Error>(&bytes).unwrap();
     assert_eq!(notification, roundtrip);
 }

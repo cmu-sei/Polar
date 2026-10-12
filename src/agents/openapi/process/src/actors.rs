@@ -6,6 +6,7 @@ use cassini_types::ClientEvent;
 use cassini_types::WireTraceCtx;
 use neo4rs::Graph;
 use neo4rs::Query;
+use openapi_common::AppData;
 use polar::Supervisor;
 use polar::SupervisorMessage;
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
@@ -22,7 +23,6 @@ use tracing::info;
 use tracing::warn;
 use utoipa::openapi::Deprecated;
 use utoipa::openapi::OpenApi;
-use openapi_common::AppData;
 
 const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
 const DRAIN_WINDOW_SECS: u64 = 5;
@@ -184,7 +184,9 @@ impl Actor for ConsumerSupervisor {
                 }
                 ClientEvent::TransportError { reason } => {
                     warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
-                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
+                    let _ = state
+                        .healthcheck
+                        .cast(HealthCheckMessage::CassiniDisconnected);
                 }
                 _ => (),
             },
@@ -219,9 +221,10 @@ impl Actor for ConsumerSupervisor {
                     state.draining = true;
                     info!("entering drain window before exiting for rejuvenation");
                     let _ = myself
-                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                            SupervisorMessage::ForceExit
-                        })
+                        .send_after(
+                            ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS),
+                            || SupervisorMessage::ForceExit,
+                        )
                         .await;
                 }
                 // --- end NEW ---
@@ -241,9 +244,10 @@ impl Actor for ConsumerSupervisor {
                     state.draining = true;
                     warn!("entering drain window before exit");
                     let _ = myself
-                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                            SupervisorMessage::ForceExit
-                        })
+                        .send_after(
+                            ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS),
+                            || SupervisorMessage::ForceExit,
+                        )
                         .await;
                 }
             }

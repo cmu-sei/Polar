@@ -152,10 +152,11 @@ impl EscrowedSecret {
             .map_err(|e| EscrowError::KeyUnwrap(e.to_string()))?;
         let aes_key_bytes = Zeroizing::new(aes_key_bytes);
 
-        let aes_key =
-            AesKey::<Aes256Gcm>::try_from(aes_key_bytes.as_slice()).map_err(|_| EscrowError::MalformedKey)?;
+        let aes_key = AesKey::<Aes256Gcm>::try_from(aes_key_bytes.as_slice())
+            .map_err(|_| EscrowError::MalformedKey)?;
         let cipher = Aes256Gcm::new(&aes_key);
-        let nonce = Nonce::try_from(self.nonce.as_slice()).map_err(|_| EscrowError::MalformedKey)?;
+        let nonce =
+            Nonce::try_from(self.nonce.as_slice()).map_err(|_| EscrowError::MalformedKey)?;
 
         let plaintext = cipher
             .decrypt(&nonce, self.ciphertext.as_slice())
@@ -281,8 +282,7 @@ mod tests {
         let plaintext = b"a real secret, encrypted via the already-parsed-key path";
 
         let secret =
-            EscrowedSecret::encrypt_to_parsed_key(plaintext, &public_key, &public_key_pem)
-                .unwrap();
+            EscrowedSecret::encrypt_to_parsed_key(plaintext, &public_key, &public_key_pem).unwrap();
 
         let decrypted = secret.decrypt(&private_key).unwrap();
         assert_eq!(&*decrypted, plaintext);

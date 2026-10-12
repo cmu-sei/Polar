@@ -50,7 +50,9 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub struct DecryptOnBehalfOfRequest {
     /// The real ciphertext the requester already read directly from
     /// wherever it lives (e.g. a graph node) -- never looked up by
@@ -65,7 +67,9 @@ pub struct DecryptOnBehalfOfRequest {
     pub resource_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub enum DecryptOnBehalfOfReply {
     /// A real, genuine policy decision permitted this -- the same,
     /// real secret, decrypted and immediately re-encrypted to the
@@ -77,9 +81,7 @@ pub enum DecryptOnBehalfOfReply {
     /// verified -- but a real, live PolicyActor decision refused it.
     /// Deliberately, genuinely distinct from Refused below: this is
     /// a real, deliberate policy outcome, not a structural failure.
-    Denied {
-        reason: String,
-    },
+    Denied { reason: String },
     /// Mirrors RetrieveSecretReply::Refused's own, real reasoning
     /// exactly -- a structural failure that happens before policy is
     /// even genuinely consulted.
@@ -88,13 +90,20 @@ pub enum DecryptOnBehalfOfReply {
     },
     /// Mirrors RetrieveSecretReply::Failed's own, real distinction:
     /// not a deterministic rejection retrying would ever fix.
-    Failed {
-        detail: String,
-    },
+    Failed { detail: String },
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    Archive,
+    SerdeDeserialize,
+    SerdeSerialize,
 )]
 pub enum DecryptOnBehalfOfRefusalReason {
     /// Mirrors RetrieveRefusalReason::AnonymousPublisherNotAllowed's

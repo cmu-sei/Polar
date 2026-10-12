@@ -18,7 +18,8 @@ mod tests {
             Some("test-topic-manager".to_string()),
             cassini_broker::topic::TopicManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         Ok(())
     }
@@ -35,7 +36,8 @@ mod tests {
             Some("test-topic-manager-2".to_string()),
             cassini_broker::topic::TopicManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a publish request (this should create the topic if it doesn't exist)
         let msg = BrokerMessage::PublishRequest {
@@ -65,7 +67,8 @@ mod tests {
             Some("test-topic-manager-3".to_string()),
             cassini_broker::topic::TopicManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send initiate shutdown phase message
         let msg = BrokerMessage::InitiateShutdownPhase {

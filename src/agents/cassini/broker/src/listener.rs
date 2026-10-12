@@ -69,14 +69,14 @@ fn extract_peer_identity(stream: &TlsStream<TcpStream>) -> Option<String> {
     let leaf_cert = peer_certs.first()?;
 
     use x509_parser::prelude::FromDer;
-    let (_, parsed) =
-        match x509_parser::certificate::X509Certificate::from_der(leaf_cert.as_ref()) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = ?e, "Failed to parse peer certificate for identity extraction");
-                return None;
-            }
-        };
+    let (_, parsed) = match x509_parser::certificate::X509Certificate::from_der(leaf_cert.as_ref())
+    {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = ?e, "Failed to parse peer certificate for identity extraction");
+            return None;
+        }
+    };
 
     for ext in parsed.extensions() {
         if let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) =
@@ -541,12 +541,14 @@ impl ListenerManager {
         // else keeps it for a while). It used to be sent to the session actor, which does not
         // handle it and logged it as unexpected.
         if let Some(id) = registration_id {
-            let _ = state.session_mgr.send_message(BrokerMessage::DisconnectRequest {
-                reason,
-                client_id: client_id.clone(),
-                registration_id: Some(id),
-                trace_ctx: Some(span.context()),
-            });
+            let _ = state
+                .session_mgr
+                .send_message(BrokerMessage::DisconnectRequest {
+                    reason,
+                    client_id: client_id.clone(),
+                    registration_id: Some(id),
+                    trace_ctx: Some(span.context()),
+                });
         } else {
             warn!("DisconnectRequest missing registration_id");
         }
@@ -857,7 +859,13 @@ impl Actor for Listener {
                 published_by,
             } => {
                 self.handle_publish_response(
-                    myself, state, topic, payload, trace_ctx, result, published_by,
+                    myself,
+                    state,
+                    topic,
+                    payload,
+                    trace_ctx,
+                    result,
+                    published_by,
                 )
                 .await?;
             }

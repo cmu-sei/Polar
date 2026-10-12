@@ -110,9 +110,7 @@ mod tests {
     #[test]
     fn what_is_set_overrides_the_defaults() {
         let mut vars = MINIMUM.to_vec();
-        vars.extend([
-            ("CASSINI_BIND_ADDR", "0.0.0.0:9000"),
-        ]);
+        vars.extend([("CASSINI_BIND_ADDR", "0.0.0.0:9000")]);
         let settings = BrokerSettings::read(&config(&vars)).unwrap();
         assert_eq!(settings.bind_addr, "0.0.0.0:9000");
     }
@@ -126,7 +124,10 @@ mod tests {
             ("TLS_CA_CERT", "clients' certificates"),
             ("CASSINI_SHUTDOWN_TOKEN", "shut down over the wire"),
         ] {
-            assert!(problems.contains(name) && problems.contains(what), "{name}: {problems}");
+            assert!(
+                problems.contains(name) && problems.contains(what),
+                "{name}: {problems}"
+            );
         }
     }
 

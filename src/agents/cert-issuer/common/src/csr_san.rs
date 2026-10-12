@@ -55,8 +55,12 @@ mod tests {
 
     #[test]
     fn a_generated_csr_yields_the_identity_it_was_built_around() {
-        let csr = generate_csr("3f2c9a1e-0000-4000-8000-000000000001", &KeyAlgorithm::Ed25519, &[])
-            .expect("CSR generation succeeds");
+        let csr = generate_csr(
+            "3f2c9a1e-0000-4000-8000-000000000001",
+            &KeyAlgorithm::Ed25519,
+            &[],
+        )
+        .expect("CSR generation succeeds");
         let sans = csr_dns_sans(&csr.csr_pem).expect("the CSR parses");
         assert!(
             sans.contains(&"3f2c9a1e-0000-4000-8000-000000000001".to_string()),
@@ -66,12 +70,8 @@ mod tests {
 
     #[test]
     fn extra_sans_are_reported_too() {
-        let csr = generate_csr(
-            "acct-1",
-            &KeyAlgorithm::EcdsaP256,
-            &["p:u2s".to_string()],
-        )
-        .expect("CSR generation succeeds");
+        let csr = generate_csr("acct-1", &KeyAlgorithm::EcdsaP256, &["p:u2s".to_string()])
+            .expect("CSR generation succeeds");
         let sans = csr_dns_sans(&csr.csr_pem).expect("the CSR parses");
         assert!(sans.contains(&"acct-1".to_string()), "SANs were {sans:?}");
         assert!(sans.contains(&"p:u2s".to_string()), "SANs were {sans:?}");

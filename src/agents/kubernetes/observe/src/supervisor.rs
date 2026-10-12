@@ -7,17 +7,17 @@ use kube::ResourceExt;
 use kube::runtime::{watcher, watcher::Event};
 use kube::{Api, Client, api::ListParams};
 use kube_common::{KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY};
+use polar::cassini::TcpClient;
 use polar_agent_builder::{
     AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
     InfrastructureSupervisorMessage,
 };
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use ractor::concurrency::Duration;
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use serde_json::to_value;
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 use tracing::{instrument, trace};
-use polar::cassini::TcpClient;
 
 use crate::{
     GlobalWatcherState, KustomizationWatcher, NamespacedWatcherState, OciRepositoryWatcher,
@@ -45,7 +45,9 @@ pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(3 * 10 + 10);
 /// smaller, local type matching exactly what this supervisor
 /// genuinely needs is the correct, clean fix, not a workaround.
 pub enum ObserverSupervisorMessage {
-    ClientEvent { event: ClientEvent },
+    ClientEvent {
+        event: ClientEvent,
+    },
     /// InfrastructureSupervisor's own InfrastructureEvent::PrepareShutdown,
     /// forwarded here -- HealthCheckActor (now InfrastructureSupervisor's
     /// own, direct child, not this supervisor's) has genuinely,
@@ -290,7 +292,9 @@ impl Actor for ClusterObserverSupervisor {
 
                         state.oci_repository_watcher = Some(oci_watcher);
                     } else {
-                        debug!("OCIRepository watcher already running; skipping respawn on reconnect");
+                        debug!(
+                            "OCIRepository watcher already running; skipping respawn on reconnect"
+                        );
                     }
 
                     if state.kustomization_watcher.is_none() {
@@ -310,7 +314,9 @@ impl Actor for ClusterObserverSupervisor {
 
                         state.kustomization_watcher = Some(ks_watcher);
                     } else {
-                        debug!("Kustomization watcher already running; skipping respawn on reconnect");
+                        debug!(
+                            "Kustomization watcher already running; skipping respawn on reconnect"
+                        );
                     }
                 }
                 ClientEvent::MessagePublished { .. } => {

@@ -150,11 +150,9 @@ impl EscrowKeypair {
                 })?
                 .permissions();
             perms.set_mode(0o600);
-            std::fs::set_permissions(path, perms).map_err(|e| {
-                EscrowKeypairError::Permissions {
-                    path: path.to_string(),
-                    source: e,
-                }
+            std::fs::set_permissions(path, perms).map_err(|e| EscrowKeypairError::Permissions {
+                path: path.to_string(),
+                source: e,
             })?;
         }
 
@@ -198,7 +196,11 @@ pub(crate) mod tests {
                 .public_key_pem()
                 .starts_with("-----BEGIN PUBLIC KEY-----")
         );
-        assert!(keypair.public_key_pem().ends_with("-----END PUBLIC KEY-----\n"));
+        assert!(
+            keypair
+                .public_key_pem()
+                .ends_with("-----END PUBLIC KEY-----\n")
+        );
     }
 
     #[test]
@@ -250,7 +252,11 @@ pub(crate) mod tests {
     #[test]
     fn load_or_generate_creates_missing_parent_directories() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested").join("dirs").join("escrow-key.pem");
+        let path = dir
+            .path()
+            .join("nested")
+            .join("dirs")
+            .join("escrow-key.pem");
         assert!(!path.parent().unwrap().exists());
 
         EscrowKeypair::load_or_generate(path.to_str().unwrap()).unwrap();

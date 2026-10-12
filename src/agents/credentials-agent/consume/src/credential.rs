@@ -91,7 +91,8 @@ mod tests {
     #[test]
     fn anything_else_is_assumed_to_need_introspection() {
         let known = vec!["https://kubernetes.default.svc.cluster.local".to_string()];
-        let token = make_token("http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar");
+        let token =
+            make_token("http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar");
         assert_eq!(
             classify_credential(&token, &known),
             Ok(CredentialKind::LikelyIdp)

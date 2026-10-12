@@ -42,33 +42,73 @@ fn test_disconnect_reason_variants() {
 
 #[test]
 fn test_shutdown_phase_variants() {
-    assert_eq!(format!("{:?}", ShutdownPhase::StopAcceptingNewConnections),
-               "StopAcceptingNewConnections");
-    assert_eq!(format!("{:?}", ShutdownPhase::DrainExistingSessions),
-               "DrainExistingSessions");
-    assert_eq!(format!("{:?}", ShutdownPhase::FlushTopicQueues),
-               "FlushTopicQueues");
-    assert_eq!(format!("{:?}", ShutdownPhase::TerminateSubscribers),
-               "TerminateSubscribers");
-    assert_eq!(format!("{:?}", ShutdownPhase::TerminateListeners),
-               "TerminateListeners");
+    assert_eq!(
+        format!("{:?}", ShutdownPhase::StopAcceptingNewConnections),
+        "StopAcceptingNewConnections"
+    );
+    assert_eq!(
+        format!("{:?}", ShutdownPhase::DrainExistingSessions),
+        "DrainExistingSessions"
+    );
+    assert_eq!(
+        format!("{:?}", ShutdownPhase::FlushTopicQueues),
+        "FlushTopicQueues"
+    );
+    assert_eq!(
+        format!("{:?}", ShutdownPhase::TerminateSubscribers),
+        "TerminateSubscribers"
+    );
+    assert_eq!(
+        format!("{:?}", ShutdownPhase::TerminateListeners),
+        "TerminateListeners"
+    );
 }
 
 #[test]
 fn test_control_op_variants() {
-    assert_eq!(format!("{:?}", ControlOp::GetSessionInfo { registration_id: "id".to_string() }),
-               "GetSessionInfo { registration_id: \"id\" }");
-    assert_eq!(format!("{:?}", ControlOp::DisconnectSession { registration_id: "id".to_string() }),
-               "DisconnectSession { registration_id: \"id\" }");
+    assert_eq!(
+        format!(
+            "{:?}",
+            ControlOp::GetSessionInfo {
+                registration_id: "id".to_string()
+            }
+        ),
+        "GetSessionInfo { registration_id: \"id\" }"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            ControlOp::DisconnectSession {
+                registration_id: "id".to_string()
+            }
+        ),
+        "DisconnectSession { registration_id: \"id\" }"
+    );
     assert_eq!(format!("{:?}", ControlOp::ListSessions), "ListSessions");
     assert_eq!(format!("{:?}", ControlOp::ListTopics), "ListTopics");
-    assert_eq!(format!("{:?}", ControlOp::ListSubscribers { topic: "t".to_string() }),
-               "ListSubscribers { topic: \"t\" }");
-    assert_eq!(format!("{:?}", ControlOp::PrepareForShutdown { auth_token: "token".to_string() }),
-               "PrepareForShutdown { auth_token: \"token\" }");
+    assert_eq!(
+        format!(
+            "{:?}",
+            ControlOp::ListSubscribers {
+                topic: "t".to_string()
+            }
+        ),
+        "ListSubscribers { topic: \"t\" }"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            ControlOp::PrepareForShutdown {
+                auth_token: "token".to_string()
+            }
+        ),
+        "PrepareForShutdown { auth_token: \"token\" }"
+    );
     assert_eq!(format!("{:?}", ControlOp::GetBrokerStats), "GetBrokerStats");
-    assert_eq!(format!("{:?}", ControlOp::ShutdownBroker { graceful: true }),
-               "ShutdownBroker { graceful: true }");
+    assert_eq!(
+        format!("{:?}", ControlOp::ShutdownBroker { graceful: true }),
+        "ShutdownBroker { graceful: true }"
+    );
     assert_eq!(format!("{:?}", ControlOp::Ping), "Ping");
 }
 
@@ -82,25 +122,46 @@ fn test_control_result_variants() {
     let session_info = format!("{:?}", ControlResult::SessionInfo(details.clone()));
     assert!(session_info.contains("SessionInfo"));
     assert!(session_info.contains("registration_id"));
-    assert_eq!(format!("{:?}", ControlResult::SessionList(HashMap::new())),
-               "SessionList({})");
-    assert_eq!(format!("{:?}", ControlResult::SubscriberList(vec!["t1".to_string()])),
-               "SubscriberList([\"t1\"])");
-    assert_eq!(format!("{:?}", ControlResult::TopicList(HashSet::from(["t1".to_string()]))),
-               "TopicList({\"t1\"})");
+    assert_eq!(
+        format!("{:?}", ControlResult::SessionList(HashMap::new())),
+        "SessionList({})"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            ControlResult::SubscriberList(vec!["t1".to_string()])
+        ),
+        "SubscriberList([\"t1\"])"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            ControlResult::TopicList(HashSet::from(["t1".to_string()]))
+        ),
+        "TopicList({\"t1\"})"
+    );
     assert_eq!(format!("{:?}", ControlResult::Pong), "Pong");
     assert_eq!(format!("{:?}", ControlResult::Disconnected), "Disconnected");
-    assert_eq!(format!("{:?}", ControlResult::ShutdownInitiated), "ShutdownInitiated");
+    assert_eq!(
+        format!("{:?}", ControlResult::ShutdownInitiated),
+        "ShutdownInitiated"
+    );
 }
 
 #[test]
 fn test_control_error_variants() {
-    assert_eq!(format!("{:?}", ControlError::NotFound("not found".to_string())),
-               "NotFound(\"not found\")");
-    assert_eq!(format!("{:?}", ControlError::PermissionDenied("denied".to_string())),
-               "PermissionDenied(\"denied\")");
-    assert_eq!(format!("{:?}", ControlError::InternalError("internal".to_string())),
-               "InternalError(\"internal\")");
+    assert_eq!(
+        format!("{:?}", ControlError::NotFound("not found".to_string())),
+        "NotFound(\"not found\")"
+    );
+    assert_eq!(
+        format!("{:?}", ControlError::PermissionDenied("denied".to_string())),
+        "PermissionDenied(\"denied\")"
+    );
+    assert_eq!(
+        format!("{:?}", ControlError::InternalError("internal".to_string())),
+        "InternalError(\"internal\")"
+    );
 }
 
 #[test]
@@ -115,10 +176,13 @@ fn test_session_summary_constructor() {
 #[test]
 fn test_session_map() {
     let mut map: SessionMap = HashMap::new();
-    map.insert("id1".to_string(), SessionDetails {
-        registration_id: "id1".to_string(),
-        subscriptions: HashSet::new(),
-    });
+    map.insert(
+        "id1".to_string(),
+        SessionDetails {
+            registration_id: "id1".to_string(),
+            subscriptions: HashSet::new(),
+        },
+    );
 
     assert_eq!(map.len(), 1);
     assert_eq!(map.get("id1").unwrap().registration_id, "id1");
@@ -130,7 +194,10 @@ fn test_client_event_variants() {
         registration_id: "id".to_string(),
     };
 
-    assert_eq!(format!("{:?}", event), "Registered { registration_id: \"id\" }");
+    assert_eq!(
+        format!("{:?}", event),
+        "Registered { registration_id: \"id\" }"
+    );
 
     let event = ClientEvent::MessagePublished {
         topic: "topic".to_string(),
@@ -139,13 +206,19 @@ fn test_client_event_variants() {
         published_by: None,
     };
 
-    assert_eq!(format!("{:?}", event), "MessagePublished { topic: \"topic\", payload: [1, 2, 3], trace_ctx: None, published_by: None }");
+    assert_eq!(
+        format!("{:?}", event),
+        "MessagePublished { topic: \"topic\", payload: [1, 2, 3], trace_ctx: None, published_by: None }"
+    );
 
     let event = ClientEvent::TransportError {
         reason: "test".to_string(),
     };
 
-    assert_eq!(format!("{:?}", event), "TransportError { reason: \"test\" }");
+    assert_eq!(
+        format!("{:?}", event),
+        "TransportError { reason: \"test\" }"
+    );
 
     let event = ClientEvent::ControlResponse {
         registration_id: "id".to_string(),
@@ -153,19 +226,28 @@ fn test_client_event_variants() {
         trace_ctx: None,
     };
 
-    assert_eq!(format!("{:?}", event), "ControlResponse { registration_id: \"id\", result: Ok(Pong), trace_ctx: None }");
+    assert_eq!(
+        format!("{:?}", event),
+        "ControlResponse { registration_id: \"id\", result: Ok(Pong), trace_ctx: None }"
+    );
 
     let event = ClientEvent::PublishAcknowledged {
         topic: "topic".to_string(),
     };
 
-    assert_eq!(format!("{:?}", event), "PublishAcknowledged { topic: \"topic\" }");
+    assert_eq!(
+        format!("{:?}", event),
+        "PublishAcknowledged { topic: \"topic\" }"
+    );
 
     let event = ClientEvent::ClientSubscribed {
         topic: "topic".to_string(),
     };
 
-    assert_eq!(format!("{:?}", event), "ClientSubscribed { topic: \"topic\" }");
+    assert_eq!(
+        format!("{:?}", event),
+        "ClientSubscribed { topic: \"topic\" }"
+    );
 }
 
 #[test]
@@ -175,7 +257,10 @@ fn test_client_message_registration_request() {
         trace_ctx: None,
     };
 
-    assert_eq!(format!("{:?}", msg), "RegistrationRequest { registration_id: None, trace_ctx: None }");
+    assert_eq!(
+        format!("{:?}", msg),
+        "RegistrationRequest { registration_id: None, trace_ctx: None }"
+    );
 }
 
 #[test]
@@ -185,14 +270,20 @@ fn test_client_message_registration_response() {
         trace_ctx: None,
     };
 
-    assert_eq!(format!("{:?}", msg), "RegistrationResponse { result: Ok(\"new-id\"), trace_ctx: None }");
+    assert_eq!(
+        format!("{:?}", msg),
+        "RegistrationResponse { result: Ok(\"new-id\"), trace_ctx: None }"
+    );
 
     let msg = ClientMessage::RegistrationResponse {
         result: Err("failed".to_string()),
         trace_ctx: None,
     };
 
-    assert_eq!(format!("{:?}", msg), "RegistrationResponse { result: Err(\"failed\"), trace_ctx: None }");
+    assert_eq!(
+        format!("{:?}", msg),
+        "RegistrationResponse { result: Err(\"failed\"), trace_ctx: None }"
+    );
 }
 
 #[test]
@@ -207,7 +298,12 @@ fn test_client_message_publish_request() {
     };
 
     match &msg {
-        ClientMessage::PublishRequest { topic, payload, registration_id, .. } => {
+        ClientMessage::PublishRequest {
+            topic,
+            payload,
+            registration_id,
+            ..
+        } => {
             assert_eq!(topic, "topic");
             assert_eq!(registration_id, "id");
             assert_eq!(payload, payload);
@@ -225,7 +321,11 @@ fn test_client_message_subscribe_request() {
     };
 
     match &msg {
-        ClientMessage::SubscribeRequest { registration_id, topic, .. } => {
+        ClientMessage::SubscribeRequest {
+            registration_id,
+            topic,
+            ..
+        } => {
             assert_eq!(registration_id, "id");
             assert_eq!(topic, "topic");
         }
@@ -242,7 +342,11 @@ fn test_client_message_unsubscribe_request() {
     };
 
     match &msg {
-        ClientMessage::UnsubscribeRequest { registration_id, topic, .. } => {
+        ClientMessage::UnsubscribeRequest {
+            registration_id,
+            topic,
+            ..
+        } => {
             assert_eq!(registration_id, "id");
             assert_eq!(topic, "topic");
         }
@@ -258,7 +362,9 @@ fn test_client_message_disconnect_request() {
     };
 
     match &msg {
-        ClientMessage::DisconnectRequest { registration_id, .. } => {
+        ClientMessage::DisconnectRequest {
+            registration_id, ..
+        } => {
             assert_eq!(*registration_id, Some("id".to_string()));
         }
         _ => panic!("Expected DisconnectRequest"),
@@ -274,7 +380,11 @@ fn test_client_message_control_request() {
     };
 
     match &msg {
-        ClientMessage::ControlRequest { registration_id, op, .. } => {
+        ClientMessage::ControlRequest {
+            registration_id,
+            op,
+            ..
+        } => {
             assert_eq!(registration_id, "id");
             assert_eq!(format!("{:?}", op), "Ping");
         }
@@ -318,7 +428,12 @@ fn test_broker_message_from_client_message_unsupported() {
     let broker_msg = BrokerMessage::from_client_message(client_msg, "client1".to_string(), None);
 
     match &broker_msg {
-        BrokerMessage::PublishRequest { topic, payload, registration_id, .. } => {
+        BrokerMessage::PublishRequest {
+            topic,
+            payload,
+            registration_id,
+            ..
+        } => {
             assert_eq!(topic, "topic");
             assert_eq!(registration_id, "id");
             assert_eq!(payload, &Arc::new(vec![1, 2, 3]));
@@ -405,7 +520,11 @@ fn test_client_message_control_response() {
     };
 
     match &msg {
-        ClientMessage::ControlResponse { registration_id, result, .. } => {
+        ClientMessage::ControlResponse {
+            registration_id,
+            result,
+            ..
+        } => {
             assert_eq!(*registration_id, "id");
             // ControlResult doesn't implement PartialEq, so we just check the variant exists
             assert!(matches!(result, Ok(ControlResult::Pong)));

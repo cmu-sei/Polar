@@ -26,9 +26,7 @@ pub use capability::Capability;
 pub mod configuration;
 pub use configuration::{ConfigChanged, ConfigurationHandle};
 pub mod command;
-pub use command::{
-    ArgKind, ArgSpec, CommandSpec, CommandVerifier, Delivery, VerifiedCommand,
-};
+pub use command::{ArgKind, ArgSpec, CommandSpec, CommandVerifier, Delivery, VerifiedCommand};
 pub mod command_actor;
 pub use command_actor::{CommandHandle, CommandHandler, CommandRequest};
 pub mod crypto;
@@ -880,7 +878,8 @@ mod tests {
 
     #[test]
     fn declared_commands_are_paired_with_their_handlers_in_the_order_declared() {
-        let resolved = resolve_commands(&BOTH, vec![("two", handler()), ("one", handler())]).unwrap();
+        let resolved =
+            resolve_commands(&BOTH, vec![("two", handler()), ("one", handler())]).unwrap();
         let names: Vec<&str> = resolved.iter().map(|(spec, _)| spec.name).collect();
         assert_eq!(names, ["one", "two"]);
         assert!(resolve_commands(&[], vec![]).unwrap().is_empty());
@@ -888,19 +887,36 @@ mod tests {
 
     #[test]
     fn a_declared_command_with_no_handler_and_a_handler_for_nothing_declared_are_both_refused() {
-        let missing = resolve_commands(&BOTH, vec![("one", handler())]).err().unwrap();
-        assert!(missing.contains("`two` is declared") && missing.contains("no handler"), "{missing}");
-
-        let stray = resolve_commands(&BOTH, vec![("one", handler()), ("two", handler()), ("three", handler())])
+        let missing = resolve_commands(&BOTH, vec![("one", handler())])
             .err()
             .unwrap();
-        assert!(stray.contains("`three`") && stray.contains("not declared"), "{stray}");
+        assert!(
+            missing.contains("`two` is declared") && missing.contains("no handler"),
+            "{missing}"
+        );
+
+        let stray = resolve_commands(
+            &BOTH,
+            vec![("one", handler()), ("two", handler()), ("three", handler())],
+        )
+        .err()
+        .unwrap();
+        assert!(
+            stray.contains("`three`") && stray.contains("not declared"),
+            "{stray}"
+        );
 
         // Several problems are all said, and a handler registered twice is one of them.
-        let all = resolve_commands(&BOTH, vec![("one", handler()), ("one", handler()), ("ghost", handler())])
-            .err()
-            .unwrap();
-        assert!(all.contains("twice") && all.contains("`two`") && all.contains("`ghost`"), "{all}");
+        let all = resolve_commands(
+            &BOTH,
+            vec![("one", handler()), ("one", handler()), ("ghost", handler())],
+        )
+        .err()
+        .unwrap();
+        assert!(
+            all.contains("twice") && all.contains("`two`") && all.contains("`ghost`"),
+            "{all}"
+        );
 
         // Handlers and no declaration at all.
         assert!(resolve_commands(&[], vec![("one", handler())]).is_err());
@@ -926,7 +942,10 @@ mod tests {
             .err()
             .expect("it must not build");
         let said = error.to_string();
-        assert!(said.contains("the commands") && said.contains("no handler"), "{said}");
+        assert!(
+            said.contains("the commands") && said.contains("no handler"),
+            "{said}"
+        );
         // It stopped before it spawned anything.
         assert!(ractor::registry::where_is("no-handlers.tcp".to_string()).is_none());
     }

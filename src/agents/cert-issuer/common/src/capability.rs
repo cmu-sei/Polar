@@ -13,7 +13,17 @@ use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Deserialize,
+    Serialize,
+    Archive,
+    SerdeDeserialize,
+    SerdeSerialize,
 )]
 pub enum Capability {
     /// Provision a new Polar account (with any permissions and capabilities).
@@ -111,7 +121,10 @@ mod tests {
 
     #[test]
     fn san_string_matches_the_documented_format() {
-        assert_eq!(Capability::ProvisionAccount.to_san_string(), "c:provision-account");
+        assert_eq!(
+            Capability::ProvisionAccount.to_san_string(),
+            "c:provision-account"
+        );
         assert_eq!(Capability::UpdatePolicy.to_san_string(), "c:update-policy");
     }
 
@@ -160,9 +173,14 @@ mod tests {
     fn every_capability_round_trips_through_serde_json_and_rkyv() {
         for capability in Capability::ALL {
             let json = serde_json::to_string(&capability).unwrap();
-            assert_eq!(serde_json::from_str::<Capability>(&json).unwrap(), capability);
+            assert_eq!(
+                serde_json::from_str::<Capability>(&json).unwrap(),
+                capability
+            );
 
-            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&capability).unwrap().to_vec();
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&capability)
+                .unwrap()
+                .to_vec();
             let restored = rkyv::from_bytes::<Capability, rkyv::rancor::Error>(&bytes).unwrap();
             assert_eq!(restored, capability);
         }
@@ -213,7 +231,8 @@ mod tests {
 
     #[test]
     fn extract_capabilities_returns_empty_when_none_are_embedded() {
-        let certificate_pem = build_test_certificate(vec!["dana.polar.svc.cluster.local".to_string()]);
+        let certificate_pem =
+            build_test_certificate(vec!["dana.polar.svc.cluster.local".to_string()]);
         assert!(extract_capabilities(&certificate_pem).unwrap().is_empty());
     }
 

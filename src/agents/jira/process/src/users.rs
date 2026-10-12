@@ -139,7 +139,10 @@ mod tests {
             panic!("expected UpsertNodes");
         };
         let (_, props) = &items[0];
-        assert!(props.contains(&Property("html".to_string(), GraphValue::String(String::new()))));
+        assert!(props.contains(&Property(
+            "html".to_string(),
+            GraphValue::String(String::new())
+        )));
     }
 
     #[test]

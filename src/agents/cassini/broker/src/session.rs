@@ -94,8 +94,10 @@ impl Actor for SessionManager {
         debug!("{myself:?} starting");
         // Often enough that a session is ended soon after its window passes, never faster than
         // a tenth of a second or slower than every thirty.
-        let tick = (args.retention / 4)
-            .clamp(std::time::Duration::from_millis(100), std::time::Duration::from_secs(30));
+        let tick = (args.retention / 4).clamp(
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_secs(30),
+        );
         drop(myself.send_interval(tick, || BrokerMessage::SessionExpiryTick));
         Ok(SessionManagerState {
             broker: args.broker,
@@ -339,9 +341,11 @@ impl SessionManager {
             if let Some(session) = state.sessions.get_mut(&registration_id) {
                 session.superseded = true;
                 if session.detached_at.is_none() {
-                    let _ = session.agent_ref.send_message(BrokerMessage::CloseConnection {
-                        except: new_client_id.to_string(),
-                    });
+                    let _ = session
+                        .agent_ref
+                        .send_message(BrokerMessage::CloseConnection {
+                            except: new_client_id.to_string(),
+                        });
                 }
             }
             state.held.push(HeldSession {
@@ -606,7 +610,9 @@ impl SessionManager {
                             peer_identity: None,
                         });
                     } else {
-                        warn!("SessionManager: subscriber_mgr not set, cannot rehydrate subscribers");
+                        warn!(
+                            "SessionManager: subscriber_mgr not set, cannot rehydrate subscribers"
+                        );
                     }
                     return Ok(());
                 }

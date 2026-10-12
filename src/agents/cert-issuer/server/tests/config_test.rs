@@ -156,7 +156,6 @@ fn duplicate_issuer_urls_are_rejected() {
     assert!(matches!(err, ConfigError::DuplicateIssuer(ref u) if u == &valid_issuer().issuer));
 }
 
-
 // ---------------------------------------------------------------------
 // mTLS config coverage
 // ---------------------------------------------------------------------
@@ -181,7 +180,6 @@ fn empty_internal_callers_list_is_accepted() {
     cfg.mtls.internal_callers = vec![];
     assert!(cfg.validate().is_ok());
 }
-
 
 // ---------------------------------------------------------------------
 // CA provisioning mode

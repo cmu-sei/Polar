@@ -127,7 +127,9 @@ mod tests {
             r#"{{"auths":{{"registry.example.com":{{"auth":"{USER_PASS}"}}}}}}"#
         ));
         match registry_auth(Some(dir.path()), "registry.example.com").unwrap() {
-            RegistryAuth::Basic(user, pass) => assert_eq!((user.as_str(), pass.as_str()), ("user", "pass")),
+            RegistryAuth::Basic(user, pass) => {
+                assert_eq!((user.as_str(), pass.as_str()), ("user", "pass"))
+            }
             other => panic!("expected basic credentials, got {other:?}"),
         }
     }

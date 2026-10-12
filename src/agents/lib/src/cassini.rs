@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-pub use cassini_client::{MessageQueue, OfflineBehavior, PublishRequest, QueueEntry};
 use cassini_client::facade::{
     Backoff, DEFAULT_OFFLINE_BUFFER, FacadeArgs, TcpClientFacade, TlsTransportSpawner,
 };
+pub use cassini_client::{MessageQueue, OfflineBehavior, PublishRequest, QueueEntry};
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
 use cassini_types::{ClientEvent, ControlOp, WireTraceCtx};
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort};
@@ -172,7 +172,9 @@ impl TcpClient {
                 if let Some(mapped) = map_event(event)
                     && let Err(e) = supervisor_for_lifecycle.send_message(mapped)
                 {
-                    tracing::warn!("TcpClient: failed to deliver lifecycle event to supervisor: {e}");
+                    tracing::warn!(
+                        "TcpClient: failed to deliver lifecycle event to supervisor: {e}"
+                    );
                 }
             });
 
@@ -244,7 +246,6 @@ impl TcpClient {
         }
     }
 }
-
 
 #[async_trait]
 impl CassiniClient for TcpClient {
@@ -428,7 +429,11 @@ mod tests {
 
     #[tokio::test]
     async fn while_online_a_publish_is_sent_whatever_its_offline_behavior() {
-        for behavior in [OfflineBehavior::Fail, OfflineBehavior::Drop, OfflineBehavior::Queue] {
+        for behavior in [
+            OfflineBehavior::Fail,
+            OfflineBehavior::Drop,
+            OfflineBehavior::Queue,
+        ] {
             let (client, received) = client(true).await;
             client.publish(publish(behavior)).unwrap();
             assert_eq!(sent(&received).await, 1);
@@ -463,9 +468,15 @@ mod tests {
     async fn the_connection_state_is_read_each_time() {
         let online = Arc::new(AtomicBool::new(false));
         let received = Arc::new(Mutex::new(Vec::new()));
-        let (inner, _) = Actor::spawn(None, Recorder { received: received.clone() }, ())
-            .await
-            .unwrap();
+        let (inner, _) = Actor::spawn(
+            None,
+            Recorder {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
         let client = TcpClient::from_actor_ref_with_state(inner, online.clone());
         assert!(client.publish(publish(OfflineBehavior::Fail)).is_err());
         online.store(true, Ordering::SeqCst);

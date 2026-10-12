@@ -90,7 +90,10 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(settings.agent_config, PathBuf::from("/etc/git/git.yaml"));
-        assert_eq!(settings.absolute_cache_root().unwrap(), PathBuf::from("/tmp/polar-cache"));
+        assert_eq!(
+            settings.absolute_cache_root().unwrap(),
+            PathBuf::from("/tmp/polar-cache")
+        );
     }
 
     #[test]

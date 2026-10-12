@@ -178,10 +178,12 @@ mod tests {
             target: Some("cassini.cluster.local".to_string()),
         };
 
-        ractor::call!(actor, |reply| PermissionsMessage::UpdateSupplementalPermissions {
-            identity: "test-agent".to_string(),
-            permissions: vec![supplemental_permission.clone()],
-            reply,
+        ractor::call!(actor, |reply| {
+            PermissionsMessage::UpdateSupplementalPermissions {
+                identity: "test-agent".to_string(),
+                permissions: vec![supplemental_permission.clone()],
+                reply,
+            }
         })
         .unwrap();
 
@@ -211,10 +213,12 @@ mod tests {
             scope: PermissionScope::UserToUser,
             target: None,
         };
-        ractor::call!(actor, |reply| PermissionsMessage::UpdateSupplementalPermissions {
-            identity: "test-agent".to_string(),
-            permissions: vec![supplemental_permission.clone()],
-            reply,
+        ractor::call!(actor, |reply| {
+            PermissionsMessage::UpdateSupplementalPermissions {
+                identity: "test-agent".to_string(),
+                permissions: vec![supplemental_permission.clone()],
+                reply,
+            }
         })
         .unwrap();
 
@@ -233,13 +237,15 @@ mod tests {
     async fn supplemental_permissions_are_genuinely_scoped_to_their_own_identity() {
         let (actor, _) = Actor::spawn(None, PermissionsActor, ()).await.unwrap();
 
-        ractor::call!(actor, |reply| PermissionsMessage::UpdateSupplementalPermissions {
-            identity: "agent-a".to_string(),
-            permissions: vec![Permission {
-                scope: PermissionScope::ServiceToService,
-                target: None,
-            }],
-            reply,
+        ractor::call!(actor, |reply| {
+            PermissionsMessage::UpdateSupplementalPermissions {
+                identity: "agent-a".to_string(),
+                permissions: vec![Permission {
+                    scope: PermissionScope::ServiceToService,
+                    target: None,
+                }],
+                reply,
+            }
         })
         .unwrap();
 

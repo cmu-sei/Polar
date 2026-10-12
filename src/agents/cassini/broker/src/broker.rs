@@ -1,6 +1,6 @@
 use crate::{
-    LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME, SUBSCRIBER_MANAGER_NAME,
-    TOPIC_MANAGER_NAME, UNEXPECTED_MESSAGE_STR,
+    LISTENER_MANAGER_NAME, SESSION_MANAGER_NAME, SUBSCRIBER_MANAGER_NAME, TOPIC_MANAGER_NAME,
+    UNEXPECTED_MESSAGE_STR,
     control::{ControlManager, ControlManagerState},
     listener::{ListenerManager, ListenerManagerArgs},
     session::{SessionManager, SessionManagerArgs},
@@ -10,16 +10,16 @@ use crate::{
 
 use cassini_tracing::try_set_parent_otel;
 
-use cassini_types::{BrokerMessage, ShutdownPhase};
 use cassini_types::ControlOp;
 use cassini_types::DisconnectReason;
+use cassini_types::{BrokerMessage, ShutdownPhase};
 
 use polar_agent_builder::{
     Configured, InfrastructureEvent, InfrastructureSupervisorMessage, ServiceBuilder,
 };
 
-use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use ractor::concurrency::Duration;
+use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 
 use std::sync::Arc;
 
@@ -70,7 +70,10 @@ pub struct BrokerArgs {
 
 impl BrokerArgs {
     /// From the broker's settings and what `run` judged.
-    pub fn from_settings(settings: crate::settings::BrokerSettings, configured: Configured) -> Self {
+    pub fn from_settings(
+        settings: crate::settings::BrokerSettings,
+        configured: Configured,
+    ) -> Self {
         Self {
             bind_addr: settings.bind_addr,
             session_timeout: None,

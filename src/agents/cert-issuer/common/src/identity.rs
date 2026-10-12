@@ -98,7 +98,9 @@ pub fn normalize_identity(
             let namespace = parts[2];
             let name = parts[3];
 
-            Ok(format!("{name}.{namespace}.serviceaccount.{cluster_domain}"))
+            Ok(format!(
+                "{name}.{namespace}.serviceaccount.{cluster_domain}"
+            ))
         }
         IdentityNormalization::SuffixedClaim => {
             let Some(scope) = scope_claim_value else {

@@ -111,7 +111,9 @@ impl Actor for RootSupervisor {
         resources
             .infrastructure_events
             .subscribe(myself.clone(), |event| match event {
-                InfrastructureEvent::PrepareShutdown => Some(RootSupervisorMessage::PrepareShutdown),
+                InfrastructureEvent::PrepareShutdown => {
+                    Some(RootSupervisorMessage::PrepareShutdown)
+                }
             });
 
         let (repo_supervisor, _) = Actor::spawn_linked(
@@ -212,7 +214,9 @@ impl Actor for RootSupervisor {
                     std::process::exit(1);
                 }
                 if !state.shutting_down {
-                    error!("ROOT_SUPERVISOR: the repository supervisor ended unexpectedly; exiting");
+                    error!(
+                        "ROOT_SUPERVISOR: the repository supervisor ended unexpectedly; exiting"
+                    );
                     std::process::exit(1);
                 }
             }
@@ -249,8 +253,7 @@ mod tests {
             Some(50),
             vec!["refs/heads/main".into()],
         );
-        let bytes =
-            rkyv::to_bytes::<rkyv::rancor::Error>(&ConfigurationEvent { config }).unwrap();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&ConfigurationEvent { config }).unwrap();
         let decoded = RootSupervisor::decode(&bytes).expect("it decodes");
         assert_eq!(decoded.repo_url, "https://example.org/org/repo.git");
         assert_eq!(decoded.refs, vec!["refs/heads/main".to_string()]);

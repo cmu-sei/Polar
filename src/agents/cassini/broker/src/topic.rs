@@ -566,10 +566,9 @@ impl Actor for TopicAgent {
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} Started");
-        let _ = myself.send_interval(
-            std::time::Duration::from_secs(QUEUE_TICK_SECS),
-            || BrokerMessage::QueueExpiryTick,
-        );
+        let _ = myself.send_interval(std::time::Duration::from_secs(QUEUE_TICK_SECS), || {
+            BrokerMessage::QueueExpiryTick
+        });
         Ok(())
     }
 
@@ -613,8 +612,14 @@ impl Actor for TopicAgent {
                 subscriber_ref,
                 trace_ctx,
             } => {
-                self.handle_add_subscriber(myself.clone(), state, registration_id, subscriber_ref, trace_ctx)
-                    .await?;
+                self.handle_add_subscriber(
+                    myself.clone(),
+                    state,
+                    registration_id,
+                    subscriber_ref,
+                    trace_ctx,
+                )
+                .await?;
             }
             BrokerMessage::UnsubscribeRequest {
                 registration_id,
@@ -788,7 +793,9 @@ impl TopicAgent {
         // structural one-to-many mismatch between TopicAgent's own
         // tracking and SubscriberManager's already-enforced one-to-one
         // (registration_id, topic) -> SubscriberAgent relationship.
-        state.subscribers.insert(registration_id, subscriber_ref.clone());
+        state
+            .subscribers
+            .insert(registration_id, subscriber_ref.clone());
 
         // Drain queued messages now that someone is listening.
         while let Some((_queued_at, msg, published_by)) = state.queue.pop_front() {

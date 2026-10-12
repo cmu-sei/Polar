@@ -117,7 +117,10 @@ mod tests {
     #[test]
     fn a_missing_url_or_token_is_named_with_what_it_is_for() {
         let error = config(&[]).check().join(" | ");
-        assert!(error.contains("JIRA_URL") && error.contains("address"), "{error}");
+        assert!(
+            error.contains("JIRA_URL") && error.contains("address"),
+            "{error}"
+        );
         assert!(error.contains("JIRA_TOKEN"), "{error}");
         assert!(JiraSettings::read(&config(&[])).is_err());
     }
@@ -155,7 +158,10 @@ mod tests {
         let url = "https://jira.example.org";
         assert!(JiraDeployment::resolve(Some("cloud"), url) == Cloud);
         assert!(JiraDeployment::resolve(Some("CLOUD"), url) == Cloud);
-        assert!(JiraDeployment::resolve(Some("server"), "https://x.atlassian.net") == ServerOrDataCenter);
+        assert!(
+            JiraDeployment::resolve(Some("server"), "https://x.atlassian.net")
+                == ServerOrDataCenter
+        );
         assert!(JiraDeployment::resolve(Some("datacenter"), url) == ServerOrDataCenter);
         assert!(JiraDeployment::resolve(None, "https://x.atlassian.net") == Cloud);
         assert!(JiraDeployment::resolve(None, url) == ServerOrDataCenter);

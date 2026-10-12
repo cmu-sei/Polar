@@ -250,7 +250,9 @@ pub fn neo4j() -> &'static Graph {
 pub fn enter() -> tokio::runtime::EnterGuard<'static> {
     NEO4J_RUNTIME_HANDLE
         .get()
-        .expect("enter() called before neo4j() -- call neo4j() first to initialize the shared runtime")
+        .expect(
+            "enter() called before neo4j() -- call neo4j() first to initialize the shared runtime",
+        )
         .enter()
 }
 

@@ -98,7 +98,9 @@ pub async fn run(args: ClaimArgs) -> Result<(), String> {
 
     if let Err(e) = write_new(&args.cert_out, certificate_pem.as_bytes(), 0o644) {
         emit_fallback(&certificate_pem, &ca_chain_pem);
-        return Err(format!("{e}; the certificate was printed to stdout instead"));
+        return Err(format!(
+            "{e}; the certificate was printed to stdout instead"
+        ));
     }
     let chain_path = args.cert_out.with_extension("chain.pem");
     if let Err(e) = write_new(&chain_path, ca_chain_pem.as_bytes(), 0o644) {

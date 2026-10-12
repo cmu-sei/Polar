@@ -36,7 +36,7 @@ pub async fn say_goodbye(client: &ActorRef<TcpClientMessage>, within: Duration) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ractor::{async_trait, Actor, ActorProcessingErr};
+    use ractor::{Actor, ActorProcessingErr, async_trait};
     use std::sync::{Arc, Mutex};
 
     /// A transport that records what it is sent and, like the real one, stops itself on a

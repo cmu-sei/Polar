@@ -40,7 +40,9 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub struct AgentEscrowKeyRequest {
     pub identity: String,
 }
@@ -49,7 +51,9 @@ pub struct AgentEscrowKeyRequest {
 /// see CertificateReply::NotFound's own doc comment for the identical
 /// reasoning; a caller only needs to know whether there's a usable
 /// key to encrypt to right now.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub enum AgentEscrowKeyReply {
     Found { public_key_pem: String },
     NotFound,

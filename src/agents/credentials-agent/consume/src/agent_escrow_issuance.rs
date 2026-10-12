@@ -36,7 +36,7 @@ use cert_client::handshake::HandshakeClient;
 use cert_issuer_common::CertType;
 use cert_issuer_common::permission::{Permission, PermissionScope};
 use credentials_agent_common::agent_escrow_issuance::{
-    AgentEscrowIssuanceReply, AgentEscrowIssuanceRefusalReason, AgentEscrowIssuanceRequest,
+    AgentEscrowIssuanceRefusalReason, AgentEscrowIssuanceReply, AgentEscrowIssuanceRequest,
 };
 use credentials_agent_common::events::CredentialsEvent;
 use ractor::ActorRef;
@@ -75,8 +75,7 @@ impl AgentEscrowIssuanceHandler {
         // Anything else is a real anomaly worth a clear, explicit
         // refusal, not a silent misroute or a fallback attempt to
         // treat it as one anyway.
-        let kind = match classify_credential(&request.credential, &self.known_kubernetes_issuers)
-        {
+        let kind = match classify_credential(&request.credential, &self.known_kubernetes_issuers) {
             Ok(k) => k,
             Err(e) => {
                 warn!("Credential classification failed: {e}");
@@ -104,7 +103,10 @@ impl AgentEscrowIssuanceHandler {
         // Identical mechanism to IssuanceHandler's own Step 3.
         let validated = match self
             .cert_issuer
-            .validate(&request.credential, cert_issuer_common::ValidateRequest::default())
+            .validate(
+                &request.credential,
+                cert_issuer_common::ValidateRequest::default(),
+            )
             .await
         {
             Ok(v) => v,
@@ -181,7 +183,13 @@ impl AgentEscrowIssuanceHandler {
         let extra_sans: Vec<String> = permissions.iter().map(|p| p.to_san_string()).collect();
         let issued = match self
             .cert_issuer
-            .issue(&request.credential, &request.csr_pem, CertType::Service, extra_sans, None)
+            .issue(
+                &request.credential,
+                &request.csr_pem,
+                CertType::Service,
+                extra_sans,
+                None,
+            )
             .await
         {
             Ok(r) => r,
@@ -269,20 +277,16 @@ async fn call_check_agent_escrow_renewal(
     }
 }
 
-async fn call_append(ledger: &ActorRef<LedgerMessage>, event: CredentialsEvent) -> Result<(), String> {
-    match ractor::rpc::call(
-        ledger,
-        |reply| LedgerMessage::Append { event, reply },
-        None,
-    )
-    .await
-    {
+async fn call_append(
+    ledger: &ActorRef<LedgerMessage>,
+    event: CredentialsEvent,
+) -> Result<(), String> {
+    match ractor::rpc::call(ledger, |reply| LedgerMessage::Append { event, reply }, None).await {
         Ok(ractor::rpc::CallResult::Success(result)) => result,
         Ok(other) => Err(format!("unexpected CallResult: {other:?}")),
         Err(e) => Err(e.to_string()),
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -319,8 +323,8 @@ mod tests {
 
     fn fake_issue_response() -> cert_issuer_common::IssueResponse {
         cert_issuer_common::IssueResponse {
-            certificate_pem: "-----BEGIN CERTIFICATE-----\nfake-service\n-----END CERTIFICATE-----\n"
-                .to_string(),
+            certificate_pem:
+                "-----BEGIN CERTIFICATE-----\nfake-service\n-----END CERTIFICATE-----\n".to_string(),
             ca_chain_pem: "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----\n"
                 .to_string(),
             serial_number: "service-01:23:45".to_string(),
@@ -356,7 +360,9 @@ mod tests {
         let handler = AgentEscrowIssuanceHandler {
             ledger: spawn_test_ledger().await,
             cert_issuer: HandshakeClient::new(server.uri()),
-            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
@@ -375,14 +381,18 @@ mod tests {
         let handler = AgentEscrowIssuanceHandler {
             ledger: spawn_test_ledger().await,
             cert_issuer: HandshakeClient::new("http://127.0.0.1:1".to_string()),
-            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
         let reply = handler
             .handle(AgentEscrowIssuanceRequest {
                 csr_pem: "fake-csr".to_string(),
-                credential: make_token("http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar"),
+                credential: make_token(
+                    "http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar",
+                ),
             })
             .await;
 
@@ -424,28 +434,32 @@ mod tests {
         // DIFFERENT instance_binding -- proving the check is genuinely
         // identity-scoped, not pod-instance-scoped the way ordinary
         // mTLS renewal-prevention is.
-        let _ = ractor::rpc::call(
-            &ledger,
-            |reply| LedgerMessage::Append {
-                event: CredentialsEvent::AgentEscrowIssuanceCompleted {
-                    identity: "system:serviceaccount:polar:git-observer".to_string(),
-                    instance_binding: "pod-uid-1".to_string(),
-                    serial: "already-issued-service-serial".to_string(),
-                    timestamp: 1000,
-                    certificate_pem:
-                        "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n".to_string(),
+        let _ =
+            ractor::rpc::call(
+                &ledger,
+                |reply| LedgerMessage::Append {
+                    event: CredentialsEvent::AgentEscrowIssuanceCompleted {
+                        identity: "system:serviceaccount:polar:git-observer".to_string(),
+                        instance_binding: "pod-uid-1".to_string(),
+                        serial: "already-issued-service-serial".to_string(),
+                        timestamp: 1000,
+                        certificate_pem:
+                            "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                                .to_string(),
+                    },
+                    reply,
                 },
-                reply,
-            },
-            None,
-        )
-        .await
-        .unwrap();
+                None,
+            )
+            .await
+            .unwrap();
 
         let handler = AgentEscrowIssuanceHandler {
             ledger,
             cert_issuer: HandshakeClient::new(server.uri()),
-            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
@@ -472,7 +486,8 @@ mod tests {
             .and(path("/validate"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
                 cert_issuer_common::ValidateResponse {
-                    workload_identity: "system:serviceaccount:polar:nobody-granted-this".to_string(),
+                    workload_identity:
+                        "system:serviceaccount:polar:nobody-granted-this".to_string(),
                     instance_binding: Some("pod-uid-1".to_string()),
                     jti: None,
                     normalized_identity: None,
@@ -492,7 +507,9 @@ mod tests {
         let handler = AgentEscrowIssuanceHandler {
             ledger: spawn_test_ledger().await,
             cert_issuer: HandshakeClient::new(server.uri()),
-            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
@@ -554,7 +571,9 @@ mod tests {
         let handler = AgentEscrowIssuanceHandler {
             ledger,
             cert_issuer: HandshakeClient::new(server.uri()),
-            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 

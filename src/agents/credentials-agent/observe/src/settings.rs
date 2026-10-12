@@ -61,7 +61,10 @@ mod tests {
         for bad in ["http", "70000", "-1"] {
             let problems = config(&[("CREDENTIALS_AGENT_OBSERVER_PORT", bad)]).check();
             assert_eq!(problems.len(), 1, "{bad}: {problems:?}");
-            assert!(problems[0].contains("CREDENTIALS_AGENT_OBSERVER_PORT"), "{problems:?}");
+            assert!(
+                problems[0].contains("CREDENTIALS_AGENT_OBSERVER_PORT"),
+                "{problems:?}"
+            );
         }
     }
 }

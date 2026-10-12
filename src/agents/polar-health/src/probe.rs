@@ -356,12 +356,18 @@ mod tests {
         use polar_env::{DocValue, Document};
         let f = Fixture::new();
         let mut document = Document::scaffold(&[(&crate::vars::SECTION, None)]);
-        for variable in document.sections.iter_mut().flat_map(|s| s.variables.iter_mut()) {
+        for variable in document
+            .sections
+            .iter_mut()
+            .flat_map(|s| s.variables.iter_mut())
+        {
             match variable.name.as_str() {
                 POLAR_HEALTH_FILE_ENV => {
                     variable.value = Some(DocValue::Literal("/from/the/document".into()))
                 }
-                POLAR_HEALTH_STALE_SECS_ENV => variable.value = Some(DocValue::Literal("45".into())),
+                POLAR_HEALTH_STALE_SECS_ENV => {
+                    variable.value = Some(DocValue::Literal("45".into()))
+                }
                 _ => {}
             }
         }
@@ -382,7 +388,8 @@ mod tests {
 
     #[test]
     fn the_probe_still_reads_the_environment_when_there_is_no_document() {
-        let process = |name: &str| (name == POLAR_HEALTH_FILE_ENV).then(|| "/env/health".to_string());
+        let process =
+            |name: &str| (name == POLAR_HEALTH_FILE_ENV).then(|| "/env/health".to_string());
         let config = ProbeConfig::from_environment(process).unwrap();
         assert_eq!(config.health_file, "/env/health");
     }

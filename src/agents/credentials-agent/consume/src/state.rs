@@ -379,7 +379,11 @@ impl CredentialsState {
                     .active_provisioned_accounts
                     .remove(username)
                     .map(|pending| {
-                        (pending.permissions, pending.capabilities, pending.via_bootstrap)
+                        (
+                            pending.permissions,
+                            pending.capabilities,
+                            pending.via_bootstrap,
+                        )
                     })
                     .unwrap_or_default();
                 // Bootstrap is complete when its certificate exists, not
@@ -566,14 +570,19 @@ mod tests {
         }
     }
 
-    fn agent_escrow_issued(identity: &str, instance_binding: &str, serial: &str) -> CredentialsEvent {
+    fn agent_escrow_issued(
+        identity: &str,
+        instance_binding: &str,
+        serial: &str,
+    ) -> CredentialsEvent {
         CredentialsEvent::AgentEscrowIssuanceCompleted {
             identity: identity.to_string(),
             instance_binding: instance_binding.to_string(),
             serial: serial.to_string(),
             timestamp: 2000,
-            certificate_pem: "-----BEGIN CERTIFICATE-----\nfake-service-cert\n-----END CERTIFICATE-----\n"
-                .to_string(),
+            certificate_pem:
+                "-----BEGIN CERTIFICATE-----\nfake-service-cert\n-----END CERTIFICATE-----\n"
+                    .to_string(),
         }
     }
 
@@ -610,7 +619,11 @@ mod tests {
         // The admin-bootstrap case: no Grant event ever exists for
         // this flow at all. Must fold cleanly with zero special-casing.
         let mut state = CredentialsState::new();
-        state.apply(&issued("admin-bootstrap-identity", "admin-tool-uid", "serial-99"));
+        state.apply(&issued(
+            "admin-bootstrap-identity",
+            "admin-tool-uid",
+            "serial-99",
+        ));
         assert!(state.has_valid_certificate("admin-bootstrap-identity", "admin-tool-uid"));
     }
 
@@ -683,7 +696,11 @@ mod tests {
         assert!(!state.has_agent_escrow_certificate("git-observer"));
         assert!(state.agent_escrow_certificate_for("git-observer").is_none());
 
-        state.apply(&agent_escrow_issued("git-observer", "pod-uid-1", "service-serial-1"));
+        state.apply(&agent_escrow_issued(
+            "git-observer",
+            "pod-uid-1",
+            "service-serial-1",
+        ));
 
         assert!(state.has_agent_escrow_certificate("git-observer"));
         let record = state
@@ -702,7 +719,11 @@ mod tests {
         // not accidentally sharing state.
         let mut state = CredentialsState::new();
         state.apply(&issued("git-observer", "pod-uid-1", "client-serial-1"));
-        state.apply(&agent_escrow_issued("git-observer", "pod-uid-1", "service-serial-1"));
+        state.apply(&agent_escrow_issued(
+            "git-observer",
+            "pod-uid-1",
+            "service-serial-1",
+        ));
 
         assert!(state.has_valid_certificate("git-observer", "pod-uid-1"));
         assert!(state.has_agent_escrow_certificate("git-observer"));
@@ -727,8 +748,16 @@ mod tests {
         // doesn't yet track revocation the way valid_certificates
         // does for the superseded entry.
         let mut state = CredentialsState::new();
-        state.apply(&agent_escrow_issued("git-observer", "pod-uid-1", "service-serial-1"));
-        state.apply(&agent_escrow_issued("git-observer", "pod-uid-2", "service-serial-2"));
+        state.apply(&agent_escrow_issued(
+            "git-observer",
+            "pod-uid-1",
+            "service-serial-1",
+        ));
+        state.apply(&agent_escrow_issued(
+            "git-observer",
+            "pod-uid-2",
+            "service-serial-2",
+        ));
 
         let record = state.agent_escrow_certificate_for("git-observer").unwrap();
         assert_eq!(record.serial, "service-serial-2");
@@ -762,8 +791,8 @@ mod tests {
             username: username.to_string(),
             serial: serial.to_string(),
             timestamp: 2000,
-            certificate_pem: "-----BEGIN CERTIFICATE-----\nfake-account\n-----END CERTIFICATE-----\n"
-                .to_string(),
+            certificate_pem:
+                "-----BEGIN CERTIFICATE-----\nfake-account\n-----END CERTIFICATE-----\n".to_string(),
         }
     }
 
@@ -832,7 +861,10 @@ mod tests {
 
         assert!(state.account_certificate_by_serial("s1").is_none());
         assert_eq!(
-            state.account_certificate_by_serial("s2").unwrap().account_id,
+            state
+                .account_certificate_by_serial("s2")
+                .unwrap()
+                .account_id,
             "acct-1"
         );
     }
@@ -844,13 +876,18 @@ mod tests {
         state.apply(&account_issued("dana", "acct-1", "s1"));
         state.apply(&revoked("s1"));
 
-        assert_eq!(state.account_for_username("dana").unwrap().account_id, "acct-1");
+        assert_eq!(
+            state.account_for_username("dana").unwrap().account_id,
+            "acct-1"
+        );
         assert!(state.account_for_username("nobody").is_none());
     }
 
     #[test]
     fn a_recorded_grant_takes_effect_and_its_hash_is_remembered_across_replay() {
-        use credentials_agent_common::admin_action::{AdminAction, AdminActionBody, SignedAdminAction};
+        use credentials_agent_common::admin_action::{
+            AdminAction, AdminActionBody, SignedAdminAction,
+        };
         let payload = AdminActionBody {
             nonce: "n1".to_string(),
             action: AdminAction::Grant {
@@ -1037,7 +1074,12 @@ mod provisioning_count_tests {
     #[test]
     fn a_recorded_provisioning_is_counted_against_its_author() {
         let mut state = bootstrap_account_with_certificate();
-        state.apply(&recorded(provision("alice"), "n1", "acct-boot", Some("acct-2")));
+        state.apply(&recorded(
+            provision("alice"),
+            "n1",
+            "acct-boot",
+            Some("acct-2"),
+        ));
 
         let record = state.account_certificate_by_serial("b1").unwrap();
         assert_eq!(record.provisionings_made, 1);
@@ -1087,11 +1129,19 @@ mod provisioning_count_tests {
         ]);
 
         assert_eq!(
-            replayed.account_certificate_by_serial("b1").unwrap().provisionings_made,
-            live.account_certificate_by_serial("b1").unwrap().provisionings_made
+            replayed
+                .account_certificate_by_serial("b1")
+                .unwrap()
+                .provisionings_made,
+            live.account_certificate_by_serial("b1")
+                .unwrap()
+                .provisionings_made
         );
         assert_eq!(
-            replayed.account_certificate_by_serial("b1").unwrap().provisionings_made,
+            replayed
+                .account_certificate_by_serial("b1")
+                .unwrap()
+                .provisionings_made,
             1
         );
     }

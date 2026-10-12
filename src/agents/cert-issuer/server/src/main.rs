@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("reading config from {config_path}"))?;
     let config: ServiceConfig =
         serde_json::from_slice(&config_bytes).context("parsing config JSON")?;
-        config.validate().context("config validation")?;
+    config.validate().context("config validation")?;
 
     info!(
         bind_addr = %config.bind_addr,

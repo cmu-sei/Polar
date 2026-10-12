@@ -26,7 +26,9 @@ pub fn configuration_topic(agent: &str) -> String {
 /// A signed configuration document on its way to the agent it is for. The document is carried as it was
 /// read from the repository (`{ "payload": .., "signature": .. }`), untouched: the receiver verifies it for
 /// itself, and nothing in between is trusted.
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub struct ConfigurationNotification {
     pub agent: String,
     pub document_json: String,
@@ -40,7 +42,9 @@ pub fn command_topic(agent: &str) -> String {
 
 /// A signed command document on its way to the agent it is for, carried as it was read from the repository,
 /// untouched: the receiver verifies it for itself.
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub struct CommandNotification {
     pub agent: String,
     pub document_json: String,
@@ -71,7 +75,9 @@ pub mod command_status {
 /// One step an agent took with a signed command. Carries names and reasons, never an argument value.
 /// `id` and `command` are as the document claims them, and mean something only when `signer` is set, which
 /// it is only for a document that was verified.
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub struct CommandOutcome {
     pub agent: String,
     pub id: Option<String>,
@@ -110,7 +116,9 @@ pub mod outcome {
 /// What an agent did with one signed configuration document. Carries names and reasons, never values.
 /// `id` and `version` are as the document claims them, and mean something only when `signer` is set,
 /// which it is only for a document that was verified.
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub struct ConfigurationOutcome {
     pub agent: String,
     pub id: Option<String>,
@@ -129,7 +137,9 @@ pub struct ConfigurationOutcome {
 }
 
 // Time specification
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub enum TimeSpec {
     Periodic {
         interval: u64,
@@ -157,14 +167,18 @@ pub enum TimeSpec {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub enum TimeUnit {
     Minutes,
     Hours,
     Days,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub enum Weekday {
     Mon,
     Tue,
@@ -175,14 +189,18 @@ pub enum Weekday {
     Sun,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub enum ScheduleKind {
     Permanent,
     Adhoc,
     Ephemeral,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub struct ScheduleMetadata {
     pub description: Option<String>,
     pub owner: Option<String>,
@@ -201,21 +219,27 @@ pub struct ScheduleNode {
 }
 
 // Keep existing messages
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub enum GitScheduleChange {
     Create { path: String, json: String },
     Update { path: String, json: String },
     Delete { path: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub struct AdhocAgentAnnouncement {
     pub agent_type: String,
     pub version: u64,
     pub default_schedule_json: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
 pub enum ScheduleNotification {
     PermanentUpdate {
         agent_id: String,

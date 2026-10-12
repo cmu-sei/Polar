@@ -35,7 +35,7 @@ use crate::escrow::EscrowKeypair;
 use crate::ledger::LedgerMessage;
 use crate::retrieve_secret::call_check_certificate;
 use credentials_agent_common::decrypt_on_behalf_of::{
-    DecryptOnBehalfOfReply, DecryptOnBehalfOfRequest, DecryptOnBehalfOfRefusalReason,
+    DecryptOnBehalfOfRefusalReason, DecryptOnBehalfOfReply, DecryptOnBehalfOfRequest,
 };
 use credentials_agent_common::escrow_secret::EscrowedSecret;
 use ractor::ActorRef;
@@ -64,7 +64,8 @@ impl DecryptOnBehalfOfHandler {
         // needed both for re-encryption below AND as the real,
         // direct input PolicyActor uses to resolve the requester's
         // own, actual permissions internally.
-        let requester_certificate = match call_check_certificate(&self.ledger, &requested_by).await {
+        let requester_certificate = match call_check_certificate(&self.ledger, &requested_by).await
+        {
             Ok(Some(record)) => record,
             Ok(None) => {
                 return DecryptOnBehalfOfReply::Refused {
@@ -137,7 +138,10 @@ impl DecryptOnBehalfOfHandler {
         // requester's own public key. Mirrors
         // RetrieveSecretHandler::handle's own, real Zeroizing
         // discipline exactly.
-        let plaintext = match request.ciphertext.decrypt(self.escrow_keypair.private_key()) {
+        let plaintext = match request
+            .ciphertext
+            .decrypt(self.escrow_keypair.private_key())
+        {
             Ok(p) => p,
             Err(e) => {
                 error!("Failed to decrypt on behalf of {requested_by}: {e}");
@@ -199,9 +203,7 @@ mod tests {
         let (policy_actor, _) = ractor::Actor::spawn(
             None,
             polar_policy::PolicyActor,
-            polar_policy::PolicyActorArgs {
-                permissions_actor,
-            },
+            polar_policy::PolicyActorArgs { permissions_actor },
         )
         .await
         .unwrap();
@@ -215,9 +217,11 @@ mod tests {
             );
             "#
         );
-        let result = ractor::call!(policy_actor, |reply| polar_policy::PolicyMessage::UpdatePolicy {
-            policy_source: policy,
-            reply,
+        let result = ractor::call!(policy_actor, |reply| {
+            polar_policy::PolicyMessage::UpdatePolicy {
+                policy_source: policy,
+                reply,
+            }
         })
         .unwrap();
         result.unwrap();
@@ -237,12 +241,13 @@ mod tests {
         )
         .unwrap();
         let requester_key_pair = rcgen::KeyPair::from_pem(&requester_private_key_pem).unwrap();
-        let requester_params = rcgen::CertificateParams::new(vec![
-            "requester.polar.svc.cluster.local".to_string(),
-        ])
-        .unwrap();
-        let requester_certificate_pem =
-            requester_params.self_signed(&requester_key_pair).unwrap().pem();
+        let requester_params =
+            rcgen::CertificateParams::new(vec!["requester.polar.svc.cluster.local".to_string()])
+                .unwrap();
+        let requester_certificate_pem = requester_params
+            .self_signed(&requester_key_pair)
+            .unwrap()
+            .pem();
 
         let _ = ractor::rpc::call(
             ledger,
@@ -265,7 +270,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_genuinely_permitted_requester_receives_the_decrypted_secret_reencrypted_to_their_own_key() {
+    async fn a_genuinely_permitted_requester_receives_the_decrypted_secret_reencrypted_to_their_own_key()
+     {
         let ledger = spawn_test_ledger().await;
         let escrow_keypair = crate::escrow::tests::test_keypair();
         let resource_id = r#"KubeSecret::"namespace/pod/ENV_VAR""#;
@@ -311,7 +317,8 @@ mod tests {
         seed_requester_certificate(&ledger, "requester").await;
         // A real policy permitting a completely different principal
         // -- this requester must genuinely be denied.
-        let policy_actor = spawn_policy_actor_permitting("someone-else-entirely", resource_id).await;
+        let policy_actor =
+            spawn_policy_actor_permitting("someone-else-entirely", resource_id).await;
 
         let ciphertext =
             EscrowedSecret::encrypt(b"secret", escrow_keypair.public_key_pem()).unwrap();

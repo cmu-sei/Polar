@@ -64,7 +64,8 @@ mod tests {
             Some("test-control-manager".to_string()),
             ControlManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         Ok(())
     }
@@ -97,12 +98,11 @@ mod tests {
             Some("test-control-manager-2".to_string()),
             ControlManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a prepare for shutdown message to the actor
-        let msg = BrokerMessage::PrepareForShutdown {
-            auth_token: None,
-        };
+        let msg = BrokerMessage::PrepareForShutdown { auth_token: None };
 
         // This should not panic or error
         actor_ref.send_message(msg).unwrap();
@@ -111,7 +111,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_control_manager_handle_shutdown_phase_complete() -> Result<(), ActorProcessingErr> {
+    async fn test_control_manager_handle_shutdown_phase_complete() -> Result<(), ActorProcessingErr>
+    {
         // Create a mock broker to pass as argument
         let listener_mgr = Actor::spawn(None, MockActor, ()).await.unwrap().0;
         let session_mgr = Actor::spawn(None, MockActor, ()).await.unwrap().0;
@@ -138,7 +139,8 @@ mod tests {
             Some("test-control-manager-3".to_string()),
             ControlManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a shutdown phase complete message to the actor
         let msg = BrokerMessage::ShutdownPhaseComplete {
@@ -152,7 +154,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_control_manager_handle_initiate_shutdown_phase() -> Result<(), ActorProcessingErr> {
+    async fn test_control_manager_handle_initiate_shutdown_phase() -> Result<(), ActorProcessingErr>
+    {
         // Create a mock broker to pass as argument
         let listener_mgr = Actor::spawn(None, MockActor, ()).await.unwrap().0;
         let session_mgr = Actor::spawn(None, MockActor, ()).await.unwrap().0;
@@ -179,7 +182,8 @@ mod tests {
             Some("test-control-manager-4".to_string()),
             ControlManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send an initiate shutdown phase message to the actor
         let msg = BrokerMessage::InitiateShutdownPhase {
@@ -220,7 +224,8 @@ mod tests {
             Some("test-control-manager-5".to_string()),
             ControlManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a control request with ping operation to the actor
         let msg = BrokerMessage::ControlRequest {
@@ -237,7 +242,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_control_manager_handle_control_request_list_sessions() -> Result<(), ActorProcessingErr> {
+    async fn test_control_manager_handle_control_request_list_sessions()
+    -> Result<(), ActorProcessingErr> {
         // Create a mock broker to pass as argument
         let listener_mgr = Actor::spawn(None, MockActor, ()).await.unwrap().0;
         let session_mgr = Actor::spawn(None, MockActor, ()).await.unwrap().0;
@@ -264,7 +270,8 @@ mod tests {
             Some("test-control-manager-6".to_string()),
             ControlManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a control request with list sessions operation to the actor
         let msg = BrokerMessage::ControlRequest {
@@ -281,7 +288,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_control_manager_handle_control_request_list_topics() -> Result<(), ActorProcessingErr> {
+    async fn test_control_manager_handle_control_request_list_topics()
+    -> Result<(), ActorProcessingErr> {
         // Create a mock broker to pass as argument
         let listener_mgr = Actor::spawn(None, MockActor, ()).await.unwrap().0;
         let session_mgr = Actor::spawn(None, MockActor, ()).await.unwrap().0;
@@ -308,7 +316,8 @@ mod tests {
             Some("test-control-manager-7".to_string()),
             ControlManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a control request with list topics operation to the actor
         let msg = BrokerMessage::ControlRequest {
@@ -325,7 +334,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_control_manager_handle_prepare_for_shutdown_with_token() -> Result<(), ActorProcessingErr> {
+    async fn test_control_manager_handle_prepare_for_shutdown_with_token()
+    -> Result<(), ActorProcessingErr> {
         // Create a mock broker to pass as argument
         let listener_mgr = Actor::spawn(None, MockActor, ()).await.unwrap().0;
         let session_mgr = Actor::spawn(None, MockActor, ()).await.unwrap().0;
@@ -352,7 +362,8 @@ mod tests {
             Some("test-control-manager-8".to_string()),
             ControlManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a prepare for shutdown message with token to the actor
         let msg = BrokerMessage::PrepareForShutdown {

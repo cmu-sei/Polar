@@ -788,7 +788,9 @@ impl SubscriberAgent {
         payload: Arc<Vec<u8>>,
         published_by: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
-        state.dead_letter_queue.push_back((payload.clone(), published_by));
+        state
+            .dead_letter_queue
+            .push_back((payload.clone(), published_by));
         debug!(
             "Subscriber queue has {} message(s) waiting",
             state.dead_letter_queue.len()

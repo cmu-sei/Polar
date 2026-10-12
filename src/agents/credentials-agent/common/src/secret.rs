@@ -33,7 +33,9 @@ use crate::escrow_secret::EscrowedSecret;
 use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub struct StoreSecretRequest {
     /// The storing agent's own chosen identifier -- e.g. "gitlab-token".
     /// A second store under the same name supersedes the first; see
@@ -42,10 +44,14 @@ pub struct StoreSecretRequest {
     pub secret: EscrowedSecret,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub enum StoreSecretReply {
     Stored,
-    Refused { reason: StoreRefusalReason },
+    Refused {
+        reason: StoreRefusalReason,
+    },
     /// The request was genuinely valid -- correctly encrypted to this
     /// agent's own current escrow key, from a real, attributed
     /// publisher -- but a real infrastructure failure (the ledger
@@ -54,11 +60,22 @@ pub enum StoreSecretReply {
     /// retrying would never fix, it's the opposite -- the caller
     /// should not assume the secret is safely stored, and retrying
     /// may well succeed.
-    Failed { detail: String },
+    Failed {
+        detail: String,
+    },
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    Archive,
+    SerdeDeserialize,
+    SerdeSerialize,
 )]
 pub enum StoreRefusalReason {
     /// The submitted EscrowedSecret is encrypted to some public key

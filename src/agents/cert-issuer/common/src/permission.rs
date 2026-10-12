@@ -39,7 +39,16 @@ use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    Archive,
+    SerdeDeserialize,
+    SerdeSerialize,
 )]
 pub enum PermissionScope {
     ServiceToService,
@@ -48,7 +57,9 @@ pub enum PermissionScope {
     UserToUser,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub struct Permission {
     pub scope: PermissionScope,
     /// A specific FQDN this permission is scoped to (e.g.
@@ -185,9 +196,7 @@ pub fn extract_permissions(
 /// too so certificates issued before that change still resolve. Anything
 /// else (IP, email) is skipped. A certificate with no SAN extension yields
 /// an empty list, not an error.
-pub(crate) fn san_strings(
-    certificate_pem: &str,
-) -> Result<Vec<String>, PermissionExtractionError> {
+pub(crate) fn san_strings(certificate_pem: &str) -> Result<Vec<String>, PermissionExtractionError> {
     let (_, pem) = x509_parser::pem::parse_x509_pem(certificate_pem.as_bytes())
         .map_err(|e| PermissionExtractionError::InvalidPem(e.to_string()))?;
     let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents)
@@ -233,9 +242,7 @@ pub(crate) fn san_strings(
 /// than each caller needing its own, separate, real source for the
 /// same, real identity string `polar-init` already, separately
 /// computed once, at issuance time.
-pub fn extract_own_identity(
-    certificate_pem: &str,
-) -> Result<String, PermissionExtractionError> {
+pub fn extract_own_identity(certificate_pem: &str) -> Result<String, PermissionExtractionError> {
     let (_, pem) = x509_parser::pem::parse_x509_pem(certificate_pem.as_bytes())
         .map_err(|e| PermissionExtractionError::InvalidPem(e.to_string()))?;
     let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents)
@@ -451,7 +458,11 @@ mod tests {
 
         let extracted = extract_permissions(&certificate_pem).unwrap();
 
-        assert_eq!(extracted.len(), 2, "the real identity SAN must not be mistaken for a permission");
+        assert_eq!(
+            extracted.len(),
+            2,
+            "the real identity SAN must not be mistaken for a permission"
+        );
         assert!(extracted.contains(&permission_a));
         assert!(extracted.contains(&permission_b));
     }
@@ -469,7 +480,10 @@ mod tests {
     #[test]
     fn extract_permissions_on_malformed_pem_is_a_real_error_not_a_panic() {
         let result = extract_permissions("not a real certificate");
-        assert!(matches!(result, Err(PermissionExtractionError::InvalidPem(_))));
+        assert!(matches!(
+            result,
+            Err(PermissionExtractionError::InvalidPem(_))
+        ));
     }
 
     #[test]
@@ -501,7 +515,10 @@ mod tests {
     #[test]
     fn extract_own_identity_on_malformed_pem_is_a_real_error_not_a_panic() {
         let result = extract_own_identity("not a real certificate");
-        assert!(matches!(result, Err(PermissionExtractionError::InvalidPem(_))));
+        assert!(matches!(
+            result,
+            Err(PermissionExtractionError::InvalidPem(_))
+        ));
     }
 }
 
@@ -515,11 +532,14 @@ mod uri_san_tests {
     fn issued_like_cert_issuer() -> String {
         let key = rcgen::KeyPair::generate().unwrap();
         let mut params = rcgen::CertificateParams::new(vec!["acct-1".to_string()]).unwrap();
+        params
+            .subject_alt_names
+            .push(rcgen::SanType::URI("p:u2s".to_string().try_into().unwrap()));
         params.subject_alt_names.push(rcgen::SanType::URI(
-            "p:u2s".to_string().try_into().unwrap(),
-        ));
-        params.subject_alt_names.push(rcgen::SanType::URI(
-            Capability::ProvisionAccount.to_san_string().try_into().unwrap(),
+            Capability::ProvisionAccount
+                .to_san_string()
+                .try_into()
+                .unwrap(),
         ));
         params.self_signed(&key).unwrap().pem()
     }

@@ -45,10 +45,14 @@ use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
 /// Genuinely empty -- nothing to validate, nothing to check. Any
 /// authenticated core service asking on this topic gets the key.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub struct EscrowKeyRequest;
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub struct EscrowKeyReply {
     pub public_key_pem: String,
 }

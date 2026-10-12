@@ -10,7 +10,10 @@ use polar_sign::{
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "polar-sign", about = "Sign and check Polar configuration documents")]
+#[command(
+    name = "polar-sign",
+    about = "Sign and check Polar configuration documents"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -91,7 +94,11 @@ fn main() -> Result<()> {
                 Some(path) => {
                     std::fs::write(&path, &file)
                         .with_context(|| format!("cannot write {}", path.display()))?;
-                    eprintln!("wrote {} ({} change(s) for {agent}, version {version})", path.display(), changes.len());
+                    eprintln!(
+                        "wrote {} ({} change(s) for {agent}, version {version})",
+                        path.display(),
+                        changes.len()
+                    );
                 }
                 None => print!("{file}"),
             }
@@ -114,7 +121,8 @@ fn main() -> Result<()> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .context("the clock is before 1970")?
                 .as_secs() as i64;
-            let (signer, payload) = verify_source(&source, &trust, now).map_err(anyhow::Error::msg)?;
+            let (signer, payload) =
+                verify_source(&source, &trust, now).map_err(anyhow::Error::msg)?;
             println!(
                 "signed by {} <{}> (identity {}, certificate {})",
                 signer.username.as_deref().unwrap_or("?"),
@@ -122,7 +130,11 @@ fn main() -> Result<()> {
                 signer.identity.as_deref().unwrap_or("?"),
                 signer.serial
             );
-            let capabilities: Vec<String> = signer.capabilities.iter().map(|c| c.to_san_string()).collect();
+            let capabilities: Vec<String> = signer
+                .capabilities
+                .iter()
+                .map(|c| c.to_san_string())
+                .collect();
             println!("capabilities: {}", capabilities.join(" "));
             println!(
                 "type {}, for {}, version {}, changing: {}",
@@ -131,7 +143,11 @@ fn main() -> Result<()> {
                 payload["version"],
                 payload["changes"]
                     .as_array()
-                    .map(|c| c.iter().filter_map(|c| c["name"].as_str()).collect::<Vec<_>>().join(", "))
+                    .map(|c| c
+                        .iter()
+                        .filter_map(|c| c["name"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "))
                     .unwrap_or_default()
             );
         }

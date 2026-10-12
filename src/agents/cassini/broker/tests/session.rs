@@ -49,7 +49,8 @@ mod tests {
             Some("test-session-manager".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         Ok(())
     }
@@ -69,7 +70,8 @@ mod tests {
             Some("test-session-manager-2".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a registration request message to the actor
         let msg = BrokerMessage::RegistrationRequest {
@@ -86,7 +88,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_session_manager_handle_session_pending_update() -> Result<(), ActorProcessingErr> {
+    async fn test_session_manager_handle_session_pending_update() -> Result<(), ActorProcessingErr>
+    {
         // Create a mock broker to pass as argument
         let broker_ref = Actor::spawn(None, MockActor, ()).await.unwrap().0;
         let args = SessionManagerArgs {
@@ -100,7 +103,8 @@ mod tests {
             Some("test-session-manager-3".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a session pending update message to the actor
         let msg = BrokerMessage::SessionPendingUpdate {
@@ -129,7 +133,8 @@ mod tests {
             Some("test-session-manager-4".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a set listener manager message to the actor
         let msg = BrokerMessage::SetListenerManager {
@@ -157,12 +162,11 @@ mod tests {
             Some("test-session-manager-5".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a prepare for shutdown message to the actor
-        let msg = BrokerMessage::PrepareForShutdown {
-            auth_token: None,
-        };
+        let msg = BrokerMessage::PrepareForShutdown { auth_token: None };
 
         // This should not panic or error
         actor_ref.send_message(msg).unwrap();
@@ -185,7 +189,8 @@ mod tests {
             Some("test-session-manager-6".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send an initiate drain phase message to the actor
         let msg = BrokerMessage::InitiateShutdownPhase {
@@ -213,11 +218,12 @@ mod tests {
             Some("test-session-manager-7".to_string()),
             SessionManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a get session reference message to the actor - this test is just to make sure we can send the message
         // We're not actually testing the reply_to functionality since that's complex to set up
-        
+
         Ok(())
     }
 }

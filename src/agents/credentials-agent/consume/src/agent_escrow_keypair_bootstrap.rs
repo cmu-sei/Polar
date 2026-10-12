@@ -32,7 +32,7 @@
 use crate::escrow::EscrowKeypair;
 use crate::ledger::LedgerMessage;
 use credentials_agent_common::agent_escrow_keypair_bootstrap::{
-    RetrieveAgentEscrowKeypairReply, RetrieveAgentEscrowKeypairRefusalReason,
+    RetrieveAgentEscrowKeypairRefusalReason, RetrieveAgentEscrowKeypairReply,
     RetrieveAgentEscrowKeypairRequest, agent_escrow_keypair_secret_name,
 };
 use credentials_agent_common::ephemeral_exchange::EphemeralEncryptedPayload;
@@ -87,16 +87,16 @@ impl AgentEscrowKeypairBootstrapHandler {
             }
         };
 
-        let payload = match EphemeralEncryptedPayload::encrypt(&plaintext, &request.ephemeral_public_key)
-        {
-            Ok(p) => p,
-            Err(e) => {
-                error!("Failed to re-encrypt agent escrow keypair for {requested_by}: {e}");
-                return RetrieveAgentEscrowKeypairReply::Failed {
-                    detail: e.to_string(),
-                };
-            }
-        };
+        let payload =
+            match EphemeralEncryptedPayload::encrypt(&plaintext, &request.ephemeral_public_key) {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("Failed to re-encrypt agent escrow keypair for {requested_by}: {e}");
+                    return RetrieveAgentEscrowKeypairReply::Failed {
+                        detail: e.to_string(),
+                    };
+                }
+            };
         // `plaintext` goes out of scope here, genuinely wiped.
 
         RetrieveAgentEscrowKeypairReply::Found { payload }
@@ -262,7 +262,8 @@ mod tests {
         let escrow_keypair = crate::escrow::tests::test_keypair();
 
         let stored_secret =
-            EscrowedSecret::encrypt(b"alice's own keypair", escrow_keypair.public_key_pem()).unwrap();
+            EscrowedSecret::encrypt(b"alice's own keypair", escrow_keypair.public_key_pem())
+                .unwrap();
         let _ = ractor::rpc::call(
             &ledger,
             |reply| LedgerMessage::Append {

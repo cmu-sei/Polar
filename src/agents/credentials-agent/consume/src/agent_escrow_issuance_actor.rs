@@ -28,6 +28,7 @@
 //! calls, ledger RPCs).
 
 use crate::agent_escrow_issuance::AgentEscrowIssuanceHandler;
+use crate::supervisor::BROKER_CLIENT_NAME;
 use cassini_client::TcpClientMessage;
 use credentials_agent_common::CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC;
 use credentials_agent_common::agent_escrow_issuance::AgentEscrowIssuanceRequest;
@@ -35,7 +36,6 @@ use polar::request_reply::Envelope;
 use ractor::registry::where_is;
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::error;
-use crate::supervisor::BROKER_CLIENT_NAME;
 
 pub struct AgentEscrowIssuanceActor;
 
@@ -96,7 +96,9 @@ impl Actor for AgentEscrowIssuanceActor {
                 }
             }
             None => {
-                error!("Broker client not found while attempting to publish agent escrow-issuance reply");
+                error!(
+                    "Broker client not found while attempting to publish agent escrow-issuance reply"
+                );
             }
         }
 

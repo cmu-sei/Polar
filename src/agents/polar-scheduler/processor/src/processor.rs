@@ -1,8 +1,6 @@
 use cassini_client::TcpClientMessage;
 use polar::graph::{
-    controller::{
-        GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property,
-    },
+    controller::{GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
     nodes::schedule::ScheduleKey,
 };
 use polar_scheduler_common::{
@@ -161,10 +159,19 @@ impl ScheduleInfoProcessor {
                         .into_key(),
                         props: vec![
                             Property("document".to_string(), GraphValue::String(json.clone())),
-                            Property("target".to_string(), GraphValue::String(routing.agent.clone())),
-                            Property("version".to_string(), GraphValue::I64(routing.version as i64)),
+                            Property(
+                                "target".to_string(),
+                                GraphValue::String(routing.agent.clone()),
+                            ),
+                            Property(
+                                "version".to_string(),
+                                GraphValue::I64(routing.version as i64),
+                            ),
                             Property("source_path".to_string(), GraphValue::String(path)),
-                            Property("status".to_string(), GraphValue::String("received".to_string())),
+                            Property(
+                                "status".to_string(),
+                                GraphValue::String("received".to_string()),
+                            ),
                             Property("received_at".to_string(), GraphValue::String(received_at)),
                         ],
                     }))?;
@@ -198,7 +205,10 @@ impl ScheduleInfoProcessor {
                         props: vec![
                             Property("document".to_string(), GraphValue::String(json)),
                             Property("source_path".to_string(), GraphValue::String(path)),
-                            Property("status".to_string(), GraphValue::String("unroutable".to_string())),
+                            Property(
+                                "status".to_string(),
+                                GraphValue::String("unroutable".to_string()),
+                            ),
                             Property("reason".to_string(), GraphValue::String(why)),
                             Property("received_at".to_string(), GraphValue::String(received_at)),
                         ],
@@ -237,13 +247,19 @@ impl ScheduleInfoProcessor {
             Property("changed".to_string(), list(&outcome.changed)),
             Property("detail".to_string(), list(&outcome.detail)),
             Property("at".to_string(), text(at)),
-            Property("sequence".to_string(), GraphValue::I64(outcome.sequence as i64)),
+            Property(
+                "sequence".to_string(),
+                GraphValue::I64(outcome.sequence as i64),
+            ),
         ];
         if let Some(id) = &outcome.id {
             props.push(Property("claimed_id".to_string(), text(id.clone())));
         }
         if let Some(version) = outcome.version {
-            props.push(Property("claimed_version".to_string(), GraphValue::I64(version as i64)));
+            props.push(Property(
+                "claimed_version".to_string(),
+                GraphValue::I64(version as i64),
+            ));
         }
         if let Some(signer) = &outcome.signer {
             props.push(Property("signer".to_string(), text(signer.clone())));
@@ -344,11 +360,9 @@ async fn publish_notification(
     notif: &ScheduleNotification,
 ) -> Result<(), ActorProcessingErr> {
     let payload = rkyv::to_bytes::<rkyv::rancor::Error>(notif)?.to_vec();
-    state.tcp_client.cast(TcpClientMessage::publish(
-        topic.to_string(),
-        payload,
-        None,
-    ))?;
+    state
+        .tcp_client
+        .cast(TcpClientMessage::publish(topic.to_string(), payload, None))?;
     Ok(())
 }
 

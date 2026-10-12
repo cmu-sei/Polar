@@ -83,8 +83,8 @@
 
 use keyutils_raw::{
     KEY_POS_ALL, KEY_SPEC_SESSION_KEYRING, KEY_SPEC_USER_KEYRING, KEY_USR_ALL,
-    KEYCTL_SUPPORTS_DECRYPT, add_key, keyctl_describe, keyctl_link, keyctl_pkey_decrypt, keyctl_pkey_query, keyctl_revoke,
-    keyctl_setperm, keyctl_unlink,
+    KEYCTL_SUPPORTS_DECRYPT, add_key, keyctl_describe, keyctl_link, keyctl_pkey_decrypt,
+    keyctl_pkey_query, keyctl_revoke, keyctl_setperm, keyctl_unlink,
 };
 // Re-exported so callers holding a serial this crate returned (e.g.
 // try_load_asymmetric_key's own Some(serial)) can genuinely name its
@@ -270,8 +270,11 @@ pub fn adopt_asymmetric_key(raw_serial: i32, expected_description: &str) -> Opti
 
     let length = keyctl_describe(serial, None).ok()?;
     let mut buffer = vec![0u8; length];
-    let written =
-        keyctl_describe(serial, Some(uninit::out_ref::Out::from(buffer.as_mut_slice()))).ok()?;
+    let written = keyctl_describe(
+        serial,
+        Some(uninit::out_ref::Out::from(buffer.as_mut_slice())),
+    )
+    .ok()?;
     buffer.truncate(written.min(length));
     let described = String::from_utf8(buffer).ok()?;
     // "type;uid;gid;permissions;description", with a trailing NUL the kernel counts.
@@ -446,9 +449,16 @@ mod tests {
 
         let mut rng = rand::rng();
         let ciphertext = public_key
-            .encrypt(&mut rng, Oaep::<EscrowOaepHash>::new(), b"for the adopted key")
+            .encrypt(
+                &mut rng,
+                Oaep::<EscrowOaepHash>::new(),
+                b"for the adopted key",
+            )
             .unwrap();
-        assert_eq!(decrypt(adopted, &ciphertext).unwrap(), b"for the adopted key");
+        assert_eq!(
+            decrypt(adopted, &ciphertext).unwrap(),
+            b"for the adopted key"
+        );
     }
 
     #[test]
@@ -499,10 +509,18 @@ mod tests {
 
         let mut rng = rand::rng();
         let to_first = first_public
-            .encrypt(&mut rng, Oaep::<EscrowOaepHash>::new(), b"for the first key")
+            .encrypt(
+                &mut rng,
+                Oaep::<EscrowOaepHash>::new(),
+                b"for the first key",
+            )
             .unwrap();
         let to_second = second_public
-            .encrypt(&mut rng, Oaep::<EscrowOaepHash>::new(), b"for the second key")
+            .encrypt(
+                &mut rng,
+                Oaep::<EscrowOaepHash>::new(),
+                b"for the second key",
+            )
             .unwrap();
         assert_eq!(decrypt(first, &to_first).unwrap(), b"for the first key");
         assert_eq!(decrypt(second, &to_second).unwrap(), b"for the second key");

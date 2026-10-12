@@ -1,7 +1,7 @@
 // cert_issuer_init/src/output.rs
 
-use std::path::{Path, PathBuf};
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

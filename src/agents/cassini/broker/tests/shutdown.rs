@@ -97,7 +97,11 @@ async fn a_shutdown_that_finishes_within_its_budget_lets_the_infrastructure_come
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert_eq!(*broker.exits.lock().unwrap(), Vec::<i32>::new(), "well inside the budget");
+        assert_eq!(
+            *broker.exits.lock().unwrap(),
+            Vec::<i32>::new(),
+            "well inside the budget"
+        );
     })
     .await;
 }

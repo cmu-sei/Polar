@@ -114,7 +114,13 @@ impl AccountHandler {
             .permissions
             .iter()
             .map(|p| p.to_san_string())
-            .chain(pending.record.capabilities.iter().map(|c| c.to_san_string()))
+            .chain(
+                pending
+                    .record
+                    .capabilities
+                    .iter()
+                    .map(|c| c.to_san_string()),
+            )
             .collect();
 
         let issued = self
@@ -160,7 +166,10 @@ impl AccountHandler {
             e
         })?;
 
-        info!("account {account_id} claimed; certificate {}", issued.serial_number);
+        info!(
+            "account {account_id} claimed; certificate {}",
+            issued.serial_number
+        );
         Ok(AccountReply::Issued {
             certificate_pem: issued.certificate_pem,
             ca_chain_pem: issued.ca_chain_pem,
@@ -202,8 +211,10 @@ impl AccountHandler {
                 if !create {
                     return Err(AccountRefusal::NoMatchingProvisioning.into());
                 }
-                if ask(&self.ledger, |reply| LedgerMessage::CheckBootstrapCompleted { reply })
-                    .await?
+                if ask(&self.ledger, |reply| {
+                    LedgerMessage::CheckBootstrapCompleted { reply }
+                })
+                .await?
                 {
                     return Err(AccountRefusal::BootstrapAlreadyDone.into());
                 }
@@ -264,7 +275,10 @@ impl AccountHandler {
         username: &str,
     ) -> Result<Option<crate::state::ProvisionedAccountRecord>, String> {
         let username = username.to_string();
-        ask(&self.ledger, |reply| LedgerMessage::CheckProvisionedAccount { username, reply }).await
+        ask(&self.ledger, |reply| {
+            LedgerMessage::CheckProvisionedAccount { username, reply }
+        })
+        .await
     }
 
     async fn append(&self, event: CredentialsEvent) -> Result<(), Stop> {
@@ -416,9 +430,11 @@ mod tests {
     }
 
     async fn bootstrap_completed(handler: &AccountHandler) -> bool {
-        ask(&handler.ledger, |reply| LedgerMessage::CheckBootstrapCompleted { reply })
-            .await
-            .unwrap()
+        ask(&handler.ledger, |reply| {
+            LedgerMessage::CheckBootstrapCompleted { reply }
+        })
+        .await
+        .unwrap()
     }
 
     #[test]
@@ -437,7 +453,14 @@ mod tests {
         let server = MockServer::start().await;
         mock_internal_issue_ok(&server).await;
         let handler = handler_for(&server).await;
-        provision(&handler.ledger, ALICE_ID, "alice", "alice@example.com", false).await;
+        provision(
+            &handler.ledger,
+            ALICE_ID,
+            "alice",
+            "alice@example.com",
+            false,
+        )
+        .await;
 
         let account_id = offered(
             handler
@@ -452,7 +475,10 @@ mod tests {
                 csr_pem: csr_for(&account_id),
             })
             .await;
-        assert!(matches!(reply, AccountReply::Issued { .. }), "got {reply:?}");
+        assert!(
+            matches!(reply, AccountReply::Issued { .. }),
+            "got {reply:?}"
+        );
 
         // The certificate is on the ledger, with what the account was
         // provisioned with, and no longer claimable.
@@ -480,7 +506,14 @@ mod tests {
     async fn the_right_username_with_the_wrong_email_is_refused() {
         let server = MockServer::start().await;
         let handler = handler_for(&server).await;
-        provision(&handler.ledger, ALICE_ID, "alice", "alice@example.com", false).await;
+        provision(
+            &handler.ledger,
+            ALICE_ID,
+            "alice",
+            "alice@example.com",
+            false,
+        )
+        .await;
 
         let reply = handler
             .handle(AccountRequest::Begin {
@@ -497,7 +530,14 @@ mod tests {
     async fn a_native_claim_cannot_reach_the_bootstrap_account() {
         let server = MockServer::start().await;
         let handler = handler_for(&server).await;
-        provision(&handler.ledger, "acct-boot", BOOTSTRAP_USERNAME, BOOTSTRAP_EMAIL, true).await;
+        provision(
+            &handler.ledger,
+            "acct-boot",
+            BOOTSTRAP_USERNAME,
+            BOOTSTRAP_EMAIL,
+            true,
+        )
+        .await;
 
         // Matching its fixed username and email isn't enough.
         let reply = handler
@@ -523,7 +563,14 @@ mod tests {
             .mount(&server)
             .await;
         let handler = handler_for(&server).await;
-        provision(&handler.ledger, ALICE_ID, "alice", "alice@example.com", false).await;
+        provision(
+            &handler.ledger,
+            ALICE_ID,
+            "alice",
+            "alice@example.com",
+            false,
+        )
+        .await;
 
         let reply = handler
             .handle(AccountRequest::Complete {
@@ -542,12 +589,16 @@ mod tests {
 
         let first = offered(
             handler
-                .handle(AccountRequest::Begin { claimant: bootstrap() })
+                .handle(AccountRequest::Begin {
+                    claimant: bootstrap(),
+                })
                 .await,
         );
         let second = offered(
             handler
-                .handle(AccountRequest::Begin { claimant: bootstrap() })
+                .handle(AccountRequest::Begin {
+                    claimant: bootstrap(),
+                })
                 .await,
         );
         assert_eq!(first, second);
@@ -564,13 +615,17 @@ mod tests {
         let handler = handler_for(&server).await;
 
         let reply = handler
-            .handle(AccountRequest::Begin { claimant: bootstrap() })
+            .handle(AccountRequest::Begin {
+                claimant: bootstrap(),
+            })
             .await;
         assert_eq!(refused(reply), AccountRefusal::NotTheBootstrapIdentity);
 
-        let pending = ask(&handler.ledger, |reply| LedgerMessage::CheckProvisionedAccount {
-            username: BOOTSTRAP_USERNAME.to_string(),
-            reply,
+        let pending = ask(&handler.ledger, |reply| {
+            LedgerMessage::CheckProvisionedAccount {
+                username: BOOTSTRAP_USERNAME.to_string(),
+                reply,
+            }
         })
         .await
         .unwrap();
@@ -586,7 +641,9 @@ mod tests {
 
         let account_id = offered(
             handler
-                .handle(AccountRequest::Begin { claimant: bootstrap() })
+                .handle(AccountRequest::Begin {
+                    claimant: bootstrap(),
+                })
                 .await,
         );
         assert!(!bootstrap_completed(&handler).await);
@@ -597,7 +654,10 @@ mod tests {
                 csr_pem: csr_for(&account_id),
             })
             .await;
-        assert!(matches!(reply, AccountReply::Issued { .. }), "got {reply:?}");
+        assert!(
+            matches!(reply, AccountReply::Issued { .. }),
+            "got {reply:?}"
+        );
         assert!(bootstrap_completed(&handler).await);
 
         // The certificate is recorded as the bootstrap one, holding exactly
@@ -618,7 +678,9 @@ mod tests {
         );
 
         let again = handler
-            .handle(AccountRequest::Begin { claimant: bootstrap() })
+            .handle(AccountRequest::Begin {
+                claimant: bootstrap(),
+            })
             .await;
         assert_eq!(refused(again), AccountRefusal::BootstrapAlreadyDone);
     }
@@ -636,7 +698,9 @@ mod tests {
 
         let account_id = offered(
             handler
-                .handle(AccountRequest::Begin { claimant: bootstrap() })
+                .handle(AccountRequest::Begin {
+                    claimant: bootstrap(),
+                })
                 .await,
         );
         let reply = handler
@@ -650,7 +714,9 @@ mod tests {
 
         let retry = offered(
             handler
-                .handle(AccountRequest::Begin { claimant: bootstrap() })
+                .handle(AccountRequest::Begin {
+                    claimant: bootstrap(),
+                })
                 .await,
         );
         assert_eq!(retry, account_id);

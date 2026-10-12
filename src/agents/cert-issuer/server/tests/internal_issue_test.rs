@@ -7,7 +7,9 @@
 //! caller gets the same identity-matching guarantee /issue gives against
 //! a token -- the CSR's SAN must equal the identity the caller asserts.
 
-use cert_issuer::ca::{CaClient, CaError, CaIssueRequest, IssuedCert, RcgenCaClient, load_or_bootstrap_ca};
+use cert_issuer::ca::{
+    CaClient, CaError, CaIssueRequest, IssuedCert, RcgenCaClient, load_or_bootstrap_ca,
+};
 use cert_issuer::handler::{Handler, HandlerBody};
 use cert_issuer::oidc::Validator;
 use cert_issuer_common::keypair::{KeyAlgorithm, generate_csr};

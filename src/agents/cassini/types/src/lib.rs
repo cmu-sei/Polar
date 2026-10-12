@@ -43,7 +43,17 @@ pub enum DisconnectReason {
 /// this specific publish. A publisher can choose to stay anonymous,
 /// but can never spoof a different identity -- `identity` itself is
 /// always broker-derived.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Serialize, Deserialize, Archive)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    Serialize,
+    Deserialize,
+    Archive,
+)]
 pub struct PublisherContext {
     pub identity: String,
     pub share_identity: bool,

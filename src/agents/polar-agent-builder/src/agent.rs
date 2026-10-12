@@ -158,10 +158,7 @@ impl Configured {
         env: &dyn Env,
         budget: Duration,
         exits: Arc<std::sync::Mutex<Vec<i32>>>,
-    ) -> (
-        Self,
-        Arc<std::sync::Mutex<Option<crate::ServiceResources>>>,
-    ) {
+    ) -> (Self, Arc<std::sync::Mutex<Option<crate::ServiceResources>>>) {
         let startup = startup::prepare(env, &[], &[], Some(budget))
             .unwrap_or_else(|problems| panic!("the test's environment is not sound: {problems}"));
         let out = Arc::new(std::sync::Mutex::new(None));
@@ -486,7 +483,11 @@ pub fn help_text<A: PolarAgent>() -> String {
     } else {
         text.push_str(&format!(
             "Capabilities it needs from its deployment: {} (it is not a Cassini client)\n",
-            if names.is_empty() { "none".to_string() } else { names.join(", ") }
+            if names.is_empty() {
+                "none".to_string()
+            } else {
+                names.join(", ")
+            }
         ));
     }
     text.push_str(&format!(
@@ -869,7 +870,11 @@ mod tests {
     #[test]
     fn a_service_is_not_given_the_cassini_client() {
         assert!(needs_of::<Serving>().is_empty());
-        assert_eq!(needs_of::<Example>()[0], Capability::Cassini, "an agent still is");
+        assert_eq!(
+            needs_of::<Example>()[0],
+            Capability::Cassini,
+            "an agent still is"
+        );
         let document = scaffold_document::<Serving>();
         assert!(document.requires.is_empty());
         let sections: Vec<&str> = document
@@ -1024,7 +1029,10 @@ mod tests {
             .collect();
         // Every agent is a Cassini client, so it is implied: an agent cannot forget it. And every
         // agent logs and traces as its deployment says.
-        assert_eq!(names, vec!["builder", "health", "logging", "cassini-client"]);
+        assert_eq!(
+            names,
+            vec!["builder", "health", "logging", "cassini-client"]
+        );
         assert_eq!(doc.requires, vec!["cassini"]);
     }
 
@@ -1367,7 +1375,10 @@ mod tests {
     #[test]
     fn an_agent_that_declares_its_commands_badly_says_so_and_is_not_started() {
         let problems = declaration_problems::<BadCommands>();
-        assert!(problems.iter().any(|p| p.contains("declared twice")), "{problems:?}");
+        assert!(
+            problems.iter().any(|p| p.contains("declared twice")),
+            "{problems:?}"
+        );
         BAD_COMMANDS_STARTED.store(false, Ordering::SeqCst);
         let status = run_with::<BadCommands>(&[], with_secrets());
         assert_eq!(status, 1);

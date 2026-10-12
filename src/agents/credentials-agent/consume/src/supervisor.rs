@@ -76,12 +76,16 @@ use credentials_agent_common::retrieve_secret::RetrieveSecretRequest;
 use credentials_agent_common::secret::StoreSecretRequest;
 
 // ---- Local: shared infrastructure ----
-use crate::settings::ConsumerSettings;
 use crate::introspection::IntrospectionClient;
 use crate::ledger::{LedgerActor, LedgerActorArgs, LedgerMessage};
 use crate::projection::{ProjectionActor, ProjectionActorArgs, ProjectionMessage};
+use crate::settings::ConsumerSettings;
 
 // ---- Local: handler + actor pairs, one per request/reply flow ----
+use crate::account::AccountHandler;
+use crate::account_actor::{AccountActor, AccountActorArgs};
+use crate::admin_action::AdminActionHandler;
+use crate::admin_action_actor::{AdminActionActor, AdminActionActorArgs};
 use crate::agent_escrow_issuance::AgentEscrowIssuanceHandler;
 use crate::agent_escrow_issuance_actor::{AgentEscrowIssuanceActor, AgentEscrowIssuanceActorArgs};
 use crate::agent_escrow_key::AgentEscrowKeyHandler;
@@ -100,15 +104,15 @@ use crate::decrypt_on_behalf_of_actor::{
 use crate::escrow_key::EscrowKeyHandler;
 use crate::escrow_key_actor::{EscrowKeyActor, EscrowKeyActorArgs};
 use crate::identity_normalization::IdentityNormalizationHandler;
-use crate::identity_normalization_actor::{IdentityNormalizationActor, IdentityNormalizationActorArgs};
+use crate::identity_normalization_actor::{
+    IdentityNormalizationActor, IdentityNormalizationActorArgs,
+};
 use crate::issuance::IssuanceHandler;
 use crate::issuance_actor::{IssuanceActor, IssuanceActorArgs};
 use crate::retrieve_secret::RetrieveSecretHandler;
-use crate::retrieve_secret_actor::{RetrieveSecretActor, RetrieveSecretActorArgs, RetrieveSecretDispatch};
-use crate::account::AccountHandler;
-use crate::account_actor::{AccountActor, AccountActorArgs};
-use crate::admin_action::AdminActionHandler;
-use crate::admin_action_actor::{AdminActionActor, AdminActionActorArgs};
+use crate::retrieve_secret_actor::{
+    RetrieveSecretActor, RetrieveSecretActorArgs, RetrieveSecretDispatch,
+};
 use crate::store_secret::StoreSecretHandler;
 use crate::store_secret_actor::{StoreSecretActor, StoreSecretActorArgs, StoreSecretDispatch};
 
@@ -275,7 +279,9 @@ impl Supervisor for ConsumerSupervisor {
         }
 
         if topic == CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC {
-            match rkyv::from_bytes::<Envelope<AgentEscrowIssuanceRequest>, rkyv::rancor::Error>(&payload) {
+            match rkyv::from_bytes::<Envelope<AgentEscrowIssuanceRequest>, rkyv::rancor::Error>(
+                &payload,
+            ) {
                 Ok(envelope) => {
                     if let Some(actor) = where_is(AGENT_ESCROW_ISSUANCE_ACTOR_NAME.to_string()) {
                         if let Err(e) = actor.send_message(envelope) {
@@ -286,14 +292,17 @@ impl Supervisor for ConsumerSupervisor {
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to deserialize agent escrow-issuance request from topic {topic}: {e}");
+                    warn!(
+                        "Failed to deserialize agent escrow-issuance request from topic {topic}: {e}"
+                    );
                 }
             }
             return;
         }
 
         if topic == CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC {
-            match rkyv::from_bytes::<Envelope<AgentEscrowKeyRequest>, rkyv::rancor::Error>(&payload) {
+            match rkyv::from_bytes::<Envelope<AgentEscrowKeyRequest>, rkyv::rancor::Error>(&payload)
+            {
                 Ok(envelope) => {
                     if let Some(actor) = where_is(AGENT_ESCROW_KEY_ACTOR_NAME.to_string()) {
                         if let Err(e) = actor.send_message(envelope) {
@@ -320,9 +329,7 @@ impl Supervisor for ConsumerSupervisor {
                             warn!("Failed to forward identity-normalization request to actor: {e}");
                         }
                     } else {
-                        warn!(
-                            "Identity-normalization actor not yet registered, dropping request"
-                        );
+                        warn!("Identity-normalization actor not yet registered, dropping request");
                     }
                 }
                 Err(e) => {
@@ -446,20 +453,28 @@ impl ConsumerSupervisor {
     /// AgentEscrowKeypairBootstrapActor, bundled with the
     /// broker-verified published_by this dispatch path exists
     /// specifically to carry.
-    fn dispatch_agent_escrow_keypair_bootstrap_request(payload: Vec<u8>, published_by: Option<String>) {
+    fn dispatch_agent_escrow_keypair_bootstrap_request(
+        payload: Vec<u8>,
+        published_by: Option<String>,
+    ) {
         match rkyv::from_bytes::<Envelope<RetrieveAgentEscrowKeypairRequest>, rkyv::rancor::Error>(
             &payload,
         ) {
             Ok(envelope) => {
-                if let Some(actor) = where_is(AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME.to_string()) {
+                if let Some(actor) = where_is(AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME.to_string())
+                {
                     if let Err(e) = actor.send_message(AgentEscrowKeypairBootstrapDispatch {
                         envelope,
                         published_by,
                     }) {
-                        warn!("Failed to forward agent escrow-keypair bootstrap request to actor: {e}");
+                        warn!(
+                            "Failed to forward agent escrow-keypair bootstrap request to actor: {e}"
+                        );
                     }
                 } else {
-                    warn!("Agent escrow-keypair bootstrap actor not yet registered, dropping request");
+                    warn!(
+                        "Agent escrow-keypair bootstrap actor not yet registered, dropping request"
+                    );
                 }
             }
             Err(e) => {
@@ -475,7 +490,8 @@ impl ConsumerSupervisor {
     /// -- the requesting identity PolicyActor's own resolution is
     /// derived from, never self-reported.
     fn dispatch_decrypt_on_behalf_of_request(payload: Vec<u8>, published_by: Option<String>) {
-        match rkyv::from_bytes::<Envelope<DecryptOnBehalfOfRequest>, rkyv::rancor::Error>(&payload) {
+        match rkyv::from_bytes::<Envelope<DecryptOnBehalfOfRequest>, rkyv::rancor::Error>(&payload)
+        {
             Ok(envelope) => {
                 if let Some(actor) = where_is(DECRYPT_ON_BEHALF_OF_ACTOR_NAME.to_string()) {
                     if let Err(e) = actor.send_message(DecryptOnBehalfOfDispatch {
@@ -553,9 +569,11 @@ impl ConsumerSupervisor {
     /// supervisor keeps handling (and logging) messages while the window is open.
     fn schedule_drain_end(myself: &ActorRef<ConsumerSupervisorMessage>) {
         // Dropping the handle detaches the timer; it still fires.
-        drop(myself.send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
-            ConsumerSupervisorMessage::DrainElapsed
-        }));
+        drop(
+            myself.send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                ConsumerSupervisorMessage::DrainElapsed
+            }),
+        );
     }
 
     /// Tells the broker this agent is going dark, so it stops routing requests
@@ -606,8 +624,8 @@ impl Actor for ConsumerSupervisor {
             polar::graph::environment::GraphSettings::from_env(&**configured.config())
                 .map_err(ActorProcessingErr::from)?;
 
-        let settings = ConsumerSettings::read(configured.config())
-            .map_err(ActorProcessingErr::from)?;
+        let settings =
+            ConsumerSettings::read(configured.config()).map_err(ActorProcessingErr::from)?;
         let log_path = settings.event_log_path.clone();
 
         // ProjectionActor owns the graph projection as its own,
@@ -663,14 +681,11 @@ impl Actor for ConsumerSupervisor {
         // trust setup runs once per handler.
         let cert_issuer_ca_path = settings.ca_cert.clone();
         let make_cert_issuer_client = || async {
-            HandshakeClient::for_trust_mode(
-                cert_issuer_url.clone(),
-                cert_issuer_ca_path.as_deref(),
-            )
-            .await
-            .map_err(|e| {
-                ActorProcessingErr::from(format!("cannot establish trust in cert-issuer: {e}"))
-            })
+            HandshakeClient::for_trust_mode(cert_issuer_url.clone(), cert_issuer_ca_path.as_deref())
+                .await
+                .map_err(|e| {
+                    ActorProcessingErr::from(format!("cannot establish trust in cert-issuer: {e}"))
+                })
         };
 
         let escrow_keypair = {
@@ -865,16 +880,17 @@ impl Actor for ConsumerSupervisor {
             escrow_keypair: escrow_keypair.clone(),
             ledger: ledger.clone(),
         };
-        let (_agent_escrow_keypair_bootstrap_actor, _) = AgentEscrowKeypairBootstrapActor::spawn_linked(
-            Some(AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME.to_string()),
-            AgentEscrowKeypairBootstrapActor,
-            AgentEscrowKeypairBootstrapActorArgs {
-                handler: agent_escrow_keypair_bootstrap_handler,
-            },
-            myself.get_cell(),
-        )
-        .await
-        .map_err(ActorProcessingErr::from)?;
+        let (_agent_escrow_keypair_bootstrap_actor, _) =
+            AgentEscrowKeypairBootstrapActor::spawn_linked(
+                Some(AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME.to_string()),
+                AgentEscrowKeypairBootstrapActor,
+                AgentEscrowKeypairBootstrapActorArgs {
+                    handler: agent_escrow_keypair_bootstrap_handler,
+                },
+                myself.get_cell(),
+            )
+            .await
+            .map_err(ActorProcessingErr::from)?;
 
         // PermissionsActor is the sole, real, authoritative source of
         // what permissions an identity actually holds -- PolicyActor
@@ -958,7 +974,6 @@ impl Actor for ConsumerSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-
             ConsumerSupervisorMessage::PrepareShutdown => {
                 if state.draining {
                     // A failure already started a drain that ends in exit(1);
@@ -1151,7 +1166,6 @@ impl Actor for ConsumerSupervisor {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1212,10 +1226,7 @@ mod tests {
 
         // The real function every incoming Cassini message actually
         // goes through -- not a reimplementation of it.
-        ConsumerSupervisor::deserialize_and_dispatch(
-            CREDENTIALS_GRANTS_TOPIC.to_string(),
-            bytes,
-        );
+        ConsumerSupervisor::deserialize_and_dispatch(CREDENTIALS_GRANTS_TOPIC.to_string(), bytes);
 
         // A subsequent call() to the same actor only returns after
         // every prior message (including our dispatch above) has
@@ -1283,7 +1294,11 @@ mod issuance_wiring_tests {
         }
     }
 
-    async fn check_renewal(ledger: &ActorRef<LedgerMessage>, identity: &str, instance_binding: &str) -> bool {
+    async fn check_renewal(
+        ledger: &ActorRef<LedgerMessage>,
+        identity: &str,
+        instance_binding: &str,
+    ) -> bool {
         match ractor::rpc::call(
             ledger,
             |reply| LedgerMessage::CheckRenewal {
@@ -1357,7 +1372,9 @@ mod issuance_wiring_tests {
             ledger: ledger.clone(),
             cert_issuer: HandshakeClient::new(cert_issuer.uri()),
             introspection: None,
-            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
@@ -1396,12 +1413,19 @@ mod issuance_wiring_tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         assert!(
-            check_renewal(&ledger, "system:serviceaccount:polar:admin-tool", "admin-tool-uid").await,
+            check_renewal(
+                &ledger,
+                "system:serviceaccount:polar:admin-tool",
+                "admin-tool-uid"
+            )
+            .await,
             "IssuanceCompleted must have actually been recorded in the ledger by now"
         );
-        assert!(check_grant(&ledger, "system:serviceaccount:polar:admin-tool")
-            .await
-            .is_none());
+        assert!(
+            check_grant(&ledger, "system:serviceaccount:polar:admin-tool")
+                .await
+                .is_none()
+        );
 
         issuance_actor.stop_and_wait(None, None).await.unwrap();
         ledger.stop_and_wait(None, None).await.unwrap();
@@ -1412,7 +1436,9 @@ mod issuance_wiring_tests {
 mod agent_escrow_wiring_tests {
     use super::*;
     use crate::agent_escrow_issuance::AgentEscrowIssuanceHandler;
-    use crate::agent_escrow_issuance_actor::{AgentEscrowIssuanceActor, AgentEscrowIssuanceActorArgs};
+    use crate::agent_escrow_issuance_actor::{
+        AgentEscrowIssuanceActor, AgentEscrowIssuanceActorArgs,
+    };
     use crate::agent_escrow_key::AgentEscrowKeyHandler;
     use crate::agent_escrow_key_actor::{AgentEscrowKeyActor, AgentEscrowKeyActorArgs};
     use base64::Engine;
@@ -1475,17 +1501,19 @@ mod agent_escrow_wiring_tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/issue"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                cert_issuer_common::IssueResponse {
-                    certificate_pem: "-----BEGIN CERTIFICATE-----\nfake-service\n-----END CERTIFICATE-----\n"
-                        .to_string(),
-                    ca_chain_pem: "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----\n"
-                        .to_string(),
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(cert_issuer_common::IssueResponse {
+                    certificate_pem:
+                        "-----BEGIN CERTIFICATE-----\nfake-service\n-----END CERTIFICATE-----\n"
+                            .to_string(),
+                    ca_chain_pem:
+                        "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----\n"
+                            .to_string(),
                     serial_number: "agent-escrow-wiring-test-serial".to_string(),
                     session_id: "00000000-0000-0000-0000-000000000098".to_string(),
                     expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
-                },
-            ))
+                }),
+            )
             .mount(&cert_issuer)
             .await;
 
@@ -1505,7 +1533,9 @@ mod agent_escrow_wiring_tests {
         let handler = AgentEscrowIssuanceHandler {
             ledger: ledger.clone(),
             cert_issuer: HandshakeClient::new(cert_issuer.uri()),
-            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
@@ -1538,14 +1568,18 @@ mod agent_escrow_wiring_tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-        let record = check_agent_escrow_key(&ledger, "system:serviceaccount:polar:git-observer").await;
+        let record =
+            check_agent_escrow_key(&ledger, "system:serviceaccount:polar:git-observer").await;
         assert!(
             record.is_some(),
             "AgentEscrowIssuanceCompleted must have actually been recorded in the ledger by now"
         );
         assert_eq!(record.unwrap().serial, "agent-escrow-wiring-test-serial");
 
-        agent_escrow_issuance_actor.stop_and_wait(None, None).await.unwrap();
+        agent_escrow_issuance_actor
+            .stop_and_wait(None, None)
+            .await
+            .unwrap();
         ledger.stop_and_wait(None, None).await.unwrap();
     }
 
@@ -1620,9 +1654,11 @@ mod agent_escrow_wiring_tests {
         let certificate_pem = {
             let mut rng = rand::rng();
             let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
-            let private_key_pem =
-                rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&private_key, rsa::pkcs8::LineEnding::LF)
-                    .unwrap();
+            let private_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
+                &private_key,
+                rsa::pkcs8::LineEnding::LF,
+            )
+            .unwrap();
             let key_pair = rcgen::KeyPair::from_pem(&private_key_pem).unwrap();
             let params = rcgen::CertificateParams::new(vec![
                 "git-observer.polar.svc.cluster.local".to_string(),
@@ -1681,21 +1717,24 @@ mod agent_escrow_wiring_tests {
             .await
             .clone()
             .expect("the actor's own reply must have actually been published");
-        let reply_envelope = rkyv::from_bytes::<Envelope<AgentEscrowKeyReply>, rkyv::rancor::Error>(
-            &captured_bytes,
-        )
-        .unwrap();
+        let reply_envelope =
+            rkyv::from_bytes::<Envelope<AgentEscrowKeyReply>, rkyv::rancor::Error>(&captured_bytes)
+                .unwrap();
         assert_eq!(reply_envelope.correlation_id, "test-correlation-id-2");
         match reply_envelope.payload {
             AgentEscrowKeyReply::Found { public_key_pem } => {
                 let expected =
-                    cert_issuer_common::public_key::extract_public_key_pem(&certificate_pem).unwrap();
+                    cert_issuer_common::public_key::extract_public_key_pem(&certificate_pem)
+                        .unwrap();
                 assert_eq!(public_key_pem, expected);
             }
             other => panic!("expected Found, got {other:?}"),
         }
 
-        agent_escrow_key_actor.stop_and_wait(None, None).await.unwrap();
+        agent_escrow_key_actor
+            .stop_and_wait(None, None)
+            .await
+            .unwrap();
         broker_client.stop_and_wait(None, None).await.unwrap();
         ledger.stop_and_wait(None, None).await.unwrap();
     }
@@ -1786,12 +1825,13 @@ mod retrieve_secret_wiring_tests {
         )
         .unwrap();
         let requester_key_pair = rcgen::KeyPair::from_pem(&requester_private_key_pem).unwrap();
-        let requester_params = rcgen::CertificateParams::new(vec![
-            "requester.polar.svc.cluster.local".to_string(),
-        ])
-        .unwrap();
-        let requester_certificate_pem =
-            requester_params.self_signed(&requester_key_pair).unwrap().pem();
+        let requester_params =
+            rcgen::CertificateParams::new(vec!["requester.polar.svc.cluster.local".to_string()])
+                .unwrap();
+        let requester_certificate_pem = requester_params
+            .self_signed(&requester_key_pair)
+            .unwrap()
+            .pem();
         let _ = ractor::rpc::call(
             &ledger,
             |reply| LedgerMessage::Append {
@@ -1859,10 +1899,7 @@ mod retrieve_secret_wiring_tests {
         // ConsumerSupervisor's own ClientEvent::MessagePublished
         // handler and dispatch_retrieve_secret_request's own doc
         // comment for why).
-        ConsumerSupervisor::dispatch_retrieve_secret_request(
-            bytes,
-            Some("requester".to_string()),
-        );
+        ConsumerSupervisor::dispatch_retrieve_secret_request(bytes, Some("requester".to_string()));
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
@@ -1871,11 +1908,13 @@ mod retrieve_secret_wiring_tests {
             .await
             .clone()
             .expect("the actor's own reply must have actually been published");
-        let reply_envelope = rkyv::from_bytes::<Envelope<RetrieveSecretReply>, rkyv::rancor::Error>(
-            &captured_bytes,
-        )
-        .unwrap();
-        assert_eq!(reply_envelope.correlation_id, "test-correlation-id-retrieve");
+        let reply_envelope =
+            rkyv::from_bytes::<Envelope<RetrieveSecretReply>, rkyv::rancor::Error>(&captured_bytes)
+                .unwrap();
+        assert_eq!(
+            reply_envelope.correlation_id,
+            "test-correlation-id-retrieve"
+        );
         match reply_envelope.payload {
             RetrieveSecretReply::Found { secret } => {
                 let decrypted = secret.decrypt(&requester_private_key).unwrap();
@@ -1884,7 +1923,10 @@ mod retrieve_secret_wiring_tests {
             other => panic!("expected Found, got {other:?}"),
         }
 
-        retrieve_secret_actor.stop_and_wait(None, None).await.unwrap();
+        retrieve_secret_actor
+            .stop_and_wait(None, None)
+            .await
+            .unwrap();
         broker_client.stop_and_wait(None, None).await.unwrap();
         ledger.stop_and_wait(None, None).await.unwrap();
     }
@@ -2028,9 +2070,15 @@ mod agent_escrow_keypair_bootstrap_wiring_tests {
             .await
             .clone()
             .expect("the actor's own reply must have actually been published");
-        let reply_envelope = rkyv::from_bytes::<Envelope<RetrieveAgentEscrowKeypairReply>, rkyv::rancor::Error>(&captured_bytes)
-            .unwrap();
-        assert_eq!(reply_envelope.correlation_id, "test-correlation-id-bootstrap");
+        let reply_envelope = rkyv::from_bytes::<
+            Envelope<RetrieveAgentEscrowKeypairReply>,
+            rkyv::rancor::Error,
+        >(&captured_bytes)
+        .unwrap();
+        assert_eq!(
+            reply_envelope.correlation_id,
+            "test-correlation-id-bootstrap"
+        );
         match reply_envelope.payload {
             RetrieveAgentEscrowKeypairReply::Found { payload } => {
                 let decrypted = payload.decrypt(requester_secret).unwrap();
@@ -2119,7 +2167,11 @@ mod identity_normalization_wiring_tests {
         // cert-issuer's /validate, confirmed by the mock's own
         // request count, not just assumed from no panic occurring.
         let received = cert_issuer.received_requests().await.unwrap();
-        assert_eq!(received.len(), 1, "cert-issuer's /validate must have been called exactly once");
+        assert_eq!(
+            received.len(),
+            1,
+            "cert-issuer's /validate must have been called exactly once"
+        );
     }
 }
 
@@ -2189,9 +2241,11 @@ mod decrypt_on_behalf_of_wiring_tests {
             );
             "#
         );
-        let result = ractor::call!(policy_actor, |reply| polar_policy::PolicyMessage::UpdatePolicy {
-            policy_source: policy,
-            reply,
+        let result = ractor::call!(policy_actor, |reply| {
+            polar_policy::PolicyMessage::UpdatePolicy {
+                policy_source: policy,
+                reply,
+            }
         })
         .unwrap();
         result.unwrap();
@@ -2200,7 +2254,8 @@ mod decrypt_on_behalf_of_wiring_tests {
     }
 
     #[tokio::test]
-    async fn full_pipeline_from_raw_bytes_through_the_special_dispatch_path_to_a_real_allowed_reply() {
+    async fn full_pipeline_from_raw_bytes_through_the_special_dispatch_path_to_a_real_allowed_reply()
+     {
         let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
         // Mirrors retrieve_secret_wiring_tests's own test of the
         // identical shape -- proves published_by genuinely reaches
@@ -2245,12 +2300,13 @@ mod decrypt_on_behalf_of_wiring_tests {
         )
         .unwrap();
         let requester_key_pair = rcgen::KeyPair::from_pem(&requester_private_key_pem).unwrap();
-        let requester_params = rcgen::CertificateParams::new(vec![
-            "requester.polar.svc.cluster.local".to_string(),
-        ])
-        .unwrap();
-        let requester_certificate_pem =
-            requester_params.self_signed(&requester_key_pair).unwrap().pem();
+        let requester_params =
+            rcgen::CertificateParams::new(vec!["requester.polar.svc.cluster.local".to_string()])
+                .unwrap();
+        let requester_certificate_pem = requester_params
+            .self_signed(&requester_key_pair)
+            .unwrap()
+            .pem();
         let _ = ractor::rpc::call(
             &ledger,
             |reply| LedgerMessage::Append {
@@ -2315,9 +2371,10 @@ mod decrypt_on_behalf_of_wiring_tests {
             .await
             .clone()
             .expect("the actor's own reply must have actually been published");
-        let reply_envelope = rkyv::from_bytes::<Envelope<DecryptOnBehalfOfReply>, rkyv::rancor::Error>(
-            &captured_bytes,
-        )
+        let reply_envelope = rkyv::from_bytes::<
+            Envelope<DecryptOnBehalfOfReply>,
+            rkyv::rancor::Error,
+        >(&captured_bytes)
         .unwrap();
         assert_eq!(
             reply_envelope.correlation_id,
@@ -2331,7 +2388,10 @@ mod decrypt_on_behalf_of_wiring_tests {
             other => panic!("expected Allowed, got {other:?}"),
         }
 
-        decrypt_on_behalf_of_actor.stop_and_wait(None, None).await.unwrap();
+        decrypt_on_behalf_of_actor
+            .stop_and_wait(None, None)
+            .await
+            .unwrap();
         broker_client.stop_and_wait(None, None).await.unwrap();
         ledger.stop_and_wait(None, None).await.unwrap();
     }

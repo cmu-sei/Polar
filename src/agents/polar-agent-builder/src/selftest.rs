@@ -149,7 +149,9 @@ mod tests {
         assert_eq!(test.tick(secs(19), true), vec![], "not yet");
         assert_eq!(
             test.tick(secs(20), true),
-            vec![Action::Deaf { unanswered_for: secs(20) }]
+            vec![Action::Deaf {
+                unanswered_for: secs(20)
+            }]
         );
         // Still deaf, and said once: the next look at the interval probes again, silently.
         assert_eq!(test.tick(secs(25), true), vec![]);
@@ -163,7 +165,12 @@ mod tests {
         test.tick(secs(0), true);
         assert_eq!(
             test.tick(secs(30), true),
-            vec![Action::Deaf { unanswered_for: secs(30) }, Action::Probe(2)]
+            vec![
+                Action::Deaf {
+                    unanswered_for: secs(30)
+                },
+                Action::Probe(2)
+            ]
         );
         assert_eq!(test.tick(secs(60), true), vec![Action::Probe(3)]);
     }
@@ -179,7 +186,9 @@ mod tests {
         assert_eq!(test.tick(secs(30), true), vec![Action::Probe(2)]);
         assert_eq!(
             test.tick(secs(50), true),
-            vec![Action::Deaf { unanswered_for: secs(20) }]
+            vec![Action::Deaf {
+                unanswered_for: secs(20)
+            }]
         );
     }
 
@@ -188,8 +197,16 @@ mod tests {
         let mut test = machine();
         test.tick(secs(0), true);
         test.tick(secs(30), true); // judged deaf, probe 2 sent
-        assert_eq!(test.heard(1), Some(Action::Hearing), "the path works, however late");
-        assert_eq!(test.tick(secs(45), true), vec![], "nothing is owed any more");
+        assert_eq!(
+            test.heard(1),
+            Some(Action::Hearing),
+            "the path works, however late"
+        );
+        assert_eq!(
+            test.tick(secs(45), true),
+            vec![],
+            "nothing is owed any more"
+        );
     }
 
     #[test]
@@ -199,7 +216,9 @@ mod tests {
         assert_eq!(test.heard(7), None);
         assert_eq!(
             test.tick(secs(20), true),
-            vec![Action::Deaf { unanswered_for: secs(20) }],
+            vec![Action::Deaf {
+                unanswered_for: secs(20)
+            }],
             "still unanswered"
         );
     }
@@ -211,7 +230,11 @@ mod tests {
         test.tick(secs(20), true);
         test.registered();
         assert_eq!(test.tick(secs(21), true), vec![Action::Probe(2)]);
-        assert_eq!(test.tick(secs(40), true), vec![], "judged from the new probe, 19 s old");
+        assert_eq!(
+            test.tick(secs(40), true),
+            vec![],
+            "judged from the new probe, 19 s old"
+        );
     }
 
     #[test]

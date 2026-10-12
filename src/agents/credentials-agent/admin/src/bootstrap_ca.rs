@@ -17,8 +17,8 @@
 
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, PostParams};
 use kube::Client;
+use kube::api::{Api, PostParams};
 use std::collections::BTreeMap;
 
 /// Holds the CA certificate and private key. Mounted only into
@@ -66,7 +66,10 @@ pub fn build_objects(
                 namespace: Some(ns.clone()),
                 ..Default::default()
             },
-            data: Some(BTreeMap::from([("ca.pem".to_string(), cert_pem.to_string())])),
+            data: Some(BTreeMap::from([(
+                "ca.pem".to_string(),
+                cert_pem.to_string(),
+            )])),
             ..Default::default()
         })
         .collect();

@@ -94,9 +94,8 @@ impl Actor for JiraProjectObserver {
                 if let Command::GetProjects(op) = command {
                     debug!("{op}");
 
-                    let projects: Vec<JiraProject> = state
-                        .get_json(&format!("{}{}", state.jira_url, op))
-                        .await?;
+                    let projects: Vec<JiraProject> =
+                        state.get_json(&format!("{}{}", state.jira_url, op)).await?;
 
                     publish_data(
                         &state.tcp_client,

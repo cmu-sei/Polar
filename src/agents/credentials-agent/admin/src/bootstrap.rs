@@ -15,13 +15,13 @@
 //!   * the issued certificate is checked against the key before success is
 //!     reported, and printed to stdout if it cannot be written.
 
-use cert_issuer_common::keypair::{generate_csr, KeyAlgorithm};
 use cert_issuer_common::key_match::certificate_matches_key;
+use cert_issuer_common::keypair::{KeyAlgorithm, generate_csr};
 use credentials_agent_common::account_claim::{AccountReply, AccountRequest, Claimant};
 use k8s_openapi::api::authentication::v1::{TokenRequest, TokenRequestSpec};
 use k8s_openapi::api::core::v1::ServiceAccount;
-use kube::api::{Api, PostParams};
 use kube::Client;
+use kube::api::{Api, PostParams};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -51,7 +51,15 @@ pub async fn run(args: BootstrapArgs) -> Result<(), String> {
     let claimant = Claimant::Bootstrap { credential: token };
 
     // Phase 1: prove the identity, learn the account id.
-    let account_id = match post(&http, &url, &AccountRequest::Begin { claimant: claimant.clone() }).await? {
+    let account_id = match post(
+        &http,
+        &url,
+        &AccountRequest::Begin {
+            claimant: claimant.clone(),
+        },
+    )
+    .await?
+    {
         AccountReply::Offered { account_id } => account_id,
         other => return Err(format!("unexpected reply to Begin: {other:?}")),
     };
@@ -95,17 +103,26 @@ pub async fn run(args: BootstrapArgs) -> Result<(), String> {
 
     if let Err(e) = write_new(&args.cert_out, certificate_pem.as_bytes(), 0o644) {
         emit_fallback(&certificate_pem, &ca_chain_pem);
-        return Err(format!("{e}; the certificate was printed to stdout instead"));
+        return Err(format!(
+            "{e}; the certificate was printed to stdout instead"
+        ));
     }
     let chain_path = args.cert_out.with_extension("chain.pem");
     if let Err(e) = write_new(&chain_path, ca_chain_pem.as_bytes(), 0o644) {
-        eprintln!("warning: could not write the CA chain to {}: {e}", chain_path.display());
+        eprintln!(
+            "warning: could not write the CA chain to {}: {e}",
+            chain_path.display()
+        );
     }
 
     eprintln!("certificate written to {}", args.cert_out.display());
     eprintln!();
     eprintln!("!! This is the ONLY bootstrap certificate that will ever be issued.");
-    eprintln!("!! Back up {} and {} now.", args.cert_out.display(), args.key_out.display());
+    eprintln!(
+        "!! Back up {} and {} now.",
+        args.cert_out.display(),
+        args.key_out.display()
+    );
     eprintln!("!! If either is lost, the only recovery is rebuilding the cluster.");
     eprintln!();
     eprintln!(

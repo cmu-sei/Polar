@@ -1,10 +1,10 @@
 pub mod cassini;
+pub mod event_log;
 pub mod events;
 pub mod graph;
 pub mod logging;
 pub mod request_reply;
 pub mod time;
-pub mod event_log;
 pub mod topics;
 pub use events::*;
 
@@ -13,6 +13,8 @@ use cassini_client::{
     TcpClientMessage,
 };
 use cassini_types::{ClientEvent, WireTraceCtx};
+pub use polar_health;
+pub use polar_health as health;
 use ractor::OutputPort;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use reqwest::{Certificate, Client, ClientBuilder};
@@ -24,8 +26,6 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, info};
-pub use polar_health;
-pub use polar_health as health;
 
 use crate::cassini::CassiniClient;
 use crate::topics::PROVENANCE_DISCOVERY;
@@ -71,7 +71,9 @@ pub trait Supervisor {
 }
 
 pub enum SupervisorMessage {
-    ClientEvent { event: ClientEvent },
+    ClientEvent {
+        event: ClientEvent,
+    },
     Heartbeat,
     /// Graph controller availability/failure signal, translated from
     /// polar::graph::GraphSignal via an OutputPort subscription in

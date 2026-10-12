@@ -35,7 +35,9 @@ use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 /// The observer's HTTP request body for `POST /identity`, and (wrapped
 /// in `Envelope`) what it publishes to
 /// `credentials-identity-normalization-requests`.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityNormalizationRequest {
     pub credential: String,
@@ -45,7 +47,9 @@ pub struct IdentityNormalizationRequest {
 /// in an `Envelope` carrying the original request's `correlation_id`.
 #[derive(Debug, Clone, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
 pub enum IdentityNormalizationReply {
-    Normalized { identity: String },
+    Normalized {
+        identity: String,
+    },
     Refused {
         reason: IdentityNormalizationRefusalReason,
     },
@@ -85,8 +89,7 @@ mod tests {
             .unwrap()
             .to_vec();
         let restored: IdentityNormalizationRequest =
-            rkyv::from_bytes::<IdentityNormalizationRequest, rkyv::rancor::Error>(&bytes)
-                .unwrap();
+            rkyv::from_bytes::<IdentityNormalizationRequest, rkyv::rancor::Error>(&bytes).unwrap();
         assert_eq!(original, restored);
     }
 

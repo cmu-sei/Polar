@@ -70,16 +70,19 @@ async fn start() -> Fixture {
         build_router(handler),
     ));
 
-    Fixture { addr, ca_cert_pem, ca }
+    Fixture {
+        addr,
+        ca_cert_pem,
+        ca,
+    }
 }
 
 /// A client certificate for `identity`, signed by the fixture's CA.
 /// Returns (certificate PEM, private key PEM).
 async fn client_cert(f: &Fixture, identity: &str) -> (String, String) {
     let csr = generate_csr(identity, &KeyAlgorithm::Ed25519, &[]).unwrap();
-    let issued = f
-        .ca
-        .issue(CaIssueRequest {
+    let issued =
+        f.ca.issue(CaIssueRequest {
             csr_pem: csr.csr_pem,
             sans: vec![identity.to_string()],
             lifetime: Duration::from_secs(3600),
@@ -108,7 +111,9 @@ async fn request(f: &Fixture, client: Option<(String, String)>, raw: String) -> 
             let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
                 .unwrap()
                 .unwrap();
-            builder.with_client_auth_cert(certs, key).expect("client auth cert")
+            builder
+                .with_client_auth_cert(certs, key)
+                .expect("client auth cert")
         }
         None => builder.with_no_client_auth(),
     };

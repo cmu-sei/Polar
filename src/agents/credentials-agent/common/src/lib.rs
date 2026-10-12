@@ -21,24 +21,24 @@
    DM24-0470
 */
 
-pub mod events;
-pub mod issuance;
-pub mod observer;
-pub mod identity;
-pub mod graph;
-pub mod certificate;
-pub mod escrow_key;
-pub mod escrow_secret;
-pub mod secret;
-pub mod agent_escrow_issuance;
-pub mod agent_escrow_key;
-pub mod retrieve_secret;
-pub mod ephemeral_exchange;
-pub mod agent_escrow_keypair_bootstrap;
-pub mod decrypt_on_behalf_of;
 pub mod account_claim;
 pub mod admin_action;
 pub mod admin_signing;
+pub mod agent_escrow_issuance;
+pub mod agent_escrow_key;
+pub mod agent_escrow_keypair_bootstrap;
+pub mod certificate;
+pub mod decrypt_on_behalf_of;
+pub mod ephemeral_exchange;
+pub mod escrow_key;
+pub mod escrow_secret;
+pub mod events;
+pub mod graph;
+pub mod identity;
+pub mod issuance;
+pub mod observer;
+pub mod retrieve_secret;
+pub mod secret;
 
 /// Published by an admin's tool (polar-admin-grant) to grant or
 /// revoke permissions -- see events.rs's own CredentialsEvent::Grant/
@@ -68,8 +68,10 @@ pub const CREDENTIALS_ISSUANCE_REPLIES_TOPIC: &str = "credentials-issuance-repli
 /// see identity.rs's own IdentityNormalizationRequest/Reply. Queried
 /// before a CSR is ever built, so its SAN already matches what
 /// cert-issuer's /issue will independently check.
-pub const CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC: &str = "credentials-identity-normalization-requests";
-pub const CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC: &str = "credentials-identity-normalization-replies";
+pub const CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC: &str =
+    "credentials-identity-normalization-requests";
+pub const CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC: &str =
+    "credentials-identity-normalization-replies";
 
 /// The Credentials Agent's own, singleton escrow public key -- see
 /// escrow_key.rs's own EscrowKeyRequest/Reply. What any participant
@@ -112,7 +114,8 @@ pub const CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC: &str =
 /// certificate. Distinct from CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC
 /// above, which asks about the Credentials Agent's own key
 /// specifically.
-pub const CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC: &str = "credentials-agent-escrow-key-requests";
+pub const CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC: &str =
+    "credentials-agent-escrow-key-requests";
 pub const CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC: &str = "credentials-agent-escrow-key-replies";
 
 /// Retrieve half of the general secret-escrow mechanism -- see

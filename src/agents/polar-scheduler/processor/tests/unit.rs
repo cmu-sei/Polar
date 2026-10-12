@@ -1,6 +1,8 @@
 use cassini_client::TcpClientMessage;
 use polar::graph::{
-    controller::{compile_graph_op, GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property},
+    controller::{
+        GraphControllerMsg, GraphOp, GraphValue, IntoGraphKey, Property, compile_graph_op,
+    },
     nodes::schedule::ScheduleKey,
 };
 use polar_scheduler::processor::ScheduleInfoProcessor;
@@ -40,8 +42,14 @@ impl Actor for MockGraphController {
 #[test]
 fn test_compile_upsert_node() {
     let op = GraphOp::UpsertNode {
-        key: ScheduleKey::Permanent { agent_id: "agent-1".to_string() }.into_key(),
-        props: vec![Property("schedule".to_string(), GraphValue::String("{}".to_string()))],
+        key: ScheduleKey::Permanent {
+            agent_id: "agent-1".to_string(),
+        }
+        .into_key(),
+        props: vec![Property(
+            "schedule".to_string(),
+            GraphValue::String("{}".to_string()),
+        )],
     };
     let q = compile_graph_op(&op).unwrap();
     assert!(!q.query().is_empty());
@@ -51,7 +59,10 @@ fn test_compile_upsert_node() {
 #[test]
 fn test_compile_upsert_node_adhoc() {
     let op = GraphOp::UpsertNode {
-        key: ScheduleKey::Adhoc { agent_type: "worker".to_string() }.into_key(),
+        key: ScheduleKey::Adhoc {
+            agent_type: "worker".to_string(),
+        }
+        .into_key(),
         props: vec![],
     };
     let q = compile_graph_op(&op).unwrap();
@@ -62,7 +73,10 @@ fn test_compile_upsert_node_adhoc() {
 #[test]
 fn test_compile_upsert_node_ephemeral() {
     let op = GraphOp::UpsertNode {
-        key: ScheduleKey::Ephemeral { agent_type: "handler".to_string() }.into_key(),
+        key: ScheduleKey::Ephemeral {
+            agent_type: "handler".to_string(),
+        }
+        .into_key(),
         props: vec![],
     };
     let q = compile_graph_op(&op).unwrap();
@@ -73,8 +87,14 @@ fn test_compile_upsert_node_ephemeral() {
 #[test]
 fn test_compile_ensure_edge() {
     let op = GraphOp::EnsureEdge {
-        from: ScheduleKey::Permanent { agent_id: "a".to_string() }.into_key(),
-        to: ScheduleKey::Adhoc { agent_type: "b".to_string() }.into_key(),
+        from: ScheduleKey::Permanent {
+            agent_id: "a".to_string(),
+        }
+        .into_key(),
+        to: ScheduleKey::Adhoc {
+            agent_type: "b".to_string(),
+        }
+        .into_key(),
         rel_type: "DESCRIBES".to_string(),
         props: vec![],
     };
@@ -86,9 +106,15 @@ fn test_compile_ensure_edge() {
 #[test]
 fn test_compile_replace_edge() {
     let op = GraphOp::ReplaceEdge {
-        from: ScheduleKey::Permanent { agent_id: "a".to_string() }.into_key(),
+        from: ScheduleKey::Permanent {
+            agent_id: "a".to_string(),
+        }
+        .into_key(),
         rel_type: "HAS_STATE".to_string(),
-        to: ScheduleKey::Adhoc { agent_type: "b".to_string() }.into_key(),
+        to: ScheduleKey::Adhoc {
+            agent_type: "b".to_string(),
+        }
+        .into_key(),
     };
     let q = compile_graph_op(&op).unwrap();
     assert!(q.query().contains("HAS_STATE"));
@@ -97,7 +123,10 @@ fn test_compile_replace_edge() {
 #[test]
 fn test_compile_remove_edges() {
     let op = GraphOp::RemoveEdges {
-        from: ScheduleKey::Permanent { agent_id: "a".to_string() }.into_key(),
+        from: ScheduleKey::Permanent {
+            agent_id: "a".to_string(),
+        }
+        .into_key(),
         rel_type: "HAS_STATE".to_string(),
     };
     let q = compile_graph_op(&op).unwrap();
@@ -108,10 +137,22 @@ fn test_compile_remove_edges() {
 #[test]
 fn test_compile_update_state() {
     let op = GraphOp::UpdateState {
-        resource_key: ScheduleKey::Permanent { agent_id: "a".to_string() }.into_key(),
-        state_type_key: ScheduleKey::Adhoc { agent_type: "state-type".to_string() }.into_key(),
-        state_instance_key: ScheduleKey::Ephemeral { agent_type: "instance".to_string() }.into_key(),
-        state_instance_props: vec![Property("status".to_string(), GraphValue::String("active".to_string()))],
+        resource_key: ScheduleKey::Permanent {
+            agent_id: "a".to_string(),
+        }
+        .into_key(),
+        state_type_key: ScheduleKey::Adhoc {
+            agent_type: "state-type".to_string(),
+        }
+        .into_key(),
+        state_instance_key: ScheduleKey::Ephemeral {
+            agent_type: "instance".to_string(),
+        }
+        .into_key(),
+        state_instance_props: vec![Property(
+            "status".to_string(),
+            GraphValue::String("active".to_string()),
+        )],
     };
     let q = compile_graph_op(&op).unwrap();
     assert!(q.query().contains("MERGE"));
@@ -120,10 +161,7 @@ fn test_compile_update_state() {
 
 // ── ScheduleInfoProcessor actor tests ────────────────────────────────────────
 
-async fn spawn_processor() -> (
-    ActorRef<ProcessorMsg>,
-    tokio::task::JoinHandle<()>,
-) {
+async fn spawn_processor() -> (ActorRef<ProcessorMsg>, tokio::task::JoinHandle<()>) {
     let (tcp, _) = Actor::spawn(None, MockTcpClient, ()).await.unwrap();
     let (graph, _) = Actor::spawn(None, MockGraphController, ()).await.unwrap();
     let (processor, handle) = Actor::spawn(None, ScheduleInfoProcessor, (tcp, graph))
@@ -152,13 +190,16 @@ async fn test_processor_git_change_create() {
         "config": {},
         "metadata": {"description": null, "owner": null},
         "version": 1
-    }).to_string();
+    })
+    .to_string();
 
     let change = GitScheduleChange::Create {
         path: "permanent/test.dhall".to_string(),
         json: schedule_json,
     };
-    processor.send_message(ProcessorMsg::GitChange(change)).unwrap();
+    processor
+        .send_message(ProcessorMsg::GitChange(change))
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     processor.stop(None);
     handle.await.unwrap();
@@ -177,13 +218,16 @@ async fn test_processor_git_change_update() {
         "config": {},
         "metadata": {"description": null, "owner": null},
         "version": 2
-    }).to_string();
+    })
+    .to_string();
 
     let change = GitScheduleChange::Update {
         path: "adhoc/worker.dhall".to_string(),
         json: schedule_json,
     };
-    processor.send_message(ProcessorMsg::GitChange(change)).unwrap();
+    processor
+        .send_message(ProcessorMsg::GitChange(change))
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     processor.stop(None);
     handle.await.unwrap();
@@ -195,7 +239,9 @@ async fn test_processor_git_change_delete() {
     let change = GitScheduleChange::Delete {
         path: "permanent/test.dhall".to_string(),
     };
-    processor.send_message(ProcessorMsg::GitChange(change)).unwrap();
+    processor
+        .send_message(ProcessorMsg::GitChange(change))
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     processor.stop(None);
     handle.await.unwrap();
@@ -214,14 +260,17 @@ async fn test_processor_announcement() {
         "config": {},
         "metadata": {"description": null, "owner": null},
         "version": 1
-    }).to_string();
+    })
+    .to_string();
 
     let ann = AdhocAgentAnnouncement {
         agent_type: "worker".to_string(),
         version: 1,
         default_schedule_json,
     };
-    processor.send_message(ProcessorMsg::Announcement(ann)).unwrap();
+    processor
+        .send_message(ProcessorMsg::Announcement(ann))
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     processor.stop(None);
     handle.await.unwrap();
@@ -230,10 +279,12 @@ async fn test_processor_announcement() {
 #[tokio::test]
 async fn test_processor_event() {
     let (processor, handle) = spawn_processor().await;
-    processor.send_message(ProcessorMsg::Event {
-        topic: "events.user.updated".to_string(),
-        payload: vec![],
-    }).unwrap();
+    processor
+        .send_message(ProcessorMsg::Event {
+            topic: "events.user.updated".to_string(),
+            payload: vec![],
+        })
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     processor.stop(None);
     handle.await.unwrap();

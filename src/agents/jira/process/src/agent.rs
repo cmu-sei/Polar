@@ -34,7 +34,9 @@ impl PolarAgent for JiraProcessor {
         .await
         .map_err(|e| format!("failed to start {JIRA_PROCESSOR_SUPERVISOR}: {e}"))?;
 
-        handle.await.map_err(|e| format!("{JIRA_PROCESSOR_SUPERVISOR} task failed: {e}"))?;
+        handle
+            .await
+            .map_err(|e| format!("{JIRA_PROCESSOR_SUPERVISOR} task failed: {e}"))?;
 
         // The supervisor stopping is never a success: a processor that no longer processes must
         // be restarted. `run` exits non-zero so the Job does.

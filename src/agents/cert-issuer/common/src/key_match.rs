@@ -21,8 +21,8 @@ pub enum KeyMatchError {
 /// True when the certificate's public key is the public half of `key_pem`.
 /// Only the first certificate in `cert_pem` is considered (the leaf).
 pub fn certificate_matches_key(cert_pem: &str, key_pem: &str) -> Result<bool, KeyMatchError> {
-    let (_, pem) =
-        parse_x509_pem(cert_pem.as_bytes()).map_err(|e| KeyMatchError::BadCertPem(e.to_string()))?;
+    let (_, pem) = parse_x509_pem(cert_pem.as_bytes())
+        .map_err(|e| KeyMatchError::BadCertPem(e.to_string()))?;
     let cert = pem
         .parse_x509()
         .map_err(|e| KeyMatchError::BadCert(e.to_string()))?;
@@ -33,7 +33,7 @@ pub fn certificate_matches_key(cert_pem: &str, key_pem: &str) -> Result<bool, Ke
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keypair::{generate_csr, KeyAlgorithm};
+    use crate::keypair::{KeyAlgorithm, generate_csr};
 
     fn self_signed(key_pem: &str) -> String {
         let key = KeyPair::from_pem(key_pem).unwrap();

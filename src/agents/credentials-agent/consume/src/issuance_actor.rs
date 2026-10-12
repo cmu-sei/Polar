@@ -32,6 +32,7 @@
 //! correlation_id, per cassini-request-reply-protocol.md.
 
 use crate::issuance::IssuanceHandler;
+use crate::supervisor::BROKER_CLIENT_NAME;
 use cassini_client::TcpClientMessage;
 use credentials_agent_common::CREDENTIALS_ISSUANCE_REPLIES_TOPIC;
 use credentials_agent_common::issuance::IssuanceRequest;
@@ -39,7 +40,6 @@ use polar::request_reply::Envelope;
 use ractor::registry::where_is;
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use tracing::error;
-use crate::supervisor::BROKER_CLIENT_NAME;
 
 pub struct IssuanceActor;
 

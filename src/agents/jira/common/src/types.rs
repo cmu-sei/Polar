@@ -204,10 +204,14 @@ pub struct JiraIssue {
     pub changelog: JiraIssueChangeLog,
 }
 
-#[derive(Debug, Serialize, Deserialize, SerdeDeserialize, SerdeSerialize, Archive, Clone, Default)]
+#[derive(
+    Debug, Serialize, Deserialize, SerdeDeserialize, SerdeSerialize, Archive, Clone, Default,
+)]
 pub struct IdString(pub String);
 
-#[derive(Debug, Serialize, Deserialize, SerdeDeserialize, SerdeSerialize, Archive, Clone, Default)]
+#[derive(
+    Debug, Serialize, Deserialize, SerdeDeserialize, SerdeSerialize, Archive, Clone, Default,
+)]
 pub struct JsonString {
     pub json: String,
 }

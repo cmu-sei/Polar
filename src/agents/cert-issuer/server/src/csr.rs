@@ -269,8 +269,7 @@ impl JobTitle {
         // routinely include commas, slashes, ampersands, and
         // parentheses ("Staff SRE, Security & Compliance (EMEA)").
         if !trimmed.chars().all(|c| {
-            c.is_alphanumeric()
-                || matches!(c, ' ' | '-' | '\'' | '.' | ',' | '/' | '&' | '(' | ')')
+            c.is_alphanumeric() || matches!(c, ' ' | '-' | '\'' | '.' | ',' | '/' | '&' | '(' | ')')
         }) {
             return Err(CsrError::SubjectFieldInvalidCharacter {
                 field: Self::FIELD_NAME.to_string(),

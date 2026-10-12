@@ -44,7 +44,9 @@ impl Activity {
         Report {
             by_topic: std::mem::take(&mut self.since_report).into_iter().collect(),
             total: self.total,
-            last_request_ago: self.last_request.map(|at| now.saturating_duration_since(at)),
+            last_request_ago: self
+                .last_request
+                .map(|at| now.saturating_duration_since(at)),
         }
     }
 }
@@ -106,15 +108,26 @@ mod tests {
         activity.record("a", t0);
 
         let first = activity.take_report(t0 + Duration::from_secs(60));
-        assert_eq!(first.by_topic, vec![("a".to_string(), 2), ("b".to_string(), 1)]);
+        assert_eq!(
+            first.by_topic,
+            vec![("a".to_string(), 2), ("b".to_string(), 1)]
+        );
         assert_eq!(first.total, 3);
         assert_eq!(first.last_request_ago, Some(Duration::from_secs(60)));
 
         let second = activity.take_report(t0 + Duration::from_secs(120));
-        assert_eq!(second.by_topic, vec![], "nothing new since the first report");
+        assert_eq!(
+            second.by_topic,
+            vec![],
+            "nothing new since the first report"
+        );
         assert_eq!(second.total, 3, "the total is since start");
         assert_eq!(second.last_request_ago, Some(Duration::from_secs(120)));
-        assert!(second.to_string().contains("no requests since the last report"));
+        assert!(
+            second
+                .to_string()
+                .contains("no requests since the last report")
+        );
     }
 
     #[test]

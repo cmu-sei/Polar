@@ -58,7 +58,8 @@ impl RetrieveSecretHandler {
         // Step 1: find the target to re-encrypt to -- always the
         // requester's own, broker-verified identity's current mTLS
         // certificate, never anything the request itself specifies.
-        let requester_certificate = match call_check_certificate(&self.ledger, &requested_by).await {
+        let requester_certificate = match call_check_certificate(&self.ledger, &requested_by).await
+        {
             Ok(Some(record)) => record,
             Ok(None) => {
                 return RetrieveSecretReply::Refused {
@@ -114,7 +115,10 @@ impl RetrieveSecretHandler {
         let reencrypted = match EscrowedSecret::encrypt(&plaintext, &target_public_key_pem) {
             Ok(s) => s,
             Err(e) => {
-                error!("Failed to re-encrypt secret {} for {requested_by}: {e}", request.name);
+                error!(
+                    "Failed to re-encrypt secret {} for {requested_by}: {e}",
+                    request.name
+                );
                 return RetrieveSecretReply::Failed {
                     detail: e.to_string(),
                 };
@@ -123,7 +127,9 @@ impl RetrieveSecretHandler {
         // `plaintext` (Zeroizing<Vec<u8>>) goes out of scope here,
         // genuinely wiped rather than merely deallocated.
 
-        RetrieveSecretReply::Found { secret: reencrypted }
+        RetrieveSecretReply::Found {
+            secret: reencrypted,
+        }
     }
 }
 
@@ -167,7 +173,6 @@ async fn call_check_secret(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,11 +210,13 @@ mod tests {
         )
         .unwrap();
         let requester_key_pair = rcgen::KeyPair::from_pem(&requester_private_key_pem).unwrap();
-        let requester_params = rcgen::CertificateParams::new(vec![
-            "requester.polar.svc.cluster.local".to_string(),
-        ])
-        .unwrap();
-        let requester_certificate_pem = requester_params.self_signed(&requester_key_pair).unwrap().pem();
+        let requester_params =
+            rcgen::CertificateParams::new(vec!["requester.polar.svc.cluster.local".to_string()])
+                .unwrap();
+        let requester_certificate_pem = requester_params
+            .self_signed(&requester_key_pair)
+            .unwrap()
+            .pem();
 
         let _ = ractor::rpc::call(
             &ledger,
@@ -343,11 +350,13 @@ mod tests {
         )
         .unwrap();
         let requester_key_pair = rcgen::KeyPair::from_pem(&requester_private_key_pem).unwrap();
-        let requester_params = rcgen::CertificateParams::new(vec![
-            "requester.polar.svc.cluster.local".to_string(),
-        ])
-        .unwrap();
-        let requester_certificate_pem = requester_params.self_signed(&requester_key_pair).unwrap().pem();
+        let requester_params =
+            rcgen::CertificateParams::new(vec!["requester.polar.svc.cluster.local".to_string()])
+                .unwrap();
+        let requester_certificate_pem = requester_params
+            .self_signed(&requester_key_pair)
+            .unwrap()
+            .pem();
         let _ = ractor::rpc::call(
             &ledger,
             |reply| LedgerMessage::Append {

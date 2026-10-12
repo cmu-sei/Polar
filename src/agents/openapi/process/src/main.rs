@@ -20,9 +20,9 @@
 
    DM24-0470
 */
+use openapi_processor::actors::{ConsumerSupervisor, ConsumerSupervisorArgs};
 use ractor::Actor;
 use std::error::Error;
-use openapi_processor::actors::{ConsumerSupervisor, ConsumerSupervisorArgs};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {

@@ -7,17 +7,19 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
 pub mod ca_root;
-pub mod identity;
-pub mod permission;
-pub mod public_key;
-pub mod keypair;
-pub mod serial;
 pub mod capability;
 pub mod csr_san;
+pub mod identity;
 pub mod key_match;
+pub mod keypair;
+pub mod permission;
+pub mod public_key;
+pub mod serial;
 
 // cert_issuer_common/src/lib.rs — add to IssueRequest
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum,)]
+#[derive(
+    Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum,
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CertType {
     #[default]

@@ -1,4 +1,4 @@
-use cassini_types::{BrokerMessage, ShutdownPhase, DisconnectReason};
+use cassini_types::{BrokerMessage, DisconnectReason, ShutdownPhase};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 
 // Minimal no-op actor that accepts BrokerMessage and does nothing.
@@ -38,7 +38,8 @@ mod tests {
             Some("test-subscriber-manager".to_string()),
             SubscriberManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         Ok(())
     }
@@ -55,7 +56,8 @@ mod tests {
             Some("test-subscriber-manager-2".to_string()),
             SubscriberManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send initiate shutdown phase message
         let msg = BrokerMessage::InitiateShutdownPhase {
@@ -80,7 +82,8 @@ mod tests {
             Some("test-subscriber-manager-3".to_string()),
             SubscriberManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a registration request
         let msg = BrokerMessage::RegistrationRequest {
@@ -108,11 +111,12 @@ mod tests {
             Some("test-subscriber-manager-4".to_string()),
             SubscriberManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // This test is more about ensuring the message handling works without panicking
         // The actual subscriber creation would require a complex setup with topic manager
-        
+
         Ok(())
     }
 
@@ -128,7 +132,8 @@ mod tests {
             Some("test-subscriber-manager-5".to_string()),
             SubscriberManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send an unsubscribe request
         let msg = BrokerMessage::UnsubscribeRequest {
@@ -155,7 +160,8 @@ mod tests {
             Some("test-subscriber-manager-6".to_string()),
             SubscriberManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a disconnect request
         let msg = BrokerMessage::DisconnectRequest {
@@ -183,7 +189,8 @@ mod tests {
             Some("test-subscriber-manager-7".to_string()),
             SubscriberManager,
             args,
-        ).await?;
+        )
+        .await?;
 
         // Send a timeout message
         let msg = BrokerMessage::TimeoutMessage {
@@ -200,10 +207,12 @@ mod tests {
 
     async fn create_mock_session_manager() -> ActorRef<BrokerMessage> {
         let (actor_ref, _handle) = Actor::spawn(
-            None,  // anonymous — no registry collision
+            None, // anonymous — no registry collision
             MockActor,
             (),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         actor_ref
     }
 }

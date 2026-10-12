@@ -81,7 +81,8 @@ async fn a_goodbye_ends_the_session_at_once() {
         leaving.say_goodbye();
         pause().await;
 
-        let back = TestClient::connect_resuming(&broker, "leaving.test", Some(session.clone())).await;
+        let back =
+            TestClient::connect_resuming(&broker, "leaving.test", Some(session.clone())).await;
         assert_ne!(
             back.registration_id().unwrap(),
             session,
@@ -103,7 +104,11 @@ async fn a_vanished_session_is_kept_for_the_retention_window_and_then_removed() 
         // Back inside the window: the same session.
         tokio::time::sleep(Duration::from_millis(500)).await;
         let back = TestClient::connect_resuming(&broker, "away.test", Some(session.clone())).await;
-        assert_eq!(back.registration_id().unwrap(), session, "kept inside the window");
+        assert_eq!(
+            back.registration_id().unwrap(),
+            session,
+            "kept inside the window"
+        );
 
         // Gone again, and this time gone for longer than the window.
         back.vanish().await;
@@ -180,9 +185,11 @@ async fn a_client_that_loses_its_connection_comes_back_to_its_session_and_what_i
         // The front brings its own connection back, asking for the session it had.
         agent
             .client
-            .wait_for("a second registration", std::time::Duration::from_secs(10), |_| {
-                agent.registrations().len() >= 2
-            })
+            .wait_for(
+                "a second registration",
+                std::time::Duration::from_secs(10),
+                |_| agent.registrations().len() >= 2,
+            )
             .await;
         assert_eq!(
             agent.registrations(),

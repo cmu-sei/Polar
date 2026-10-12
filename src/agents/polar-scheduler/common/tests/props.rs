@@ -1,8 +1,8 @@
-use proptest::prelude::*;
 use polar_scheduler_common::{
-    ScheduleNode, ScheduleKind, ScheduleMetadata, TimeSpec, TimeUnit,
-    GitScheduleChange, AdhocAgentAnnouncement, ScheduleNotification,
+    AdhocAgentAnnouncement, GitScheduleChange, ScheduleKind, ScheduleMetadata, ScheduleNode,
+    ScheduleNotification, TimeSpec, TimeUnit,
 };
+use proptest::prelude::*;
 use serde_json::json;
 
 proptest! {

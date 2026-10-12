@@ -28,15 +28,15 @@
 //! per "one mechanism, both flows."
 
 use crate::credential::{CredentialKind, classify_credential};
-use std::sync::Arc;
 use crate::escrow::EscrowKeypair;
 use crate::introspection::IntrospectionClient;
 use crate::ledger::LedgerMessage;
 use cert_client::handshake::HandshakeClient;
 use cert_issuer_common::CertType;
 use credentials_agent_common::events::CredentialsEvent;
-use credentials_agent_common::issuance::{IssuanceReply, IssuanceRefusalReason, IssuanceRequest};
+use credentials_agent_common::issuance::{IssuanceRefusalReason, IssuanceReply, IssuanceRequest};
 use ractor::ActorRef;
+use std::sync::Arc;
 use tracing::{error, warn};
 
 pub struct IssuanceHandler {
@@ -54,8 +54,7 @@ pub struct IssuanceHandler {
 impl IssuanceHandler {
     pub async fn handle(&self, request: IssuanceRequest) -> IssuanceReply {
         // ---- Step 1: classify the credential ----
-        let kind = match classify_credential(&request.credential, &self.known_kubernetes_issuers)
-        {
+        let kind = match classify_credential(&request.credential, &self.known_kubernetes_issuers) {
             Ok(k) => k,
             Err(e) => {
                 warn!("Credential classification failed: {e}");
@@ -99,7 +98,10 @@ impl IssuanceHandler {
         // ---- Step 3: real validation via cert-issuer's /validate ----
         let validated = match self
             .cert_issuer
-            .validate(&request.credential, cert_issuer_common::ValidateRequest::default())
+            .validate(
+                &request.credential,
+                cert_issuer_common::ValidateRequest::default(),
+            )
             .await
         {
             Ok(v) => v,
@@ -117,22 +119,25 @@ impl IssuanceHandler {
         // property is actually keyed on, so a token/config combination
         // that doesn't provide it can't be safely processed at all.
         let Some(instance_binding) = validated.instance_binding else {
-            warn!("Validated token for '{identity}' has no instance_binding -- refusing rather than degrading the renewal check");
+            warn!(
+                "Validated token for '{identity}' has no instance_binding -- refusing rather than degrading the renewal check"
+            );
             return IssuanceReply::Refused {
                 reason: IssuanceRefusalReason::TokenInvalid,
             };
         };
 
         // ---- Step 4: renewal-prevention check ----
-        let already_valid = match call_check_renewal(&self.ledger, &identity, &instance_binding).await {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Ledger CheckRenewal call failed: {e}");
-                return IssuanceReply::Refused {
-                    reason: IssuanceRefusalReason::TokenInvalid,
-                };
-            }
-        };
+        let already_valid =
+            match call_check_renewal(&self.ledger, &identity, &instance_binding).await {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Ledger CheckRenewal call failed: {e}");
+                    return IssuanceReply::Refused {
+                        reason: IssuanceRefusalReason::TokenInvalid,
+                    };
+                }
+            };
         if already_valid {
             return IssuanceReply::Refused {
                 reason: IssuanceRefusalReason::AlreadyHasValidCertificate,
@@ -161,16 +166,20 @@ impl IssuanceHandler {
             // K8s-originated request) never require a prior grant --
             // a missing one just means no extra permissions embedded,
             // matching "no more privileged than any other agent gets."
-            (CredentialKind::Kubernetes, grant) => {
-                grant.map(|g| g.permissions).unwrap_or_default()
-            }
+            (CredentialKind::Kubernetes, grant) => grant.map(|g| g.permissions).unwrap_or_default(),
         };
 
         // ---- Step 6: sign, via cert-issuer's /issue ----
         let extra_sans: Vec<String> = permissions.iter().map(|p| p.to_san_string()).collect();
         let issued = match self
             .cert_issuer
-            .issue(&request.credential, &request.csr_pem, CertType::Client, extra_sans, None)
+            .issue(
+                &request.credential,
+                &request.csr_pem,
+                CertType::Client,
+                extra_sans,
+                None,
+            )
             .await
         {
             Ok(r) => r,
@@ -256,14 +265,11 @@ async fn call_check_renewal(
     }
 }
 
-async fn call_append(ledger: &ActorRef<LedgerMessage>, event: CredentialsEvent) -> Result<(), String> {
-    match ractor::rpc::call(
-        ledger,
-        |reply| LedgerMessage::Append { event, reply },
-        None,
-    )
-    .await
-    {
+async fn call_append(
+    ledger: &ActorRef<LedgerMessage>,
+    event: CredentialsEvent,
+) -> Result<(), String> {
+    match ractor::rpc::call(ledger, |reply| LedgerMessage::Append { event, reply }, None).await {
         Ok(ractor::rpc::CallResult::Success(result)) => result,
         Ok(other) => Err(format!("unexpected CallResult: {other:?}")),
         Err(e) => Err(e.to_string()),
@@ -274,9 +280,9 @@ async fn call_append(ledger: &ActorRef<LedgerMessage>, event: CredentialsEvent) 
 mod tests {
     use super::*;
     use crate::ledger::{LedgerActor, LedgerActorArgs};
-    use credentials_agent_common::events::GrantReason;
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use credentials_agent_common::events::GrantReason;
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -342,7 +348,9 @@ mod tests {
             ledger: spawn_test_ledger().await,
             cert_issuer: HandshakeClient::new(server.uri()),
             introspection: None,
-            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
@@ -396,7 +404,8 @@ mod tests {
                     target_identity: "testuser".to_string(),
                     permissions: vec![
                         cert_issuer_common::permission::Permission {
-                            scope: cert_issuer_common::permission::PermissionScope::ServiceToService,
+                            scope:
+                                cert_issuer_common::permission::PermissionScope::ServiceToService,
                             target: None,
                         },
                         cert_issuer_common::permission::Permission {
@@ -423,14 +432,18 @@ mod tests {
                 "test-client".to_string(),
                 "test-secret".to_string(),
             )),
-            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
         let reply = handler
             .handle(IssuanceRequest {
                 csr_pem: "fake-csr".to_string(),
-                credential: make_token("http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar"),
+                credential: make_token(
+                    "http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar",
+                ),
             })
             .await;
 
@@ -468,14 +481,18 @@ mod tests {
                 "test-client".to_string(),
                 "test-secret".to_string(),
             )),
-            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
         let reply = handler
             .handle(IssuanceRequest {
                 csr_pem: "fake-csr".to_string(),
-                credential: make_token("http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar"),
+                credential: make_token(
+                    "http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar",
+                ),
             })
             .await;
 
@@ -513,29 +530,33 @@ mod tests {
             .await;
 
         let ledger = spawn_test_ledger().await;
-        let _ = ractor::rpc::call(
-            &ledger,
-            |reply| LedgerMessage::Append {
-                event: CredentialsEvent::IssuanceCompleted {
-                    identity: "system:serviceaccount:polar:admin-tool".to_string(),
-                    instance_binding: "admin-tool-uid".to_string(),
-                    serial: "already-issued-serial".to_string(),
-                    timestamp: 1000,
-                    certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
-                        .to_string(),
+        let _ =
+            ractor::rpc::call(
+                &ledger,
+                |reply| LedgerMessage::Append {
+                    event: CredentialsEvent::IssuanceCompleted {
+                        identity: "system:serviceaccount:polar:admin-tool".to_string(),
+                        instance_binding: "admin-tool-uid".to_string(),
+                        serial: "already-issued-serial".to_string(),
+                        timestamp: 1000,
+                        certificate_pem:
+                            "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                                .to_string(),
+                    },
+                    reply,
                 },
-                reply,
-            },
-            None,
-        )
-        .await
-        .unwrap();
+                None,
+            )
+            .await
+            .unwrap();
 
         let handler = IssuanceHandler {
             ledger,
             cert_issuer: HandshakeClient::new(server.uri()),
             introspection: None,
-            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
@@ -580,14 +601,18 @@ mod tests {
                 "test-client".to_string(),
                 "test-secret".to_string(),
             )),
-            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
         let reply = handler
             .handle(IssuanceRequest {
                 csr_pem: "fake-csr".to_string(),
-                credential: make_token("http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar"),
+                credential: make_token(
+                    "http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar",
+                ),
             })
             .await;
 
@@ -606,14 +631,18 @@ mod tests {
             ledger: spawn_test_ledger().await,
             cert_issuer: HandshakeClient::new("http://127.0.0.1:1".to_string()),
             introspection: None,
-            known_kubernetes_issuers: vec!["https://kubernetes.default.svc.cluster.local".to_string()],
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
         let reply = handler
             .handle(IssuanceRequest {
                 csr_pem: "fake-csr".to_string(),
-                credential: make_token("http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar"),
+                credential: make_token(
+                    "http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar",
+                ),
             })
             .await;
 

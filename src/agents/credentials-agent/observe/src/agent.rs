@@ -11,8 +11,7 @@ pub struct CredentialsObserver;
 
 impl PolarAgent for CredentialsObserver {
     const NAME: &'static str = SERVICE_NAME;
-    const PURPOSE: &'static str =
-        "The HTTP front of the credentials agent: relays certificate, account and admin requests to the consumer over Cassini";
+    const PURPOSE: &'static str = "The HTTP front of the credentials agent: relays certificate, account and admin requests to the consumer over Cassini";
     const NEEDS: &'static [Capability] = &[];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
     const SECTIONS: &'static [&'static Section] = &[&crate::settings::SECTION];

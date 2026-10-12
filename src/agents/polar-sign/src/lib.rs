@@ -11,7 +11,9 @@ use serde_json::{Map, Value, json};
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DhallError {
-    #[error("`{0}` cannot be written in Dhall here: only text, whole numbers, true and false, lists and records")]
+    #[error(
+        "`{0}` cannot be written in Dhall here: only text, whole numbers, true and false, lists and records"
+    )]
     Unsupported(&'static str),
     #[error("an empty list has no type to write in Dhall")]
     EmptyList,
@@ -41,7 +43,10 @@ fn text(s: &str) -> String {
 
 fn field_name(name: &str) -> Result<String, DhallError> {
     let plain = !name.is_empty()
-        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '/');
@@ -64,7 +69,9 @@ pub fn dhall(value: &Value) -> Result<String, DhallError> {
         Value::Number(n) => match (n.as_u64(), n.as_i64()) {
             (Some(natural), _) => Ok(natural.to_string()),
             (None, Some(integer)) => Ok(format!("{integer}")),
-            _ => Err(DhallError::Unsupported("a number that is not a whole number")),
+            _ => Err(DhallError::Unsupported(
+                "a number that is not a whole number",
+            )),
         },
         Value::String(s) => Ok(text(s)),
         Value::Array(items) => {
@@ -148,7 +155,10 @@ pub fn load_identity(dir: &std::path::Path, user: &str) -> Result<Identity, Stri
     };
     let leaf = split_pem(&read(format!("{user}.crt"))?);
     let [leaf] = leaf.as_slice() else {
-        return Err(format!("{user}.crt holds {} certificates, not one", leaf.len()));
+        return Err(format!(
+            "{user}.crt holds {} certificates, not one",
+            leaf.len()
+        ));
     };
     let mut chain = vec![leaf.clone()];
     if let Ok(more) = read(format!("{user}.chain.pem")) {
@@ -196,7 +206,10 @@ pub fn document_dhall(document: &polar_signing::Document) -> Result<String, Dhal
     if let Value::Object(map) = value {
         fields = map;
     }
-    Ok(format!("-- Signed by `polar-sign`. Do not edit: any change invalidates the signature.\n{}\n", dhall(&Value::Object(fields))?))
+    Ok(format!(
+        "-- Signed by `polar-sign`. Do not edit: any change invalidates the signature.\n{}\n",
+        dhall(&Value::Object(fields))?
+    ))
 }
 
 #[cfg(test)]
@@ -227,7 +240,9 @@ mod tests {
     #[test]
     fn text_with_quotes_slashes_newlines_and_dollars_survives() {
         roundtrip(json!({ "v": "say \"hi\" \\ then\nnext\tline $HOME ${not} é" }));
-        roundtrip(json!({ "pem": "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n" }));
+        roundtrip(
+            json!({ "pem": "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n" }),
+        );
     }
 
     #[test]
@@ -244,7 +259,10 @@ mod tests {
 
     #[test]
     fn a_change_is_name_equals_value_and_the_value_may_hold_equals() {
-        assert_eq!(parse_change("RUST_LOG=debug"), Ok(("RUST_LOG".into(), "debug".into())));
+        assert_eq!(
+            parse_change("RUST_LOG=debug"),
+            Ok(("RUST_LOG".into(), "debug".into()))
+        );
         assert_eq!(parse_change("A=b=c"), Ok(("A".into(), "b=c".into())));
         assert_eq!(parse_change("A="), Ok(("A".into(), "".into())));
         assert!(parse_change("nothing").is_err());
@@ -269,7 +287,11 @@ mod tests {
         assert_eq!(p["version"], 2);
         assert_eq!(p["changes"][0]["name"], "A");
         assert_eq!(p["changes"][0]["value"], "b");
-        assert_eq!(p.as_object().unwrap().len(), 5, "no field the receiver does not know");
+        assert_eq!(
+            p.as_object().unwrap().len(),
+            5,
+            "no field the receiver does not know"
+        );
     }
 
     use polar_signing::testing::{Spec, now, root, signer};

@@ -130,7 +130,10 @@ mod tests {
             "label".to_string(),
             GraphValue::String("core".to_string())
         )));
-        assert!(!props.iter().any(|p| p.0 == "labels"), "must never write the old, buggy plural key");
+        assert!(
+            !props.iter().any(|p| p.0 == "labels"),
+            "must never write the old, buggy plural key"
+        );
     }
 
     #[test]
@@ -142,8 +145,14 @@ mod tests {
             panic!("expected UpsertNodes");
         };
         let (_, props) = &items[0];
-        assert!(props.contains(&Property("html".to_string(), GraphValue::String(String::new()))));
-        assert!(props.contains(&Property("label".to_string(), GraphValue::String(String::new()))));
+        assert!(props.contains(&Property(
+            "html".to_string(),
+            GraphValue::String(String::new())
+        )));
+        assert!(props.contains(&Property(
+            "label".to_string(),
+            GraphValue::String(String::new())
+        )));
     }
 
     #[test]

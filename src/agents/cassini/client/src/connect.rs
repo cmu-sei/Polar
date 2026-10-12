@@ -61,8 +61,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use tokio::time::Instant;
 
     fn policy() -> Policy {
@@ -94,8 +94,16 @@ mod tests {
         assert_eq!(outcome, Ok(3), "the third try connected");
         assert_eq!(tries.load(Ordering::SeqCst), 3);
         // Two tries each given 5 s, and the waits between: not minutes of waiting on one.
-        assert!(began.elapsed() < Duration::from_secs(11), "{:?}", began.elapsed());
-        assert!(began.elapsed() >= Duration::from_secs(10), "{:?}", began.elapsed());
+        assert!(
+            began.elapsed() < Duration::from_secs(11),
+            "{:?}",
+            began.elapsed()
+        );
+        assert!(
+            began.elapsed() >= Duration::from_secs(10),
+            "{:?}",
+            began.elapsed()
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -108,18 +116,24 @@ mod tests {
 
         assert!(outcome.is_err());
         // Four tries of 5 s and the waits between them (100, 200, 400 ms).
-        assert!(began.elapsed() <= Duration::from_secs(21), "{:?}", began.elapsed());
+        assert!(
+            began.elapsed() <= Duration::from_secs(21),
+            "{:?}",
+            began.elapsed()
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_try_that_fails_at_once_is_retried_after_the_backoff_which_doubles_to_its_limit() {
         let began = Instant::now();
-        let outcome: Result<u32, String> = with_retries(&policy(), |_| async {
-            Err("refused".to_string())
-        })
-        .await;
+        let outcome: Result<u32, String> =
+            with_retries(&policy(), |_| async { Err("refused".to_string()) }).await;
 
-        assert_eq!(outcome, Err("refused".to_string()), "the last error is the one reported");
+        assert_eq!(
+            outcome,
+            Err("refused".to_string()),
+            "the last error is the one reported"
+        );
         // Waits of 100, 200 and 400 ms between four tries: none after the last.
         assert_eq!(began.elapsed(), Duration::from_millis(700));
     }

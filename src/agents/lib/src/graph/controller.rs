@@ -1,7 +1,7 @@
 use super::environment::{GraphSettings, GraphTls};
 use neo4rs::{BoltNull, BoltType, Graph, Query};
-use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait, RpcReplyPort};
 use ractor::concurrency::Duration;
+use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, async_trait};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use tracing::{debug, error, info, instrument, trace};
@@ -64,9 +64,27 @@ pub mod rel {
 /// exhaustive against every reserved word, but covers every keyword that
 /// could actually mutate or destroy data if smuggled in this way.
 const CYPHER_KEYWORD_BLACKLIST: &[&str] = &[
-    "MATCH", "MERGE", "CREATE", "DELETE", "DETACH", "SET", "REMOVE",
-    "RETURN", "WHERE", "WITH", "UNWIND", "CALL", "YIELD", "FOREACH",
-    "LOAD", "CSV", "UNION", "OPTIONAL", "DROP", "CONSTRAINT", "INDEX",
+    "MATCH",
+    "MERGE",
+    "CREATE",
+    "DELETE",
+    "DETACH",
+    "SET",
+    "REMOVE",
+    "RETURN",
+    "WHERE",
+    "WITH",
+    "UNWIND",
+    "CALL",
+    "YIELD",
+    "FOREACH",
+    "LOAD",
+    "CSV",
+    "UNION",
+    "OPTIONAL",
+    "DROP",
+    "CONSTRAINT",
+    "INDEX",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -94,7 +112,10 @@ pub fn validate_cypher_identifier(s: &str) -> Result<(), CypherIdentifierError> 
     if s.chars().next().unwrap().is_ascii_digit() {
         return Err(CypherIdentifierError::StartsWithDigit(s.to_string()));
     }
-    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == 'Σ') {
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == 'Σ')
+    {
         return Err(CypherIdentifierError::InvalidCharacters(s.to_string()));
     }
     if CYPHER_KEYWORD_BLACKLIST.contains(&s.to_ascii_uppercase().as_str()) {
@@ -192,7 +213,10 @@ impl GraphNodeKey for DynamicNodeKey {
                 "({prefix}:{} {{ {}: ${value_param} }})",
                 self.label, self.key_prop_name
             ),
-            vec![(value_param, BoltType::String(self.key_prop_value.clone().into()))],
+            vec![(
+                value_param,
+                BoltType::String(self.key_prop_value.clone().into()),
+            )],
         )
     }
 }
@@ -400,9 +424,7 @@ pub enum GraphOp {
     /// Not itself compilable via compile_graph_op -- see handle_op, which
     /// checks for this variant before falling through to the ordinary
     /// compile-one-query-and-run path every other variant uses.
-    Transaction {
-        ops: Vec<GraphOp>,
-    },
+    Transaction { ops: Vec<GraphOp> },
 }
 
 // ── GraphControllerMsg ─────────────────────────────────────────────────────────
@@ -826,7 +848,6 @@ impl GraphControllerActor {
     pub fn neo_config_for(
         settings: GraphSettings,
     ) -> Result<neo4rs::Config, ractor::ActorProcessingErr> {
-
         info!("Using Neo4j database at {}", settings.endpoint);
 
         let builder = neo4rs::ConfigBuilder::default()
@@ -926,7 +947,11 @@ impl Actor for GraphControllerActor {
         // Canary: "RETURN 1" can only fail on auth/connectivity, never on
         // data content — this is what actually proves the graph is
         // reachable, as opposed to pre_start's pool config succeeding.
-        match state.graph.execute(Query::new("RETURN 1".to_string())).await {
+        match state
+            .graph
+            .execute(Query::new("RETURN 1".to_string()))
+            .await
+        {
             Ok(_) => {
                 info!("GraphControllerActor: canary query succeeded, graph available");
                 state.signal_port.send(GraphSignal::Available);
@@ -969,7 +994,11 @@ impl Actor for GraphControllerActor {
                 }
             },
             GraphControllerMsg::Tick => {
-                match state.graph.execute(Query::new("RETURN 1".to_string())).await {
+                match state
+                    .graph
+                    .execute(Query::new("RETURN 1".to_string()))
+                    .await
+                {
                     Ok(_) => {
                         state.signal_port.send(GraphSignal::Available);
                     }

@@ -329,7 +329,7 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
                 ],
             )];
 
-        // Same reasoning as IssuanceCompleted's own grant-existed
+            // Same reasoning as IssuanceCompleted's own grant-existed
             // check above -- never create a spurious grant node for
             // the (far more common, given the uniform-permission
             // default) case where no Grant event ever existed for
@@ -388,7 +388,10 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
                             "reason".to_string(),
                             GraphValue::String(format!("{reason:?}")),
                         ),
-                        Property("via_bootstrap".to_string(), GraphValue::Bool(*via_bootstrap)),
+                        Property(
+                            "via_bootstrap".to_string(),
+                            GraphValue::Bool(*via_bootstrap),
+                        ),
                         Property("claimed".to_string(), GraphValue::Bool(false)),
                     ],
                 )],
@@ -429,10 +432,7 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
                                 "identity".to_string(),
                                 GraphValue::String(account_id.clone()),
                             ),
-                            Property(
-                                "username".to_string(),
-                                GraphValue::String(username.clone()),
-                            ),
+                            Property("username".to_string(), GraphValue::String(username.clone())),
                             Property("issued_at".to_string(), GraphValue::I64(*timestamp)),
                             Property("revoked".to_string(), GraphValue::Bool(false)),
                         ],
@@ -604,7 +604,11 @@ async fn read_checkpoint(graph_controller: &GraphController) -> Result<Option<St
     {
         Ok(ractor::rpc::CallResult::Success(Ok(rows))) => rows,
         Ok(ractor::rpc::CallResult::Success(Err(e))) => return Err(e),
-        other => return Err(format!("unexpected CallResult reading checkpoint: {other:?}")),
+        other => {
+            return Err(format!(
+                "unexpected CallResult reading checkpoint: {other:?}"
+            ));
+        }
     };
 
     match rows.first() {
@@ -619,7 +623,13 @@ async fn read_checkpoint(graph_controller: &GraphController) -> Result<Option<St
 async fn get_full_history(
     ledger: &ActorRef<LedgerMessage>,
 ) -> Result<Vec<(String, CredentialsEvent)>, String> {
-    match ractor::rpc::call(ledger, |reply| LedgerMessage::GetFullHistory { reply }, None).await {
+    match ractor::rpc::call(
+        ledger,
+        |reply| LedgerMessage::GetFullHistory { reply },
+        None,
+    )
+    .await
+    {
         Ok(ractor::rpc::CallResult::Success(result)) => result,
         other => Err(format!("unexpected CallResult reading history: {other:?}")),
     }
@@ -762,8 +772,9 @@ pub(crate) mod tests {
             instance_binding: "pod-uid-1".to_string(),
             serial: "service-serial-1".to_string(),
             timestamp: 2000,
-            certificate_pem: "-----BEGIN CERTIFICATE-----\nfake-service-cert\n-----END CERTIFICATE-----\n"
-                .to_string(),
+            certificate_pem:
+                "-----BEGIN CERTIFICATE-----\nfake-service-cert\n-----END CERTIFICATE-----\n"
+                    .to_string(),
         };
         let with_grant = graph_ops_for_event(&event, true);
         match &with_grant[0] {
@@ -787,7 +798,9 @@ pub(crate) mod tests {
 
     #[test]
     fn graph_ops_for_a_recorded_grant_match_the_derived_grant() {
-        use credentials_agent_common::admin_action::{AdminAction, AdminActionBody, SignedAdminAction};
+        use credentials_agent_common::admin_action::{
+            AdminAction, AdminActionBody, SignedAdminAction,
+        };
         let payload = AdminActionBody {
             nonce: "n1".to_string(),
             action: AdminAction::Grant {

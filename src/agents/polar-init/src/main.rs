@@ -84,13 +84,16 @@ impl FromStr for CertRequest {
                 return Err(format!(
                     "invalid cert type '{}': expected 'client' or 'server'",
                     other
-                ))
+                ));
             }
         };
 
         let cert_dir = parts[1].trim().to_string();
         if cert_dir.is_empty() {
-            return Err(format!("invalid --cert '{}': cert_dir must not be empty", s));
+            return Err(format!(
+                "invalid --cert '{}': cert_dir must not be empty",
+                s
+            ));
         }
 
         let key_algorithm = match parts[2].trim().to_lowercase().as_str() {
@@ -100,7 +103,7 @@ impl FromStr for CertRequest {
                 return Err(format!(
                     "invalid key algorithm '{}': expected 'ed25519' or 'ecdsa-p256'",
                     other
-                ))
+                ));
             }
         };
 
@@ -209,15 +212,14 @@ async fn main() {
 
     // The environment is read once and judged as a whole before the first wait, so a mistake
     // in it is one clear exit naming every problem, never a hang or a late failure.
-    let settings = match environment::InitSettings::from_env(&environment::snapshot(
-        &polar_env::ProcessEnv,
-    )) {
-        Ok(settings) => settings,
-        Err(problems) => {
-            eprintln!("error: this container's environment is not sound: {problems}");
-            std::process::exit(1);
-        }
-    };
+    let settings =
+        match environment::InitSettings::from_env(&environment::snapshot(&polar_env::ProcessEnv)) {
+            Ok(settings) => settings,
+            Err(problems) => {
+                eprintln!("error: this container's environment is not sound: {problems}");
+                std::process::exit(1);
+            }
+        };
     let cert_issuer_url = settings.cert_issuer_url.clone();
     let token_path = settings.token_path.clone();
 
@@ -381,7 +383,10 @@ async fn ensure_escrow_bootstrapped(own_identity: &str, escrow: &environment::Es
     // This binary has no supervisor to forward ClientEvent::Registered,
     // and its lifecycle closure above is a no-op.
     loop {
-        match ractor::call!(tcp_client, cassini_client::TcpClientMessage::GetRegistrationId) {
+        match ractor::call!(
+            tcp_client,
+            cassini_client::TcpClientMessage::GetRegistrationId
+        ) {
             Ok(Some(_)) => break,
             _ => tokio::time::sleep(Duration::from_millis(200)).await,
         }
@@ -540,7 +545,10 @@ async fn issue_cert(
                 return;
             }
             Err(e) => {
-                tracing::warn!("failed to write cert bundle to '{}': {e}, retrying...", req.cert_dir);
+                tracing::warn!(
+                    "failed to write cert bundle to '{}': {e}, retrying...",
+                    req.cert_dir
+                );
                 tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
             }
         }

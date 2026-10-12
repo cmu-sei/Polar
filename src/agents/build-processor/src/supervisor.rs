@@ -12,9 +12,9 @@ use polar::{
     graph::controller::{GraphController, GraphControllerActor, GraphSignal},
     health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage},
 };
+use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, SupervisionEvent, async_trait};
 use std::sync::Arc;
-use ractor::concurrency::Duration;
 use tracing::{debug, error, info, instrument, warn};
 
 const HEALTHCHECK_ACTOR_NAME: &str = "polar.healthcheck";
@@ -220,7 +220,9 @@ impl Actor for BuildProcessorSupervisor {
                 // Job marks Completed, no restart, no visible failure.
                 ClientEvent::TransportError { reason } => {
                     warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
-                    let _ = state.healthcheck.cast(HealthCheckMessage::CassiniDisconnected);
+                    let _ = state
+                        .healthcheck
+                        .cast(HealthCheckMessage::CassiniDisconnected);
                 }
 
                 _ => {}
@@ -231,7 +233,9 @@ impl Actor for BuildProcessorSupervisor {
                     let _ = state.healthcheck.cast(HealthCheckMessage::GraphAvailable);
                 }
                 GraphSignal::OpFailed(reason) => {
-                    let _ = state.healthcheck.cast(HealthCheckMessage::GraphOpFailed(reason));
+                    let _ = state
+                        .healthcheck
+                        .cast(HealthCheckMessage::GraphOpFailed(reason));
                 }
             },
             SupervisorMessage::ForceExit => {
@@ -286,9 +290,10 @@ impl Actor for BuildProcessorSupervisor {
                     state.draining = true;
                     info!("entering drain window before exiting for rejuvenation");
                     let _ = myself
-                        .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                            SupervisorMessage::ForceExit
-                        })
+                        .send_after(
+                            ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS),
+                            || SupervisorMessage::ForceExit,
+                        )
                         .await;
                 }
             }
@@ -302,9 +307,10 @@ impl Actor for BuildProcessorSupervisor {
                         state.draining = true;
                         warn!("entering drain window before exit ({actor_name} failed)");
                         let _ = myself
-                            .send_after(ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS), || {
-                                SupervisorMessage::ForceExit
-                            })
+                            .send_after(
+                                ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS),
+                                || SupervisorMessage::ForceExit,
+                            )
                             .await;
                     }
                 }

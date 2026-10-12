@@ -1,9 +1,9 @@
 //! What the OCI resolver is, as the infrastructure asks to be told: see
 //! `polar_agent_builder::PolarAgent`.
 
+use crate::RESOLVER_SUPERVISOR_NAME;
 use crate::settings;
 use crate::supervisor::{ResolverSupervisor, SHUTDOWN_BUDGET};
-use crate::RESOLVER_SUPERVISOR_NAME;
 use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
 use polar_env::Section;
 use ractor::Actor;
@@ -13,8 +13,7 @@ pub struct OciResolver;
 
 impl PolarAgent for OciResolver {
     const NAME: &'static str = "oci-resolver";
-    const PURPOSE: &'static str =
-        "Follows image references other agents discover to their registry and publishes the verified manifest";
+    const PURPOSE: &'static str = "Follows image references other agents discover to their registry and publishes the verified manifest";
     const NEEDS: &'static [Capability] = &[];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
     const SECTIONS: &'static [&'static Section] = &[&settings::SECTION];

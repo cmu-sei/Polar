@@ -189,9 +189,10 @@ impl CaClient for RcgenCaClient {
         const OID_MAIL: [u64; 7] = [0, 9, 2342, 19200300, 100, 1, 3];
 
         if let Some(v) = &req.subject_dn.given_name {
-            csr.params
-                .distinguished_name
-                .push(rcgen::DnType::CustomDnType(OID_GIVEN_NAME.to_vec()), v.clone());
+            csr.params.distinguished_name.push(
+                rcgen::DnType::CustomDnType(OID_GIVEN_NAME.to_vec()),
+                v.clone(),
+            );
         }
         if let Some(v) = &req.subject_dn.surname {
             csr.params
@@ -270,9 +271,8 @@ impl CaClient for RcgenCaClient {
             .map_err(|e| CaError::SigningFailed(format!("rcgen sign: {e}")))?;
 
         let certificate_pem = cert.pem();
-        let serial_number =
-            cert_issuer_common::serial::serial_from_pem(&certificate_pem)
-                .unwrap_or_else(|| "unknown".to_string());
+        let serial_number = cert_issuer_common::serial::serial_from_pem(&certificate_pem)
+            .unwrap_or_else(|| "unknown".to_string());
 
         Ok(IssuedCert {
             certificate_pem,
@@ -339,7 +339,9 @@ pub enum CaMaterialsError {
     /// Provisioned mode only: the key is writable by its group or
     /// accessible to others. Group-read is allowed because a mounted
     /// Secret is typically shared with the pod through fsGroup.
-    #[error("provisioned CA key {path} has insecure permissions {mode:o}; group-write and any access for others are forbidden")]
+    #[error(
+        "provisioned CA key {path} has insecure permissions {mode:o}; group-write and any access for others are forbidden"
+    )]
     InsecureProvisionedKeyPermissions { path: String, mode: u32 },
 
     /// Catch-all for parse failures, IO errors writing, etc.

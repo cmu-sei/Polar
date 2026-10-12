@@ -59,7 +59,9 @@ fn sanitize_label(raw: &str) -> String {
 /// Object/List/Null, matching the original's silent skip of those.
 fn first_tier_to_property(key: &str, value: &FirstTierField) -> Option<Property> {
     match value {
-        FirstTierField::Option(Some(v)) => Some(Property(key.to_string(), GraphValue::String(v.clone()))),
+        FirstTierField::Option(Some(v)) => {
+            Some(Property(key.to_string(), GraphValue::String(v.clone())))
+        }
         FirstTierField::Number(v) => Some(Property(
             key.to_string(),
             GraphValue::I64(v.min(i64::MAX as f64) as i64),
@@ -174,7 +176,10 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
     for (key, value) in issue.fields.iter() {
         match value {
             FieldValue::OptionValue(Some(v)) => {
-                issue_props.push(Property(sanitize_label(&key.clone()), GraphValue::String(v.clone())));
+                issue_props.push(Property(
+                    sanitize_label(&key.clone()),
+                    GraphValue::String(v.clone()),
+                ));
             }
             FieldValue::Number(v) => {
                 issue_props.push(Property(
@@ -220,11 +225,21 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
             }
             FieldValue::Object(v) => {
                 if key == "Assignee" {
-                    merge_user(&mut ops, &issue.key, "ASSIGNED", issue.fields.get("Assignee"));
+                    merge_user(
+                        &mut ops,
+                        &issue.key,
+                        "ASSIGNED",
+                        issue.fields.get("Assignee"),
+                    );
                 } else if key == "Creator" {
                     merge_user(&mut ops, &issue.key, "CREATED", issue.fields.get("Creator"));
                 } else if key == "Reporter" {
-                    merge_user(&mut ops, &issue.key, "REPORTED", issue.fields.get("Reporter"));
+                    merge_user(
+                        &mut ops,
+                        &issue.key,
+                        "REPORTED",
+                        issue.fields.get("Reporter"),
+                    );
                 } else if key == "Issue Type" {
                     if let Some(FirstTierField::Option(Some(name))) = v.get("name") {
                         let mut props = Vec::new();
@@ -301,8 +316,7 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
                         });
                     }
                 } else {
-                    let sub_key = if let Some(FirstTierField::Option(Some(name))) = v.get("name")
-                    {
+                    let sub_key = if let Some(FirstTierField::Option(Some(name))) = v.get("name") {
                         name.clone()
                     } else if let Some(FirstTierField::Option(Some(id))) = v.get("id") {
                         id.clone()
@@ -358,7 +372,10 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
                 ),
             ];
             if let Some(from) = &item.from {
-                cl_props.push(Property("from".to_string(), GraphValue::String(from.clone())));
+                cl_props.push(Property(
+                    "from".to_string(),
+                    GraphValue::String(from.clone()),
+                ));
             }
             if let Some(from_string) = &item.from_string {
                 cl_props.push(Property(
@@ -440,8 +457,8 @@ pub fn handle_issue(
 mod tests {
     use super::*;
     use jira_common::types::{JiraAuthor, JiraHistory, JiraIssueChangeLog, JiraItemHistory};
-    use std::collections::HashMap;
     use polar::graph::controller::GraphNodeKey;
+    use std::collections::HashMap;
 
     fn empty_issue(key: &str) -> JiraIssue {
         JiraIssue {
@@ -890,7 +907,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(indices_seen, vec![0, 1, 2], "counter must increment across histories, not reset per-history");
+        assert_eq!(
+            indices_seen,
+            vec![0, 1, 2],
+            "counter must increment across histories, not reset per-history"
+        );
         assert!(authors_seen.contains(&"jdoe".to_string()));
         assert!(authors_seen.contains(&"No one".to_string()));
     }

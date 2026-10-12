@@ -74,7 +74,9 @@ pub enum AgentEscrowIssuanceReply {
 /// IssuanceRefusalReason -- this flow's own failure modes are
 /// genuinely different, not a subset or superset of the human-issuance
 /// ones.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub enum AgentEscrowIssuanceRefusalReason {
     /// The Kubernetes credential itself failed validation (signature,
     /// issuer, audience, expiry -- the existing, already-tested
@@ -163,14 +165,20 @@ mod tests {
 
         let json = serde_json::to_string(&original).unwrap();
         let restored_json: AgentEscrowIssuanceReply = serde_json::from_str(&json).unwrap();
-        assert!(matches!(restored_json, AgentEscrowIssuanceReply::Issued { .. }));
+        assert!(matches!(
+            restored_json,
+            AgentEscrowIssuanceReply::Issued { .. }
+        ));
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original)
             .unwrap()
             .to_vec();
         let restored_rkyv: AgentEscrowIssuanceReply =
             rkyv::from_bytes::<AgentEscrowIssuanceReply, rkyv::rancor::Error>(&bytes).unwrap();
-        assert!(matches!(restored_rkyv, AgentEscrowIssuanceReply::Issued { .. }));
+        assert!(matches!(
+            restored_rkyv,
+            AgentEscrowIssuanceReply::Issued { .. }
+        ));
     }
 
     #[test]

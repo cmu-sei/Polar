@@ -447,10 +447,11 @@ mod tests {
             Err(Rejection::Unauthorized(_))
         ));
         // The default signer holds update-configuration, and may.
-        assert!(rig
-            .verifier
-            .verify(&document(&rig, Spec::default(), payload()))
-            .is_ok());
+        assert!(
+            rig.verifier
+                .verify(&document(&rig, Spec::default(), payload()))
+                .is_ok()
+        );
     }
 
     #[test]

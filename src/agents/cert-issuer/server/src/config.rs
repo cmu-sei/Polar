@@ -311,6 +311,8 @@ pub enum ConfigError {
         "issuer '{issuer}' uses the SuffixedClaim identity normalization strategy but has no identity_scope_claim configured"
     )]
     MissingScopeClaim { issuer: String },
-    #[error("mtls.server_identity must be non-empty -- the listener cannot mint its own TLS server certificate without it")]
+    #[error(
+        "mtls.server_identity must be non-empty -- the listener cannot mint its own TLS server certificate without it"
+    )]
     EmptyMtlsServerIdentity,
 }

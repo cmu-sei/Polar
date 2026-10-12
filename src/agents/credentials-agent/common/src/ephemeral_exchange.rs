@@ -61,7 +61,9 @@ pub enum EphemeralExchangeError {
 /// A single, one-time response encrypted via an ephemeral X25519 key
 /// exchange. The only way to construct one from plaintext is through
 /// `encrypt`.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub struct EphemeralEncryptedPayload {
     /// The responder's own ephemeral public key for this one
     /// exchange -- the requester derives the same shared secret
@@ -205,7 +207,8 @@ mod tests {
         let requester_public_key = PublicKey::from(&requester_secret).to_bytes();
 
         let plaintext = b"a real secret";
-        let mut payload = EphemeralEncryptedPayload::encrypt(plaintext, &requester_public_key).unwrap();
+        let mut payload =
+            EphemeralEncryptedPayload::encrypt(plaintext, &requester_public_key).unwrap();
         payload.ciphertext[0] ^= 0xFF;
 
         let result = payload.decrypt(requester_secret);

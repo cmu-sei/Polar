@@ -49,8 +49,7 @@ const OBSERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// is stopped in turn, bounded at `OBSERVER_STOP_TIMEOUT`, so this allows for
 /// several, plus a margin. If it is not done by then the process exits 1
 /// regardless.
-pub const SHUTDOWN_BUDGET: Duration =
-    Duration::from_secs(OBSERVER_STOP_TIMEOUT.as_secs() * 3 + 10);
+pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(OBSERVER_STOP_TIMEOUT.as_secs() * 3 + 10);
 
 /// This supervisor's own message type. polar::SupervisorMessage cannot carry
 /// the infrastructure signals without polar-agent-builder depending back on

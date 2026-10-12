@@ -281,7 +281,9 @@ impl InfrastructureSupervisor {
             return;
         };
         let heard = test.heard.load(std::sync::atomic::Ordering::SeqCst);
-        if heard > 0 && let Some(Action::Hearing) = test.machine.heard(heard) {
+        if heard > 0
+            && let Some(Action::Hearing) = test.machine.heard(heard)
+        {
             tracing::info!(
                 "InfrastructureSupervisor: self-test: a probe came back, the agent hears the \
                  broker again"
@@ -292,14 +294,13 @@ impl InfrastructureSupervisor {
             match action {
                 Action::Probe(number) => {
                     tracing::debug!(number, "InfrastructureSupervisor: self-test: probing");
-                    let _ = client
-                        .tcp_client
-                        .as_actor_ref()
-                        .send_message(cassini_client::TcpClientMessage::publish(
+                    let _ = client.tcp_client.as_actor_ref().send_message(
+                        cassini_client::TcpClientMessage::publish(
                             test.topic.clone(),
                             probe_payload(&test.instance, number),
                             None,
-                        ));
+                        ),
+                    );
                 }
                 Action::Deaf { unanswered_for } => {
                     tracing::error!(
@@ -388,7 +389,8 @@ impl InfrastructureSupervisor {
             None
         };
 
-        let subscribed_topics: Vec<String> = subscriptions.iter().map(|s| s.topic.clone()).collect();
+        let subscribed_topics: Vec<String> =
+            subscriptions.iter().map(|s| s.topic.clone()).collect();
 
         tracing::info!(
             "InfrastructureSupervisor: expecting {} subscription(s): {}",
@@ -557,7 +559,9 @@ impl Actor for InfrastructureSupervisor {
                 }
             };
         // The same trust, clock and revocation check commands, with their own authority.
-        let command_verifier = verifier.as_ref().map(crate::signed::UpdateVerifier::commands);
+        let command_verifier = verifier
+            .as_ref()
+            .map(crate::signed::UpdateVerifier::commands);
         let configuration = ConfigurationHandle::spawn(
             None,
             args.service_name.clone(),
@@ -579,11 +583,15 @@ impl Actor for InfrastructureSupervisor {
         });
         // What became of each signed document is announced for the scheduler to record. It goes through
         // this supervisor so that it uses the Cassini client as it is now, across a respawn.
-        configuration.outcomes().subscribe(myself.clone(), |outcome| {
-            Some(InfrastructureSupervisorMessage::Outcome(outcome))
-        });
+        configuration
+            .outcomes()
+            .subscribe(myself.clone(), |outcome| {
+                Some(InfrastructureSupervisorMessage::Outcome(outcome))
+            });
         configuration.changes().subscribe(myself.clone(), |change| {
-            Some(InfrastructureSupervisorMessage::ConfigurationChanged(change))
+            Some(InfrastructureSupervisorMessage::ConfigurationChanged(
+                change,
+            ))
         });
 
         let infrastructure_events = Arc::new(OutputPort::default());
@@ -729,14 +737,18 @@ impl Actor for InfrastructureSupervisor {
                             ),
                         },
                         Err(why) => {
-                            tracing::warn!("InfrastructureSupervisor: {why}; the log filters stay as they were")
+                            tracing::warn!(
+                                "InfrastructureSupervisor: {why}; the log filters stay as they were"
+                            )
                         }
                     }
                 }
             }
             InfrastructureSupervisorMessage::Outcome(outcome) => {
                 let Some(client) = &state.client else {
-                    tracing::debug!("InfrastructureSupervisor: no Cassini client, outcome not announced");
+                    tracing::debug!(
+                        "InfrastructureSupervisor: no Cassini client, outcome not announced"
+                    );
                     return Ok(());
                 };
                 match rkyv::to_bytes::<rkyv::rancor::Error>(&outcome) {
@@ -748,10 +760,14 @@ impl Actor for InfrastructureSupervisor {
                                 None,
                             ),
                         ) {
-                            tracing::warn!("InfrastructureSupervisor: cannot announce an outcome: {e}");
+                            tracing::warn!(
+                                "InfrastructureSupervisor: cannot announce an outcome: {e}"
+                            );
                         }
                     }
-                    Err(e) => tracing::error!("InfrastructureSupervisor: cannot encode an outcome: {e}"),
+                    Err(e) => {
+                        tracing::error!("InfrastructureSupervisor: cannot encode an outcome: {e}")
+                    }
                 }
             }
             InfrastructureSupervisorMessage::ProceedWithShutdown => {
@@ -1200,7 +1216,10 @@ mod tests {
     fn only_a_change_to_a_log_filter_reaches_the_logging() {
         let changed = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
         assert!(affects_logging(&changed(&["RUST_LOG"])));
-        assert!(affects_logging(&changed(&["POLAR_HEALTH_TICK_SECS", "POLAR_TRACE_FILTER"])));
+        assert!(affects_logging(&changed(&[
+            "POLAR_HEALTH_TICK_SECS",
+            "POLAR_TRACE_FILTER"
+        ])));
         assert!(!affects_logging(&changed(&["POLAR_HEALTH_TICK_SECS"])));
         // Where traces are sent is fixed when the exporter is built, so it is not a reload.
         assert!(!affects_logging(&changed(&["JAEGER_OTLP_ENDPOINT"])));
@@ -1231,7 +1250,8 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_resources_carry_a_live_configuration_that_refuses_to_change_the_health_invariants() {
+    async fn the_resources_carry_a_live_configuration_that_refuses_to_change_the_health_invariants()
+    {
         let rig = Rig::standard("infra-live-config").await;
         let configuration = &rig.resources.configuration;
         let name = polar_health::vars::CASSINI_DEADLINE_SECS.name();
@@ -1353,18 +1373,24 @@ mod tests {
         // And it says so on Cassini, for the scheduler to record: two documents have been handled (the
         // one that came over the router, and the one submitted), each refused for what it asks.
         let published = rig.spawner.published.lock().unwrap().clone();
-        let outcomes: Vec<polar_scheduler_common::ConfigurationOutcome> = published
-            .iter()
-            .filter(|(topic, _)| topic == polar_scheduler_common::CONFIGURATION_OUTCOME_TOPIC)
-            .map(|(_, payload)| {
-                rkyv::from_bytes::<polar_scheduler_common::ConfigurationOutcome, rkyv::rancor::Error>(
-                    payload,
-                )
-                .unwrap()
-            })
-            .collect();
+        let outcomes: Vec<polar_scheduler_common::ConfigurationOutcome> =
+            published
+                .iter()
+                .filter(|(topic, _)| topic == polar_scheduler_common::CONFIGURATION_OUTCOME_TOPIC)
+                .map(|(_, payload)| {
+                    rkyv::from_bytes::<
+                        polar_scheduler_common::ConfigurationOutcome,
+                        rkyv::rancor::Error,
+                    >(payload)
+                    .unwrap()
+                })
+                .collect();
         assert_eq!(outcomes.len(), 2, "{outcomes:?}");
-        assert!(outcomes.iter().all(|o| o.agent == "infra-signed" && o.status == "invalid"));
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| o.agent == "infra-signed" && o.status == "invalid")
+        );
         assert_eq!(outcomes[0].sequence + 1, outcomes[1].sequence);
 
         // An agent whose CA file is not there refuses the very same document, and says why.
@@ -1506,7 +1532,11 @@ mod tests {
         let last = announced(&rig).pop().unwrap();
         assert_eq!(last.status, "refused");
         assert_eq!(last.id.as_deref(), Some("two"));
-        assert!(last.detail[0].contains("shutting down"), "{:?}", last.detail);
+        assert!(
+            last.detail[0].contains("shutting down"),
+            "{:?}",
+            last.detail
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1921,8 +1951,8 @@ mod service_tests {
             )
             .await
             .unwrap();
-            let service = ractor::call!(infra, |reply| InfrastructureSupervisorMessage::GetService {
-                reply
+            let service = ractor::call!(infra, |reply| {
+                InfrastructureSupervisorMessage::GetService { reply }
             })
             .unwrap();
             let events = Arc::new(Mutex::new(Vec::new()));
@@ -1963,7 +1993,10 @@ mod service_tests {
         )
         .await;
         tokio::time::sleep(Duration::from_secs(200)).await;
-        assert!(rig.events.lock().unwrap().is_empty(), "no verdict, no shutdown");
+        assert!(
+            rig.events.lock().unwrap().is_empty(),
+            "no verdict, no shutdown"
+        );
         assert_eq!(
             rig.service.healthcheck.as_actor_ref().get_status(),
             ActorStatus::Running
@@ -1975,7 +2008,10 @@ mod service_tests {
     #[tokio::test(start_paused = true)]
     async fn a_health_verdict_tells_the_service_once() {
         let rig = ServiceRig::new(Duration::from_secs(20), &[]).await;
-        for verdict in [HealthVerdict::Rejuvenate, HealthVerdict::Unhealthy("late".into())] {
+        for verdict in [
+            HealthVerdict::Rejuvenate,
+            HealthVerdict::Unhealthy("late".into()),
+        ] {
             rig.infra
                 .cast(InfrastructureSupervisorMessage::Health(verdict))
                 .unwrap();
@@ -2001,7 +2037,9 @@ mod service_tests {
     async fn the_watchdog_ends_a_service_that_never_finishes_draining() {
         let rig = ServiceRig::new(Duration::from_secs(20), &[]).await;
         rig.infra
-            .cast(InfrastructureSupervisorMessage::BeginShutdown { reason: "test".into() })
+            .cast(InfrastructureSupervisorMessage::BeginShutdown {
+                reason: "test".into(),
+            })
             .unwrap();
         rig.settle().await;
         tokio::time::sleep(Duration::from_secs(19)).await;
@@ -2014,7 +2052,9 @@ mod service_tests {
     async fn proceeding_ends_the_service_infrastructure() {
         let mut rig = ServiceRig::new(Duration::from_secs(20), &[]).await;
         rig.infra
-            .cast(InfrastructureSupervisorMessage::BeginShutdown { reason: "test".into() })
+            .cast(InfrastructureSupervisorMessage::BeginShutdown {
+                reason: "test".into(),
+            })
             .unwrap();
         rig.settle().await;
         rig.infra

@@ -10,7 +10,9 @@ pub const POLAR_GIT_REPO_CHANGED_TOPIC: &str = "polar-git-repo-changed";
 
 /// A ref of a hosted repository now points somewhere new. `pusher` is the identity from the
 /// client's verified certificate.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
 pub struct RepoChangedEvent {
     pub repo: String,
     pub refname: String,

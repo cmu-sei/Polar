@@ -76,14 +76,11 @@ impl StoreSecretHandler {
     }
 }
 
-async fn call_append(ledger: &ActorRef<LedgerMessage>, event: CredentialsEvent) -> Result<(), String> {
-    match ractor::rpc::call(
-        ledger,
-        |reply| LedgerMessage::Append { event, reply },
-        None,
-    )
-    .await
-    {
+async fn call_append(
+    ledger: &ActorRef<LedgerMessage>,
+    event: CredentialsEvent,
+) -> Result<(), String> {
+    match ractor::rpc::call(ledger, |reply| LedgerMessage::Append { event, reply }, None).await {
         Ok(ractor::rpc::CallResult::Success(result)) => result,
         Ok(other) => Err(format!("unexpected CallResult: {other:?}")),
         Err(e) => Err(e.to_string()),

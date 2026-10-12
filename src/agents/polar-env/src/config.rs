@@ -250,7 +250,8 @@ impl Config {
     pub fn report(&self) -> Vec<Resolved> {
         self.declarations()
             .map(|(section, desc)| {
-                let (value, source) = effective(&self.overrides, &self.snapshot, self.snapshot_source, &desc);
+                let (value, source) =
+                    effective(&self.overrides, &self.snapshot, self.snapshot_source, &desc);
                 Resolved {
                     section,
                     name: desc.name,

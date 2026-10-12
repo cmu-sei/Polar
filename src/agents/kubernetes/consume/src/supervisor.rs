@@ -22,16 +22,15 @@ use polar::graph::nodes::builds::ArtifactNodeKey;
 use polar::graph::nodes::kube::KubeNodeKey;
 use polar::topics::KUBERNETES_RESOLUTION_EVENTS;
 use polar_agent_builder::{
-    Configured,
-    AgentBuilder, HealthClient, HealthHandle, InfrastructureEvent,
+    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
     InfrastructureSupervisorMessage, Subscription,
 };
-use ractor::{Actor, OutputPort};
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::SupervisionEvent;
 use ractor::async_trait;
 use ractor::concurrency::Duration;
+use ractor::{Actor, OutputPort};
 use serde::de::DeserializeOwned;
 use serde_json::from_value;
 use std::collections::HashMap;
@@ -292,9 +291,7 @@ impl ClusterConsumerSupervisor {
     /// design exactly; only how the results get registered with
     /// RouterActor changed (AgentBuilder's own, real
     /// .with_subscription(...) now owns that part).
-    fn kube_subscriptions(
-        supervisor: &ActorRef<ConsumerSupervisorMessage>,
-    ) -> Vec<Subscription> {
+    fn kube_subscriptions(supervisor: &ActorRef<ConsumerSupervisorMessage>) -> Vec<Subscription> {
         let supervisor_for_consumer = supervisor.clone();
         let supervisor_for_resolution = supervisor.clone();
         vec![
@@ -422,7 +419,9 @@ impl Actor for ClusterConsumerSupervisor {
 
         // The encryption capability must have produced the crypto actor; nothing here uses it.
         resources.crypto.as_ref().ok_or_else(|| {
-            ActorProcessingErr::from("with_encryption() was called but the builder returned no CryptoHandle")
+            ActorProcessingErr::from(
+                "with_encryption() was called but the builder returned no CryptoHandle",
+            )
         })?;
 
         Ok(ClusterConsumerSupervisorState {
@@ -453,7 +452,6 @@ impl Actor for ClusterConsumerSupervisor {
                     let _ = state.healthcheck.graph_op_failed(reason);
                 }
             },
-
 
             ConsumerSupervisorMessage::PrepareShutdown => {
                 if state.draining {
@@ -506,7 +504,9 @@ impl Actor for ClusterConsumerSupervisor {
                     // Our own children are down; let the infrastructure stop.
                     // Its termination (handled in handle_supervisor_evt)
                     // exits the process with a non-zero status.
-                    info!("CONSUMER_SUPERVISOR: domain shutdown complete, releasing infrastructure");
+                    info!(
+                        "CONSUMER_SUPERVISOR: domain shutdown complete, releasing infrastructure"
+                    );
                     if let Err(e) = state
                         .infrastructure
                         .cast(InfrastructureSupervisorMessage::ProceedWithShutdown)
