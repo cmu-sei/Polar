@@ -508,12 +508,21 @@ impl Actor for InfrastructureSupervisor {
 
         // Owns the configuration the agent runs on from here, and takes updates to it. It needs
         // nothing but the snapshot, so it starts before, and without, the Cassini client.
-        let configuration = ConfigurationHandle::spawn(
-            None,
-            (*args.config).clone(),
-            myself_cell.clone(),
-        )
-        .await?;
+        // Signed documents are checked against the CA this agent already pins for Cassini. Without a
+        // readable one there is nothing to verify against and every document is refused.
+        let verifier =
+            match crate::signed::UpdateVerifier::from_config(&args.config, &args.service_name) {
+                Ok(verifier) => Some(verifier),
+                Err(why) => {
+                    tracing::warn!(
+                        "InfrastructureSupervisor: signed configuration will be refused: {why}"
+                    );
+                    None
+                }
+            };
+        let configuration =
+            ConfigurationHandle::spawn(None, (*args.config).clone(), verifier, myself_cell.clone())
+                .await?;
 
         let infrastructure_events = Arc::new(OutputPort::default());
 
@@ -1038,7 +1047,7 @@ mod tests {
         // A health safety invariant is static: an update to it is refused by name and the value
         // in force is unchanged.
         let outcome = configuration
-            .apply(1, vec![(name.to_string(), "1".to_string())])
+            .apply_unchecked(1, vec![(name.to_string(), "1".to_string())])
             .await
             .unwrap();
         let crate::configuration::ApplyOutcome::Refused(crate::configuration::Refusal::Invalid(
@@ -1056,6 +1065,72 @@ mod tests {
                 .read(&polar_health::vars::CASSINI_DEADLINE_SECS)
                 .unwrap(),
             100000
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn signed_configuration_is_checked_against_the_ca_the_agent_pins_and_refused_without_one()
+    {
+        use crate::configuration::{ApplyOutcome, Refusal};
+        use crate::signed::Rejection;
+        use polar_signing::testing::{Spec, root, signer};
+
+        // An agent that pins a real CA accepts what that CA's signers sign, and the document goes on
+        // to the configuration checks: HOST-style variables of the health section are static.
+        let ca = root("Polar Internal CA");
+        let dir = tempfile::tempdir().unwrap();
+        let ca_file = dir.path().join("ca.pem");
+        std::fs::write(&ca_file, &ca.pem).unwrap();
+        let rig = Rig::new(
+            "infra-signed",
+            Duration::from_secs(20),
+            &[("TLS_CA_CERT", ca_file.to_str().unwrap())],
+            false,
+        )
+        .await;
+        let s = signer(
+            &ca,
+            Spec {
+                not_after_year: 2090,
+                ..Spec::default()
+            },
+        );
+        let name = polar_health::vars::CASSINI_DEADLINE_SECS.name();
+        let document = polar_signing::sign(
+            serde_json::json!({
+                "id": "u",
+                "target": {"agent": "infra-signed"},
+                "version": 1,
+                "changes": [{"name": name, "value": "1"}]
+            }),
+            std::slice::from_ref(&s.cert_pem),
+            &s.key_pem,
+        )
+        .unwrap()
+        .to_value();
+        let outcome = rig
+            .resources
+            .configuration
+            .submit(document.clone())
+            .await
+            .unwrap();
+        // Verified (signature, signer, target), then refused for what it asks: a static variable.
+        assert!(
+            matches!(outcome, ApplyOutcome::Refused(Refusal::Invalid(_))),
+            "{outcome:?}"
+        );
+
+        // An agent whose CA file is not there refuses the very same document, and says why.
+        let rig = Rig::new(
+            "infra-unpinned",
+            Duration::from_secs(20),
+            &[("TLS_CA_CERT", "/nonexistent/ca.pem")],
+            false,
+        )
+        .await;
+        assert_eq!(
+            rig.resources.configuration.submit(document).await.unwrap(),
+            ApplyOutcome::Refused(Refusal::Unverified(Rejection::NotConfigured))
         );
     }
 

@@ -22,6 +22,8 @@ pub mod canonical;
 mod cert;
 pub mod document;
 pub mod sign;
+#[cfg(feature = "testing")]
+pub mod testing;
 pub mod verify;
 
 pub use authority::{Authority, AuthorityRefusal, RequireCapability};

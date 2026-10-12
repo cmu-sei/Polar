@@ -1,6 +1,6 @@
 # Signed configuration
 
-Status, 2026-10-11: design, agreed with David (including the single-file form below). Built so far: the `polar-signing` library (`src/agents/polar-signing`): the canonical encoding, the two-field document layout, sign, verify and the version-one authority rule, with tests. Not built: `polar-sign`, the Dhall rendering, the ConfigurationActor in front of `apply`, encryption of secrets, the git integration and everything else below. It is the
+Status, 2026-10-11: design, agreed with David (including the single-file form below). Built so far: the `polar-signing` library (`src/agents/polar-signing`): the canonical encoding, the two-field document layout, sign, verify and the version-one authority rule, with tests. The ConfigurationActor verifies a signed document before it applies anything (`polar-agent-builder`: `ConfigurationHandle::submit`, `signed.rs`). Not built: `polar-sign`, the Dhall rendering, the subscriber that delivers documents to `submit`, encryption of secrets, the git integration and everything else below. It is the
 "signed configuration" item in `docs/architecture/configuration.md` section 6, and it sits in front of
 `ConfigurationHandle::apply` (`polar-agent-builder/src/configuration.rs`).
 
@@ -80,16 +80,32 @@ exposes it.)
 
 **What the receiver checks, in this order, refusing on the first failure and recording it:**
 
-1. The document parses, has exactly the two fields, and contains no import.
+1. The document parses, has exactly the two fields, and the signature block has exactly its three.
+   (A committed document that still contains a Dhall import is refused where the file is read, before
+   it becomes JSON: not built.)
 2. The signature block's chain verifies to the Polar CA the receiver already pins, and the signing
    certificate is valid now, with `digitalSignature` key usage and a key of a type this system signs with,
-   the one the document claims.
-3. The signature verifies over the canonical encoding of `payload`.
-4. The signer is authorised to make this change (below).
-5. The signer is not revoked (a seam only for now; see open question 1).
-6. The version is higher than the last applied: the ConfigurationActor's existing check.
-7. Only then is `apply` called. The ConfigurationActor still refuses a Static variable, a bad value and
+   the one the document claims. The signature verifies over the canonical encoding of `payload`.
+3. Only now is `payload` read, since until the signature held it is not to be trusted. It must have the
+   shape of an update (below), with no field the receiver does not know.
+4. It is addressed to this agent, so a document signed for one agent cannot be applied by another.
+5. The signer is authorised to make this change.
+6. The signer is not revoked (a hook that always says no, until something revokes).
+7. The version is higher than the last applied: the ConfigurationActor's existing check.
+8. Only then is the update applied. The ConfigurationActor still refuses a Static variable, a bad value and
    a result the sections' relations reject, whoever signed.
+
+**The payload of an update** is `{ id, target: { agent }, version, changes: [ { name, value } ] }`, all
+strings except the version, which is a whole number. `target.agent` is the receiving agent's own name (its
+service name) for now; how a schedule's agent id and agent type map onto that, and where a `ScheduleNode`'s
+`config` becomes `changes`, are the addressing questions still open.
+
+**Built (2026-10-11).** `ConfigurationHandle::submit(document)` is the only way in; the unverified
+`apply` is crate-private and used only by tests. The verifier takes its trust from the CA the agent already
+pins for Cassini (`TLS_CA_CERT`), and an agent with no readable CA refuses every document (it fails
+closed). The history records the signer (username or identity, and serial) of every verified update; a
+document refused before its payload could be trusted is recorded with version zero and no signer, and no
+value of any kind is ever recorded.
 
 Until a receiver has what it needs to verify (the CA, a policy) it **fails closed**: it refuses.
 

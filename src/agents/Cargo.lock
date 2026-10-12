@@ -5562,6 +5562,7 @@ dependencies = [
  "polar-env",
  "polar-health",
  "polar-router",
+ "polar-signing",
  "ractor",
  "rand 0.10.3",
  "rcgen",
@@ -5820,11 +5821,11 @@ dependencies = [
  "cert-issuer-common",
  "ed25519-dalek",
  "p256",
+ "polar-signing",
  "rcgen",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 1.0.69",
- "time",
  "x509-parser",
 ]
 

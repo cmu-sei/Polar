@@ -1,16 +1,14 @@
 //! Signing and verifying, against real certificates.
 
-mod support;
-
 use cert_issuer_common::capability::Capability;
 use polar_signing::document::{Algorithm, signing_input};
+use polar_signing::testing::{self as support, Kind, Spec, now, root, signer};
 use polar_signing::{
     Authority, Document, LayoutError, RequireCapability, SignError, Trust, VerifyError, sign,
     verify,
 };
 use rcgen::KeyUsagePurpose;
 use serde_json::{Value, json};
-use support::{Kind, Spec, now, root, signer};
 
 fn payload() -> Value {
     json!({

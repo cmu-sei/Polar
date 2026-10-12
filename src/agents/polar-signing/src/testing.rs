@@ -1,7 +1,6 @@
-//! Certificates for the tests, minted with rcgen: a CA, optional intermediates, and signers of either
-//! key type with the subject and SAN entries cert-issuer puts in a user's certificate.
-
-#![allow(dead_code)]
+//! Certificates for tests, here and in crates that verify signed documents, minted with rcgen: a CA,
+//! optional intermediates, and signers of either key type with the subject and SAN entries cert-issuer
+//! puts in a user's certificate. Behind the `testing` feature so nothing ships with it.
 
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, DnValue, ExtendedKeyUsagePurpose, IsCa, Issuer,
@@ -23,7 +22,7 @@ pub fn root(name: &str) -> Authority {
     params.distinguished_name.push(DnType::CommonName, name);
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.not_before = date_time_ymd(2026, 1, 1);
-    params.not_after = date_time_ymd(2036, 1, 1);
+    params.not_after = date_time_ymd(2100, 1, 1);
     let key = KeyPair::generate().unwrap();
     let pem = params.self_signed(&key).unwrap().pem();
     Authority {

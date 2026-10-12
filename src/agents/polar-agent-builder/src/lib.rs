@@ -38,6 +38,8 @@ pub mod message;
 pub use message::{Encrypted, Outbound, Plaintext};
 pub mod selftest;
 pub mod shutdown;
+pub mod signed;
+pub use signed::{Rejection, UpdateVerifier};
 pub(crate) mod startup;
 pub use shutdown::{DEFAULT_SHUTDOWN_BUDGET, SHUTDOWN_BUDGET_ENV};
 

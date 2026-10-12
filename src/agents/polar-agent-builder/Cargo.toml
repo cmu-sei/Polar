@@ -16,6 +16,7 @@ polar-env = { workspace = true, features = ["document"] }
 serde.workspace = true
 polar-health = { path = "../polar-health" }
 polar-router.workspace = true
+polar-signing.workspace = true
 rand.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
@@ -25,6 +26,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+polar-signing = { workspace = true, features = ["testing"] }
 polar-health = { path = "../polar-health", features = ["virtual-time"] }
 rcgen.workspace = true
 rsa.workspace = true

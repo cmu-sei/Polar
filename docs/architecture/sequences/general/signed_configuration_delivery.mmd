@@ -19,15 +19,16 @@ sequenceDiagram
     Processor->>Graph: upsert the schedule node (document stored as received)
     Processor-)Cassini: ScheduleNotification {whole document} on agent.<id>.schedule
     Cassini-)Target: ScheduleNotification
-    Target->>CA: apply(document)
+    Target->>CA: submit(document)
 
     Note over Target,CA: verifies for itself, in order
     CA->>CA: 1. two fields only, no import
     CA->>CA: 2. chain to pinned CA, cert valid
-    CA->>CA: 3. signature over the payload
-    CA->>CA: 4. signer holds c:update-policy
-    CA->>CA: 5. not revoked (hook only)
-    CA->>CA: 6. version above the last
+    CA->>CA: 3. signature over the payload, then read it
+    CA->>CA: 4. addressed to this agent
+    CA->>CA: 5. signer holds c:update-policy
+    CA->>CA: 6. not revoked (hook only)
+    CA->>CA: 7. version above the last
     alt every check passes
         CA->>CA: apply: all or none
         CA-)Target: ConfigChanged {version, names}
