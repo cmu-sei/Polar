@@ -102,6 +102,8 @@ pub enum InfrastructureSupervisorMessage {
     /// Internal: the ConfigurationActor says what it did with a document. Published on Cassini, if there
     /// is a client; a service without one has nowhere to say it.
     Outcome(polar_scheduler_common::ConfigurationOutcome),
+    /// The configuration changed: if it was a log filter, the logging follows.
+    ConfigurationChanged(crate::configuration::ConfigChanged),
 }
 
 /// The lifecycle callback the Cassini client is given.
@@ -239,6 +241,14 @@ pub struct InfrastructureSupervisorState {
 }
 
 pub struct InfrastructureSupervisor;
+
+/// Whether a change to these variables is one the logging follows: the two filters. (The
+/// endpoint is not: traces go where the exporter was built to send them.)
+pub(crate) fn affects_logging(changed: &[String]) -> bool {
+    changed.iter().any(|name| {
+        name == polar::logging::CONSOLE_FILTER.name() || name == polar::logging::TRACE_FILTER.name()
+    })
+}
 
 impl InfrastructureSupervisor {
     /// The one entry point to ending the agent. Idempotent: the first reason
@@ -572,6 +582,9 @@ impl Actor for InfrastructureSupervisor {
         configuration.outcomes().subscribe(myself.clone(), |outcome| {
             Some(InfrastructureSupervisorMessage::Outcome(outcome))
         });
+        configuration.changes().subscribe(myself.clone(), |change| {
+            Some(InfrastructureSupervisorMessage::ConfigurationChanged(change))
+        });
 
         let infrastructure_events = Arc::new(OutputPort::default());
 
@@ -696,6 +709,29 @@ impl Actor for InfrastructureSupervisor {
                     Err(e) => tracing::error!(
                         "InfrastructureSupervisor: cannot encode a command outcome: {e}"
                     ),
+                }
+            }
+            InfrastructureSupervisorMessage::ConfigurationChanged(change) => {
+                if affects_logging(&change.changed) {
+                    match state.configuration.current().await {
+                        Ok(config) => match polar::logging::LoggingSettings::read(&config) {
+                            Ok(settings) => match polar::logging::reload(&settings) {
+                                Ok(()) => tracing::info!(
+                                    version = change.version,
+                                    "InfrastructureSupervisor: the log filters follow the new configuration"
+                                ),
+                                Err(why) => tracing::warn!(
+                                    "InfrastructureSupervisor: the log filters could not be reloaded: {why}"
+                                ),
+                            },
+                            Err(why) => tracing::warn!(
+                                "InfrastructureSupervisor: the logging settings cannot be read: {why}"
+                            ),
+                        },
+                        Err(why) => {
+                            tracing::warn!("InfrastructureSupervisor: {why}; the log filters stay as they were")
+                        }
+                    }
                 }
             }
             InfrastructureSupervisorMessage::Outcome(outcome) => {
@@ -1159,6 +1195,17 @@ mod tests {
     }
 
     // -- the funnel ----------------------------------------------------------------------
+
+    #[test]
+    fn only_a_change_to_a_log_filter_reaches_the_logging() {
+        let changed = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert!(affects_logging(&changed(&["RUST_LOG"])));
+        assert!(affects_logging(&changed(&["POLAR_HEALTH_TICK_SECS", "POLAR_TRACE_FILTER"])));
+        assert!(!affects_logging(&changed(&["POLAR_HEALTH_TICK_SECS"])));
+        // Where traces are sent is fixed when the exporter is built, so it is not a reload.
+        assert!(!affects_logging(&changed(&["JAEGER_OTLP_ENDPOINT"])));
+        assert!(!affects_logging(&[]));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn the_resources_carry_the_snapshot_the_supervisor_holds() {

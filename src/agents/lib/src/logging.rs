@@ -17,14 +17,16 @@ pub static CONSOLE_FILTER: Defaulted<String> = Defaulted::text(
     "what is written to the console, in tracing's filter syntax (for example info, or \
      warn,polar=debug)",
     DEFAULT_FILTER,
-);
+)
+.dynamic();
 
 pub static TRACE_FILTER: Defaulted<String> = Defaulted::text(
     "POLAR_TRACE_FILTER",
     "which spans and events are exported as traces, in tracing's filter syntax; keep it narrow, \
      since every span it admits is sent",
     DEFAULT_FILTER,
-);
+)
+.dynamic();
 
 pub static OTLP_ENDPOINT: Optional<String> = Optional::text(
     "JAEGER_OTLP_ENDPOINT",
@@ -96,7 +98,47 @@ fn filter_or_default(text: &str) -> tracing_subscriber::filter::EnvFilter {
         .unwrap_or_else(|_| tracing_subscriber::filter::EnvFilter::new(DEFAULT_FILTER))
 }
 
-/// Sets logging up, and trace export when there is an endpoint.
+/// Changes a filter that is already in use.
+type Reload = Box<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
+/// How to change the filters of the logging that was set up. One per process, since the
+/// subscriber it belongs to is.
+struct Handles {
+    console: Reload,
+    trace: Option<Reload>,
+}
+
+static HANDLES: std::sync::OnceLock<Handles> = std::sync::OnceLock::new();
+
+fn reloader<S>(handle: tracing_subscriber::reload::Handle<tracing_subscriber::filter::EnvFilter, S>) -> Reload
+where
+    S: 'static,
+{
+    Box::new(move |text| {
+        let filter = tracing_subscriber::filter::EnvFilter::try_new(text).map_err(|e| e.to_string())?;
+        handle.reload(filter).map_err(|e| e.to_string())
+    })
+}
+
+/// Changes the filters of the logging that is running: the console's, and the exported traces'
+/// when traces are exported. The endpoint cannot change; it is where the exporter was built to
+/// send. Fails, changing nothing, if logging was never set up or a filter does not parse.
+pub fn reload(settings: &LoggingSettings) -> Result<(), String> {
+    let handles = HANDLES.get().ok_or("logging has not been set up in this process")?;
+    // Both parse first, so one bad filter does not leave the other changed.
+    for text in [&settings.console_filter, &settings.trace_filter] {
+        tracing_subscriber::filter::EnvFilter::try_new(text.as_str())
+            .map_err(|e| format!("`{text}` is not a log filter: {e}"))?;
+    }
+    (handles.console)(&settings.console_filter)?;
+    if let Some(trace) = &handles.trace {
+        trace(&settings.trace_filter)?;
+    }
+    Ok(())
+}
+
+/// Sets logging up, and trace export when there is an endpoint. The filters can be changed
+/// afterwards with [`reload`].
 pub fn init_with(service_name: String, settings: &LoggingSettings) {
     use opentelemetry::{KeyValue, global};
     use opentelemetry_otlp::{Protocol, WithExportConfig};
@@ -105,6 +147,7 @@ pub fn init_with(service_name: String, settings: &LoggingSettings) {
         trace::{self, RandomIdGenerator},
     };
     use tracing_subscriber::Layer;
+    use tracing_subscriber::reload;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let exporter = settings
@@ -120,7 +163,9 @@ pub fn init_with(service_name: String, settings: &LoggingSettings) {
                 .ok()
         });
 
-    let initialised = if let Some(exporter) = exporter {
+    let (console_filter, console_handle) = reload::Layer::new(filter_or_default(&settings.console_filter));
+
+    let (initialised, handles) = if let Some(exporter) = exporter {
         let tracer_provider = trace::SdkTracerProvider::builder()
             .with_batch_exporter(exporter)
             .with_sampler(trace::Sampler::AlwaysOn)
@@ -136,13 +181,22 @@ pub fn init_with(service_name: String, settings: &LoggingSettings) {
             )
             .build();
         global::set_tracer_provider(tracer_provider);
+        let (trace_filter, trace_handle) =
+            reload::Layer::new(filter_or_default(&settings.trace_filter));
         let telemetry = tracing_opentelemetry::layer()
             .with_tracer(global::tracer("polar"))
-            .with_filter(filter_or_default(&settings.trace_filter));
-        tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer().with_filter(filter_or_default(&settings.console_filter)))
+            .with_filter(trace_filter);
+        let initialised = tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_filter(console_filter))
             .with(telemetry)
-            .try_init()
+            .try_init();
+        (
+            initialised,
+            Handles {
+                console: reloader(console_handle),
+                trace: Some(reloader(trace_handle)),
+            },
+        )
     } else {
         let fmt_layer = tracing_subscriber::fmt::layer()
             .pretty()
@@ -150,11 +204,20 @@ pub fn init_with(service_name: String, settings: &LoggingSettings) {
             .with_target(true)
             .with_file(true)
             .with_line_number(true)
-            .with_filter(filter_or_default(&settings.console_filter));
-        tracing_subscriber::registry().with(fmt_layer).try_init()
+            .with_filter(console_filter);
+        (
+            tracing_subscriber::registry().with(fmt_layer).try_init(),
+            Handles {
+                console: reloader(console_handle),
+                trace: None,
+            },
+        )
     };
-    if initialised.is_err() {
-        eprintln!("Logging registry already initialized");
+    match initialised {
+        Ok(()) => {
+            let _ = HANDLES.set(handles);
+        }
+        Err(_) => eprintln!("Logging registry already initialized"),
     }
 }
 
@@ -174,6 +237,33 @@ mod tests {
     #[test]
     fn the_section_is_sound_and_its_defaults_parse() {
         assert_eq!(SECTION.defaults_problems(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_filters_may_change_while_the_agent_runs_and_the_endpoint_may_not() {
+        use polar_env::Mutability;
+        let mutability = |name: &str| {
+            SECTION
+                .describe()
+                .into_iter()
+                .find(|v| v.name == name)
+                .unwrap_or_else(|| panic!("{name} is not declared"))
+                .mutability
+        };
+        assert_eq!(mutability("RUST_LOG"), Mutability::Dynamic);
+        assert_eq!(mutability("POLAR_TRACE_FILTER"), Mutability::Dynamic);
+        // Where traces go is decided when the exporter is built; it needs a restart.
+        assert_eq!(mutability("JAEGER_OTLP_ENDPOINT"), Mutability::Static);
+    }
+
+    #[test]
+    fn reloading_before_logging_is_set_up_says_so_and_changes_nothing() {
+        let settings = LoggingSettings {
+            console_filter: "warn".to_string(),
+            trace_filter: "warn".to_string(),
+            otlp_endpoint: None,
+        };
+        assert!(reload(&settings).is_err());
     }
 
     #[test]
