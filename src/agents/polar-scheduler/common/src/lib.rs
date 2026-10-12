@@ -13,7 +13,12 @@ pub mod routing;
 pub mod document_type {
     /// Desired state for an agent: values for the variables its code declared Dynamic.
     pub const CONFIGURATION: &str = "configuration";
-    /// The rules under which proposals of one kind are accepted.
+    /// What an agent works on, in sections it declared: which repositories it observes, under what rules
+    /// (docs/architecture/git-controller.md). Replaced whole per section; a lower authority than
+    /// configuration, since it cannot change how the agent runs.
+    pub const RUNTIME: &str = "runtime";
+    /// The rules under which proposals of one kind are accepted. To become the `admission` section of a
+    /// runtime document.
     pub const ADMISSION: &str = "admission";
     /// A one-time instruction to an agent.
     pub const COMMAND: &str = "command";

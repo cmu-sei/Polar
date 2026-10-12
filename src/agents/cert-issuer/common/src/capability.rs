@@ -41,6 +41,12 @@ pub enum Capability {
     /// `UpdatePolicy`, and a repository holds both only if it holds both kinds of content. Appended, so that
     /// what was archived with the earlier ones keeps its meaning.
     UpdateConfiguration,
+    /// Change what an agent works on, by a signed runtime document (docs/architecture/git-controller.md):
+    /// which repositories it observes, under what admission rules. Not `UpdateConfiguration`, which changes
+    /// how the agent runs, and not `UpdatePolicy`. Appended, so that what was archived with the earlier ones
+    /// keeps its meaning; a consumer built before it rejects a certificate that carries it as malformed, so
+    /// the consumers are redeployed before any certificate does.
+    UpdateRuntime,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -52,13 +58,14 @@ pub enum CapabilityParseError {
 }
 
 impl Capability {
-    pub const ALL: [Capability; 6] = [
+    pub const ALL: [Capability; 7] = [
         Capability::ProvisionAccount,
         Capability::Grant,
         Capability::Revoke,
         Capability::UpdatePolicy,
         Capability::RunCommand,
         Capability::UpdateConfiguration,
+        Capability::UpdateRuntime,
     ];
 
     fn name(self) -> &'static str {
@@ -69,6 +76,7 @@ impl Capability {
             Self::UpdatePolicy => "update-policy",
             Self::RunCommand => "run-command",
             Self::UpdateConfiguration => "update-configuration",
+            Self::UpdateRuntime => "update-runtime",
         }
     }
 
@@ -159,6 +167,27 @@ mod tests {
         assert_eq!(Capability::ALL[3], Capability::UpdatePolicy);
         assert_ne!(Capability::UpdateConfiguration, Capability::UpdatePolicy);
         assert!(Capability::from_san_string("c:update-config").is_err());
+    }
+
+    #[test]
+    fn update_runtime_is_its_own_capability_and_comes_last() {
+        assert_eq!(
+            Capability::UpdateRuntime.to_san_string(),
+            "c:update-runtime"
+        );
+        assert_eq!(
+            Capability::from_san_string("c:update-runtime"),
+            Ok(Capability::UpdateRuntime)
+        );
+        // Appended after update-configuration, which keeps its place: what was archived with the
+        // earlier ones keeps its meaning.
+        assert_eq!(Capability::ALL[6], Capability::UpdateRuntime);
+        assert_eq!(Capability::ALL[5], Capability::UpdateConfiguration);
+        assert_eq!(Capability::ALL.len(), 7);
+        // Changing what an agent works on is not changing how it runs, and not changing policy.
+        assert_ne!(Capability::UpdateRuntime, Capability::UpdateConfiguration);
+        assert_ne!(Capability::UpdateRuntime, Capability::UpdatePolicy);
+        assert!(Capability::from_san_string("c:update-runtimes").is_err());
     }
 
     #[test]

@@ -40,16 +40,22 @@ impl HeldDocuments {
         self.by_path.remove(path);
     }
 
-    /// The documents held for `agent`, as they were read, oldest version first so that an agent that
-    /// applies versions in order ends at the latest.
+    /// The documents held for `agent`, as they were read, oldest version first within each section so that
+    /// an agent that applies versions in order ends at the latest.
     pub fn for_agent(&self, agent: &str) -> Vec<String> {
         let mut held: Vec<(&String, &Held)> = self
             .by_path
             .iter()
             .filter(|(_, h)| h.routing.agent == agent)
             .collect();
+        // Versions are per section, so a section's documents stay together, each in its own order.
         held.sort_by(|(pa, a), (pb, b)| {
-            (a.routing.version, &a.routing.id, pa).cmp(&(b.routing.version, &b.routing.id, pb))
+            (&a.routing.section, a.routing.version, &a.routing.id, pa).cmp(&(
+                &b.routing.section,
+                b.routing.version,
+                &b.routing.id,
+                pb,
+            ))
         });
         held.into_iter().map(|(_, h)| h.json.clone()).collect()
     }
@@ -108,6 +114,42 @@ mod tests {
         held.remove("permanent/a.dhall");
         assert!(held.for_agent("agent-a").is_empty());
         held.remove("permanent/never-there.dhall"); // harmless
+    }
+
+    fn runtime(id: &str, agent: &str, section: &str, version: u64) -> String {
+        json!({
+            "payload": {"type": "runtime", "id": id, "target": {"agent": agent}, "section": section,
+                        "version": version, "body": {}},
+            "signature": {}
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn runtime_documents_are_ordered_by_version_within_their_own_section() {
+        let mut held = HeldDocuments::default();
+        // Versions are per section: sorted by version alone these would interleave (1, 2, 3, 4) and split each
+        // section's documents; they belong together, each in its own order.
+        let (a5, a9, b1, b2) = (
+            runtime("a1", "agent-a", "alpha", 1),
+            runtime("a3", "agent-a", "alpha", 3),
+            runtime("b2", "agent-a", "beta", 2),
+            runtime("b4", "agent-a", "beta", 4),
+        );
+        for (path, doc) in [("1", &a9), ("2", &b2), ("3", &a5), ("4", &b1)] {
+            held.record(path, doc);
+        }
+        let sent = held.for_agent("agent-a");
+        let position = |doc: &String| sent.iter().position(|d| d == doc).unwrap();
+        assert_eq!(sent.len(), 4);
+        assert!(position(&a5) < position(&a9), "alpha in version order");
+        assert!(position(&b1) < position(&b2), "beta in version order");
+        // And the sections stay together, so no section's documents are split by the other's.
+        assert!(
+            (position(&a5).abs_diff(position(&a9)) == 1)
+                && (position(&b1).abs_diff(position(&b2)) == 1),
+            "{sent:?}"
+        );
     }
 
     #[test]

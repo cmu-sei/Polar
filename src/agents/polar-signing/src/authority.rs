@@ -32,6 +32,12 @@ impl RequireCapability {
         Self(Capability::UpdateConfiguration)
     }
 
+    /// The capability meant for changing what an agent works on (a runtime document). Neither
+    /// `update-configuration`, which changes how it runs, nor `update-policy`.
+    pub fn update_runtime() -> Self {
+        Self(Capability::UpdateRuntime)
+    }
+
     /// The capability meant for running commands.
     pub fn run_command() -> Self {
         Self(Capability::RunCommand)

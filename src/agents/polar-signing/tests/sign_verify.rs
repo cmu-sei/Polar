@@ -458,6 +458,45 @@ fn a_signer_with_the_update_configuration_capability_is_authorised_and_one_witho
 }
 
 #[test]
+fn changing_what_an_agent_works_on_needs_its_own_capability_and_configuration_is_not_enough() {
+    let ca = root("Polar Internal CA");
+    let trust = trust(&ca.pem);
+    let rule = RequireCapability::update_runtime();
+
+    let (allowed, _) = signed(
+        &ca,
+        Spec {
+            capabilities: vec!["c:update-runtime"],
+            ..Spec::default()
+        },
+    );
+    let who = verify(&allowed, &trust, now()).unwrap();
+    assert!(rule.authorize(&who, &allowed.payload).is_ok());
+
+    // Whoever may change how an agent runs may not thereby change what it works on, and the reverse.
+    let (configuration_only, _) = signed(&ca, Spec::default());
+    let who = verify(&configuration_only, &trust, now()).unwrap();
+    let refusal = rule
+        .authorize(&who, &configuration_only.payload)
+        .unwrap_err();
+    assert!(refusal.0.contains("c:update-runtime"), "{refusal}");
+
+    let (runtime_only, _) = signed(
+        &ca,
+        Spec {
+            capabilities: vec!["c:update-runtime"],
+            ..Spec::default()
+        },
+    );
+    let who = verify(&runtime_only, &trust, now()).unwrap();
+    assert!(
+        RequireCapability::update_configuration()
+            .authorize(&who, &runtime_only.payload)
+            .is_err()
+    );
+}
+
+#[test]
 fn a_document_with_a_field_the_signature_does_not_cover_is_refused_before_anything_else() {
     let ca = root("Polar Internal CA");
     let (document, _) = signed(&ca, Spec::default());

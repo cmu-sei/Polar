@@ -14,6 +14,9 @@ pub struct Routing {
     pub id: String,
     pub agent: String,
     pub version: u64,
+    /// The section of the agent's runtime configuration a `runtime` document is for; none for a
+    /// `configuration` document, whose versions are the agent's own.
+    pub section: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,20 +48,25 @@ fn routing(payload: &Value) -> Result<Routing, String> {
             .map(str::to_string)
             .ok_or_else(|| format!("the payload has no text `{what}`"))
     };
-    // Only configuration is handled so far. A command or an admission is still written to the graph, as one
-    // that cannot be routed, so that it is seen.
+    // A command or an admission is still written to the graph, as one that cannot be routed, so that it
+    // is seen.
     let kind = text(&payload["type"], "type")?;
-    if kind != document_type::CONFIGURATION {
-        return Err(format!(
-            "a `{kind}` document is not handled by the scheduler yet"
-        ));
-    }
+    let section = match kind.as_str() {
+        document_type::CONFIGURATION => None,
+        document_type::RUNTIME => Some(text(&payload["section"], "section")?),
+        other => {
+            return Err(format!(
+                "a `{other}` document is not handled by the scheduler yet"
+            ));
+        }
+    };
     Ok(Routing {
         id: text(&payload["id"], "id")?,
         agent: text(&payload["target"]["agent"], "target.agent")?,
         version: payload["version"]
             .as_u64()
             .ok_or_else(|| "the payload has no whole-number `version`".to_string())?,
+        section,
     })
 }
 
@@ -75,7 +83,8 @@ mod tests {
             Shape::Document(Ok(Routing {
                 id: "c".into(),
                 agent: "a".into(),
-                version: 3
+                version: 3,
+                section: None,
             }))
         );
         let old = json!({"id": "x", "kind": "Permanent", "version": 1});
@@ -84,6 +93,39 @@ mod tests {
         assert_eq!(classify("[1]"), Shape::NotADocument);
         // Only one of the two fields is not a document.
         assert_eq!(classify(r#"{"payload": {}}"#), Shape::NotADocument);
+    }
+
+    #[test]
+    fn a_runtime_document_is_routed_by_its_agent_and_carries_its_section() {
+        let doc = json!({
+            "payload": {"type": "runtime", "id": "repos-0007", "target": {"agent": "git-repo-controller"},
+                        "section": "repositories", "version": 7, "body": {}},
+            "signature": {}
+        });
+        assert_eq!(
+            classify(&doc.to_string()),
+            Shape::Document(Ok(Routing {
+                id: "repos-0007".into(),
+                agent: "git-repo-controller".into(),
+                version: 7,
+                section: Some("repositories".into()),
+            }))
+        );
+        // A configuration document has no section.
+        let configuration = json!({"payload": {"type": "configuration", "id": "c", "target": {"agent": "a"}, "version": 3}, "signature": {}});
+        match classify(&configuration.to_string()) {
+            Shape::Document(Ok(routing)) => assert_eq!(routing.section, None),
+            other => panic!("{other:?}"),
+        }
+        // A runtime document that names no section cannot be routed to one.
+        let no_section = json!({
+            "payload": {"type": "runtime", "id": "r", "target": {"agent": "a"}, "version": 1, "body": {}},
+            "signature": {}
+        });
+        match classify(&no_section.to_string()) {
+            Shape::Document(Err(why)) => assert!(why.contains("section"), "{why}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
