@@ -20,6 +20,7 @@
 #![deny(clippy::disallowed_methods)]
 
 pub mod agent;
+pub mod authority;
 pub use agent::{Configured, PolarAgent, StartError, run};
 pub mod capability;
 pub use capability::Capability;

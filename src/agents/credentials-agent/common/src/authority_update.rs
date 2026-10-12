@@ -21,6 +21,12 @@ use std::collections::BTreeMap;
 /// Where the credentials agent publishes updates, and every agent listens.
 pub const AUTHORITY_UPDATES_TOPIC: &str = "polar-authority-updates";
 
+/// Where an agent asks for the current authority, and the credentials agent answers: a leaf that has just
+/// registered, or that saw a jump in the sequence. The answer is also published without being asked every half
+/// hour, so a leaf that missed everything is repaired by the next one.
+pub const AUTHORITY_SNAPSHOT_REQUESTS_TOPIC: &str = "polar-authority-snapshot-requests";
+pub const AUTHORITY_SNAPSHOT_REPLIES_TOPIC: &str = "polar-authority-snapshot-replies";
+
 /// The line every signed update's bytes begin with.
 const DOMAIN: &[u8] = b"polar-authority-update-v1\n";
 
@@ -94,6 +100,35 @@ pub struct AuthorityUpdate {
     pub payload: Vec<u8>,
     /// RSASSA-PSS over the domain line and `payload`.
     pub signature: Vec<u8>,
+}
+
+/// "Send me the current authority." Anyone may ask: what comes back is public, signed, and the same for
+/// everyone.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
+pub struct AuthoritySnapshotRequest;
+
+/// The current authority: the key that signs it, and the latest signed update of each kind. A leaf that has
+/// no key yet pins the one here (accepted only from the credentials agent's own identity, as the broker names
+/// it), and every update in it is checked against that key like any other.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, SerdeSerialize, SerdeDeserialize,
+)]
+pub struct AuthoritySnapshot {
+    /// The signing key's public half, PEM.
+    pub public_key_pem: String,
+    /// The latest signed update of each kind, oldest sequence first.
+    pub updates: Vec<AuthorityUpdate>,
+}
+
+impl AuthoritySnapshot {
+    /// The key it carries, parsed.
+    pub fn public_key(&self) -> Result<RsaPublicKey, AuthorityUpdateError> {
+        use rsa::pkcs8::DecodePublicKey;
+        RsaPublicKey::from_public_key_pem(&self.public_key_pem)
+            .map_err(|e| AuthorityUpdateError::Encoding(format!("the snapshot's key: {e}")))
+    }
 }
 
 /// The fingerprint of a public key: what an update says signed it, and what a leaf compares with the key it
@@ -319,6 +354,41 @@ mod tests {
                 String::from_utf8_lossy(&update.payload)
             );
         }
+    }
+
+    #[test]
+    fn a_snapshot_and_a_request_for_one_survive_the_wire() {
+        let key = key();
+        let snapshot = AuthoritySnapshot {
+            public_key_pem: rsa::pkcs8::EncodePublicKey::to_public_key_pem(
+                &key.to_public_key(),
+                rsa::pkcs8::LineEnding::LF,
+            )
+            .unwrap(),
+            updates: vec![sign(&payload(), &key).unwrap()],
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot).unwrap();
+        let back = rkyv::from_bytes::<AuthoritySnapshot, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(back, snapshot);
+        // The key it carries is the key that signed what it carries.
+        let carried = back.public_key().unwrap();
+        assert_eq!(carried, key.to_public_key());
+        assert_eq!(verify(&back.updates[0], &carried), Ok(payload()));
+
+        let request = rkyv::to_bytes::<rkyv::rancor::Error>(&AuthoritySnapshotRequest).unwrap();
+        rkyv::from_bytes::<AuthoritySnapshotRequest, rkyv::rancor::Error>(&request).unwrap();
+    }
+
+    #[test]
+    fn a_snapshot_whose_key_is_not_a_key_says_so() {
+        let snapshot = AuthoritySnapshot {
+            public_key_pem: "not a key".into(),
+            updates: vec![],
+        };
+        assert!(matches!(
+            snapshot.public_key(),
+            Err(AuthorityUpdateError::Encoding(_))
+        ));
     }
 
     #[test]

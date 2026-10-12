@@ -19,6 +19,7 @@ polar-router.workspace = true
 polar-scheduler-common.workspace = true
 polar-signing.workspace = true
 rand.workspace = true
+rsa.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
 serde_json.workspace = true
@@ -30,7 +31,6 @@ tracing.workspace = true
 polar-signing = { workspace = true, features = ["testing"] }
 polar-health = { path = "../polar-health", features = ["virtual-time"] }
 rcgen.workspace = true
-rsa.workspace = true
 tempfile.workspace = true
 libc.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
