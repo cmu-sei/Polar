@@ -60,14 +60,39 @@ in  { name             = "cert-issuer"
         [ { workload = "system:serviceaccount:${Constants.PolarNamespace}:credentials-agent"
           , certType = "CLIENT"
           , names = [] : List Text
+          , vouchedOnly = False
           }
         , { workload = "system:serviceaccount:${Constants.PolarNamespace}:credentials-agent-observer"
           , certType = "CLIENT"
           , names = [] : List Text
+          , vouchedOnly = False
           }
         , { workload = "system:serviceaccount:${Constants.PolarNamespace}:cassini"
           , certType = "SERVER"
           , names = [ Constants.cassiniDNSName ]
+          , vouchedOnly = False
+          }
+        -- Workloads reached only through the credentials agent. They are listed
+        -- so cert-issuer checks the names the credentials agent states for them
+        -- (a token alone never gets them a certificate). Neo4j's list is the
+        -- one its init container asks for (`neo4jSans` in the target's
+        -- overrides); the catalog renders both from one place in phase 5.
+        , { workload = "system:serviceaccount:${Constants.GraphNamespace}:graph"
+          , certType = "SERVER"
+          , names =
+            [ "neo4j"
+            , "polar-neo4j"
+            , Constants.neo4jServiceName
+            , "${Constants.neo4jServiceName}.${Constants.GraphNamespace}"
+            , Constants.neo4jDNSName
+            , "localhost"
+            ]
+          , vouchedOnly = True
+          }
+        , { workload = "system:serviceaccount:${Constants.PolarNamespace}:polar-git-server"
+          , certType = "SERVER"
+          , names = [ "polar-git-server.${Constants.PolarNamespace}.svc.cluster.local" ]
+          , vouchedOnly = True
           }
         ]
     -- Whether cert-issuer enforces the floor. False is the old open

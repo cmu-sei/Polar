@@ -28,6 +28,11 @@ pub struct BootstrapIdentity {
     /// its own identity.
     #[serde(default)]
     pub names: Vec<String>,
+    /// True for a workload that is issued only through the credentials agent (Neo4j, the git server): its names
+    /// are written down here so they are checked on the vouched path, but its token alone never gets it a
+    /// certificate. False (the default) is a bootstrap identity.
+    #[serde(default)]
+    pub vouched_only: bool,
 }
 
 /// Why a token-only request is not signed.
@@ -71,7 +76,10 @@ pub fn admit_token_only(
     cert_type: &CertType,
     extra_sans: &[String],
 ) -> Result<(), Refusal> {
-    let Some(entry) = floor.iter().find(|b| b.workload == workload) else {
+    let Some(entry) = floor
+        .iter()
+        .find(|b| b.workload == workload && !b.vouched_only)
+    else {
         return Err(Refusal::NotBootstrap);
     };
     if &entry.cert_type != cert_type {
@@ -81,6 +89,30 @@ pub fn admit_token_only(
     }
     for name in extra_sans {
         if !entry.names.iter().any(|allowed| allowed == name) {
+            return Err(Refusal::NameNotAllowed(name.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a request the credentials agent vouches for may be signed: its names are checked here too, so a
+/// compromised or mistaken credentials agent cannot have a workload signed with a name that is not its own.
+/// The permissions of a grant (`p:`) are the credentials agent's to state and are not names; every other extra
+/// must be on the list of the workload's entry, for the type it asks for.
+pub fn admit_vouched(
+    floor: &[BootstrapIdentity],
+    workload: &str,
+    cert_type: &CertType,
+    extra_sans: &[String],
+) -> Result<(), Refusal> {
+    let entry = floor
+        .iter()
+        .find(|b| b.workload == workload && &b.cert_type == cert_type);
+    for name in extra_sans
+        .iter()
+        .filter(|n| !n.trim().to_ascii_lowercase().starts_with("p:"))
+    {
+        if !entry.is_some_and(|e| e.names.iter().any(|allowed| allowed == name)) {
             return Err(Refusal::NameNotAllowed(name.clone()));
         }
     }
@@ -128,11 +160,13 @@ mod tests {
                 workload: "system:serviceaccount:polar:credentials-agent".to_string(),
                 cert_type: CertType::Client,
                 names: vec![],
+                vouched_only: false,
             },
             BootstrapIdentity {
                 workload: "system:serviceaccount:polar:cassini".to_string(),
                 cert_type: CertType::Server,
                 names: vec!["cassini-ip-svc.polar.svc.cluster.local".to_string()],
+                vouched_only: false,
             },
         ]
     }
@@ -274,6 +308,117 @@ mod tests {
         );
     }
 
+    fn floor_with_a_vouched_only_server() -> Vec<BootstrapIdentity> {
+        let mut f = floor();
+        f.push(BootstrapIdentity {
+            workload: "system:serviceaccount:polar-graph:neo4j".to_string(),
+            cert_type: CertType::Server,
+            names: vec!["polar-db-svc.polar-graph.svc.cluster.local".to_string()],
+            vouched_only: true,
+        });
+        f
+    }
+
+    #[test]
+    fn a_vouched_only_workload_is_never_signed_on_its_token_alone() {
+        assert_eq!(
+            admit_token_only(
+                &floor_with_a_vouched_only_server(),
+                "system:serviceaccount:polar-graph:neo4j",
+                &CertType::Server,
+                &names(&["polar-db-svc.polar-graph.svc.cluster.local"])
+            ),
+            Err(Refusal::NotBootstrap)
+        );
+    }
+
+    #[test]
+    fn a_vouched_request_may_carry_the_names_written_down_for_its_workload() {
+        assert_eq!(
+            admit_vouched(
+                &floor_with_a_vouched_only_server(),
+                "system:serviceaccount:polar-graph:neo4j",
+                &CertType::Server,
+                &names(&["polar-db-svc.polar-graph.svc.cluster.local"])
+            ),
+            Ok(())
+        );
+        // A bootstrap identity's names hold on this path too.
+        assert_eq!(
+            admit_vouched(
+                &floor(),
+                "system:serviceaccount:polar:cassini",
+                &CertType::Server,
+                &names(&["cassini-ip-svc.polar.svc.cluster.local"])
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_vouched_request_cannot_carry_a_name_that_is_not_written_down_for_its_workload() {
+        let f = floor_with_a_vouched_only_server();
+        for (workload, extra) in [
+            // Someone else's name, a wildcard, a capability.
+            (
+                "system:serviceaccount:polar-graph:neo4j",
+                "cassini-ip-svc.polar.svc.cluster.local",
+            ),
+            ("system:serviceaccount:polar-graph:neo4j", "*.polar.svc"),
+            ("system:serviceaccount:polar-graph:neo4j", "c:grant"),
+            // A workload with no entry at all has no names it may carry.
+            (
+                "system:serviceaccount:polar:git-observer",
+                "polar-db-svc.polar-graph.svc.cluster.local",
+            ),
+        ] {
+            assert_eq!(
+                admit_vouched(&f, workload, &CertType::Server, &names(&[extra])),
+                Err(Refusal::NameNotAllowed(extra.to_string())),
+                "{workload} {extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_vouched_request_takes_permissions_from_the_credentials_agent_and_names_only_from_the_list()
+    {
+        // The permissions of a grant are the credentials agent's to state; they are not names.
+        assert_eq!(
+            admit_vouched(
+                &floor(),
+                "system:serviceaccount:polar:git-observer",
+                &CertType::Client,
+                &names(&["p:u2s:polar-db-svc.polar-graph.svc.cluster.local"])
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            admit_vouched(
+                &floor(),
+                "system:serviceaccount:polar:git-observer",
+                &CertType::Client,
+                &[]
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_vouched_request_cannot_change_its_type_to_get_at_another_workloads_names() {
+        assert_eq!(
+            admit_vouched(
+                &floor_with_a_vouched_only_server(),
+                "system:serviceaccount:polar-graph:neo4j",
+                &CertType::Client,
+                &names(&["polar-db-svc.polar-graph.svc.cluster.local"])
+            ),
+            Err(Refusal::NameNotAllowed(
+                "polar-db-svc.polar-graph.svc.cluster.local".to_string()
+            ))
+        );
+    }
+
     #[test]
     fn an_empty_floor_admits_nobody() {
         assert_eq!(
@@ -295,16 +440,19 @@ mod tests {
                 workload: " ".into(),
                 cert_type: CertType::Client,
                 names: vec![],
+                vouched_only: false,
             },
             BootstrapIdentity {
                 workload: "a".into(),
                 cert_type: CertType::Server,
                 names: names(&["p:s2s:x", "c:grant", "*.x", ""]),
+                vouched_only: false,
             },
             BootstrapIdentity {
                 workload: "a".into(),
                 cert_type: CertType::Client,
                 names: vec![],
+                vouched_only: false,
             },
         ];
         let p = problems(&bad);

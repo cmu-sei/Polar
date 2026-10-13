@@ -319,7 +319,19 @@ over Cassini with the certificate it just obtained. The requests across the rend
      be held by handle when that work lands. The returned private key is in a `Zeroizing` string and is written to the
      requested directory as before.
    - **Not settled:** how a pod tells it is talking to the credentials agent (see phase 2).
-4. **cert-issuer.** Names checked on every path; configuration and chart.
+4. **cert-issuer. BUILT 2026-10-13** (tests first; five rules each broken on purpose and caught, and a sixth found
+   uncovered and given a test; not deployed). The floor's list now holds every workload that has names written down,
+   and the names are checked on **both** paths. `BootstrapIdentity` gains `vouched_only` (default false). A
+   token-only request is admitted only for an entry that is not `vouched_only`. A request the credentials agent
+   vouches for (`admit_vouched`) may carry the permissions of a grant (`p:`, which are the credentials agent's to
+   state) and otherwise only names on the list of the token's workload **for the type it asks for**; a workload with
+   no entry may carry no names, and `c:` is still refused. So a credentials agent that is mistaken or subverted cannot
+   have a workload signed with a name that is not its own. `/validate` follows the same rule (a `vouched_only`
+   workload is not answered on its token alone). The chart's `mtlsBootstrap` gains `vouchedOnly` and two entries,
+   Neo4j (`graph` in `polar-graph`, the names its init container asks for) and the git server. **Duplication to
+   remove in phase 5:** Neo4j's names are written here and in the target's `neo4jSans` override; the catalog should
+   render both from one place. Still off: `mtlsEnforceBootstrap = False`, and absent `mtls.bootstrap` is the old open
+   behaviour, so none of this applies on the cluster until the floor is enabled in phase 6.
 5. **Catalog and resolver.** Mode per workload, the rule, render tests.
 6. **Rollout on the cluster, in groups,** credentials pair first, then the leaf workloads, then Neo4j and the git
    server (server certificates), with the secret harness as the check that a retrieve works; the floor is enabled in

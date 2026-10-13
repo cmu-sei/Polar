@@ -229,6 +229,7 @@ fn a_sound_floor_is_accepted_and_so_is_an_empty_one() {
         workload: "system:serviceaccount:polar:cassini".to_string(),
         cert_type: CertType::Server,
         names: vec!["cassini-ip-svc.polar.svc.cluster.local".to_string()],
+        vouched_only: false,
     }];
     assert!(config_with_floor(Some(floor)).validate().is_ok());
     // Present and empty is a closed floor: nobody is a bootstrap identity.
@@ -246,6 +247,7 @@ fn a_floor_that_lists_a_permission_or_a_wildcard_does_not_load() {
             workload: "system:serviceaccount:polar:cassini".to_string(),
             cert_type: CertType::Server,
             names: vec![name.to_string()],
+            vouched_only: false,
         }];
         let err = config_with_floor(Some(floor)).validate().unwrap_err();
         assert!(err.to_string().contains("mtls.bootstrap"), "{name}: {err}");
@@ -263,4 +265,17 @@ fn the_mtls_section_reads_a_bootstrap_list_and_reads_its_absence_as_none() {
     let without: cert_issuer::config::MtlsConfig =
         serde_json::from_str(r#"{"server_identity": "x"}"#).unwrap();
     assert!(without.bootstrap.is_none());
+}
+
+#[test]
+fn a_bootstrap_entry_reads_vouched_only_and_defaults_it_to_false() {
+    let mtls: cert_issuer::config::MtlsConfig = serde_json::from_str(
+        r#"{"server_identity": "x", "bootstrap": [
+            {"workload": "a", "cert_type": "SERVER", "names": ["a.b"], "vouched_only": true},
+            {"workload": "b", "cert_type": "CLIENT"}]}"#,
+    )
+    .unwrap();
+    let floor = mtls.bootstrap.unwrap();
+    assert!(floor[0].vouched_only);
+    assert!(!floor[1].vouched_only);
 }

@@ -111,6 +111,7 @@ fn floor_with_this_workload() -> Option<Vec<BootstrapIdentity>> {
         workload: WORKLOAD.to_string(),
         cert_type: CertType::Client,
         names: vec![],
+        vouched_only: false,
     }])
 }
 
@@ -120,6 +121,7 @@ fn floor_without_this_workload() -> Option<Vec<BootstrapIdentity>> {
         workload: "system:serviceaccount:polar:cassini".to_string(),
         cert_type: CertType::Server,
         names: vec!["cassini-ip-svc.polar.svc.cluster.local".to_string()],
+        vouched_only: false,
     }])
 }
 
@@ -225,10 +227,20 @@ async fn a_peer_that_is_not_the_credentials_agent_does_not_vouch_for_anyone() {
 
 // ---- vouched for by the credentials agent ----------------------------------------------------------------------
 
+/// A floor in which the token's workload is reached only through the credentials agent and has one server name.
+fn floor_with_this_workload_vouched_only() -> Option<Vec<BootstrapIdentity>> {
+    Some(vec![BootstrapIdentity {
+        workload: WORKLOAD.to_string(),
+        cert_type: CertType::Server,
+        names: vec!["polar-git-server.polar.svc.cluster.local".to_string()],
+        vouched_only: true,
+    }])
+}
+
 #[tokio::test]
-async fn the_credentials_agent_may_have_any_workload_signed_with_the_permissions_and_names_it_states()
+async fn the_credentials_agent_may_have_a_workload_signed_with_the_permissions_and_names_written_down_for_it()
  {
-    let (handler, ca) = rig(floor_without_this_workload());
+    let (handler, ca) = rig(floor_with_this_workload_vouched_only());
     let plain = handler
         .handle(
             Some(CREDENTIALS_AGENT),
@@ -260,6 +272,55 @@ async fn the_credentials_agent_may_have_any_workload_signed_with_the_permissions
         .await;
     assert_eq!(server.status, 200);
     assert_eq!(ca.asked.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn the_credentials_agent_cannot_have_a_workload_signed_with_a_name_that_is_not_written_down_for_it()
+ {
+    // The token's workload has an entry with one name; another workload's name, and a name for a workload with
+    // no entry at all, are both refused even though the credentials agent vouches for the request.
+    for floor in [
+        floor_with_this_workload_vouched_only(),
+        floor_without_this_workload(),
+    ] {
+        let (handler, ca) = rig(floor);
+        for (cert_type, name) in [
+            (CertType::Server, "cassini-ip-svc.polar.svc.cluster.local"),
+            (
+                CertType::Server,
+                "polar-git-server.polar.svc.cluster.local.evil",
+            ),
+            (CertType::Client, "polar-git-server.polar.svc.cluster.local"),
+        ] {
+            let response = handler
+                .handle(
+                    Some(CREDENTIALS_AGENT),
+                    &mint_default_token(),
+                    request(cert_type, &[name]),
+                )
+                .await;
+            assert!(refused_as_not_authorized(&response), "{name}: {response:?}");
+        }
+        assert!(ca.asked.lock().unwrap().is_empty(), "{}", signed(&ca));
+    }
+}
+
+#[tokio::test]
+async fn a_workload_that_is_reached_only_through_the_credentials_agent_is_refused_on_its_token_alone()
+ {
+    let (handler, ca) = rig(floor_with_this_workload_vouched_only());
+    let response = handler
+        .handle(
+            None,
+            &mint_default_token(),
+            request(
+                CertType::Server,
+                &["polar-git-server.polar.svc.cluster.local"],
+            ),
+        )
+        .await;
+    assert!(refused_as_not_authorized(&response), "{response:?}");
+    assert!(ca.asked.lock().unwrap().is_empty(), "{}", signed(&ca));
 }
 
 #[tokio::test]
@@ -316,4 +377,13 @@ async fn with_no_floor_configured_validate_answers_a_token_holder_as_before() {
         .handle_validate(None, &mint_default_token(), ValidateRequest::default())
         .await;
     assert_eq!(response.status, 200);
+}
+
+#[tokio::test]
+async fn validate_does_not_answer_a_workload_that_is_reached_only_through_the_credentials_agent() {
+    let (handler, _) = rig(floor_with_this_workload_vouched_only());
+    let refused = handler
+        .handle_validate(None, &mint_default_token(), ValidateRequest::default())
+        .await;
+    assert_eq!(refused.status, 403);
 }

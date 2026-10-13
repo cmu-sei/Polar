@@ -108,26 +108,37 @@ impl Handler {
         peer_identity.is_some_and(|peer| self.internal_callers.iter().any(|c| c == peer))
     }
 
-    /// Why a caller with this token may not have this request served, if it may not: the detail to send. A
-    /// vouched caller is not limited here. A token-only caller must be a bootstrap identity asking only for
-    /// what is written down for it, once a floor is configured. `request` is the type and names for `/issue`,
-    /// and none for `/validate`, which signs nothing.
+    /// Why a caller with this token may not have this request served, if it may not: the detail to send. Once a
+    /// floor is configured, the names a request carries are checked on every path against what is written down for
+    /// the token's workload. A vouched caller is not limited otherwise (the credentials agent has applied its own
+    /// controls and states the type and permissions); a token-only caller must also be a bootstrap identity asking
+    /// only for its own type. `request` is the type and names for `/issue`, and none for `/validate`, which signs
+    /// nothing.
     fn caller_refusal(
         &self,
         peer_identity: Option<&str>,
         workload_identity: &str,
         request: Option<(&cert_issuer_common::CertType, &[String])>,
     ) -> Option<String> {
-        if self.vouched_for(peer_identity) {
-            return None;
-        }
-        let floor = self.floor.as_ref()?;
-        let refusal = match request {
-            Some((cert_type, extra_sans)) => {
+        let floor = self.floor.as_ref();
+        let vouched = self.vouched_for(peer_identity);
+        let refusal = match (vouched, floor, request) {
+            (_, None, _) => return None,
+            (true, Some(floor), Some((cert_type, extra_sans))) => {
+                crate::floor::admit_vouched(floor, workload_identity, cert_type, extra_sans)
+            }
+            (true, Some(_), None) => return None,
+            (false, Some(floor), Some((cert_type, extra_sans))) => {
                 crate::floor::admit_token_only(floor, workload_identity, cert_type, extra_sans)
             }
-            None if floor.iter().any(|b| b.workload == workload_identity) => Ok(()),
-            None => Err(crate::floor::Refusal::NotBootstrap),
+            (false, Some(floor), None)
+                if floor
+                    .iter()
+                    .any(|b| b.workload == workload_identity && !b.vouched_only) =>
+            {
+                Ok(())
+            }
+            (false, Some(_), None) => Err(crate::floor::Refusal::NotBootstrap),
         };
         match refusal {
             Ok(()) => None,
@@ -135,7 +146,7 @@ impl Handler {
                 warn!(
                     workload = %workload_identity,
                     peer_identity = ?peer_identity,
-                    "refused a token-only caller: {refusal}"
+                    "refused a request: {refusal}"
                 );
                 Some(refusal.to_string())
             }

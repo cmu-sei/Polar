@@ -63,7 +63,12 @@ let render =
           -- The issuance floor: workloads that may be issued with only a
           -- token. Written into the config only when enforced.
           , mtlsBootstrap :
-              List { workload : Text, certType : Text, names : List Text }
+              List
+                { workload : Text
+                , certType : Text
+                , names : List Text
+                , vouchedOnly : Bool
+                }
           , mtlsEnforceBootstrap : Bool
           -- Where cert-issuer's CA comes from. See ca-provisioning.dhall.
           , caProvisioning : CaProvisioning
@@ -227,12 +232,14 @@ let render =
                                                     { workload : Text
                                                     , certType : Text
                                                     , names : List Text
+                                                    , vouchedOnly : Bool
                                                     }
                                                     JSON.Type
                                                     ( \ ( b
                                                         : { workload : Text
                                                           , certType : Text
                                                           , names : List Text
+                                                          , vouchedOnly : Bool
                                                           }
                                                         ) ->
                                                         JSON.object
@@ -249,6 +256,8 @@ let render =
                                                                         JSON.string
                                                                         b.names
                                                                     )
+                                                              , vouched_only =
+                                                                  JSON.bool b.vouchedOnly
                                                               }
                                                           )
                                                     )
