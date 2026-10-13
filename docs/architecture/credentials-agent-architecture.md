@@ -804,6 +804,19 @@ identity alone, is what makes this safe rather than disruptive:
   already valid — correctly refused. This is the actual defensive
   case the rule exists for.
 
+**Per certificate type (2026-10-13).** A pod instance may need two certificates at start: a client
+certificate, and for a listener a server certificate. The rule is therefore keyed on
+`(identity, instance_binding, type)`: a pod instance may be issued one client certificate and one server
+certificate and is refused a second of either (`AlreadyHasValidCertificate`), and a reissue supersedes only the
+prior certificate of the **same type**. The request says which it wants (`cert_type`, default client, so existing
+callers are unchanged) and, for a server certificate, the DNS names (`names`); only a Kubernetes credential may ask
+for a server certificate, a client request carries no names (its extras are the grant's permissions, added from the
+ledger), and only a client certificate uses up a grant. The residual this leaves, stated plainly: a pod that has a
+client certificate and no server certificate could ask for a server one. It has no token to ask with (the main
+container never holds it), and cert-issuer's per-workload name allowlist decides what any server certificate may
+carry. The service-identity (escrow) certificate is a different thing with its own flow and record, and is not
+requestable here.
+
 ## What is deferred
 
 - OCSP, as a live alternative or complement to a periodically-published

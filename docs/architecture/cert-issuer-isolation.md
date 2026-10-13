@@ -162,9 +162,9 @@ only thing standing between a pod and the CA.
 
 ### 3. `polar-init` goes through the observer, except for the bootstrap identities
 
-- A mode (the architecture document's flag) that sends `{csr_pem, credential}` to the observer's `POST /issue`,
-  trusting `polar-ca` as it does cert-issuer today. The pod has no certificate yet, so this must be HTTP to the
-  observer, which relays over Cassini.
+- A mode (the architecture document's flag) that sends the request to the observer's HTTP route, which relays it
+  over Cassini; the pod has no certificate yet, so it cannot use Cassini itself. **Superseded in detail by "Scope:
+  `polar-init` through the observer" below** (the token is sealed by an ephemeral negotiation, not carried over TLS).
 - `IssuanceRequest` gains what a server certificate needs (type, names), or the three server workloads are issued
   by a separate request the consumer checks against the allowlist.
 - The catalog's `provides: [... "pinned-ca" ...]` and `cert_issuer_url` become, per workload, either the observer
@@ -192,6 +192,122 @@ only thing standing between a pod and the CA.
   The documented residual risk is that any pod can still open a connection to cert-issuer, and what it can do with
   that is limited to the bootstrap identities' tokens and `GET /ca`. The dev cluster could also gain enforcement
   (add a policy engine to `nix-usernetes`), which is the cluster's owner's to decide.
+
+## Scope: `polar-init` through the observer (2026-10-13, read from the code; nothing built)
+
+What moving the 22 non-bootstrap workloads onto the credentials agent actually takes. Four of the findings below
+change the shape of the floor or of the existing issuance flow, so they are decisions, not just work.
+
+### Correction (David, 2026-10-13): an agent holds two certificates with two lifecycles
+
+The sections below were written as if a pod's identity were its client certificates. It is not:
+
+- **An mTLS client certificate**, scoped to the pod instance, rejuvenating about hourly. This is what the floor and
+  the bundle below are about.
+- **A service-identity (agent escrow) certificate** that survives rejuvenation. Its key is escrowed with the
+  credentials agent; on the first deployment it is created, on every later one it is retrieved. It has its own flow
+  and its own ledger record (`AgentEscrowIssuanceCompleted`, checked with `has_agent_escrow_certificate`, not by the
+  pod-instance renewal rule). Every agent has both. Exceptions, for their own reasons: `ace` (not yet a proper Polar
+  service; it holds only the Neo4j client certificate), Neo4j (a server certificate), and Cassini (never a client).
+- **Direction: `CryptoActor`, inside `polar-init`, owns the lifecycle of both** and passes the workload *handles*, not
+  only certificates. Today only the escrow half does that: the actor retrieves the escrow key first and issues it as
+  a fallback, and `polar-init` records the kernel keyring number so the workload adopts the key without ever holding
+  it. The mTLS half is still `polar-init` writing PEM files from its own `issue_cert` loop, with the key in a file;
+  the work file's "harden the mTLS client key" item is this same step.
+
+What that changes below: the observer client belongs in `polar-crypto` (a message that ensures the pod's client
+certificates, beside `EnsureBootstrapped`, which does the escrow identity), not as new code in `polar-init`'s file
+loop; the bundle covers the pod-scoped certificates only and the service identity keeps its own flow (`Service` is
+not requestable in a bundle), but the actor is what calls both, in one place; and the two flows use different
+transports, because the first client certificate cannot be fetched over Cassini (the actor needs that certificate to
+connect): the observer's TLS route for the pod-scoped certificates, Cassini for the escrow identity after it. The
+ledger consequence is that every agent ends with a client-certificate record and an escrow record, and the retrieve
+handlers (which need both) work as built.
+
+### What `polar-init` does today
+
+One run per pod, one service-account token, then one `POST /issue` to cert-issuer per `--cert` argument, writing
+`cert.pem`, `key.pem` and `ca.pem` into each directory. Transient trouble (unreachable, a malformed response) is
+retried every 5 seconds forever; a rejection is fatal (exit 1). After the certificates it runs the escrow bootstrap
+over Cassini with the certificate it just obtained. The requests across the rendered manifests:
+
+- 15 workloads ask for a client certificate (`/etc/tls/certs`); 6 of those also ask for a second client certificate
+  for Neo4j (`/etc/neo4j-client-tls`): `credentials-agent`, `git-repo-processor`, `git-repo-scheduler`,
+  `jira-processor`, `kube-consumer` and `polar-scheduler`. `ace` asks only for the Neo4j one.
+- 3 ask for a server certificate with names: Cassini (`cassini-ip-svc.polar.svc.cluster.local`), Neo4j (several), and
+  the git server, which asks for a client **and** a server certificate (`polar-git-server.polar.svc.cluster.local`).
+
+### What the credentials agent's issuance flow assumes, which does not fit
+
+1. **One certificate per pod instance.** `IssuanceHandler` refuses a request whenever the pod's
+   `(identity, instance_binding)` already has a valid certificate (`AlreadyHasValidCertificate`, 403), and a second
+   `IssuanceCompleted` for the same identity marks the earlier record revoked as `Superseded`. That is the
+   "a pod cannot renew itself" property, and it is right; but a pod that legitimately needs two certificates would be
+   refused on the second and, if it were not, would revoke its own first. The request carries one CSR.
+2. **Client certificates only.** The handler always signs `CertType::Client`, with `p:` extras taken from a grant
+   (a Kubernetes credential needs no grant). `IssuanceRequest` is `{csr_pem, credential}`: no certificate type, no
+   names. Cassini, Neo4j and the git server cannot be issued this way.
+3. **The observer is plain HTTP.** `axum::serve` on a `TcpListener`, no TLS. `polar-init` would send the pod's
+   service-account token, a bearer credential, in a request body in the clear on the pod network, and receive the
+   certificate back. The token has to be protected before this carries it; David's decision is an ephemeral negotiation, not TLS and another certificate (below).
+4. **The ledger keeps one certificate record per `(identity, instance_binding)`**, which the retrieve handlers read
+   for the requester's certificate. Server certificates and second client certificates have nowhere to go.
+
+### Proposed shape (revised 2026-10-13 after David's decisions)
+
+- **Several separate requests per pod, on the existing flow. No new request kind.** The consumer's two pod-instance
+  rules change just enough: the renewal check and the "superseded" marking are keyed on the certificate **type**
+  as well as `(identity, instance_binding)`, so a pod instance may be issued one client certificate and one server
+  certificate, and a second request of the same type is still refused. The request gains what a server certificate
+  needs and a client request never sets: the type and the names. The second Neo4j client-certificate directory is
+  not designed for: it belongs to the builder migration, which is the priority, and what the builder's graph
+  component actually reads is to be checked in the code when this is built.
+- **The token is protected by an ephemeral negotiation, not by TLS and not by another certificate.** The existing
+  `ephemeral_exchange.rs` (single-use X25519, HKDF-SHA256, AES-256-GCM, used today for an agent's first escrow-keypair
+  retrieval) is the machinery. The negotiation is between the requesting actor and the **consumer**, which holds the
+  escrow key; the observer relays the sealed request and never sees the token. The observer therefore stays a plain
+  HTTP relay with no server certificate of its own, and the floor does not change shape (the observer remains a
+  client-certificate bootstrap identity only). What remains to read from the code rather than ask: how the
+  requester knows it is negotiating with the credentials agent (the published escrow public key is the obvious
+  anchor, and how the escrow bootstrap handles it today decides it).
+- **Who sends it: `CryptoActor`, in `polar-crypto`, in `polar-init`.** A message beside `EnsureBootstrapped` (which
+  sets up the escrow identity) that ensures the pod's client certificate; `polar-init` sends the two messages and
+  no longer runs its own `issue_cert` loop. The actor is the owner of both lifecycles and, later, of the handles.
+- **Consumer rules:** the credential must be a Kubernetes token (an IdP token is refused on this path); a client
+  request takes the grant's `p:` extras as now and no names from the caller; a server request's names must all be in
+  the allowlist for this identity; the escrow-identity type (`Service`) is not requestable here.
+- **cert-issuer.** The floor's list of names per workload is checked on every path, vouched or not. The reason is that
+  cert-issuer is moving onto the builder so that it reasons about policy itself with its own infrastructure; until
+  then it is configuration, rendered from the catalog, and signed policy takes it over above that.
+- **Catalog, resolver, render, `up.nu`.** Each workload's mode (the bootstrap three keep going to cert-issuer
+  directly) is a catalog fact; a resolver rule refuses a non-bootstrap workload that names cert-issuer;
+  `up.nu` already applies the credentials pair first and waits on it.
+
+### Phases, each tests first and independently deployable
+
+1. **The consumer. BUILT 2026-10-13** (tests first; six rules each broken on purpose and caught). The request gains type and names; the renewal and superseded rules keyed on type; the
+   server-name check; the ledger event and state with replay of an existing ledger; a pure planning function tested
+   exhaustively.
+2. **The sealed request.** The negotiation over `ephemeral_exchange.rs`, terminating at the consumer; the observer
+   relays it; tests with the existing fake broker.
+3. **`CryptoActor` and `polar-init`.** The message that ensures the pod's client certificate, `polar-init` calling it
+   with the escrow bootstrap, the mode and settings (declared with `polar-env`), retry semantics; tests with a fake
+   observer. Handles for the mTLS key follow with the key-hardening item.
+4. **cert-issuer.** Names checked on every path; configuration and chart.
+5. **Catalog and resolver.** Mode per workload, the rule, render tests.
+6. **Rollout on the cluster, in groups,** credentials pair first, then the leaf workloads, then Neo4j and the git
+   server (server certificates), with the secret harness as the check that a retrieve works; the floor is enabled in
+   the last step.
+
+Phases 1 to 5 can be built and tested without touching the cluster. Phase 6 restarts every pod.
+
+### Settled by David, and what is left
+
+Settled: several separate requests (no bundle); an ephemeral negotiation, not TLS on the observer; the allowlist
+lives with cert-issuer because cert-issuer reasons about policy itself; nothing special for agents not yet on the
+builder; a name not on the allowlist is refused; the crypto actor owns both certificate lifecycles. Left, to be
+read from the code and decided in the build, not asked: how the requester authenticates the credentials agent in the
+negotiation, and what the builder's graph component reads for its Neo4j connection.
 
 ## Order of work, tests first
 
