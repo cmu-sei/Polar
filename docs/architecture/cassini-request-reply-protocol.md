@@ -107,6 +107,10 @@ for the forward leg, `<subject>-replies` for the reply leg. Concretely:
 
 - `credentials-issuance-requests` — observer → consumer
 - `credentials-issuance-replies` — consumer → observer
+- `credentials-workload-issuance-requests` — observer → consumer: a workload's own request for its pod-instance
+  certificates, before it has any certificate; either an open-session request or a request with the service-account
+  token sealed to an open session (`credentials-agent-common/src/workload_issuance.rs`)
+- `credentials-workload-issuance-replies` — consumer → observer: the session offer, or the usual issuance reply
 
 ## What this does not solve
 

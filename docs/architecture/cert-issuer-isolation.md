@@ -288,8 +288,19 @@ over Cassini with the certificate it just obtained. The requests across the rend
 1. **The consumer. BUILT 2026-10-13** (tests first; six rules each broken on purpose and caught). The request gains type and names; the renewal and superseded rules keyed on type; the
    server-name check; the ledger event and state with replay of an existing ledger; a pure planning function tested
    exhaustively.
-2. **The sealed request.** The negotiation over `ephemeral_exchange.rs`, terminating at the consumer; the observer
-   relays it; tests with the existing fake broker.
+2. **The sealed request. BUILT 2026-10-13** (seven rules each broken on purpose and caught; not deployed). The flow is
+   an ephemeral session, not TLS: the workload asks for a session (`POST /workload/session` on the observer, relayed as
+   `OpenSession`); the consumer makes a fresh X25519 keypair, keeps the secret half for 60 seconds (at most 256 open,
+   single use, in memory) and returns the public half; the workload seals its token to it with the existing
+   `EphemeralEncryptedPayload::encrypt` and sends the sealed request (`POST /workload/issue`) with the CSR, type and
+   names in the clear; the consumer opens the session once and hands the unsealed request to the same
+   `IssuanceHandler`, so no issuance rule is duplicated. The observer relays opaque bytes and never holds the token.
+   One new topic pair, `credentials-workload-issuance-{requests,replies}`, one actor, one reply router. The old
+   `/issue` route is unchanged. **What this does and does not protect:** a token cannot be read by anyone who only
+   watches the network. It does not authenticate the credentials agent to the workload, so someone able to alter
+   traffic between a pod and the observer could answer the session request with their own key; that is the same
+   exposure the cleartext route had, not a new one, and closing it needs a trust anchor the pod can check, which is
+   the open question left to settle when the workload side is built (phase 3).
 3. **`CryptoActor` and `polar-init`.** The message that ensures the pod's client certificate, `polar-init` calling it
    with the escrow bootstrap, the mode and settings (declared with `polar-env`), retry semantics; tests with a fake
    observer. Handles for the mTLS key follow with the key-hardening item.
