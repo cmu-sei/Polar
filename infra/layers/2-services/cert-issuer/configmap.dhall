@@ -60,6 +60,11 @@ let render =
           -- against the connection's verified mTLS peer SAN. Empty
           -- means the endpoint is unreachable, which is the safe default.
           , mtlsInternalCallers : List Text
+          -- The issuance floor: workloads that may be issued with only a
+          -- token. Written into the config only when enforced.
+          , mtlsBootstrap :
+              List { workload : Text, certType : Text, names : List Text }
+          , mtlsEnforceBootstrap : Bool
           -- Where cert-issuer's CA comes from. See ca-provisioning.dhall.
           , caProvisioning : CaProvisioning
           }
@@ -214,6 +219,44 @@ let render =
                                             v.mtlsInternalCallers
                                         )
                                   }
+                              # ( if    v.mtlsEnforceBootstrap
+                                  then  toMap
+                                          { bootstrap =
+                                              JSON.array
+                                                ( Prelude.List.map
+                                                    { workload : Text
+                                                    , certType : Text
+                                                    , names : List Text
+                                                    }
+                                                    JSON.Type
+                                                    ( \ ( b
+                                                        : { workload : Text
+                                                          , certType : Text
+                                                          , names : List Text
+                                                          }
+                                                        ) ->
+                                                        JSON.object
+                                                          ( toMap
+                                                              { workload =
+                                                                  JSON.string b.workload
+                                                              , cert_type =
+                                                                  JSON.string b.certType
+                                                              , names =
+                                                                  JSON.array
+                                                                    ( Prelude.List.map
+                                                                        Text
+                                                                        JSON.Type
+                                                                        JSON.string
+                                                                        b.names
+                                                                    )
+                                                              }
+                                                          )
+                                                    )
+                                                    v.mtlsBootstrap
+                                                )
+                                          }
+                                  else  [] : List { mapKey : Text, mapValue : JSON.Type }
+                                )
                               )
                         }
                     )

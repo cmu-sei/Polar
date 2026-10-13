@@ -56,6 +56,7 @@ fn handler(ca: Arc<dyn CaClient>, internal_callers: Vec<&str>) -> Handler {
         user_lifetime: Duration::from_secs(43200),
         identity_lifetime_overrides: HashMap::new(),
         internal_callers: internal_callers.into_iter().map(String::from).collect(),
+        floor: None,
         ca_cert_pem: String::new(),
     }
 }

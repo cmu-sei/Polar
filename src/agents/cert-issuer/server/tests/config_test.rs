@@ -45,6 +45,7 @@ fn valid_mtls() -> MtlsConfig {
     MtlsConfig {
         server_identity: "cert-issuer.polar.svc.cluster.local".to_string(),
         internal_callers: vec![],
+        bootstrap: None,
     }
 }
 
@@ -204,4 +205,62 @@ fn ca_provisioning_accepts_provisioned() {
         "provisioning":"provisioned"}"#;
     let ca: CaConfig = serde_json::from_str(json).expect("parse");
     assert_eq!(ca.provisioning, CaProvisioning::Provisioned);
+}
+
+// ---- the issuance floor --------------------------------------------------------------------------------------
+
+use cert_issuer::floor::BootstrapIdentity;
+use cert_issuer_common::CertType;
+
+fn config_with_floor(floor: Option<Vec<BootstrapIdentity>>) -> ServiceConfig {
+    let mut config = valid_config();
+    config.mtls.bootstrap = floor;
+    config
+}
+
+#[test]
+fn no_floor_is_a_valid_configuration_and_means_the_open_mode() {
+    assert!(config_with_floor(None).validate().is_ok());
+}
+
+#[test]
+fn a_sound_floor_is_accepted_and_so_is_an_empty_one() {
+    let floor = vec![BootstrapIdentity {
+        workload: "system:serviceaccount:polar:cassini".to_string(),
+        cert_type: CertType::Server,
+        names: vec!["cassini-ip-svc.polar.svc.cluster.local".to_string()],
+    }];
+    assert!(config_with_floor(Some(floor)).validate().is_ok());
+    // Present and empty is a closed floor: nobody is a bootstrap identity.
+    assert!(config_with_floor(Some(vec![])).validate().is_ok());
+}
+
+#[test]
+fn a_floor_that_lists_a_permission_or_a_wildcard_does_not_load() {
+    for name in [
+        "p:u2s:polar-db-svc",
+        "c:provision-account",
+        "*.polar.svc.cluster.local",
+    ] {
+        let floor = vec![BootstrapIdentity {
+            workload: "system:serviceaccount:polar:cassini".to_string(),
+            cert_type: CertType::Server,
+            names: vec![name.to_string()],
+        }];
+        let err = config_with_floor(Some(floor)).validate().unwrap_err();
+        assert!(err.to_string().contains("mtls.bootstrap"), "{name}: {err}");
+    }
+}
+
+#[test]
+fn the_mtls_section_reads_a_bootstrap_list_and_reads_its_absence_as_none() {
+    let with: cert_issuer::config::MtlsConfig = serde_json::from_str(
+        r#"{"server_identity": "x", "internal_callers": [], "bootstrap": [
+            {"workload": "system:serviceaccount:polar:cassini", "cert_type": "SERVER", "names": ["a.b"]}]}"#,
+    )
+    .unwrap();
+    assert_eq!(with.bootstrap.unwrap().len(), 1);
+    let without: cert_issuer::config::MtlsConfig =
+        serde_json::from_str(r#"{"server_identity": "x"}"#).unwrap();
+    assert!(without.bootstrap.is_none());
 }

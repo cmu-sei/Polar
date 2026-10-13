@@ -174,6 +174,11 @@ pub struct MtlsConfig {
     /// oversight.
     #[serde(default)]
     pub internal_callers: Vec<String>,
+    /// The bootstrap identities (`floor.rs`): the only callers that may be issued with nothing but a token.
+    /// Absent means the floor is not configured and `/issue` stays open to any token holder, which the
+    /// service says plainly at start. Present, even if empty, closes it.
+    #[serde(default)]
+    pub bootstrap: Option<Vec<crate::floor::BootstrapIdentity>>,
 }
 
 impl ServiceConfig {
@@ -196,6 +201,17 @@ impl ServiceConfig {
         // the existing /issue and /validate paths.
         if self.mtls.server_identity.is_empty() {
             return Err(ConfigError::EmptyMtlsServerIdentity);
+        }
+
+        // ---- The floor ----
+        //
+        // A bootstrap entry that lists a permission, a capability, a wildcard or nothing is a mistake that
+        // would either not do what it says or sign more than meant.
+        if let Some(floor) = &self.mtls.bootstrap {
+            let problems = crate::floor::problems(floor);
+            if !problems.is_empty() {
+                return Err(ConfigError::BadBootstrap(problems.join("; ")));
+            }
         }
 
         // ---- Empty issuer list ----
@@ -315,4 +331,6 @@ pub enum ConfigError {
         "mtls.server_identity must be non-empty -- the listener cannot mint its own TLS server certificate without it"
     )]
     EmptyMtlsServerIdentity,
+    #[error("mtls.bootstrap is not sound: {0}")]
+    BadBootstrap(String),
 }

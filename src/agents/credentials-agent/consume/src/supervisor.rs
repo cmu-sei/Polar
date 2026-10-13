@@ -723,13 +723,28 @@ impl Actor for ConsumerSupervisor {
         // the CA is fetched once from GET /ca and pinned (the degraded
         // self-bootstrap mode). Each handler owns its own client, so the
         // trust setup runs once per handler.
+        //
+        // Every client also presents this agent's own mTLS certificate (the
+        // files its Cassini client uses). cert-issuer vouches for what the
+        // credentials agent asks of it by that certificate: the issuance
+        // flow forwards a workload's token, which on its own proves only
+        // whose workload it is. Without the certificate a request would be
+        // treated as that workload's own, and refused once the issuance
+        // floor is configured (docs/architecture/cert-issuer-isolation.md).
         let cert_issuer_ca_path = settings.ca_cert.clone();
+        let own_cert_path = settings.own_cert_path.clone();
+        let own_key_path = settings.own_key_path.clone();
         let make_cert_issuer_client = || async {
-            HandshakeClient::for_trust_mode(cert_issuer_url.clone(), cert_issuer_ca_path.as_deref())
-                .await
-                .map_err(|e| {
-                    ActorProcessingErr::from(format!("cannot establish trust in cert-issuer: {e}"))
-                })
+            HandshakeClient::for_trust_mode_with_identity(
+                cert_issuer_url.clone(),
+                cert_issuer_ca_path.as_deref(),
+                &own_cert_path,
+                &own_key_path,
+            )
+            .await
+            .map_err(|e| {
+                ActorProcessingErr::from(format!("cannot establish trust in cert-issuer: {e}"))
+            })
         };
 
         let escrow_keypair = {
@@ -873,22 +888,9 @@ impl Actor for ConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
-        // The account claim signs through /internal/issue, which identifies
-        // its caller by the client certificate on the connection: this is
-        // the agent's own mTLS identity, the same files its Cassini client
-        // uses.
-        let own_cert_path = settings.own_cert_path.clone();
-        let own_key_path = settings.own_key_path.clone();
-        let account_cert_issuer = HandshakeClient::for_trust_mode_with_identity(
-            cert_issuer_url.clone(),
-            cert_issuer_ca_path.as_deref(),
-            &own_cert_path,
-            &own_key_path,
-        )
-        .await
-        .map_err(|e| {
-            ActorProcessingErr::from(format!("cannot establish trust in cert-issuer: {e}"))
-        })?;
+        // The account claim signs through /internal/issue, which identifies its caller by the
+        // client certificate on the connection, as every client above now does.
+        let account_cert_issuer = make_cert_issuer_client().await?;
         let account_handler = AccountHandler {
             ledger: ledger.clone(),
             cert_issuer: account_cert_issuer,

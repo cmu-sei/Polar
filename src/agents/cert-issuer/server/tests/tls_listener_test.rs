@@ -35,6 +35,13 @@ struct Fixture {
 }
 
 async fn start() -> Fixture {
+    start_with(Validator::new(vec![]), None).await
+}
+
+async fn start_with(
+    validator: Validator,
+    floor: Option<Vec<cert_issuer::floor::BootstrapIdentity>>,
+) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let (ca_cert_pem, ca_key_pem) = load_or_bootstrap_ca(
         dir.path().join("ca.crt").to_str().unwrap(),
@@ -52,13 +59,14 @@ async fn start() -> Fixture {
     let handler = Arc::new(Handler {
         // Never consulted by /internal/issue, /ca or a request refused
         // for a missing Authorization header.
-        validator: Arc::new(Validator::new(vec![])),
+        validator: Arc::new(validator),
         ca: ca.clone(),
         default_lifetime: Duration::from_secs(3600),
         server_lifetime: Duration::from_secs(43200),
         user_lifetime: Duration::from_secs(43200),
         identity_lifetime_overrides: HashMap::new(),
         internal_callers: vec![ALLOWED.to_string()],
+        floor,
         ca_cert_pem: ca_cert_pem.clone(),
     });
 
@@ -227,4 +235,85 @@ async fn plain_http_is_not_served() {
         !String::from_utf8_lossy(&buf).starts_with("HTTP/"),
         "a plaintext request must not get an HTTP response from a TLS-only listener"
     );
+}
+
+// ---- the floor, over the real listener --------------------------------------------------------------------------
+//
+// The verified peer identity reaches the decision only through the real handshake. A token for the
+// `git-observer` workload, which is not a bootstrap identity.
+
+mod helpers;
+use helpers::*;
+
+fn token_validator() -> Validator {
+    use cert_issuer::config::IssuerConfig;
+    use cert_issuer_common::identity::IdentityNormalization;
+    let jwks = jwks_doc(&[jwk_for(TEST_KID, primary_keypair())]);
+    Validator::with_jwks_source(
+        vec![IssuerConfig {
+            issuer: TEST_ISSUER.to_string(),
+            audience: vec![TEST_AUDIENCE.to_string()],
+            jwks_uri: Some("https://test-issuer.example.com/jwks".to_string()),
+            workload_identity_claim: "sub".to_string(),
+            instance_binding_claim: "kubernetes.io/pod/uid".to_string(),
+            identity_normalization: IdentityNormalization::KubernetesServiceAccount {
+                cluster_domain: "cluster.local".to_string(),
+            },
+            identity_scope_claim: None,
+            allowed_algorithms: vec!["RS256".to_string()],
+            jwks_cache_ttl_min: Duration::from_secs(30),
+            jwks_cache_ttl_max: Duration::from_secs(3600),
+        }],
+        Arc::new(FakeJwksSource::new(jwks)),
+    )
+}
+
+/// `/issue` with the default token (for `git-observer`) and a client certificate request for it.
+fn issue_with_token() -> String {
+    let csr = generate_csr(
+        "git-observer.polar.serviceaccount.cluster.local",
+        &KeyAlgorithm::EcdsaP256,
+        &[],
+    )
+    .unwrap();
+    let body = serde_json::to_string(&IssueRequest {
+        csr_pem: csr.csr_pem,
+        cert_type: CertType::Client,
+        extra_sans: vec![],
+        subject_dn_defaults: None,
+    })
+    .unwrap();
+    format!(
+        "POST /issue HTTP/1.1\r\nHost: {SERVER_IDENTITY}\r\nContent-Type: application/json\r\n\
+         Authorization: Bearer {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        mint_default_token(),
+        body.len()
+    )
+}
+
+#[tokio::test]
+async fn with_a_floor_a_token_alone_is_refused_but_the_credentials_agents_certificate_vouches() {
+    let f = start_with(token_validator(), Some(vec![])).await;
+
+    let alone = request(&f, None, issue_with_token()).await;
+    assert_eq!(status(&alone), 403, "{alone}");
+    assert!(alone.contains("CALLER_NOT_AUTHORIZED"), "{alone}");
+
+    // A certificate from our CA whose identity is not the credentials agent's does not vouch.
+    let other = client_cert(&f, OTHER).await;
+    let not_vouching = request(&f, Some(other), issue_with_token()).await;
+    assert_eq!(status(&not_vouching), 403, "{not_vouching}");
+
+    // The credentials agent's does, and the same token is then signed.
+    let credentials_agent = client_cert(&f, ALLOWED).await;
+    let vouched = request(&f, Some(credentials_agent), issue_with_token()).await;
+    assert_eq!(status(&vouched), 200, "{vouched}");
+    assert!(vouched.contains("BEGIN CERTIFICATE"));
+}
+
+#[tokio::test]
+async fn with_no_floor_a_token_alone_is_still_signed_the_open_mode() {
+    let f = start_with(token_validator(), None).await;
+    let alone = request(&f, None, issue_with_token()).await;
+    assert_eq!(status(&alone), 200, "{alone}");
 }

@@ -59,6 +59,7 @@ fn test_handler() -> Handler {
         user_lifetime: Duration::from_secs(43200),
         identity_lifetime_overrides: HashMap::new(),
         internal_callers: vec![],
+        floor: None,
         ca_cert_pem: String::new(),
     }
 }
@@ -69,7 +70,7 @@ async fn valid_token_returns_raw_workload_identity_and_instance_binding() {
     let token = mint_default_token();
 
     let result = handler
-        .handle_validate(&token, cert_issuer_common::ValidateRequest::default())
+        .handle_validate(None, &token, cert_issuer_common::ValidateRequest::default())
         .await;
 
     assert_eq!(result.status, 200);
@@ -97,7 +98,7 @@ async fn invalid_token_is_rejected_with_the_correct_outcome() {
     let token = mint_hs256_token();
 
     let result = handler
-        .handle_validate(&token, cert_issuer_common::ValidateRequest::default())
+        .handle_validate(None, &token, cert_issuer_common::ValidateRequest::default())
         .await;
 
     assert_eq!(result.status, 401);
@@ -124,7 +125,7 @@ async fn missing_instance_binding_is_none_not_an_error() {
     );
 
     let result = handler
-        .handle_validate(&token, cert_issuer_common::ValidateRequest::default())
+        .handle_validate(None, &token, cert_issuer_common::ValidateRequest::default())
         .await;
 
     match result.body {
@@ -141,7 +142,7 @@ async fn normalized_identity_is_none_when_not_requested() {
     let token = mint_default_token();
 
     let result = handler
-        .handle_validate(&token, cert_issuer_common::ValidateRequest::default())
+        .handle_validate(None, &token, cert_issuer_common::ValidateRequest::default())
         .await;
 
     match result.body {
@@ -159,6 +160,7 @@ async fn normalized_identity_is_included_and_genuinely_normalized_when_requested
 
     let result = handler
         .handle_validate(
+            None,
             &token,
             cert_issuer_common::ValidateRequest {
                 include_normalized_identity: true,

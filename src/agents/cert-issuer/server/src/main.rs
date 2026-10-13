@@ -39,7 +39,7 @@ use cert_issuer::{
     tls::{build_server_config, serve_tls},
 };
 use std::sync::Arc;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 #[tokio::main]
 #[instrument]
@@ -121,8 +121,20 @@ async fn main() -> Result<()> {
         user_lifetime: config.ca.user_lifetime,
         identity_lifetime_overrides: config.ca.identity_lifetime_overrides.clone(),
         internal_callers: config.mtls.internal_callers.clone(),
+        floor: config.mtls.bootstrap.clone(),
         ca_cert_pem: ca_cert_pem.clone(),
     });
+
+    match &config.mtls.bootstrap {
+        Some(floor) => info!(
+            bootstrap_identities = floor.len(),
+            "issuance floor configured: a caller with only a token must be a bootstrap identity"
+        ),
+        None => warn!(
+            "issuance floor NOT configured: /issue and /validate are open to any holder of a valid \
+             service-account token, who may ask for any certificate type and names. Set mtls.bootstrap."
+        ),
+    }
 
     // ---- Server ----
     let app = build_router(handler);

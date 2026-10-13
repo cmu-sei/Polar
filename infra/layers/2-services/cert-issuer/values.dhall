@@ -48,6 +48,35 @@ in  { name             = "cert-issuer"
     -- mtlsServerIdentity above, pending the configurable-domain work.
     , mtlsInternalCallers =
         [ "credentials-agent.${Constants.PolarNamespace}.serviceaccount.cluster.local" ]
+    -- The issuance floor (docs/architecture/cert-issuer-isolation.md): the
+    -- only workloads that may be issued a certificate with nothing but a
+    -- service-account token, because they are what the credentials agent
+    -- needs in order to run. Every other workload is to be issued through
+    -- the credentials agent, whose mTLS certificate vouches for it. Each
+    -- bootstrap workload is written as its token names it, so no cluster
+    -- domain appears; the one server name is the same constant Cassini's own
+    -- certificate request is built from.
+    , mtlsBootstrap =
+        [ { workload = "system:serviceaccount:${Constants.PolarNamespace}:credentials-agent"
+          , certType = "CLIENT"
+          , names = [] : List Text
+          }
+        , { workload = "system:serviceaccount:${Constants.PolarNamespace}:credentials-agent-observer"
+          , certType = "CLIENT"
+          , names = [] : List Text
+          }
+        , { workload = "system:serviceaccount:${Constants.PolarNamespace}:cassini"
+          , certType = "SERVER"
+          , names = [ Constants.cassiniDNSName ]
+          }
+        ]
+    -- Whether cert-issuer enforces the floor. False is the old open
+    -- behaviour (any token holder is signed what it asks for), and
+    -- cert-issuer says so at every start. It is turned on in the same change
+    -- that has polar-init request its certificate through the credentials
+    -- agent: until then every other workload still asks cert-issuer
+    -- directly, and enforcing would stop them all from starting.
+    , mtlsEnforceBootstrap = False
     -- Stays SelfBootstrap until bootstrap-ca exists and the Deployment
     -- mounts its Secret. Switching this without that mount makes
     -- cert-issuer refuse to start, by design.

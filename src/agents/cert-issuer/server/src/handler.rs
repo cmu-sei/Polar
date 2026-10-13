@@ -64,6 +64,11 @@ pub struct Handler {
     /// Empty means that endpoint refuses every caller, which is the
     /// safe default until credentials-agent has its own identity.
     pub internal_callers: Vec<String>,
+    /// The bootstrap identities: the only callers that may be issued with nothing but a token. With a floor
+    /// set, any other token-only caller is refused on `/issue` and `/validate`; a caller vouched for by an
+    /// internal-caller mTLS identity is not limited by it. `None` is the old open behaviour (any token holder
+    /// is signed what it asks for), kept only until `polar-init` goes through the credentials agent.
+    pub floor: Option<Vec<crate::floor::BootstrapIdentity>>,
     /// PEM of the CA certificate this service signs with, served
     /// unauthenticated at `GET /ca`. Public by nature: every issuance
     /// response already carries it, and it is presented in every TLS
@@ -97,17 +102,75 @@ pub struct ValidateHandlerResponse {
 }
 
 impl Handler {
+    /// Whether the connection's verified mTLS peer is one that vouches for the request: an internal caller
+    /// (the credentials agent), which has applied its own controls and states the certificate itself.
+    fn vouched_for(&self, peer_identity: Option<&str>) -> bool {
+        peer_identity.is_some_and(|peer| self.internal_callers.iter().any(|c| c == peer))
+    }
+
+    /// Why a caller with this token may not have this request served, if it may not: the detail to send. A
+    /// vouched caller is not limited here. A token-only caller must be a bootstrap identity asking only for
+    /// what is written down for it, once a floor is configured. `request` is the type and names for `/issue`,
+    /// and none for `/validate`, which signs nothing.
+    fn caller_refusal(
+        &self,
+        peer_identity: Option<&str>,
+        workload_identity: &str,
+        request: Option<(&cert_issuer_common::CertType, &[String])>,
+    ) -> Option<String> {
+        if self.vouched_for(peer_identity) {
+            return None;
+        }
+        let floor = self.floor.as_ref()?;
+        let refusal = match request {
+            Some((cert_type, extra_sans)) => {
+                crate::floor::admit_token_only(floor, workload_identity, cert_type, extra_sans)
+            }
+            None if floor.iter().any(|b| b.workload == workload_identity) => Ok(()),
+            None => Err(crate::floor::Refusal::NotBootstrap),
+        };
+        match refusal {
+            Ok(()) => None,
+            Err(refusal) => {
+                warn!(
+                    workload = %workload_identity,
+                    peer_identity = ?peer_identity,
+                    "refused a token-only caller: {refusal}"
+                );
+                Some(refusal.to_string())
+            }
+        }
+    }
+
     /// Process an `/issue` request.
     // skip_all: the bearer token is a live credential and the request carries
     // the CSR. Neither belongs in a span field, and the debug log would
     // otherwise print both in full.
     #[instrument(skip_all)]
-    pub async fn handle(&self, bearer_token: &str, request: IssueRequest) -> HandlerResponse {
+    pub async fn handle(
+        &self,
+        peer_identity: Option<&str>,
+        bearer_token: &str,
+        request: IssueRequest,
+    ) -> HandlerResponse {
         // ---- Step 1: OIDC validation ----
         let claims = match self.validator.validate(bearer_token).await {
             Ok(claims) => claims,
             Err(e) => return error_response(map_validation_error(&e), &e.to_string()),
         };
+
+        // ---- Step 1.5: who is asking ----
+        //
+        // The token says whose workload this is and nothing about whether it may ask for this. A caller
+        // vouched for by the credentials agent's mTLS identity states the certificate itself; a caller
+        // with only a token is limited to the bootstrap identities and what is written down for them.
+        if let Some(detail) = self.caller_refusal(
+            peer_identity,
+            &claims.workload_identity,
+            Some((&request.cert_type, &request.extra_sans)),
+        ) {
+            return error_response(IssueOutcome::CallerNotAuthorized, &detail);
+        }
 
         // ---- Step 2: CSR parsing ----
         let parsed_csr = match csr::parse_csr(&request.csr_pem) {
@@ -384,6 +447,7 @@ impl Handler {
     #[instrument(skip_all)]
     pub async fn handle_validate(
         &self,
+        peer_identity: Option<&str>,
         bearer_token: &str,
         request: ValidateRequest,
     ) -> ValidateHandlerResponse {
@@ -399,6 +463,17 @@ impl Handler {
                 };
             }
         };
+
+        // Who is asking: the same rule as /issue, without a request to inspect.
+        if let Some(detail) = self.caller_refusal(peer_identity, &claims.workload_identity, None) {
+            return ValidateHandlerResponse {
+                status: status_for_outcome(IssueOutcome::CallerNotAuthorized),
+                body: ValidateHandlerBody::Error(IssueError {
+                    outcome: IssueOutcome::CallerNotAuthorized,
+                    detail,
+                }),
+            };
+        }
 
         // Computed via the exact same normalize_identity call /issue
         // itself uses -- a client building a CSR from this value is

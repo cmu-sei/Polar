@@ -78,6 +78,7 @@ pub struct PeerIdentity(pub String);
 ///   automatically; it returns 400 before our handler runs.
 async fn issue(
     State(handler): State<Arc<Handler>>,
+    peer: Option<Extension<PeerIdentity>>,
     headers: HeaderMap,
     Json(request): Json<IssueRequest>,
 ) -> Response {
@@ -88,7 +89,8 @@ async fn issue(
         }
     };
 
-    let result = handler.handle(&bearer, request).await;
+    let peer_identity = peer.as_ref().map(|Extension(p)| p.0.as_str());
+    let result = handler.handle(peer_identity, &bearer, request).await;
     handler_response_to_axum(result)
 }
 
@@ -133,6 +135,7 @@ async fn internal_issue(
 /// point.
 async fn validate(
     State(handler): State<Arc<Handler>>,
+    peer: Option<Extension<PeerIdentity>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
@@ -167,7 +170,10 @@ async fn validate(
         }
     };
 
-    let result = handler.handle_validate(&bearer, request).await;
+    let peer_identity = peer.as_ref().map(|Extension(p)| p.0.as_str());
+    let result = handler
+        .handle_validate(peer_identity, &bearer, request)
+        .await;
     validate_response_to_axum(result)
 }
 

@@ -3,6 +3,7 @@
 //! Modules are organized so that each can be tested in isolation:
 //! - `oidc`: JWT validation against configured issuers, JWKS caching.
 //! - `csr`: CSR parsing and SAN-vs-identity verification.
+//! - `floor`: who may be issued with only a token (the bootstrap identities).
 //! - `ca`: Smallstep CA client (mockable via trait).
 //! - `handler`: protocol handler that wires the above together.
 //! - `server`: Axum HTTP wrapper around the handler.
@@ -12,6 +13,7 @@
 pub mod ca;
 pub mod config;
 pub mod csr;
+pub mod floor;
 pub mod handler;
 pub mod oidc;
 pub mod server;

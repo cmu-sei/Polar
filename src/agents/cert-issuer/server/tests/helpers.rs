@@ -1,3 +1,4 @@
+#![allow(dead_code)] // shared by several test binaries, each of which uses some of it
 //! Test infrastructure: keypair generation, JWT minting, JWKS
 //! encoding, and a counting fake `JwksSource`.
 //!
