@@ -83,6 +83,77 @@ def main [] {
             let p = (shutdown_problems "w" ($GOOD_SHUTDOWN | update grace_margin_secs 0 | update termination_grace_secs 20))
             assert (has $p "shutdown.grace_margin_secs must be at least 1")
         }
+        "a workload that asks cert-issuer and is not a bootstrap identity is pending until the floor is enforced, then an error": {
+            let r = [{ who: "kube-consumer", issuer: "cert-issuer", bootstrap: false }]
+            let before = (issuer_problems $r false)
+            assert equal $before.errors []
+            assert (has $before.pending "kube-consumer")
+            let after = (issuer_problems $r true)
+            assert (has $after.errors "kube-consumer")
+            assert equal $after.pending []
+        }
+
+        "a bootstrap identity may ask cert-issuer, and a workload on the credentials agent is never a problem": {
+            let r = [
+                { who: "cassini", issuer: "cert-issuer", bootstrap: true }
+                { who: "kube-consumer", issuer: "credentials-agent", bootstrap: false }
+            ]
+            for enforced in [false true] {
+                let p = (issuer_problems $r $enforced)
+                assert equal $p.errors []
+                assert equal $p.pending []
+            }
+        }
+
+        "a bootstrap identity cannot be on the credentials agent, and an unknown issuer is an error": {
+            let p = (issuer_problems [{ who: "cassini", issuer: "credentials-agent", bootstrap: true }] false)
+            assert (has $p.errors "cassini")
+            let q = (issuer_problems [{ who: "x", issuer: "vault", bootstrap: false }] false)
+            assert (has $q.errors "vault")
+        }
+
+        "the floor is the bootstrap identities with their type and names, from what they are issued": {
+            let r = [
+                { who: "cassini", namespace: "polar", service_account: "cassini", issuer: "cert-issuer", bootstrap: true,
+                  certs: ["server:/etc/tls/certs:ecdsa-p256:cassini-ip-svc.polar.svc.cluster.local"] }
+                { who: "credentials-agent", namespace: "polar", service_account: "credentials-agent", issuer: "cert-issuer", bootstrap: true,
+                  certs: ["client:/etc/tls/certs:ecdsa-p256:", "client:/etc/neo4j-client-tls:ecdsa-p256:"] }
+            ]
+            let f = (floor_entries $r)
+            assert equal $f.problems []
+            assert equal $f.entries [
+                { workload: "system:serviceaccount:polar:cassini", certType: "SERVER", names: ["cassini-ip-svc.polar.svc.cluster.local"], vouchedOnly: false }
+                { workload: "system:serviceaccount:polar:credentials-agent", certType: "CLIENT", names: [], vouchedOnly: false }
+            ]
+        }
+
+        "a workload on the credentials agent gets a vouched-only entry for its server names, and none for client certificates": {
+            let r = [
+                { who: "polar-git-server", namespace: "polar", service_account: "polar-git-server", issuer: "credentials-agent", bootstrap: false,
+                  certs: ["client:/etc/tls/certs:ecdsa-p256:", "server:/etc/tls/git-server:ecdsa-p256:polar-git-server.polar.svc.cluster.local"] }
+                { who: "kube-consumer", namespace: "polar", service_account: "kube-consumer", issuer: "credentials-agent", bootstrap: false,
+                  certs: ["client:/etc/tls/certs:ecdsa-p256:"] }
+            ]
+            let f = (floor_entries $r)
+            assert equal $f.problems []
+            assert equal $f.entries [
+                { workload: "system:serviceaccount:polar:polar-git-server", certType: "SERVER", names: ["polar-git-server.polar.svc.cluster.local"], vouchedOnly: true }
+            ]
+        }
+
+        "a bootstrap identity that is issued two types cannot be written as one floor entry": {
+            let r = [{ who: "x", namespace: "polar", service_account: "x", issuer: "cert-issuer", bootstrap: true,
+                       certs: ["client:/a:ecdsa-p256:", "server:/b:ecdsa-p256:x.polar"] }]
+            let f = (floor_entries $r)
+            assert (has $f.problems "x")
+        }
+
+        "a workload still on cert-issuer that is not a bootstrap identity has no floor entry yet": {
+            # Its names stay unchecked until it moves; the issuer rule is what reports it.
+            let r = [{ who: "k", namespace: "polar", service_account: "k", issuer: "cert-issuer", bootstrap: false,
+                       certs: ["server:/b:ecdsa-p256:k.polar"] }]
+            assert equal (floor_entries $r).entries []
+        }
     }
 
     let results = ($tests | transpose name body | each {|t|

@@ -48,53 +48,20 @@ in  { name             = "cert-issuer"
     -- mtlsServerIdentity above, pending the configurable-domain work.
     , mtlsInternalCallers =
         [ "credentials-agent.${Constants.PolarNamespace}.serviceaccount.cluster.local" ]
-    -- The issuance floor (docs/architecture/cert-issuer-isolation.md): the
-    -- only workloads that may be issued a certificate with nothing but a
-    -- service-account token, because they are what the credentials agent
-    -- needs in order to run. Every other workload is to be issued through
-    -- the credentials agent, whose mTLS certificate vouches for it. Each
-    -- bootstrap workload is written as its token names it, so no cluster
-    -- domain appears; the one server name is the same constant Cassini's own
-    -- certificate request is built from.
+    -- The issuance floor (docs/architecture/cert-issuer-isolation.md): who may
+    -- be signed what. Nothing is written here: `infra/resolve.nu floor` writes
+    -- the entries for every catalog workload from what it is issued (the
+    -- bootstrap identities, which may be signed on a token alone, and the
+    -- workloads on the credentials agent that are issued a server
+    -- certificate), and main.nu adds Neo4j's, from its chart and the target's
+    -- `neo4jSans`. Rendering puts them in front of whatever is listed here.
     , mtlsBootstrap =
-        [ { workload = "system:serviceaccount:${Constants.PolarNamespace}:credentials-agent"
-          , certType = "CLIENT"
-          , names = [] : List Text
-          , vouchedOnly = False
-          }
-        , { workload = "system:serviceaccount:${Constants.PolarNamespace}:credentials-agent-observer"
-          , certType = "CLIENT"
-          , names = [] : List Text
-          , vouchedOnly = False
-          }
-        , { workload = "system:serviceaccount:${Constants.PolarNamespace}:cassini"
-          , certType = "SERVER"
-          , names = [ Constants.cassiniDNSName ]
-          , vouchedOnly = False
-          }
-        -- Workloads reached only through the credentials agent. They are listed
-        -- so cert-issuer checks the names the credentials agent states for them
-        -- (a token alone never gets them a certificate). Neo4j's list is the
-        -- one its init container asks for (`neo4jSans` in the target's
-        -- overrides); the catalog renders both from one place in phase 5.
-        , { workload = "system:serviceaccount:${Constants.GraphNamespace}:graph"
-          , certType = "SERVER"
-          , names =
-            [ "neo4j"
-            , "polar-neo4j"
-            , Constants.neo4jServiceName
-            , "${Constants.neo4jServiceName}.${Constants.GraphNamespace}"
-            , Constants.neo4jDNSName
-            , "localhost"
-            ]
-          , vouchedOnly = True
-          }
-        , { workload = "system:serviceaccount:${Constants.PolarNamespace}:polar-git-server"
-          , certType = "SERVER"
-          , names = [ "polar-git-server.${Constants.PolarNamespace}.svc.cluster.local" ]
-          , vouchedOnly = True
-          }
-        ]
+        [] : List
+               { workload : Text
+               , certType : Text
+               , names : List Text
+               , vouchedOnly : Bool
+               }
     -- Whether cert-issuer enforces the floor. False is the old open
     -- behaviour (any token holder is signed what it asks for), and
     -- cert-issuer says so at every start. It is turned on in the same change

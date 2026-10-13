@@ -10,5 +10,8 @@
   # Jaeger's OTLP HTTP port, where traces are sent (its UI, 16686, is not an endpoint for them).
   # The configuration git server: git smart HTTP over mTLS, no TLS termination anywhere on the way.
   polar-git-server: { dns_name: "polar-git-server", namespace: "polar", port: 8443, scheme: "https" }
+  # The credentials agent's HTTP front, which a pod without a certificate asks for one (`polar-init`).
+  # Plain http by design: the token in the request is sealed to an ephemeral session, not sent in the clear.
+  credentials-agent-observer: { dns_name: "credentials-agent-observer", namespace: "polar", port: 8080, scheme: "http" }
   jaeger:      { dns_name: "jaeger-svc",    namespace: "polar", port: 4318, scheme: "http" }
 }

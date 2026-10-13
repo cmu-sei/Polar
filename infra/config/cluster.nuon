@@ -21,6 +21,14 @@
   # Audience of the projected ServiceAccount token presented to cert-issuer.
   sa_token_audience: "polar-cert-issuer.local"
 
+  # Who may ask cert-issuer for a certificate with only a token. The bootstrap identities (the workloads
+  # that cannot be issued through the credentials agent, because they are what it needs to run) always may.
+  # While the floor is off, cert-issuer signs any token holder and `resolve.nu check` lists the workloads
+  # that still ask it directly as pending. Turn it on, in the last step of the rollout, only when that list
+  # is empty: it then refuses every workload that is not a bootstrap identity, and from then on the same
+  # list is an error. The cert-issuer chart's `mtlsEnforceBootstrap` is rendered from this.
+  issuance: { floor_enforced: false }
+
   # Persistent volume claims a workload's capabilities ask for: the storage class the cluster
   # provides and how much each claim asks for.
   storage: { class: "managed-csi", size: "1Gi" }

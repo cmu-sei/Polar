@@ -82,7 +82,13 @@ def main [
         # Build chart-specific context by extending base context
         let chart_context = ($base_context | merge { chart_dir: $chart_dir } | merge (
             match $chart_name {
-                "cert-issuer" => { identityLifetimeOverrides: $identity_lifetime_overrides }
+                "cert-issuer" => {
+                    identityLifetimeOverrides: $identity_lifetime_overrides
+                    # The floor is written from the catalog, so what a workload is issued and what cert-issuer
+                    # allows it cannot differ.
+                    floor: (^nu ($infra_root | path join "resolve.nu") floor --target $target | from json)
+                    floorEnforced: (^nu ($infra_root | path join "resolve.nu") floor-enforced --target $target | str trim | into bool)
+                }
                 "neo4j" => { polarInitImage: $polar_init_image }
                 "gitlab" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "git"         => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }

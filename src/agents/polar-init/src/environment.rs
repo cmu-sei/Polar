@@ -377,6 +377,27 @@ mod tests {
     }
 
     #[test]
+    fn the_rendered_observer_mode_has_a_blank_cert_issuer_address_and_that_is_fine() {
+        // The catalog renders POLAR_INIT_CERT_ISSUER_URL as an empty string for a workload on the credentials
+        // agent, so that nothing in its pod is told where cert-issuer is.
+        let s = InitSettings::from_env(&with(&[
+            &[
+                ("POLAR_INIT_CERT_ISSUER_URL", ""),
+                ("POLAR_INIT_ISSUER", "credentials-agent"),
+                ("POLAR_INIT_OBSERVER_URL", "http://obs:8080"),
+            ],
+            SKIP,
+        ]))
+        .unwrap();
+        assert_eq!(
+            s.issuance,
+            Issuance::Observer {
+                url: "http://obs:8080".to_string()
+            }
+        );
+    }
+
+    #[test]
     fn each_mode_names_the_address_it_is_missing_and_not_the_other() {
         let error = InitSettings::from_env(&with(&[
             &[("POLAR_INIT_ISSUER", "credentials-agent")],

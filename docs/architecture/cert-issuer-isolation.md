@@ -332,7 +332,21 @@ over Cassini with the certificate it just obtained. The requests across the rend
    remove in phase 5:** Neo4j's names are written here and in the target's `neo4jSans` override; the catalog should
    render both from one place. Still off: `mtlsEnforceBootstrap = False`, and absent `mtls.bootstrap` is the old open
    behaviour, so none of this applies on the cluster until the floor is enabled in phase 6.
-5. **Catalog and resolver.** Mode per workload, the rule, render tests.
+5. **Catalog and resolver. BUILT 2026-10-13** (tests first; seven rules and wirings each broken on purpose and caught;
+   not deployed). Each workload has an `issuer` (`cert-issuer` or `credentials-agent`; the kind's default is
+   `cert-issuer`, today's behaviour, and a target moves a workload by setting it, so the rollout goes in groups) and a
+   `bootstrap` flag (cassini, the credentials agent and its observer). A workload on the credentials agent is given
+   `POLAR_INIT_ISSUER` and `POLAR_INIT_OBSERVER_URL` (the observer is in `services.nuon`) and a **blank**
+   cert-issuer address, so nothing in its pod is told where cert-issuer is. The rule (`rules.nu`, `issuer_problems`):
+   an unknown issuer, or a bootstrap identity on the credentials agent, is always an error; a non-bootstrap workload
+   on cert-issuer is listed as *pending* by `resolve.nu check` while `cluster.nuon`'s `issuance.floor_enforced` is
+   false, and an error once it is true, because cert-issuer would then refuse it. **The floor is written from the
+   catalog** (`resolve.nu floor`, `floor_entries`): the bootstrap identities with the one type and the names they are
+   issued, and a `vouchedOnly` entry for each server certificate of a workload on the credentials agent (the git
+   server, when it moves). `render.nu` hands these, and `floor_enforced`, to the cert-issuer chart; the chart's
+   `main.nu` adds Neo4j's entry from its chart and the target's `neo4jSans`, so those names are written once. The
+   chart's own `mtlsBootstrap` is now empty. Neo4j itself is not yet on the credentials agent: its StatefulSet is a
+   chart, not a catalog workload, and moving it is part of phase 6.
 6. **Rollout on the cluster, in groups,** credentials pair first, then the leaf workloads, then Neo4j and the git
    server (server certificates), with the secret harness as the check that a retrieve works; the floor is enabled in
    the last step.

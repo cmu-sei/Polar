@@ -68,3 +68,65 @@ export def apply_order_problems [rendered: list<string>, order: list<string>]: n
     } | flatten)
     $missing ++ $misordered
 }
+
+# Where a workload gets its certificates: cert-issuer itself (only the bootstrap identities, the ones that
+# cannot be issued through the credentials agent because they are what it needs to run) or the credentials
+# agent. `records` have who, issuer and bootstrap. Until the floor is enforced a non-bootstrap workload that
+# still asks cert-issuer is pending migration, listed and not an error; once cert-issuer refuses it, it is an
+# error, because it could not start. Returns { errors, pending }.
+export def issuer_problems [records: list, enforced: bool]: nothing -> record {
+    mut errors: list<string> = []
+    mut pending: list<string> = []
+    for r in $records {
+        if not ($r.issuer in ["cert-issuer" "credentials-agent"]) {
+            $errors = ($errors | append $"($r.who): issuer '($r.issuer)' must be cert-issuer or credentials-agent")
+        } else if $r.bootstrap and $r.issuer != "cert-issuer" {
+            $errors = ($errors | append $"($r.who): a bootstrap identity is issued by cert-issuer, since it is what the credentials agent needs to run")
+        } else if $r.issuer == "cert-issuer" and (not $r.bootstrap) {
+            let m = $"($r.who) asks cert-issuer directly and is not a bootstrap identity"
+            if $enforced { $errors = ($errors | append $m) } else { $pending = ($pending | append $m) }
+        }
+    }
+    { errors: $errors, pending: $pending }
+}
+
+# The entries of cert-issuer's floor, from what the catalog says each workload is issued (the `--cert` specs
+# `kind:dir:algorithm:names`). A bootstrap identity gets an entry that lets its token alone be signed, for the one
+# type it is issued and the names it carries. A workload on the credentials agent that is issued a server
+# certificate gets a `vouchedOnly` entry, so cert-issuer checks the names the credentials agent states for it and
+# never signs it on its token alone. Anything else has no entry. Returns { entries, problems }.
+export def floor_entries [records: list]: nothing -> record {
+    mut entries: list<any> = []
+    mut problems: list<string> = []
+    for r in $records {
+        let parsed = ($r.certs | each {|c|
+            let p = ($c | split row ":")
+            { kind: ($p | get 0), names: (($p | get -o 3 | default "") | split row "," | where {|n| $n != "" }) }
+        })
+        let workload = $"system:serviceaccount:($r.namespace):($r.service_account)"
+        if $r.bootstrap {
+            let kinds = ($parsed | get kind | uniq)
+            if ($kinds | length) != 1 {
+                $problems = ($problems | append $"($r.who): a bootstrap identity is written as one certificate type, and this one is issued ($kinds | str join ' and ')")
+            } else {
+                $entries = ($entries | append {
+                    workload: $workload
+                    certType: ($kinds | first | str uppercase)
+                    names: ($parsed | get names | flatten | uniq)
+                    vouchedOnly: false
+                })
+            }
+        } else if $r.issuer == "credentials-agent" {
+            let servers = ($parsed | where kind == "server")
+            if ($servers | is-not-empty) {
+                $entries = ($entries | append {
+                    workload: $workload
+                    certType: "SERVER"
+                    names: ($servers | get names | flatten | uniq)
+                    vouchedOnly: true
+                })
+            }
+        }
+    }
+    { entries: $entries, problems: $problems }
+}

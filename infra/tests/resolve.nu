@@ -49,6 +49,28 @@ def env_value [r: record, name: string] {
     }
 }
 
+const INFRA = (path self | path dirname | path dirname)
+
+# Runs `body` with a throwaway target whose config.nuon is `config`, and removes it afterwards, so a test can
+# say what a target would change (a workload's issuer, whether the floor is enforced).
+def with_target [config: record, body: closure] {
+    let name = $"zz-test-(random chars --length 8)"
+    let dir = ($INFRA | path join "targets" $name)
+    mkdir $dir
+    $config | to nuon | save --force ($dir | path join "config.nuon")
+    try {
+        do $body $name
+        rm -rf $dir
+    } catch {|e|
+        rm -rf $dir
+        error make { msg: $e.msg }
+    }
+}
+
+def init_env_value [r: record, name: string] {
+    $r.init_env | where name == $name | get -o 0.value
+}
+
 def main [] {
     let tests = {
         "every workload's budget is in what the agent is given, as the code declared": {
@@ -282,6 +304,80 @@ def main [] {
         "a volume that is not a Secret with items has none": {
             let r = (resolve "kube-consumer")
             assert ($r.volumes | all {|v| $v.items == [] })
+        }
+
+        "the bootstrap identities ask cert-issuer, and every other workload does until it is moved": {
+            for n in [cassini credentials-agent credentials-agent-observer] {
+                let r = (resolve $n)
+                let st = (settings $n)
+                assert equal $st.issuer "cert-issuer" $n
+                assert $st.bootstrap $n
+                assert ($r.cert_issuer_url | str starts-with "https://cert-issuer.") $n
+            }
+            let k = (resolve "kube-consumer")
+            let ks = (settings "kube-consumer")
+            assert equal $ks.issuer "cert-issuer"
+            assert (not $ks.bootstrap)
+            assert equal (init_env_value $k "POLAR_INIT_ISSUER") null
+        }
+
+        "a workload moved onto the credentials agent is told the observer's address and not cert-issuer's": {
+            with_target { workloads: { kube-consumer: { issuer: "credentials-agent" } } } {|t|
+                let r = (^nu $RESOLVER json kube-consumer --target $t | from json)
+                assert equal (^nu $RESOLVER settings kube-consumer --target $t | from json | get issuer) "credentials-agent"
+                assert equal (init_env_value $r "POLAR_INIT_ISSUER") "credentials-agent"
+                assert equal (init_env_value $r "POLAR_INIT_OBSERVER_URL") "http://credentials-agent-observer.polar.svc.cluster.local:8080"
+                assert equal $r.cert_issuer_url ""
+            }
+        }
+
+        "a bootstrap identity cannot be moved onto the credentials agent": {
+            with_target { workloads: { cassini: { issuer: "credentials-agent" } } } {|t|
+                let r = (^nu $RESOLVER check --target $t | complete)
+                assert ($r.exit_code != 0)
+                assert ($r.stderr | str contains "cassini")
+            }
+        }
+
+        "an issuer that is neither is refused": {
+            with_target { workloads: { kube-consumer: { issuer: "vault" } } } {|t|
+                let r = (^nu $RESOLVER check --target $t | complete)
+                assert ($r.exit_code != 0)
+                assert ($r.stderr | str contains "vault")
+            }
+        }
+
+        "workloads still asking cert-issuer are listed as pending while the floor is off, and refused once it is enforced": {
+            let off = (^nu $RESOLVER check | complete)
+            assert equal $off.exit_code 0 $off.stderr
+            assert ($off.stdout | str contains "pending")
+            assert ($off.stdout | str contains "kube-consumer")
+            with_target { cluster: { issuance: { floor_enforced: true } } } {|t|
+                let on = (^nu $RESOLVER check --target $t | complete)
+                assert ($on.exit_code != 0)
+                assert ($on.stderr | str contains "kube-consumer")
+            }
+        }
+
+        "the floor is written from the catalog: the bootstrap identities, then a vouched-only entry for each server certificate on the credentials agent": {
+            let f = (^nu $RESOLVER floor | from json)
+            let cassini = ($f | where workload == "system:serviceaccount:polar:cassini" | first)
+            assert equal $cassini.certType "SERVER"
+            assert equal $cassini.names ["cassini-ip-svc.polar.svc.cluster.local"]
+            assert (not $cassini.vouchedOnly)
+            for w in [credentials-agent credentials-agent-observer] {
+                let e = ($f | where workload == $"system:serviceaccount:polar:($w)" | first)
+                assert equal $e.certType "CLIENT"
+            }
+            # The git server is still on cert-issuer, so it has no entry yet.
+            assert equal ($f | where workload == "system:serviceaccount:polar:polar-git-server" | length) 0
+            with_target { workloads: { polar-git-server: { issuer: "credentials-agent" } } } {|t|
+                let moved = (^nu $RESOLVER floor --target $t | from json)
+                let g = ($moved | where workload == "system:serviceaccount:polar:polar-git-server" | first)
+                assert equal $g.certType "SERVER"
+                assert $g.vouchedOnly
+                assert equal $g.names ["polar-git-server.polar.svc.cluster.local"]
+            }
         }
 
         "the template does not see the settings record": {

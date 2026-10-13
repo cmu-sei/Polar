@@ -42,6 +42,14 @@
     # needs (with_shutdown_budget), and the agent refuses to start if this is less.
     shutdown: { budget_secs: 20, grace_margin_secs: 10 }
 
+    # Where polar-init gets the pod's certificates: `cert-issuer` (what every workload does until it is moved,
+    # and what the bootstrap identities always do) or `credentials-agent`. A target moves a workload by
+    # setting its `issuer`; the rollout goes in groups. `bootstrap: true` marks the few workloads that
+    # cannot go through the credentials agent; only they may name cert-issuer once the floor is enforced
+    # (cluster.nuon, `issuance`).
+    issuer: "cert-issuer"
+    bootstrap: false
+
     # The projected token polar-init presents to cert-issuer.
     sa_token: { volume: "sa-token", path: "/workspace/token", expiration_secs: 3600 }
   }

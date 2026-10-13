@@ -430,6 +430,17 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     let ci = ($vars | get cert-issuer)
     let scheme = ($services | get cert-issuer | get -o scheme | default "https")
 
+    # Where polar-init gets this pod's certificates. On the credentials agent it is told the observer's
+    # address and is not told cert-issuer's at all, so nothing in the pod can reach for it.
+    let issuer = $spec.issuer
+    let init_env = (if $issuer == "credentials-agent" {
+        let obs = ($vars | get -o credentials-agent-observer)
+        if $obs == null { error make { msg: $"($name): issuer credentials-agent needs credentials-agent-observer in services.nuon" } }
+        $init_env
+        | append { name: "POLAR_INIT_ISSUER", value: "credentials-agent", secret: null, key: null, from: "issuer" }
+        | append { name: "POLAR_INIT_OBSERVER_URL", value: $obs.url, secret: null, key: null, from: "issuer" }
+    } else { $init_env })
+
     {
         name: $name
         kind: $entry.kind
@@ -438,7 +449,9 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         pull_policy: $spec.pull_policy
         pull_secrets: $spec.pull_secrets
         polar_init_image: (image_ref $images $cluster "polar-init" $name)
-        cert_issuer_url: $"($scheme)://($ci.addr)"
+        issuer: $issuer
+        bootstrap: $spec.bootstrap
+        cert_issuer_url: (if $issuer == "credentials-agent" { "" } else { $"($scheme)://($ci.addr)" })
         sa_token_audience: $cluster.sa_token_audience
         sa_token_volume: $spec.sa_token.volume
         sa_token_path: $spec.sa_token.path
@@ -466,7 +479,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         config_problems: $config_problems
         image_name: ($spec.scaffold_package? | default $spec.image)
         _origin: $origin
-        _settings: { health: $h, shutdown: ($sd | insert termination_grace_secs $grace) }
+        _settings: { issuer: $issuer, bootstrap: $spec.bootstrap, health: $h, shutdown: ($sd | insert termination_grace_secs $grace) }
         _from: { roles: $cluster_roles, env: $entries, volumes: $volumes, mounts: $mounts, deps: $deps, certs: $certs }
     }
 }
@@ -474,7 +487,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
 # What the template takes: the resolved record without provenance.
 def for_template [r: record] {
     $r
-    | reject _origin _from _settings resources config_map config_problems image_name
+    | reject _origin _from _settings resources config_map config_problems image_name issuer bootstrap
     | update env { reject from }
     | update volumes { reject from }
     | update mounts { reject from }
@@ -533,6 +546,8 @@ def check_all [target: string] {
             let r = (resolve $n $target)
             {
                 who: $n
+                issuer: $r.issuer
+                bootstrap: $r.bootstrap
                 identity: $"($r.service_account).($r.namespace)"
                 # The agent's configuration is judged by filling its own scaffold and then by the agent
                 # itself; its pod environment is a pointer, not the variables.
@@ -540,7 +555,7 @@ def check_all [target: string] {
                 error: null
             }
         } catch {|e|
-            { who: $n, identity: null, rules: [], error: $e.msg }
+            { who: $n, issuer: null, bootstrap: null, identity: null, rules: [], error: $e.msg }
         }
     })
     for r in ($results | where error != null) { $problems = ($problems | append $r.error) }
@@ -554,7 +569,20 @@ def check_all [target: string] {
     for g in $shared {
         $problems = ($problems | append $"identity ($g.identity) is shared by: ($g.items | get who | str join ', ')")
     }
-    $problems
+    # Where each workload gets its certificates, and the rule that only the bootstrap identities may ask
+    # cert-issuer directly (an error once the floor is enforced, a list of what is still to move until then).
+    let issuance = (issuer_problems ($sas | select who issuer bootstrap) ((load_cluster $target).issuance?.floor_enforced? | default false))
+    for p in $issuance.errors { $problems = ($problems | append $p) }
+    { problems: $problems, pending: $issuance.pending }
+}
+
+# The floor of cert-issuer for this target, written from the catalog: what each workload is issued, resolved.
+def floor_of [target: string] {
+    let records = (all_workloads | get name | each {|n|
+        let r = (resolve $n $target)
+        { who: $n, namespace: $r.namespace, service_account: $r.service_account, issuer: $r.issuer, bootstrap: $r.bootstrap, certs: $r.certs }
+    })
+    floor_entries $records
 }
 
 # ── Comparison with a rendered manifest ──────────────────────────────────────
@@ -677,7 +705,7 @@ def "main explain" [
     print $"  needs: ($r.needs | str join ', ')"
     print ""
     print "  values:"
-    for k in [namespace image pull_policy polar_init_image cert_issuer_url service_account sa_token_secret automount_sa_token restart_policy backoff_limit ttl_after_finished_secs termination_grace_secs] {
+    for k in [namespace image pull_policy polar_init_image issuer bootstrap cert_issuer_url service_account sa_token_secret automount_sa_token restart_policy backoff_limit ttl_after_finished_secs termination_grace_secs] {
         let v = ($r | get $k)
         let o = ($r._origin | get -o $k | default "derived")
         print $"    ($k | fill -w 24)  (one_line $v)   [($o)]"
@@ -762,13 +790,33 @@ def "main resources" [
 
 # Validate every workload in the catalog.
 def "main check" [--target: string = $DEFAULT_TARGET] {
-    let problems = (check_all $target)
+    let found = (check_all $target)
+    let problems = $found.problems
+    if ($found.pending | is-not-empty) {
+        print $"pending: ($found.pending | length) workload\(s\) still ask cert-issuer directly and are not bootstrap identities; the floor cannot be enforced until they move"
+        for p in $found.pending { print $"  ($p)" }
+    }
     if ($problems | is-empty) {
         print $"ok: (all_workloads | length) workloads resolve cleanly for ($target)"
     } else {
         for p in $problems { print -e $"  ERROR: ($p)" }
         exit 1
     }
+}
+
+# The entries of cert-issuer's floor for this target, as JSON (render.nu hands them to the cert-issuer chart).
+def "main floor" [--target: string = $DEFAULT_TARGET] {
+    let f = (floor_of $target)
+    if ($f.problems | is-not-empty) {
+        for p in $f.problems { print -e $"  ERROR: ($p)" }
+        exit 1
+    }
+    print ($f.entries | to json --raw)
+}
+
+# Whether cert-issuer enforces the floor on this target (cluster.nuon, `issuance.floor_enforced`).
+def "main floor-enforced" [--target: string = $DEFAULT_TARGET] {
+    print ((load_cluster $target).issuance?.floor_enforced? | default false)
 }
 
 # Compare a workload's resolved record with the manifest it is rendered into.
