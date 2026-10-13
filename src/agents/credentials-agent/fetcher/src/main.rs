@@ -27,14 +27,12 @@
 //! against the IdP is deliberately deferred, the same pragmatic
 //! approach used for the admin tool's own bootstrap step.
 
-mod observer_client;
-
 use cert_client::output::{self, OutputBundle};
 use cert_issuer_common::keypair::{self, KeyAlgorithm};
 use clap::Parser;
+use credentials_agent_client::{ObserverClient, ObserverClientError};
 use credentials_agent_common::identity::IdentityNormalizationReply;
 use credentials_agent_common::issuance::IssuanceReply;
-use observer_client::{ObserverClient, ObserverClientError};
 use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]

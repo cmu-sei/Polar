@@ -66,6 +66,7 @@
 #![deny(clippy::disallowed_methods)]
 
 pub mod environment;
+pub mod workload_certificates;
 
 use cassini_client::TcpClientMessage;
 use cert_issuer_common::keypair::{KeyAlgorithm, KeypairError};

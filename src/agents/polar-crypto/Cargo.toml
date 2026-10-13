@@ -16,6 +16,7 @@ polar-env = { workspace = true }
 cassini-client = { workspace = true }
 cassini-types = { workspace = true }
 credentials_agent_common = { workspace = true }
+credentials-agent-client = { workspace = true }
 # The plaintext of a retrieved secret is wiped when dropped.
 zeroize = { version = "1.9.0", features = ["aarch64"] }
 thiserror.workspace = true
@@ -33,5 +34,7 @@ polar-router.workspace = true
 sha2_011 = { package = "sha2", version = "0.11", default-features = false, features = ["oid"] }
 
 [dev-dependencies]
+wiremock.workspace = true
+serde_json.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true

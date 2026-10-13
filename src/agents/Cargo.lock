@@ -1417,6 +1417,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "credentials-agent-client"
+version = "1.0.0"
+dependencies = [
+ "credentials_agent_common",
+ "reqwest 0.12.28",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "credentials-agent-consumer"
 version = "1.0.0"
 dependencies = [
@@ -5606,6 +5618,7 @@ dependencies = [
  "cassini-client",
  "cassini-types",
  "cert-issuer-common",
+ "credentials-agent-client",
  "credentials_agent_common",
  "polar",
  "polar-env",
@@ -5616,12 +5629,14 @@ dependencies = [
  "rcgen",
  "rkyv",
  "rsa 0.10.0-rc.18",
+ "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "uuid",
+ "wiremock",
  "x25519-dalek",
  "zeroize",
 ]
@@ -5706,6 +5721,8 @@ dependencies = [
  "cert-client",
  "cert-issuer-common",
  "clap",
+ "credentials-agent-client",
+ "credentials_agent_common",
  "polar-crypto",
  "polar-env",
  "polar-health",
@@ -5715,11 +5732,13 @@ dependencies = [
  "rand 0.10.3",
  "rsa 0.10.0-rc.18",
  "rustls",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]
@@ -8229,6 +8248,7 @@ dependencies = [
  "cert-client",
  "cert-issuer-common",
  "clap",
+ "credentials-agent-client",
  "credentials_agent_common",
  "reqwest 0.12.28",
  "serde_json",

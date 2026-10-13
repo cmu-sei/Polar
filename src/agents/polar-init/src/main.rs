@@ -46,6 +46,7 @@ use cert_issuer_common::{
     identity::{IdentityNormalization, normalize_identity},
 };
 use clap::Parser;
+use credentials_agent_common::issuance::WorkloadCertType;
 use polar_health::DepCertEndpoint;
 use ractor::Actor;
 
@@ -220,7 +221,6 @@ async fn main() {
                 std::process::exit(1);
             }
         };
-    let cert_issuer_url = settings.cert_issuer_url.clone();
     let token_path = settings.token_path.clone();
 
     // Phase 1: wait for all dep cert endpoints to be healthy.
@@ -261,37 +261,50 @@ async fn main() {
 
     tracing::info!("identity: {dns_identity}");
 
-    // Phase 3: issue all requested certs.
-    // Phase 3: issue all requested certs.
-    //
-    // The trust decision is made once, here. With POLAR_INIT_CA_CERT set the
-    // client verifies cert-issuer against that file from its first request;
-    // without it, the CA is fetched once and pinned (the degraded mode).
-    let ca_path = settings.ca_cert_path.clone();
-    let client = loop {
-        match handshake::HandshakeClient::for_trust_mode(
-            cert_issuer_url.clone(),
-            ca_path.as_deref(),
-        )
-        .await
-        {
-            Ok(c) => break c,
-            // A configured but unreadable or malformed CA needs an
-            // operator, and retrying can't fix it.
-            Err(e) if ca_path.is_some() => {
-                eprintln!("error: cannot establish trust in cert-issuer: {e}");
-                std::process::exit(1);
-            }
-            // Fetch mode: cert-issuer not being up yet is transient, and
-            // this binary never exits non-zero for transient failures.
-            Err(e) => {
-                tracing::warn!("cannot fetch the CA from cert-issuer: {e}, retrying...");
-                tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
+    // Phase 3: issue all requested certs, from where this workload gets them.
+    match &settings.issuance {
+        environment::Issuance::CertIssuer { url, ca_cert_path } => {
+            // Straight from cert-issuer, with the pod's token: the bootstrap services only (Cassini, the
+            // credentials agent and its observer), which cannot wait on the credentials agent because they
+            // are what it needs to run.
+            //
+            // The trust decision is made once, here. With POLAR_INIT_CA_CERT set the
+            // client verifies cert-issuer against that file from its first request;
+            // without it, the CA is fetched once and pinned (the degraded mode).
+            let client = loop {
+                match handshake::HandshakeClient::for_trust_mode(
+                    url.clone(),
+                    ca_cert_path.as_deref(),
+                )
+                .await
+                {
+                    Ok(c) => break c,
+                    // A configured but unreadable or malformed CA needs an
+                    // operator, and retrying can't fix it.
+                    Err(e) if ca_cert_path.is_some() => {
+                        eprintln!("error: cannot establish trust in cert-issuer: {e}");
+                        std::process::exit(1);
+                    }
+                    // Fetch mode: cert-issuer not being up yet is transient, and
+                    // this binary never exits non-zero for transient failures.
+                    Err(e) => {
+                        tracing::warn!("cannot fetch the CA from cert-issuer: {e}, retrying...");
+                        tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
+                    }
+                }
+            };
+            for req in &cert_requests {
+                issue_cert(&client, &sa_token, &dns_identity, req).await;
             }
         }
-    };
-    for req in &cert_requests {
-        issue_cert(&client, &sa_token, &dns_identity, req).await;
+        environment::Issuance::Observer { url } => {
+            // From the credentials agent, through its observer, with the token sealed to an ephemeral
+            // session so it is not on the pod network in the clear. Every other workload does this.
+            let observer = credentials_agent_client::ObserverClient::new(url.clone());
+            for req in &cert_requests {
+                issue_cert_via_observer(&observer, &sa_token, &dns_identity, req).await;
+            }
+        }
     }
 
     tracing::info!("all certs issued");
@@ -527,10 +540,31 @@ async fn issue_cert(
         }
     };
 
+    write_bundle_patiently(
+        req,
+        dns_identity,
+        &response.certificate_pem,
+        &csr_output.private_key_pem,
+        &response.ca_chain_pem,
+        &response.expires_at.to_string(),
+    )
+    .await;
+}
+
+/// Writes the certificate, its key and the CA into the requested directory, and keeps trying until it can: a
+/// volume that is not writable yet is transient here, like everything but a refusal.
+async fn write_bundle_patiently(
+    req: &CertRequest,
+    dns_identity: &str,
+    cert_pem: &str,
+    key_pem: &str,
+    ca_pem: &str,
+    expires_at: &str,
+) {
     let bundle = output::OutputBundle {
-        cert_pem: &response.certificate_pem,
-        key_pem: &csr_output.private_key_pem,
-        ca_pem: &response.ca_chain_pem,
+        cert_pem,
+        key_pem,
+        ca_pem,
     };
 
     loop {
@@ -540,7 +574,7 @@ async fn issue_cert(
                     "issued {:?} cert for '{}', expires {}",
                     req.cert_type,
                     dns_identity,
-                    response.expires_at,
+                    expires_at,
                 );
                 return;
             }
@@ -552,5 +586,219 @@ async fn issue_cert(
                 tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
             }
         }
+    }
+}
+
+/// The certificate type the credentials agent knows for a `--cert` type. The escrow identity is not one: it is
+/// not requested here at all.
+fn workload_cert_type(cert_type: &CertType) -> Option<WorkloadCertType> {
+    match cert_type {
+        CertType::Client => Some(WorkloadCertType::Client),
+        CertType::Server => Some(WorkloadCertType::Server),
+        CertType::Service => None,
+    }
+}
+
+/// One certificate from the credentials agent through its observer, waiting out whatever is only unavailable and
+/// stopping at what is final. `Ok` is the certificate; `Err` says why it will not come.
+async fn obtain_via_observer(
+    observer: &credentials_agent_client::ObserverClient,
+    token: &str,
+    dns_identity: &str,
+    request: &polar_crypto::workload_certificates::CertificateRequest,
+    delay: Duration,
+) -> Result<polar_crypto::workload_certificates::IssuedCertificate, String> {
+    use polar_crypto::workload_certificates::{RequestError, request_certificate};
+    loop {
+        match request_certificate(observer, token, dns_identity, request).await {
+            Ok(issued) => return Ok(issued),
+            Err(RequestError::Retry(why)) => {
+                tracing::warn!("the credentials agent cannot issue just yet: {why}, retrying...");
+                tokio::time::sleep(delay).await;
+            }
+            // A refusal is final: misconfiguration, an identity mismatch, or a pod that was already issued
+            // this certificate. The pod is replaced (a new pod has a new instance binding), so exit and let
+            // the operator look.
+            Err(RequestError::Refused(reason)) => {
+                return Err(format!(
+                    "the credentials agent refused the request: {reason:?}"
+                ));
+            }
+            Err(RequestError::Failed(why)) => return Err(why),
+        }
+    }
+}
+
+async fn issue_cert_via_observer(
+    observer: &credentials_agent_client::ObserverClient,
+    sa_token: &str,
+    dns_identity: &str,
+    req: &CertRequest,
+) {
+    tracing::info!(
+        "requesting {:?} cert into '{}' from the credentials agent (algorithm: {:?}, names: {:?})",
+        req.cert_type,
+        req.cert_dir,
+        req.key_algorithm,
+        req.extra_sans,
+    );
+    let Some(cert_type) = workload_cert_type(&req.cert_type) else {
+        eprintln!(
+            "error: the credentials agent does not issue a {:?} cert here",
+            req.cert_type
+        );
+        std::process::exit(1);
+    };
+    let request = polar_crypto::workload_certificates::CertificateRequest {
+        cert_type,
+        key_algorithm: req.key_algorithm.clone(),
+        names: req.extra_sans.clone(),
+    };
+    match obtain_via_observer(
+        observer,
+        sa_token,
+        dns_identity,
+        &request,
+        Duration::from_secs(POLL_INTERVAL_SECS),
+    )
+    .await
+    {
+        Ok(issued) => {
+            write_bundle_patiently(
+                req,
+                dns_identity,
+                &issued.certificate_pem,
+                &issued.private_key_pem,
+                &issued.ca_chain_pem,
+                "(per the credentials agent)",
+            )
+            .await;
+        }
+        Err(why) => {
+            eprintln!("error: {why}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use credentials_agent_common::ephemeral_exchange::EphemeralSession;
+    use credentials_agent_common::issuance::{IssuanceRefusalReason, IssuanceReply};
+    use credentials_agent_common::workload_issuance::SessionOffer;
+    use polar_crypto::workload_certificates::CertificateRequest;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn a_cert_argument_maps_to_the_type_the_credentials_agent_knows_and_the_escrow_identity_does_not()
+     {
+        assert_eq!(
+            workload_cert_type(&CertType::Client),
+            Some(WorkloadCertType::Client)
+        );
+        assert_eq!(
+            workload_cert_type(&CertType::Server),
+            Some(WorkloadCertType::Server)
+        );
+        assert_eq!(workload_cert_type(&CertType::Service), None);
+    }
+
+    fn a_request() -> CertificateRequest {
+        CertificateRequest {
+            cert_type: WorkloadCertType::Client,
+            key_algorithm: keypair::KeyAlgorithm::EcdsaP256,
+            names: vec![],
+        }
+    }
+
+    fn an_offer() -> SessionOffer {
+        SessionOffer {
+            session_id: "s1".to_string(),
+            public_key: EphemeralSession::open().public_key(),
+            valid_for_secs: 60,
+        }
+    }
+
+    fn issued() -> IssuanceReply {
+        IssuanceReply::Issued {
+            certificate_pem: "CERT".to_string(),
+            ca_chain_pem: "CHAIN".to_string(),
+            escrow_public_key_pem: "ESCROW".to_string(),
+        }
+    }
+
+    const MILLISECOND: Duration = Duration::from_millis(1);
+
+    #[tokio::test]
+    async fn a_flooded_observer_is_waited_out_and_the_certificate_then_comes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/workload/session"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("too many sessions are open"))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/workload/session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(an_offer()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/workload/issue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(issued()))
+            .mount(&server)
+            .await;
+        let observer = credentials_agent_client::ObserverClient::new(server.uri());
+        let got = obtain_via_observer(&observer, "token", "a.b", &a_request(), MILLISECOND)
+            .await
+            .expect("it comes in the end");
+        assert_eq!(got.certificate_pem, "CERT");
+        let asked_for_a_session = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/workload/session")
+            .count();
+        assert_eq!(
+            asked_for_a_session, 3,
+            "two refusals to wait out, then the one that worked"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_final_and_is_not_asked_again() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/workload/session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(an_offer()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/workload/issue"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(IssuanceReply::Refused {
+                    reason: IssuanceRefusalReason::AlreadyHasValidCertificate,
+                }),
+            )
+            .mount(&server)
+            .await;
+        let observer = credentials_agent_client::ObserverClient::new(server.uri());
+        let err =
+            match obtain_via_observer(&observer, "token", "a.b", &a_request(), MILLISECOND).await {
+                Ok(_) => panic!("a refusal must not become a certificate"),
+                Err(why) => why,
+            };
+        assert!(err.contains("AlreadyHasValidCertificate"), "{err}");
+        let attempts = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/workload/issue")
+            .count();
+        assert_eq!(attempts, 1);
     }
 }

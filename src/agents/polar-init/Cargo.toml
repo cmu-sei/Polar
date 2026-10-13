@@ -10,6 +10,8 @@ cassini-client = { workspace = true }
 cassini-types = { workspace = true }
 cert-issuer-common = { path = "../cert-issuer/common" }
 clap = { workspace = true }
+credentials-agent-client.workspace = true
+credentials_agent_common.workspace = true
 polar-crypto.workspace = true
 polar-env.workspace = true
 polar-kernel-keyring.workspace = true
@@ -24,6 +26,8 @@ rustls = { workspace = true }
 
 [dev-dependencies]
 rand.workspace = true
+wiremock.workspace = true
+serde_json.workspace = true
 rsa.workspace = true
 tempfile.workspace = true
 
