@@ -301,9 +301,24 @@ over Cassini with the certificate it just obtained. The requests across the rend
    traffic between a pod and the observer could answer the session request with their own key; that is the same
    exposure the cleartext route had, not a new one, and closing it needs a trust anchor the pod can check, which is
    the open question left to settle when the workload side is built (phase 3).
-3. **`CryptoActor` and `polar-init`.** The message that ensures the pod's client certificate, `polar-init` calling it
-   with the escrow bootstrap, the mode and settings (declared with `polar-env`), retry semantics; tests with a fake
-   observer. Handles for the mTLS key follow with the key-hardening item.
+3. **The client side. BUILT 2026-10-13** (eight rules each broken on purpose and caught; not deployed).
+   - **`credentials-agent/client`** (`credentials-agent-client`): the observer HTTP client, which was the
+     user-cert-fetcher's private one and is now shared (the architecture document called for exactly this crate), with
+     `open_session` and `issue_sealed` beside `identity` and `issue`.
+   - **`polar-crypto::workload_certificates`**: `request_certificate`, one attempt at one certificate: CSR and key
+     generated in process, a session opened, the token sealed to it, the sealed request sent. Which failures are worth
+     another attempt is decided there and said in the type (`RequestError::{Retry, Refused, Failed}`): a flooded or
+     absent observer, an expired session and a signing failure are retried; a refusal is final.
+   - **`polar-init`**: `POLAR_INIT_ISSUER` (`cert-issuer`, the default, or `credentials-agent`) and
+     `POLAR_INIT_OBSERVER_URL`; in observer mode each `--cert` goes through `request_certificate` and the bundle is
+     written as before. Nothing changes for a workload until its environment says `credentials-agent`.
+   - **A correction to what I proposed above:** this is a function beside `CryptoActor` in `polar-crypto`, and not a
+     message on the actor. The actor is spawned over a Cassini connection, and that connection needs the very client
+     certificate being requested here, so the actor cannot exist yet when the request is made. It is the first half of
+     the crypto lifecycle; the actor takes over once there is a certificate to connect with, and is where the keys will
+     be held by handle when that work lands. The returned private key is in a `Zeroizing` string and is written to the
+     requested directory as before.
+   - **Not settled:** how a pod tells it is talking to the credentials agent (see phase 2).
 4. **cert-issuer.** Names checked on every path; configuration and chart.
 5. **Catalog and resolver.** Mode per workload, the rule, render tests.
 6. **Rollout on the cluster, in groups,** credentials pair first, then the leaf workloads, then Neo4j and the git

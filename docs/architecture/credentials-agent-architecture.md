@@ -515,6 +515,10 @@ credentials-agent/
                  Grant/Revoke events directly to Cassini
   fetcher/    -- user-cert-fetcher, the human self-service issuance
                  client (see "User self-service issuance" below)
+  client/     -- credentials-agent-client, the observer's HTTP client
+                 (built 2026-10-13, from fetcher's own): shared by the
+                 fetcher and by a workload asking for its certificates
+                 (polar-crypto's workload_certificates)
 ```
 
 There is no single, shared client crate -- the original plan called
