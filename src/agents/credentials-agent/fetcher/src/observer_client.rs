@@ -108,6 +108,8 @@ impl ObserverClient {
         let body = IssuanceRequest {
             csr_pem: csr_pem.to_string(),
             credential: credential.to_string(),
+            cert_type: Default::default(),
+            names: vec![],
         };
 
         let response = self

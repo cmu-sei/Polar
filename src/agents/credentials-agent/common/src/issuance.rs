@@ -44,6 +44,48 @@ use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 pub struct IssuanceRequest {
     pub csr_pem: String,
     pub credential: String,
+    /// What the pod is asking for. A request that does not say is a client certificate, which is what every
+    /// caller before this field existed asked for. The service identity (escrow) certificate is not a choice
+    /// here: it has its own flow, and the type has no variant for it.
+    #[serde(default)]
+    pub cert_type: WorkloadCertType,
+    /// The DNS names a **server** certificate is to carry besides the identity. A client request has none:
+    /// its only extras are the permissions of a grant, which the credentials agent adds itself.
+    #[serde(default)]
+    pub names: Vec<String>,
+}
+
+/// The two kinds of pod-instance certificate a workload may ask the credentials agent for. A client certificate
+/// is the mTLS identity it connects with; a server certificate is the one a listener presents (Cassini, Neo4j,
+/// the git server). Each pod instance may be issued one of each, and not a second of either.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Deserialize,
+    Serialize,
+    Archive,
+    SerdeDeserialize,
+    SerdeSerialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadCertType {
+    #[default]
+    Client,
+    Server,
+}
+
+impl WorkloadCertType {
+    /// For `skip_serializing_if`: a client certificate is the default and is left out of a serialized event, so
+    /// every event written before the type existed reads back unchanged and every client event is written
+    /// byte-for-byte as it always was.
+    pub fn is_client(&self) -> bool {
+        matches!(self, WorkloadCertType::Client)
+    }
 }
 
 /// Published to `credentials-issuance-replies`, wrapped in an
@@ -95,6 +137,10 @@ pub enum IssuanceRefusalReason {
     /// internal signing error). Distinct from the other variants,
     /// which all cover failures before ever reaching cert-issuer.
     SigningFailed,
+    /// The request is well formed and the credential is good, but what it asks for is not something this
+    /// credential may have: a server certificate on an IdP credential, names on a client request, or a name
+    /// that is not a plain DNS name (a wildcard, an address, a permission or a capability).
+    RequestNotPermitted,
 }
 
 #[cfg(test)]
@@ -106,7 +152,72 @@ mod tests {
             csr_pem: "-----BEGIN CERTIFICATE REQUEST-----\n...\n-----END CERTIFICATE REQUEST-----"
                 .to_string(),
             credential: "some-token-or-k8s-credential".to_string(),
+            cert_type: WorkloadCertType::Client,
+            names: vec![],
         }
+    }
+
+    #[test]
+    fn a_request_written_before_types_existed_is_a_client_request_with_no_names() {
+        // The admin tool and the fetcher send exactly this, and must keep working unchanged.
+        let json = r#"{ "csr_pem": "csr", "credential": "token" }"#;
+        let request: IssuanceRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.cert_type, WorkloadCertType::Client);
+        assert!(request.names.is_empty());
+    }
+
+    #[test]
+    fn a_server_request_carries_its_type_and_names_through_both_encodings() {
+        let original = IssuanceRequest {
+            cert_type: WorkloadCertType::Server,
+            names: vec!["cassini-ip-svc.polar.svc.cluster.local".to_string()],
+            ..sample_request()
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(json.contains(r#""cert_type":"server""#), "{json}");
+        let from_json: IssuanceRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(from_json.cert_type, WorkloadCertType::Server);
+        assert_eq!(from_json.names, original.names);
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original)
+            .unwrap()
+            .to_vec();
+        let from_rkyv: IssuanceRequest =
+            rkyv::from_bytes::<IssuanceRequest, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(from_rkyv.cert_type, WorkloadCertType::Server);
+        assert_eq!(from_rkyv.names, original.names);
+    }
+
+    #[test]
+    fn only_a_client_or_a_server_can_be_asked_for_and_the_escrow_identity_cannot() {
+        for ok in ["client", "server"] {
+            let json = format!(r#"{{"csr_pem":"c","credential":"t","cert_type":"{ok}"}}"#);
+            assert!(
+                serde_json::from_str::<IssuanceRequest>(&json).is_ok(),
+                "{ok}"
+            );
+        }
+        for bad in ["service", "Client", "SERVER", ""] {
+            let json = format!(r#"{{"csr_pem":"c","credential":"t","cert_type":"{bad}"}}"#);
+            assert!(
+                serde_json::from_str::<IssuanceRequest>(&json).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_new_refusal_round_trips() {
+        let reply = IssuanceReply::Refused {
+            reason: IssuanceRefusalReason::RequestNotPermitted,
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        let back: IssuanceReply = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            IssuanceReply::Refused {
+                reason: IssuanceRefusalReason::RequestNotPermitted
+            }
+        ));
     }
 
     #[test]

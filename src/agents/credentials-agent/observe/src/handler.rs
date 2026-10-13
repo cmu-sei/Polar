@@ -391,6 +391,7 @@ fn reply_to_response(reply: IssuanceReply) -> Response {
             IssuanceRefusalReason::NoGrantFound => StatusCode::FORBIDDEN,
             IssuanceRefusalReason::AlreadyHasValidCertificate => StatusCode::FORBIDDEN,
             IssuanceRefusalReason::SigningFailed => StatusCode::SERVICE_UNAVAILABLE,
+            IssuanceRefusalReason::RequestNotPermitted => StatusCode::FORBIDDEN,
         },
     };
     (status, Json(reply)).into_response()
@@ -522,6 +523,8 @@ mod tests {
             Json(IssuanceRequest {
                 csr_pem: "not a real CSR".to_string(),
                 credential: "irrelevant".to_string(),
+                cert_type: Default::default(),
+                names: vec![],
             }),
         )
         .await;
@@ -552,6 +555,8 @@ mod tests {
             Json(IssuanceRequest {
                 csr_pem: well_formed_csr(),
                 credential: "any-credential".to_string(),
+                cert_type: Default::default(),
+                names: vec![],
             }),
         )
         .await;
@@ -580,6 +585,8 @@ mod tests {
             Json(IssuanceRequest {
                 csr_pem: well_formed_csr(),
                 credential: "any-credential".to_string(),
+                cert_type: Default::default(),
+                names: vec![],
             }),
         )
         .await;
@@ -638,6 +645,8 @@ mod tests {
                 Json(IssuanceRequest {
                     csr_pem: well_formed_csr(),
                     credential: "any-credential".to_string(),
+                    cert_type: Default::default(),
+                    names: vec![],
                 }),
             )
             .await

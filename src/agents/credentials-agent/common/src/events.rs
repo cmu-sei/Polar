@@ -225,6 +225,13 @@ pub enum CredentialsEvent {
         instance_binding: String,
         serial: String,
         timestamp: i64,
+        /// Which of the pod instance's certificates this was. Absent from every event written before it
+        /// existed, and from every client event since, which read back as a client certificate.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::issuance::WorkloadCertType::is_client"
+        )]
+        cert_type: crate::issuance::WorkloadCertType,
         /// The actual signed certificate, in plain PEM. Public by
         /// nature -- presented in plaintext during every mTLS
         /// handshake anyway -- so no encryption is needed here,
@@ -452,9 +459,58 @@ mod tests {
             instance_binding: "some-session-id".to_string(),
             serial: "abc123".to_string(),
             timestamp: 1767225600000,
+            cert_type: crate::issuance::WorkloadCertType::Client,
             certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                 .to_string(),
         }
+    }
+
+    #[test]
+    fn an_issuance_written_before_cert_types_existed_reads_back_as_a_client_certificate() {
+        // A line from a ledger as it was: no cert_type. It must replay.
+        let old = r#"{"IssuanceCompleted":{"identity":"a","instance_binding":"b","serial":"c","timestamp":1,"certificate_pem":"p"}}"#;
+        let event: CredentialsEvent = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            event,
+            CredentialsEvent::IssuanceCompleted {
+                identity: "a".into(),
+                instance_binding: "b".into(),
+                serial: "c".into(),
+                timestamp: 1,
+                cert_type: crate::issuance::WorkloadCertType::Client,
+                certificate_pem: "p".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_client_issuance_is_written_exactly_as_it_always_was_and_a_server_one_says_what_it_is() {
+        let client = serde_json::to_string(&sample_issuance_completed()).unwrap();
+        assert!(!client.contains("cert_type"), "{client}");
+        let server = match sample_issuance_completed() {
+            CredentialsEvent::IssuanceCompleted {
+                identity,
+                instance_binding,
+                serial,
+                timestamp,
+                certificate_pem,
+                ..
+            } => CredentialsEvent::IssuanceCompleted {
+                identity,
+                instance_binding,
+                serial,
+                timestamp,
+                cert_type: crate::issuance::WorkloadCertType::Server,
+                certificate_pem,
+            },
+            _ => unreachable!(),
+        };
+        let json = serde_json::to_string(&server).unwrap();
+        assert!(json.contains(r#""cert_type":"server""#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<CredentialsEvent>(&json).unwrap(),
+            server
+        );
     }
 
     #[test]

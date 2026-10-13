@@ -34,10 +34,89 @@ use crate::ledger::LedgerMessage;
 use cert_client::handshake::HandshakeClient;
 use cert_issuer_common::CertType;
 use credentials_agent_common::events::CredentialsEvent;
-use credentials_agent_common::issuance::{IssuanceRefusalReason, IssuanceReply, IssuanceRequest};
+use credentials_agent_common::issuance::{
+    IssuanceRefusalReason, IssuanceReply, IssuanceRequest, WorkloadCertType,
+};
 use ractor::ActorRef;
 use std::sync::Arc;
 use tracing::{error, warn};
+
+/// The most names a server certificate may carry besides its identity.
+pub const MAX_SERVER_NAMES: usize = 16;
+
+/// Whether `name` is a plain DNS name a server certificate may carry: letters, digits, dots and hyphens, and
+/// not a wildcard, an address, a permission (`p:`) or a capability (`c:`). cert-issuer checks the names against
+/// the workload's own allowlist; this is the credentials agent refusing what is not a name at all before asking.
+fn is_plain_dns_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 253
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && !name.starts_with('.')
+        && !name.ends_with('.')
+        && name.parse::<std::net::IpAddr>().is_err()
+}
+
+/// The request asks for something its credential may not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestNotPermitted;
+
+/// Whether the credential may be issued what it asks for, judged on the request alone, before any network call.
+///
+/// * a server certificate is for a workload, so it needs a Kubernetes credential, and an IdP credential (a person)
+///   is refused;
+/// * a client request has no names: its only extras are the permissions of a grant, which are added from the
+///   ledger and never from the caller;
+/// * a server request's names are plain DNS names, not too many.
+pub fn check_request_shape(
+    kind: CredentialKind,
+    cert_type: WorkloadCertType,
+    names: &[String],
+) -> Result<(), RequestNotPermitted> {
+    match cert_type {
+        WorkloadCertType::Client => {
+            if names.is_empty() {
+                Ok(())
+            } else {
+                Err(RequestNotPermitted)
+            }
+        }
+        WorkloadCertType::Server => {
+            if kind != CredentialKind::Kubernetes
+                || names.len() > MAX_SERVER_NAMES
+                || !names.iter().all(|n| is_plain_dns_name(n))
+            {
+                Err(RequestNotPermitted)
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// The extra names the certificate is signed with: a client certificate carries the permissions of its grant, a
+/// server certificate the names it asked for and no permissions.
+fn extra_sans_for(
+    cert_type: WorkloadCertType,
+    names: &[String],
+    grant_permissions: &[cert_issuer_common::permission::Permission],
+) -> Vec<String> {
+    match cert_type {
+        WorkloadCertType::Client => grant_permissions
+            .iter()
+            .map(|p| p.to_san_string())
+            .collect(),
+        WorkloadCertType::Server => names.to_vec(),
+    }
+}
+
+fn signing_type(cert_type: WorkloadCertType) -> CertType {
+    match cert_type {
+        WorkloadCertType::Client => CertType::Client,
+        WorkloadCertType::Server => CertType::Server,
+    }
+}
 
 pub struct IssuanceHandler {
     pub ledger: ActorRef<LedgerMessage>,
@@ -63,6 +142,21 @@ impl IssuanceHandler {
                 };
             }
         };
+
+        // ---- Step 1.5: what is being asked for ----
+        //
+        // Judged on the request alone, so a request this credential may not make is refused before any
+        // introspection or call to cert-issuer.
+        if check_request_shape(kind, request.cert_type, &request.names).is_err() {
+            warn!(
+                cert_type = ?request.cert_type,
+                names = request.names.len(),
+                "refused a request for a certificate this credential may not have"
+            );
+            return IssuanceReply::Refused {
+                reason: IssuanceRefusalReason::RequestNotPermitted,
+            };
+        }
 
         // ---- Step 2: IdP introspection (LikelyIdp only) ----
         if kind == CredentialKind::LikelyIdp {
@@ -128,16 +222,22 @@ impl IssuanceHandler {
         };
 
         // ---- Step 4: renewal-prevention check ----
-        let already_valid =
-            match call_check_renewal(&self.ledger, &identity, &instance_binding).await {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Ledger CheckRenewal call failed: {e}");
-                    return IssuanceReply::Refused {
-                        reason: IssuanceRefusalReason::TokenInvalid,
-                    };
-                }
-            };
+        let already_valid = match call_check_renewal(
+            &self.ledger,
+            &identity,
+            &instance_binding,
+            request.cert_type,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Ledger CheckRenewal call failed: {e}");
+                return IssuanceReply::Refused {
+                    reason: IssuanceRefusalReason::TokenInvalid,
+                };
+            }
+        };
         if already_valid {
             return IssuanceReply::Refused {
                 reason: IssuanceRefusalReason::AlreadyHasValidCertificate,
@@ -170,13 +270,13 @@ impl IssuanceHandler {
         };
 
         // ---- Step 6: sign, via cert-issuer's /issue ----
-        let extra_sans: Vec<String> = permissions.iter().map(|p| p.to_san_string()).collect();
+        let extra_sans = extra_sans_for(request.cert_type, &request.names, &permissions);
         let issued = match self
             .cert_issuer
             .issue(
                 &request.credential,
                 &request.csr_pem,
-                CertType::Client,
+                signing_type(request.cert_type),
                 extra_sans,
                 None,
             )
@@ -202,6 +302,7 @@ impl IssuanceHandler {
             instance_binding,
             serial: issued.serial_number,
             timestamp: polar::time::now_millis(),
+            cert_type: request.cert_type,
             certificate_pem: issued.certificate_pem.clone(),
         };
         if let Err(e) = call_append(&self.ledger, event).await {
@@ -247,12 +348,14 @@ async fn call_check_renewal(
     ledger: &ActorRef<LedgerMessage>,
     identity: &str,
     instance_binding: &str,
+    cert_type: WorkloadCertType,
 ) -> Result<bool, String> {
     match ractor::rpc::call(
         ledger,
         |reply| LedgerMessage::CheckRenewal {
             identity: identity.to_string(),
             instance_binding: instance_binding.to_string(),
+            cert_type,
             reply,
         },
         None,
@@ -358,6 +461,8 @@ mod tests {
             .handle(IssuanceRequest {
                 csr_pem: "fake-csr".to_string(),
                 credential: make_token("https://kubernetes.default.svc.cluster.local"),
+                cert_type: Default::default(),
+                names: vec![],
             })
             .await;
 
@@ -444,6 +549,8 @@ mod tests {
                 credential: make_token(
                     "http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar",
                 ),
+                cert_type: Default::default(),
+                names: vec![],
             })
             .await;
 
@@ -493,6 +600,8 @@ mod tests {
                 credential: make_token(
                     "http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar",
                 ),
+                cert_type: Default::default(),
+                names: vec![],
             })
             .await;
 
@@ -539,6 +648,7 @@ mod tests {
                         instance_binding: "admin-tool-uid".to_string(),
                         serial: "already-issued-serial".to_string(),
                         timestamp: 1000,
+                        cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
                         certificate_pem:
                             "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                                 .to_string(),
@@ -564,6 +674,8 @@ mod tests {
             .handle(IssuanceRequest {
                 csr_pem: "fake-csr".to_string(),
                 credential: make_token("https://kubernetes.default.svc.cluster.local"),
+                cert_type: Default::default(),
+                names: vec![],
             })
             .await;
 
@@ -613,6 +725,8 @@ mod tests {
                 credential: make_token(
                     "http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar",
                 ),
+                cert_type: Default::default(),
+                names: vec![],
             })
             .await;
 
@@ -643,6 +757,8 @@ mod tests {
                 credential: make_token(
                     "http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar",
                 ),
+                cert_type: Default::default(),
+                names: vec![],
             })
             .await;
 
@@ -652,5 +768,274 @@ mod tests {
                 reason: IssuanceRefusalReason::TokenIntrospectionFailed
             }
         ));
+    }
+
+    // ---- the two kinds of pod-instance certificate ---------------------------------------------------------
+
+    use credentials_agent_common::issuance::WorkloadCertType::{Client, Server};
+
+    const K8S: &str = "https://kubernetes.default.svc.cluster.local";
+    const CASSINI_NAME: &str = "cassini-ip-svc.polar.svc.cluster.local";
+
+    fn names(n: &[&str]) -> Vec<String> {
+        n.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_client_request_has_no_names_of_its_own() {
+        assert!(check_request_shape(CredentialKind::Kubernetes, Client, &[]).is_ok());
+        assert!(check_request_shape(CredentialKind::LikelyIdp, Client, &[]).is_ok());
+        assert!(
+            check_request_shape(CredentialKind::Kubernetes, Client, &names(&[CASSINI_NAME]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_server_request_is_for_a_workload_and_asks_for_plain_dns_names() {
+        assert!(
+            check_request_shape(
+                CredentialKind::Kubernetes,
+                Server,
+                &names(&[CASSINI_NAME, "localhost"])
+            )
+            .is_ok()
+        );
+        // A person's credential is not a workload's.
+        assert!(
+            check_request_shape(CredentialKind::LikelyIdp, Server, &names(&[CASSINI_NAME]))
+                .is_err()
+        );
+        for bad in [
+            "",
+            "*.polar.svc.cluster.local",
+            "10.0.0.1",
+            "::1",
+            "p:u2s:polar-db-svc",
+            "c:provision-account",
+            "has space.example",
+            "under_score.example",
+            ".leading.dot",
+            "trailing.dot.",
+        ] {
+            assert!(
+                check_request_shape(CredentialKind::Kubernetes, Server, &names(&[bad])).is_err(),
+                "{bad:?}"
+            );
+        }
+        let too_long = "a".repeat(254);
+        assert!(
+            check_request_shape(CredentialKind::Kubernetes, Server, &names(&[&too_long])).is_err()
+        );
+        let many: Vec<String> = (0..=MAX_SERVER_NAMES)
+            .map(|i| format!("n{i}.example"))
+            .collect();
+        assert!(check_request_shape(CredentialKind::Kubernetes, Server, &many).is_err());
+    }
+
+    #[test]
+    fn a_client_certificate_carries_a_grants_permissions_and_a_server_certificate_its_names_and_no_permissions()
+     {
+        let grant = vec![cert_issuer_common::permission::Permission {
+            scope: cert_issuer_common::permission::PermissionScope::ServiceToService,
+            target: None,
+        }];
+        assert_eq!(
+            extra_sans_for(Client, &[], &grant),
+            vec!["p:s2s".to_string()]
+        );
+        assert!(extra_sans_for(Client, &[], &[]).is_empty());
+        assert_eq!(
+            extra_sans_for(Server, &names(&[CASSINI_NAME]), &grant),
+            names(&[CASSINI_NAME])
+        );
+    }
+
+    fn response_with_serial(serial: &str) -> cert_issuer_common::IssueResponse {
+        cert_issuer_common::IssueResponse {
+            serial_number: serial.to_string(),
+            ..fake_issue_response()
+        }
+    }
+
+    async fn kubernetes_pod(server: &MockServer, instance_binding: &str) {
+        Mock::given(method("POST"))
+            .and(path("/validate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::ValidateResponse {
+                    workload_identity: "system:serviceaccount:polar:git-server".to_string(),
+                    instance_binding: Some(instance_binding.to_string()),
+                    jti: None,
+                    normalized_identity: None,
+                },
+            ))
+            .mount(server)
+            .await;
+    }
+
+    async fn handler_for(server: &MockServer, ledger: ActorRef<LedgerMessage>) -> IssuanceHandler {
+        IssuanceHandler {
+            ledger,
+            cert_issuer: HandshakeClient::new(server.uri()),
+            introspection: None,
+            known_kubernetes_issuers: vec![K8S.to_string()],
+            escrow_keypair: crate::escrow::tests::test_keypair(),
+        }
+    }
+
+    fn request_for(cert_type: WorkloadCertType, names_: &[&str]) -> IssuanceRequest {
+        IssuanceRequest {
+            csr_pem: "fake-csr".to_string(),
+            credential: make_token(K8S),
+            cert_type,
+            names: names(names_),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pod_is_issued_a_client_certificate_and_then_a_server_certificate_and_not_a_second_of_either()
+     {
+        let server = MockServer::start().await;
+        kubernetes_pod(&server, "pod-1").await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .and(body_partial_json(
+                serde_json::json!({"cert_type": "CLIENT"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(response_with_serial("client-1")),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .and(body_partial_json(serde_json::json!({
+                "cert_type": "SERVER",
+                "extra_sans": [CASSINI_NAME]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(response_with_serial("server-1")),
+            )
+            .mount(&server)
+            .await;
+        let handler = handler_for(&server, spawn_test_ledger().await).await;
+
+        let client = handler.handle(request_for(Client, &[])).await;
+        assert!(matches!(client, IssuanceReply::Issued { .. }), "{client:?}");
+        let server_cert = handler.handle(request_for(Server, &[CASSINI_NAME])).await;
+        assert!(
+            matches!(server_cert, IssuanceReply::Issued { .. }),
+            "{server_cert:?}"
+        );
+
+        // The pod cannot be issued a second of either: the renewal rule, per type.
+        for again in [
+            request_for(Client, &[]),
+            request_for(Server, &[CASSINI_NAME]),
+        ] {
+            let reply = handler.handle(again).await;
+            assert!(
+                matches!(
+                    reply,
+                    IssuanceReply::Refused {
+                        reason: IssuanceRefusalReason::AlreadyHasValidCertificate
+                    }
+                ),
+                "{reply:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_server_certificate_leaves_the_grant_for_the_client_certificate_that_follows() {
+        let server = MockServer::start().await;
+        kubernetes_pod(&server, "pod-1").await;
+        // The server certificate must carry no permission; the client certificate must carry the grant's.
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .and(body_partial_json(serde_json::json!({
+                "cert_type": "SERVER",
+                "extra_sans": [CASSINI_NAME]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(response_with_serial("server-1")),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .and(body_partial_json(serde_json::json!({
+                "cert_type": "CLIENT",
+                "extra_sans": ["p:s2s"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(response_with_serial("client-1")),
+            )
+            .mount(&server)
+            .await;
+        let ledger = spawn_test_ledger().await;
+        let _ = ractor::rpc::call(
+            &ledger,
+            |reply| LedgerMessage::Append {
+                event: CredentialsEvent::Grant {
+                    target_identity: "system:serviceaccount:polar:git-server".to_string(),
+                    permissions: vec![cert_issuer_common::permission::Permission {
+                        scope: cert_issuer_common::permission::PermissionScope::ServiceToService,
+                        target: None,
+                    }],
+                    granted_by: "admin".to_string(),
+                    timestamp: 1000,
+                    reason: GrantReason::UserOnboarding,
+                },
+                reply,
+            },
+            None,
+        )
+        .await;
+        let handler = handler_for(&server, ledger).await;
+
+        let first = handler.handle(request_for(Server, &[CASSINI_NAME])).await;
+        assert!(matches!(first, IssuanceReply::Issued { .. }), "{first:?}");
+        let second = handler.handle(request_for(Client, &[])).await;
+        assert!(matches!(second, IssuanceReply::Issued { .. }), "{second:?}");
+    }
+
+    #[tokio::test]
+    async fn a_request_for_what_the_credential_may_not_have_is_refused_before_anyone_is_asked() {
+        // No mock is mounted: any call to cert-issuer would answer 404 and show up as a different refusal.
+        let server = MockServer::start().await;
+        let handler = handler_for(&server, spawn_test_ledger().await).await;
+
+        let refused = |reply: IssuanceReply| {
+            matches!(
+                reply,
+                IssuanceReply::Refused {
+                    reason: IssuanceRefusalReason::RequestNotPermitted
+                }
+            )
+        };
+        // A person's credential asking for a server certificate.
+        let idp = IssuanceRequest {
+            credential: make_token("https://keycloak.example/realms/polar"),
+            ..request_for(Server, &[CASSINI_NAME])
+        };
+        assert!(refused(handler.handle(idp).await));
+        // A client request choosing names.
+        assert!(refused(
+            handler.handle(request_for(Client, &[CASSINI_NAME])).await
+        ));
+        // A server request with names that are not names.
+        for bad in [
+            "*.polar.svc.cluster.local",
+            "p:u2s:polar-db-svc",
+            "c:grant",
+            "10.0.0.1",
+        ] {
+            assert!(
+                refused(handler.handle(request_for(Server, &[bad])).await),
+                "{bad}"
+            );
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

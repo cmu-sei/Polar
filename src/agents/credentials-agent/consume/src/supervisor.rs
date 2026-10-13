@@ -1402,6 +1402,7 @@ mod issuance_wiring_tests {
             |reply| LedgerMessage::CheckRenewal {
                 identity: identity.to_string(),
                 instance_binding: instance_binding.to_string(),
+                cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
                 reply,
             },
             None,
@@ -1487,6 +1488,8 @@ mod issuance_wiring_tests {
         let request = IssuanceRequest {
             csr_pem: "fake-csr".to_string(),
             credential: make_token("https://kubernetes.default.svc.cluster.local"),
+            cert_type: Default::default(),
+            names: vec![],
         };
         let envelope = Envelope {
             correlation_id: "test-correlation-id".to_string(),
@@ -2334,6 +2337,7 @@ mod decrypt_on_behalf_of_wiring_tests {
                     instance_binding: "pod-uid-1".to_string(),
                     serial: "requester-serial-1".to_string(),
                     timestamp: 1000,
+                    cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
                     certificate_pem: requester_certificate_pem,
                 },
                 reply,

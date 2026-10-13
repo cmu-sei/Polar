@@ -313,6 +313,7 @@ pub(crate) mod tests {
                 serial: format!("{identity}-serial-1"),
                 timestamp: 1000,
                 certificate_pem,
+                cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
             },
         )
         .await;

@@ -22,6 +22,7 @@
 */
 
 use credentials_agent_common::events::{CredentialsEvent, GrantReason, RevocationReason};
+use credentials_agent_common::issuance::WorkloadCertType;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// A grant currently available to be consumed by a matching issuance.
@@ -38,6 +39,8 @@ pub struct GrantRecord {
 pub struct CertificateRecord {
     pub identity: String,
     pub instance_binding: String,
+    /// Which of the pod instance's certificates this is.
+    pub cert_type: WorkloadCertType,
     pub serial: String,
     pub timestamp: i64,
     /// The actual signed certificate PEM, carried through from
@@ -144,16 +147,18 @@ pub struct CredentialsState {
     active_grants: HashMap<String, GrantRecord>,
 
     /// Every currently-valid certificate, keyed on `(identity,
-    /// instance_binding)` -- exactly the pair the renewal-prevention
+    /// instance_binding, type)` -- exactly what the renewal-prevention
     /// check needs (see credentials-agent-architecture.md, "Pods
-    /// cannot request their own renewal").
-    valid_certificates: HashMap<(String, String), CertificateRecord>,
+    /// cannot request their own renewal"): a pod instance may hold one
+    /// client certificate and one server certificate, and may not be
+    /// issued a second of either.
+    valid_certificates: HashMap<(String, String, WorkloadCertType), CertificateRecord>,
 
-    /// `serial -> (identity, instance_binding)`, so a `Revoke` event
+    /// `serial -> (identity, instance_binding, type)`, so a `Revoke` event
     /// (which only ever carries a serial) can find and remove the
     /// matching entry above without a linear scan over every
     /// currently-valid certificate.
-    serial_index: HashMap<String, (String, String)>,
+    serial_index: HashMap<String, (String, String, WorkloadCertType)>,
 
     /// The current, escrowed secret for each name -- keyed on the
     /// storing agent's own chosen name. A second SecretStored for the
@@ -268,23 +273,36 @@ impl CredentialsState {
                 instance_binding,
                 serial,
                 timestamp,
+                cert_type,
                 certificate_pem,
             } => {
                 // Single-use: remove the matching grant, if any. A
                 // harmless no-op when there isn't one -- exactly what
                 // lets admin bootstrap (which has no grant at all)
                 // fold through this same logic with zero
-                // special-casing.
-                self.active_grants.remove(identity);
+                // special-casing. Only a client certificate uses it up:
+                // a grant is permissions, which a server certificate
+                // does not carry, and a server certificate issued first
+                // must not take them from the client certificate that
+                // follows.
+                if cert_type.is_client() {
+                    self.active_grants.remove(identity);
+                }
 
                 // A reissue for the same identity supersedes any
-                // prior, still-valid certificate for it -- regardless
-                // of instance_binding, since a pod restart gets a
-                // fresh one. Marked revoked in place, not removed, so
-                // the record survives. Done before inserting the new
-                // entry, so this can't mark the new one itself.
+                // prior, still-valid certificate of the same type for it
+                // -- regardless of instance_binding, since a pod restart
+                // gets a fresh one. A client certificate and a server
+                // certificate are different things, and neither
+                // retires the other. Marked revoked in place, not
+                // removed, so the record survives. Done before
+                // inserting the new entry, so this can't mark the new
+                // one itself.
                 for record in self.valid_certificates.values_mut() {
-                    if record.identity == *identity && !record.revoked {
+                    if record.identity == *identity
+                        && record.cert_type == *cert_type
+                        && !record.revoked
+                    {
                         record.revoked = true;
                         record.revoked_reason = Some(RevocationReason::Superseded);
                         record.revoked_by = Some("system".to_string());
@@ -293,12 +311,13 @@ impl CredentialsState {
                     }
                 }
 
-                let key = (identity.clone(), instance_binding.clone());
+                let key = (identity.clone(), instance_binding.clone(), *cert_type);
                 self.valid_certificates.insert(
                     key.clone(),
                     CertificateRecord {
                         identity: identity.clone(),
                         instance_binding: instance_binding.clone(),
+                        cert_type: *cert_type,
                         serial: serial.clone(),
                         timestamp: *timestamp,
                         certificate_pem: certificate_pem.clone(),
@@ -493,9 +512,18 @@ impl CredentialsState {
     /// True if this exact `(identity, instance_binding)` pair
     /// currently holds a valid, unrevoked certificate -- the
     /// renewal-prevention check itself.
-    pub fn has_valid_certificate(&self, identity: &str, instance_binding: &str) -> bool {
+    pub fn has_valid_certificate(
+        &self,
+        identity: &str,
+        instance_binding: &str,
+        cert_type: WorkloadCertType,
+    ) -> bool {
         self.valid_certificates
-            .get(&(identity.to_string(), instance_binding.to_string()))
+            .get(&(
+                identity.to_string(),
+                instance_binding.to_string(),
+                cert_type,
+            ))
             .is_some_and(|record| !record.revoked)
     }
     /// The current, non-revoked certificate for a given identity, if
@@ -505,9 +533,12 @@ impl CredentialsState {
     /// (see apply()'s own IssuanceCompleted handling), so there's at
     /// most one non-revoked entry per identity at any given time.
     pub fn certificate_for(&self, identity: &str) -> Option<&CertificateRecord> {
-        self.valid_certificates
-            .values()
-            .find(|record| record.identity == identity && !record.revoked)
+        // The requester's certificate is its client certificate. A server
+        // certificate is the listener's, and says nothing of what the
+        // requester may do.
+        self.valid_certificates.values().find(|record| {
+            record.identity == identity && record.cert_type.is_client() && !record.revoked
+        })
     }
 
     /// The current, escrowed secret stored under `name`, if any --
@@ -661,11 +692,21 @@ mod tests {
     }
 
     fn issued(identity: &str, instance_binding: &str, serial: &str) -> CredentialsEvent {
+        issued_as(identity, instance_binding, serial, WorkloadCertType::Client)
+    }
+
+    fn issued_as(
+        identity: &str,
+        instance_binding: &str,
+        serial: &str,
+        cert_type: WorkloadCertType,
+    ) -> CredentialsEvent {
         CredentialsEvent::IssuanceCompleted {
             identity: identity.to_string(),
             instance_binding: instance_binding.to_string(),
             serial: serial.to_string(),
             timestamp: 2000,
+            cert_type,
             certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                 .to_string(),
         }
@@ -757,7 +798,7 @@ mod tests {
             state.grant_for("alice").is_none(),
             "grant must be consumed, not still available"
         );
-        assert!(state.has_valid_certificate("alice", "pod-uid-1"));
+        assert!(state.has_valid_certificate("alice", "pod-uid-1", WorkloadCertType::Client));
     }
 
     #[test]
@@ -770,17 +811,21 @@ mod tests {
             "admin-tool-uid",
             "serial-99",
         ));
-        assert!(state.has_valid_certificate("admin-bootstrap-identity", "admin-tool-uid"));
+        assert!(state.has_valid_certificate(
+            "admin-bootstrap-identity",
+            "admin-tool-uid",
+            WorkloadCertType::Client
+        ));
     }
 
     #[test]
     fn revoke_removes_the_certificate() {
         let mut state = CredentialsState::new();
         state.apply(&issued("alice", "pod-uid-1", "serial-1"));
-        assert!(state.has_valid_certificate("alice", "pod-uid-1"));
+        assert!(state.has_valid_certificate("alice", "pod-uid-1", WorkloadCertType::Client));
 
         state.apply(&revoked("serial-1"));
-        assert!(!state.has_valid_certificate("alice", "pod-uid-1"));
+        assert!(!state.has_valid_certificate("alice", "pod-uid-1", WorkloadCertType::Client));
     }
 
     #[test]
@@ -789,7 +834,7 @@ mod tests {
         state.apply(&issued("alice", "pod-uid-1", "serial-1"));
         state.apply(&revoked("serial-does-not-exist"));
         // The real, still-valid certificate must be unaffected.
-        assert!(state.has_valid_certificate("alice", "pod-uid-1"));
+        assert!(state.has_valid_certificate("alice", "pod-uid-1", WorkloadCertType::Client));
     }
 
     #[test]
@@ -800,9 +845,9 @@ mod tests {
         let mut state = CredentialsState::new();
         state.apply(&issued("alice", "old-pod-uid", "serial-1"));
 
-        assert!(state.has_valid_certificate("alice", "old-pod-uid"));
+        assert!(state.has_valid_certificate("alice", "old-pod-uid", WorkloadCertType::Client));
         assert!(
-            !state.has_valid_certificate("alice", "new-pod-uid"),
+            !state.has_valid_certificate("alice", "new-pod-uid", WorkloadCertType::Client),
             "a different instance_binding must not be blocked by an unrelated pod's cert"
         );
     }
@@ -819,8 +864,98 @@ mod tests {
             state.grant_for("bob").is_some(),
             "bob's grant must be untouched by alice's issuance"
         );
-        assert!(state.has_valid_certificate("alice", "pod-uid-1"));
-        assert!(!state.has_valid_certificate("bob", "pod-uid-1"));
+        assert!(state.has_valid_certificate("alice", "pod-uid-1", WorkloadCertType::Client));
+        assert!(!state.has_valid_certificate("bob", "pod-uid-1", WorkloadCertType::Client));
+    }
+
+    // ---- a pod instance holds one client and one server certificate ----------------------------------------
+
+    use credentials_agent_common::issuance::WorkloadCertType::{Client, Server};
+
+    #[test]
+    fn a_pod_instance_may_hold_one_client_and_one_server_certificate() {
+        let mut state = CredentialsState::new();
+        state.apply(&issued_as("git-server", "pod-1", "client-1", Client));
+        state.apply(&issued_as("git-server", "pod-1", "server-1", Server));
+        assert!(state.has_valid_certificate("git-server", "pod-1", Client));
+        assert!(state.has_valid_certificate("git-server", "pod-1", Server));
+    }
+
+    #[test]
+    fn what_the_renewal_check_blocks_is_a_second_certificate_of_a_type_the_pod_already_holds() {
+        let mut state = CredentialsState::new();
+        state.apply(&issued_as("kube", "pod-1", "client-1", Client));
+        // It holds a client certificate and no server one.
+        assert!(state.has_valid_certificate("kube", "pod-1", Client));
+        assert!(!state.has_valid_certificate("kube", "pod-1", Server));
+        // Another pod of the same identity holds neither.
+        assert!(!state.has_valid_certificate("kube", "pod-2", Client));
+        assert!(!state.has_valid_certificate("kube", "pod-2", Server));
+    }
+
+    #[test]
+    fn a_server_certificate_does_not_supersede_a_client_certificate_nor_the_reverse() {
+        let mut state = CredentialsState::new();
+        state.apply(&issued_as("x", "pod-1", "client-1", Client));
+        let superseded = state.apply(&issued_as("x", "pod-1", "server-1", Server));
+        assert!(superseded.is_empty(), "{superseded:?}");
+        let superseded = state.apply(&issued_as("y", "pod-1", "server-2", Server));
+        assert!(superseded.is_empty(), "{superseded:?}");
+        let superseded = state.apply(&issued_as("y", "pod-1", "client-2", Client));
+        assert!(superseded.is_empty(), "{superseded:?}");
+        assert!(state.has_valid_certificate("x", "pod-1", Client));
+        assert!(state.has_valid_certificate("y", "pod-1", Server));
+    }
+
+    #[test]
+    fn a_new_pods_certificate_supersedes_only_the_old_pods_certificate_of_the_same_type() {
+        let mut state = CredentialsState::new();
+        state.apply(&issued_as("x", "old", "old-client", Client));
+        state.apply(&issued_as("x", "old", "old-server", Server));
+        // The replacement pod's client certificate retires the old client certificate, and only that.
+        let superseded = state.apply(&issued_as("x", "new", "new-client", Client));
+        assert_eq!(superseded, vec!["old-client".to_string()]);
+        assert!(!state.has_valid_certificate("x", "old", Client));
+        assert!(state.has_valid_certificate("x", "old", Server));
+        let superseded = state.apply(&issued_as("x", "new", "new-server", Server));
+        assert_eq!(superseded, vec!["old-server".to_string()]);
+    }
+
+    #[test]
+    fn the_certificate_looked_up_for_an_identity_is_its_client_certificate() {
+        // The retrieve handlers read it for the requester's permissions: a server certificate, issued later,
+        // is not the requester's.
+        let mut state = CredentialsState::new();
+        state.apply(&issued_as("x", "pod-1", "client-1", Client));
+        state.apply(&issued_as("x", "pod-1", "server-1", Server));
+        assert_eq!(state.certificate_for("x").unwrap().serial, "client-1");
+        // And an identity with only a server certificate has no requester certificate.
+        state.apply(&issued_as("only-server", "pod-1", "server-2", Server));
+        assert!(state.certificate_for("only-server").is_none());
+    }
+
+    #[test]
+    fn a_server_certificate_does_not_use_up_a_grant_and_a_client_certificate_does() {
+        let mut state = CredentialsState::new();
+        state.apply(&grant("x"));
+        state.apply(&issued_as("x", "pod-1", "server-1", Server));
+        assert!(
+            state.grant_for("x").is_some(),
+            "the permissions are for the client certificate, which has not been asked for yet"
+        );
+        state.apply(&issued_as("x", "pod-1", "client-1", Client));
+        assert!(state.grant_for("x").is_none());
+    }
+
+    #[test]
+    fn a_server_certificate_is_revoked_by_serial_and_the_clients_stays() {
+        let mut state = CredentialsState::new();
+        state.apply(&issued_as("x", "pod-1", "client-1", Client));
+        state.apply(&issued_as("x", "pod-1", "server-1", Server));
+        state.apply(&revoked("server-1"));
+        assert!(!state.has_valid_certificate("x", "pod-1", Server));
+        assert!(state.has_valid_certificate("x", "pod-1", Client));
+        assert!(state.revoked_serials().contains(&"server-1".to_string()));
     }
 
     #[test]
@@ -833,7 +968,7 @@ mod tests {
         let state = CredentialsState::from_events(&events);
 
         assert!(state.grant_for("alice").is_none());
-        assert!(!state.has_valid_certificate("alice", "pod-uid-1"));
+        assert!(!state.has_valid_certificate("alice", "pod-uid-1", WorkloadCertType::Client));
     }
 
     #[test]
@@ -871,7 +1006,7 @@ mod tests {
             "service-serial-1",
         ));
 
-        assert!(state.has_valid_certificate("git-observer", "pod-uid-1"));
+        assert!(state.has_valid_certificate("git-observer", "pod-uid-1", WorkloadCertType::Client));
         assert!(state.has_agent_escrow_certificate("git-observer"));
         assert_eq!(
             state.certificate_for("git-observer").unwrap().serial,

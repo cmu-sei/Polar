@@ -148,6 +148,7 @@ mod tests {
                     instance_binding: "pod-uid-1".to_string(),
                     serial: "serial-1".to_string(),
                     timestamp: 2000,
+                    cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
                     certificate_pem: expected_pem.to_string(),
                 },
                 reply,

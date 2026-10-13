@@ -52,6 +52,7 @@
 use crate::projection::ProjectionMessage;
 use crate::state::{CertificateRecord, CredentialsState, GrantRecord};
 use credentials_agent_common::events::CredentialsEvent;
+use credentials_agent_common::issuance::WorkloadCertType;
 use polar::event_log::EventLog;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort, async_trait};
 use std::sync::Arc;
@@ -125,10 +126,13 @@ pub enum LedgerMessage {
         reply: RpcReplyPort<Option<GrantRecord>>,
     },
     /// Whether `(identity, instance_binding)` currently holds a valid,
-    /// unrevoked certificate -- the renewal-prevention check itself.
+    /// unrevoked certificate of this type -- the renewal-prevention check
+    /// itself. A pod instance may hold one client and one server
+    /// certificate, so it is asked per type.
     CheckRenewal {
         identity: String,
         instance_binding: String,
+        cert_type: WorkloadCertType,
         reply: RpcReplyPort<bool>,
     },
     /// The current, non-revoked certificate for `identity`, if any --
@@ -332,11 +336,14 @@ impl Actor for LedgerActor {
             LedgerMessage::CheckRenewal {
                 identity,
                 instance_binding,
+                cert_type,
                 reply,
             } => {
-                let has_valid = state
-                    .credentials_state
-                    .has_valid_certificate(&identity, &instance_binding);
+                let has_valid = state.credentials_state.has_valid_certificate(
+                    &identity,
+                    &instance_binding,
+                    cert_type,
+                );
                 let _ = reply.send(has_valid);
             }
             LedgerMessage::CheckCertificate { identity, reply } => {
@@ -505,6 +512,7 @@ pub(crate) mod tests {
             |reply| LedgerMessage::CheckRenewal {
                 identity: identity.to_string(),
                 instance_binding: instance_binding.to_string(),
+                cert_type: WorkloadCertType::Client,
                 reply,
             },
             None,
@@ -748,6 +756,7 @@ pub(crate) mod tests {
                 instance_binding: "pod-uid-1".to_string(),
                 serial: "serial-1".to_string(),
                 timestamp: 2000,
+                cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
                 certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                     .to_string(),
             },
@@ -843,6 +852,7 @@ pub(crate) mod tests {
                     instance_binding: "pod-uid-1".to_string(),
                     serial: "serial-1".to_string(),
                     timestamp: 2000,
+                    cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
                     certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                         .to_string(),
                 },
