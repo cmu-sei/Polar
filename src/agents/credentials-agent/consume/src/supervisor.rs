@@ -59,7 +59,7 @@ use credentials_agent_common::{
     CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
     CREDENTIALS_ISSUANCE_REQUESTS_TOPIC, CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
     CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC,
-    CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+    CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC, CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
 };
 
 // ---- credentials_agent_common: wire types ----
@@ -74,6 +74,7 @@ use credentials_agent_common::identity::IdentityNormalizationRequest;
 use credentials_agent_common::issuance::IssuanceRequest;
 use credentials_agent_common::retrieve_secret::RetrieveSecretRequest;
 use credentials_agent_common::secret::StoreSecretRequest;
+use credentials_agent_common::workload_issuance::WorkloadIssuanceRequest;
 
 // ---- Local: shared infrastructure ----
 use crate::authority_publisher::{AuthorityPublisher, PublisherArgs, PublisherMessage};
@@ -116,6 +117,8 @@ use crate::retrieve_secret_actor::{
 };
 use crate::store_secret::StoreSecretHandler;
 use crate::store_secret_actor::{StoreSecretActor, StoreSecretActorArgs, StoreSecretDispatch};
+use crate::workload_issuance::WorkloadIssuanceHandler;
+use crate::workload_issuance_actor::{WorkloadIssuanceActor, WorkloadIssuanceActorArgs};
 
 const LEDGER_ACTOR_NAME: &str = "polar.credentials-agent.ledger";
 
@@ -142,7 +145,7 @@ pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(50);
 
 /// Every topic this agent subscribes to. One subscription each; the same list
 /// is unsubscribed from when shutdown begins.
-pub const REQUEST_TOPICS: [&str; 15] = [
+pub const REQUEST_TOPICS: [&str; 16] = [
     CREDENTIALS_GRANTS_TOPIC,
     CREDENTIALS_REVOCATIONS_TOPIC,
     CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC,
@@ -158,9 +161,11 @@ pub const REQUEST_TOPICS: [&str; 15] = [
     CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
     CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
     CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
+    CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
 ];
 
 const ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.issuance";
+const WORKLOAD_ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.workload-issuance";
 const IDENTITY_NORMALIZATION_ACTOR_NAME: &str = "polar.credentials-agent.identity-normalization";
 const ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.escrow-key";
 const CERTIFICATE_ACTOR_NAME: &str = "polar.credentials-agent.certificate";
@@ -282,6 +287,26 @@ impl Supervisor for ConsumerSupervisor {
                 }
                 Err(e) => {
                     warn!("Failed to deserialize issuance request from topic {topic}: {e}");
+                }
+            }
+            return;
+        }
+
+        if topic == CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC {
+            match rkyv::from_bytes::<Envelope<WorkloadIssuanceRequest>, rkyv::rancor::Error>(
+                &payload,
+            ) {
+                Ok(envelope) => {
+                    if let Some(actor) = where_is(WORKLOAD_ISSUANCE_ACTOR_NAME.to_string()) {
+                        if let Err(e) = actor.send_message(envelope) {
+                            warn!("Failed to forward workload issuance request to actor: {e}");
+                        }
+                    } else {
+                        warn!("Workload issuance actor not yet registered, dropping request");
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize workload issuance request: {e}");
                 }
             }
             return;
@@ -754,31 +779,47 @@ impl Actor for ConsumerSupervisor {
             )
         };
 
-        let issuance_handler = IssuanceHandler {
-            ledger: ledger.clone(),
-            cert_issuer: make_cert_issuer_client().await?,
-            // Introspection is genuinely optional at the deployment
-            // level -- a cluster that never has LikelyIdp credentials
-            // in practice doesn't need it configured. If one does
-            // arrive without introspection configured, the handler
-            // itself refuses it (TokenIntrospectionFailed) rather
-            // than silently proceeding unintrospected.
-            introspection: settings.introspection.as_ref().map(|i| {
-                IntrospectionClient::new(
-                    i.endpoint.clone(),
-                    i.client_id.clone(),
-                    i.client_secret.clone(),
-                )
-            }),
-            known_kubernetes_issuers: settings.kubernetes_issuers.clone(),
-            escrow_keypair: escrow_keypair.clone(),
+        // Two actors issue: the one for requests that arrive with a clear credential (the admin tool and
+        // people) and the one for a workload's, whose token arrives sealed. Each owns its own handler, so each
+        // is built the same way from the same settings.
+        let make_issuance_handler = || async {
+            Ok::<_, ActorProcessingErr>(IssuanceHandler {
+                ledger: ledger.clone(),
+                cert_issuer: make_cert_issuer_client().await?,
+                // Introspection is genuinely optional at the deployment
+                // level -- a cluster that never has LikelyIdp credentials
+                // in practice doesn't need it configured. If one does
+                // arrive without introspection configured, the handler
+                // itself refuses it (TokenIntrospectionFailed) rather
+                // than silently proceeding unintrospected.
+                introspection: settings.introspection.as_ref().map(|i| {
+                    IntrospectionClient::new(
+                        i.endpoint.clone(),
+                        i.client_id.clone(),
+                        i.client_secret.clone(),
+                    )
+                }),
+                known_kubernetes_issuers: settings.kubernetes_issuers.clone(),
+                escrow_keypair: escrow_keypair.clone(),
+            })
         };
 
         let (_issuance_actor, _) = IssuanceActor::spawn_linked(
             Some(ISSUANCE_ACTOR_NAME.to_string()),
             IssuanceActor,
             IssuanceActorArgs {
-                handler: issuance_handler,
+                handler: make_issuance_handler().await?,
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
+        let (_workload_issuance_actor, _) = WorkloadIssuanceActor::spawn_linked(
+            Some(WORKLOAD_ISSUANCE_ACTOR_NAME.to_string()),
+            WorkloadIssuanceActor,
+            WorkloadIssuanceActorArgs {
+                handler: WorkloadIssuanceHandler::new(make_issuance_handler().await?),
             },
             myself.get_cell(),
         )
@@ -1530,6 +1571,201 @@ mod issuance_wiring_tests {
 
         issuance_actor.stop_and_wait(None, None).await.unwrap();
         ledger.stop_and_wait(None, None).await.unwrap();
+    }
+
+    /// Everything the consumer publishes, in order, for tests that follow a conversation.
+    struct RecordingBrokerClient {
+        published: std::sync::Arc<tokio::sync::Mutex<Vec<(String, Vec<u8>)>>>,
+    }
+
+    #[ractor::async_trait]
+    impl ractor::Actor for RecordingBrokerClient {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { topic, payload, .. } = message {
+                self.published.lock().await.push((topic, payload));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sealed_issuance_goes_from_raw_bytes_through_dispatch_and_two_replies_to_a_recorded_certificate()
+     {
+        use credentials_agent_common::CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC;
+        use credentials_agent_common::ephemeral_exchange::EphemeralEncryptedPayload;
+        use credentials_agent_common::issuance::IssuanceReply;
+        use credentials_agent_common::workload_issuance::{
+            SealedIssuanceRequest, WorkloadIssuanceReply, WorkloadIssuanceRequest,
+        };
+        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
+
+        // The conversation, as the real components have it: open a session, seal the token to it, ask. The
+        // replies are what reaches the broker, so a recording client stands where Cassini would.
+        let published = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (broker_client, _) = ractor::Actor::spawn(
+            Some(BROKER_CLIENT_NAME.to_string()),
+            RecordingBrokerClient {
+                published: published.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+
+        let cert_issuer = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/validate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::ValidateResponse {
+                    workload_identity: "system:serviceaccount:polar:git-server".to_string(),
+                    instance_binding: Some("pod-1".to_string()),
+                    jti: None,
+                    normalized_identity: None,
+                },
+            ))
+            .mount(&cert_issuer)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::IssueResponse {
+                    certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                        .to_string(),
+                    ca_chain_pem: "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----\n"
+                        .to_string(),
+                    serial_number: "sealed-pipeline-serial".to_string(),
+                    session_id: "00000000-0000-0000-0000-000000000042".to_string(),
+                    expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+                },
+            ))
+            .mount(&cert_issuer)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, _) = LedgerActor::spawn(
+            Some(LEDGER_ACTOR_NAME.to_string()),
+            LedgerActor,
+            LedgerActorArgs {
+                log_path: dir
+                    .path()
+                    .join("events.jsonl")
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+                projection_actor: crate::projection::tests::fake_projection_actor().await,
+            },
+        )
+        .await
+        .unwrap();
+        let (actor, _) = WorkloadIssuanceActor::spawn(
+            Some(WORKLOAD_ISSUANCE_ACTOR_NAME.to_string()),
+            WorkloadIssuanceActor,
+            WorkloadIssuanceActorArgs {
+                handler: WorkloadIssuanceHandler::new(IssuanceHandler {
+                    ledger: ledger.clone(),
+                    cert_issuer: HandshakeClient::new(cert_issuer.uri()),
+                    introspection: None,
+                    known_kubernetes_issuers: vec![
+                        "https://kubernetes.default.svc.cluster.local".to_string(),
+                    ],
+                    escrow_keypair: crate::escrow::tests::test_keypair(),
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        async fn send(request: WorkloadIssuanceRequest, correlation_id: &str) {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&Envelope {
+                correlation_id: correlation_id.to_string(),
+                payload: request,
+            })
+            .unwrap()
+            .to_vec();
+            ConsumerSupervisor::deserialize_and_dispatch(
+                CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC.to_string(),
+                bytes,
+            );
+        }
+        async fn reply_number(
+            published: &std::sync::Arc<tokio::sync::Mutex<Vec<(String, Vec<u8>)>>>,
+            n: usize,
+        ) -> Envelope<WorkloadIssuanceReply> {
+            for _ in 0..60 {
+                if let Some((topic, bytes)) = published.lock().await.get(n).cloned() {
+                    assert_eq!(topic, CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC);
+                    return rkyv::from_bytes::<Envelope<WorkloadIssuanceReply>, rkyv::rancor::Error>(
+                        &bytes,
+                    )
+                    .unwrap();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("reply {n} never arrived");
+        }
+
+        send(WorkloadIssuanceRequest::OpenSession, "open-1").await;
+        let offered = reply_number(&published, 0).await;
+        assert_eq!(offered.correlation_id, "open-1");
+        let WorkloadIssuanceReply::Offer(offer) = offered.payload else {
+            panic!("expected an offer");
+        };
+
+        let token = make_token("https://kubernetes.default.svc.cluster.local");
+        send(
+            WorkloadIssuanceRequest::Issue(SealedIssuanceRequest {
+                session_id: offer.session_id,
+                csr_pem: "fake-csr".to_string(),
+                cert_type: Default::default(),
+                names: vec![],
+                sealed_credential: EphemeralEncryptedPayload::encrypt(
+                    token.as_bytes(),
+                    &offer.public_key,
+                )
+                .unwrap(),
+            }),
+            "issue-1",
+        )
+        .await;
+        let issued = reply_number(&published, 1).await;
+        assert_eq!(issued.correlation_id, "issue-1");
+        assert!(
+            matches!(
+                issued.payload,
+                WorkloadIssuanceReply::Issuance(IssuanceReply::Issued { .. })
+            ),
+            "{:?}",
+            issued.payload
+        );
+        assert!(
+            check_renewal(&ledger, "system:serviceaccount:polar:git-server", "pod-1").await,
+            "the issuance must be recorded in the ledger"
+        );
+        // And nowhere on the wire is the token in the clear.
+        for (_, bytes) in published.lock().await.iter() {
+            assert!(!bytes.windows(token.len()).any(|w| w == token.as_bytes()));
+        }
+
+        actor.stop_and_wait(None, None).await.unwrap();
+        ledger.stop_and_wait(None, None).await.unwrap();
+        broker_client.stop_and_wait(None, None).await.unwrap();
     }
 }
 
@@ -2436,12 +2672,12 @@ mod builder_wiring_tests {
     }
 
     #[test]
-    fn there_are_fifteen_distinct_request_topics() {
+    fn there_are_sixteen_distinct_request_topics() {
         let distinct: HashSet<&str> = REQUEST_TOPICS.iter().copied().collect();
-        assert_eq!(REQUEST_TOPICS.len(), 15);
+        assert_eq!(REQUEST_TOPICS.len(), 16);
         assert_eq!(
             distinct.len(),
-            15,
+            16,
             "a topic is listed twice: {REQUEST_TOPICS:?}"
         );
     }

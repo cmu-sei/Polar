@@ -380,7 +380,7 @@ async fn call_append(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ledger::{LedgerActor, LedgerActorArgs};
     use base64::Engine;
@@ -389,13 +389,13 @@ mod tests {
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn make_token(iss: &str) -> String {
+    pub(crate) fn make_token(iss: &str) -> String {
         let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
         let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"iss":"{iss}"}}"#));
         format!("{header}.{payload}.")
     }
 
-    async fn spawn_test_ledger() -> ActorRef<LedgerMessage> {
+    pub(crate) async fn spawn_test_ledger() -> ActorRef<LedgerMessage> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
         // Leak the tempdir so it isn't cleaned up while the actor's
@@ -414,7 +414,7 @@ mod tests {
         ledger
     }
 
-    fn fake_issue_response() -> cert_issuer_common::IssueResponse {
+    pub(crate) fn fake_issue_response() -> cert_issuer_common::IssueResponse {
         cert_issuer_common::IssueResponse {
             certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                 .to_string(),
@@ -774,10 +774,10 @@ mod tests {
 
     use credentials_agent_common::issuance::WorkloadCertType::{Client, Server};
 
-    const K8S: &str = "https://kubernetes.default.svc.cluster.local";
-    const CASSINI_NAME: &str = "cassini-ip-svc.polar.svc.cluster.local";
+    pub(crate) const K8S: &str = "https://kubernetes.default.svc.cluster.local";
+    pub(crate) const CASSINI_NAME: &str = "cassini-ip-svc.polar.svc.cluster.local";
 
-    fn names(n: &[&str]) -> Vec<String> {
+    pub(crate) fn names(n: &[&str]) -> Vec<String> {
         n.iter().map(|s| s.to_string()).collect()
     }
 
@@ -851,14 +851,14 @@ mod tests {
         );
     }
 
-    fn response_with_serial(serial: &str) -> cert_issuer_common::IssueResponse {
+    pub(crate) fn response_with_serial(serial: &str) -> cert_issuer_common::IssueResponse {
         cert_issuer_common::IssueResponse {
             serial_number: serial.to_string(),
             ..fake_issue_response()
         }
     }
 
-    async fn kubernetes_pod(server: &MockServer, instance_binding: &str) {
+    pub(crate) async fn kubernetes_pod(server: &MockServer, instance_binding: &str) {
         Mock::given(method("POST"))
             .and(path("/validate"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
@@ -873,7 +873,10 @@ mod tests {
             .await;
     }
 
-    async fn handler_for(server: &MockServer, ledger: ActorRef<LedgerMessage>) -> IssuanceHandler {
+    pub(crate) async fn handler_for(
+        server: &MockServer,
+        ledger: ActorRef<LedgerMessage>,
+    ) -> IssuanceHandler {
         IssuanceHandler {
             ledger,
             cert_issuer: HandshakeClient::new(server.uri()),
@@ -883,7 +886,7 @@ mod tests {
         }
     }
 
-    fn request_for(cert_type: WorkloadCertType, names_: &[&str]) -> IssuanceRequest {
+    pub(crate) fn request_for(cert_type: WorkloadCertType, names_: &[&str]) -> IssuanceRequest {
         IssuanceRequest {
             csr_pem: "fake-csr".to_string(),
             credential: make_token(K8S),

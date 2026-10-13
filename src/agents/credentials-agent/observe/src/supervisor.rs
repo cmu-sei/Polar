@@ -34,7 +34,9 @@
 //!    non-zero. Exit is never zero: this agent runs as a Job, so a clean exit
 //!    would count as completion and nothing would restart it.
 
-use crate::handler::{ObserverState, account, admin_action, identity, issue};
+use crate::handler::{
+    ObserverState, account, admin_action, identity, issue, workload_issue, workload_session,
+};
 use axum::Router;
 use axum::routing::post;
 use cassini_types::ClientEvent;
@@ -42,9 +44,11 @@ use credentials_agent_common::account_claim::AccountReply;
 use credentials_agent_common::admin_action::AdminActionReply;
 use credentials_agent_common::identity::IdentityNormalizationReply;
 use credentials_agent_common::issuance::IssuanceReply;
+use credentials_agent_common::workload_issuance::WorkloadIssuanceReply;
 use credentials_agent_common::{
     CREDENTIALS_ACCOUNT_REPLIES_TOPIC, CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC,
     CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC, CREDENTIALS_ISSUANCE_REPLIES_TOPIC,
+    CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC,
 };
 use polar::request_reply::{Envelope, ReplyRouter};
 use polar_agent_builder::{
@@ -73,7 +77,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// not done by then the process exits 1 regardless.
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(DRAIN_TIMEOUT.as_secs() + 10);
 
-/// The four reply routers: one per request/reply flow this observer fronts.
+/// The reply routers: one per request/reply flow this observer fronts.
 /// Shared between the subscriptions that fill them and the HTTP handlers
 /// that wait on them.
 #[derive(Clone, Default)]
@@ -82,6 +86,7 @@ pub struct ReplyRouters {
     pub identity: Arc<ReplyRouter<IdentityNormalizationReply>>,
     pub account: Arc<ReplyRouter<AccountReply>>,
     pub admin_action: Arc<ReplyRouter<AdminActionReply>>,
+    pub workload_issuance: Arc<ReplyRouter<WorkloadIssuanceReply>>,
 }
 
 macro_rules! reply_subscription {
@@ -124,6 +129,12 @@ pub fn reply_subscriptions(routers: &ReplyRouters) -> Vec<Subscription> {
             AdminActionReply,
             routers.admin_action,
             "admin action"
+        ),
+        reply_subscription!(
+            CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC,
+            WorkloadIssuanceReply,
+            routers.workload_issuance,
+            "workload issuance"
         ),
     ]
 }
@@ -177,6 +188,10 @@ async fn start_http(
         .route("/identity", post(identity))
         .route("/account", post(account))
         .route("/admin-action", post(admin_action))
+        // A workload's own request, before it has a certificate: open a session, then ask with the token sealed
+        // to it. The observer relays both and never holds the token.
+        .route("/workload/session", post(workload_session))
+        .route("/workload/issue", post(workload_issue))
         .with_state(state);
 
     let shutdown = Arc::new(Notify::new());
@@ -245,6 +260,7 @@ impl Actor for ObserverSupervisor {
             identity_reply_router: routers.identity.clone(),
             account_reply_router: routers.account.clone(),
             admin_action_reply_router: routers.admin_action.clone(),
+            workload_issuance_reply_router: routers.workload_issuance.clone(),
         });
 
         let http = start_http(observer.clone(), settings.port).await?;
@@ -352,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn subscribes_to_exactly_the_four_reply_topics() {
+    fn subscribes_to_exactly_the_five_reply_topics() {
         let subs = reply_subscriptions(&ReplyRouters::default());
         let mut topics: Vec<&str> = subs.iter().map(|s| s.topic.as_str()).collect();
         topics.sort_unstable();
@@ -361,9 +377,32 @@ mod tests {
             CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC,
             CREDENTIALS_ACCOUNT_REPLIES_TOPIC,
             CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC,
+            CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC,
         ];
         expected.sort_unstable();
         assert_eq!(topics, expected);
+    }
+
+    #[test]
+    fn the_workload_reply_topic_delivers_to_the_workload_router_and_no_other() {
+        let routers = ReplyRouters::default();
+        let subs = reply_subscriptions(&routers);
+        let mut workload = routers.workload_issuance.register("c-workload".to_string());
+        let mut issuance = routers.issuance.register("c-workload".to_string());
+        let mut admin = routers.admin_action.register("c-workload".to_string());
+
+        deliver!(
+            subs,
+            CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC,
+            "c-workload",
+            WorkloadIssuanceReply::UnknownSession
+        );
+        assert!(matches!(
+            workload.try_recv(),
+            Ok(WorkloadIssuanceReply::UnknownSession)
+        ));
+        assert!(issuance.try_recv().is_err());
+        assert!(admin.try_recv().is_err());
     }
 
     #[test]

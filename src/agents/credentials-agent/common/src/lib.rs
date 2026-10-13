@@ -42,6 +42,7 @@ pub mod issuance;
 pub mod observer;
 pub mod retrieve_secret;
 pub mod secret;
+pub mod workload_issuance;
 
 /// Published by an admin's tool (polar-admin-grant) to grant or
 /// revoke permissions -- see events.rs's own CredentialsEvent::Grant/
@@ -66,6 +67,13 @@ pub const CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC: &str = "credentials-account-pr
 /// query/issuance pair below, which are core-to-core only.
 pub const CREDENTIALS_ISSUANCE_REQUESTS_TOPIC: &str = "credentials-issuance-requests";
 pub const CREDENTIALS_ISSUANCE_REPLIES_TOPIC: &str = "credentials-issuance-replies";
+
+// A workload's own request for its pod-instance certificates, with the token sealed to an ephemeral session
+// (`workload_issuance.rs`): the observer relays it and the consumer opens it.
+pub const CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC: &str =
+    "credentials-workload-issuance-requests";
+pub const CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC: &str =
+    "credentials-workload-issuance-replies";
 
 /// What SAN a CSR should carry for a given credential's identity --
 /// see identity.rs's own IdentityNormalizationRequest/Reply. Queried

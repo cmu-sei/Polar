@@ -144,6 +144,37 @@ impl EphemeralEncryptedPayload {
 /// "info" names this specific use, so a key derived here could never
 /// collide with a key derived from the same shared secret for a
 /// genuinely different purpose.
+/// A session the responder opens so a requester can send it something secret: a fresh X25519 keypair whose
+/// public half goes to the requester and whose secret half is kept until the one message arrives. The requester
+/// seals to the public half with [`EphemeralEncryptedPayload::encrypt`], which is the same call whichever way the
+/// secret travels; [`unseal`](Self::unseal) opens it and uses the session up. Nothing here outlives that one
+/// exchange: the secret is not clonable and is consumed by opening.
+pub struct EphemeralSession {
+    secret: EphemeralSecret,
+    public_key: [u8; 32],
+}
+
+impl EphemeralSession {
+    pub fn open() -> Self {
+        let secret = EphemeralSecret::random();
+        let public_key = PublicKey::from(&secret).to_bytes();
+        Self { secret, public_key }
+    }
+
+    pub fn public_key(&self) -> [u8; 32] {
+        self.public_key
+    }
+
+    /// Opens what a requester sealed to this session. Consumes the session either way: a payload that does not
+    /// open is not tried again.
+    pub fn unseal(
+        self,
+        sealed: &EphemeralEncryptedPayload,
+    ) -> Result<Zeroizing<Vec<u8>>, EphemeralExchangeError> {
+        sealed.decrypt(self.secret)
+    }
+}
+
 fn derive_aes_key(shared_secret: &[u8; 32]) -> AesKey<Aes256Gcm> {
     let hkdf = Hkdf::<Sha256>::new(None, shared_secret);
     let mut okm = [0u8; 32];
@@ -155,6 +186,39 @@ fn derive_aes_key(shared_secret: &[u8; 32]) -> AesKey<Aes256Gcm> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- a session the responder opens, sealed to by the requester -----------------------------------------
+
+    #[test]
+    fn what_a_requester_seals_to_a_session_only_that_session_opens() {
+        let session = EphemeralSession::open();
+        let sealed =
+            EphemeralEncryptedPayload::encrypt(b"a service-account token", &session.public_key())
+                .unwrap();
+        let opened = session.unseal(&sealed).unwrap();
+        assert_eq!(opened.as_slice(), b"a service-account token");
+
+        // Another session, with another key, cannot.
+        let other = EphemeralSession::open();
+        assert!(other.unseal(&sealed).is_err());
+    }
+
+    #[test]
+    fn two_sessions_never_share_a_public_key() {
+        assert_ne!(
+            EphemeralSession::open().public_key(),
+            EphemeralSession::open().public_key()
+        );
+    }
+
+    #[test]
+    fn a_sealed_payload_that_was_changed_does_not_open() {
+        let session = EphemeralSession::open();
+        let mut sealed =
+            EphemeralEncryptedPayload::encrypt(b"token", &session.public_key()).unwrap();
+        sealed.ciphertext[0] ^= 1;
+        assert!(session.unseal(&sealed).is_err());
+    }
 
     #[test]
     fn round_trips_the_actual_plaintext() {

@@ -37,6 +37,7 @@ use credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_ISSUANCE_REQUESTS_TOPIC;
+use credentials_agent_common::CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC;
 use credentials_agent_common::account_claim::{
     AccountRefusal, AccountReply, AccountRequest, Claimant,
 };
@@ -48,6 +49,9 @@ use credentials_agent_common::identity::{
 };
 use credentials_agent_common::issuance::{IssuanceRefusalReason, IssuanceReply, IssuanceRequest};
 use credentials_agent_common::observer::ObserverRejection;
+use credentials_agent_common::workload_issuance::{
+    SealedIssuanceRequest, WorkloadIssuanceReply, WorkloadIssuanceRequest,
+};
 use polar::request_reply::{Envelope, ReplyError, ReplyRouter};
 use ractor::ActorRef;
 use std::sync::Arc;
@@ -111,6 +115,7 @@ pub struct ObserverState {
     pub identity_reply_router: Arc<ReplyRouter<IdentityNormalizationReply>>,
     pub account_reply_router: Arc<ReplyRouter<AccountReply>>,
     pub admin_action_reply_router: Arc<ReplyRouter<AdminActionReply>>,
+    pub workload_issuance_reply_router: Arc<ReplyRouter<WorkloadIssuanceReply>>,
 }
 
 /// One request relayed to the consumer and the wait for its reply: the exchange every handler
@@ -211,6 +216,81 @@ pub async fn issue(
     .await
     {
         Ok(reply) => reply_to_response(reply),
+        Err(response) => response,
+    }
+}
+
+/// How long a workload waits for the credentials agent to open a session: no token is involved and nothing is
+/// signed, so it is quick or it is not coming.
+const SESSION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `POST /workload/session`: a workload, before it has any certificate, asks for a session to seal its token to.
+/// The request carries nothing; the credentials agent's consumer answers with the public half of a fresh key.
+pub async fn workload_session(State(state): State<Arc<ObserverState>>) -> Response {
+    match relay(
+        &state.broker_client,
+        &state.workload_issuance_reply_router,
+        CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
+        "workload session",
+        WorkloadIssuanceRequest::OpenSession,
+        SESSION_TIMEOUT,
+    )
+    .await
+    {
+        Ok(WorkloadIssuanceReply::Offer(offer)) => (StatusCode::OK, Json(offer)).into_response(),
+        Ok(WorkloadIssuanceReply::Busy) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many sessions are open",
+        )
+            .into_response(),
+        Ok(_) => {
+            error!("the consumer answered a session request with something else");
+            (StatusCode::BAD_GATEWAY, "unexpected reply").into_response()
+        }
+        Err(response) => response,
+    }
+}
+
+/// `POST /workload/issue`: a workload asks for a certificate with its token sealed to a session. The observer
+/// checks only what is public (the CSR is a CSR) and relays the rest as it arrived: it cannot open the seal and
+/// never holds the token. The consumer decides everything, as for `/issue`.
+pub async fn workload_issue(
+    State(state): State<Arc<ObserverState>>,
+    Json(request): Json<SealedIssuanceRequest>,
+) -> Response {
+    if let Err(e) = cert_issuer::csr::parse_csr(&request.csr_pem) {
+        let rejection = ObserverRejection::MalformedCsr(e.to_string());
+        return (StatusCode::BAD_REQUEST, Json(rejection)).into_response();
+    }
+
+    // The token is sealed, so its expiry cannot be read to size the wait: the ceiling applies.
+    let timeout = Duration::from_secs(MAX_TIMEOUT_SECS as u64);
+    match relay(
+        &state.broker_client,
+        &state.workload_issuance_reply_router,
+        CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
+        "workload issuance",
+        WorkloadIssuanceRequest::Issue(request),
+        timeout,
+    )
+    .await
+    {
+        Ok(WorkloadIssuanceReply::Issuance(reply)) => reply_to_response(reply),
+        // The session is not there any more; the workload opens another.
+        Ok(WorkloadIssuanceReply::UnknownSession) => (
+            StatusCode::GONE,
+            Json(serde_json::json!({ "reason": "unknown_session" })),
+        )
+            .into_response(),
+        Ok(WorkloadIssuanceReply::Busy) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many sessions are open",
+        )
+            .into_response(),
+        Ok(WorkloadIssuanceReply::Offer(_)) => {
+            error!("the consumer answered a sealed request with a session offer");
+            (StatusCode::BAD_GATEWAY, "unexpected reply").into_response()
+        }
         Err(response) => response,
     }
 }
@@ -461,7 +541,7 @@ mod tests {
         broker
     }
 
-    fn well_formed_csr() -> String {
+    pub(super) fn well_formed_csr() -> String {
         let params =
             rcgen::CertificateParams::new(vec!["test.polar.svc.cluster.local".to_string()])
                 .expect("valid params");
@@ -516,6 +596,7 @@ mod tests {
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
+            workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -548,6 +629,7 @@ mod tests {
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
+            workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -578,6 +660,7 @@ mod tests {
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
+            workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -630,6 +713,7 @@ mod tests {
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
+            workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         // A credential with no readable exp claim falls back to the
@@ -750,6 +834,7 @@ mod tests {
             identity_reply_router,
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
+            workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = identity(
@@ -777,6 +862,7 @@ mod tests {
             identity_reply_router,
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
+            workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = identity(
@@ -822,6 +908,7 @@ mod tests {
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
+            workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         tokio::time::pause();
@@ -948,6 +1035,7 @@ mod account_tests {
             identity_reply_router: Arc::new(ReplyRouter::new()),
             account_reply_router,
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
+            workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
         })
     }
 
@@ -1239,5 +1327,213 @@ mod broker_handle_tests {
             rx_new.try_recv().is_err(),
             "the new client must not receive anything sent before the swap"
         );
+    }
+}
+
+#[cfg(test)]
+mod workload_tests {
+    use super::tests::well_formed_csr;
+    use super::*;
+    use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
+
+    // ---- a workload's own sealed request -------------------------------------------------------------------
+
+    use credentials_agent_common::ephemeral_exchange::{
+        EphemeralEncryptedPayload, EphemeralSession,
+    };
+    use credentials_agent_common::issuance::WorkloadCertType;
+    use credentials_agent_common::workload_issuance::SessionOffer;
+
+    /// A broker that records the workload requests it is asked to relay and answers each with a canned reply.
+    struct WorkloadBroker {
+        reply_router: Arc<ReplyRouter<WorkloadIssuanceReply>>,
+        canned_reply: WorkloadIssuanceReply,
+        relayed: Arc<std::sync::Mutex<Vec<WorkloadIssuanceRequest>>>,
+    }
+
+    #[async_trait]
+    impl Actor for WorkloadBroker {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { topic, payload, .. } = message {
+                assert_eq!(topic, CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC);
+                let envelope = rkyv::from_bytes::<
+                    Envelope<WorkloadIssuanceRequest>,
+                    rkyv::rancor::Error,
+                >(&payload)
+                .expect("the observer relays a workload request");
+                self.relayed.lock().unwrap().push(envelope.payload);
+                self.reply_router
+                    .deliver(&envelope.correlation_id, self.canned_reply.clone());
+            }
+            Ok(())
+        }
+    }
+
+    async fn workload_state(
+        canned_reply: WorkloadIssuanceReply,
+    ) -> (
+        Arc<ObserverState>,
+        Arc<std::sync::Mutex<Vec<WorkloadIssuanceRequest>>>,
+    ) {
+        let router = Arc::new(ReplyRouter::new());
+        let relayed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (broker, _) = Actor::spawn(
+            None,
+            WorkloadBroker {
+                reply_router: router.clone(),
+                canned_reply,
+                relayed: relayed.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        let state = Arc::new(ObserverState {
+            broker_client: broker.into(),
+            issuance_reply_router: Arc::new(ReplyRouter::new()),
+            identity_reply_router: Arc::new(ReplyRouter::new()),
+            account_reply_router: Arc::new(ReplyRouter::new()),
+            admin_action_reply_router: Arc::new(ReplyRouter::new()),
+            workload_issuance_reply_router: router,
+        });
+        (state, relayed)
+    }
+
+    fn an_offer() -> SessionOffer {
+        SessionOffer {
+            session_id: "session-1".to_string(),
+            public_key: EphemeralSession::open().public_key(),
+            valid_for_secs: 60,
+        }
+    }
+
+    fn a_sealed_request(offer: &SessionOffer, csr_pem: String) -> SealedIssuanceRequest {
+        SealedIssuanceRequest {
+            session_id: offer.session_id.clone(),
+            csr_pem,
+            cert_type: WorkloadCertType::Client,
+            names: vec![],
+            sealed_credential: EphemeralEncryptedPayload::encrypt(
+                b"a service-account token",
+                &offer.public_key,
+            )
+            .unwrap(),
+        }
+    }
+
+    async fn body_of(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn asking_for_a_session_relays_an_open_and_returns_the_offer() {
+        let offer = an_offer();
+        let (state, relayed) = workload_state(WorkloadIssuanceReply::Offer(offer.clone())).await;
+        let response = workload_session(State(state)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: SessionOffer = serde_json::from_str(&body_of(response).await).unwrap();
+        assert_eq!(body, offer);
+        assert!(matches!(
+            relayed.lock().unwrap().as_slice(),
+            [WorkloadIssuanceRequest::OpenSession]
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_full_table_of_sessions_is_unavailable_and_not_an_error() {
+        let (state, _) = workload_state(WorkloadIssuanceReply::Busy).await;
+        assert_eq!(
+            workload_session(State(state)).await.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sealed_request_is_relayed_exactly_as_it_arrived_and_its_reply_is_the_usual_one() {
+        let (state, relayed) =
+            workload_state(WorkloadIssuanceReply::Issuance(IssuanceReply::Issued {
+                certificate_pem: "cert".to_string(),
+                ca_chain_pem: "chain".to_string(),
+                escrow_public_key_pem: "key".to_string(),
+            }))
+            .await;
+        let request = a_sealed_request(&an_offer(), well_formed_csr());
+        let response = workload_issue(State(state), Json(request.clone())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        match relayed.lock().unwrap().as_slice() {
+            [WorkloadIssuanceRequest::Issue(relayed)] => {
+                assert_eq!(relayed.session_id, request.session_id);
+                assert_eq!(relayed.csr_pem, request.csr_pem);
+                assert_eq!(relayed.sealed_credential, request.sealed_credential);
+            }
+            other => panic!("expected one relayed Issue, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_mapped_as_it_is_for_the_clear_route() {
+        use credentials_agent_common::issuance::IssuanceRefusalReason::*;
+        for (reason, status) in [
+            (TokenInvalid, StatusCode::UNAUTHORIZED),
+            (AlreadyHasValidCertificate, StatusCode::FORBIDDEN),
+            (RequestNotPermitted, StatusCode::FORBIDDEN),
+            (SigningFailed, StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let (state, _) =
+                workload_state(WorkloadIssuanceReply::Issuance(IssuanceReply::Refused {
+                    reason,
+                }))
+                .await;
+            let response = workload_issue(
+                State(state),
+                Json(a_sealed_request(&an_offer(), well_formed_csr())),
+            )
+            .await;
+            assert_eq!(response.status(), status);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_that_is_gone_is_gone() {
+        let (state, _) = workload_state(WorkloadIssuanceReply::UnknownSession).await;
+        let response = workload_issue(
+            State(state),
+            Json(a_sealed_request(&an_offer(), well_formed_csr())),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::GONE);
+        assert!(body_of(response).await.contains("unknown_session"));
+    }
+
+    #[tokio::test]
+    async fn a_csr_that_is_not_one_is_turned_away_before_anything_is_relayed() {
+        let (state, relayed) = workload_state(WorkloadIssuanceReply::UnknownSession).await;
+        let response = workload_issue(
+            State(state),
+            Json(a_sealed_request(&an_offer(), "not a csr".to_string())),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(relayed.lock().unwrap().is_empty());
     }
 }
