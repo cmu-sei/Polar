@@ -1877,6 +1877,15 @@ mod tests {
         )
     }
 
+    /// Stops the actor and waits for it, so its `post_stop` releases the kernel key it loaded:
+    /// the machine's keyring is shared with the dev cluster's node, and nothing else unloads it.
+    async fn stop_and_release_key(actor: &ActorRef<CryptoMessage>) {
+        actor
+            .stop_and_wait(None, Some(std::time::Duration::from_secs(5)))
+            .await
+            .unwrap();
+    }
+
     async fn crypto_actor_holding_an_escrow_key(
         secrets: &[(&str, &[u8])],
         deny_retrieval: bool,
@@ -1912,6 +1921,7 @@ mod tests {
             result.unwrap().as_deref().map(|v| v.as_slice()),
             Some(&b"a token"[..])
         );
+        stop_and_release_key(&crypto).await;
     }
 
     #[tokio::test]
@@ -1923,6 +1933,7 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(result, Ok(None)), "{result:?}");
+        stop_and_release_key(&crypto).await;
     }
 
     #[tokio::test]
@@ -1937,6 +1948,7 @@ mod tests {
             matches!(result, Err(CryptoError::RetrieveSecretDenied(_))),
             "{result:?}"
         );
+        stop_and_release_key(&crypto).await;
     }
 
     #[tokio::test]
@@ -1952,6 +1964,7 @@ mod tests {
         .unwrap();
 
         assert!(result.is_ok(), "expected Ok(()), got {result:?}");
+        stop_and_release_key(&crypto_actor).await;
     }
 
     #[tokio::test]
@@ -1976,6 +1989,7 @@ mod tests {
             1,
             "escrow key should be queried exactly once, then served from cache"
         );
+        stop_and_release_key(&crypto_actor).await;
     }
     #[tokio::test]
     async fn decrypt_own_message_falls_back_to_real_issuance_when_nothing_is_escrowed_yet() {
@@ -2035,6 +2049,7 @@ mod tests {
             Ok(decrypted) => assert_eq!(decrypted, plaintext),
             other => panic!("expected Ok(_), got {other:?}"),
         }
+        stop_and_release_key(&crypto_actor).await;
     }
 
     #[tokio::test]
@@ -2075,6 +2090,7 @@ mod tests {
             Ok(decrypted) => assert_eq!(decrypted, plaintext),
             other => panic!("expected Ok(_), got {other:?}"),
         }
+        stop_and_release_key(&crypto_actor).await;
     }
 
     #[tokio::test]
@@ -2113,6 +2129,7 @@ mod tests {
             Err(CryptoError::IssuanceRefused(_)) => {}
             other => panic!("expected Err(IssuanceRefused(_)), got {other:?}"),
         }
+        stop_and_release_key(&crypto_actor).await;
     }
 
     #[tokio::test]
@@ -2160,6 +2177,7 @@ mod tests {
             second_result.is_ok(),
             "expected Ok(()), got {second_result:?}"
         );
+        stop_and_release_key(&crypto_actor).await;
     }
 
     #[tokio::test]
@@ -2204,6 +2222,7 @@ mod tests {
         let decrypted = escrowed.decrypt(&recipient_key).unwrap();
 
         assert_eq!(&*decrypted, plaintext);
+        stop_and_release_key(&crypto_actor).await;
     }
 
     #[tokio::test]
@@ -2240,6 +2259,7 @@ mod tests {
             1,
             "the recipient's own public key must genuinely be queried exactly once across three calls"
         );
+        stop_and_release_key(&crypto_actor).await;
     }
 
     #[tokio::test]
@@ -2267,6 +2287,7 @@ mod tests {
             }
             other => panic!("expected Err(RecipientKeyNotFound(_)), got {other:?}"),
         }
+        stop_and_release_key(&crypto_actor).await;
     }
 
     // -- a key the init container loaded into the kernel keyring ---------------------------
