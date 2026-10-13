@@ -60,6 +60,43 @@ authoritative update is accepted, an **event is raised** to every consumer of it
    is pushed. Changes set the cadence, and agents rejuvenate often enough that a quiet cluster repairs itself
    at registration.
 
+## Aging, and being told to catch up (David, 2026-10-13)
+
+**Status: decided, not built.** What an agent holds is a cache of the credentials agent's authority, and the cache
+has a lifetime.
+
+- **The cache is ephemeral state of the running pod, and that is right.** A pod cannot start without being able to
+  initialize its state (its certificates come from the credentials agent), so a cluster that has lost the authority is
+  on a ticking clock, and the end of the clock is every pod dropping back to its init container to wait. That is the
+  intended way to tell an administrator that the cluster is dying, in place of an agent running in a degraded state
+  for an unspecified time. There is no persistence of the cache.
+- **Valid until aged out or evicted.** An update is valid until the agent has gone longer than a maximum age
+  without hearing from the authority, or until it is told to catch up and cannot.
+- **What counts as hearing from it:** any verified message from the credentials agent: an update, a snapshot (the
+  half-hourly republish is the heartbeat), or the notice below. The clock restarts on each, not on each change.
+- **Defaults, chosen to be sensible and tunable** (`POLAR_AUTHORITY_MAX_AGE_SECS`, declared in the builder's
+  environment section):
+  - republish stays at 30 minutes (decision 8);
+  - an agent that has not heard for 45 minutes (one and a half periods) asks for a snapshot, as it does now when it
+    has no key;
+  - the cache expires at **90 minutes** (three periods: two republishes missed, plus margin).
+- **On expiry the agent fails its health check** with a reason that names the cause ("no authority update heard from
+  the credentials agent for 90 minutes"), which takes the existing shutdown pipeline to a restart into init. Until
+  then its decisions stand; from expiry they fail closed. The credentials agent is exempt (it is the authority; its
+  clock restarts at each of its own publications). An agent that has never verified a snapshot is not healthy: the
+  credentials agent always publishes one (the key, even before any policy exists), so this does not wait on a policy
+  being written.
+- **Forced eviction is a notice, not a new kind of policy.** When a significant event needs every agent at a given
+  revision and a plain "here is the new policy" may not be enough, the credentials agent publishes a signed
+  **revision notice**: the sequence agents must have reached, and a deadline in seconds. An agent behind it asks
+  for a snapshot at once; if it has not reached that sequence by the deadline it fails its health check as above and
+  restarts. An agent already at or past it needs do nothing; the notice also counts as hearing from the authority.
+  The update that carries the change (a higher-version policy, which can deny everything) is published as usual; the
+  notice is what makes catching up mandatory.
+- **A mismatch with the current code.** Today `AuthorityState` only compares versions (stale means "not higher"); it
+  has no clock, no expiry and no deadline, and the builder creates the authority holder only for Cassini clients.
+  Both would change. Tests first: an injected clock (the publisher's tests already use paused time).
+
 ## Where things are decided
 
 There are two evaluation sites, running the same machinery:
