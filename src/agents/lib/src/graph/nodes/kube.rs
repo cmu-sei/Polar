@@ -390,8 +390,6 @@ impl GraphNodeKey for KubeNodeKey {
                     ],
                 )
             }
-
-            _ => todo!("Handle unimplemented types"),
         }
     }
 }
