@@ -57,12 +57,16 @@
         { name: "GRAPH_DB",          value: "neo4j" }
         { name: "GRAPH_USER",        value: "neo4j" }
         { name: "GRAPH_PASSWORD",    secret: "polar-graph-pw", key: "secret" }
-        { name: "GRAPH_CLIENT_CERT", value: "/etc/neo4j-client-tls/cert.pem" }
-        { name: "GRAPH_CLIENT_KEY",  value: "/etc/neo4j-client-tls/key.pem" }
-        { name: "GRAPH_CA_CERT",     value: "/etc/neo4j-client-tls/ca.pem" }
+        { name: "GRAPH_CLIENT_CERT", value: "/etc/tls/certs/cert.pem" }
+        { name: "GRAPH_CLIENT_KEY",  value: "/etc/tls/certs/key.pem" }
+        { name: "GRAPH_CA_CERT",     value: "/etc/tls/certs/ca.pem" }
       ]
     }
-    identity: { certs: [ { dir: "/etc/neo4j-client-tls", volume: "neo4j-client-tls", read_only: true } ] }
+    # No certificate of its own: the pod presents the one client certificate it has (the identity facet's
+    # /etc/tls/certs) to Neo4j as it does to Cassini. Neo4j accepts any client certificate the Polar CA signed,
+    # so a second one, for the same identity and type with no extra names, said nothing the first did not, and
+    # the credentials agent issues one client certificate per pod instance.
+    identity: {}
     dependency: { service: "neo4j", ttl_secs: 300 }
     init: {}
     resources: {}

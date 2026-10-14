@@ -258,7 +258,7 @@ def main [] {
             assert equal (env_value $r "POLAR_HEALTH_CERTS") "/etc/tls/certs/cert.pem,/etc/tls/certs/ca.pem"
             # an agent still watches its own certificate only
             let agent = (resolve "kube-consumer")
-            assert equal (env_value $agent "POLAR_HEALTH_CERTS") "/etc/tls/certs/cert.pem,/etc/neo4j-client-tls/cert.pem"
+            assert equal (env_value $agent "POLAR_HEALTH_CERTS") "/etc/tls/certs/cert.pem"
         }
 
         "a kind can extend another and change only what differs": {
@@ -378,6 +378,29 @@ def main [] {
                 assert $g.vouchedOnly
                 assert equal $g.names ["polar-git-server.polar.svc.cluster.local"]
             }
+        }
+
+        "a graph agent presents the pod's one client certificate to Neo4j and does not ask for a second": {
+            # Two client certificates for one pod instance is what the credentials agent refuses (and a second
+            # would revoke the first), and the second was the same identity and type with no extra names, so
+            # Neo4j is shown the certificate the pod already has.
+            for n in [kube-consumer jira-processor polar-scheduler git-repo-processor git-repo-scheduler credentials-agent] {
+                let r = (resolve $n)
+                assert equal $r.certs ["client:/etc/tls/certs:ecdsa-p256:"] $n
+                assert ($r.volumes | where name == "neo4j-client-tls" | is-empty) $n
+                assert ($r.mounts | where name == "neo4j-client-tls" | is-empty) $n
+                assert ($r.init_mounts | where name == "neo4j-client-tls" | is-empty) $n
+                assert equal (env_value $r "GRAPH_CLIENT_CERT") "/etc/tls/certs/cert.pem" $n
+                assert equal (env_value $r "GRAPH_CLIENT_KEY") "/etc/tls/certs/key.pem" $n
+                assert equal (env_value $r "GRAPH_CA_CERT") "/etc/tls/certs/ca.pem" $n
+            }
+        }
+
+        "the health check watches the one certificate a graph agent has": {
+            let r = (resolve "kube-consumer")
+            let certs = (env_value $r "POLAR_HEALTH_CERTS")
+            assert ($certs | str contains "/etc/tls/certs/cert.pem")
+            assert (not ($certs | str contains "neo4j-client-tls"))
         }
 
         "the template does not see the settings record": {
