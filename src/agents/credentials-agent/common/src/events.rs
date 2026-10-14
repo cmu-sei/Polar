@@ -232,6 +232,14 @@ pub enum CredentialsEvent {
             skip_serializing_if = "crate::issuance::WorkloadCertType::is_client"
         )]
         cert_type: crate::issuance::WorkloadCertType,
+        /// The identity the credential was presented under, when a grant was found for it and differs from
+        /// `identity`. `identity` is the certificate's own (its DNS name: what the mTLS connection says, and so
+        /// what every lookup uses); a grant is written by an administrator from the identity provider's claim
+        /// before any certificate exists, so it is keyed on the credential's raw identity. This is the one
+        /// place the two meet. Absent means the grant, if any, was keyed on `identity`, which is how every
+        /// event written before this field existed reads.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant_key: Option<String>,
         /// The actual signed certificate, in plain PEM. Public by
         /// nature -- presented in plaintext during every mTLS
         /// handshake anyway -- so no encryption is needed here,
@@ -355,6 +363,21 @@ pub enum CredentialsEvent {
 }
 
 impl CredentialsEvent {
+    /// The key of the grant an issuance uses up, if this is one: the credential's own identity when it differs
+    /// from the certificate's (`grant_key`), otherwise the certificate's. State and the graph projection both
+    /// ask this, so they agree on which grant an issuance consumed. Only a client certificate consumes one.
+    pub fn consumed_grant_key(&self) -> Option<&str> {
+        match self {
+            CredentialsEvent::IssuanceCompleted {
+                identity,
+                grant_key,
+                cert_type,
+                ..
+            } if cert_type.is_client() => Some(grant_key.as_deref().unwrap_or(identity)),
+            _ => None,
+        }
+    }
+
     /// The effect event an `AdminActionRecorded` stands for, or `None`
     /// for any other event (and for an action with no effect yet).
     /// State and the graph projection both fold this, so there is one
@@ -460,6 +483,7 @@ mod tests {
             serial: "abc123".to_string(),
             timestamp: 1767225600000,
             cert_type: crate::issuance::WorkloadCertType::Client,
+            grant_key: None,
             certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                 .to_string(),
         }
@@ -478,9 +502,67 @@ mod tests {
                 serial: "c".into(),
                 timestamp: 1,
                 cert_type: crate::issuance::WorkloadCertType::Client,
+                grant_key: None,
                 certificate_pem: "p".into(),
             }
         );
+    }
+
+    #[test]
+    fn an_issuance_with_no_grant_key_is_written_without_one_and_one_with_it_round_trips() {
+        let plain = serde_json::to_string(&sample_issuance_completed()).unwrap();
+        assert!(!plain.contains("grant_key"), "{plain}");
+        let keyed = match sample_issuance_completed() {
+            CredentialsEvent::IssuanceCompleted {
+                identity,
+                instance_binding,
+                serial,
+                timestamp,
+                cert_type,
+                certificate_pem,
+                ..
+            } => CredentialsEvent::IssuanceCompleted {
+                identity,
+                instance_binding,
+                serial,
+                timestamp,
+                cert_type,
+                grant_key: Some("jdoe".into()),
+                certificate_pem,
+            },
+            _ => unreachable!(),
+        };
+        let json = serde_json::to_string(&keyed).unwrap();
+        assert!(json.contains(r#""grant_key":"jdoe""#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<CredentialsEvent>(&json).unwrap(),
+            keyed
+        );
+    }
+
+    #[test]
+    fn an_issuance_uses_up_the_grant_under_its_grant_key_or_else_its_identity() {
+        let with = |grant_key: Option<&str>, cert_type| CredentialsEvent::IssuanceCompleted {
+            identity: "jdoe.polar-auth".into(),
+            instance_binding: "b".into(),
+            serial: "s".into(),
+            timestamp: 1,
+            cert_type,
+            grant_key: grant_key.map(str::to_string),
+            certificate_pem: "p".into(),
+        };
+        use crate::issuance::WorkloadCertType::{Client, Server};
+        assert_eq!(
+            with(Some("jdoe"), Client).consumed_grant_key(),
+            Some("jdoe")
+        );
+        assert_eq!(
+            with(None, Client).consumed_grant_key(),
+            Some("jdoe.polar-auth")
+        );
+        // A server certificate carries no permissions, so it uses up nothing.
+        assert_eq!(with(Some("jdoe"), Server).consumed_grant_key(), None);
+        assert_eq!(sample_revoke().consumed_grant_key(), None);
     }
 
     #[test]
@@ -501,6 +583,7 @@ mod tests {
                 serial,
                 timestamp,
                 cert_type: crate::issuance::WorkloadCertType::Server,
+                grant_key: None,
                 certificate_pem,
             },
             _ => unreachable!(),

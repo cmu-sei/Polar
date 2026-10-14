@@ -254,6 +254,8 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
             // A client or a server certificate is a Certificate node alike; the graph keeps no more
             // about it than it does about either's PEM.
             cert_type: _,
+            // Which grant it used up is the fold's business (state.rs), not a fact about the certificate.
+            grant_key: _,
             // Deliberately not projected -- the graph stays
             // metadata-only, observability-only; a full cert PEM
             // doesn't belong there. Lookup goes through LedgerActor's
@@ -478,18 +480,12 @@ async fn project_single_event(
     ledger: &ActorRef<LedgerMessage>,
 ) {
     // Only a client certificate uses up a grant (state.rs), so only it can have found one.
-    let grant_existed = if let CredentialsEvent::IssuanceCompleted {
-        identity,
-        cert_type,
-        ..
-    } = event
-        && cert_type.is_client()
-    {
+    let grant_existed = if let Some(key) = event.consumed_grant_key() {
         matches!(
             ractor::rpc::call(
                 ledger,
                 |reply| LedgerMessage::CheckGrant {
-                    identity: identity.clone(),
+                    identity: key.to_string(),
                     reply,
                 },
                 None,
@@ -587,17 +583,9 @@ fn ops_for_catch_up(
             continue;
         }
 
-        let grant_existed = if let CredentialsEvent::IssuanceCompleted {
-            identity,
-            cert_type,
-            ..
-        } = event
-            && cert_type.is_client()
-        {
-            state.grant_for(identity).is_some()
-        } else {
-            false
-        };
+        let grant_existed = event
+            .consumed_grant_key()
+            .is_some_and(|key| state.grant_for(key).is_some());
 
         let superseded_serials = state.apply(event);
         ops.extend(graph_ops_for_event(event, grant_existed));
@@ -763,6 +751,7 @@ pub(crate) mod tests {
             serial: "serial-1".to_string(),
             timestamp: 2000,
             cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
+            grant_key: None,
             certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                 .to_string(),
         };

@@ -1474,7 +1474,9 @@ mod issuance_wiring_tests {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
                     jti: None,
-                    normalized_identity: None,
+                    normalized_identity: Some(
+                        "admin-tool.polar.serviceaccount.cluster.local".to_string(),
+                    ),
                 },
             ))
             .mount(&cert_issuer)
@@ -1557,7 +1559,7 @@ mod issuance_wiring_tests {
         assert!(
             check_renewal(
                 &ledger,
-                "system:serviceaccount:polar:admin-tool",
+                "admin-tool.polar.serviceaccount.cluster.local",
                 "admin-tool-uid"
             )
             .await,
@@ -1637,7 +1639,9 @@ mod issuance_wiring_tests {
                     workload_identity: "system:serviceaccount:polar:git-server".to_string(),
                     instance_binding: Some("pod-1".to_string()),
                     jti: None,
-                    normalized_identity: None,
+                    normalized_identity: Some(
+                        "git-server.polar.serviceaccount.cluster.local".to_string(),
+                    ),
                 },
             ))
             .mount(&cert_issuer)
@@ -1755,7 +1759,12 @@ mod issuance_wiring_tests {
             issued.payload
         );
         assert!(
-            check_renewal(&ledger, "system:serviceaccount:polar:git-server", "pod-1").await,
+            check_renewal(
+                &ledger,
+                "git-server.polar.serviceaccount.cluster.local",
+                "pod-1"
+            )
+            .await,
             "the issuance must be recorded in the ledger"
         );
         // And nowhere on the wire is the token in the clear.
@@ -1831,7 +1840,9 @@ mod agent_escrow_wiring_tests {
                     workload_identity: "system:serviceaccount:polar:git-observer".to_string(),
                     instance_binding: Some("pod-uid-1".to_string()),
                     jti: None,
-                    normalized_identity: None,
+                    normalized_identity: Some(
+                        "git-observer.polar.serviceaccount.cluster.local".to_string(),
+                    ),
                 },
             ))
             .mount(&cert_issuer)
@@ -2574,6 +2585,7 @@ mod decrypt_on_behalf_of_wiring_tests {
                     serial: "requester-serial-1".to_string(),
                     timestamp: 1000,
                     cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
+                    grant_key: None,
                     certificate_pem: requester_certificate_pem,
                 },
                 reply,

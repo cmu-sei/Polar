@@ -788,6 +788,22 @@ incoming requests against the Credentials Agent's own issuance records
 together, and refuses any request where that exact pair already holds
 a currently valid, unrevoked certificate.
 
+**Which identity.** A credential has two names, and the ledger keeps each where it belongs (decided 2026-10-14, after
+the secret harness showed `RequesterCertificateNotFound` for a pod whose certificate had been issued through the
+credentials agent). The **certificate's identity** is the normalized one, its DNS name (`name.ns.serviceaccount.<domain>`
+for a workload, `claim.scope` for an identity-provider credential, the account's UUID for an account). It is what the
+mTLS connection says, so it is what every lookup uses: `IssuanceCompleted.identity`, the renewal check above, the
+requester of a retrieve, store or decrypt, the owner of a secret, the recipient of an encrypted payload. The
+**credential's own identity** (the token's raw one) is what a *grant* is written under, because an administrator names
+the identity provider's claim before any certificate exists. The issuance event is where the two meet, so it carries
+the second only when a grant was found, as the optional `grant_key`; the fold uses up the grant under
+`grant_key`, or under `identity` when there is none, which is how every event written before the field existed reads
+(`CredentialsEvent::consumed_grant_key` is the one derivation, used by state and the graph projection). The issuance
+handler asks cert-issuer for the normalized identity and refuses a credential it is not given one for, since recording
+the raw name would put the certificate where nothing looks for it. The properties are unchanged: a grant is single-use
+and used up at issuance, a pod instance cannot renew itself (the check is still `(identity, instance_binding, type)`),
+and the normalized identity comes from cert-issuer's own validation of the token, never from the caller.
+
 `instance_binding` is `IssuerConfig.instance_binding_claim`, present
 since v1 but previously unused beyond audit telemetry (for Kubernetes,
 the requesting pod's own UID). Scoping the check to the pair, not

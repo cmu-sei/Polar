@@ -194,7 +194,11 @@ impl IssuanceHandler {
             .cert_issuer
             .validate(
                 &request.credential,
-                cert_issuer_common::ValidateRequest::default(),
+                // The certificate's own identity: what the pod will present on every mTLS connection, and so
+                // what the retrieve, store and decrypt handlers look the requester up by.
+                cert_issuer_common::ValidateRequest {
+                    include_normalized_identity: true,
+                },
             )
             .await
         {
@@ -207,7 +211,19 @@ impl IssuanceHandler {
             }
         };
 
-        let identity = validated.workload_identity;
+        // Two names for one credential. The token's own identity is what a grant is written under (an
+        // administrator names the claim); the certificate's is what everything else in the ledger is keyed on.
+        // With no normalized identity there is no telling where the certificate would be looked for, so the
+        // request is refused and not recorded under the raw name.
+        let token_identity = validated.workload_identity;
+        let Some(identity) = validated.normalized_identity else {
+            warn!(
+                "cert-issuer gave no normalized identity for '{token_identity}' -- refusing rather than recording the certificate where nothing looks for it"
+            );
+            return IssuanceReply::Refused {
+                reason: IssuanceRefusalReason::TokenInvalid,
+            };
+        };
         // Fails closed rather than proceeding with a degraded renewal
         // check: instance_binding is what the pod-cannot-renew-itself
         // property is actually keyed on, so a token/config combination
@@ -245,7 +261,7 @@ impl IssuanceHandler {
         }
 
         // ---- Step 5: grant lookup ----
-        let grant = match call_check_grant(&self.ledger, &identity).await {
+        let grant = match call_check_grant(&self.ledger, &token_identity).await {
             Ok(g) => g,
             Err(e) => {
                 error!("Ledger CheckGrant call failed: {e}");
@@ -255,6 +271,8 @@ impl IssuanceHandler {
             }
         };
 
+        // The grant, if there is one, is used up under the token's identity when the event is folded.
+        let grant_key = grant.as_ref().map(|_| token_identity.clone());
         let permissions = match (kind, grant) {
             (CredentialKind::LikelyIdp, None) => {
                 return IssuanceReply::Refused {
@@ -303,6 +321,7 @@ impl IssuanceHandler {
             serial: issued.serial_number,
             timestamp: polar::time::now_millis(),
             cert_type: request.cert_type,
+            grant_key,
             certificate_pem: issued.certificate_pem.clone(),
         };
         if let Err(e) = call_append(&self.ledger, event).await {
@@ -427,6 +446,66 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_workloads_certificate_can_be_found_by_the_identity_the_certificate_carries() {
+        // The retrieve, store and decrypt handlers find the requester's certificate by the identity of its mTLS
+        // connection, which is the certificate's DNS name: the normalized identity, not the token's raw one.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/validate"))
+            // cert-issuer returns the normalized identity only when asked for it.
+            .and(body_partial_json(serde_json::json!({
+                "include_normalized_identity": true
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::ValidateResponse {
+                    workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
+                    instance_binding: Some("admin-tool-uid".to_string()),
+                    jti: None,
+                    normalized_identity: Some(
+                        "admin-tool.polar.serviceaccount.cluster.local".to_string(),
+                    ),
+                },
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fake_issue_response()))
+            .mount(&server)
+            .await;
+        let ledger = spawn_test_ledger().await;
+        let handler = IssuanceHandler {
+            ledger: ledger.clone(),
+            cert_issuer: HandshakeClient::new(server.uri()),
+            introspection: None,
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
+            escrow_keypair: crate::escrow::tests::test_keypair(),
+        };
+        let reply = handler
+            .handle(IssuanceRequest {
+                csr_pem: "fake-csr".to_string(),
+                credential: make_token("https://kubernetes.default.svc.cluster.local"),
+                cert_type: Default::default(),
+                names: vec![],
+            })
+            .await;
+        assert!(matches!(reply, IssuanceReply::Issued { .. }));
+
+        let found = crate::retrieve_secret::call_check_certificate(
+            &ledger,
+            "admin-tool.polar.serviceaccount.cluster.local",
+        )
+        .await
+        .unwrap();
+        assert!(
+            found.is_some(),
+            "the certificate the pod was issued is not found by the identity it presents"
+        );
+    }
+
+    #[tokio::test]
     async fn kubernetes_credential_succeeds_without_a_grant() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -436,7 +515,9 @@ pub(crate) mod tests {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
                     jti: None,
-                    normalized_identity: None,
+                    normalized_identity: Some(
+                        "admin-tool.polar.serviceaccount.cluster.local".to_string(),
+                    ),
                 },
             ))
             .mount(&server)
@@ -486,7 +567,7 @@ pub(crate) mod tests {
                     workload_identity: "testuser".to_string(),
                     instance_binding: Some("session-1".to_string()),
                     jti: None,
-                    normalized_identity: None,
+                    normalized_identity: Some("testuser.polar-auth".to_string()),
                 },
             ))
             .mount(&server)
@@ -555,6 +636,66 @@ pub(crate) mod tests {
             .await;
 
         assert!(matches!(reply, IssuanceReply::Issued { .. }));
+
+        // The grant was written from the identity provider's claim (`testuser`); the certificate carries
+        // the normalized identity. The grant is used up under the first and the certificate found under
+        // the second, and the claim is not a certificate identity at all.
+        assert!(
+            call_check_grant(&handler.ledger, "testuser")
+                .await
+                .unwrap()
+                .is_none(),
+            "the grant was not used up"
+        );
+        assert!(
+            crate::retrieve_secret::call_check_certificate(&handler.ledger, "testuser.polar-auth")
+                .await
+                .unwrap()
+                .is_some(),
+            "the certificate is not found by the identity it carries"
+        );
+        assert!(
+            crate::retrieve_secret::call_check_certificate(&handler.ledger, "testuser")
+                .await
+                .unwrap()
+                .is_none(),
+            "the raw claim must not find a certificate"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_credential_the_issuer_gave_no_normalized_identity_for_is_refused() {
+        // Fails closed: recording the raw identity would put the certificate where nothing looks for it.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/validate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::ValidateResponse {
+                    workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
+                    instance_binding: Some("admin-tool-uid".to_string()),
+                    jti: None,
+                    normalized_identity: None,
+                },
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let handler = handler_for(&server, spawn_test_ledger().await).await;
+        let reply = handler.handle(request_for(Client, &[])).await;
+        assert!(
+            matches!(
+                reply,
+                IssuanceReply::Refused {
+                    reason: IssuanceRefusalReason::TokenInvalid
+                }
+            ),
+            "{reply:?}"
+        );
     }
 
     #[tokio::test]
@@ -574,7 +715,7 @@ pub(crate) mod tests {
                     workload_identity: "nobody-granted-this-user".to_string(),
                     instance_binding: Some("session-1".to_string()),
                     jti: None,
-                    normalized_identity: None,
+                    normalized_identity: Some("nobody-granted-this-user.polar-auth".to_string()),
                 },
             ))
             .mount(&server)
@@ -623,7 +764,9 @@ pub(crate) mod tests {
                     workload_identity: "system:serviceaccount:polar:admin-tool".to_string(),
                     instance_binding: Some("admin-tool-uid".to_string()),
                     jti: None,
-                    normalized_identity: None,
+                    normalized_identity: Some(
+                        "admin-tool.polar.serviceaccount.cluster.local".to_string(),
+                    ),
                 },
             ))
             .mount(&server)
@@ -644,11 +787,12 @@ pub(crate) mod tests {
                 &ledger,
                 |reply| LedgerMessage::Append {
                     event: CredentialsEvent::IssuanceCompleted {
-                        identity: "system:serviceaccount:polar:admin-tool".to_string(),
+                        identity: "admin-tool.polar.serviceaccount.cluster.local".to_string(),
                         instance_binding: "admin-tool-uid".to_string(),
                         serial: "already-issued-serial".to_string(),
                         timestamp: 1000,
                         cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
+                        grant_key: None,
                         certificate_pem:
                             "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                                 .to_string(),
@@ -866,7 +1010,9 @@ pub(crate) mod tests {
                     workload_identity: "system:serviceaccount:polar:git-server".to_string(),
                     instance_binding: Some(instance_binding.to_string()),
                     jti: None,
-                    normalized_identity: None,
+                    normalized_identity: Some(
+                        "git-server.polar.serviceaccount.cluster.local".to_string(),
+                    ),
                 },
             ))
             .mount(server)

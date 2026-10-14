@@ -757,6 +757,7 @@ pub(crate) mod tests {
                 serial: "serial-1".to_string(),
                 timestamp: 2000,
                 cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
+                grant_key: None,
                 certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                     .to_string(),
             },
@@ -853,6 +854,7 @@ pub(crate) mod tests {
                     serial: "serial-1".to_string(),
                     timestamp: 2000,
                     cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
+                    grant_key: None,
                     certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                         .to_string(),
                 },

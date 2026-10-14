@@ -146,7 +146,9 @@ mod tests {
                     workload_identity: "system:serviceaccount:polar:git-server".to_string(),
                     instance_binding: Some("pod-1".to_string()),
                     jti: None,
-                    normalized_identity: None,
+                    normalized_identity: Some(
+                        "git-server.polar.serviceaccount.cluster.local".to_string(),
+                    ),
                 },
             ))
             .mount(&server)

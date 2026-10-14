@@ -275,6 +275,7 @@ impl CredentialsState {
                 timestamp,
                 cert_type,
                 certificate_pem,
+                grant_key: _,
             } => {
                 // Single-use: remove the matching grant, if any. A
                 // harmless no-op when there isn't one -- exactly what
@@ -285,8 +286,8 @@ impl CredentialsState {
                 // does not carry, and a server certificate issued first
                 // must not take them from the client certificate that
                 // follows.
-                if cert_type.is_client() {
-                    self.active_grants.remove(identity);
+                if let Some(key) = event.consumed_grant_key() {
+                    self.active_grants.remove(key);
                 }
 
                 // A reissue for the same identity supersedes any
@@ -625,6 +626,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_issuance_under_a_grant_key_uses_up_that_grant_and_not_one_named_like_the_certificate() {
+        let mut state = CredentialsState::default();
+        // A grant written from the identity provider's claim, and an unrelated one that happens to be named
+        // like the certificate's identity.
+        state.apply(&grant("jdoe"));
+        state.apply(&grant("jdoe.polar-auth"));
+        state.apply(&issued_under_grant(
+            "jdoe.polar-auth",
+            "jdoe",
+            "pod-1",
+            "s1",
+        ));
+        assert!(
+            state.grant_for("jdoe").is_none(),
+            "the grant it was issued under is used up"
+        );
+        assert!(
+            state.grant_for("jdoe.polar-auth").is_some(),
+            "a different grant is left alone"
+        );
+        assert!(state.certificate_for("jdoe.polar-auth").is_some());
+        assert!(state.certificate_for("jdoe").is_none());
+    }
+
+    #[test]
+    fn an_issuance_written_before_grant_keys_existed_uses_up_the_grant_under_its_identity() {
+        let mut state = CredentialsState::default();
+        state.apply(&grant("jdoe"));
+        state.apply(&issued("jdoe", "pod-1", "s1"));
+        assert!(state.grant_for("jdoe").is_none());
+    }
+
+    #[test]
     fn only_the_identity_that_stored_a_secret_may_store_that_name_again() {
         let keypair = crate::escrow::tests::test_keypair();
         let mut state = CredentialsState::default();
@@ -691,6 +725,34 @@ mod tests {
         }
     }
 
+    fn issued_under_grant(
+        identity: &str,
+        grant_key: &str,
+        instance_binding: &str,
+        serial: &str,
+    ) -> CredentialsEvent {
+        match issued(identity, instance_binding, serial) {
+            CredentialsEvent::IssuanceCompleted {
+                identity,
+                instance_binding,
+                serial,
+                timestamp,
+                cert_type,
+                certificate_pem,
+                ..
+            } => CredentialsEvent::IssuanceCompleted {
+                identity,
+                instance_binding,
+                serial,
+                timestamp,
+                cert_type,
+                grant_key: Some(grant_key.to_string()),
+                certificate_pem,
+            },
+            other => other,
+        }
+    }
+
     fn issued(identity: &str, instance_binding: &str, serial: &str) -> CredentialsEvent {
         issued_as(identity, instance_binding, serial, WorkloadCertType::Client)
     }
@@ -707,6 +769,7 @@ mod tests {
             serial: serial.to_string(),
             timestamp: 2000,
             cert_type,
+            grant_key: None,
             certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                 .to_string(),
         }

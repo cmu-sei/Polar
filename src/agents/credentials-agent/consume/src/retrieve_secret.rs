@@ -312,6 +312,7 @@ pub(crate) mod tests {
                 instance_binding: "pod-uid-1".to_string(),
                 serial: format!("{identity}-serial-1"),
                 timestamp: 1000,
+                grant_key: None,
                 certificate_pem,
                 cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
             },
