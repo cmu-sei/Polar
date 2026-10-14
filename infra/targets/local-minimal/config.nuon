@@ -29,7 +29,8 @@
     secret-harness-intruder: { issuer: "credentials-agent" }
     # Group 2: the workloads that ask for one client certificate. The ones that also open a Neo4j connection ask
     # for a second client certificate (/etc/neo4j-client-tls), which the credentials agent does not issue
-    # (one client and one server certificate per pod instance); that belongs to the builder migration.
+    # (one client and one server certificate per pod instance). They move once the graph connection presents
+    # the pod's one client certificate instead (the graph-write capability).
     kube-observer: { issuer: "credentials-agent" }
     git-repo-observer: { issuer: "credentials-agent" }
     polar-scheduler-observer: { issuer: "credentials-agent" }
