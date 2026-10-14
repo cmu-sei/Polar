@@ -188,12 +188,13 @@ Closed for the agents on the builder:
 
 Still open:
 
-1. **Most workloads are not in the catalog.** Only `kube-observer`, `kube-consumer`,
-   `jira-observer`, `jira-processor`, the credentials agent's consumer and observer and the
-   Cassini broker (a service, not a client) are. The
+1. **Some workloads are not in the catalog.** `kube-observer`, `kube-consumer`,
+   `jira-observer`, `jira-processor`, the credentials agent's consumer and observer, the
+   Cassini broker (a service, not a client), the git observer, processor and scheduler, the
+   polar-scheduler pair, the OCI resolver and the git server are. The
    rest are hand-written charts under `infra/layers/`: `polar-init`, ace, cert-issuer, Neo4j,
-   Postgres, Keycloak, Jaeger; and the agents not yet on the builder (gitlab, git, scheduler,
-   openapi, build-processor, resolver) are in neither. Their numbers are tied to their code by
+   Postgres, Keycloak, Jaeger; and the agents not yet on the builder (gitlab, openapi,
+   build-processor) are in neither. Their numbers are tied to their code by
    convention or by the runtime check only.
 2. **`render.nu` on its own still asks the source tree** (`cargo run`); `up.nu` makes it ask the
    built image, the artifact that deploys (`configuration.md` 9.7).
