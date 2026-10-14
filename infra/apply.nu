@@ -42,12 +42,18 @@ export def jobs_in [got: record] {
 # Whether to delete and re-apply a manifest holding Jobs, and why.
 #
 # `diff_exit` is the exit code of `kubectl diff -f <manifest>`: 0 no differences, 1 differences,
-# more than 1 it could not compare. `jobs` is each Job in the file with whether its pod is
-# ready and whether it has finished. `rebuilt` is whether the images were just rebuilt: they
-# keep their tags, so an unchanged manifest would leave the old code running.
-export def job_verdict [diff_exit: int, jobs: list, rebuilt: bool = false] {
-    if $rebuilt {
-        return { restart: true, reason: "the images were rebuilt (--dev), and keep their tags" }
+# more than 1 it could not compare. `jobs` is each Job in the file with whether its pod is ready
+# and whether it has finished. `stale` is what `stale_images` found for them: images are rebuilt
+# under the same tag, so an unchanged manifest would leave the old code running, and only a Job
+# whose own image is no longer what the registry serves has anything to restart for. `changed_config`
+# is the ConfigMaps these Jobs use that were just changed: a Job reads its ConfigMap when it starts, so
+# an unchanged manifest would leave it running on the old one.
+export def job_verdict [diff_exit: int, jobs: list, stale: list<string> = [], changed_config: list<string> = []] {
+    if ($stale | is-not-empty) {
+        return { restart: true, reason: $"its image was rebuilt, ($stale | str join '; ')" }
+    }
+    if ($changed_config | is-not-empty) {
+        return { restart: true, reason: $"its ConfigMap changed, ($changed_config | str join ', ')" }
     }
     if $diff_exit == 1 {
         return { restart: true, reason: "differs from the cluster (or is not there yet)" }
@@ -61,6 +67,65 @@ export def job_verdict [diff_exit: int, jobs: list, rebuilt: bool = false] {
     } else {
         { restart: true, reason: $"unchanged, but not ready: ($unwell | str join ', ')" }
     }
+}
+
+# The ConfigMaps `kubectl apply` reported as changed (it says `configured`; `created` has no running
+# user yet, and `unchanged` changed nothing).
+export def changed_configmaps [apply_output: string] {
+    $apply_output
+    | lines
+    | parse --regex '^configmap/(?<name>\S+) configured\s*$'
+    | get name
+}
+
+# The workloads in a manifest that read a ConfigMap, and which: `{ kind, name, ns, configmaps }` for each Job,
+# Deployment and StatefulSet. They read it when they start, so a changed ConfigMap changes nothing for
+# one that is running.
+export def config_users [manifest: string] {
+    $manifest
+    | split row "\n---"
+    | each {|text| try { $text | from yaml } catch { null } }
+    | compact
+    | where {|d| ($d | describe | str starts-with "record") and (($d.kind? | default "") in ["Job" "Deployment" "StatefulSet"]) }
+    | each {|d|
+        let pod = ($d | get -o spec.template.spec | default {})
+        let containers = (($pod | get -o containers | default []) ++ ($pod | get -o initContainers | default []))
+        let from_volumes = ($pod | get -o volumes | default [] | each {|v|
+            [ ($v | get -o configMap.name) ] ++ ($v | get -o projected.sources | default [] | each {|s| $s | get -o configMap.name })
+        } | flatten)
+        let from_env_from = ($containers | each {|c| $c | get -o envFrom | default [] | each {|e| $e | get -o configMapRef.name } } | flatten)
+        let from_env = ($containers | each {|c| $c | get -o env | default [] | each {|e| $e | get -o valueFrom.configMapKeyRef.name } } | flatten)
+        {
+            kind: $d.kind
+            name: $d.metadata.name
+            ns: ($d.metadata?.namespace? | default $POLAR)
+            configmaps: (($from_volumes ++ $from_env_from ++ $from_env) | compact | uniq)
+        }
+    }
+}
+
+# Whether a Deployment or StatefulSet that uses ConfigMaps that just changed has to be rolled: it reads them
+# when its pods start. Not when its own spec changed (its `metadata.generation` went up, so it is rolling
+# already: `kubectl apply` prints `configured` for more than that, so its words are not the test), and not when it
+# did not exist before. `before` and `after` are the generation around the apply, null when there is none.
+export def workload_needs_restart [before: any, after: any, changed_configmaps: list] {
+    ($changed_configmaps | is-not-empty) and ($before != null) and ($before == $after)
+}
+
+# The images in `running` (each `{ image, digest }`: what a pod is running) that the registry no longer
+# serves under that tag: `served` is `{ image, digest }` for each the registry answered for. An image the
+# registry did not answer for is never called stale, since nothing is known. Each is a sentence saying so.
+export def stale_images [running: list, served: list] {
+    $running
+    | uniq
+    | each {|r|
+        let hit = ($served | where image == $r.image)
+        if ($hit | is-empty) { null } else {
+            let now = ($hit | first | get digest)
+            if $now == $r.digest { null } else { $"($r.image) runs ($r.digest), the registry has ($now)" }
+        }
+    }
+    | compact
 }
 
 # Whether any pod in `items` (the `items` of `kubectl get pods -o json`) is Running with every

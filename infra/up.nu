@@ -39,7 +39,7 @@ use retry.nu [with_retries]
 use forwards.nu [ensure_observer_forward]
 use seed.nu
 use plan.nu [build_forwards, build_plan, deployed_charts]
-use apply.nu [any_pod_ready, gate_after, job_verdict, jobs_in]
+use apply.nu [any_pod_ready, changed_configmaps, config_users, gate_after, job_verdict, jobs_in, stale_images, workload_needs_restart]
 
 def note [msg: string] { print $"  -- ($msg)" }
 def ok [msg: string] { print $"  ok: ($msg)" }
@@ -73,16 +73,69 @@ def cmd_ok [] {
     $r.exit_code == 0
 }
 
-# kubectl apply, deleting first when the manifest holds a Job (their pod templates are
-# immutable). A manifest whose Jobs are unchanged and ready is left alone, unless the images
-# were just rebuilt: a re-run should not restart what is already running, since that drops
-# every session its peers hold (decided by apply.nu's job_verdict).
-def apply_file [output_dir: string, filename: string, rebuilt: bool = false] {
+# The registry as this machine reaches it. The cluster names it differently (10.0.2.2:5000, the host as the
+# node sees it), so an image reference is looked up here by its path and tag.
+def registry_host [] { $env.POLAR_REGISTRY? | default "localhost:5000" }
+
+# The digest the registry serves for an image as the cluster names it ("10.0.2.2:5000/x:latest"), or null
+# when it cannot say. The same digest a pod reports as its image once it has pulled it.
+def served_digest [image: string] {
+    let parsed = ($image | parse --regex '^[^/]+/(?<name>.+):(?<tag>[^:/]+)$')
+    if ($parsed | is-empty) { return null }
+    let url = $"http://(registry_host)/v2/($parsed.0.name)/manifests/($parsed.0.tag)"
+    let r = (do { ^curl -sI -m 5 -H "Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json" $url } | complete)
+    if $r.exit_code != 0 { return null }
+    let line = ($r.stdout | lines | where {|l| ($l | str downcase | str starts-with "docker-content-digest:") })
+    if ($line | is-empty) { null } else { $line | first | str replace --regex '(?i)^docker-content-digest:\s*' '' | str trim }
+}
+
+# The images a Job's pods are running, init containers too (polar-init is rebuilt like the rest): the image
+# as the pod names it, and the digest it pulled.
+def running_images [ns: string, job: string] {
+    let r = (do { ^kubectl -n $ns get pods -l $"job-name=($job)" -o json } | complete)
+    if $r.exit_code != 0 { return [] }
+    $r.stdout
+    | from json
+    | get items
+    | where {|p| (($p.metadata?.deletionTimestamp? | default null) == null) and (($p.status?.phase? | default "") == "Running") }
+    | each {|p|
+        (($p.status?.containerStatuses? | default []) ++ ($p.status?.initContainerStatuses? | default []))
+        | where {|c| ($c.imageID? | default "") != "" }
+        | each {|c| { image: $c.image, digest: ($c.imageID | split row "@" | last) } }
+    }
+    | flatten
+}
+
+# A Deployment's or StatefulSet's `metadata.generation`, which goes up only when its spec changes, or null when
+# there is no such object.
+def generation_of [ns: string, kind: string, name: string] {
+    let r = (do { ^kubectl -n $ns get $"($kind)/($name)" -o jsonpath="{.metadata.generation}" } | complete)
+    let text = ($r.stdout | str trim)
+    if $r.exit_code != 0 or ($text | is-empty) { null } else { $text | into int }
+}
+
+# Which of these Jobs run an image the registry no longer serves under that tag (apply.nu's stale_images).
+def stale_for [jobs: list] {
+    let running = ($jobs | each {|j| running_images $j.ns $j.name } | flatten)
+    if ($running | is-empty) { return [] }
+    let served = ($running | get image | uniq | each {|i| { image: $i, digest: (served_digest $i) } } | where digest != null)
+    stale_images $running $served
+}
+
+# kubectl apply, deleting first when the manifest holds a Job (their pod templates are immutable). A manifest
+# whose Jobs are unchanged and ready is left alone: restarting what is already running drops every session its
+# peers hold. It is restarted when the manifest differs, when a Job's image is no longer what the registry
+# serves (images keep their tags, so an unchanged manifest would leave the old code running, and only a Job whose
+# own image changed has anything to restart for), or when a ConfigMap it uses was just changed (it reads it at
+# start). A Deployment or StatefulSet that uses a ConfigMap that just changed is rolled the same way.
+# `changed` is the ConfigMaps changed by the manifests applied before this one; returns the ones this one changed.
+def apply_file [output_dir: string, filename: string, changed: list<string> = []] {
     let manifest = ($output_dir | path join $filename)
     if not ($manifest | path exists) {
         note $"skipping ($filename), not found"
-        return
+        return { changed: [] }
     }
+    let users = (config_users (open --raw $manifest))
     let has_job = (open --raw $manifest
         | find --regex r#'(?m)^\s*["']?kind["']?\s*:\s*["']?Job["']?\s*,?\s*$'#
         | is-not-empty)
@@ -95,10 +148,12 @@ def apply_file [output_dir: string, filename: string, rebuilt: bool = false] {
                 | each {|j| $j | insert ready (pod_ready $j.ns $"job-name=($j.name)") }
             } else { [] }
         } else { [] }
-        let verdict = (job_verdict $diff.exit_code $jobs $rebuilt)
+        let stale = if $diff.exit_code == 0 { stale_for $jobs } else { [] }
+        let changed_config = ($users | where kind == "Job" | get configmaps | flatten | where {|c| $c in $changed } | uniq)
+        let verdict = (job_verdict $diff.exit_code $jobs $stale $changed_config)
         if not $verdict.restart {
             ok $"($filename): left running, ($verdict.reason)"
-            return
+            return { changed: [] }
         }
         note $"($filename): restarting its Jobs, ($verdict.reason)"
     }
@@ -106,8 +161,29 @@ def apply_file [output_dir: string, filename: string, rebuilt: bool = false] {
     if $has_job {
         ^kubectl delete --ignore-not-found -f $manifest
     }
-    ^kubectl apply -f $manifest
-    if $env.LAST_EXIT_CODE != 0 { fail $"kubectl apply failed for ($filename)" }
+    let rollers = ($users | where kind in ["Deployment" "StatefulSet"])
+    let before = ($rollers | each {|u| generation_of $u.ns ($u.kind | str downcase) $u.name })
+    let applied = (do { ^kubectl apply -f $manifest } | complete)
+    print ($applied.stdout | str trim)
+    if $applied.exit_code != 0 {
+        print -e ($applied.stderr | str trim)
+        fail $"kubectl apply failed for ($filename)"
+    }
+    let now_changed = (changed_configmaps $applied.stdout)
+    # A Deployment or StatefulSet is not restarted by its ConfigMap changing, and it reads the ConfigMap when its
+    # pods start. If its own spec changed it is rolling already and is not rolled twice; whether it did is its
+    # generation, not what kubectl printed, since `configured` is printed for more than a changed spec.
+    for it in ($rollers | enumerate) {
+        let u = $it.item
+        let kind = ($u.kind | str downcase)
+        let hit = ($u.configmaps | where {|c| $c in ($changed ++ $now_changed) })
+        let after = (generation_of $u.ns $kind $u.name)
+        if (workload_needs_restart ($before | get $it.index) $after $hit) {
+            note $"($kind)/($u.name): restarting it, its ConfigMap changed, ($hit | str join ', ')"
+            ^kubectl -n $u.ns rollout restart $"($kind)/($u.name)"
+        }
+    }
+    { changed: $now_changed }
 }
 
 # True when at least one pod matching the selector is Running with every container ready, and
@@ -243,7 +319,7 @@ def step_ca [] {
     }
 }
 
-def step_infra [config: record, rebuilt: bool] {
+def step_infra [config: record] {
     let output_dir = $config.output_dir
     let secrets_script = ($config.target_dir | path join "secrets.nu")
     if ($secrets_script | path exists) {
@@ -251,8 +327,10 @@ def step_infra [config: record, rebuilt: bool] {
         ^$nu.current-exe $secrets_script $config.target_dir $config.repo_root
         if $env.LAST_EXIT_CODE != 0 { fail "secrets.nu failed" }
     }
+    mut changed: list<string> = []
     for filename in ($config.apply_order | skip 1) {
-        apply_file $output_dir $filename $rebuilt
+        let applied = (apply_file $output_dir $filename $changed)
+        $changed = ($changed ++ $applied.changed | uniq)
         # What the next manifests connect to must be up before they start: a client that comes
         # up first attaches to a broker that is about to go away, and loses it.
         let gate = (gate_after $filename)
@@ -440,7 +518,7 @@ def main [
             "images" => { step_images $config }
             "namespaces" => { apply_file $config.output_dir "namespaces.yaml" }
             "ca" => { step_ca }
-            "infra" => { step_infra $config $dev }
+            "infra" => { step_infra $config }
             "pods" => { wait_pods $waits 10min }
             "forwards" => { step_forwards $forwards }
             "admin" => { step_admin $username $mail }

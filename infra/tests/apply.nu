@@ -46,10 +46,70 @@ def main [] {
             ])
             assert $v.restart
         }
-        "rebuilt images restart a job even when its manifest is unchanged and it is ready": {
-            let v = (job_verdict 0 [{ name: "a", ready: true, done: false }] true)
+        "a job whose image was rebuilt is restarted even when its manifest is unchanged and it is ready": {
+            let v = (job_verdict 0 [{ name: "a", ready: true, done: false }] ["x:latest runs sha256:aaa, the registry has sha256:bbb"])
             assert $v.restart
-            assert ($v.reason | str contains "rebuilt")
+            assert ($v.reason | str contains "image")
+            assert ($v.reason | str contains "sha256:bbb")
+        }
+        "a job whose image was not rebuilt is left alone, however many images were built elsewhere": {
+            # --dev builds everything; only a Job whose own image changed has anything to restart for.
+            let v = (job_verdict 0 [{ name: "a", ready: true, done: false }] [])
+            assert (not $v.restart)
+        }
+        "a job whose ConfigMap changed is restarted even when its manifest is unchanged and it is ready": {
+            let v = (job_verdict 0 [{ name: "a", ready: true, done: false }] [] ["polar-git-server-config"])
+            assert $v.restart
+            assert ($v.reason | str contains "polar-git-server-config")
+        }
+        "a ConfigMap is changed when kubectl says it was configured, and not when it was created or is unchanged": {
+            let out = "configmap/a-config configured\npersistentvolumeclaim/a-data unchanged\nconfigmap/b-config unchanged\nconfigmap/c-config created\nservice/a configured\n"
+            assert equal (changed_configmaps $out) ["a-config"]
+            assert equal (changed_configmaps "") []
+        }
+        "the ConfigMaps a workload mounts or reads are found in its manifest, and only for workloads": {
+            let manifest = "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: a\n  namespace: polar\nspec:\n  template:\n    spec:\n      volumes:\n      - name: cfg\n        configMap:\n          name: a-config\n      containers:\n      - name: a\n        envFrom:\n        - configMapRef:\n            name: a-env\n        env:\n        - name: X\n          valueFrom:\n            configMapKeyRef:\n              name: a-key\n              key: k\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a-config\n"
+            let users = (config_users $manifest)
+            assert equal ($users | length) 1
+            assert equal ($users | first | get kind) "Job"
+            assert equal ($users | first | get name) "a"
+            assert equal ($users | first | get configmaps | sort) ["a-config" "a-env" "a-key"]
+        }
+        "a Deployment's and a StatefulSet's ConfigMaps are found too, since a changed ConfigMap does not restart them either": {
+            let manifest = "kind: Deployment\nmetadata:\n  name: d\nspec:\n  template:\n    spec:\n      volumes:\n      - name: v\n        configMap:\n          name: d-config\n---\nkind: StatefulSet\nmetadata:\n  name: s\nspec:\n  template:\n    spec:\n      volumes:\n      - name: v\n        configMap:\n          name: s-config\n"
+            let users = (config_users $manifest)
+            assert equal ($users | get kind | sort) ["Deployment" "StatefulSet"]
+        }
+        "a Deployment or StatefulSet is rolled when a ConfigMap it uses changed and its own spec did not": {
+            # generation only goes up when the spec changes; kubectl prints "configured" for more than that.
+            assert (workload_needs_restart 3 3 ["a-config"])
+        }
+        "a workload whose own spec changed is already rolling, so a changed ConfigMap does not roll it twice": {
+            assert (not (workload_needs_restart 3 4 ["a-config"]))
+        }
+        "a workload that did not exist before is new, not restarted": {
+            assert (not (workload_needs_restart null 1 ["a-config"]))
+            # nor one that is not there at all, before or after: there is nothing to restart
+            assert (not (workload_needs_restart null null ["a-config"]))
+        }
+        "a workload whose ConfigMaps did not change is not rolled, whatever kubectl printed": {
+            assert (not (workload_needs_restart 3 3 []))
+        }
+        "an image is stale when what a pod runs is not what the registry serves, and never when the registry's answer is unknown": {
+            let running = [
+                { image: "10.0.2.2:5000/a:latest", digest: "sha256:old" }
+                { image: "10.0.2.2:5000/b:latest", digest: "sha256:same" }
+                { image: "10.0.2.2:5000/c:latest", digest: "sha256:whatever" }
+            ]
+            let served = [
+                { image: "10.0.2.2:5000/a:latest", digest: "sha256:new" }
+                { image: "10.0.2.2:5000/b:latest", digest: "sha256:same" }
+            ]
+            let stale = (stale_images $running $served)
+            assert equal ($stale | length) 1
+            assert ($stale | first | str contains "10.0.2.2:5000/a:latest")
+            assert ($stale | first | str contains "sha256:old")
+            assert ($stale | first | str contains "sha256:new")
         }
         "the jobs in a list of objects are found, and only the jobs": {
             let list = { kind: "List", items: [
