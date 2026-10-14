@@ -11,6 +11,8 @@
     # cluster's ledger and change when it is reset: read them with
     #   openssl x509 -in ~/.config/polar-admin/<user>.crt -noout -ext subjectAltName
     polar-git-server: {
+      # Group 4: its client certificate and its server certificate, one of each, come from the credentials agent.
+      issuer: "credentials-agent"
       env: [
         { name: "POLAR_GIT_SERVER_ADMINS", value: "381258d0-9180-40c8-a0b0-074739719963" }
       ]
