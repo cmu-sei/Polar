@@ -37,6 +37,7 @@ use images.nu
 use secrets-lib.nu [existing_required_secrets, secrets_check]
 use retry.nu [with_retries]
 use admin.nu [aside_path, is_another_clusters]
+use browser.nu [browser_expected, browser_found, browser_problems, neo4j_password_state, neo4j_probe, nss_db]
 use forwards.nu [ensure_observer_forward]
 use seed.nu
 use plan.nu [build_forwards, build_plan, deployed_charts]
@@ -387,19 +388,51 @@ def step_admin [username: string, mail: string] {
     }
 }
 
+# The browser holds this cluster's CA and the user's certificate, and Neo4j's password is the one the agents use.
+# Each is looked at first, read-only; a person is asked only for what is missing, and told which.
 def step_browser [username: string] {
-    pause "Close Librewolf so its certificate store is not locked."
-    ^just user-cert-install $username
-    if $env.LAST_EXIT_CODE != 0 { fail "just user-cert-install failed" }
+    let dir = (admin_dir)
 
-    let neo4j_secret = (^kubectl get secret -n $GRAPH neo4j-secret -o "jsonpath={.data.secret}" | ^base64 -d)
-    let neo4j_password = ($neo4j_secret | split row "/" | skip 1 | str join "/")
-    print ""
-    print "  Open https://localhost:7473 in Librewolf and pick your certificate."
-    print "  Log in as neo4j / neo4j and set the new password to:"
-    print $"    ($neo4j_password)"
-    print "  (A wrong password retried repeatedly trips Neo4j's failed-login rate limit.)"
-    pause "Change the Neo4j password in the browser."
+    let db = (nss_db)
+    let browser_problems = if $db == null {
+        ["no Librewolf profile with a certificate database was found under ~/.librewolf or ~/.config/librewolf (set POLAR_NSS_DB to its directory)"]
+    } else {
+        browser_problems (browser_found $db $username) (browser_expected $dir $username) $username
+    }
+    if ($browser_problems | is-empty) {
+        ok $"the browser trusts this cluster's CA and holds ($username)'s current certificate"
+    } else {
+        for p in $browser_problems { note $p }
+        pause "Close Librewolf so its certificate store is not locked."
+        ^just user-cert-install $username
+        if $env.LAST_EXIT_CODE != 0 { fail "just user-cert-install failed" }
+    }
+
+    # The password the agents use is the Secret's; whether Neo4j has it tells whether the first login happened.
+    let agents_password = (^kubectl -n $POLAR get secret polar-graph-pw -o "jsonpath={.data.secret}" | ^base64 -d)
+    let answered = (neo4j_probe $dir $username $agents_password)
+    match (neo4j_password_state $answered.code $answered.body) {
+        "set" => { ok "Neo4j's password is already the one the agents use" }
+        "default" => {
+            let neo4j_secret = (^kubectl get secret -n $GRAPH neo4j-secret -o "jsonpath={.data.secret}" | ^base64 -d)
+            let neo4j_password = ($neo4j_secret | split row "/" | skip 1 | str join "/")
+            print ""
+            print "  Open https://localhost:7473 in Librewolf and pick your certificate."
+            print "  Log in as neo4j / neo4j and set the new password to:"
+            print $"    ($neo4j_password)"
+            print "  (A wrong password retried repeatedly trips Neo4j's failed-login rate limit.)"
+            pause "Change the Neo4j password in the browser."
+        }
+        "different" => {
+            note "Neo4j has a password other than the one in the polar-graph-pw Secret, so the agents cannot log in. Either set the Secret to the password it has, or change Neo4j's to the Secret's; this is not the default password, so there is no first login to do."
+        }
+        "unreachable" => {
+            fail "Neo4j does not answer at https://localhost:7473, so its password cannot be checked: start its port-forward (just port-forwards-up neo4j) and run this again"
+        }
+        _ => {
+            note $"Neo4j answered http ($answered.code) to the password check, which is neither success nor a request to change it; not asking for anything"
+        }
+    }
 }
 
 # What `just admin-provision` leaves for the seed: the signer's certificate must be one the git server
