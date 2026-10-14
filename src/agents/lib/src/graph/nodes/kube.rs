@@ -62,11 +62,6 @@ pub enum KubeNodeKey {
         name: String,
         namespace: String,
     },
-    GenericOwner {
-        uid: String,
-        kind: String,
-        namespace: String,
-    },
     Job {
         uid: String,
     },
