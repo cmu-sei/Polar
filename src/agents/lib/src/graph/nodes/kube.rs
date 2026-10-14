@@ -70,6 +70,17 @@ pub enum KubeNodeKey {
     Job {
         uid: String,
     },
+    /// Owners nothing in this workspace watches, so the node is an anchor: a uid, the kind's label and (from
+    /// the owner reference on the pod) a name. `is_anchor_only` is true for these.
+    StatefulSet {
+        uid: String,
+    },
+    DaemonSet {
+        uid: String,
+    },
+    Node {
+        uid: String,
+    },
     JobState {
         uid: String,
         valid_from: String,
@@ -165,6 +176,20 @@ impl GraphNodeKey for KubeNodeKey {
                 (
                     format!("({prefix}:Pod {{ uid: ${uid_k} }})"),
                     vec![(uid_k, BoltType::String(uid.to_string().into()))],
+                )
+            }
+            KubeNodeKey::StatefulSet { uid }
+            | KubeNodeKey::DaemonSet { uid }
+            | KubeNodeKey::Node { uid } => {
+                let label = match self {
+                    KubeNodeKey::StatefulSet { .. } => "StatefulSet",
+                    KubeNodeKey::DaemonSet { .. } => "DaemonSet",
+                    _ => "Node",
+                };
+                let uid_k = format!("{prefix}_uid");
+                (
+                    format!("({prefix}:{label} {{ uid: ${uid_k} }})"),
+                    vec![(uid_k, BoltType::String(uid.clone().into()))],
                 )
             }
             KubeNodeKey::Job { uid } => {
@@ -377,6 +402,17 @@ impl GraphNodeKey for KubeNodeKey {
 }
 
 impl KubeNodeKey {
+    /// Whether nothing projects this node itself, so the only thing known about it is what an owner reference
+    /// on a pod says (its name). The pod's handler records that name; the other owners have their own handlers.
+    pub fn is_anchor_only(&self) -> bool {
+        matches!(
+            self,
+            KubeNodeKey::StatefulSet { .. }
+                | KubeNodeKey::DaemonSet { .. }
+                | KubeNodeKey::Node { .. }
+        )
+    }
+
     pub fn from_owner_reference(owner: &OwnerReference) -> Option<KubeNodeKey> {
         match owner.kind.as_str() {
             "ReplicaSet" => KubeNodeKey::ReplicaSet {
@@ -384,6 +420,22 @@ impl KubeNodeKey {
             }
             .into(),
             "Deployment" => KubeNodeKey::Deployment {
+                uid: owner.uid.clone(),
+            }
+            .into(),
+            "Job" => KubeNodeKey::Job {
+                uid: owner.uid.clone(),
+            }
+            .into(),
+            "StatefulSet" => KubeNodeKey::StatefulSet {
+                uid: owner.uid.clone(),
+            }
+            .into(),
+            "DaemonSet" => KubeNodeKey::DaemonSet {
+                uid: owner.uid.clone(),
+            }
+            .into(),
+            "Node" => KubeNodeKey::Node {
                 uid: owner.uid.clone(),
             }
             .into(),
@@ -426,8 +478,43 @@ mod owner_reference_tests {
     }
 
     #[test]
-    fn other_kinds_of_owner_have_no_node_and_are_skipped() {
-        for kind in ["Job", "StatefulSet", "DaemonSet", "Node"] {
+    fn a_job_owner_is_the_job_node_the_consumer_already_projects() {
+        assert_eq!(
+            KubeNodeKey::from_owner_reference(&owner("Job")),
+            Some(KubeNodeKey::Job { uid: "u-1".into() })
+        );
+    }
+
+    #[test]
+    fn statefulsets_daemonsets_and_nodes_get_anchors_named_for_their_kind() {
+        for (kind, label) in [
+            ("StatefulSet", "StatefulSet"),
+            ("DaemonSet", "DaemonSet"),
+            ("Node", "Node"),
+        ] {
+            let key = KubeNodeKey::from_owner_reference(&owner(kind))
+                .unwrap_or_else(|| panic!("{kind} should map"));
+            let (pattern, params) = key.cypher_match("n");
+            assert_eq!(pattern, format!("(n:{label} {{ uid: $n_uid }})"), "{kind}");
+            assert_eq!(params.len(), 1, "{kind}");
+            assert!(key.is_anchor_only(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn only_owners_nothing_else_projects_are_anchor_only() {
+        for kind in ["ReplicaSet", "Deployment", "Job"] {
+            let key = KubeNodeKey::from_owner_reference(&owner(kind)).expect(kind);
+            assert!(
+                !key.is_anchor_only(),
+                "{kind} is projected by its own handler"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kind_the_graph_has_no_node_for_is_skipped() {
+        for kind in ["CronJob", "Cluster", "Widget"] {
             assert!(
                 KubeNodeKey::from_owner_reference(&owner(kind)).is_none(),
                 "{kind}"
