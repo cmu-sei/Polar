@@ -112,6 +112,9 @@ nu infra/up.nu local-minimal --dev          # --dev builds and pushes the images
 # Only render (never touches a cluster); output goes to manifests/ (gitignored)
 nu infra/render.nu local-minimal
 
+# Render without the cache, to see the true cost or to rule it out (see "The render cache")
+POLAR_CACHE=off nu infra/render.nu local-minimal
+
 # What does the catalog say about a workload, and where did each value come from?
 nu infra/resolve.nu explain kube-consumer
 
@@ -147,10 +150,17 @@ infra/
   up.nu                  brings a cluster up from a target (applies)
   render.nu              renders a target (never applies)
   resolve.nu             the resolver: explain, json, resources, diff, check
-  render-catalog.nu      renders every catalog workload
+  render-catalog.nu      renders every catalog workload (through the render cache)
+  cache.nu               the render cache: where it lives, how a key is made, read or compute
   compare-manifests.nu   compares two renders by meaning
   images.nu  images.nuon which images exist, and building/pushing them
   validate.nu            environment validation helpers
+  apply.nu               the decisions up.nu makes while applying: which Jobs to restart and why
+  retry.nu               try again for a while, and stop at once on a failure that cannot be fixed
+  forwards.nu            wait for a port-forward to answer; restart it if it does not
+  admin.nu               what to do with ~/.config/polar-admin that belongs to another cluster
+  browser.nu             step 10: does the browser hold this cluster's CA and the user's certificate, and has
+                         Neo4j's password been changed (read-only)
   config/                the catalog
     cluster.nuon         domain, namespaces, registry, token audience
     services.nuon        in-cluster services other things connect to
@@ -356,6 +366,95 @@ image references, pull secrets, storage classes, hostnames, URLs.
 - **`functions.dhall`**: shared helpers (`makeDeployment`, `makePolarInitContainer`, the proxy cert helpers, ...).
 - **`agents.dhall`, `cassini.dhall`, `storage-class.dhall`, `identity-strategy.dhall`, `ca-provisioning.dhall`**: type definitions.
 - **`constants.dhall`**: static values: namespace names, service names, TLS paths, ports, labels. Its header says it holds no constructed resources and no environment-dependent values, but it still contains a few (`certEmptyDirVolume`, `saTokenVolume`, `commonClientEnv`); they are on the list to move out.
+
+## The render cache
+
+A re-run of `up.nu` renders the whole catalog again, and nearly all of that time is Dhall evaluating two templates per
+workload (the pod, and the objects beside it). A rendered manifest is a pure function of its inputs, so one rendered
+before from the same inputs is read back instead of rendered again. A resume that changed nothing takes a fraction of
+the time; a change to one workload re-renders that workload and nothing else.
+
+### What is cached, and under what key
+
+`render-catalog.nu` keeps the output of each `dhall-to-yaml` call (two per workload) in `cache.nu`'s store, under
+`~/.cache/polar/render/` (`POLAR_CACHE_DIR` moves it; `XDG_CACHE_HOME` is honoured). The key is a hash of:
+
+- the **typed spec**: the workload's resolved record as `json-to-dhall` turns it into Dhall, with the template it is
+  applied to. A different value anywhere in the workload (an environment variable, a pull policy, a shutdown budget) is
+  different text, so a different key;
+- **every file in `infra/schema/`**, hashed together. This is deliberately more than the templates import: any edit
+  to the schema, even a comment, is a different key for every workload, and nothing is left to judge by hand;
+- the **version of `dhall-to-yaml`**.
+
+The remote Dhall imports (the Prelude, the Kubernetes bindings) are pinned by `sha256:` hash in the schema files, so
+they cannot differ under the same key. The parts of the key are length-prefixed, so two lists of inputs cannot run
+together into one.
+
+### Why it cannot serve a stale manifest
+
+The cache stores only successes; a failed render reaches the caller and nothing is written. A file is written under a
+name of its own and moved into place, so a reader never sees half of one. What was checked on the 16 workloads of
+`local-minimal`:
+
+- rendered with the cache off, cold (empty) and warm, the 32 output files are **byte-identical**;
+- with one workload's pull policy changed, **one** new cache entry was made and **one** output file differed; the
+  other fifteen were read back;
+- after a schema file was edited, **all 32** entries were rendered again (the output was unchanged, as it must be for
+  a comment).
+
+`infra/tests/cache.nu` covers the store itself (a stored result is used, a failure is not stored, the key changes with
+every part, the directory digest changes when a file is edited, added, removed or renamed, `POLAR_CACHE=off` stores
+nothing). One property is not tested: that the move into place is atomic, which only matters if a process dies
+mid-write.
+
+### What it saves
+
+Measured with `infra/measure-render-cache.nu` on 2026-10-14, on a machine with 32 logical CPUs, with the cluster
+running and the machine otherwise idle. "Cold" is a fresh, empty cache directory for every run; "off" is
+`POLAR_CACHE=off`. Dhall's own import cache (`~/.cache/dhall`) was left as it was in every case, so it is not part
+of these numbers.
+
+| case | runs | mean | min to max | against cache off |
+| --- | --- | --- | --- | --- |
+| catalog render, cache off | 3 | 55.2 s | 54.9 to 55.3 s | |
+| catalog render, cold cache | 3 | 54.9 s | 54.8 to 55.2 s | 0.3 s less: a miss costs nothing measurable |
+| **catalog render, warm cache** | 3 | **8.2 s** | 8.2 to 8.2 s | **47.0 s less (85%), 6.7 times faster** |
+| catalog render, warm, one workload changed | 3 | 11.2 s | 11.2 to 11.3 s | 44.0 s less (80%), 4.9 times faster |
+| whole render (`render.nu`), cache off | 2 | 67.6 s | 67.3 to 67.8 s | |
+| **whole render (`render.nu`), warm cache** | 3 | **20.8 s** | 20.7 to 20.8 s | **46.8 s less (69%), 3.3 times faster** |
+| `up.nu` resume that changes nothing, cache off | 2 | 74.7 s | 74.2 to 75.1 s | |
+| **`up.nu` resume that changes nothing, warm cache** | 3 | **28.0 s** | 27.9 to 28.0 s | **46.7 s less (63%), 2.7 times faster** |
+
+The cache holds 32 entries (16 workloads, two each) and takes 258 kB.
+
+Per workload that is about 3.4 s uncached, about 0.5 s cached, and about 3.0 s more for each workload whose input
+changed. The saving is the same in absolute terms at each level, about 47 s, because it is the same work being
+skipped; it is a smaller share of the larger totals.
+
+### Where a warm resume still spends its time
+
+By subtraction, not measured separately: of the 28.0 s,
+
+- about **8.2 s** is the catalog render that is left (resolving each workload twice, about a quarter of a second
+  each, and reading the cache);
+- about **12.6 s** is the eight custom charts, which are not cached;
+- about **7.2 s** is everything else `up.nu` does (the applies and their comparisons with the cluster, the checks,
+  the waits).
+
+So the next saving is in the charts and in resolving, about 21 s between them, and neither is cached yet. A cache
+of the per-image scaffold would address a slice of the resolving only; measure before building it.
+
+### Using it
+
+```fish
+POLAR_CACHE=off nu infra/render.nu local-minimal      # render everything, store nothing
+POLAR_CACHE_DIR=/tmp/c nu infra/render.nu local-minimal   # use another directory
+rm -rf ~/.cache/polar                                 # forget it all; nothing depends on it
+nu infra/measure-render-cache.nu results.md           # reproduce the numbers above (about 16 minutes)
+nu infra/measure-render-cache.nu results.md --user U --email E    # and the up.nu cases, which need a cluster
+```
+
+Leave the machine alone while the measurement runs, or the timings move.
 
 ---
 
@@ -707,5 +806,9 @@ beside one that may still be alive), but it is an outage until someone acts.
 - **`POLAR_CAPABILITIES` unset is a warning, not an error,** so an agent run outside the cluster still starts. A deployment that forgets to set it is therefore not caught by the builder; the catalog sets it for every workload it renders.
 - **The cluster domain drives catalog addresses,** but custom charts still hard-code `svc.cluster.local`, and `polar-init --cluster-domain` is not passed.
 - **`src/deploy/`** is the old system. Confirm it is dead and remove it, or mark it.
+- **Only the catalog's manifests are cached.** The custom charts (cert-issuer, Neo4j, ACE, ...) are rendered in full
+  on every run; see "The render cache" for what that costs.
+- **Resolving the workloads is not cached.** A warm render still runs `resolve` for each workload twice (its
+  pod and its resources, each about a quarter of a second), which is most of what remains of a warm render.
 
 Open items are tracked in `remaining-work.md`.
