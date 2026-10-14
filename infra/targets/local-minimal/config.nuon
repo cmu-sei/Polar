@@ -4,7 +4,9 @@
 #   cluster    any field of cluster.nuon
 #   workloads  per-workload fields, keyed by workload name
 {
-  cluster: {}
+  # cert-issuer signs only the bootstrap identities on a token alone; everything else is vouched for by the
+  # credentials agent (docs/architecture/cert-issuer-isolation.md). On once no workload asked it directly.
+  cluster: { issuance: { floor_enforced: true } }
   workloads: {
     # Who administers the git server in development: the DNS names in the certificates of the
     # accounts `just admin-claim` made on this cluster (djshepard, operator, seeder). They belong to this

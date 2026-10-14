@@ -347,9 +347,37 @@ over Cassini with the certificate it just obtained. The requests across the rend
    `main.nu` adds Neo4j's entry from its chart and the target's `neo4jSans`, so those names are written once. The
    chart's own `mtlsBootstrap` is now empty. Neo4j itself is not yet on the credentials agent: its StatefulSet is a
    chart, not a catalog workload, and moving it is part of phase 6.
-6. **Rollout on the cluster, in groups,** credentials pair first, then the leaf workloads, then Neo4j and the git
-   server (server certificates), with the secret harness as the check that a retrieve works; the floor is enabled in
-   the last step.
+6. **Rollout on the cluster, DONE 2026-10-14 on `local-minimal`** (a fresh cluster, so no workload had to be
+   moved while running; the order below is the order it was proven in). Each group was one target override, one
+   `up.nu` apply, a check of every pod's init log, and the secret harness.
+   - **Baseline (everything on cert-issuer):** the harness failed with `RequesterCertificateNotFound`, as the
+     analysis predicted.
+   - **Group 1, the harness pair.** Found two defects in what the credentials agent records, fixed at the source
+     (`docs/architecture/credentials-agent-architecture.md`, "Which identity"): the issuance event and the service
+     certificate were recorded under the token's raw identity, not the certificate's. After the fixes, on a clean
+     ledger, the harness passes.
+   - **Group 2, the five workloads that ask for one client certificate** (the observers and the OCI resolver).
+   - **A change to the `graph-write` capability:** a graph agent presents the pod's one client certificate to Neo4j
+     (`GRAPH_CLIENT_CERT`, `GRAPH_CLIENT_KEY` and `GRAPH_CA_CERT` point at `/etc/tls/certs`) and no longer asks for a
+     second one, which the credentials agent refuses (one client and one server certificate per pod instance). The
+     second was the same identity and type with no extra names; Neo4j accepts any client certificate the Polar CA
+     signed (`client_auth=REQUIRE`), so it said nothing the first did not.
+   - **Group 3, the five graph agents,** and **group 4, the git server** (a client and a server certificate, the first
+     server certificate through this path).
+   - **Neo4j and the ACE job,** which are charts and not catalog workloads: they are told the observer's address
+     (from `services.nuon`, through `resolve.nu service-url` and `render.nu`) and no cert-issuer address
+     (`tests/charts.nu`). The comment in Neo4j's chart that this would deadlock was out of date: the consumer
+     starts without Neo4j.
+   - **The floor is enforced** (`cluster.issuance.floor_enforced`). A canary asks cert-issuer, with no client
+     certificate, to validate a real token: before, `kube-consumer` and the bootstrap observer both got 200; after,
+     `kube-consumer` gets 403 and the observer 200. Cassini's own issuance path was exercised the same way: its own
+     server name is signed, another name or the client type is refused. A pod restarted on each path afterwards
+     (a moved workload, the git server's vouched server certificate, a bootstrap identity) started without a refusal.
+   - **Not done:** NetworkPolicy emission with the canary (the control below); the hand-written agent charts that
+     are not in `local-minimal` (gitlab, openapi, build-processor) still ask cert-issuer directly, so a target that
+     deploys them cannot enforce the floor until they move; and the larger gap this exposed, that nothing checks a
+     certificate's permissions on service-to-service traffic (`remaining-work.md`, the top item under
+     "Next: orchestration and Justfile").
 
 Phases 1 to 5 can be built and tested without touching the cluster. Phase 6 restarts every pod.
 
