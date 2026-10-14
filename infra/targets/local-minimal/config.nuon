@@ -21,6 +21,11 @@
         { name: "OCI_INSECURE_REGISTRIES", value: "10.0.2.2:5000" }
       ]
     }
+    # Rollout of cert-issuer isolation (docs/architecture/cert-issuer-isolation.md, phase 6), in groups. A
+    # workload on the credentials agent gets its certificates through the observer, so the credentials agent
+    # has a record of it. Group 1 is the secret harness, which is the check on the rest.
+    secret-harness-owner: { issuer: "credentials-agent" }
+    secret-harness-intruder: { issuer: "credentials-agent" }
     jira-observer: {
       env: [
         { name: "JIRA_URL", value: "https://daveman1010220.atlassian.net" }
