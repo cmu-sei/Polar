@@ -12,7 +12,7 @@
     #   openssl x509 -in ~/.config/polar-admin/<user>.crt -noout -ext subjectAltName
     polar-git-server: {
       env: [
-        { name: "POLAR_GIT_SERVER_ADMINS", value: "a22407b8-d508-4bbc-b90a-445cb5f6e073" }
+        { name: "POLAR_GIT_SERVER_ADMINS", value: "381258d0-9180-40c8-a0b0-074739719963" }
       ]
     }
     # The cluster pulls from the development registry over plain http, and so must the resolver.
