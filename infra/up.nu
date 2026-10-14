@@ -35,6 +35,8 @@ const GRAPH = "polar-graph"
 
 use images.nu
 use secrets-lib.nu [existing_required_secrets, secrets_check]
+use retry.nu [with_retries]
+use forwards.nu [ensure_observer_forward]
 use seed.nu
 use plan.nu [build_forwards, build_plan, deployed_charts]
 use apply.nu [any_pod_ready, gate_after, job_verdict, jobs_in]
@@ -276,6 +278,7 @@ def step_forwards [forwards: list] {
 }
 
 def step_admin [username: string, mail: string] {
+    ensure_observer_forward
     let dir = (admin_dir)
     let cluster_ca = (^kubectl -n $POLAR get configmap polar-ca -o "jsonpath={.data.ca\\.pem}" | str trim)
     let ca_file = ($dir | path join "ca.pem")
@@ -343,13 +346,22 @@ def step_seed [target: string, username: string, mail: string] {
     let missing = (seed lacks $san (seed documents))
     if ($missing | is-not-empty) { fail (seed lacks_hint $username $missing) }
 
-    let cloned = (do { seed_git $username [clone (seed repo_url) $repo] } | complete)
-    if $cloned.exit_code != 0 {
+    # Through a port-forward that may be reconnecting to a pod that was just replaced (every pod restarts
+    # hourly, before its certificate expires), so a transport failure is tried again for a while; a refusal is not.
+    let cloned = (with_retries 6 5sec {|n|
+        let r = (do { seed_git $username [clone (seed repo_url) $repo] } | complete)
+        if $r.exit_code != 0 {
+            note $"clone attempt ($n) failed: ($r.stderr | lines | last | default '' | str trim)"
+            rm -rf $repo
+        }
+        seed clone_outcome $r.exit_code $r.stderr
+    })
+    if not $cloned.ok {
         let identity = (seed first_dns_name $san)
-        if ($cloned.stderr | str contains "403") and ($identity != null) {
+        if ($cloned.detail | str contains "403") and ($identity != null) {
             fail (seed refused_hint $identity $target)
         }
-        fail $"cannot clone polar-schedules: ($cloned.stderr | str trim)"
+        fail $"cannot clone polar-schedules after ($cloned.tries) tries: ($cloned.detail)"
     }
 
     let existing = (^git -C $repo ls-files | lines)

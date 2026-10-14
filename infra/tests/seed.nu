@@ -13,6 +13,31 @@ def root [] { $env.FILE_PWD | path dirname | path dirname }
 def main [] {
     let tests = [
         {
+            name: "a clone that worked is done, and one refused with 403 is final: trying again cannot fix a refusal"
+            body: {
+                assert equal (clone_outcome 0 "").ok true
+                let refused = (clone_outcome 128 "fatal: unable to access 'https://x/': The requested URL returned error: 403")
+                assert (not $refused.ok)
+                assert $refused.final
+            }
+        }
+        {
+            name: "a clone that failed in transport is worth another try: the forward may be reconnecting to a replaced pod"
+            body: {
+                for stderr in [
+                    "fatal: unable to access 'https://x/': TLS connect error: error:0A000126:SSL routines::unexpected eof while reading"
+                    "fatal: unable to access 'https://x/': Send failure: Broken pipe"
+                    "fatal: unable to access 'https://x/': Failed to connect to localhost port 8443 after 0 ms: Couldn't connect to server"
+                    "fatal: unable to access 'https://x/': Recv failure: Connection reset by peer"
+                ] {
+                    let r = (clone_outcome 128 $stderr)
+                    assert (not $r.ok) $stderr
+                    assert (not $r.final) $stderr
+                    assert ($r.detail | str contains "fatal") $stderr
+                }
+            }
+        }
+        {
             name: "every seed document has a place of its own and a section it fills"
             body: {
                 let docs = (documents)

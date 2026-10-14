@@ -58,6 +58,17 @@ export def repo_url [] {
 # What to say when the git server refuses the administrator: who it is that the server must be told
 # about. The identity is the first DNS name in the user's certificate; the server learns its
 # administrators from POLAR_GIT_SERVER_ADMINS in the target's config.
+# What a `git clone` of the schedules repository came to, for `retry`: done; final when the git server refused
+# this identity (403: trying again cannot fix it); otherwise a transport failure, which is worth another try,
+# because the port-forward may be reconnecting to a pod that was just replaced.
+export def clone_outcome [exit_code: int, stderr: string] {
+    if $exit_code == 0 {
+        { ok: true, final: false, detail: "" }
+    } else {
+        { ok: false, final: ($stderr | str contains "403"), detail: ($stderr | str trim) }
+    }
+}
+
 export def refused_hint [identity: string, target: string] {
     $"the Polar git server does not know ($identity) as an administrator, so it will not take the seed. Add it to POLAR_GIT_SERVER_ADMINS for polar-git-server in infra/targets/($target)/config.nuon, then run this again."
 }
