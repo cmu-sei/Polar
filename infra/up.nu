@@ -39,6 +39,7 @@ use retry.nu [with_retries]
 use admin.nu [aside_path, is_another_clusters]
 use browser.nu [browser_expected, browser_found, browser_problems, neo4j_answer, neo4j_probe, nss_db, password_verdict, probe_until_answered]
 use forwards.nu [ensure_observer_forward]
+use egress.nu [egress_report, kube_probe, probe_url]
 use seed.nu
 use plan.nu [build_forwards, build_plan, deployed_charts]
 use apply.nu [any_pod_ready, changed_configmaps, config_users, gate_after, job_verdict, jobs_in, stale_images, workload_needs_restart]
@@ -527,6 +528,15 @@ def step_seed [target: string, username: string, mail: string] {
     ok "the credentials agent has applied and published the policy"
 }
 
+# Whether a pod can reach the outside, said once the cluster is up. A note, never a failure: the cluster works
+# offline, and a probe that cannot run is not a reason to stop.
+def report_egress [] {
+    let r = try { egress_report (probe_url) {|u| kube_probe $u } } catch {|e|
+        { verdict: "error", lines: [$"could not check access to the outside: ($e.msg)"] }
+    }
+    for l in $r.lines { if $r.verdict == "ok" { ok $l } else { note $l } }
+}
+
 def main [
     target: string          # Target name, e.g. local-minimal
     --dev                   # Also build and load images (local development cluster)
@@ -577,5 +587,6 @@ def main [
     print ""
     print $"=== Target ($target) is up ==="
     ^kubectl -n $POLAR get pods
+    report_egress
     note "other services (keycloak, ace, jaeger) are not forwarded here; run: just port-forwards-up"
 }

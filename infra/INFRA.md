@@ -165,6 +165,8 @@ infra/
   admin.nu               what to do with ~/.config/polar-admin that belongs to another cluster
   browser.nu             step 10: does the browser hold this cluster's CA and the user's certificate, and has
                          Neo4j's password been changed (read-only)
+  egress.nu              the check at the end of up.nu: can a pod reach a host outside the cluster, and if not, why
+                         (a note, never a failure)
   config/                the catalog
     cluster.nuon         domain, namespaces, registry, token audience
     services.nuon        in-cluster services other things connect to
@@ -802,6 +804,7 @@ beside one that may still be alive), but it is an outage until someone acts.
 
 ## Known issues and limits
 
+- **Access to the outside is checked once, at the end of `up.nu`, and only reported.** A pod runs `git ls-remote` against one public repository (`POLAR_EGRESS_PROBE_URL` changes it) and `up.nu` says whether the name resolved and the host answered. It is a note because a cluster used offline works. The probe runs in the `polar-scheduler-observer` pod, the one image with a git CLI, so if that pod is not running the check says it was skipped. In nix-usernetes, CoreDNS forwards names it does not own to the host's `systemd-resolved` through a second listener on `127.0.0.1:5300` (`services.resolved.settings.Resolve.DNSStubListenerExtra` on the host); without it pods resolve nothing outside the cluster, and this check says so.
 - **Service-account token ordering.** On a fresh cluster, a `kubernetes.io/service-account-token` Secret is populated by the token controller only after its ServiceAccount exists, so the first apply may need repeating. `serviceaccounts.yaml` precedes `kube-observer-resources.yaml` in `apply_order`, which should avoid it, but this has only been exercised on an existing cluster.
 - **Only `agent` is a catalog kind, and only the kube agents are in the catalog.** Everything else is a custom chart.
 - **`apply_order` is hand-maintained** in each `target.nu`. It should be derived from the catalog (resources before the Job).
