@@ -1917,7 +1917,8 @@ mod agent_escrow_wiring_tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         let record =
-            check_agent_escrow_key(&ledger, "system:serviceaccount:polar:git-observer").await;
+            check_agent_escrow_key(&ledger, "git-observer.polar.serviceaccount.cluster.local")
+                .await;
         assert!(
             record.is_some(),
             "AgentEscrowIssuanceCompleted must have actually been recorded in the ledger by now"

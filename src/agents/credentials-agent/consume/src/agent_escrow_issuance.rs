@@ -105,7 +105,11 @@ impl AgentEscrowIssuanceHandler {
             .cert_issuer
             .validate(
                 &request.credential,
-                cert_issuer_common::ValidateRequest::default(),
+                // The certificate's own identity: what the pod presents on every mTLS connection, and so what
+                // the retrieve handler looks its escrow key up by.
+                cert_issuer_common::ValidateRequest {
+                    include_normalized_identity: true,
+                },
             )
             .await
         {
@@ -118,7 +122,18 @@ impl AgentEscrowIssuanceHandler {
             }
         };
 
-        let identity = validated.workload_identity;
+        // Two names for one credential: a grant is written under the token's own identity, and everything
+        // else in the ledger (the renewal check, the record) is keyed on the certificate's. With no normalized
+        // identity there is no telling where the certificate would be looked for, so the request is refused.
+        let token_identity = validated.workload_identity;
+        let Some(identity) = validated.normalized_identity else {
+            warn!(
+                "cert-issuer gave no normalized identity for '{token_identity}' -- refusing rather than recording the certificate where nothing looks for it"
+            );
+            return AgentEscrowIssuanceReply::Refused {
+                reason: AgentEscrowIssuanceRefusalReason::CredentialInvalid,
+            };
+        };
         // Still extracted and still recorded on the resulting event
         // (see Step 6, below), for the same audit-visibility reason
         // IssuanceCompleted records it -- but, unlike IssuanceHandler's
@@ -162,7 +177,7 @@ impl AgentEscrowIssuanceHandler {
         // entirely. An admin who has explicitly granted specific
         // permissions to this identity ahead of time still overrides
         // the default.
-        let grant = match call_check_grant(&self.ledger, &identity).await {
+        let grant = match call_check_grant(&self.ledger, &token_identity).await {
             Ok(g) => g,
             Err(e) => {
                 error!("Ledger CheckGrant call failed: {e}");
@@ -340,10 +355,13 @@ mod tests {
             .and(path("/validate"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
                 cert_issuer_common::ValidateResponse {
-                    workload_identity: "system:serviceaccount:polar:git-observer".to_string(),
+                    workload_identity:
+                        "git-observer.polar.serviceaccount.cluster.local".to_string(),
                     instance_binding: Some("pod-uid-1".to_string()),
                     jti: None,
-                    normalized_identity: None,
+                    normalized_identity: Some(
+                        "git-observer.polar.serviceaccount.cluster.local".to_string(),
+                    ),
                 },
             ))
             .mount(&server)
@@ -405,16 +423,130 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn already_has_a_service_certificate_is_refused_and_issue_is_never_called() {
+    async fn the_service_certificate_is_found_by_the_identity_the_certificate_carries() {
+        // The retrieve handler asks whether the requester has an escrow key by the identity of its mTLS
+        // connection, which is the certificate's DNS name, not the token's raw identity.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/validate"))
+            // cert-issuer returns the normalized identity only when asked for it.
+            .and(body_partial_json(serde_json::json!({
+                "include_normalized_identity": true
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::ValidateResponse {
+                    workload_identity: "system:serviceaccount:polar:git-observer".to_string(),
+                    instance_binding: Some("pod-uid-1".to_string()),
+                    jti: None,
+                    normalized_identity: Some(
+                        "git-observer.polar.serviceaccount.cluster.local".to_string(),
+                    ),
+                },
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fake_issue_response()))
+            .mount(&server)
+            .await;
+        let ledger = spawn_test_ledger().await;
+        let handler = AgentEscrowIssuanceHandler {
+            ledger: ledger.clone(),
+            cert_issuer: HandshakeClient::new(server.uri()),
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
+            escrow_keypair: crate::escrow::tests::test_keypair(),
+        };
+        let reply = handler
+            .handle(AgentEscrowIssuanceRequest {
+                csr_pem: "fake-csr".to_string(),
+                credential: make_token("https://kubernetes.default.svc.cluster.local"),
+            })
+            .await;
+        assert!(
+            matches!(reply, AgentEscrowIssuanceReply::Issued { .. }),
+            "{reply:?}"
+        );
+
+        assert!(
+            call_check_agent_escrow_renewal(
+                &ledger,
+                "git-observer.polar.serviceaccount.cluster.local"
+            )
+            .await
+            .unwrap(),
+            "the service certificate is not found by the identity it presents"
+        );
+        assert!(
+            !call_check_agent_escrow_renewal(&ledger, "system:serviceaccount:polar:git-observer")
+                .await
+                .unwrap(),
+            "the raw token identity must not be what it is recorded under"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_credential_the_issuer_gave_no_normalized_identity_for_is_refused() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/validate"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
                 cert_issuer_common::ValidateResponse {
                     workload_identity: "system:serviceaccount:polar:git-observer".to_string(),
-                    instance_binding: Some("pod-uid-2".to_string()),
+                    instance_binding: Some("pod-uid-1".to_string()),
                     jti: None,
                     normalized_identity: None,
+                },
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let handler = AgentEscrowIssuanceHandler {
+            ledger: spawn_test_ledger().await,
+            cert_issuer: HandshakeClient::new(server.uri()),
+            known_kubernetes_issuers: vec![
+                "https://kubernetes.default.svc.cluster.local".to_string(),
+            ],
+            escrow_keypair: crate::escrow::tests::test_keypair(),
+        };
+        let reply = handler
+            .handle(AgentEscrowIssuanceRequest {
+                csr_pem: "fake-csr".to_string(),
+                credential: make_token("https://kubernetes.default.svc.cluster.local"),
+            })
+            .await;
+        assert!(
+            matches!(
+                reply,
+                AgentEscrowIssuanceReply::Refused {
+                    reason: AgentEscrowIssuanceRefusalReason::CredentialInvalid
+                }
+            ),
+            "{reply:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn already_has_a_service_certificate_is_refused_and_issue_is_never_called() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/validate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::ValidateResponse {
+                    workload_identity:
+                        "git-observer.polar.serviceaccount.cluster.local".to_string(),
+                    instance_binding: Some("pod-uid-2".to_string()),
+                    jti: None,
+                    normalized_identity: Some(
+                        "git-observer.polar.serviceaccount.cluster.local".to_string(),
+                    ),
                 },
             ))
             .mount(&server)
@@ -439,7 +571,7 @@ mod tests {
                 &ledger,
                 |reply| LedgerMessage::Append {
                     event: CredentialsEvent::AgentEscrowIssuanceCompleted {
-                        identity: "system:serviceaccount:polar:git-observer".to_string(),
+                        identity: "git-observer.polar.serviceaccount.cluster.local".to_string(),
                         instance_binding: "pod-uid-1".to_string(),
                         serial: "already-issued-service-serial".to_string(),
                         timestamp: 1000,
@@ -490,7 +622,9 @@ mod tests {
                         "system:serviceaccount:polar:nobody-granted-this".to_string(),
                     instance_binding: Some("pod-uid-1".to_string()),
                     jti: None,
-                    normalized_identity: None,
+                    normalized_identity: Some(
+                        "nobody-granted-this.polar.serviceaccount.cluster.local".to_string(),
+                    ),
                 },
             ))
             .mount(&server)
@@ -533,7 +667,9 @@ mod tests {
                     workload_identity: "system:serviceaccount:polar:special-agent".to_string(),
                     instance_binding: Some("pod-uid-1".to_string()),
                     jti: None,
-                    normalized_identity: None,
+                    normalized_identity: Some(
+                        "special-agent.polar.serviceaccount.cluster.local".to_string(),
+                    ),
                 },
             ))
             .mount(&server)
