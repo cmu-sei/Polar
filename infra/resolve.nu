@@ -194,6 +194,12 @@ def scaffold_of [name: string, spec: record] {
 # function it runs when it starts. Skipped when scaffolds come from a directory, since then there is
 # no binary to ask. The secrets the document refers to are given dummy values: only that they are
 # set matters here.
+# What the agent check needs to name: the image it pulls (a row of images.nuon) and the crate it builds with
+# cargo (`-p`). They are one name unless the crate is not named for its image (`scaffold_package`).
+def check_names [spec: record] {
+    { image: $spec.image, package: ($spec.scaffold_package? | default $spec.image) }
+}
+
 def agent_check [name: string, r: record] {
     let dir = ($env.POLAR_SCAFFOLD_DIR? | default "")
     if ($dir | is-not-empty) { return [] }
@@ -202,13 +208,13 @@ def agent_check [name: string, r: record] {
     let secrets = ($r.env | where secret != null | get name | reduce --fold {} {|n, acc| $acc | insert $n "x" })
     let ran = if (agent_source) == "images" {
         chmod 644 $file
-        let ref = (pushed_image_ref (open ($INFRA | path join "images.nuon")) $r.image_name $name)
+        let ref = (pushed_image_ref (open ($INFRA | path join "images.nuon")) $r.check_names.image $name)
         let env_flags = ($secrets | columns | each {|n| ["-e" $"($n)=x"] } | flatten)
         try {
             run_in_image $ref ["--check" "--config" "/polar-config.json"] (["-v" $"($file):/polar-config.json:ro,Z"] ++ $env_flags)
         } catch {|e| { exit_code: 1, stderr: $"ERROR: ($e.msg)" } }
     } else {
-        let package = $r.image_name
+        let package = $r.check_names.package
         do {
             cd ($INFRA | path join "../src/agents")
             with-env $secrets { ^cargo run -q -p $package -- --check --config $file }
@@ -477,7 +483,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         resources: { cluster_roles: ($cluster_roles | reject from), sa_token_secrets: (if $sa_secret == null { [] } else { [$sa_secret] }), pvcs: $pvcs, services: $exposed }
         config_map: $config_map
         config_problems: $config_problems
-        image_name: ($spec.scaffold_package? | default $spec.image)
+        check_names: (check_names $spec)
         _origin: $origin
         _settings: { issuer: $issuer, bootstrap: $spec.bootstrap, health: $h, shutdown: ($sd | insert termination_grace_secs $grace) }
         _from: { roles: $cluster_roles, env: $entries, volumes: $volumes, mounts: $mounts, deps: $deps, certs: $certs }
@@ -487,7 +493,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
 # What the template takes: the resolved record without provenance.
 def for_template [r: record] {
     $r
-    | reject _origin _from _settings resources config_map config_problems image_name issuer bootstrap
+    | reject _origin _from _settings resources config_map config_problems check_names issuer bootstrap
     | update env { reject from }
     | update volumes { reject from }
     | update mounts { reject from }
@@ -759,6 +765,14 @@ def "main settings" [
     --target: string = $DEFAULT_TARGET
 ] {
     (resolve $name $target)._settings | to json
+}
+
+# The names the agent check uses for a workload, as JSON: the image it pulls and the crate it builds.
+def "main agent-names" [
+    name: string
+    --target: string = $DEFAULT_TARGET
+] {
+    (resolve $name $target).check_names | to json
 }
 
 # The record the workload's template takes, as JSON.

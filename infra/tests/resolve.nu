@@ -95,6 +95,29 @@ def main [] {
             }
         }
 
+        "the image an agent's check pulls is a row of images.nuon, and the crate it builds is named separately": {
+            # The check pulls by the image's name; the crate (cargo -p) is named for the package. For a workload
+            # whose crate is not named for its image, the two differ, and looking the package up in the images
+            # table finds no row (cassini-broker, polar-scheduler-observer).
+            let rows = (open ($INFRA | path join "images.nuon") | get image)
+            let names = (^nu $RESOLVER names | from json)
+            assert (($names | length) > 0) "the catalog lists workloads"
+            for n in $names {
+                let a = (^nu $RESOLVER agent-names $n | from json)
+                assert ($a.image in $rows) $"($n): image '($a.image)' has no row in images.nuon"
+            }
+        }
+
+        "a workload whose crate is not named for its image is checked as that crate, and pulled as that image": {
+            let a = (^nu $RESOLVER agent-names cassini | from json)
+            assert equal $a { image: "cassini", package: "cassini-broker" }
+            let b = (^nu $RESOLVER agent-names polar-scheduler-observer | from json)
+            assert equal $b { image: "scheduler-observer", package: "polar-scheduler-observer" }
+            # One named for its image is both.
+            let c = (^nu $RESOLVER agent-names kube-consumer | from json)
+            assert equal $c.image $c.package
+        }
+
         "the health settings the agent validates are in what the agent is given": {
             let r = (resolve "kube-consumer")
             assert equal (env_value $r "POLAR_HEALTH_REJUVENATION_SECS") "300"
