@@ -139,7 +139,11 @@ with a summary and a non-zero exit. The node cache step of `image` and
 preflight, render, images (`--dev`), namespaces, cluster CA, secrets and
 infrastructure, waiting for core services, port-forwards, admin flow, browser
 certificate and Neo4j password. It stops for a human only where a human is
-required (closing the browser, the Neo4j password).
+required, and looks first, read-only, so it stops only for what is missing: the browser step when the
+Librewolf profile does not hold this cluster's CA and the user's current certificate (closing the browser
+and importing it), and the Neo4j password step only when Neo4j is still on its factory password. With the
+`nix-neo4j` image that applies `NEO4J_AUTH` on its first start (the one this repository deploys), Neo4j starts
+with the password the agents use and there is no password step at all.
 
 ---
 

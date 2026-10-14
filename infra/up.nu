@@ -37,7 +37,7 @@ use images.nu
 use secrets-lib.nu [existing_required_secrets, secrets_check]
 use retry.nu [with_retries]
 use admin.nu [aside_path, is_another_clusters]
-use browser.nu [browser_expected, browser_found, browser_problems, neo4j_password_state, neo4j_probe, nss_db]
+use browser.nu [browser_expected, browser_found, browser_problems, neo4j_answer, neo4j_probe, nss_db, password_verdict]
 use forwards.nu [ensure_observer_forward]
 use seed.nu
 use plan.nu [build_forwards, build_plan, deployed_charts]
@@ -410,8 +410,15 @@ def step_browser [username: string] {
 
     # The password the agents use is the Secret's; whether Neo4j has it tells whether the first login happened.
     let agents_password = (^kubectl -n $POLAR get secret polar-graph-pw -o "jsonpath={.data.secret}" | ^base64 -d)
-    let answered = (neo4j_probe $dir $username $agents_password)
-    match (neo4j_password_state $answered.code $answered.body) {
+    let first = (neo4j_probe $dir $username $agents_password)
+    let with_secret = (neo4j_answer $first.code $first.body)
+    # Only if the Secret's password is refused is the factory default tried, so a Neo4j still on it is recognised
+    # (it refuses the Secret's password) and one with a password of its own gets no more failed logins than that.
+    let with_default = if $with_secret == "refused" {
+        let second = (neo4j_probe $dir $username "neo4j")
+        neo4j_answer $second.code $second.body
+    } else { null }
+    match (password_verdict $with_secret $with_default) {
         "set" => { ok "Neo4j's password is already the one the agents use" }
         "default" => {
             let neo4j_secret = (^kubectl get secret -n $GRAPH neo4j-secret -o "jsonpath={.data.secret}" | ^base64 -d)
@@ -430,7 +437,7 @@ def step_browser [username: string] {
             fail "Neo4j does not answer at https://localhost:7473, so its password cannot be checked: start its port-forward (just port-forwards-up neo4j) and run this again"
         }
         _ => {
-            note $"Neo4j answered http ($answered.code) to the password check, which is neither success nor a request to change it; not asking for anything"
+            note $"Neo4j answered http ($first.code) to the password check, which is neither success nor a request to change the password; not asking for anything"
         }
     }
 }

@@ -35,15 +35,41 @@ export def browser_problems [found: record, expected: record, user: string] {
     $problems
 }
 
-# What Neo4j's answer to the Secret's password says about whether it was changed from the default:
-# `set` (200), `default` (it asks for a new password, 403 CredentialsExpired), `different` (401: the Secret's
-# password is not the one it has), `unreachable` (no answer at all, 0), `unknown` (anything else).
-export def neo4j_password_state [code: int, body: string] {
-    if $code == 200 { return "set" }
+# What one answer from Neo4j's query API means, by what it really says (observed on a Neo4j started with and without
+# a password, not recalled from its documentation):
+#   `ok`          200, and the query ran
+#   `expired`     200 with Neo.ClientError.Security.CredentialsExpired in the body: the credentials are valid but
+#                 must be changed before use, which is how a Neo4j still on its default password answers
+#   `refused`     401: the credentials are wrong
+#   `unreachable` no answer at all (0)
+#   `unknown`     anything else
+export def neo4j_answer [code: int, body: string] {
     if $code == 0 { return "unreachable" }
-    if $code == 403 and ($body | str contains "CredentialsExpired") { return "default" }
-    if $code == 401 { return "different" }
+    if $code == 200 and ($body | str contains "CredentialsExpired") { return "expired" }
+    if $code == 200 { return "ok" }
+    if $code == 401 { return "refused" }
     "unknown"
+}
+
+# Whether Neo4j's password is the one the agents use, from two answers: `with_secret`, to the password in the
+# polar-graph-pw Secret, and `with_default`, to the factory default neo4j/neo4j (null when it was not asked, which is
+# only done when the first was refused). `set` (the Secret's password works), `default` (still on its factory
+# password, so a first login has to change it), `different` (a password of its own: neither works, so nobody is told to
+# set it again), `unreachable` or `unknown`.
+export def password_verdict [with_secret: string, with_default: any] {
+    match $with_secret {
+        "ok" => "set"
+        "expired" => "default"
+        "unreachable" => "unreachable"
+        "refused" => {
+            match $with_default {
+                "expired" => "default"
+                "unreachable" => "unreachable"
+                _ => "different"
+            }
+        }
+        _ => "unknown"
+    }
 }
 
 # ── Probes: they read, and change nothing ────────────────────────────────────

@@ -67,28 +67,58 @@ def main [] {
             }
         }
         {
-            name: "Neo4j answering 200 to the Secret's password means the password is already set"
-            body: { assert equal (neo4j_password_state 200 "") "set" }
-        }
-        {
-            name: "Neo4j asking for a new password means it is still the default one"
+            name: "a usable answer from Neo4j is `ok`, and a refusal is `refused`: a wrong password is the 401"
             body: {
-                assert equal (neo4j_password_state 403 '{"errors":[{"code":"Neo.ClientError.Security.CredentialsExpired","message":"The credentials you provided were valid, but must be changed before you can use this instance."}]}') "default"
+                assert equal (neo4j_answer 200 '{"results":[{"columns":["1"],"data":[{"row":[1],"meta":[null]}]}],"errors":[]}') "ok"
+                assert equal (neo4j_answer 401 '{"errors":[{"code":"Neo.ClientError.Security.Unauthorized","message":"Invalid credential."}]}') "refused"
             }
         }
         {
-            name: "a refused password is wrong and not default, so the step does not tell anyone to set it again"
+            name: "valid credentials that must be changed are `expired`, and Neo4j reports that as a 200 with the code in the body"
             body: {
-                assert equal (neo4j_password_state 401 '{"errors":[{"code":"Neo.ClientError.Security.Unauthorized"}]}') "different"
+                # The body is what a Neo4j started with its default credentials really answered (observed, not
+                # recalled): the status is 200, and the error is in the body.
+                let body = '{"results":[],"errors":[{"code":"Neo.ClientError.Security.CredentialsExpired","message":"ACCESS on database \'neo4j\' is not allowed.\n\nThe credentials you provided were valid, but must be changed before you can use this instance."}]}'
+                assert equal (neo4j_answer 200 $body) "expired"
             }
         }
         {
-            name: "no answer from Neo4j is unknown, and never taken for set or default"
+            name: "no answer is `unreachable`, anything else is `unknown`, and a 403 is not taken for a request to change the password"
             body: {
-                assert equal (neo4j_password_state 0 "") "unreachable"
-                assert equal (neo4j_password_state 502 "") "unknown"
-                # a refusal that is not a request to change the password is not the default password
-                assert equal (neo4j_password_state 403 '{"errors":[{"code":"Neo.ClientError.Security.Forbidden"}]}') "unknown"
+                assert equal (neo4j_answer 0 "") "unreachable"
+                assert equal (neo4j_answer 502 "") "unknown"
+                assert equal (neo4j_answer 403 '{"errors":[{"code":"Neo.ClientError.Security.CredentialsExpired"}]}') "unknown"
+            }
+        }
+        {
+            name: "the Secret's password working means the password is set"
+            body: { assert equal (password_verdict "ok" null) "set" }
+        }
+        {
+            name: "a Neo4j that refuses the Secret's password but accepts neo4j/neo4j as valid-but-expired is still on its default password"
+            body: {
+                # The case step 10 exists for, and the one the first version got backwards: the Secret's password is
+                # refused (401) because Neo4j still has the default.
+                assert equal (password_verdict "refused" "expired") "default"
+            }
+        }
+        {
+            name: "the Secret's password accepted but expired also needs a first change"
+            body: { assert equal (password_verdict "expired" null) "default" }
+        }
+        {
+            name: "a Neo4j that refuses both has a password of its own, which is not the default, so nobody is told to set it again"
+            body: {
+                assert equal (password_verdict "refused" "refused") "different"
+                assert equal (password_verdict "refused" null) "different"
+            }
+        }
+        {
+            name: "no answer is never taken for set or default, whichever probe it was"
+            body: {
+                assert equal (password_verdict "unreachable" null) "unreachable"
+                assert equal (password_verdict "refused" "unreachable") "unreachable"
+                assert equal (password_verdict "unknown" null) "unknown"
             }
         }
     ]

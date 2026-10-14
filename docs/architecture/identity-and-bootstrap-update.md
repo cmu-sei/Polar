@@ -58,7 +58,9 @@ rebuild state from the ledger.
 3. `just admin-claim <user> <email>`: the admin claims the account (ECDSA P-256, 1-year cert).
 4. `just user-cert-install <user>`: the cert and the Polar CA are imported into the browser.
 5. The browser reaches Neo4j Browser over mTLS (`client_auth=REQUIRE`) at `https://localhost:7473`.
-6. Neo4j password changed interactively from `neo4j`; this unblocks `kube-consumer` and `jira-processor`.
+6. Neo4j password changed interactively from `neo4j`; this unblocks `kube-consumer` and `jira-processor`. (Superseded 2026-10-14: the
+   nix-built image now applies `NEO4J_AUTH` on its first start, so Neo4j starts with the password the agents use and
+   there is no interactive step; see `remaining-work.md`.)
    `NEO4J_AUTH` is ignored by the custom image; do not seed the password.
 
 Neo4j trusts only the Polar CA for client certs on both connectors: the JVM keystore is built from `polar-internal-ca`
