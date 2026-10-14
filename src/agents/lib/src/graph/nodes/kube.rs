@@ -388,9 +388,50 @@ impl KubeNodeKey {
             }
             .into(),
             _ => {
-                tracing::warn!("Unknown owner key");
+                tracing::warn!(
+                    owner_kind = %owner.kind,
+                    owner_name = %owner.name,
+                    owner_uid = %owner.uid,
+                    "Unknown owner key: no graph node for this kind of owner, so its edge is not written"
+                );
                 None
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod owner_reference_tests {
+    use super::*;
+
+    fn owner(kind: &str) -> OwnerReference {
+        OwnerReference {
+            kind: kind.to_string(),
+            name: "x".to_string(),
+            uid: "u-1".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn replicasets_and_deployments_are_owners_the_graph_knows() {
+        assert!(matches!(
+            KubeNodeKey::from_owner_reference(&owner("ReplicaSet")),
+            Some(KubeNodeKey::ReplicaSet { .. })
+        ));
+        assert!(matches!(
+            KubeNodeKey::from_owner_reference(&owner("Deployment")),
+            Some(KubeNodeKey::Deployment { .. })
+        ));
+    }
+
+    #[test]
+    fn other_kinds_of_owner_have_no_node_and_are_skipped() {
+        for kind in ["Job", "StatefulSet", "DaemonSet", "Node"] {
+            assert!(
+                KubeNodeKey::from_owner_reference(&owner(kind)).is_none(),
+                "{kind}"
+            );
         }
     }
 }
