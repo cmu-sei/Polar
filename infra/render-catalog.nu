@@ -19,6 +19,8 @@
 
 const INFRA = (path self | path dirname)
 
+use cache.nu [cached_text, content_key, dir_digest]
+
 # Which template renders which workload kind. A kind with no entry here is a
 # custom chart, not a catalog workload.
 const TEMPLATES = { agent: "agent", service: "agent" }
@@ -26,6 +28,23 @@ const TEMPLATES = { agent: "agent", service: "agent" }
 def fail [msg: string] {
     print -e $"  ERROR: ($msg)"
     exit 1
+}
+
+# Dhall's rendering of `expr`: read back when the same inputs were rendered before, rendered and kept when not.
+# The key covers the expression (the typed spec, and the template it is applied to), every file in infra/schema
+# (a deliberate over-approximation of what the templates import: any edit there is a different key), and the
+# version of dhall-to-yaml. The remote imports are pinned by hash, so they cannot differ under the same key.
+def render_yaml [name: string, expr: string, schema_key: string, what: string] {
+    let key = (content_key [$schema_key $expr])
+    try {
+        cached_text "render" $key {||
+            let r = ($expr | dhall-to-yaml --quoted --documents | complete)
+            if $r.exit_code != 0 { error make { msg: $r.stderr } }
+            $r.stdout
+        }
+    } catch {|e|
+        fail $"($name): dhall-to-yaml failed($what)\n($e.msg)"
+    }
 }
 
 def main [
@@ -42,6 +61,8 @@ def main [
     let selected = if ($only | is-empty) { $names } else { $names | where {|n| $n in $only } }
 
     mkdir $output_dir
+
+    let schema_key = (content_key [(dir_digest ($INFRA | path join "schema") "*.dhall") (^dhall-to-yaml --version | str trim)])
 
     for name in $selected {
         let resolved = (nu $resolver json $name --target $target | from json)
@@ -60,13 +81,10 @@ def main [
         }
 
         let expr = ("let spec = " + $typed.stdout + "\nin " + $template_file + " spec")
-        let rendered = ($expr | dhall-to-yaml --quoted --documents | complete)
-        if $rendered.exit_code != 0 {
-            fail $"($name): dhall-to-yaml failed\n($rendered.stderr)"
-        }
+        let rendered = (render_yaml $name $expr $schema_key "")
 
         let out = ($output_dir | path join $"($name).yaml")
-        $rendered.stdout | save --force $out
+        $rendered | save --force $out
         print $"  rendering ($template).dhall -> ($name).yaml"
 
         # Objects that live alongside the workload, if its capabilities ask for any.
@@ -78,11 +96,8 @@ def main [
                 fail $"($name): resources do not match resources-spec.dhall\n($res_typed.stderr)"
             }
             let res_expr = ("let spec = " + $res_typed.stdout + "\nin " + ($INFRA | path join "schema/resources.dhall") + " spec")
-            let res_out = ($res_expr | dhall-to-yaml --quoted --documents | complete)
-            if $res_out.exit_code != 0 {
-                fail $"($name): dhall-to-yaml failed on resources\n($res_out.stderr)"
-            }
-            $res_out.stdout | save --force ($output_dir | path join $"($name)-resources.yaml")
+            let res_out = (render_yaml $name $res_expr $schema_key " on resources")
+            $res_out | save --force ($output_dir | path join $"($name)-resources.yaml")
             print $"  rendering resources.dhall -> ($name)-resources.yaml"
         }
     }
