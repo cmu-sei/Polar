@@ -7,7 +7,6 @@ def main [context_nuon: string] {
     let output_dir        = $context.output_dir
     let overrides         = $context.overrides
     let neo4j_addr        = $context.neo4jBoltAddr
-    let cert_issuer_url   = $context.certIssuerUrl
     let polar_init_image  = $context.polarInitImage
     let sa_audience       = $context.certIssuerAudience
 
@@ -33,7 +32,7 @@ def main [context_nuon: string] {
         + " imagePullSecrets = v.imagePullSecrets, serviceAccountName = v.serviceAccountName,"
         + " serviceType = v.serviceType, port = v.port,"
         + " polarInitImage = \"" + $polar_init_image + "\","
-        + " certIssuerUrl = \"" + $cert_issuer_url + "\","
+        + " credentialsObserverUrl = \"" + $context.credentialsObserverUrl + "\","
         + " saTokenAudience = \"" + $sa_audience + "\","
         + " neo4jBoltAddr = \"" + $neo4j_addr + "\""
         + " }"

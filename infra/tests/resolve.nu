@@ -306,19 +306,22 @@ def main [] {
             assert ($r.volumes | all {|v| $v.items == [] })
         }
 
-        "the bootstrap identities ask cert-issuer, and every other workload does until it is moved": {
-            for n in [cassini credentials-agent credentials-agent-observer] {
-                let r = (resolve $n)
-                let st = (settings $n)
-                assert equal $st.issuer "cert-issuer" $n
-                assert $st.bootstrap $n
-                assert ($r.cert_issuer_url | str starts-with "https://cert-issuer.") $n
+        "the bootstrap identities ask cert-issuer, and every other workload does until a target moves it": {
+            # An empty target, so this says what the catalog's defaults are and not how far the rollout has got.
+            with_target { workloads: {} } {|t|
+                for n in [cassini credentials-agent credentials-agent-observer] {
+                    let r = (^nu $RESOLVER json $n --target $t | from json)
+                    let st = (^nu $RESOLVER settings $n --target $t | from json)
+                    assert equal $st.issuer "cert-issuer" $n
+                    assert $st.bootstrap $n
+                    assert ($r.cert_issuer_url | str starts-with "https://cert-issuer.") $n
+                }
+                let k = (^nu $RESOLVER json kube-consumer --target $t | from json)
+                let ks = (^nu $RESOLVER settings kube-consumer --target $t | from json)
+                assert equal $ks.issuer "cert-issuer"
+                assert (not $ks.bootstrap)
+                assert equal (init_env_value $k "POLAR_INIT_ISSUER") null
             }
-            let k = (resolve "kube-consumer")
-            let ks = (settings "kube-consumer")
-            assert equal $ks.issuer "cert-issuer"
-            assert (not $ks.bootstrap)
-            assert equal (init_env_value $k "POLAR_INIT_ISSUER") null
         }
 
         "a workload moved onto the credentials agent is told the observer's address and not cert-issuer's": {
@@ -348,15 +351,30 @@ def main [] {
         }
 
         "workloads still asking cert-issuer are listed as pending while the floor is off, and refused once it is enforced": {
-            let off = (^nu $RESOLVER check | complete)
-            assert equal $off.exit_code 0 $off.stderr
-            assert ($off.stdout | str contains "pending")
-            assert ($off.stdout | str contains "kube-consumer")
-            with_target { cluster: { issuance: { floor_enforced: true } } } {|t|
+            # Everything on cert-issuer, as the catalog's defaults have it. The Jira observer needs the one
+            # setting a target gives it, or `check` would fail for that and not for what this is about.
+            let jira = { jira-observer: { env: [
+                { name: "JIRA_URL", value: "https://example.atlassian.net" }
+                { name: "JIRA_EMAIL", value: "someone@example.com" }
+            ] } }
+            with_target { workloads: $jira } {|t|
+                let off = (^nu $RESOLVER check --target $t | complete)
+                assert equal $off.exit_code 0 $off.stderr
+                assert ($off.stdout | str contains "pending")
+                assert ($off.stdout | str contains "kube-consumer")
+            }
+            with_target { cluster: { issuance: { floor_enforced: true } }, workloads: $jira } {|t|
                 let on = (^nu $RESOLVER check --target $t | complete)
                 assert ($on.exit_code != 0)
                 assert ($on.stderr | str contains "kube-consumer")
             }
+        }
+
+        "on the local-minimal target no catalog workload asks cert-issuer directly but the bootstrap identities": {
+            # The state phase 6 of the cert-issuer isolation reached (docs/architecture/cert-issuer-isolation.md).
+            let r = (^nu $RESOLVER check | complete)
+            assert equal $r.exit_code 0 $r.stderr
+            assert (not ($r.stdout | str contains "pending"))
         }
 
         "the floor is written from the catalog: the bootstrap identities, then a vouched-only entry for each server certificate on the credentials agent": {
@@ -369,8 +387,12 @@ def main [] {
                 let e = ($f | where workload == $"system:serviceaccount:polar:($w)" | first)
                 assert equal $e.certType "CLIENT"
             }
-            # The git server is still on cert-issuer, so it has no entry yet.
-            assert equal ($f | where workload == "system:serviceaccount:polar:polar-git-server" | length) 0
+            # A workload still on cert-issuer has no entry; one moved onto the credentials agent that is issued a
+            # server certificate has a vouched-only one.
+            with_target { workloads: {} } {|t|
+                let before = (^nu $RESOLVER floor --target $t | from json)
+                assert equal ($before | where workload == "system:serviceaccount:polar:polar-git-server" | length) 0
+            }
             with_target { workloads: { polar-git-server: { issuer: "credentials-agent" } } } {|t|
                 let moved = (^nu $RESOLVER floor --target $t | from json)
                 let g = ($moved | where workload == "system:serviceaccount:polar:polar-git-server" | first)
@@ -401,6 +423,15 @@ def main [] {
             let certs = (env_value $r "POLAR_HEALTH_CERTS")
             assert ($certs | str contains "/etc/tls/certs/cert.pem")
             assert (not ($certs | str contains "neo4j-client-tls"))
+        }
+
+        "the address of a service comes from services.nuon, and a service with no URL is an error": {
+            let url = (^nu $RESOLVER service-url credentials-agent-observer | str trim)
+            assert equal $url "http://credentials-agent-observer.polar.svc.cluster.local:8080"
+            let missing = (^nu $RESOLVER service-url cassini | complete)
+            assert ($missing.exit_code != 0)
+            let unknown = (^nu $RESOLVER service-url no-such-service | complete)
+            assert ($unknown.exit_code != 0)
         }
 
         "the template does not see the settings record": {

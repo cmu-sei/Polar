@@ -1,0 +1,99 @@
+#!/usr/bin/env nu
+# infra/tests/charts.nu
+#
+# What the hand-written service charts tell `polar-init`: Neo4j's server certificate and the ACE job's
+# client certificate come from the credentials agent, not from cert-issuer. Neither is a bootstrap identity,
+# so cert-issuer will not sign either on its token alone once the floor is enforced
+# (docs/architecture/cert-issuer-isolation.md). Rendered the way render.nu renders them.
+#
+#   nu infra/tests/charts.nu
+
+use std/assert
+
+const INFRA = (path self | path dirname | path dirname)
+const OBSERVER = "http://credentials-agent-observer.polar.svc.cluster.local:8080"
+
+def render [chart: string, extra: record] {
+    let out = (mktemp --directory)
+    let context = ({
+        chart_dir: ($INFRA | path join "layers/2-services" $chart)
+        output_dir: $out
+        overrides: ($INFRA | path join "targets/local-minimal/overrides.dhall")
+        target_dir: ($INFRA | path join "targets/local-minimal")
+        enable_tls: true
+        polarInitImage: "polar-init:test"
+        neo4jBoltAddr: "polar-db-svc.polar-graph.svc.cluster.local:7687"
+        certIssuerUrl: "https://cert-issuer.polar.svc.cluster.local:8443"
+        certIssuerAudience: "polar-cert-issuer-neo4j.local"
+        credentialsObserverUrl: $OBSERVER
+    } | merge $extra)
+    let r = (^nu ($INFRA | path join "layers/2-services" $chart "main.nu") ($context | to nuon) | complete)
+    if $r.exit_code != 0 { error make { msg: $"rendering ($chart) failed: ($r.stderr)" } }
+    $out
+}
+
+# The env of the polar-init container in the first document that has one.
+def init_env [file: string] {
+    open --raw $file
+    | split row "\n---\n"
+    | each {|d| $d | from yaml }
+    | each {|doc|
+        let pod = ($doc | get -o spec.template.spec)
+        if $pod == null { null } else {
+            $pod | get -o initContainers | default [] | where name == "polar-init" | get -o 0.env
+        }
+    }
+    | compact
+    | first
+}
+
+def value_of [vars: list, name: string] { $vars | where name == $name | get -o 0.value }
+
+def main [] {
+    let tests = {
+        "Neo4j's server certificate is requested from the credentials agent": {
+            let out = (render neo4j {})
+            let vars = (init_env ($out | path join "neo4j-statefulset.yaml"))
+            assert equal (value_of $vars "POLAR_INIT_ISSUER") "credentials-agent"
+            assert equal (value_of $vars "POLAR_INIT_OBSERVER_URL") $OBSERVER
+            # nothing in the pod is told where cert-issuer is
+            assert (((value_of $vars "POLAR_INIT_CERT_ISSUER_URL") | default "") == "")
+        }
+
+        "Neo4j still asks for the server certificate it did and skips the escrow bootstrap": {
+            let out = (render neo4j {})
+            let text = (open --raw ($out | path join "neo4j-statefulset.yaml"))
+            assert ($text | str contains "server:/etc/neo4j-tls:ecdsa-p256:")
+            let vars = (init_env ($out | path join "neo4j-statefulset.yaml"))
+            assert ((value_of $vars "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP") == "true")
+        }
+
+        "the ACE job's client certificate is requested from the credentials agent": {
+            let out = (render ace {})
+            let vars = (init_env ($out | path join "ace.yaml"))
+            assert equal (value_of $vars "POLAR_INIT_ISSUER") "credentials-agent"
+            assert equal (value_of $vars "POLAR_INIT_OBSERVER_URL") $OBSERVER
+            assert (((value_of $vars "POLAR_INIT_CERT_ISSUER_URL") | default "") == "")
+        }
+    }
+
+    let results = ($tests | transpose name body | each {|t|
+        try {
+            do $t.body
+            { name: $t.name, error: null }
+        } catch {|e|
+            { name: $t.name, error: $e.msg }
+        }
+    })
+
+    for r in $results {
+        if $r.error == null { print $"  ok    ($r.name)" } else { print -e $"  FAIL  ($r.name): ($r.error)" }
+    }
+
+    let failed = ($results | where error != null | length)
+    if $failed > 0 {
+        print -e $"($failed) of ($results | length) failed"
+        exit 1
+    }
+    print $"all ($results | length) passed"
+}

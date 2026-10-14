@@ -43,7 +43,7 @@ let render =
           , serviceType        : Text
           , port               : Natural
           , polarInitImage     : Text
-          , certIssuerUrl      : Text
+          , credentialsObserverUrl : Text
           , saTokenAudience    : Text
           , neo4jBoltAddr      : Text
           }
@@ -94,8 +94,8 @@ let render =
                     v.polarInitImage
                     v.imagePullPolicy
                     Constants.saTokenVolumeName
-                    v.certIssuerUrl
-                    functions.noEnv
+                    ""
+                    (functions.credentialsAgentIssuerEnv v.credentialsObserverUrl)
                     Constants.saTokenPath
                     [ kubernetes.VolumeMount::{ name = Constants.neo4jClientCertVolumeName, mountPath = Constants.neo4jClientCertPath } ]
                     ([] : List Text)

@@ -79,7 +79,7 @@ def main [context_nuon: string] {
         + ", ports              = v.ports"
         + ", config             = v.config"
         + ", volumes            = v.volumes"
-        + ", certIssuerUrl      = v.certIssuerUrl"
+        + ", credentialsObserverUrl = \"" + $context.credentialsObserverUrl + "\""
         + ", polarInitImage     = \"" + $context.polarInitImage + "\""
         + ", nuInitImage        = v.nuInitImage"
         + ", certIssuerAudience = v.certIssuerAudience"

@@ -187,6 +187,16 @@ let DockerRegistrySecret =
 -- have nothing to add don't each spell out a typed empty list.
 let noEnv = [] : List kubernetes.EnvVar.Type
 
+-- What polar-init is told when its certificates come from the credentials agent (through its observer) and
+-- not from cert-issuer. The pod is not told where cert-issuer is, and pairs this with an empty
+-- certIssuerUrl. For a workload that is not a bootstrap identity (cert-issuer will not sign it on its token
+-- alone once the floor is enforced; docs/architecture/cert-issuer-isolation.md).
+let credentialsAgentIssuerEnv =
+      \(observerUrl : Text) ->
+        [ kubernetes.EnvVar::{ name = "POLAR_INIT_ISSUER", value = Some "credentials-agent" }
+        , kubernetes.EnvVar::{ name = "POLAR_INIT_OBSERVER_URL", value = Some observerUrl }
+        ]
+
 let makePolarInitContainer =
       \(polarInitImage : Text) ->
       \(imagePullPolicy : Text) ->
@@ -245,4 +255,5 @@ in  { makeGraphEnv
     , GraphProxyEnv
     , makePolarInitContainer
     , noEnv
+    , credentialsAgentIssuerEnv
     }

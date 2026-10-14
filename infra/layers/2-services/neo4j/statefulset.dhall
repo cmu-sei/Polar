@@ -30,7 +30,7 @@ let render =
           , namespace           : Text
           , serviceAccountName  : Text
           , configVolume        : Text
-          , certIssuerUrl       : Text
+          , credentialsObserverUrl : Text
           , polarInitImage      : Text
           , nuInitImage          : Text
           , certIssuerAudience  : Text
@@ -155,16 +155,18 @@ let render =
                         v.polarInitImage
                         v.imagePullPolicy
                         "neo4j-sa-token"
-                        v.certIssuerUrl
-                        Functions.noEnv
+                        -- Not told where cert-issuer is: its server certificate comes from the
+                        -- credentials agent. Neo4j is not a bootstrap identity.
+                        ""
+                        (Functions.credentialsAgentIssuerEnv v.credentialsObserverUrl)
                         "/workspace/token"
                         [ kubernetes.VolumeMount::{ name = "neo4j-tls", mountPath = "/etc/neo4j-tls" } ]
                         ([] : List Text)
                         [ "server:/etc/neo4j-tls:ecdsa-p256:${Prelude.Text.concatSep "," v.neo4jSans}" ]
                         -- Neo4j is storage, not an agent: it has no Cassini
-                        -- connection, and the credentials agent needs Neo4j up
-                        -- before it can answer. Skipping escrow bootstrap here
-                        -- breaks what would otherwise be a startup deadlock.
+                        -- connection, so it has no escrow identity to bootstrap. (The
+                        -- credentials agent does not need Neo4j to answer, so getting
+                        -- the server certificate from it is no startup deadlock.)
                         True
                     , kubernetes.Container::{
                       , name            = "neo4j-init"

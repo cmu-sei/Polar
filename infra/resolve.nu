@@ -814,6 +814,18 @@ def "main floor" [--target: string = $DEFAULT_TARGET] {
     print ($f.entries | to json --raw)
 }
 
+# The URL of an in-cluster service, from services.nuon (render.nu hands it to the hand-written charts, so the
+# address is written once). An error for a service that is not there or is not addressed by URL.
+def "main service-url" [name: string, --target: string = $DEFAULT_TARGET] {
+    let services = (open ($CONFIG | path join "services.nuon"))
+    let vars = (service_vars $services (load_cluster $target))
+    let url = ($vars | get -o $name | get -o url)
+    if $url == null {
+        error make { msg: $"service '($name)' is not in services.nuon, or has no scheme and so no URL" }
+    }
+    print $url
+}
+
 # Whether cert-issuer enforces the floor on this target (cluster.nuon, `issuance.floor_enforced`).
 def "main floor-enforced" [--target: string = $DEFAULT_TARGET] {
     print ((load_cluster $target).issuance?.floor_enforced? | default false)
