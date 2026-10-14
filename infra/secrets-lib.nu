@@ -135,3 +135,35 @@ export def required_secret_problems [required: list, existing: list, secrets: re
         }
     }
 }
+
+
+# The secrets the cluster cannot run without, each `{ namespace, name, key }` where `key` is the entry of the
+# decrypted files that holds its value. Written once: every target needs the same two.
+export const REQUIRED_SECRETS = [
+    { namespace: "polar-graph", name: "neo4j-secret", key: "neo4j_auth" }
+    { namespace: "polar", name: "polar-graph-pw", key: "graph_password" }
+]
+
+# The `namespace/name` of the required secrets the cluster already has.
+export def existing_required_secrets [] {
+    $REQUIRED_SECRETS
+    | where {|r| secret_exists $r.name $r.namespace }
+    | each {|r| $"($r.namespace)/($r.name)" }
+}
+
+# What would stop the secrets step for a target, found without creating anything: decrypts its SOPS files and
+# compares what they hold with what the cluster already has. Returns `{ secrets, failures, problems }`;
+# `problems` is empty when the step can go on. `up.nu` asks this first, so a shell without the SOPS variables
+# is told so before the images are built and not after, and each target's `secrets.nu` asks it again.
+export def secrets_check [target_dir: string, existing: list] {
+    let shared = (decrypt_sops $target_dir "secrets.sops.yaml")
+    let user   = (decrypt_sops $target_dir "user.sops.yaml")
+    let failures = ([$shared.failure $user.failure] | compact)
+    # Merge: user values take precedence
+    let secrets = ($shared.data | merge $user.data)
+    {
+        secrets: $secrets
+        failures: $failures
+        problems: (required_secret_problems $REQUIRED_SECRETS $existing $secrets $failures)
+    }
+}

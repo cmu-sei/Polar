@@ -19,6 +19,14 @@ const BOTH_THERE = ["polar-graph/neo4j-secret" "polar/polar-graph-pw"]
 
 def failure [file: string, reason: string] { { file: $file, reason: $reason } }
 
+# A target directory whose shared SOPS file is not a SOPS file, so it cannot be decrypted by anyone.
+def broken_target [] {
+    let dir = (mktemp --directory)
+    "creation_rules: []\n" | save --force ($dir | path join ".sops.yaml")
+    "neo4j_auth: not-encrypted\n" | save --force ($dir | path join "secrets.sops.yaml")
+    $dir
+}
+
 def main [] {
     let tests = [
         {
@@ -30,6 +38,47 @@ def main [] {
                 assert ($a =~ '^[A-Za-z0-9]+$')
                 assert ($a != $b)
                 assert equal (random_token 16 | str length) 16
+            }
+        }
+        {
+            name: "a target whose SOPS file will not decrypt is told so by the check, with the way out, before anything is built"
+            body: {
+                let dir = (broken_target)
+                let found = (secrets_check $dir [])
+                assert equal ($found.problems | length) 2
+                for p in $found.problems {
+                    assert ($p | str contains "would not decrypt") $p
+                    assert ($p | str contains "SOPS_AGE_SSH_PRIVATE_KEY_FILE") $p
+                    assert ($p | str contains "SOPS_AGE_BINARY") $p
+                }
+                assert ($found.failures | any {|f| $f.file == "secrets.sops.yaml" })
+                rm -rf $dir
+            }
+        }
+        {
+            name: "the check lets a resume through when the secrets already exist, even though the file will not decrypt"
+            body: {
+                let dir = (broken_target)
+                let found = (secrets_check $dir $BOTH_THERE)
+                assert equal $found.problems []
+                assert ($found.failures | is-not-empty)
+                rm -rf $dir
+            }
+        }
+        {
+            name: "the check names what is missing when there is nothing to decrypt and nothing exists"
+            body: {
+                let dir = (mktemp --directory)
+                let found = (secrets_check $dir [])
+                assert equal ($found.problems | length) 2
+                assert ($found.problems | all {|p| $p | str contains "is not in the decrypted files" })
+                rm -rf $dir
+            }
+        }
+        {
+            name: "the secrets every target needs are written once"
+            body: {
+                assert equal ($REQUIRED_SECRETS | get name | sort) ["neo4j-secret" "polar-graph-pw"]
             }
         }
         {

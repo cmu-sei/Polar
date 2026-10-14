@@ -13,24 +13,12 @@ def main [target_dir: string, repo_root: string] {
     print "── secrets ──"
     print "  Decrypting secrets..."
 
-    let shared = (decrypt_sops $target_dir "secrets.sops.yaml")
-    let user   = (decrypt_sops $target_dir "user.sops.yaml")
-    let failures = ([$shared.failure $user.failure] | compact)
-
-    # Merge — user values take precedence
-    let secrets = ($shared.data | merge $user.data)
-
     # A file that will not decrypt matters only if it leaves a secret the cluster needs unmade.
-    let required = [
-        { namespace: "polar-graph", name: "neo4j-secret", key: "neo4j_auth" }
-        { namespace: "polar", name: "polar-graph-pw", key: "graph_password" }
-    ]
-    let existing = ($required
-        | where {|r| secret_exists $r.name $r.namespace }
-        | each {|r| $"($r.namespace)/($r.name)" })
-    let problems = (required_secret_problems $required $existing $secrets $failures)
-    if ($problems | is-not-empty) {
-        for p in $problems { print -e $"  FAILED: ($p)" }
+    let checked = (secrets_check $target_dir (existing_required_secrets))
+    let secrets = $checked.secrets
+    let failures = $checked.failures
+    if ($checked.problems | is-not-empty) {
+        for p in $checked.problems { print -e $"  FAILED: ($p)" }
         exit 1
     }
     for f in $failures {

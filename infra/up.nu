@@ -34,6 +34,7 @@ const POLAR = "polar"
 const GRAPH = "polar-graph"
 
 use images.nu
+use secrets-lib.nu [existing_required_secrets, secrets_check]
 use seed.nu
 use plan.nu [build_forwards, build_plan, deployed_charts]
 use apply.nu [any_pod_ready, gate_after, job_verdict, jobs_in]
@@ -173,7 +174,7 @@ def build_waits [config: record] {
     $w
 }
 
-def step_preflight [] {
+def step_preflight [config: record] {
     if not ("infra/render.nu" | path exists) {
         fail "run this from the repo root (infra/render.nu not found)"
     }
@@ -185,6 +186,18 @@ def step_preflight [] {
         fail $"cluster not reachable: ($nodes.stderr | str trim)"
     }
     ok $"cluster reachable, ($nodes.stdout | lines | length) node\(s\)"
+
+    # The secrets step needs the SOPS files to decrypt unless the secrets are already there. Found out here, in
+    # seconds, and not after the images are built: a shell without the dev shell's SOPS variables was told so
+    # only at the secrets step, after the whole build.
+    if ($config.target_dir | path join "secrets.nu" | path exists) {
+        let checked = (secrets_check $config.target_dir (existing_required_secrets))
+        if ($checked.problems | is-not-empty) {
+            for p in $checked.problems { print -e $"  FAILED: ($p)" }
+            fail "the secrets step could not run; fix the above (the dev shell sets the SOPS variables), then run this again"
+        }
+        ok (if ($checked.failures | is-empty) { "secrets: the SOPS files decrypt" } else { "secrets: all the required secrets already exist" })
+    }
 }
 
 # The agents that describe themselves are asked for their scaffold, and to check the document they
@@ -409,7 +422,7 @@ def main [
         print ""
         print $"[($it.index + 1)/($total)] ($s.title)"
         match $s.id {
-            "preflight" => { step_preflight }
+            "preflight" => { step_preflight $config }
             "agent-images" => { step_agent_images }
             "render" => { step_render $target }
             "images" => { step_images $config }
