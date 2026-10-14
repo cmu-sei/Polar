@@ -17,6 +17,7 @@
     }
     # The cluster pulls from the development registry over plain http, and so must the resolver.
     oci-registry-resolver: {
+      issuer: "credentials-agent"
       env: [
         { name: "OCI_INSECURE_REGISTRIES", value: "10.0.2.2:5000" }
       ]
@@ -26,7 +27,14 @@
     # has a record of it. Group 1 is the secret harness, which is the check on the rest.
     secret-harness-owner: { issuer: "credentials-agent" }
     secret-harness-intruder: { issuer: "credentials-agent" }
+    # Group 2: the workloads that ask for one client certificate. The ones that also open a Neo4j connection ask
+    # for a second client certificate (/etc/neo4j-client-tls), which the credentials agent does not issue
+    # (one client and one server certificate per pod instance); that belongs to the builder migration.
+    kube-observer: { issuer: "credentials-agent" }
+    git-repo-observer: { issuer: "credentials-agent" }
+    polar-scheduler-observer: { issuer: "credentials-agent" }
     jira-observer: {
+      issuer: "credentials-agent"
       env: [
         { name: "JIRA_URL", value: "https://daveman1010220.atlassian.net" }
         { name: "JIRA_EMAIL", value: "daveman1010220@gmail.com" }
