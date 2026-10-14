@@ -70,7 +70,7 @@ export def clone_outcome [exit_code: int, stderr: string] {
 }
 
 export def refused_hint [identity: string, target: string] {
-    $"the Polar git server does not know ($identity) as an administrator, so it will not take the seed. Add it to POLAR_GIT_SERVER_ADMINS for polar-git-server in infra/targets/($target)/config.nuon, then run this again."
+    $"the Polar git server does not know ($identity) as an administrator, so it will not take the seed. That identity belongs to this cluster, and a reset gives new ones: set POLAR_GIT_SERVER_ADMINS for polar-git-server in infra/targets/($target)/config.nuon to include it \(comma-separated; drop the previous cluster's\), then run this again. Running it again restarts the git server by itself, because its ConfigMap changes."
 }
 
 # Whether the credentials agent has said it published `section`'s authority: its log line for the first

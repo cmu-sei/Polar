@@ -36,6 +36,7 @@ const GRAPH = "polar-graph"
 use images.nu
 use secrets-lib.nu [existing_required_secrets, secrets_check]
 use retry.nu [with_retries]
+use admin.nu [aside_path, is_another_clusters]
 use forwards.nu [ensure_observer_forward]
 use seed.nu
 use plan.nu [build_forwards, build_plan, deployed_charts]
@@ -360,8 +361,13 @@ def step_admin [username: string, mail: string] {
     let dir = (admin_dir)
     let cluster_ca = (^kubectl -n $POLAR get configmap polar-ca -o "jsonpath={.data.ca\\.pem}" | str trim)
     let ca_file = ($dir | path join "ca.pem")
-    if ($ca_file | path exists) and ((open --raw $ca_file | str trim) != $cluster_ca) {
-        fail $"($dir) holds material from a previous cluster. Move it aside and re-run: mv ($dir) ($dir).old"
+    # The CA stored there is not this cluster's, so what is there was issued by another cluster and is of no use
+    # here. It is moved aside, not deleted, under a name that cannot overwrite an earlier one.
+    let stored_ca = if ($ca_file | path exists) { open --raw $ca_file } else { null }
+    if (is_another_clusters $stored_ca $cluster_ca) {
+        let aside = (aside_path $dir (date now | format date "%Y%m%d-%H%M%S") (glob $"($dir).old*"))
+        mv $dir $aside
+        note $"($dir) held certificates from another cluster \(its CA is not this cluster's\); moved to ($aside), nothing deleted"
     }
 
     if ($dir | path join "bootstrap-admin.crt" | path exists) {

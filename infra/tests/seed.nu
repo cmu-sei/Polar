@@ -107,6 +107,9 @@ def main [] {
                 assert ($hint | str contains "66b3f4c8-f024")
                 assert ($hint | str contains "POLAR_GIT_SERVER_ADMINS")
                 assert ($hint | str contains "infra/targets/local-minimal/config.nuon")
+                # what to do about the old value, and what running it again does
+                assert ($hint | str contains "this cluster")
+                assert ($hint | str contains "restarts the git server")
             }
         }
         {
