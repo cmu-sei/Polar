@@ -7,6 +7,8 @@
 # read.
 
 # The name Neo4j's server certificate carries for the service (services.nuon), which the forward answers to.
+use retry.nu [with_retries]
+
 const NEO4J_HOST = "polar-db-svc.polar-graph.svc.cluster.local"
 
 # Whether two fingerprints are the same one, whatever the case or the colons. Null is never the same as anything.
@@ -117,4 +119,16 @@ export def neo4j_probe [admin_dir: string, user: string, password: string] {
     let body = (try { open --raw $out } catch { "" })
     rm -f $out
     { code: (try { $r.stdout | str trim | into int } catch { 0 }), body: $body }
+}
+
+# Runs `probe` (which returns `{ code, body }`, as `neo4j_probe` does) until Neo4j answers at all, up to `attempts`
+# times with `pause` between. Neo4j that was just started, or whose port-forward is reconnecting, answers nothing
+# for a while; any answer, a refusal included, ends the wait, since asking again cannot change it. Returns the last
+# `{ code, body }`, whose code is 0 if nothing ever answered.
+export def probe_until_answered [attempts: int, pause: duration, probe: closure] {
+    let r = (with_retries $attempts $pause {|n|
+        let a = (do $probe)
+        { ok: ((neo4j_answer $a.code $a.body) != "unreachable"), final: false, detail: ($a | to json --raw) }
+    })
+    $r.detail | from json
 }

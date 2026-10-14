@@ -121,6 +121,55 @@ def main [] {
                 assert equal (password_verdict "unknown" null) "unknown"
             }
         }
+        {
+            name: "a Neo4j that is still starting is waited for: the probe is repeated until something answers"
+            body: {
+                let f = (mktemp)
+                "0" | save --force $f
+                let probe = {||
+                    let n = ((open --raw $f | into int) + 1)
+                    $"($n)" | save --force $f
+                    if $n < 3 { { code: 0, body: "" } } else { { code: 200, body: "{}" } }
+                }
+                let r = (probe_until_answered 5 1ms $probe)
+                let calls = (open --raw $f | into int)
+                rm -f $f
+                assert equal $r.code 200
+                assert equal $calls 3
+            }
+        }
+        {
+            name: "a Neo4j that never answers is given up on after the attempts, reporting no answer"
+            body: {
+                let f = (mktemp)
+                "0" | save --force $f
+                let probe = {||
+                    $"((open --raw $f | into int) + 1)" | save --force $f
+                    { code: 0, body: "" }
+                }
+                let r = (probe_until_answered 4 1ms $probe)
+                let calls = (open --raw $f | into int)
+                rm -f $f
+                assert equal $r.code 0
+                assert equal $calls 4
+            }
+        }
+        {
+            name: "any answer ends the wait, a refusal included: trying again cannot change it"
+            body: {
+                let f = (mktemp)
+                "0" | save --force $f
+                let probe = {||
+                    $"((open --raw $f | into int) + 1)" | save --force $f
+                    { code: 401, body: "" }
+                }
+                let r = (probe_until_answered 5 1ms $probe)
+                let calls = (open --raw $f | into int)
+                rm -f $f
+                assert equal $r.code 401
+                assert equal $calls 1
+            }
+        }
     ]
 
     let results = ($tests | each {|t|

@@ -37,7 +37,7 @@ use images.nu
 use secrets-lib.nu [existing_required_secrets, secrets_check]
 use retry.nu [with_retries]
 use admin.nu [aside_path, is_another_clusters]
-use browser.nu [browser_expected, browser_found, browser_problems, neo4j_answer, neo4j_probe, nss_db, password_verdict]
+use browser.nu [browser_expected, browser_found, browser_problems, neo4j_answer, neo4j_probe, nss_db, password_verdict, probe_until_answered]
 use forwards.nu [ensure_observer_forward]
 use seed.nu
 use plan.nu [build_forwards, build_plan, deployed_charts]
@@ -410,7 +410,8 @@ def step_browser [username: string] {
 
     # The password the agents use is the Secret's; whether Neo4j has it tells whether the first login happened.
     let agents_password = (^kubectl -n $POLAR get secret polar-graph-pw -o "jsonpath={.data.secret}" | ^base64 -d)
-    let first = (neo4j_probe $dir $username $agents_password)
+    # Neo4j that was just (re)started answers nothing for up to a minute or so: wait for it rather than fail.
+    let first = (probe_until_answered 30 4sec {|| neo4j_probe $dir $username $agents_password })
     let with_secret = (neo4j_answer $first.code $first.body)
     # Only if the Secret's password is refused is the factory default tried, so a Neo4j still on it is recognised
     # (it refuses the Secret's password) and one with a password of its own gets no more failed logins than that.
@@ -434,7 +435,7 @@ def step_browser [username: string] {
             note "Neo4j has a password other than the one in the polar-graph-pw Secret, so the agents cannot log in. Either set the Secret to the password it has, or change Neo4j's to the Secret's; this is not the default password, so there is no first login to do."
         }
         "unreachable" => {
-            fail "Neo4j does not answer at https://localhost:7473, so its password cannot be checked: start its port-forward (just port-forwards-up neo4j) and run this again"
+            fail "Neo4j did not answer at https://localhost:7473 in two minutes, so its password cannot be checked: start its port-forward (just port-forwards-up neo4j) and run this again"
         }
         _ => {
             note $"Neo4j answered http ($first.code) to the password check, which is neither success nor a request to change the password; not asking for anything"
