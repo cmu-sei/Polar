@@ -903,6 +903,7 @@ impl Actor for ConsumerSupervisor {
         let store_secret_handler = StoreSecretHandler {
             escrow_keypair: escrow_keypair.clone(),
             ledger: ledger.clone(),
+            policy: polar_agent_builder::PolicyLookup::for_service(SERVICE_NAME),
         };
         let (_store_secret_actor, _) = StoreSecretActor::spawn_linked(
             Some(STORE_SECRET_ACTOR_NAME.to_string()),

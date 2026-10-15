@@ -21,23 +21,53 @@
    DM24-0470
 */
 
-//! Store half of the general secret-escrow mechanism. Validates that
-//! the submitted EscrowedSecret is genuinely encrypted to this
-//! agent's own current escrow key, and that the publish carrying it
-//! has real, broker-verified attribution -- then appends
-//! CredentialsEvent::SecretStored to the ledger. Retrieval is
-//! in retrieve_secret.rs.
+//! Store half of the general secret-escrow mechanism
+//! (docs/architecture/credentials-policy.md, "Storing is governed by policy").
+//!
+//! In order, refusing at the first failure, and saying nothing about whether a secret exists to anyone policy
+//! does not permit:
+//!
+//! 1. the publish is attributed (broker-verified);
+//! 2. the name is one a secret can have, and the labels are well formed: both reach policy, so nothing in them
+//!    may end a resource or a rule early;
+//! 3. the requester's client certificate is on record: policy reads its permissions;
+//! 4. policy lets this identity store this secret. Cedar is asked first (action `store`). If it says nothing, or no
+//!    policy is loaded, the floor decides: an identity may store under its own namespace (`<identity>/...`) and
+//!    as `agent-escrow-keypair:<identity>`. That floor is what lets every agent escrow its keypair on a fresh
+//!    cluster, before any policy has been seeded. If policy cannot be reached at all that is a failure to
+//!    retry, never the floor;
+//! 5. the secret is genuinely encrypted to this agent's own current escrow key;
+//! 6. the ledger appends it, atomically with its check that the name is the requester's to store and that the
+//!    labels are those it was stored with.
 
 use crate::escrow::EscrowKeypair;
 use crate::ledger::{LedgerMessage, SecretStoreError};
+use crate::retrieve_secret::{call_check_certificate, call_check_secret};
+use credentials_agent_common::agent_escrow_keypair_bootstrap::agent_escrow_keypair_secret_name;
 use credentials_agent_common::events::CredentialsEvent;
-use credentials_agent_common::secret::{StoreRefusalReason, StoreSecretReply, StoreSecretRequest};
+use credentials_agent_common::retrieve_secret::is_valid_secret_name;
+use credentials_agent_common::secret::{
+    StoreRefusalReason, StoreSecretReply, StoreSecretRequest, namespace_of, validate_labels,
+};
+use polar_agent_builder::{LookupError, PolicyLookup};
 use ractor::ActorRef;
 use std::sync::Arc;
+use tracing::{debug, error};
 
 pub struct StoreSecretHandler {
     pub escrow_keypair: Arc<EscrowKeypair>,
     pub ledger: ActorRef<LedgerMessage>,
+    pub policy: PolicyLookup,
+}
+
+/// What an identity may store when policy has nothing to say: a name in its own namespace, and the name its own
+/// escrow keypair is stored under.
+pub fn floor_allows(requester: &str, name: &str) -> bool {
+    namespace_of(name) == Some(requester) || name == agent_escrow_keypair_secret_name(requester)
+}
+
+fn refused(reason: StoreRefusalReason) -> StoreSecretReply {
+    StoreSecretReply::Refused { reason }
 }
 
 impl StoreSecretHandler {
@@ -47,15 +77,68 @@ impl StoreSecretHandler {
         stored_by: Option<String>,
     ) -> StoreSecretReply {
         let Some(stored_by) = stored_by else {
-            return StoreSecretReply::Refused {
-                reason: StoreRefusalReason::AnonymousPublisherNotAllowed,
-            };
+            return refused(StoreRefusalReason::AnonymousPublisherNotAllowed);
+        };
+        if !is_valid_secret_name(&request.name) {
+            return refused(StoreRefusalReason::InvalidSecretName);
+        }
+        if let Err(problem) = validate_labels(&request.labels) {
+            debug!(%stored_by, %problem, "a store was refused for its labels");
+            return refused(StoreRefusalReason::InvalidLabels);
+        }
+
+        let requester_certificate = match call_check_certificate(&self.ledger, &stored_by).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return refused(StoreRefusalReason::RequesterCertificateNotFound),
+            Err(e) => {
+                error!("Failed to check requester certificate for {stored_by}: {e}");
+                return StoreSecretReply::Failed { detail: e };
+            }
         };
 
+        // The ledger's record of the secret: its owner is what policy speaks of. An absent secret simply has no
+        // owner, so a refusal below is the same whether or not one exists.
+        let existing = match call_check_secret(&self.ledger, &request.name).await {
+            Ok(existing) => existing,
+            Err(e) => {
+                error!("Failed to check stored secret {}: {e}", request.name);
+                return StoreSecretReply::Failed { detail: e };
+            }
+        };
+        let facts = polar_policy::Facts {
+            owner: existing.as_ref().map(|s| s.stored_by.clone()),
+            namespace: namespace_of(&request.name).map(str::to_string),
+            labels: request.labels.clone(),
+        };
+        let decision = self
+            .policy
+            .decide(
+                &stored_by,
+                Some(requester_certificate.certificate_pem.clone()),
+                r#"Action::"store""#,
+                &format!(r#"Secret::"{}""#, request.name),
+                facts,
+            )
+            .await;
+        let allowed = match decision {
+            Ok(polar_policy::Decision::Allow) => true,
+            Ok(polar_policy::Decision::Deny) => false,
+            // Policy does not speak to it, or none is loaded yet: the floor decides.
+            Ok(polar_policy::Decision::NotDetermined) | Err(LookupError::NoPolicyLoaded) => {
+                floor_allows(&stored_by, &request.name)
+            }
+            // No decision is never a grant, and never a reason to fall back: try again.
+            Err(LookupError::Unavailable(detail)) => {
+                error!("Policy could not decide a store for {stored_by}: {detail}");
+                return StoreSecretReply::Failed { detail };
+            }
+        };
+        if !allowed {
+            return refused(StoreRefusalReason::PolicyDenied);
+        }
+
         if request.secret.encrypted_to_pem() != self.escrow_keypair.public_key_pem() {
-            return StoreSecretReply::Refused {
-                reason: StoreRefusalReason::WrongEscrowKey,
-            };
+            return refused(StoreRefusalReason::WrongEscrowKey);
         }
 
         let event = CredentialsEvent::SecretStored {
@@ -75,9 +158,10 @@ impl StoreSecretHandler {
         {
             Ok(ractor::rpc::CallResult::Success(Ok(()))) => StoreSecretReply::Stored,
             Ok(ractor::rpc::CallResult::Success(Err(SecretStoreError::NameTaken))) => {
-                StoreSecretReply::Refused {
-                    reason: StoreRefusalReason::NameTaken,
-                }
+                refused(StoreRefusalReason::NameTaken)
+            }
+            Ok(ractor::rpc::CallResult::Success(Err(SecretStoreError::LabelsChanged))) => {
+                refused(StoreRefusalReason::LabelsChanged)
             }
             Ok(ractor::rpc::CallResult::Success(Err(SecretStoreError::Ledger(e)))) => {
                 tracing::error!("Failed to append SecretStored to the ledger: {e}");
@@ -96,7 +180,9 @@ impl StoreSecretHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::retrieve_secret::tests::spawn_test_ledger;
+    use crate::retrieve_secret::tests::{
+        registered_policy, seed_mtls_certificate, spawn_test_ledger,
+    };
     use credentials_agent_common::escrow_secret::EscrowedSecret;
 
     struct World {
@@ -105,13 +191,33 @@ mod tests {
         keypair: Arc<EscrowKeypair>,
     }
 
-    async fn world() -> World {
+    /// What the policy actor holds.
+    enum Policy<'a> {
+        /// Running, with no rules loaded: a fresh cluster before the seed.
+        NoRules,
+        /// Running, holding these rules.
+        Rules(&'a str),
+        /// Nothing is running under the name the handler looks for.
+        NotRunning,
+    }
+
+    /// A handler, and the certificates on record for the identities a test acts as.
+    async fn world(policy: Policy<'_>, identities: &[&str]) -> World {
         let ledger = spawn_test_ledger().await;
         let keypair = crate::escrow::tests::test_keypair();
+        for identity in identities {
+            seed_mtls_certificate(&ledger, identity).await;
+        }
+        let lookup = match policy {
+            Policy::NoRules => registered_policy(None).await,
+            Policy::Rules(source) => registered_policy(Some(source.to_string())).await,
+            Policy::NotRunning => polar_agent_builder::PolicyLookup::named("no-such-policy-actor"),
+        };
         World {
             handler: StoreSecretHandler {
                 escrow_keypair: keypair.clone(),
                 ledger: ledger.clone(),
+                policy: lookup,
             },
             ledger,
             keypair,
@@ -119,10 +225,22 @@ mod tests {
     }
 
     fn request(w: &World, name: &str, plaintext: &[u8]) -> StoreSecretRequest {
+        request_with(w, name, plaintext, &[])
+    }
+
+    fn request_with(
+        w: &World,
+        name: &str,
+        plaintext: &[u8],
+        labels: &[(&str, &str)],
+    ) -> StoreSecretRequest {
         StoreSecretRequest {
             name: name.to_string(),
             secret: EscrowedSecret::encrypt(plaintext, w.keypair.public_key_pem()).unwrap(),
-            labels: Default::default(),
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         }
     }
 
@@ -134,70 +252,366 @@ mod tests {
         .unwrap()
     }
 
+    fn refused(reason: StoreRefusalReason) -> StoreSecretReply {
+        StoreSecretReply::Refused { reason }
+    }
+
+    const PERMIT_ANY_STORE: &str = r#"permit (principal, action == Action::"store", resource);"#;
+
+    // ---- the floor: no policy has spoken, so an identity stores under its own name --------------------------
+
     #[tokio::test]
-    async fn the_identity_that_stored_a_secret_may_replace_it() {
-        let w = world().await;
-        let first = w
+    async fn with_no_policy_loaded_an_identity_may_store_under_its_own_namespace() {
+        let w = world(Policy::NoRules, &["alice"]).await;
+        let reply = w
             .handler
-            .handle(request(&w, "github-sei", b"one"), Some("observer".into()))
+            .handle(
+                request_with(&w, "alice/github", b"one", &[("kind", "token")]),
+                Some("alice".into()),
+            )
             .await;
-        assert_eq!(first, StoreSecretReply::Stored);
-        let before = held(&w, "github-sei").await.unwrap();
-        let again = w
+        assert_eq!(reply, StoreSecretReply::Stored);
+        let stored = held(&w, "alice/github").await.unwrap();
+        assert_eq!(stored.stored_by, "alice");
+        assert_eq!(stored.labels.get("kind").map(String::as_str), Some("token"));
+    }
+
+    #[tokio::test]
+    async fn with_no_policy_loaded_an_agent_may_escrow_its_own_keypair_under_its_historic_name() {
+        let w = world(Policy::NoRules, &["alice", "bob"]).await;
+        let own = credentials_agent_common::agent_escrow_keypair_bootstrap::agent_escrow_keypair_secret_name("alice");
+        assert_eq!(
+            w.handler
+                .handle(request(&w, &own, b"k"), Some("alice".into()))
+                .await,
+            StoreSecretReply::Stored
+        );
+        // Not another agent's keypair.
+        let theirs = credentials_agent_common::agent_escrow_keypair_bootstrap::agent_escrow_keypair_secret_name("alice");
+        assert_eq!(
+            w.handler
+                .handle(request(&w, &theirs, b"k"), Some("bob".into()))
+                .await,
+            refused(StoreRefusalReason::PolicyDenied)
+        );
+    }
+
+    #[tokio::test]
+    async fn with_no_rule_about_it_the_floor_decides_and_refuses_what_is_not_the_identitys_own() {
+        // A policy is loaded, and says nothing about stores.
+        let w = world(
+            Policy::Rules(r#"permit (principal, action == Action::"retrieve", resource) when { resource.owner == principal };"#),
+            &["alice"],
+        )
+        .await;
+        assert_eq!(
+            w.handler
+                .handle(request(&w, "alice/github", b"x"), Some("alice".into()))
+                .await,
+            StoreSecretReply::Stored
+        );
+        for name in [
+            "github",
+            "bob/github",
+            "alice",
+            "alice/",
+            "/github",
+            "agent-escrow-keypair:bob",
+        ] {
+            assert_eq!(
+                w.handler
+                    .handle(request(&w, name, b"x"), Some("alice".into()))
+                    .await,
+                refused(StoreRefusalReason::PolicyDenied),
+                "{name:?}"
+            );
+            assert!(held(&w, name).await.is_none(), "{name:?} was stored");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_identity_cannot_store_under_another_identitys_namespace() {
+        let w = world(Policy::NoRules, &["alice", "bob"]).await;
+        assert_eq!(
+            w.handler
+                .handle(request(&w, "alice/github", b"mine"), Some("bob".into()))
+                .await,
+            refused(StoreRefusalReason::PolicyDenied)
+        );
+    }
+
+    // ---- Cedar first -------------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_rule_may_permit_more_than_the_floor_does() {
+        let w = world(Policy::Rules(PERMIT_ANY_STORE), &["alice"]).await;
+        assert_eq!(
+            w.handler
+                .handle(request(&w, "shared/github", b"x"), Some("alice".into()))
+                .await,
+            StoreSecretReply::Stored
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forbid_overrides_the_floor() {
+        let w = world(
+            Policy::Rules(r#"forbid (principal, action == Action::"store", resource);"#),
+            &["alice"],
+        )
+        .await;
+        assert_eq!(
+            w.handler
+                .handle(request(&w, "alice/github", b"x"), Some("alice".into()))
+                .await,
+            refused(StoreRefusalReason::PolicyDenied)
+        );
+        assert!(held(&w, "alice/github").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_rule_can_speak_of_the_labels_a_secret_is_stored_with() {
+        let w = world(
+            Policy::Rules(r#"forbid (principal, action == Action::"store", resource) when { resource has kind && resource.kind == "user-password" };"#),
+            &["alice"],
+        )
+        .await;
+        assert_eq!(
+            w.handler
+                .handle(
+                    request_with(&w, "alice/a", b"x", &[("kind", "token")]),
+                    Some("alice".into())
+                )
+                .await,
+            StoreSecretReply::Stored
+        );
+        assert_eq!(
+            w.handler
+                .handle(
+                    request_with(&w, "alice/b", b"x", &[("kind", "user-password")]),
+                    Some("alice".into())
+                )
+                .await,
+            refused(StoreRefusalReason::PolicyDenied)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_policy_that_cannot_be_reached_is_a_failure_to_retry_and_never_the_floor() {
+        let w = world(Policy::NotRunning, &["alice"]).await;
+        let reply = w
             .handler
-            .handle(request(&w, "github-sei", b"two"), Some("observer".into()))
+            .handle(request(&w, "alice/github", b"x"), Some("alice".into()))
             .await;
-        assert_eq!(again, StoreSecretReply::Stored);
-        let after = held(&w, "github-sei").await.unwrap();
-        assert_eq!(after.stored_by, "observer");
+        assert!(
+            matches!(reply, StoreSecretReply::Failed { .. }),
+            "{reply:?}"
+        );
+        assert!(held(&w, "alice/github").await.is_none());
+    }
+
+    // ---- what is checked, and in what order --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_name_that_cannot_be_a_policy_resource_is_refused_before_policy_is_asked() {
+        // Policy is not running, so were it asked the reply would be a failure.
+        let w = world(Policy::NotRunning, &["alice"]).await;
+        for name in [
+            "",
+            "alice/with\"quote",
+            "alice/with space",
+            &"a".repeat(129),
+        ] {
+            assert_eq!(
+                w.handler
+                    .handle(request(&w, name, b"x"), Some("alice".into()))
+                    .await,
+                refused(StoreRefusalReason::InvalidSecretName),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn labels_that_are_not_well_formed_are_refused() {
+        let w = world(Policy::NoRules, &["alice"]).await;
+        for labels in [
+            vec![("Kind", "token")],
+            vec![("owner", "me")],
+            vec![("kind", "")],
+        ] {
+            assert_eq!(
+                w.handler
+                    .handle(
+                        request_with(&w, "alice/github", b"x", &labels),
+                        Some("alice".into())
+                    )
+                    .await,
+                refused(StoreRefusalReason::InvalidLabels),
+                "{labels:?}"
+            );
+        }
+        assert!(held(&w, "alice/github").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_requester_with_no_certificate_on_record_is_refused() {
+        let w = world(Policy::NoRules, &[]).await;
+        assert_eq!(
+            w.handler
+                .handle(request(&w, "alice/github", b"x"), Some("alice".into()))
+                .await,
+            refused(StoreRefusalReason::RequesterCertificateNotFound)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_anonymous_store_and_one_to_the_wrong_key_are_still_refused() {
+        let w = world(Policy::NoRules, &["alice"]).await;
+        assert_eq!(
+            w.handler.handle(request(&w, "alice/s", b"x"), None).await,
+            refused(StoreRefusalReason::AnonymousPublisherNotAllowed)
+        );
+        let other_key = crate::escrow::EscrowKeypair::generate().unwrap();
+        let wrong = StoreSecretRequest {
+            name: "alice/s".to_string(),
+            secret: EscrowedSecret::encrypt(b"x", other_key.public_key_pem()).unwrap(),
+            labels: Default::default(),
+        };
+        assert_eq!(
+            w.handler.handle(wrong, Some("alice".into())).await,
+            refused(StoreRefusalReason::WrongEscrowKey)
+        );
+        assert!(held(&w, "alice/s").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn policy_is_asked_before_the_key_is_looked_at() {
+        let other_key = crate::escrow::EscrowKeypair::generate().unwrap();
+        let wrong_key = |name: &str| StoreSecretRequest {
+            name: name.to_string(),
+            secret: EscrowedSecret::encrypt(b"x", other_key.public_key_pem()).unwrap(),
+            labels: Default::default(),
+        };
+        // Refused by policy: the reply is the policy's, not a word about the key.
+        let w = world(Policy::NoRules, &["alice"]).await;
+        assert_eq!(
+            w.handler
+                .handle(wrong_key("bob/github"), Some("alice".into()))
+                .await,
+            refused(StoreRefusalReason::PolicyDenied)
+        );
+        // Policy cannot be reached: that is the reply, not a word about the key either.
+        let w = world(Policy::NotRunning, &["alice"]).await;
+        assert!(matches!(
+            w.handler
+                .handle(wrong_key("alice/github"), Some("alice".into()))
+                .await,
+            StoreSecretReply::Failed { .. }
+        ));
+    }
+
+    // ---- ownership and labels, in the ledger -------------------------------------------------------------
+
+    #[tokio::test]
+    async fn the_identity_that_stored_a_secret_may_replace_it_with_the_same_labels() {
+        let w = world(Policy::NoRules, &["alice"]).await;
+        let labels = [("kind", "token")];
+        assert_eq!(
+            w.handler
+                .handle(
+                    request_with(&w, "alice/github", b"one", &labels),
+                    Some("alice".into())
+                )
+                .await,
+            StoreSecretReply::Stored
+        );
+        let before = held(&w, "alice/github").await.unwrap();
+        assert_eq!(
+            w.handler
+                .handle(
+                    request_with(&w, "alice/github", b"two", &labels),
+                    Some("alice".into())
+                )
+                .await,
+            StoreSecretReply::Stored
+        );
+        let after = held(&w, "alice/github").await.unwrap();
         assert_ne!(
             after.secret, before.secret,
             "the new value replaced the old"
         );
+        assert_eq!(after.labels, before.labels);
     }
 
     #[tokio::test]
-    async fn another_identity_cannot_take_a_secret_over_and_the_owner_keeps_it() {
-        let w = world().await;
+    async fn a_replacement_with_other_labels_is_refused_and_changes_nothing() {
+        let w = world(Policy::NoRules, &["alice"]).await;
         w.handler
-            .handle(request(&w, "github-sei", b"mine"), Some("observer".into()))
+            .handle(
+                request_with(&w, "alice/github", b"one", &[("kind", "token")]),
+                Some("alice".into()),
+            )
             .await;
-        let before = held(&w, "github-sei").await.unwrap();
-
-        let taken = w
-            .handler
-            .handle(request(&w, "github-sei", b"yours"), Some("intruder".into()))
-            .await;
-        assert_eq!(
-            taken,
-            StoreSecretReply::Refused {
-                reason: StoreRefusalReason::NameTaken
-            }
-        );
-        let after = held(&w, "github-sei").await.unwrap();
-        assert_eq!(after, before, "neither the value nor the owner changed");
+        let before = held(&w, "alice/github").await.unwrap();
+        for labels in [vec![("kind", "user-password")], vec![]] {
+            assert_eq!(
+                w.handler
+                    .handle(
+                        request_with(&w, "alice/github", b"two", &labels),
+                        Some("alice".into())
+                    )
+                    .await,
+                refused(StoreRefusalReason::LabelsChanged),
+                "{labels:?}"
+            );
+        }
+        assert_eq!(held(&w, "alice/github").await.unwrap(), before);
     }
 
     #[tokio::test]
-    async fn a_name_nobody_holds_is_free_to_any_identity_and_then_theirs() {
-        let w = world().await;
-        let a = w
-            .handler
-            .handle(request(&w, "a", b"x"), Some("alice".into()))
+    async fn another_identity_is_told_nothing_about_a_name_it_may_not_store_under() {
+        let w = world(Policy::NoRules, &["alice", "bob"]).await;
+        w.handler
+            .handle(request(&w, "alice/github", b"mine"), Some("alice".into()))
             .await;
-        let b = w
+        // The same reply for a name that exists and one that does not: policy answers before the ledger.
+        let existing = w
             .handler
-            .handle(request(&w, "b", b"x"), Some("bob".into()))
+            .handle(request(&w, "alice/github", b"x"), Some("bob".into()))
             .await;
-        assert_eq!((a, b), (StoreSecretReply::Stored, StoreSecretReply::Stored));
-        assert_eq!(held(&w, "a").await.unwrap().stored_by, "alice");
-        assert_eq!(held(&w, "b").await.unwrap().stored_by, "bob");
+        let absent = w
+            .handler
+            .handle(request(&w, "alice/other", b"x"), Some("bob".into()))
+            .await;
+        assert_eq!(existing, refused(StoreRefusalReason::PolicyDenied));
+        assert_eq!(existing, absent);
+    }
+
+    #[tokio::test]
+    async fn when_policy_lets_another_identity_in_it_still_cannot_take_a_secret_over() {
+        let w = world(Policy::Rules(PERMIT_ANY_STORE), &["alice", "bob"]).await;
+        w.handler
+            .handle(request(&w, "shared/github", b"mine"), Some("alice".into()))
+            .await;
+        let before = held(&w, "shared/github").await.unwrap();
+        assert_eq!(
+            w.handler
+                .handle(request(&w, "shared/github", b"yours"), Some("bob".into()))
+                .await,
+            refused(StoreRefusalReason::NameTaken)
+        );
+        assert_eq!(
+            held(&w, "shared/github").await.unwrap(),
+            before,
+            "neither the value nor the owner changed"
+        );
     }
 
     #[tokio::test]
     async fn two_identities_racing_for_a_fresh_name_cannot_both_have_it() {
         for _ in 0..20 {
-            let w = world().await;
+            let w = world(Policy::Rules(PERMIT_ANY_STORE), &["one", "two"]).await;
             let (one, two) = tokio::join!(
                 w.handler
                     .handle(request(&w, "contested", b"one"), Some("one".into())),
@@ -217,30 +631,5 @@ mod tests {
             };
             assert_eq!(owner, winner);
         }
-    }
-
-    #[tokio::test]
-    async fn an_anonymous_store_and_one_to_the_wrong_key_are_still_refused_first() {
-        let w = world().await;
-        let anonymous = w.handler.handle(request(&w, "s", b"x"), None).await;
-        assert_eq!(
-            anonymous,
-            StoreSecretReply::Refused {
-                reason: StoreRefusalReason::AnonymousPublisherNotAllowed
-            }
-        );
-        let other_key = crate::escrow::EscrowKeypair::generate().unwrap();
-        let wrong = StoreSecretRequest {
-            name: "s".to_string(),
-            secret: EscrowedSecret::encrypt(b"x", other_key.public_key_pem()).unwrap(),
-            labels: Default::default(),
-        };
-        assert_eq!(
-            w.handler.handle(wrong, Some("alice".into())).await,
-            StoreSecretReply::Refused {
-                reason: StoreRefusalReason::WrongEscrowKey
-            }
-        );
-        assert!(held(&w, "s").await.is_none());
     }
 }
