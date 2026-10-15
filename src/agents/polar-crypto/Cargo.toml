@@ -20,6 +20,9 @@ credentials-agent-client = { workspace = true }
 # The plaintext of a retrieved secret is wiped when dropped.
 zeroize = { version = "1.9.0", features = ["aarch64"] }
 thiserror.workspace = true
+# A secret and its binding are escrowed together as JSON, so a field added later does not break an old record.
+serde = { workspace = true }
+serde_json = { workspace = true }
 rsa.workspace = true
 x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
 cert-issuer-common = { version = "1.0.0", path = "../cert-issuer/common" }
@@ -35,6 +38,5 @@ sha2_011 = { package = "sha2", version = "0.11", default-features = false, featu
 
 [dev-dependencies]
 wiremock.workspace = true
-serde_json.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true

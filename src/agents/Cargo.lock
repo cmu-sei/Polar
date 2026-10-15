@@ -5629,6 +5629,7 @@ dependencies = [
  "rcgen",
  "rkyv",
  "rsa 0.10.0-rc.18",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",

@@ -66,6 +66,7 @@
 #![deny(clippy::disallowed_methods)]
 
 pub mod environment;
+pub mod registry;
 pub mod workload_certificates;
 
 use cassini_client::TcpClientMessage;
