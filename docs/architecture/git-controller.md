@@ -249,11 +249,11 @@ the same in each (`algorithm` is `ed25519` or `ecdsa-p256-sha256`; the chain is 
                "section": "credentials", "version": 1,
                "body": { "credentials": [
                  { "name": "github-sei", "host_pattern": "github.com", "kind": "token", "username": "oauth2",
-                   "secret": "<hybrid escrowed secret, as text, bound to git-repo-observer / credentials / secret / 1>" } ] } },
+                   "secret": "<base64 of the EscrowedSecret bytes, bound to git-repo-observer|credentials|1|github-sei|secret>" } ] } },
   "signature": { "...": "same shape" } }
 ```
 
-The text encoding of the hybrid ciphertext is not decided. What is escrowed after decrypting is not the bare token: it is `{host_pattern, kind, username, token}`, so that
+The binding context and the text encoding are in `signed-configuration.md` (decided 2026-10-14). What is escrowed after decrypting is not the bare token: it is `{host_pattern, kind, username, token}`, so that
 a `RetrieveSecret` after a restart brings the binding back with the secret, and the host check cannot be lost.
 
 ### The two messages between the agents

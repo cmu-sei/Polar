@@ -200,7 +200,13 @@ in the graph and passed over topics as it is.
 **Binding.** Each ciphertext is bound to its agent, field name and version as authenticated data, so it
 cannot be moved into another field or document. The signature already pins its place in the signed
 document; this pins it to its recipient. `EscrowedSecret` carries the context as AES-GCM authenticated data
-(`encrypt_bound`, `decrypt_bound`, built 2026-10-14). The exact context for an entry in a list is open.
+(`encrypt_bound`, `decrypt_bound`, built 2026-10-14). **Decided 2026-10-14 (David):** the context is the agent, the
+section, the version, the entry's name and the field, joined by `|`, for example
+`git-repo-observer|credentials|1|github-sei|secret`, so each ciphertext fits exactly one entry. The section's
+validation restricts an entry's name to lowercase letters, digits and hyphens (as agent and section names
+already are), so the joined context is unambiguous. In a document the ciphertext is written as standard base64 of
+the bytes `EscrowedSecret` already uses on the wire (its `rkyv` encoding), so the receiver can check its shape
+without decrypting.
 
 **At the receiver.** Decryption comes after every verification step, and the CryptoActor does it (through the
 CryptoHandle the infrastructure already holds). The plaintext is never recorded: the ConfigurationActor's
