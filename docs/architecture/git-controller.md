@@ -1,11 +1,11 @@
 # The git agents: observer, processor, and a controller
 
-Status, 2026-10-14 (design agreed with David 2026-10-12). The observer's `credentials` section and its use are built (2026-10-14, step 3: `git/observe/src/credentials.rs`); the controller and the status events are not; the `runtime` document type, replay, `c:update-runtime`, `polar-sign runtime` and `RetrieveSecret` are (each section says which). It replaces the
-git scheduler (`git/scheduler`, migrated onto the builder on 2026-10-12 as it was, for the move only) and
+Status, 2026-10-14 (design agreed with David 2026-10-12). The observer's `credentials` section and its use are built (2026-10-14, step 3: `git/observe/src/credentials.rs`); the minimal controller is (2026-10-14, step 4: `git/controller`, it announces the `repositories` section, with no proposals, admission, status or backoff); the full controller and the status events are not; the `runtime` document type, replay, `c:update-runtime`, `polar-sign runtime` and `RetrieveSecret` are (each section says which). It replaces the
+git scheduler (deleted 2026-10-14; it had been migrated onto the builder on 2026-10-12 as it was, for the move only) and
 settles three things that `proposals.md` and `signed-configuration.md` left open for the git agents: who
 receives proposals, how a credential reaches the observer, and how per-repository settings travel.
 
-## Why the git scheduler goes
+## Why the git scheduler went
 
 It was built before the credentials agent and the polar scheduler existed, and it holds what they now own:
 
@@ -172,7 +172,7 @@ them, in a `runtime` list, with the same habit of saying what each field is for.
       "body": {
         "repositories": { "list_of": {
           "url":            { "type": "https URL", "required": true,  "doc": "normalised; the key of the entry" },
-          "refs":           { "type": "list of text", "required": false, "default": ["refs/heads/main"] },
+          "refs":           { "type": "list of full ref names", "required": false, "default": "the repository's default branch (decided 2026-10-14, David)" },
           "frequency_secs": { "type": "whole number, at least 60", "required": false, "default": 900 },
           "max_depth":      { "type": "whole number", "required": false, "default": 100, "doc": "commits walked per ref, a safety bound" },
           "shallow_depth":  { "type": "whole number", "required": false, "doc": "depth of a shallow fetch; unset is a full incremental fetch" },
@@ -369,8 +369,8 @@ of step 6) come after, as path 2.
 4. **`CryptoMessage::RetrieveSecret`**, and the credential working set in the observer: add, escrow with retry,
    fetch at init, the host check.
 5. **Status events** from the observer, and the checkpoint request and reply between observer and processor.
-6. **The controller** on the builder: the desired set from `repositories`, proposals decided under `admission`,
-   reconciliation and backoff. The git scheduler is deleted when it stands.
+6. **The controller** on the builder: the desired set from `repositories` (built 2026-10-14, minimal), proposals
+   decided under `admission`, reconciliation and backoff. The git scheduler was deleted with the minimal controller.
 7. **The Jira side** publishes `observe-repo` proposals (`proposals.md`, step 5).
 
 ## Decisions (David, 2026-10-12)

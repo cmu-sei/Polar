@@ -22,10 +22,10 @@ let
     src = workspaceFileset ./git/process;
   });
 
-  scheduler = craneLib.buildPackage (crateArgs // {
-    pname = "git-repo-scheduler";
-    cargoExtraArgs = "--bin git-repo-scheduler --locked";
-    src = workspaceFileset ./git/scheduler;
+  controller = craneLib.buildPackage (crateArgs // {
+    pname = "git-repo-controller";
+    cargoExtraArgs = "--bin git-repo-controller --locked";
+    src = workspaceFileset ./git/controller;
   });
 
   healthcheckInputs = inputs // {
@@ -48,16 +48,16 @@ let
     extraDerivations = [ consumer ];
   };
 
-  schedulerContainer = nix-container-lib.lib.${system}.mkContainer {
+  controllerContainer = nix-container-lib.lib.${system}.mkContainer {
     inherit system pkgs;
     inputs = healthcheckInputs;
-    configNixPath    = ./container-scheduler.nix;
-    extraDerivations = [ scheduler ];
+    configNixPath    = ./container-controller.nix;
+    extraDerivations = [ controller ];
   };
 in
 {
-  inherit observer consumer scheduler;
+  inherit observer consumer controller;
   observerImage  = observerContainer.image;
   processorImage = consumerContainer.image;
-  schedulerImage = schedulerContainer.image;
+  controllerImage = controllerContainer.image;
 }

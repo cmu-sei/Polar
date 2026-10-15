@@ -33,13 +33,13 @@
     # client certificate instead (the graph-write capability).
     kube-observer: { issuer: "credentials-agent" }
     git-repo-observer: { issuer: "credentials-agent" }
+    git-repo-controller: { issuer: "credentials-agent" }
     polar-scheduler-observer: { issuer: "credentials-agent" }
     # Group 3: the graph agents, which present their one client certificate to Neo4j too (graph-write).
     kube-consumer: { issuer: "credentials-agent" }
     jira-processor: { issuer: "credentials-agent" }
     polar-scheduler: { issuer: "credentials-agent" }
     git-repo-processor: { issuer: "credentials-agent" }
-    git-repo-scheduler: { issuer: "credentials-agent" }
     jira-observer: {
       issuer: "credentials-agent"
       env: [

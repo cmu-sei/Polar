@@ -232,8 +232,8 @@ retried every 5 seconds forever; a rejection is fatal (exit 1). After the certif
 over Cassini with the certificate it just obtained. The requests across the rendered manifests:
 
 - 15 workloads ask for a client certificate (`/etc/tls/certs`); 6 of those also ask for a second client certificate
-  for Neo4j (`/etc/neo4j-client-tls`): `credentials-agent`, `git-repo-processor`, `git-repo-scheduler`,
-  `jira-processor`, `kube-consumer` and `polar-scheduler`. `ace` asks only for the Neo4j one.
+  for Neo4j (`/etc/neo4j-client-tls`): `credentials-agent`, `git-repo-processor`,
+  `jira-processor`, `kube-consumer` and `polar-scheduler` (the git scheduler, which was a seventh, is gone). `ace` asks only for the Neo4j one.
 - 3 ask for a server certificate with names: Cassini (`cassini-ip-svc.polar.svc.cluster.local`), Neo4j (several), and
   the git server, which asks for a client **and** a server certificate (`polar-git-server.polar.svc.cluster.local`).
 

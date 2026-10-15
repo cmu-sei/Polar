@@ -24,7 +24,7 @@ const BUDGETS = {
     oci-registry-resolver: 20
     git-repo-observer: 40
     git-repo-processor: 45
-    git-repo-scheduler: 45
+    git-repo-controller: 10
 }
 
 # The record the template takes, as the pipeline gets it.
@@ -391,12 +391,14 @@ def main [] {
             assert equal $r.service_account "git-repo-observer"
         }
 
-        "the git processor and scheduler write to the graph and need no cache": {
-            for name in ["git-repo-processor" "git-repo-scheduler"] {
-                let r = (resolve $name)
-                assert ("graph-write" in $r.needs)
-                assert equal $r.service_account $name
-            }
+        "the git processor writes to the graph and needs no cache; the controller does neither": {
+            let r = (resolve "git-repo-processor")
+            assert ("graph-write" in $r.needs)
+            assert equal $r.service_account "git-repo-processor"
+            let c = (resolve "git-repo-controller")
+            assert ("graph-write" not-in $c.needs)
+            assert equal $c.service_account "git-repo-controller"
+            assert ($c.mounts | where path =~ "cache" | is-empty)
         }
 
         "a volume that is not a Secret with items has none": {
@@ -504,7 +506,7 @@ def main [] {
             # Two client certificates for one pod instance is what the credentials agent refuses (and a second
             # would revoke the first), and the second was the same identity and type with no extra names, so
             # Neo4j is shown the certificate the pod already has.
-            for n in [kube-consumer jira-processor polar-scheduler git-repo-processor git-repo-scheduler credentials-agent] {
+            for n in [kube-consumer jira-processor polar-scheduler git-repo-processor credentials-agent] {
                 let r = (resolve $n)
                 assert equal $r.certs ["client:/etc/tls/certs:ecdsa-p256:"] $n
                 assert ($r.volumes | where name == "neo4j-client-tls" | is-empty) $n

@@ -41,7 +41,7 @@
   {image: "gitlab-consumer", tag: "latest", kind: "nix", attr: "polarPkgs.gitlabAgent.consumerImage"}
   {image: "git-observer",        tag: "latest", kind: "nix", attr: "polarPkgs.gitAgent.observerImage"}
   {image: "git-processor",       tag: "latest", kind: "nix", attr: "polarPkgs.gitAgent.processorImage"}
-  {image: "git-scheduler",       tag: "latest", kind: "nix", attr: "polarPkgs.gitAgent.schedulerImage"}  # short-term; being retired
+  {image: "git-controller",      tag: "latest", kind: "nix", attr: "polarPkgs.gitAgent.controllerImage"}
   {image: "openapi-observer",    tag: "latest", kind: "nix", attr: "polarPkgs.webAgent.observerImage"}
   {image: "openapi-processor",   tag: "latest", kind: "nix", attr: "polarPkgs.webAgent.processorImage"}
   {image: "scheduler-observer",  tag: "latest", kind: "nix", attr: "polarPkgs.scheduler.observerImage"}

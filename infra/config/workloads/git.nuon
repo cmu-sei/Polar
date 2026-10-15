@@ -4,8 +4,9 @@
 # to drain (`git-repo-observer --scaffold`, and so on).
 #
 # The observer watches the repositories it is told of and publishes their commits and ref updates;
-# it never touches the graph. The processor records those events in the graph. The scheduler
-# decides how a discovered repository is observed.
+# it never touches the graph. The processor records those events in the graph. The controller holds
+# the signed `repositories` section and tells the observer what to observe; it replaced the git
+# scheduler (docs/architecture/git-controller.md).
 [
   {
     # The Job and ServiceAccount keep the name the chart gave them.
@@ -33,11 +34,11 @@
   }
 
   {
-    name: "git-repo-scheduler"
+    name: "git-repo-controller"
     kind: "agent"
-    image: "git-scheduler"
+    image: "git-controller"
     # The crate is not named for the image.
-    scaffold_package: "git-repo-scheduler"
+    scaffold_package: "git-repo-controller"
     config: "document"
   }
 ]

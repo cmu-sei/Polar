@@ -49,7 +49,6 @@ members = [
     "git/observe",
     "git/process",
     "git/controller",
-    "git/scheduler",
     "jira/common",
     "jira/process",
     "jira/observe",

@@ -1,4 +1,4 @@
--- src/agents/git/container-scheduler.dhall
+-- src/agents/git/container-observer.dhall
 
 let Lib = ../../containers/container-lib.dhall
 
@@ -10,14 +10,14 @@ let healthcheckLayer =
     ]
 
 in defaults.minimalContainer //
-  { name       = "git-scheduler"
-  , entrypoint = Some "scheduler"
+  { name       = "git-controller"
+  , entrypoint = Some "git-repo-controller"
   , staticUid  = Some 1000
   , staticGid  = Some 1000
   , packageLayers = defaults.minimalContainer.packageLayers # [ healthcheckLayer ]
   , extraEnv   =
       [ Lib.buildEnv "SSL_CERT_FILE"      "/etc/ssl/certs/ca-bundle.crt"
       , Lib.buildEnv "SSL_CERT_DIR"       "/etc/ssl/certs"
-      , Lib.buildEnv "POLAR_HEALTH_CERTS" "/etc/tls/certs/cert.pem,/etc/neo4j-client-tls/cert.pem"
+      , Lib.buildEnv "POLAR_HEALTH_CERTS" "/etc/tls/certs/cert.pem"
       ]
   }

@@ -91,7 +91,7 @@ build-all:
     nix build {{_nix_flags}} ".#packages.{{platform}}.jiraProcessorImage"    -o result-jira-processor
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitObserverImage"      -o result-git-observer
     nix build {{_nix_flags}} ".#packages.{{platform}}.gitProcessorImage"     -o result-git-processor
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitSchedulerImage"     -o result-git-scheduler
+    nix build {{_nix_flags}} ".#packages.{{platform}}.gitControllerImage"    -o result-git-controller
     nix build {{_nix_flags}} ".#packages.{{platform}}.credentialsAgentConsumerImage" -o result-credentials-agent-consumer
     nix build {{_nix_flags}} ".#packages.{{platform}}.credentialsAgentObserverImage" -o result-credentials-agent-observer
     nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage"   -o result-build-processor

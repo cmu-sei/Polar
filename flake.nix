@@ -192,7 +192,7 @@
           # ── Git agent ────────────────────────────────────────────────────────
           gitObserverImage     = polarPkgs.gitAgent.observerImage;
           gitProcessorImage    = polarPkgs.gitAgent.processorImage;
-          gitSchedulerImage    = polarPkgs.gitAgent.schedulerImage;
+          gitControllerImage   = polarPkgs.gitAgent.controllerImage;
 
           # ── Credentials agent ────────────────────────────────────────────────
           credentialsAgentConsumerImage = polarPkgs.credentialsAgent.consumerImage;

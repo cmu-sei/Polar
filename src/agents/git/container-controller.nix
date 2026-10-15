@@ -1,6 +1,6 @@
 {
   ai = null;
-  entrypoint = "git-repo-scheduler";
+  entrypoint = "git-repo-controller";
   extraEnv = [
     {
       name = "SSL_CERT_FILE";
@@ -18,12 +18,12 @@
       name = "POLAR_HEALTH_CERTS";
       placement = u:
         u.BuildTime;
-      value = "/etc/tls/certs/cert.pem,/etc/neo4j-client-tls/cert.pem";
+      value = "/etc/tls/certs/cert.pem";
     }
   ];
   mode = u:
     u.Minimal;
-  name = "git-scheduler";
+  name = "git-controller";
   nix = {
     buildUserCount = u:
       u.Dynamic;
