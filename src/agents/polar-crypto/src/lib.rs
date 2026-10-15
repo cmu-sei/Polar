@@ -230,6 +230,18 @@ pub enum CryptoMessage {
         plaintext: Vec<u8>,
         reply: RpcReplyPort<Result<Vec<u8>, CryptoError>>,
     },
+    /// Opens an `EscrowedSecret` (its `rkyv` bytes, the form `EncryptForRecipient` returns and a signed
+    /// document carries) that was encrypted to this identity's own escrow public key, and returns the
+    /// plaintext, wiped when dropped. `context` is the authenticated data the secret was bound to when it
+    /// was made (`EscrowedSecret::encrypt_bound`): a secret opens only under the same bytes, so one cannot
+    /// be moved into another field or document. The private key stays in its custody; only the unwrap is
+    /// done with it. Bytes that are not an escrowed secret are `Err(Serialization)`, and a wrong context
+    /// or a tampered secret is `Err(DecryptFailed)`.
+    DecryptOwnEscrowed {
+        secret: Vec<u8>,
+        context: Vec<u8>,
+        reply: RpcReplyPort<Result<zeroize::Zeroizing<Vec<u8>>, CryptoError>>,
+    },
     /// Runs this identity's own escrow-keypair bootstrap sequence --
     /// retrieve-first, issuance-as-fallback, real, empirical kernel-
     /// custody attempt -- as a pure side effect, with no ciphertext
@@ -610,6 +622,42 @@ impl Actor for CryptoActor {
                         cached_key,
                         name,
                         plaintext,
+                    )
+                    .await;
+                    let _ = reply.send(result);
+                });
+            }
+            CryptoMessage::DecryptOwnEscrowed {
+                secret,
+                context,
+                reply,
+            } => {
+                // Spawned, not awaited inline, for the same reason as the arms around it: the first use
+                // bootstraps the key over the broker.
+                let tcp_client = state.tcp_client.clone();
+                let retrieve_agent_escrow_keypair_reply_router =
+                    state.retrieve_agent_escrow_keypair_reply_router.clone();
+                let agent_escrow_issuance_reply_router =
+                    state.agent_escrow_issuance_reply_router.clone();
+                let escrow_key_reply_router = state.escrow_key_reply_router.clone();
+                let store_secret_reply_router = state.store_secret_reply_router.clone();
+                let cached_key = state.cached_credentials_agent_escrow_key.clone();
+                let escrow_keypair_handle = state.escrow_keypair_handle.clone();
+                let own_identity = state.own_identity.clone();
+                let paths = state.paths.clone();
+                tokio::spawn(async move {
+                    let result = handle_decrypt_own_escrowed(
+                        tcp_client,
+                        retrieve_agent_escrow_keypair_reply_router,
+                        agent_escrow_issuance_reply_router,
+                        escrow_key_reply_router,
+                        store_secret_reply_router,
+                        cached_key,
+                        escrow_keypair_handle,
+                        own_identity,
+                        paths,
+                        secret,
+                        context,
                     )
                     .await;
                     let _ = reply.send(result);
@@ -1176,6 +1224,59 @@ async fn handle_decrypt_own_message(
             .decrypt(rsa::Oaep::<sha2_011::Sha256>::new(), &ciphertext)
             .map_err(|e| CryptoError::DecryptFailed(e.to_string())),
     }
+}
+
+/// The real handler behind CryptoMessage::DecryptOwnEscrowed: read the bytes as an `EscrowedSecret`, make
+/// sure this identity's escrow key is in hand, and open the secret under `context` with that key, which
+/// never leaves its custody.
+#[allow(clippy::too_many_arguments)]
+async fn handle_decrypt_own_escrowed(
+    tcp_client: ActorRef<TcpClientMessage>,
+    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
+    agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
+    escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
+    store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
+    cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
+    escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
+    own_identity: String,
+    paths: KeyPaths,
+    secret: Vec<u8>,
+    context: Vec<u8>,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, CryptoError> {
+    // Read before the key is touched: bytes that are not a secret need no bootstrap to be refused.
+    let escrowed = rkyv::from_bytes::<EscrowedSecret, rkyv::rancor::Error>(&secret)
+        .map_err(|e| CryptoError::Serialization(e.to_string()))?;
+
+    ensure_escrow_keypair_bootstrapped(
+        tcp_client,
+        retrieve_agent_escrow_keypair_reply_router,
+        agent_escrow_issuance_reply_router,
+        escrow_key_reply_router,
+        store_secret_reply_router,
+        cached_key,
+        escrow_keypair_handle.clone(),
+        own_identity,
+        paths,
+    )
+    .await?;
+
+    let handle_guard = escrow_keypair_handle.lock().await;
+    let handle = handle_guard
+        .as_ref()
+        .expect("ensure_escrow_keypair_bootstrapped just populated this");
+    escrowed
+        .decrypt_with_bound(
+            |wrapped| match handle {
+                EscrowKeypairHandle::KernelBacked(serial) => {
+                    polar_kernel_keyring::decrypt(*serial, wrapped).map_err(|e| e.to_string())
+                }
+                EscrowKeypairHandle::InMemory(private_key) => private_key
+                    .decrypt(rsa::Oaep::<sha2_011::Sha256>::new(), wrapped)
+                    .map_err(|e| e.to_string()),
+            },
+            &context,
+        )
+        .map_err(|e| CryptoError::DecryptFailed(e.to_string()))
 }
 
 /// The real handler behind CryptoMessage::RetrieveSecret: ask the credentials agent, and decrypt what
@@ -2090,6 +2191,75 @@ mod tests {
             Ok(decrypted) => assert_eq!(decrypted, plaintext),
             other => panic!("expected Ok(_), got {other:?}"),
         }
+        stop_and_release_key(&crypto_actor).await;
+    }
+
+    #[tokio::test]
+    async fn decrypt_own_escrowed_opens_a_secret_bound_to_its_context_and_only_that_one() {
+        use credentials_agent_common::escrow_secret::EscrowedSecret;
+        let mut rng = rand::rng();
+        let escrowed_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let escrowed_key_pem =
+            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&escrowed_key, rsa::pkcs8::LineEnding::LF)
+                .unwrap();
+        let public_pem = rsa::pkcs8::EncodePublicKey::to_public_key_pem(
+            &escrowed_key.to_public_key(),
+            rsa::pkcs8::LineEnding::LF,
+        )
+        .unwrap();
+
+        let ((crypto_actor, _), _, _) =
+            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
+                stored_escrow_keypair_pem: Some(escrowed_key_pem.to_string()),
+                issue_agent_escrow_certificates: false,
+                ..Default::default()
+            })
+            .await;
+
+        let context = b"git-repo-observer|credentials|token|2".to_vec();
+        let escrowed =
+            EscrowedSecret::encrypt_bound(b"a token, in a document", &public_pem, &context)
+                .unwrap();
+        let secret = rkyv::to_bytes::<rkyv::rancor::Error>(&escrowed)
+            .unwrap()
+            .to_vec();
+
+        // Its own context: opens.
+        let opened = ractor::call!(crypto_actor, |reply| CryptoMessage::DecryptOwnEscrowed {
+            secret: secret.clone(),
+            context: context.clone(),
+            reply,
+        })
+        .unwrap()
+        .expect("opens under its own context");
+        assert_eq!(opened.as_slice(), b"a token, in a document");
+
+        // Any other (another field, another version, none): refused as a failed decrypt.
+        for other in [&b"git-repo-observer|credentials|token|3"[..], b""] {
+            let refused = ractor::call!(crypto_actor, |reply| CryptoMessage::DecryptOwnEscrowed {
+                secret: secret.clone(),
+                context: other.to_vec(),
+                reply,
+            })
+            .unwrap();
+            assert!(
+                matches!(refused, Err(CryptoError::DecryptFailed(_))),
+                "{:?}: {refused:?}",
+                String::from_utf8_lossy(other)
+            );
+        }
+
+        // Bytes that are not an escrowed secret are a serialization error, not a panic.
+        let garbage = ractor::call!(crypto_actor, |reply| CryptoMessage::DecryptOwnEscrowed {
+            secret: b"not an escrowed secret".to_vec(),
+            context: context.clone(),
+            reply,
+        })
+        .unwrap();
+        assert!(
+            matches!(garbage, Err(CryptoError::Serialization(_))),
+            "{garbage:?}"
+        );
         stop_and_release_key(&crypto_actor).await;
     }
 
