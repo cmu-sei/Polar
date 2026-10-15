@@ -231,9 +231,16 @@ store would be refused as `NameTaken` and its credential left pending. Not built
 **Naming (decided 2026-10-14, David).** A secret is named `<identity>/<name>`, for example
 `git-repo-observer/github-sei`, as the agent's own escrow keypair already is
 (`agent_escrow_keypair_secret_name`, identity-scoped). The credentials agent builds the `Secret` entity from the
-validated name and sets its `namespace`, as an `Identity`, from the prefix. The first `store` rule is
-`permit (principal, action == Action::"store", resource) when { resource.namespace == principal };`, the same
-shape as the retrieve rule on `owner`, so an identity can store only under its own name. Cedar's `like` takes
+validated name and sets its `namespace`, as an `Identity`, from the prefix. Policy is asked first: action `store`, the signer as principal, resource `Secret::"<name>"` with that
+`namespace`. **Cedar first, with a built-in floor (decided 2026-10-14, David):** if the policy does not speak to the
+request, or none is loaded, an identity may store a name in its own namespace, `<identity>/…`, and also
+`agent-escrow-keypair:<its own identity>`, the name its escrow keypair is stored under. The floor is needed
+because every agent escrows its own keypair through this same path when it starts, on a fresh cluster before any
+policy has been seeded, and the seed needs agents running; it is the same model as runtime authority
+(`authority-distribution.md`: policy first, the certificate as fallback). The seeded policy therefore has no
+`store` rule, and Cedar can still forbid, or permit more than the floor does. The keypair's name is unchanged, so
+there is no migration. The agent computes `namespace` from the name; Cedar's `like` takes only a literal
+pattern, so the prefix cannot be matched in the policy. Cedar's `like` takes
 only a literal pattern, so the prefix is computed by the agent and not matched in the policy. A repository still
 names its credential by the short name (`github-sei`), and the observer resolves it to
 `<its own identity>/github-sei`. The identity is the one policy knows an agent by, its workload name.
