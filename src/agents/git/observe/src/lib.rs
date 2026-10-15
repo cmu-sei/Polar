@@ -19,6 +19,7 @@ pub const SERVICE_NAME: &str = "polar.git.observer";
 pub const REPO_SUPERVISOR_NAME: &str = "polar.git.observer.repo.supervisor";
 
 pub mod agent;
+pub mod credentials;
 pub mod settings;
 pub mod supervisor;
 

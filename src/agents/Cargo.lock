@@ -2702,15 +2702,21 @@ dependencies = [
 name = "git-repo-observer"
 version = "1.0.0"
 dependencies = [
+ "async-trait",
+ "base64 0.22.1",
  "cassini-client",
  "cassini-types",
+ "credentials_agent_common",
  "git-agent-common",
  "git2",
  "polar",
  "polar-agent-builder",
+ "polar-crypto",
  "polar-env",
  "ractor",
+ "rand 0.10.3",
  "rkyv",
+ "rsa 0.10.0-rc.18",
  "serde",
  "serde_json",
  "serde_yaml",

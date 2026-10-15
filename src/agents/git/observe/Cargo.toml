@@ -9,11 +9,14 @@ default-run = "git-repo-observer"
 
 [dependencies]
 cassini-client.workspace = true
+base64.workspace = true
 cassini-types.workspace = true
+credentials_agent_common.workspace = true
 git2.workspace = true
 git-agent-common.workspace = true
 polar.workspace = true
 polar-agent-builder.workspace = true
+polar-crypto.workspace = true
 polar-env.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
@@ -25,7 +28,10 @@ url.workspace = true
 serde_yaml.workspace = true
 
 [dev-dependencies]
+rand.workspace = true
+rsa.workspace = true
 tempfile.workspace = true
+async-trait.workspace = true
 
 
 [[bin]]
