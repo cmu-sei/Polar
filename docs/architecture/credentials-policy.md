@@ -240,7 +240,14 @@ stored label. This is what lets "any `git-token`" be a rule from the first day.
 Decided 2026-10-14 (David). `StoreSecret` asks policy before the ledger accepts a name: action `store`, resource
 `Secret::"<name>"`, with the request's labels as the secret's attributes. Until now the first identity to store a
 name owned it, so another identity could store `github-sei` before the observer did, and the observer's own
-store would be refused as `NameTaken` and its credential left pending. Not built.
+store would be refused as `NameTaken` and its credential left pending. **Built 2026-10-14** (`store_secret.rs`): the
+checks run in this order, refusing at the first failure: the publish is attributed; the name is valid
+(`InvalidSecretName`) and the labels are well formed (`InvalidLabels`); the requester's certificate is on record
+(`RequesterCertificateNotFound`); policy; the secret is encrypted to the current escrow key (`WrongEscrowKey`); and the
+ledger, atomically, that the name is the requester's to store (`NameTaken`) and the labels are unchanged
+(`LabelsChanged`). Policy comes before the key and the ledger, so a refusal (`PolicyDenied`) is the same for a name that
+is held and one that is not. If policy cannot be reached the store fails and is retried, and never falls back to the
+floor.
 
 **Naming (decided 2026-10-14, David).** A secret is named `<identity>/<name>`, for example
 `git-repo-observer/github-sei`, as the agent's own escrow keypair already is
