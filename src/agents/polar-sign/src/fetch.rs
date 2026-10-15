@@ -25,10 +25,15 @@ pub fn certificate_from_reply(status: u16, body: &str, identity: &str) -> Result
                 .map(str::to_string)
                 .ok_or_else(|| "the gateway's answer holds no certificate".to_string())
         }
-        404 => Err(format!(
+        // The consumer's own "not found" has a body; a gateway without the route answers 404 with none.
+        404 if body.contains("NotFound") => Err(format!(
             "the credentials agent has no escrow certificate for `{identity}`: the agent has not started \
              on this cluster yet, or is not called that"
         )),
+        404 => Err(
+            "the gateway has no /agent-escrow-key route: its image is older than this tool"
+                .to_string(),
+        ),
         400 => Err(format!(
             "the gateway refused the name `{identity}`: {}",
             body.trim().chars().take(200).collect::<String>()
@@ -99,6 +104,9 @@ mod tests {
                 .unwrap_err()
                 .contains("has not started")
         );
+        // a gateway that does not have the route says nothing in its 404
+        let old = certificate_from_reply(404, "", "a.b").unwrap_err();
+        assert!(old.contains("has no /agent-escrow-key route"), "{old}");
         assert!(
             certificate_from_reply(400, "bad name", "a b")
                 .unwrap_err()

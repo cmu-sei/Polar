@@ -61,9 +61,11 @@ fn git(plan: &Plan<'_>, in_dir: Option<&Path>, args: &[&str]) -> Result<String, 
     command.args(args);
     // Never wait for a password nobody can type.
     command.env("GIT_TERMINAL_PROMPT", "0");
-    // GIT_SSL_CAINFO in the environment would override the CA given here (`http.sslCAInfo`).
+    // GIT_SSL_CAINFO and SSL_CERT_FILE in the environment would override the CA given here (`http.sslCAInfo`);
+    // `just polar-git-clone` clears both for the same reason.
     if plan.git_config.iter().any(|(k, _)| k == "http.sslCAInfo") {
         command.env_remove("GIT_SSL_CAINFO");
+        command.env_remove("SSL_CERT_FILE");
     }
     let output = command
         .output()
