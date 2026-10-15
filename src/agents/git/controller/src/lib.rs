@@ -2,6 +2,7 @@
 
 pub mod admission;
 pub mod agent;
+pub mod control;
 pub mod desired;
 pub mod proposals;
 pub mod settings;

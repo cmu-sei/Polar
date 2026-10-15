@@ -201,7 +201,7 @@ them, in a `runtime` list, with the same habit of saying what each field is for.
     {
       "name": "admission",
       "doc": "Under what parameters a proposal of a kind is accepted. Until one is held, nothing is accepted.",
-      "body": { "kind": { "type": "text", "required": true }, "rules": { "hosts": "...", "proposers": "...", "approved": "...", "denied": "...", "credentials": "...", "limits": "..." } }
+      "body": { "kind": { "type": "text", "required": true }, "hosts": "...", "proposers": "...", "approved": "...", "denied": "...", "credentials": "...", "anonymous": "...", "limits": "..." }
     }
   ]
 }
@@ -254,7 +254,7 @@ the same in each (`algorithm` is `ed25519` or `ecdsa-p256-sha256`; the chain is 
 ```json
 { "payload": { "type": "runtime", "id": "admission-0002", "target": { "agent": "git-repo-controller" },
                "section": "admission", "version": 2,
-               "body": { "kind": "observe-repo", "rules": {
+               "body": { "kind": "observe-repo",
                  "hosts": ["github.com", "*.example.org"],
                  "organisations": { "github.com": ["cmu-sei"] },
                  "proposers": ["<the Jira consumer's identity as the broker names it>"],
@@ -262,7 +262,8 @@ the same in each (`algorithm` is `ed25519` or `ecdsa-p256-sha256`; the chain is 
                  "approved": ["https://github.com/cmu-sei/Polar.git"],
                  "denied": [],
                  "credentials": [ { "host": "github.com", "name": "github-sei" } ],
-                 "limits": { "max_entries": 500, "per_proposer_per_hour": 20 } } } },
+                 "anonymous": ["*.example.org"],
+                 "limits": { "max_entries": 500, "per_proposer_per_hour": 20 } } },
   "signature": { "...": "same shape" } }
 ```
 
@@ -281,6 +282,13 @@ The binding context and the text encoding are in `signed-configuration.md` (deci
 a `RetrieveSecret` after a restart brings the binding back with the secret, and the host check cannot be lost.
 
 ### The two messages between the agents
+
+**Amended 2026-10-15: the controller announces a `RepositorySet`, not one message per repository.** One message holds every
+repository (each as the `config` below) and a `complete` flag. An observer starts or replaces a worker for each repository in
+it and, only if `complete`, stops the workers of repositories it does not name: that is how removal and expiry reach it, and one
+message is all-or-nothing, so a lost announcement stops nothing. The controller marks the set incomplete for
+`POLAR_GIT_CONTROLLER_WARMUP_SECS` (default 600) after it starts, since it may not yet have had the signed sections replayed or heard
+its proposers again, and announces nothing at all until it has received a section or rules.
 
 Controller to observer, on the existing `git.repo.config.events` (a `ConfigurationEvent`), minus the inline
 credentials and plus the credential's name:

@@ -20,7 +20,7 @@ impl PolarAgent for GitController {
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
     const SECTIONS: &'static [&'static polar_env::Section] = &[&crate::settings::SECTION];
     const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] =
-        &[&crate::desired::REPOSITORIES];
+        &[&crate::desired::REPOSITORIES, &crate::admission::ADMISSION];
     const HELP: Option<&'static str> = Some(
         "The git controller holds the latest `repositories` runtime section (a signed document \
          from the schedules repository) and announces every repository in it on \

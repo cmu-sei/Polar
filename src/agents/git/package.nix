@@ -12,7 +12,8 @@
 let
   observer = craneLib.buildPackage (crateArgs // {
     pname = "git-repo-observer";
-    cargoExtraArgs = "--bin git-repo-observer --locked";
+    # The harness proposes a repository to the controller, to try the admission rules from inside the cluster.
+    cargoExtraArgs = "--bin git-repo-observer --bin git-discovery-harness --locked";
     src = workspaceFileset ./git/observe;
   });
 

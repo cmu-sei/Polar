@@ -222,6 +222,18 @@ not wired to anything yet. Decided while building, in the places this document w
 - The guard here is at decision time. The observer must check again when it connects, so a name that changes its
   answer is caught (step 6); until then an accepted repository is only as safe as the answer at decision time.
 
+## Built 2026-10-15: the controller takes proposals (step 2)
+
+The controller (`git/controller`) subscribes to `polar-proposal-observe-repo` (a `Proposal`: the URL and evidence; the proposer is what the
+broker says), holds them in `proposals.rs` (one claim per repository and proposer, bounded in total, per proposer and in evidence;
+judged in the order first seen, with the hourly limit a sliding window; a name looked up once; expired when not announced within
+`POLAR_GIT_CONTROLLER_PROPOSAL_TTL_SECS`, default a day, at least 300), judges them under the `admission` section, merges the accepted into the set
+it announces (the signed `repositories` entry wins), and publishes every decision on `polar.git.proposals.decisions` (and logs it).
+`control.rs` holds the sequences without the actor. Decided while building: **the `admission` body is flat** (`kind`, then `hosts`,
+`proposers`, ... as fields of their own, not under a `rules` key), because the template generator describes a section as typed fields;
+and the lookups happen on a blocking thread with a 60 s limit so a slow resolver cannot stop the controller from announcing.
+`git-discovery-harness` now publishes a proposal, and the observer image carries it, to try this from inside the cluster.
+
 ## Build order, tests first
 
 1. The decision procedure as a pure function: normalisation, each rule, the order, and an attack list (user

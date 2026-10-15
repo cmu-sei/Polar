@@ -1,12 +1,12 @@
 //! src/bin/discover_repo.rs
 //!
-//! One-off harness: publishes a GitRepositoryDiscoveredEvent onto the
-//! discovery topic so the git observer agent can be exercised end-to-end
-//! without the gitlab processor / graphql scraper in the loop.
+//! One-off harness: publishes a proposal that a repository be observed, as the Jira or GitLab consumer
+//! would, so the git controller's admission rules can be exercised end-to-end without either of them in
+//! the loop. The controller names the proposer by the certificate this process connects with.
 //!
 //! Usage:
-//!   cargo run --bin discover_repo -- https://github.com/cmu-sei/Polar.git
-//!   cargo run --bin discover_repo -- https://example.org/r.git --synthetic
+//!   cargo run --bin git-discovery-harness -- https://github.com/cmu-sei/Polar.git
+//!   cargo run --bin git-discovery-harness -- https://example.org/r.git --synthetic
 //!
 //! With `--synthetic` it publishes no discovery. It publishes two commits and a ref update for the
 //! repository on the events topic, as the observer would, so the processor and the graph can be
@@ -18,11 +18,8 @@
 
 use cassini_client::OfflineBehavior;
 use cassini_types::ClientEvent;
-use polar::{
-    cassini::{CassiniClient, PublishRequest, TcpClient},
-    events::GitRepositoryDiscoveredEvent,
-    topics::GIT_REPOSITORY_DISCOVERED,
-};
+use git_agent_common::proposal::{Evidence, PROPOSAL_OBSERVE_REPO_TOPIC, Proposal};
+use polar::cassini::{CassiniClient, PublishRequest, TcpClient};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 
 const SERVICE_NAME: &str = "git-discovery-harness";
@@ -105,19 +102,22 @@ impl Actor for Harness {
                     myself.stop(None);
                 }
                 ClientEvent::Registered { .. } => {
-                    let ev = GitRepositoryDiscoveredEvent {
-                        http_url: Some(state.http_url.clone()),
-                        ssh_url: None,
+                    let proposal = Proposal {
+                        url: state.http_url.clone(),
+                        evidence: Evidence {
+                            source: "harness".into(),
+                            reference: None,
+                        },
                     };
-                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&ev)?.to_vec();
+                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&proposal)?.to_vec();
                     state.tcp_client.publish(PublishRequest {
-                        topic: GIT_REPOSITORY_DISCOVERED.to_string(),
+                        topic: PROPOSAL_OBSERVE_REPO_TOPIC.to_string(),
                         payload: bytes,
                         trace_ctx: None,
                         offline_behavior: OfflineBehavior::default(),
                         share_identity: true,
                     })?;
-                    tracing::info!("published discovery event for {}", state.http_url);
+                    tracing::info!("proposed {}", state.http_url);
                     // The publish is queued to the client; stopping at once can end the process
                     // before it reaches the broker.
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;

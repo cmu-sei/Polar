@@ -16,7 +16,31 @@ pub static REPUBLISH_SECS: Defaulted<u64> = Defaulted::seconds(
 )
 .dynamic();
 
-static VARIABLES: &[&dyn Described] = &[&REPUBLISH_SECS];
+/// The shortest time a proposal is kept without its proposer announcing it again, in seconds. A smaller setting
+/// is taken as this.
+pub const MIN_PROPOSAL_TTL_SECS: u64 = 300;
+pub const DEFAULT_PROPOSAL_TTL_SECS: &str = "86400";
+
+pub static PROPOSAL_TTL_SECS: Defaulted<u64> = Defaulted::seconds(
+    "POLAR_GIT_CONTROLLER_PROPOSAL_TTL_SECS",
+    "seconds a proposed repository is kept without its proposer announcing it again (at least 300; a smaller \
+     value is taken as 300). An entry a person wants kept for good belongs in the signed repositories section",
+    DEFAULT_PROPOSAL_TTL_SECS,
+)
+.dynamic();
+
+pub const DEFAULT_WARMUP_SECS: &str = "600";
+
+pub static WARMUP_SECS: Defaulted<u64> = Defaulted::seconds(
+    "POLAR_GIT_CONTROLLER_WARMUP_SECS",
+    "seconds after the controller starts during which the set it announces is marked incomplete, so that the \
+     observer stops nothing: the signed sections may not have reached it yet and the proposers have not \
+     announced again. Make it longer than the longest time between a proposer's announcements. 0 means no wait",
+    DEFAULT_WARMUP_SECS,
+)
+.dynamic();
+
+static VARIABLES: &[&dyn Described] = &[&REPUBLISH_SECS, &PROPOSAL_TTL_SECS, &WARMUP_SECS];
 
 /// The section the git controller registers.
 pub static SECTION: Section = Section {
@@ -28,6 +52,21 @@ pub static SECTION: Section = Section {
 /// The time to wait before the next announcement, for a setting of `secs`.
 pub fn republish_interval(secs: u64) -> Duration {
     Duration::from_secs(secs.max(MIN_REPUBLISH_SECS))
+}
+
+/// How long a proposal is kept without being announced again, for a setting of `secs`.
+pub fn proposal_ttl(secs: u64) -> Duration {
+    Duration::from_secs(secs.max(MIN_PROPOSAL_TTL_SECS))
+}
+
+/// The proposal time limit in force in `config`.
+pub fn read_proposal_ttl(config: &Config) -> Result<Duration, ConfigError> {
+    Ok(proposal_ttl(config.read(&PROPOSAL_TTL_SECS)?))
+}
+
+/// The warm-up in force in `config`.
+pub fn read_warmup(config: &Config) -> Result<Duration, ConfigError> {
+    Ok(Duration::from_secs(config.read(&WARMUP_SECS)?))
 }
 
 /// The interval in force in `config`.
@@ -81,5 +120,33 @@ mod tests {
     fn a_value_that_is_not_a_number_is_a_problem_the_check_reports() {
         let c = config(&[("POLAR_GIT_CONTROLLER_REPUBLISH_SECS", "soon")]);
         assert!(!c.check().is_empty());
+    }
+
+    #[test]
+    fn a_proposal_is_kept_a_day_by_default_and_never_less_than_the_least() {
+        assert_eq!(
+            read_proposal_ttl(&config(&[])).unwrap(),
+            Duration::from_secs(86_400)
+        );
+        let c = config(&[("POLAR_GIT_CONTROLLER_PROPOSAL_TTL_SECS", "7200")]);
+        assert_eq!(read_proposal_ttl(&c).unwrap(), Duration::from_secs(7200));
+        for secs in [0, 1, 299] {
+            assert_eq!(proposal_ttl(secs), Duration::from_secs(300), "{secs}");
+        }
+        assert_eq!(proposal_ttl(300), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn the_warm_up_is_ten_minutes_by_default_and_may_be_none() {
+        assert_eq!(read_warmup(&config(&[])).unwrap(), Duration::from_secs(600));
+        let c = config(&[("POLAR_GIT_CONTROLLER_WARMUP_SECS", "0")]);
+        assert_eq!(read_warmup(&c).unwrap(), Duration::ZERO);
+    }
+
+    #[test]
+    fn the_new_settings_are_dynamic_so_a_signed_document_may_change_them() {
+        use polar_env::Mutability;
+        assert_eq!(PROPOSAL_TTL_SECS.desc().mutability, Mutability::Dynamic);
+        assert_eq!(WARMUP_SECS.desc().mutability, Mutability::Dynamic);
     }
 }

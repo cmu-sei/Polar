@@ -9,6 +9,8 @@
 
 use git_agent_common::remote::{canonical_repository, credential_name_problem};
 use polar::graph::nodes::git::RepoId;
+use polar_agent_builder::RuntimeSection;
+use polar_agent_builder::runtime::SectionAuthority;
 use polar_crypto::registry::{host_matches, pattern_problem};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -23,6 +25,23 @@ pub const DEFAULT_MAX_ENTRIES: usize = 500;
 pub const MAX_MAX_ENTRIES: usize = 10_000;
 pub const DEFAULT_PER_PROPOSER_PER_HOUR: usize = 20;
 pub const MAX_PER_PROPOSER_PER_HOUR: usize = 1000;
+
+/// What the section is called in a document.
+pub const SECTION_NAME: &str = "admission";
+
+/// The `admission` runtime section: under what rules a proposal of repositories to observe is accepted. Until a
+/// version is held, nothing is accepted.
+pub static ADMISSION: RuntimeSection = RuntimeSection {
+    authority: SectionAuthority::Runtime,
+    name: SECTION_NAME,
+    doc: "Under what rules a repository that an agent proposes is accepted. Replaced whole by each version. Until a version is held, nothing is accepted. Approving a repository is a new version with it in `approved`; removing one is a new version with it in `denied`.",
+    body: r#"{"kind": {"type": "text", "required": true, "doc": "observe-repo, the only kind of proposal there is"}, "hosts": {"type": "list of host patterns", "required": true, "doc": "the hosts a repository may be on: github.com, or *.example.org for any subdomain of it; nothing outside them is accepted"}, "proposers": {"type": "list of agent identities", "required": true, "doc": "the identities, as the broker names them (jira-consumer.polar.serviceaccount.cluster.local), that may propose; an empty list lets nobody propose"}, "organisations": {"type": "map from host pattern to list of organisation names", "required": false, "doc": "restricts a host to these organisations, the first part of the path, compared without regard to case; a host not named here is not restricted"}, "require_approval": {"type": "true or false", "required": false, "default": true, "doc": "whether a repository that passes every other rule still waits until it is listed in approved"}, "approved": {"type": "list of repository URLs", "required": false, "doc": "repositories a person has approved"}, "denied": {"type": "list of repository URLs", "required": false, "doc": "repositories that are never accepted, and are dropped if they are already held"}, "credentials": {"required": false, "doc": "which credential a repository on a host uses, by the name the observer's credentials section gives it; the first entry that matches is used", "list_of": {"host": {"type": "host pattern", "required": true, "doc": "the hosts this credential is for"}, "name": {"type": "name of a credential", "required": true, "doc": "lowercase letters, digits and hyphens"}}}, "anonymous": {"type": "list of host patterns", "required": false, "doc": "hosts whose repositories need no credential; a host with neither a credential nor an entry here is left pending"}, "limits": {"type": "map from limit name to whole number", "required": false, "doc": "max_entries (1 to 10000, default 500): most proposed repositories observed at once; per_proposer_per_hour (1 to 1000, default 20): most new repositories one proposer may add in an hour"}}"#,
+    validate: validate_section,
+};
+
+fn validate_section(body: &Value) -> Result<(), Vec<String>> {
+    Rules::parse(body).map(|_| ())
+}
 
 /// A credential bound to the hosts a pattern names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,19 +85,12 @@ impl Rules {
         let Some(object) = body.as_object() else {
             return Err(vec!["the body must be an object".to_string()]);
         };
-        let mut problems: Vec<String> = object
-            .keys()
-            .filter(|k| !["kind", "rules"].contains(&k.as_str()))
-            .map(|k| format!("`{k}` is not a field of this section"))
-            .collect();
+        let mut problems: Vec<String> = Vec::new();
         if object.get("kind").and_then(Value::as_str) != Some(KIND) {
             problems.push(format!("`kind` must be \"{KIND}\""));
         }
-        let Some(rules) = object.get("rules").and_then(Value::as_object) else {
-            problems.push("`rules` must be an object".to_string());
-            return Err(problems);
-        };
-        const FIELDS: [&str; 9] = [
+        const FIELDS: [&str; 10] = [
+            "kind",
             "hosts",
             "organisations",
             "proposers",
@@ -89,9 +101,10 @@ impl Rules {
             "anonymous",
             "limits",
         ];
-        for key in rules.keys().filter(|k| !FIELDS.contains(&k.as_str())) {
-            problems.push(format!("rules: `{key}` is not a rule"));
+        for key in object.keys().filter(|k| !FIELDS.contains(&k.as_str())) {
+            problems.push(format!("`{key}` is not a field of this section"));
         }
+        let rules = object;
 
         let hosts = pattern_list(rules, "hosts", true, &mut problems);
         let proposers = identity_list(rules, "proposers", &mut problems);
@@ -103,7 +116,7 @@ impl Rules {
             None | Some(Value::Null) => true,
             Some(Value::Bool(b)) => *b,
             Some(_) => {
-                problems.push("rules.require_approval must be true or false".to_string());
+                problems.push("require_approval must be true or false".to_string());
                 true
             }
         };
@@ -114,13 +127,13 @@ impl Rules {
             Some(Value::Object(map)) => {
                 if map.len() > MAX_LIST {
                     problems.push(format!(
-                        "rules.organisations has {} entries, and at most {MAX_LIST} are taken",
+                        "organisations has {} entries, and at most {MAX_LIST} are taken",
                         map.len()
                     ));
                 }
                 for (pattern, orgs) in map {
                     if let Some(why) = pattern_problem(pattern) {
-                        problems.push(format!("rules.organisations: `{pattern}`: {why}"));
+                        problems.push(format!("organisations: `{pattern}`: {why}"));
                         continue;
                     }
                     let names: Option<Vec<String>> = orgs.as_array().and_then(|list| {
@@ -144,12 +157,12 @@ impl Rules {
                             organisations.insert(pattern.to_ascii_lowercase(), names);
                         }
                         _ => problems.push(format!(
-                            "rules.organisations: `{pattern}` must be a list of organisation names"
+                            "organisations: `{pattern}` must be a list of organisation names"
                         )),
                     }
                 }
             }
-            Some(_) => problems.push("rules.organisations must be an object".to_string()),
+            Some(_) => problems.push("organisations must be an object".to_string()),
         }
 
         let mut credentials = Vec::new();
@@ -158,14 +171,14 @@ impl Rules {
             Some(Value::Array(list)) if list.len() <= MAX_LIST => {
                 for (i, item) in list.iter().enumerate() {
                     let Some(entry) = item.as_object() else {
-                        problems.push(format!("rules.credentials[{i}] must be an object"));
+                        problems.push(format!("credentials[{i}] must be an object"));
                         continue;
                     };
                     for key in entry
                         .keys()
                         .filter(|k| !["host", "name"].contains(&k.as_str()))
                     {
-                        problems.push(format!("rules.credentials[{i}]: `{key}` is not a field"));
+                        problems.push(format!("credentials[{i}]: `{key}` is not a field"));
                     }
                     let host = entry.get("host").and_then(Value::as_str);
                     let name = entry.get("name").and_then(Value::as_str);
@@ -173,11 +186,11 @@ impl Rules {
                         (Some(host), Some(name)) => {
                             let mut ok = true;
                             if let Some(why) = pattern_problem(host) {
-                                problems.push(format!("rules.credentials[{i}].host: {why}"));
+                                problems.push(format!("credentials[{i}].host: {why}"));
                                 ok = false;
                             }
                             if let Some(why) = credential_name_problem(name) {
-                                problems.push(format!("rules.credentials[{i}].name {why}"));
+                                problems.push(format!("credentials[{i}].name {why}"));
                                 ok = false;
                             }
                             if ok {
@@ -188,13 +201,13 @@ impl Rules {
                             }
                         }
                         _ => problems.push(format!(
-                            "rules.credentials[{i}] needs a `host` pattern and a `name`, both text"
+                            "credentials[{i}] needs a `host` pattern and a `name`, both text"
                         )),
                     }
                 }
             }
             Some(_) => problems.push(format!(
-                "rules.credentials must be a list of at most {MAX_LIST} entries"
+                "credentials must be a list of at most {MAX_LIST} entries"
             )),
         }
 
@@ -209,14 +222,14 @@ impl Rules {
                     .keys()
                     .filter(|k| !["max_entries", "per_proposer_per_hour"].contains(&k.as_str()))
                 {
-                    problems.push(format!("rules.limits: `{key}` is not a limit"));
+                    problems.push(format!("limits: `{key}` is not a limit"));
                 }
                 let mut bounded = |key: &str, max: usize, into: &mut usize| match map.get(key) {
                     None | Some(Value::Null) => {}
                     Some(v) => match v.as_u64().filter(|n| (1..=max as u64).contains(n)) {
                         Some(n) => *into = n as usize,
                         None => problems.push(format!(
-                            "rules.limits.{key} must be a whole number from 1 to {max}"
+                            "limits.{key} must be a whole number from 1 to {max}"
                         )),
                     },
                 };
@@ -227,7 +240,7 @@ impl Rules {
                     &mut limits.per_proposer_per_hour,
                 );
             }
-            Some(_) => problems.push("rules.limits must be an object".to_string()),
+            Some(_) => problems.push("limits must be an object".to_string()),
         }
 
         if !problems.is_empty() {
@@ -259,7 +272,7 @@ fn pattern_list(
     for (i, item) in items.into_iter().enumerate() {
         match pattern_problem(&item) {
             None => out.push(item.to_ascii_lowercase()),
-            Some(why) => problems.push(format!("rules.{key}[{i}]: {why}")),
+            Some(why) => problems.push(format!("{key}[{i}]: {why}")),
         }
     }
     Some(out)
@@ -279,7 +292,7 @@ fn identity_list(
             || item.chars().any(|c| c.is_control() || c.is_whitespace())
         {
             problems.push(format!(
-                "rules.{key}[{i}] must be an identity: 1 to 253 characters, no space or control character"
+                "{key}[{i}] must be an identity: 1 to 253 characters, no space or control character"
             ));
         } else {
             out.push(item);
@@ -304,7 +317,7 @@ fn repo_list(
             Ok(c) => {
                 out.insert(c.repo_id());
             }
-            Err(why) => problems.push(format!("rules.{key}[{i}]: {why}")),
+            Err(why) => problems.push(format!("{key}[{i}]: {why}")),
         }
     }
     out
@@ -320,14 +333,14 @@ fn string_items(
     match rules.get(key) {
         None | Some(Value::Null) => {
             if required {
-                problems.push(format!("rules.{key} is required: a list"));
+                problems.push(format!("{key} is required: a list"));
             }
             None
         }
         Some(Value::Array(list)) => {
             if list.len() > MAX_LIST {
                 problems.push(format!(
-                    "rules.{key} has {} entries, and at most {MAX_LIST} are taken",
+                    "{key} has {} entries, and at most {MAX_LIST} are taken",
                     list.len()
                 ));
                 return None;
@@ -336,13 +349,13 @@ fn string_items(
             for (i, v) in list.iter().enumerate() {
                 match v.as_str() {
                     Some(text) => out.push(text.to_string()),
-                    None => problems.push(format!("rules.{key}[{i}] must be text")),
+                    None => problems.push(format!("{key}[{i}] must be text")),
                 }
             }
             Some(out)
         }
         Some(_) => {
-            problems.push(format!("rules.{key} must be a list"));
+            problems.push(format!("{key} must be a list"));
             None
         }
     }
@@ -1304,22 +1317,59 @@ mod tests {
         assert_eq!(a, ask("https://github.com/o/r", &rules));
     }
 
+    #[test]
+    fn the_section_is_declared_soundly() {
+        assert!(polar_agent_builder::runtime::check_declarations(&[&ADMISSION]).is_empty());
+    }
+
+    #[test]
+    fn the_declaration_describes_exactly_the_fields_the_parser_takes() {
+        let described: Value = serde_json::from_str(ADMISSION.body).unwrap();
+        let mut described: Vec<&str> = described
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        described.sort_unstable();
+        let mut taken = vec![
+            "kind",
+            "hosts",
+            "organisations",
+            "proposers",
+            "require_approval",
+            "approved",
+            "denied",
+            "credentials",
+            "anonymous",
+            "limits",
+        ];
+        taken.sort_unstable();
+        assert_eq!(described, taken);
+        // and a document that fills in every field the description names is read
+        assert!(Rules::parse(&doc()).is_ok());
+    }
+
+    #[test]
+    fn the_section_validates_with_the_parser() {
+        assert!((ADMISSION.validate)(&doc()).is_ok());
+        assert!((ADMISSION.validate)(&json!({"kind": "observe-repo"})).is_err());
+    }
+
     // --- reading the rules
 
     fn doc() -> Value {
         json!({
             "kind": "observe-repo",
-            "rules": {
-                "hosts": ["github.com", "*.example.org"],
-                "organisations": { "github.com": ["CMU-SEI"] },
-                "proposers": [JIRA],
-                "require_approval": true,
-                "approved": ["https://github.com/cmu-sei/Polar.git"],
-                "denied": ["https://github.com/cmu-sei/bad"],
-                "credentials": [ { "host": "*.example.org", "name": "example-sei" } ],
-                "anonymous": ["github.com"],
-                "limits": { "max_entries": 50, "per_proposer_per_hour": 5 }
-            }
+            "hosts": ["github.com", "*.example.org"],
+            "organisations": { "github.com": ["CMU-SEI"] },
+            "proposers": [JIRA],
+            "require_approval": true,
+            "approved": ["https://github.com/cmu-sei/Polar.git"],
+            "denied": ["https://github.com/cmu-sei/bad"],
+            "credentials": [ { "host": "*.example.org", "name": "example-sei" } ],
+            "anonymous": ["github.com"],
+            "limits": { "max_entries": 50, "per_proposer_per_hour": 5 }
         })
     }
 
@@ -1365,7 +1415,8 @@ mod tests {
     fn what_is_left_out_is_the_safe_default() {
         let rules = Rules::parse(&json!({
             "kind": "observe-repo",
-            "rules": { "hosts": ["github.com"], "proposers": [JIRA] }
+            "hosts": ["github.com"],
+            "proposers": [JIRA]
         }))
         .unwrap();
         assert!(
@@ -1395,94 +1446,90 @@ mod tests {
         };
         let without = |key: &str| {
             let mut d = doc();
-            d["rules"].as_object_mut().unwrap().remove(key);
+            d.as_object_mut().unwrap().remove(key);
             d
         };
         let cases: Vec<(Value, &str)> = vec![
             (json!([]), "object"),
-            (json!({"rules": {}}), "kind"),
+            (
+                json!({"hosts": ["github.com"], "proposers": [JIRA]}),
+                "kind",
+            ),
             (with(&["kind"], json!("observe-bucket")), "kind"),
-            (json!({"kind": "observe-repo"}), "rules"),
+            (json!({"kind": "observe-repo"}), "hosts"),
+            (json!({"kind": "observe-repo", "hosts": []}), "proposers"),
+            (with(&["rules"], json!({"hosts": ["github.com"]})), "rules"),
             (with(&["extra"], json!(1)), "extra"),
-            (with(&["rules", "extra"], json!(1)), "extra"),
+            (with(&["extra"], json!(1)), "extra"),
             (without("hosts"), "hosts"),
             (without("proposers"), "proposers"),
-            (with(&["rules", "hosts"], json!("github.com")), "hosts"),
-            (with(&["rules", "hosts"], json!(["*"])), "hosts"),
-            (with(&["rules", "hosts"], json!(["a.*.com"])), "hosts"),
-            (with(&["rules", "hosts"], json!(["git hub.com"])), "hosts"),
-            (with(&["rules", "proposers"], json!([""])), "proposers"),
-            (with(&["rules", "proposers"], json!([3])), "proposers"),
+            (with(&["hosts"], json!("github.com")), "hosts"),
+            (with(&["hosts"], json!(["*"])), "hosts"),
+            (with(&["hosts"], json!(["a.*.com"])), "hosts"),
+            (with(&["hosts"], json!(["git hub.com"])), "hosts"),
+            (with(&["proposers"], json!([""])), "proposers"),
+            (with(&["proposers"], json!([3])), "proposers"),
             (
-                with(&["rules", "require_approval"], json!("yes")),
+                with(&["require_approval"], json!("yes")),
                 "require_approval",
             ),
-            (with(&["rules", "approved"], json!(["ext::sh"])), "approved"),
+            (with(&["approved"], json!(["ext::sh"])), "approved"),
             (
-                with(&["rules", "approved"], json!(["http://github.com/o/r"])),
+                with(&["approved"], json!(["http://github.com/o/r"])),
                 "approved",
             ),
             (
-                with(&["rules", "denied"], json!(["https://127.0.0.1/o/r"])),
+                with(&["denied"], json!(["https://127.0.0.1/o/r"])),
                 "denied",
             ),
             (
-                with(&["rules", "credentials"], json!([{"host": "github.com"}])),
+                with(&["credentials"], json!([{"host": "github.com"}])),
                 "credentials",
             ),
             (
                 with(
-                    &["rules", "credentials"],
+                    &["credentials"],
                     json!([{"host": "github.com", "name": "Bad Name"}]),
                 ),
                 "credentials",
             ),
             (
-                with(
-                    &["rules", "credentials"],
-                    json!([{"host": "*", "name": "x"}]),
-                ),
+                with(&["credentials"], json!([{"host": "*", "name": "x"}])),
                 "credentials",
             ),
             (
                 with(
-                    &["rules", "credentials"],
+                    &["credentials"],
                     json!([{"host": "github.com", "name": "x", "extra": 1}]),
                 ),
                 "credentials",
             ),
             (
-                with(&["rules", "anonymous"], json!(["http://github.com"])),
+                with(&["anonymous"], json!(["http://github.com"])),
                 "anonymous",
             ),
             (
-                with(&["rules", "organisations"], json!({"*": ["x"]})),
+                with(&["organisations"], json!({"*": ["x"]})),
                 "organisations",
             ),
             (
-                with(&["rules", "organisations"], json!({"github.com": "x"})),
+                with(&["organisations"], json!({"github.com": "x"})),
                 "organisations",
             ),
+            (with(&["limits", "max_entries"], json!(0)), "max_entries"),
             (
-                with(&["rules", "limits", "max_entries"], json!(0)),
+                with(&["limits", "max_entries"], json!(MAX_MAX_ENTRIES + 1)),
                 "max_entries",
             ),
             (
-                with(
-                    &["rules", "limits", "max_entries"],
-                    json!(MAX_MAX_ENTRIES + 1),
-                ),
-                "max_entries",
-            ),
-            (
-                with(&["rules", "limits", "per_proposer_per_hour"], json!(0)),
+                with(&["limits", "per_proposer_per_hour"], json!(0)),
                 "per_proposer_per_hour",
             ),
             (
-                with(&["rules", "limits", "per_proposer_per_hour"], json!(-1)),
+                with(&["limits", "per_proposer_per_hour"], json!(-1)),
                 "per_proposer_per_hour",
             ),
-            (with(&["rules", "limits", "extra"], json!(1)), "extra"),
+            (with(&["limits", "extra"], json!(1)), "extra"),
         ];
         for (body, field) in cases {
             let found = problems(body.clone());
@@ -1499,16 +1546,16 @@ mod tests {
             .map(|i| json!(format!("https://github.com/o/r{i}")))
             .collect();
         let mut d = doc();
-        d["rules"]["denied"] = Value::Array(many);
+        d["denied"] = Value::Array(many);
         assert!(problems(d).iter().any(|p| p.contains("denied")));
     }
 
     #[test]
     fn every_problem_is_reported_not_just_the_first() {
         let mut d = doc();
-        d["rules"]["hosts"] = json!(["*"]);
-        d["rules"]["limits"]["max_entries"] = json!(0);
-        d["rules"]["approved"] = json!(["ext::sh"]);
+        d["hosts"] = json!(["*"]);
+        d["limits"]["max_entries"] = json!(0);
+        d["approved"] = json!(["ext::sh"]);
         assert!(problems(d).len() >= 3);
     }
 }
