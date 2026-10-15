@@ -10,6 +10,7 @@ use crate::SERVICE_NAME;
 use crate::ops;
 use cassini_types::ClientEvent;
 use git_agent_common::GitRepositoryMessage;
+use git_agent_common::status::{GIT_REPO_OBSERVATION_STATUS, ObservationStatus};
 use polar::graph::controller::{GraphControllerMsg, GraphSignal};
 use polar::topics::GIT_REPOSITORY_EVENTS;
 use polar_agent_builder::{
@@ -37,6 +38,8 @@ pub enum GitProcessorMessage {
     },
     /// An event the observer published, decoded.
     Event(GitRepositoryMessage),
+    /// What the observer says became of its latest attempt at a repository, decoded.
+    Status(ObservationStatus),
     GraphSignal(GraphSignal),
     /// The health check ended the pod's life; the infrastructure waits for
     /// `ProceedWithShutdown`.
@@ -57,15 +60,36 @@ pub fn decode(payload: &[u8]) -> Option<GitRepositoryMessage> {
     }
 }
 
-pub fn subscriptions(supervisor: &ActorRef<GitProcessorMessage>) -> Vec<Subscription> {
-    let supervisor = supervisor.clone();
-    vec![Subscription::new(GIT_REPOSITORY_EVENTS, move |incoming| {
-        if let Some(event) = decode(&incoming.payload)
-            && let Err(e) = supervisor.cast(GitProcessorMessage::Event(event))
-        {
-            error!("failed to hand an event to the supervisor: {e}");
+/// What was published on the status topic. Anything that does not decode is logged and dropped.
+pub fn decode_status(payload: &[u8]) -> Option<ObservationStatus> {
+    match rkyv::from_bytes::<ObservationStatus, rkyv::rancor::Error>(payload) {
+        Ok(status) => Some(status),
+        Err(e) => {
+            warn!("Failed to deserialize an observation status: {e}");
+            None
         }
-    })]
+    }
+}
+
+pub fn subscriptions(supervisor: &ActorRef<GitProcessorMessage>) -> Vec<Subscription> {
+    let events = supervisor.clone();
+    let statuses = supervisor.clone();
+    vec![
+        Subscription::new(GIT_REPOSITORY_EVENTS, move |incoming| {
+            if let Some(event) = decode(&incoming.payload)
+                && let Err(e) = events.cast(GitProcessorMessage::Event(event))
+            {
+                error!("failed to hand an event to the supervisor: {e}");
+            }
+        }),
+        Subscription::new(GIT_REPO_OBSERVATION_STATUS, move |incoming| {
+            if let Some(status) = decode_status(&incoming.payload)
+                && let Err(e) = statuses.cast(GitProcessorMessage::Status(status))
+            {
+                error!("failed to hand a status to the supervisor: {e}");
+            }
+        }),
+    ]
 }
 
 pub struct GitProcessorSupervisor;
@@ -158,6 +182,15 @@ impl Actor for GitProcessorSupervisor {
                     }
                 }
             }
+            GitProcessorMessage::Status(status) => {
+                if state.drain.is_draining() {
+                    warn!("draining -- a status will be lost on exit");
+                } else if let Some(controller) = &state.graph_controller {
+                    for op in ops::for_status(status) {
+                        controller.cast(GraphControllerMsg::Op(op))?;
+                    }
+                }
+            }
             GitProcessorMessage::PrepareShutdown => {
                 if state.drain.begin(&myself, drain_window(), true, || {
                     GitProcessorMessage::DrainElapsed
@@ -236,5 +269,69 @@ mod tests {
     #[test]
     fn bytes_that_are_not_an_event_are_dropped() {
         assert!(decode(b"not an event").is_none());
+    }
+
+    #[test]
+    fn a_status_the_observer_published_decodes() {
+        use git_agent_common::status::ObservationState;
+        let status = ObservationStatus {
+            repo_id: RepoId::new("r".into()),
+            state: ObservationState::PendingCredential,
+            reason: None,
+            last_success: None,
+            tips: vec![],
+            consecutive_failures: 0,
+            observed_at: 5,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&status).unwrap();
+        assert_eq!(decode_status(&bytes), Some(status));
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_status_are_dropped() {
+        assert!(decode_status(b"not a status").is_none());
+    }
+
+    /// An actor that takes the processor's messages and does nothing with them, to have a reference to hand to
+    /// `subscriptions`.
+    struct NullActor;
+
+    #[async_trait]
+    impl Actor for NullActor {
+        type Msg = GitProcessorMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(&self, _: ActorRef<Self::Msg>, _: ()) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            _: Self::Msg,
+            _: &mut (),
+        ) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_processor_listens_for_events_and_for_statuses() {
+        // Both topics, by name: a subscription that is missing is a feature that silently does nothing.
+        let (supervisor, _) = Actor::spawn(None, NullActor, ()).await.unwrap();
+        let topics: Vec<String> = subscriptions(&supervisor)
+            .into_iter()
+            .map(|s| s.topic)
+            .collect();
+        assert!(
+            topics.contains(&GIT_REPOSITORY_EVENTS.to_string()),
+            "{topics:?}"
+        );
+        assert!(
+            topics.contains(&GIT_REPO_OBSERVATION_STATUS.to_string()),
+            "{topics:?}"
+        );
+        supervisor.stop(None);
     }
 }

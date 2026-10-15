@@ -3,6 +3,7 @@
 
 use chrono::Utc;
 use git_agent_common::GitRepositoryMessage;
+use git_agent_common::status::ObservationStatus;
 use polar::graph::controller::{GraphOp, GraphValue, IntoGraphKey, Property, rel};
 use polar::graph::nodes::git::GitNodeKey;
 use tracing::{trace, warn};
@@ -108,6 +109,50 @@ pub fn for_ref_updated(ev: GitRepositoryMessage) -> Vec<GraphOp> {
     ]
 }
 
+/// What the observer says became of its latest attempt at a repository, written onto the repository's node so a
+/// person looking at the graph can tell a repository that is observed from one that is waiting or failing.
+///
+/// The properties are the latest word, replaced by the next. `observation_reason` is cleared (set to null) when
+/// the attempt had none, so an error does not outlive the failure it explained. `observation_last_success` is
+/// written only when the observer knows one: a replaced observer does not know when its predecessor's was, and
+/// must not erase it.
+pub fn for_status(status: ObservationStatus) -> Vec<GraphOp> {
+    let mut props = vec![
+        Property(
+            "observation_state".into(),
+            GraphValue::String(status.state.as_str().into()),
+        ),
+        Property(
+            "observation_reason".into(),
+            match status.reason {
+                Some(reason) => GraphValue::String(reason),
+                None => GraphValue::Null,
+            },
+        ),
+        Property(
+            "observation_consecutive_failures".into(),
+            GraphValue::I64(i64::from(status.consecutive_failures)),
+        ),
+        Property(
+            "observation_checked_at".into(),
+            GraphValue::I64(status.observed_at),
+        ),
+    ];
+    if let Some(at) = status.last_success {
+        props.push(Property(
+            "observation_last_success".into(),
+            GraphValue::I64(at),
+        ));
+    }
+    vec![GraphOp::UpsertNode {
+        key: GitNodeKey::Repository {
+            repo_id: status.repo_id,
+        }
+        .into_key(),
+        props,
+    }]
+}
+
 /// The operations for any event the observer publishes.
 pub fn for_event(ev: GitRepositoryMessage) -> Vec<GraphOp> {
     match ev {
@@ -119,6 +164,7 @@ pub fn for_event(ev: GitRepositoryMessage) -> Vec<GraphOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use git_agent_common::status::ObservationState;
     use polar::graph::nodes::git::RepoId;
 
     fn commit(oid: &str, parents: &[&str]) -> GitRepositoryMessage {
@@ -165,5 +211,121 @@ mod tests {
             observed_at: "2".into(),
         });
         assert_eq!(rels(&ops), ["POINTS_TO"]);
+    }
+
+    fn status(
+        state: ObservationState,
+        reason: Option<&str>,
+        last_success: Option<i64>,
+    ) -> ObservationStatus {
+        ObservationStatus {
+            repo_id: RepoId::new("r".into()),
+            state,
+            reason: reason.map(String::from),
+            last_success,
+            tips: vec![("refs/remotes/origin/main".into(), "abc".into())],
+            consecutive_failures: 2,
+            observed_at: 99,
+        }
+    }
+
+    fn props_of(ops: &[GraphOp]) -> Vec<(String, GraphValue)> {
+        match ops {
+            [GraphOp::UpsertNode { props, .. }] => props
+                .iter()
+                .map(|Property(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            other => panic!("expected one UpsertNode, got {other:?}"),
+        }
+    }
+
+    fn prop(props: &[(String, GraphValue)], name: &str) -> Option<GraphValue> {
+        props
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn a_status_is_written_onto_the_repository_node_and_nothing_else() {
+        let ops = for_status(status(
+            ObservationState::Failing,
+            Some("the clone failed: x"),
+            Some(7),
+        ));
+        match ops.as_slice() {
+            [GraphOp::UpsertNode { key, .. }] => {
+                let (pattern, _) = GitNodeKey::Repository {
+                    repo_id: RepoId::new("r".into()),
+                }
+                .into_key()
+                .cypher_match("n");
+                let (written, _) = key.cypher_match("n");
+                assert_eq!(written, pattern);
+                assert!(written.contains("GitRepository"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_state_the_reason_the_count_and_the_time_are_written() {
+        let props = props_of(&for_status(status(
+            ObservationState::Failing,
+            Some("the fetch failed: down"),
+            Some(7),
+        )));
+        assert_eq!(
+            prop(&props, "observation_state"),
+            Some(GraphValue::String("failing".into()))
+        );
+        assert_eq!(
+            prop(&props, "observation_reason"),
+            Some(GraphValue::String("the fetch failed: down".into()))
+        );
+        assert_eq!(
+            prop(&props, "observation_consecutive_failures"),
+            Some(GraphValue::I64(2))
+        );
+        assert_eq!(
+            prop(&props, "observation_checked_at"),
+            Some(GraphValue::I64(99))
+        );
+        assert_eq!(
+            prop(&props, "observation_last_success"),
+            Some(GraphValue::I64(7))
+        );
+    }
+
+    #[test]
+    fn an_old_reason_is_cleared_when_there_is_none_now() {
+        let props = props_of(&for_status(status(
+            ObservationState::Observing,
+            None,
+            Some(7),
+        )));
+        assert_eq!(
+            prop(&props, "observation_reason"),
+            Some(GraphValue::Null),
+            "absent would leave the old error on the node"
+        );
+        assert_eq!(
+            prop(&props, "observation_state"),
+            Some(GraphValue::String("observing".into()))
+        );
+    }
+
+    #[test]
+    fn a_last_success_the_observer_does_not_know_is_not_written_so_the_graph_keeps_its_own() {
+        let props = props_of(&for_status(status(
+            ObservationState::PendingCredential,
+            None,
+            None,
+        )));
+        assert_eq!(prop(&props, "observation_last_success"), None);
+        assert_eq!(
+            prop(&props, "observation_state"),
+            Some(GraphValue::String("pending-credential".into()))
+        );
     }
 }
