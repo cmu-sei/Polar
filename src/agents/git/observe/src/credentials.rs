@@ -199,10 +199,14 @@ fn secret_problem(secret: &str) -> Option<&'static str> {
     }
 }
 
-/// What an entry was bound to when it was encrypted: the agent, the section, the version, the entry's name and
-/// the field, joined by `|` (docs/architecture/signed-configuration.md, "Binding").
-pub fn context(agent: &str, version: u64, name: &str) -> Vec<u8> {
-    format!("{agent}|{SECTION_NAME}|{version}|{name}|secret").into_bytes()
+/// What an entry was bound to when it was encrypted (docs/architecture/signed-configuration.md, "Binding"): the
+/// one definition the author's tool uses too (`polar_escrow::binding_context`).
+pub fn context(
+    agent: &str,
+    version: u64,
+    name: &str,
+) -> Result<Vec<u8>, polar_escrow::ContextError> {
+    polar_escrow::binding_context(agent, SECTION_NAME, version, name, "secret")
 }
 
 /// What happened to a version of the section.
@@ -237,6 +241,14 @@ pub async fn apply(
                 continue;
             }
         };
+        let context = match context(agent, version, &entry.name) {
+            Ok(context) => context,
+            Err(e) => {
+                warn!(credential = %entry.name, "could not register the credential: {e}");
+                applied.failed.push((entry.name.clone(), e.to_string()));
+                continue;
+            }
+        };
         let binding = SecretBinding {
             host_pattern: entry.host_pattern.clone(),
             kind: entry.kind,
@@ -247,7 +259,7 @@ pub async fn apply(
                 entry.name.clone(),
                 SECTION_NAME.to_string(),
                 secret,
-                context(agent, version, &entry.name),
+                context,
                 binding,
             )
             .await
@@ -473,7 +485,7 @@ mod tests {
             "host_pattern": "github.com",
             "kind": "token",
             "username": "oauth2",
-            "secret": ciphertext(b"ghp-token", &context("git-repo-observer", 1, name)),
+            "secret": ciphertext(b"ghp-token", &context("git-repo-observer", 1, name).unwrap()),
         })
     }
 
@@ -708,7 +720,7 @@ mod tests {
     #[test]
     fn the_context_is_agent_section_version_name_and_field() {
         assert_eq!(
-            context("git-repo-observer", 7, "github-sei"),
+            context("git-repo-observer", 7, "github-sei").unwrap(),
             b"git-repo-observer|credentials|7|github-sei|secret".to_vec()
         );
     }

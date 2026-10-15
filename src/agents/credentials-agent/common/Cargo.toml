@@ -23,6 +23,7 @@ license.workspace = true
 
 [dependencies]
 rkyv.workspace = true
+polar-escrow.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 thiserror.workspace = true

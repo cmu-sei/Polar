@@ -250,6 +250,136 @@ impl EscrowedSecret {
     }
 }
 
+/// Why a part of a binding context cannot be used.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "`{part}` cannot be part of a binding context: it must be 1 to 64 lowercase letters, digits and hyphens"
+)]
+pub struct ContextError {
+    pub part: &'static str,
+}
+
+/// The context a secret in a signed document is bound to when it is encrypted (`EscrowedSecret::encrypt_bound`)
+/// and when it is opened (`decrypt_bound`): the agent, the section, the version, the entry's name and the field,
+/// joined by `|` (docs/architecture/signed-configuration.md, "Binding"). A ciphertext opens only under the context
+/// it was made for, so it cannot be moved to another agent, section, version, entry or field.
+///
+/// Every part but the version is restricted to lowercase letters, digits and hyphens, so that the `|` between
+/// them cannot be forged by a part that contains one. The author's tool and the agent that opens the secret both
+/// call this, so they cannot disagree about the format.
+pub fn binding_context(
+    agent: &str,
+    section: &str,
+    version: u64,
+    name: &str,
+    field: &str,
+) -> Result<Vec<u8>, ContextError> {
+    fn plain(part: &'static str, value: &str) -> Result<(), ContextError> {
+        let ok = !value.is_empty()
+            && value.len() <= 64
+            && value
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if ok {
+            Ok(())
+        } else {
+            Err(ContextError { part })
+        }
+    }
+    plain("agent", agent)?;
+    plain("section", section)?;
+    plain("name", name)?;
+    plain("field", field)?;
+    Ok(format!("{agent}|{section}|{version}|{name}|{field}").into_bytes())
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    #[test]
+    fn the_context_is_agent_section_version_name_and_field_joined_by_bars() {
+        assert_eq!(
+            binding_context(
+                "git-repo-observer",
+                "credentials",
+                7,
+                "github-sei",
+                "secret"
+            )
+            .unwrap(),
+            b"git-repo-observer|credentials|7|github-sei|secret".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_part_that_could_forge_a_bar_or_is_empty_is_refused_and_says_which() {
+        let good = ("a", "b", 1, "c", "d");
+        let with = |part: usize, value: &str| {
+            let mut p = [good.0, good.1, good.3, good.4];
+            p[part] = value;
+            binding_context(p[0], p[1], good.2, p[2], p[3])
+        };
+        for (i, label) in ["agent", "section", "name", "field"]
+            .into_iter()
+            .enumerate()
+        {
+            for bad in ["", "a|b", "A", "a b", "a_b", "é", "a.b", &"a".repeat(65)] {
+                assert_eq!(with(i, bad).unwrap_err().part, label, "{label}={bad:?}");
+            }
+            assert!(with(i, &"a".repeat(64)).is_ok());
+            assert!(with(i, "a-1").is_ok());
+        }
+    }
+
+    #[test]
+    fn contexts_that_differ_in_any_part_differ_as_bytes() {
+        let base = binding_context("a", "b", 1, "c", "d").unwrap();
+        for other in [
+            binding_context("x", "b", 1, "c", "d"),
+            binding_context("a", "x", 1, "c", "d"),
+            binding_context("a", "b", 2, "c", "d"),
+            binding_context("a", "b", 1, "x", "d"),
+            binding_context("a", "b", 1, "c", "x"),
+        ] {
+            assert_ne!(other.unwrap(), base);
+        }
+        // and the bar cannot be shifted from one part to the next
+        assert_ne!(
+            binding_context("a-b", "c", 1, "d", "e").unwrap(),
+            binding_context("a", "b-c", 1, "d", "e").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_secret_opens_only_under_the_context_it_was_made_for() {
+        use rsa::pkcs8::EncodePublicKey;
+        let mut rng = rand::rng();
+        let private = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let public_pem = private
+            .to_public_key()
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
+        let made_for =
+            binding_context("git-repo-observer", "credentials", 1, "gh", "secret").unwrap();
+        let sealed = EscrowedSecret::encrypt_bound(b"tok", &public_pem, &made_for).unwrap();
+        assert_eq!(
+            sealed
+                .decrypt_bound(&private, &made_for)
+                .unwrap()
+                .as_slice(),
+            b"tok"
+        );
+        for other in [
+            binding_context("git-repo-observer", "credentials", 2, "gh", "secret").unwrap(),
+            binding_context("git-repo-observer", "credentials", 1, "other", "secret").unwrap(),
+            binding_context("git-repo-controller", "credentials", 1, "gh", "secret").unwrap(),
+        ] {
+            assert!(sealed.decrypt_bound(&private, &other).is_err());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

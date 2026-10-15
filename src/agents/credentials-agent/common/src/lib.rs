@@ -34,7 +34,11 @@ pub mod certificate;
 pub mod decrypt_on_behalf_of;
 pub mod ephemeral_exchange;
 pub mod escrow_key;
-pub mod escrow_secret;
+/// `EscrowedSecret` moved to the light `polar-escrow` crate, so that the author's tool does not have to build this
+/// one (the graph libraries come with it). The old path stays.
+pub mod escrow_secret {
+    pub use polar_escrow::*;
+}
 pub mod events;
 pub mod graph;
 pub mod identity;

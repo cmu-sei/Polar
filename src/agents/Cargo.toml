@@ -62,6 +62,7 @@ members = [
     "openapi/process",
     "openapi/observe",
     "polar-crypto",
+    "polar-escrow",
     "polar-env",
     "polar-git-server/common",
     "polar-git-server/server",
@@ -185,6 +186,7 @@ errno = "0.3.14"
 libc = "0.2"
 uninit = "0.3"
 polar-crypto = { path = "polar-crypto" }
+polar-escrow = { path = "polar-escrow" }
 polar-signing = { path = "polar-signing" }
 polar-scheduler-common = { path = "polar-scheduler/common" }
 polar-env = { path = "polar-env" }

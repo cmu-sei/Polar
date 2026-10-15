@@ -299,7 +299,7 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   - [x] decisions recorded in the docs (`e55b0652`, 2026-10-15)
   - [x] DONE 2026-10-15: gateway route `POST /agent-escrow-key` on the credentials agent, and the escrow certificate in `AgentEscrowKeyReply::Found` (the consumer, the gateway and `polar-crypto`'s use of the reply change; wire format changes, so the credentials agent and every agent image are rebuilt together)
   - [x] DONE 2026-10-15: `polar-signing`: check an escrow certificate (chain to `ca.pem`, valid now, key encipherment, the identity asked for) and return its public key
-  - [ ] move `EscrowedSecret` to a light crate re-exported from `credentials_agent_common::escrow_secret`, with the binding-context builder shared by the observer and the tool
+  - [x] DONE 2026-10-15: move `EscrowedSecret` to a light crate (`polar-escrow`) re-exported from `credentials_agent_common::escrow_secret`, with the binding-context builder shared by the observer and the tool
   - [ ] `polar-sign template <agent> <section>` and `--settings`, from the agent's scaffold (defaults, a comment per field, secret fields marked)
   - [ ] `polar-sign sign <file>`: structure check against the scaffold, refuse a secret setting, encrypt the secret fields, sign
   - [ ] `polar-sign sign --push`: clone or update the schedules repository, write `permanent/<agent>/<section>.dhall`, commit, push with the author's certificate

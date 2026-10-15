@@ -17,6 +17,7 @@ git-agent-common.workspace = true
 polar.workspace = true
 polar-agent-builder.workspace = true
 polar-crypto.workspace = true
+polar-escrow.workspace = true
 polar-env.workspace = true
 ractor.workspace = true
 rkyv.workspace = true

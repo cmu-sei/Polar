@@ -1504,6 +1504,7 @@ dependencies = [
  "neo4rs",
  "p256",
  "polar",
+ "polar-escrow",
  "rand 0.10.3",
  "rcgen",
  "rkyv",
@@ -2732,6 +2733,7 @@ dependencies = [
  "polar-agent-builder",
  "polar-crypto",
  "polar-env",
+ "polar-escrow",
  "ractor",
  "rand 0.10.3",
  "rkyv",
@@ -5657,6 +5659,20 @@ version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "polar-escrow"
+version = "1.0.0"
+dependencies = [
+ "aes-gcm",
+ "rand 0.10.3",
+ "rkyv",
+ "rsa 0.10.0-rc.18",
+ "serde",
+ "sha2 0.11.0",
+ "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]
