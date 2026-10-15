@@ -69,8 +69,10 @@ deployed to Kubernetes.
 - A Neo4j instance populated with work-item data (see **Data source**,
   below)
 - [Nix](https://nixos.org) with flakes enabled, `podman`, `direnv`,
-  and [`just`](https://github.com/casey/just) — or use the provided
-  dev container (see below), which already has all of this
+  [`just`](https://github.com/casey/just), `nushell` and `kubectl` — or
+  use the provided dev container (see below), which already has the
+  build tools. The full list for a local cluster is in **Bring a
+  cluster up**, below
 
 ### Dev container
 
@@ -108,50 +110,205 @@ entirely.
 **If your cluster tooling (`podman`, `skopeo`, and your Kubernetes
 distribution itself) lives on the host rather than inside the dev
 container** — common on a Mac, where the dev container only provides
-the Linux build environment — you'll need to get built images out of
-the container before `just cluster-load-all` can push them. `just
-cluster-build-all`'s `result-*` outputs are Nix store symlinks; they
-only resolve inside the container's own filesystem. Copying them with
-a plain `cp` copies the symlink itself, not the actual image data —
-`ls` will still show the file on the host side, but any tool that
-actually opens it (including `just cluster-load-all`'s own existence
-check) will report it as not found. Dereference on copy instead:
+the Linux build environment — you need to get the built images out of
+the container before they can be pushed. `just images-build` leaves
+Nix store symlinks in `result/`; they only resolve inside the
+container's own filesystem. Copying them with a plain `cp` copies the
+symlink itself, not the image data — `ls` will still show the file on
+the host side, but any tool that opens it will report it as not found.
+Dereference on copy instead:
 
 ```bash
-cp -L result-* /path/to/a/folder/the/host/can/see/
+cp -rL result/ /path/to/a/folder/the/host/can/see/
 ```
 
-Then run `just cluster-load-all` from that folder, on the host.
-
-If your local cluster isn't `u7s` (nix-usernetes), set `_cluster_runtime`
-to anything other than `"u7s"` (e.g. `just _cluster_runtime=none
-cluster-load-all`) — the default cleanup step assumes `podman` +
-`containerd` specifically and doesn't apply to a different runtime
-(Docker Desktop's Kubernetes, kind, k3d, Colima, etc.).
-
-### Build
+Then, on the host, push each archive to the registry yourself:
 
 ```bash
-just cluster-build-all      # build ACE + every supporting service
+skopeo copy docker-archive:<folder>/<image> \
+  docker://localhost:5000/<image>:<tag> --dest-tls-verify=false
 ```
 
-### Load images into a registry
+(`nu infra/images.nu list` prints every image name and tag.)
 
-Nix-built images aren't pushed anywhere automatically — the pipeline
-pushes them to a plain OCI registry, which any Kubernetes distribution
-can pull from the same way. For local development:
+If your local cluster isn't `u7s` (nix-usernetes), set
+`POLAR_CLUSTER_RUNTIME` to anything other than `u7s` (e.g.
+`POLAR_CLUSTER_RUNTIME=none just image <name>`) — the step that drops
+the node's cached copy of a rebuilt image assumes `podman` + `containerd`
+specifically and doesn't apply to a different runtime (Docker Desktop's
+Kubernetes, kind, k3d, Colima, etc.).
+
+### Bring a cluster up: the whole sequence
+
+This is the path from nothing to a running Polar cluster on your own
+machine. Each step says what it does and what to expect; the sections
+after it go into detail. Every command is run from the repository root
+unless it says otherwise.
+
+**What you need before you start** (the dev shell from `direnv allow`
+provides most of it):
+
+- Nix with flakes, `podman` (rootless), `just`, `nushell`, `kubectl`,
+  `skopeo`, `dhall`, `sops` and `rage`.
+- A checkout of the sibling repository **`nix-usernetes`** at
+  `~/Documents/projects/nix-usernetes` — it builds `u7s`, the rootless
+  single-node Kubernetes cluster Polar develops against. (The
+  `Justfile` looks for it there: see `_u7s_dir`.)
+- A checkout of **`nix-neo4j`** at `~/Documents/projects/nix-neo4j`,
+  which builds the Neo4j image Polar deploys.
+- Your SSH key listed as an age recipient of the target's secrets file
+  (see **Secrets setup**), so `sops` can decrypt it.
+
+**1. Start the cluster.** In the `nix-usernetes` checkout:
 
 ```bash
-just registry-up            # starts a local registry container on :5000
-just cluster-load-all       # pushes every built image via skopeo
+just up            # start the node container (idempotent)
+just init          # initialise Kubernetes in it
+just kubeconfig    # write ./kubeconfig, pointing at 127.0.0.1
 ```
+
+Back in this repository, point `kubectl` at it (`just cluster-ctx`
+prints the line):
+
+```bash
+export KUBECONFIG=~/Documents/projects/nix-usernetes/kubeconfig
+kubectl get nodes      # the node should be Ready
+```
+
+*On a network whose DNS search domain makes lookups slow* (some
+university and corporate Wi-Fi: every in-cluster name takes seconds to
+resolve and pods time out), remove the search line from the node's
+resolver once the node is up, before anything is deployed:
+
+```bash
+podman exec u7s sh -c 'grep -v "^search" /etc/resolv.conf > /tmp/r.new && cat /tmp/r.new > /etc/resolv.conf'
+```
+
+**2. Start the local registry** that the cluster pulls images from:
+
+```bash
+just registry-up        # a registry container on localhost:5000
+just registry-status    # prints "registry reachable" when it is up
+```
+
+**3. Build the Neo4j image.** In the `nix-neo4j` checkout:
+
+```bash
+nix build -L .#neo4j-image -o result-neo4j-image
+```
+
+`infra/images.nuon` expects the archive at
+`~/Documents/projects/nix-neo4j/result-neo4j-image`; set
+`POLAR_NEO4J_IMAGE` to its path if you keep it elsewhere. This image sets
+the `neo4j` user's password from `NEO4J_AUTH` on its first start, so there
+is no password to change by hand later.
+
+**4. Make sure `sops` can find your key.** Inside the dev shell
+`SOPS_AGE_BINARY` is already set; set `SOPS_AGE_SSH_PRIVATE_KEY_FILE` to
+the private key you were added with (put it in your `my.env`, see
+`example.env`). Outside the dev shell, export both:
+
+```bash
+export SOPS_AGE_BINARY=$(which rage)
+export SOPS_AGE_SSH_PRIVATE_KEY_FILE=$HOME/.ssh/<your key>
+```
+
+**5. Bring Polar up.**
+
+```bash
+nu infra/up.nu local-minimal --dev --user <name> --email <email>
+```
+
+It prints its plan first, then builds and pushes the images the target
+needs (`--dev`; the first cold build takes a long while), creates the
+namespaces and the cluster CA, applies the target, waits for the core
+pods, starts the port-forwards, runs the admin flow and signs and pushes
+the cluster's first policy. It stops for a person only where one is
+needed. After any failure or pause, **run the same command again**: every
+step checks whether it is already done.
+
+**6. If it stops at the policy step, set the git server's administrator.**
+The Polar git server takes its administrators by identity, and an identity
+belongs to one cluster, so a new cluster needs its own. The step says:
+"the Polar git server does not know `<id>` as an administrator". Read the
+first DNS name in your new certificate:
+
+```bash
+openssl x509 -in ~/.config/polar-admin/<name>.crt -noout -ext subjectAltName
+```
+
+put it as the value of `POLAR_GIT_SERVER_ADMINS` for `polar-git-server` in
+`infra/targets/local-minimal/config.nuon`, and run the `up.nu` command
+again. (You do this once per fresh cluster, since a reset gives new ids.)
+
+**7. Import your certificate into the browser.** When `up.nu` pauses at
+"Close Librewolf", close it and press on: it imports the cluster's CA
+and your user certificate (`just user-cert-install <name>` does the same
+by hand). For another browser, import the same files from
+`~/.config/polar-admin/` yourself. Nothing else is needed for Neo4j.
+
+**8. Check that it works.**
+
+```bash
+just cluster-status                 # nodes and every pod
+kubectl -n polar get pods
+just port-forwards-up               # then browse https://localhost:7473
+```
+
+Things that look wrong and are not:
+
+- **Pods in `Error` next to a running replacement.** The agents are
+  Kubernetes Jobs and exit on purpose, about once an hour, when their
+  certificates are renewed; the Job starts a fresh pod. Look at the
+  newest pod.
+- **`jira-observer` failing** when no Jira is set up for the target: its
+  credentials come from the target's secrets (see **Secrets setup**).
+- **A port-forward that stops answering** after a pod was replaced:
+  forwards follow one pod. Run `just port-forwards-down` and then
+  `just port-forwards-up`.
+- **A Job that is slow to replace a pod you deleted by hand.** The Job
+  controller waits longer after each failure, up to about six minutes.
+
+**To start over:** `just cluster-reset` here wipes the node; then
+repeat steps 1, 5, 6 and 7. `up.nu` notices when
+`~/.config/polar-admin` holds the previous cluster's CA and moves those
+files aside (it tells you where).
+
+**What to do next:** tell Polar what to observe. Repositories,
+credentials and the rules for accepting repositories other agents propose
+are signed documents pushed to the cluster's git server with
+`polar-sign`; the walk-through, with every command, is
+[docs/operations/git-private-repository.md](docs/operations/git-private-repository.md),
+and the design is in
+[docs/architecture/signed-configuration.md](docs/architecture/signed-configuration.md).
+`infra/INFRA.md` explains the catalog, targets and images behind
+`up.nu`.
+
+### Images
+
+`infra/images.nuon` lists every image Polar can produce and where it
+comes from: built from the flake with Nix, mirrored from a third-party
+registry, or an archive built elsewhere (Neo4j). `up.nu --dev` builds
+and pushes the ones the target needs. To work on them yourself, with the
+registry from step 2 running:
+
+```bash
+nu infra/images.nu list            # every image, its tag and its source
+just images-build <name>…          # build only (needs Nix; no registry, no cluster)
+just images-push <name>…           # build and push to the registry
+just images-mirror                 # copy the third-party images into the registry
+just image <name>                  # every stage, then drop the node's cached copy
+just images-all                    # all of it, for every image
+```
+
+Give no names to `images-build`, `images-push` and `images-mirror` to
+mean every image. A failing image does not stop the stage: the rest are
+attempted and the stage ends with a summary.
 
 To push to a different registry (a real cluster, or a customer
-environment), edit the `_registry_host`/`_registry_port` variables
-near the top of the `Justfile`, or run the underlying `skopeo copy`
-commands directly — see `cluster-load-all`'s recipe body for the exact
-image list and naming convention. See **Bring your own cluster**,
-below, for pointing a target's `overrides.dhall` at the result.
+environment), set `POLAR_REGISTRY` (default `localhost:5000`), and
+see **Bring your own cluster**, below, for pointing a target's
+`overrides.dhall` at it.
 
 ### Customize a target
 
@@ -252,7 +409,10 @@ People reach Neo4j Browser and the admin tools with a personal client
 certificate, valid for one year and issued through the credentials-agent.
 The certificate is tied to an account an admin provisions for you, and
 your private key is generated on your own machine and never leaves it.
-With the pods running and `just port-forwards-up` active:
+`up.nu` runs this flow for you (its "admin" and "browser" steps), so on a
+fresh cluster you do not need to type it. Run it by hand to add another
+person, or to redo a step. With the pods running and
+`just port-forwards-up` active:
 
 ```bash
 just admin-bootstrap                    # once per cluster
@@ -278,23 +438,20 @@ just user-cert-install <user>           # imports into Librewolf
   browser first). It is the only browser-specific step; for another
   browser, import the same files by hand.
 
-Then browse to `https://localhost:7473` and log in to Neo4j. On a fresh
-cluster the `neo4j` user still has its default password, and the agents
-cannot connect until it matches the cluster's secret. Print the value
-and set it in the browser when prompted:
-
-```bash
-kubectl get secret -n polar-graph neo4j-secret -o jsonpath='{.data.secret}' | base64 -d | cut -d/ -f2
-```
-
-(`just neo4j-load-dump` sets this automatically.) Avoid repeated logins
-with a wrong password: Neo4j rate-limits failed logins per user.
+Then browse to `https://localhost:7473` and log in to Neo4j with your
+certificate. The `nix-neo4j` image this repository deploys sets the
+`neo4j` user's password from the cluster's own secret on its first
+start, so the agents can connect with nothing further for you to do.
+(Only a Neo4j that still has its factory password needs the old
+manual step: `up.nu` says so and shows the value to set. Avoid
+repeated logins with a wrong password: Neo4j rate-limits failed
+logins per user.)
 
 A new certificate always involves an admin; certificates do not
-self-renew. After a cluster rebuild the old CA is gone, so move
-`~/.config/polar-admin` aside before starting over. Keep a backup of the
-bootstrap and user keys: losing the bootstrap material means rebuilding
-the cluster.
+self-renew. After a cluster rebuild the old CA is gone: `up.nu` moves the
+previous cluster's files in `~/.config/polar-admin` aside for you. Keep a
+backup of the bootstrap and user keys: losing the bootstrap material means
+rebuilding the cluster.
 
 ### Bootstrapping Keycloak
 
@@ -492,15 +649,17 @@ podman run -p 8080:8080 \
 
 There is no static, offline-generated dev PKI any more: every certificate
 comes from `cert-issuer`, signed by the cluster's own CA. To iterate on an
-agent, rebuild its image, reload the images and bounce its pod; Jobs create a
-fresh pod, and `polar-init` fetches a new certificate from `cert-issuer`
-on startup:
+agent, rebuild its image, push it and bounce its pod; Jobs create a
+fresh pod, and `polar-init` fetches a new certificate on startup:
 
 ```bash
-(cd src/agents && just <agent> all)
-just cluster-load-all
-kubectl -n polar delete pod -l job-name=<agent>
+just image <image-name>      # build, push, drop the node's cached copy
+kubectl -n polar delete pod -l job-name=<job-name>
 ```
+
+(`nu infra/images.nu list` has the image names. Delete a pod once: the
+Job controller waits longer after each pod that fails, so deleting several
+in a row delays the replacement.)
 
 Human access (Neo4j Browser and the admin tools) uses a user certificate
 claimed through the admin flow; see **Admin access and your user
@@ -599,5 +758,5 @@ deployment pipeline, see src/agents/ and infra/.
 
 ## License
 
-Licensed under a MIT-style license — see license.txt, or contact
+Licensed under a MIT (SEI)-style license — see license.txt, or contact
 permission@sei.cmu.edu for full terms.
