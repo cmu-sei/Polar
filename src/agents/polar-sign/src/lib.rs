@@ -7,6 +7,16 @@
 //! `polar-signing`'s; this crate puts a payload together, writes the file in the form the
 //! scheduler's observer reads, and reads one back.
 
+pub mod author;
+pub mod check;
+pub mod fetch;
+pub mod flow;
+pub mod lenient;
+pub mod push;
+pub mod scaffold;
+pub mod seal;
+pub mod template;
+
 use serde_json::{Map, Value, json};
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -15,8 +25,6 @@ pub enum DhallError {
         "`{0}` cannot be written in Dhall here: only text, whole numbers, true and false, lists and records"
     )]
     Unsupported(&'static str),
-    #[error("an empty list has no type to write in Dhall")]
-    EmptyList,
     #[error("`{0}` is not a name a record field can have here")]
     FieldName(String),
 }
@@ -60,7 +68,7 @@ fn field_name(name: &str) -> Result<String, DhallError> {
 }
 
 /// `value` as a Dhall expression: what the scheduler's observer evaluates back to the same JSON.
-/// Text, whole numbers, booleans, non-empty lists and records; nothing else is in a document.
+/// Text, whole numbers, booleans, lists and records; nothing else is in a document.
 pub fn dhall(value: &Value) -> Result<String, DhallError> {
     match value {
         Value::Null => Err(DhallError::Unsupported("null")),
@@ -75,8 +83,10 @@ pub fn dhall(value: &Value) -> Result<String, DhallError> {
         },
         Value::String(s) => Ok(text(s)),
         Value::Array(items) => {
+            // Dhall wants a type on an empty list; once evaluated it is only an empty list, whatever it was
+            // annotated as, which is how a version that withdraws everything (`[]`) is written.
             if items.is_empty() {
-                return Err(DhallError::EmptyList);
+                return Ok("([] : List {})".to_string());
             }
             let rendered = items.iter().map(dhall).collect::<Result<Vec<_>, _>>()?;
             Ok(format!("[ {} ]", rendered.join(", ")))
@@ -278,7 +288,9 @@ mod tests {
     #[test]
     fn what_dhall_cannot_hold_here_is_refused_not_guessed() {
         assert_eq!(dhall(&json!(null)), Err(DhallError::Unsupported("null")));
-        assert_eq!(dhall(&json!([])), Err(DhallError::EmptyList));
+        roundtrip(json!([]));
+        roundtrip(json!({ "credentials": [] }));
+        roundtrip(json!({ "body": { "repositories": [], "n": 1 } }));
         assert!(dhall(&json!({ "x": 1.5 })).is_err());
     }
 

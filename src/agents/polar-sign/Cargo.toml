@@ -8,8 +8,11 @@ license.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 polar-env.workspace = true
+polar-escrow.workspace = true
 polar-signing.workspace = true
 serde_dhall.workspace = true
+# `--push` and the certificate request use the blocking client: the tool has no async runtime and needs none.
+reqwest = { workspace = true, features = ["blocking"] }
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
@@ -20,3 +23,6 @@ path = "src/main.rs"
 
 [dev-dependencies]
 polar-signing = { workspace = true, features = ["testing"] }
+rand.workspace = true
+rsa.workspace = true
+tempfile.workspace = true

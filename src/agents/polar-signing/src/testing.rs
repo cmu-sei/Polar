@@ -147,6 +147,15 @@ impl Default for EscrowSpec {
 /// An agent's escrow certificate as cert-issuer makes one (`CertType::Service`): the agent's identity as the DNS
 /// name, `keyEncipherment` and nothing else, over an RSA key, signed by `issuer`.
 pub fn escrow_certificate(issuer: &Authority, spec: EscrowSpec) -> String {
+    escrow_certificate_for(issuer, spec, ESCROW_PUBLIC_KEY_PEM)
+}
+
+/// The same, over an RSA public key of the caller's, for a test that has to open what was encrypted to it.
+pub fn escrow_certificate_for(
+    issuer: &Authority,
+    spec: EscrowSpec,
+    public_key_pem: &str,
+) -> String {
     let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
     params.subject_alt_names = vec![SanType::DnsName(spec.identity.try_into().unwrap())];
     params.key_usages = spec.key_usages;
@@ -155,6 +164,6 @@ pub fn escrow_certificate(issuer: &Authority, spec: EscrowSpec) -> String {
     if spec.is_ca {
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     }
-    let subject = SubjectPublicKeyInfo::from_pem(ESCROW_PUBLIC_KEY_PEM).unwrap();
+    let subject = SubjectPublicKeyInfo::from_pem(public_key_pem).unwrap();
     params.signed_by(&subject, &issuer.issuer).unwrap().pem()
 }

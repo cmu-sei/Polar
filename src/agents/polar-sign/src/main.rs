@@ -1,12 +1,16 @@
-//! `polar-sign configuration` makes a signed configuration document; `polar-sign verify` checks one.
-//! Design: `docs/architecture/signed-configuration.md`.
+//! `polar-sign template` gives a file to fill in for an agent's runtime section or settings; `polar-sign sign`
+//! checks it, seals its secrets, signs it and, with `--push`, puts it in the schedules repository;
+//! `polar-sign configuration` and `runtime` sign a change given on the command line; `polar-sign verify`
+//! checks a signed document. Design: `docs/architecture/signed-configuration.md`.
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use polar_env::Env;
+use polar_sign::flow::{Signing, sign_file};
+use polar_sign::scaffold::Scaffold;
 use polar_sign::{
-    configuration_payload, load_identity, parse_body, parse_change, runtime_payload, sign_to_dhall,
-    split_pem, verify_source,
+    author, configuration_payload, fetch, load_identity, parse_body, parse_change, push,
+    runtime_payload, sign_to_dhall, split_pem, template, verify_source,
 };
 use std::path::PathBuf;
 
@@ -78,6 +82,65 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Print a file to fill in for an agent: one of its runtime sections, or the settings a signed document may
+    /// change. It comes from the agent's own scaffold, with the defaults the agent declares and a comment on every
+    /// field, and the secret fields marked.
+    ///
+    /// Edit it, then `polar-sign sign` it. `polar-sign template <agent>` alone lists what the agent takes.
+    Template {
+        /// The agent's name, as it calls itself.
+        agent: String,
+        /// The runtime section to print a template for.
+        section: Option<String>,
+        /// Print the template for the agent's settings instead.
+        #[arg(long, conflicts_with = "section")]
+        settings: bool,
+        /// The agent's scaffold (`<agent> --scaffold`); <dir>/scaffolds/<agent>.json by default.
+        #[arg(long)]
+        scaffold: Option<PathBuf>,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Check a file made from a template, seal its secrets, sign it with your certificate and key and write the
+    /// signed Dhall file (to standard output unless --out or --push is given).
+    ///
+    /// The file is checked against the agent's scaffold first: nothing is signed if a field is missing, strange
+    /// or of the wrong kind. A secret you typed in the clear (or `-`, to be asked for it on standard input) is
+    /// encrypted so that only that agent can open it, to the agent's escrow certificate, which is fetched from
+    /// the credentials agent's gateway and checked against your CA before it is trusted. With --push the file is
+    /// committed to the schedules repository at permanent/<agent>/<section>.dhall and pushed.
+    Sign {
+        /// The file made from a template.
+        file: PathBuf,
+        #[arg(long, default_value = "djshepard")]
+        user: String,
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long)]
+        scaffold: Option<PathBuf>,
+        /// The credentials agent's gateway; POLAR_OBSERVER_URL, or http://localhost:8081, by default.
+        #[arg(long)]
+        observer_url: Option<String>,
+        /// The identity the agent's escrow certificate must carry, if not <agent>.polar.serviceaccount.cluster.local.
+        #[arg(long)]
+        escrow_identity: Option<String>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Commit the signed file to the schedules repository and push it.
+        #[arg(long)]
+        push: bool,
+        /// The schedules repository (anything `git clone` takes); POLAR_SCHEDULES_URL by default.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Where the tool keeps its clone; ~/.cache/polar-sign/schedules by default.
+        #[arg(long)]
+        workdir: Option<PathBuf>,
+        /// KEY=VALUE for every git command of the push (`git -c`), such as http.curloptResolve.
+        #[arg(long = "git-config", value_name = "KEY=VALUE")]
+        git_config: Vec<String>,
+    },
     /// Check a signed document the way a receiver checks its signature: the layout, the chain to the
     /// CA, the signer's certificate and the signature. Says who signed it and what it asks for.
     Verify {
@@ -118,8 +181,216 @@ fn default_dir(given: Option<PathBuf>) -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".config/polar-admin"))
 }
 
+fn env_var(name: &str) -> Option<String> {
+    polar_env::ProcessEnv.var(name).filter(|v| !v.is_empty())
+}
+
+/// The agent's scaffold, from --scaffold or the folder `nu infra/resolve.nu scaffolds <dir>` fills.
+fn load_scaffold(agent: &str, given: Option<PathBuf>, dir: &std::path::Path) -> Result<Scaffold> {
+    let path = given.unwrap_or_else(|| dir.join("scaffolds").join(format!("{agent}.json")));
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "cannot read the scaffold of {agent} at {}: make one with `{agent} --scaffold > <file>` and pass \
+             --scaffold, or fill {} with `nu infra/resolve.nu scaffolds <dir>`",
+            path.display(),
+            dir.join("scaffolds").display()
+        )
+    })?;
+    let scaffold = Scaffold::parse(&text).map_err(anyhow::Error::msg)?;
+    if scaffold.agent != agent {
+        bail!(
+            "{} is the scaffold of {}, not of {agent}",
+            path.display(),
+            scaffold.agent
+        );
+    }
+    Ok(scaffold)
+}
+
+/// Standard input, read when an author wrote `-` for a secret.
+fn read_secret_from_stdin() -> Result<String, String> {
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+        .map_err(|e| format!("cannot read standard input: {e}"))?;
+    Ok(text.trim_end_matches(['\n', '\r']).to_string())
+}
+
+fn write_or_print(text: &str, out: Option<&std::path::Path>, what: &str) -> Result<()> {
+    match out {
+        Some(path) => {
+            std::fs::write(path, text)
+                .with_context(|| format!("cannot write {}", path.display()))?;
+            eprintln!("wrote {} ({what})", path.display());
+        }
+        None => print!("{text}"),
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Command::Template {
+            agent,
+            section,
+            settings,
+            scaffold,
+            dir,
+            out,
+        } => {
+            let dir = default_dir(dir)?;
+            let scaffold = load_scaffold(&agent, scaffold, &dir)?;
+            if section.is_none() && !settings {
+                println!("{} takes these runtime sections:", scaffold.agent);
+                for r in &scaffold.runtime {
+                    println!("  {}  {}", r.name, r.doc);
+                }
+                println!(
+                    "and has {} setting(s) a signed document may change (--settings)",
+                    scaffold.dynamic_variables().count()
+                );
+                return Ok(());
+            }
+            let text = match section {
+                Some(section) => template::runtime_template(&scaffold, &section),
+                None => template::settings_template(&scaffold),
+            }
+            .map_err(anyhow::Error::msg)?;
+            write_or_print(
+                &text,
+                out.as_deref(),
+                "fill it in, then `polar-sign sign` it",
+            )?;
+        }
+        Command::Sign {
+            file,
+            user,
+            dir,
+            scaffold,
+            observer_url,
+            escrow_identity,
+            out,
+            push: push_it,
+            repo,
+            workdir,
+            git_config,
+        } => {
+            let dir = default_dir(dir)?;
+            let text = std::fs::read_to_string(&file)
+                .with_context(|| format!("cannot read {}", file.display()))?;
+            let input = author::read_input(&text).map_err(anyhow::Error::msg)?;
+            let scaffold = load_scaffold(&input.agent, scaffold, &dir)?;
+            let identity = load_identity(&dir, &user).map_err(anyhow::Error::msg)?;
+            let ca_path = dir.join("ca.pem");
+            let trust = split_pem(
+                &std::fs::read_to_string(&ca_path)
+                    .with_context(|| format!("cannot read {}", ca_path.display()))?,
+            );
+            if trust.is_empty() {
+                bail!("{} holds no certificate", ca_path.display());
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .context("the clock is before 1970")?
+                .as_secs() as i64;
+            let observer_url = observer_url
+                .or_else(|| env_var("POLAR_OBSERVER_URL"))
+                .unwrap_or_else(|| "http://localhost:8081".to_string());
+            let how = Signing {
+                identity: &identity,
+                trust_pem: &trust,
+                now,
+                escrow_identity: escrow_identity.as_deref(),
+            };
+            let fetch_certificate = |id: &str| fetch::fetch_certificate(&observer_url, id);
+            let signed = match sign_file(
+                &text,
+                &scaffold,
+                &how,
+                &fetch_certificate,
+                &mut read_secret_from_stdin,
+            ) {
+                Ok(signed) => signed,
+                Err(problems) => {
+                    for p in &problems {
+                        eprintln!("  {p}");
+                    }
+                    bail!(
+                        "nothing was signed: {} problem(s) in {}",
+                        problems.len(),
+                        file.display()
+                    );
+                }
+            };
+            let what = format!(
+                "{} for {}, version {}, {} secret(s) sealed",
+                signed.section.as_deref().unwrap_or("settings"),
+                signed.agent,
+                signed.version,
+                signed.sealed.encrypted
+            );
+            if push_it {
+                let (signer, _) =
+                    verify_source(&signed.dhall, &trust, now).map_err(anyhow::Error::msg)?;
+                let remote = repo.or_else(|| env_var("POLAR_SCHEDULES_URL")).context(
+                    "--push needs the schedules repository: --repo, or POLAR_SCHEDULES_URL",
+                )?;
+                let workdir = match workdir {
+                    Some(w) => w,
+                    None => {
+                        let base = env_var("XDG_CACHE_HOME")
+                            .map(PathBuf::from)
+                            .or_else(|| env_var("HOME").map(|h| PathBuf::from(h).join(".cache")));
+                        base.context("HOME is not set: say where to keep the clone with --workdir")?
+                            .join("polar-sign/schedules")
+                    }
+                };
+                let mut config: Vec<(String, String)> = Vec::new();
+                if remote.starts_with("https://") {
+                    for (key, name) in [
+                        ("http.sslCAInfo", "ca.pem".to_string()),
+                        ("http.sslCert", format!("{user}.crt")),
+                        ("http.sslKey", format!("{user}.key")),
+                    ] {
+                        config.push((
+                            key.to_string(),
+                            dir.join(name).to_string_lossy().to_string(),
+                        ));
+                    }
+                }
+                for item in &git_config {
+                    config.push(parse_change(item).map_err(anyhow::Error::msg)?);
+                }
+                let relative = push::place(&signed.agent, signed.section.as_deref());
+                let username = signer.username.clone().unwrap_or_else(|| user.clone());
+                let message = push::message(
+                    &signed.agent,
+                    signed.section.as_deref(),
+                    signed.version,
+                    &username,
+                );
+                let plan = push::Plan {
+                    remote: &remote,
+                    workdir: &workdir,
+                    relative: &relative,
+                    content: &signed.dhall,
+                    message: &message,
+                    author_name: &username,
+                    author_email: signer.email.as_deref().unwrap_or("polar-sign@invalid"),
+                    git_config: &config,
+                };
+                match push::push(&plan).map_err(anyhow::Error::msg)? {
+                    push::Pushed::Pushed => eprintln!("pushed {relative} ({what})"),
+                    push::Pushed::Unchanged => {
+                        eprintln!("{relative} already holds exactly this file; nothing was pushed")
+                    }
+                }
+                if let Some(path) = out {
+                    write_or_print(&signed.dhall, Some(&path), &what)?;
+                }
+            } else {
+                write_or_print(&signed.dhall, out.as_deref(), &what)?;
+            }
+        }
         Command::Configuration {
             agent,
             version,
