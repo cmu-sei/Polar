@@ -5666,6 +5666,7 @@ name = "polar-escrow"
 version = "1.0.0"
 dependencies = [
  "aes-gcm",
+ "base64 0.22.1",
  "rand 0.10.3",
  "rkyv",
  "rsa 0.10.0-rc.18",

@@ -250,6 +250,44 @@ impl EscrowedSecret {
     }
 }
 
+/// Why text is not a sealed secret as a signed document carries it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DocumentTextError {
+    #[error("is not standard base64")]
+    NotBase64,
+    #[error("is empty")]
+    Empty,
+    #[error("is not an escrowed secret")]
+    NotASecret,
+}
+
+impl EscrowedSecret {
+    /// How a signed document carries a sealed secret: standard base64 of the bytes this type has on the wire
+    /// (its `rkyv` encoding), so a receiver can check its shape without opening it
+    /// (docs/architecture/signed-configuration.md, "Binding").
+    pub fn to_document_text(&self) -> Result<String, String> {
+        use base64::Engine;
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(self).map_err(|e| e.to_string())?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes.as_slice()))
+    }
+
+    /// The inverse, for text that may or may not be one. Says what is wrong without repeating the text.
+    pub fn from_document_text(text: &str) -> Result<Self, DocumentTextError> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(|_| DocumentTextError::NotBase64)?;
+        if bytes.is_empty() {
+            return Err(DocumentTextError::Empty);
+        }
+        // rkyv wants aligned bytes; a decoded Vec is not promised to be.
+        let mut aligned = rkyv::util::AlignedVec::<16>::new();
+        aligned.extend_from_slice(&bytes);
+        rkyv::from_bytes::<Self, rkyv::rancor::Error>(&aligned)
+            .map_err(|_| DocumentTextError::NotASecret)
+    }
+}
+
 /// Why a part of a binding context cannot be used.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
@@ -296,6 +334,68 @@ pub fn binding_context(
 #[cfg(test)]
 mod context_tests {
     use super::*;
+
+    /// One key for these tests: making an RSA key in a build without optimisation takes a while.
+    fn key() -> &'static (RsaPrivateKey, String) {
+        use rsa::pkcs8::EncodePublicKey;
+        static KEY: std::sync::OnceLock<(RsaPrivateKey, String)> = std::sync::OnceLock::new();
+        KEY.get_or_init(|| {
+            let mut rng = rand::rng();
+            let private = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+            let pem = private
+                .to_public_key()
+                .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+                .unwrap();
+            (private, pem)
+        })
+    }
+
+    fn a_secret() -> EscrowedSecret {
+        EscrowedSecret::encrypt_bound(b"tok", &key().1, b"ctx").unwrap()
+    }
+
+    #[test]
+    fn a_sealed_secret_survives_the_text_a_document_carries_it_in() {
+        let sealed = a_secret();
+        let text = sealed.to_document_text().unwrap();
+        assert_eq!(EscrowedSecret::from_document_text(&text).unwrap(), sealed);
+        assert!(!text.contains("tok"));
+    }
+
+    #[test]
+    fn text_that_is_not_a_sealed_secret_is_told_apart_by_what_is_wrong() {
+        use base64::Engine;
+        let encode = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        assert_eq!(
+            EscrowedSecret::from_document_text("***").unwrap_err(),
+            DocumentTextError::NotBase64
+        );
+        assert_eq!(
+            EscrowedSecret::from_document_text("").unwrap_err(),
+            DocumentTextError::Empty
+        );
+        for bytes in [
+            &b"just some bytes, nothing like a sealed secret"[..],
+            &[0u8; 3][..],
+        ] {
+            assert_eq!(
+                EscrowedSecret::from_document_text(&encode(bytes)).unwrap_err(),
+                DocumentTextError::NotASecret
+            );
+        }
+        // plain text that happens to be valid base64 is not a secret either
+        assert_eq!(
+            EscrowedSecret::from_document_text("ghp1").unwrap_err(),
+            DocumentTextError::NotASecret
+        );
+        // and a sealed secret with a byte cut off is not
+        let text = a_secret().to_document_text().unwrap();
+        let mut bytes = base64::engine::general_purpose::STANDARD
+            .decode(&text)
+            .unwrap();
+        bytes.pop();
+        assert!(EscrowedSecret::from_document_text(&encode(&bytes)).is_err());
+    }
 
     #[test]
     fn the_context_is_agent_section_version_name_and_field_joined_by_bars() {
@@ -353,21 +453,12 @@ mod context_tests {
 
     #[test]
     fn a_secret_opens_only_under_the_context_it_was_made_for() {
-        use rsa::pkcs8::EncodePublicKey;
-        let mut rng = rand::rng();
-        let private = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let public_pem = private
-            .to_public_key()
-            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-            .unwrap();
+        let (private, public_pem) = key();
         let made_for =
             binding_context("git-repo-observer", "credentials", 1, "gh", "secret").unwrap();
-        let sealed = EscrowedSecret::encrypt_bound(b"tok", &public_pem, &made_for).unwrap();
+        let sealed = EscrowedSecret::encrypt_bound(b"tok", public_pem, &made_for).unwrap();
         assert_eq!(
-            sealed
-                .decrypt_bound(&private, &made_for)
-                .unwrap()
-                .as_slice(),
+            sealed.decrypt_bound(private, &made_for).unwrap().as_slice(),
             b"tok"
         );
         for other in [
@@ -375,7 +466,7 @@ mod context_tests {
             binding_context("git-repo-observer", "credentials", 1, "other", "secret").unwrap(),
             binding_context("git-repo-controller", "credentials", 1, "gh", "secret").unwrap(),
         ] {
-            assert!(sealed.decrypt_bound(&private, &other).is_err());
+            assert!(sealed.decrypt_bound(private, &other).is_err());
         }
     }
 }

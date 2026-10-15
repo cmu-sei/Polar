@@ -9,13 +9,13 @@
 use crate::GitCredentialProvider;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use credentials_agent_common::escrow_secret::EscrowedSecret;
 use git_agent_common::RepoObservationConfig;
 use git2::{Cred, CredentialType};
 use polar_agent_builder::runtime::SectionAuthority;
 use polar_agent_builder::{CryptoClient, RuntimeSection};
 use polar_crypto::registry::{SecretBinding, SecretKind, UseRefusal, pattern_problem};
 use polar_crypto::{CryptoError, Zeroizing};
+use polar_escrow::EscrowedSecret;
 use serde_json::Value;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -187,15 +187,11 @@ fn entry(i: usize, item: &Value) -> Result<Entry, Vec<String>> {
 
 /// Why a secret field is not the base64 of an escrowed secret, without saying what it holds.
 fn secret_problem(secret: &str) -> Option<&'static str> {
-    let Ok(bytes) = STANDARD.decode(secret) else {
-        return Some("is not standard base64");
-    };
-    if bytes.is_empty() {
-        return Some("is empty");
-    }
-    match rkyv::from_bytes::<EscrowedSecret, rkyv::rancor::Error>(&bytes) {
+    match EscrowedSecret::from_document_text(secret) {
         Ok(_) => None,
-        Err(_) => Some("is not an escrowed secret"),
+        Err(polar_escrow::DocumentTextError::NotBase64) => Some("is not standard base64"),
+        Err(polar_escrow::DocumentTextError::Empty) => Some("is empty"),
+        Err(polar_escrow::DocumentTextError::NotASecret) => Some("is not an escrowed secret"),
     }
 }
 

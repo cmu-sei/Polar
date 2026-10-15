@@ -181,6 +181,7 @@ impl Actor for RootSupervisor {
                 tcp_client: resources.tcp_client.clone(),
                 cache_root,
                 crypto: Arc::new(crypto.clone()),
+                clone: crate::GitRepoWorker::open_or_clone_bare,
             },
             myself.get_cell(),
         )

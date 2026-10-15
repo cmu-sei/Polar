@@ -25,6 +25,7 @@ license.workspace = true
 # (`polar-sign`): credentials_agent_common re-exports it, and carries the graph libraries this does not need.
 [dependencies]
 aes-gcm = "0.11.1"
+base64.workspace = true
 rand.workspace = true
 rkyv.workspace = true
 rsa.workspace = true

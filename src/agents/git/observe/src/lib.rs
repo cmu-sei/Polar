@@ -54,6 +54,15 @@ pub fn tracked_refs(remotes: &[String], refs: &[String]) -> Vec<String> {
  * ============================
  */
 
+/// How a worker makes its clone: `GitRepoWorker::open_or_clone_bare` outside a test. A function pointer so that a
+/// test can put another in its place and need no network, and so that it can see what the clone is given.
+pub type CloneFn = fn(
+    &Path,
+    &str,
+    Arc<dyn GitCredentialProvider>,
+    Option<usize>,
+) -> Result<Repository, git2::Error>;
+
 /// A source of Git credentials.
 ///
 /// This abstraction:
@@ -142,6 +151,7 @@ pub struct GitRepoSupervisorState {
     workers: HashMap<RepoId, RunningWorker>,
     tcp_client: TcpClient,
     crypto: Arc<dyn CryptoClient>,
+    clone: CloneFn,
 }
 
 pub struct GitRepoSupervisorArgs {
@@ -149,6 +159,7 @@ pub struct GitRepoSupervisorArgs {
     tcp_client: TcpClient,
     /// Where each worker asks for the credential its repository names.
     crypto: Arc<dyn CryptoClient>,
+    clone: CloneFn,
 }
 
 #[derive(Serialize, Deserialize, Archive, Debug)]
@@ -206,6 +217,7 @@ impl Actor for GitRepoSupervisor {
             cache_root: args.cache_root,
             tcp_client: args.tcp_client,
             crypto: args.crypto,
+            clone: args.clone,
             workers: HashMap::new(),
         })
     }
@@ -249,6 +261,7 @@ impl Actor for GitRepoSupervisor {
                 let args = GitRepoWorkerArgs {
                     config,
                     crypto: state.crypto.clone(),
+                    clone: state.clone,
                     repo_path: state.cache_root.join(repo_id.to_string()),
                     tcp_client: state.tcp_client.clone(),
                 };
@@ -337,6 +350,7 @@ pub struct GitRepoWorkerState {
     repo_path: PathBuf,
     tcp_client: TcpClient,
     crypto: Arc<dyn CryptoClient>,
+    clone: CloneFn,
     /// Cloned or opened by the first attempt that has what it needs, not before: a repository whose
     /// credential has not arrived has no clone yet.
     repo: Option<Repository>,
@@ -352,6 +366,7 @@ pub struct GitRepoWorkerArgs {
     repo_path: PathBuf,
     tcp_client: TcpClient,
     crypto: Arc<dyn CryptoClient>,
+    clone: CloneFn,
 }
 
 fn on_commit(
@@ -547,7 +562,7 @@ impl GitRepoWorker {
         };
 
         if state.repo.is_none() {
-            match Self::open_or_clone_bare(
+            match (state.clone)(
                 &state.repo_path,
                 &state.config.repo_url,
                 provider.clone(),
@@ -681,6 +696,7 @@ impl Actor for GitRepoWorker {
             repo_path: args.repo_path,
             tcp_client: args.tcp_client,
             crypto: args.crypto,
+            clone: args.clone,
             repo: None,
             last_seen: HashMap::new(),
             waiting: false,
@@ -737,6 +753,7 @@ mod tests {
     use super::*;
     use crate::credentials::test_support::{Answer, Recorder};
     use cassini_client::TcpClientMessage;
+    use git2::CredentialType;
     use std::sync::Mutex;
 
     /// Takes whatever the worker would publish, and says nothing.
@@ -776,7 +793,41 @@ mod tests {
         cache: tempfile::TempDir,
     }
 
+    /// A clone that makes no connection: it records what it was given and fails, as an unreachable host would.
+    fn refusing_clone(
+        _path: &Path,
+        url: &str,
+        provider: Arc<dyn GitCredentialProvider>,
+        _depth: Option<usize>,
+    ) -> Result<Repository, git2::Error> {
+        let credential_offered = provider
+            .credentials(url, None, CredentialType::USER_PASS_PLAINTEXT)
+            .is_ok();
+        CLONES
+            .lock()
+            .unwrap()
+            .push((url.to_string(), credential_offered));
+        Err(git2::Error::from_str("test: there is no network"))
+    }
+
+    /// What `refusing_clone` was asked: the URL, and whether the provider it was given offers a credential.
+    static CLONES: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
+
+    fn clones_of(url: &str) -> Vec<bool> {
+        CLONES
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(u, _)| u == url)
+            .map(|(_, offered)| *offered)
+            .collect()
+    }
+
     async fn start(config: RepoObservationConfig) -> Rig {
+        start_with(config, GitRepoWorker::open_or_clone_bare).await
+    }
+
+    async fn start_with(config: RepoObservationConfig, clone: CloneFn) -> Rig {
         let received = Arc::new(Mutex::new(Vec::new()));
         let (sink, _) = Actor::spawn(
             None,
@@ -797,6 +848,7 @@ mod tests {
                 config,
                 tcp_client: TcpClient::from_actor_ref(sink),
                 crypto: crypto.clone(),
+                clone,
             },
         )
         .await
@@ -925,6 +977,7 @@ mod tests {
                 cache_root: cache.path().to_path_buf(),
                 tcp_client: TcpClient::from_actor_ref(sink),
                 crypto: crypto.clone(),
+                clone: refusing_clone,
             },
         )
         .await
@@ -1078,8 +1131,13 @@ mod tests {
     #[tokio::test]
     async fn a_credential_that_has_arrived_is_used_for_the_clone_and_a_clone_that_fails_waits_for_the_next_attempt()
      {
-        let rig = start(private_repo()).await;
+        let url = "https://localhost:1/found/r.git";
+        let rig = start_with(private_repo_at(url), refusing_clone).await;
         until("the first attempt", || asked(&rig) == 1).await;
+        assert!(
+            clones_of(url).is_empty(),
+            "nothing is cloned before the credential is there"
+        );
         *rig.crypto.answer.lock().unwrap() = Answer::Found {
             username: "svc",
             secret: b"tok",
@@ -1092,12 +1150,27 @@ mod tests {
             rig.crypto.asked.lock().unwrap()[1],
             ("gh".to_string(), "localhost".to_string())
         );
-        // Nothing listens at the host, so the clone fails; the worker is still alive and still waiting.
-        settle().await;
+        // The clone is made with a provider that offers the credential, and fails; the worker is still alive
+        // and still waiting, so the next change tries the clone again.
+        until("the clone", || clones_of(url).len() == 1).await;
+        assert_eq!(clones_of(url), vec![true]);
         rig.worker
             .cast(GitRepoWorkerMsg::CredentialsChanged)
             .unwrap();
         until("a third attempt", || asked(&rig) == 3).await;
+        until("the clone again", || clones_of(url).len() == 2).await;
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_public_repository_is_cloned_with_a_provider_that_offers_nothing() {
+        let url = "https://localhost:1/public/r.git";
+        let mut config = private_repo_at(url);
+        config.credential = None;
+        let rig = start_with(config, refusing_clone).await;
+        until("the clone", || clones_of(url).len() == 1).await;
+        assert_eq!(clones_of(url), vec![false]);
+        assert_eq!(asked(&rig), 0);
         rig.worker.stop(None);
     }
 
