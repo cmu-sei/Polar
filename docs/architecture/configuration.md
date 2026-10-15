@@ -123,8 +123,11 @@ arrives. Open questions, not decisions:
   one.
 - **Fail closed.** Before any policy has arrived, the credentials agent needs a safe default,
   which should be to refuse, not to allow.
-- **Secrets as references elsewhere.** For agents that are not the credentials agent, secrets
-  should travel as a name and key, not as ciphertext on a topic.
+- **Secrets for other agents (superseded 2026-10-14).** This said that for agents that are not the
+  credentials agent, secrets should travel as a name and key, not as ciphertext on a topic. David
+  decided otherwise on 2026-10-14, confirming `signed-configuration.md` and `git-controller.md`: a
+  secret travels as ciphertext inside a signed document addressed to the one agent that needs it, and
+  everything else refers to it by name.
 
 ## 7. The schema export (direction)
 

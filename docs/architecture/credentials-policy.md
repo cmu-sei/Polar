@@ -102,7 +102,7 @@ is an error in the document (refused whole), not a silent no-match.
 | | Today | Under this design |
 |---|---|---|
 | Principal | `Identity::"id"`, attr `permissions`, no parents | the same, plus parents from the declared groups |
-| Action | `Action::"retrieve"` or `"decrypt"` | the same; others added as needed (`store`, `grant`) |
+| Action | `Action::"retrieve"` or `"decrypt"` | the same; `store` added (decided 2026-10-14, not built); `grant` as needed |
 | Resource | an ID string, no entity | `Secret::"name"` with `owner` (ledger) and declared attributes |
 | Context | empty | `{ now_secs }`, and later what a rule needs (the requester's channel, an environment) |
 | Schema | none | the agent's own, validating policies and entities on receipt |
@@ -219,6 +219,13 @@ beside `stored_by`, and they become the secret's Cedar attributes under the rese
 store under an existing name is refused today, and stays refused); the `entities` list may still *annotate* a
 secret by name for what policy needs to change after the fact (`frozen`), but an annotation cannot replace a
 stored label. This is what lets "any `git-token`" be a rule from the first day.
+
+## Storing is governed by policy
+
+Decided 2026-10-14 (David). `StoreSecret` asks policy before the ledger accepts a name: action `store`, resource
+`Secret::"<name>"`, with the request's labels as the secret's attributes. Until now the first identity to store a
+name owned it, so another identity could store `github-sei` before the observer did, and the observer's own
+store would be refused as `NameTaken` and its credential left pending. Not built.
 
 ## `DecryptOnBehalfOf` and the resource it names
 

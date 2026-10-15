@@ -1,6 +1,6 @@
 # The git agents: observer, processor, and a controller
 
-Status, 2026-10-12: design, agreed with David in conversation; nothing in it is built. It replaces the
+Status, 2026-10-14 (design agreed with David 2026-10-12). The controller, the observer's credentials section and the status events are not built; the `runtime` document type, replay, `c:update-runtime`, `polar-sign runtime` and `RetrieveSecret` are (each section says which). It replaces the
 git scheduler (`git/scheduler`, migrated onto the builder on 2026-10-12 as it was, for the move only) and
 settles three things that `proposals.md` and `signed-configuration.md` left open for the git agents: who
 receives proposals, how a credential reaches the observer, and how per-repository settings travel.
@@ -69,7 +69,7 @@ the two checks it makes itself (below).
 
 ```
 author --encrypts to the observer's escrow public key, signs--> runtime document, section "credentials"
-   --> observer: verify, DecryptOwnMessage (crypto actor, key in custody), add to the working set,
+   --> observer: verify, the CryptoActor decrypts it (key in custody), add to the working set,
                  StoreSecret to the credentials agent (retried until acknowledged)
 later, at init: RetrieveSecret { name } for each name it needs, before anything else
 ```
@@ -90,7 +90,7 @@ so a replaced pod does not walk history it already published. The processor read
 
 ## The `runtime` document type
 
-**Built 2026-10-12** (the library; no agent declares a section yet): `document_type::RUNTIME`, the capability `c:update-runtime` (appended to the closed list), `UpdateVerifier::verify_document`, `PolarAgent::RUNTIME` with `RuntimeSection { name, doc, body, validate }`, handling in the existing ConfigurationActor (`runtime(section)`, `runtime_changes()`, the same history and outcome events), the `runtime` list in `--scaffold`, routing and per-section replay order in the polar scheduler. Not built: the typed Dhall templates generated from the declarations, and `polar-sign runtime`. `admin-provision` now grants the first admin `c:update-policy` and `c:update-runtime` as well.
+**Built 2026-10-12** (the library; no agent declares a section yet): `document_type::RUNTIME`, the capability `c:update-runtime` (appended to the closed list), `UpdateVerifier::verify_document`, `PolarAgent::RUNTIME` with `RuntimeSection { name, doc, body, validate }`, handling in the existing ConfigurationActor (`runtime(section)`, `runtime_changes()`, the same history and outcome events), the `runtime` list in `--scaffold`, routing and per-section replay order in the polar scheduler. Not built: the typed Dhall templates generated from the declarations. (`polar-sign runtime` is built.) `admin-provision` now grants the first admin `c:update-policy` and `c:update-runtime` as well.
 
 There are two kinds of configuration for these agents, and they need different authors:
 
@@ -135,7 +135,9 @@ Rules:
   controller. No use case justifies that machinery.)
 - **The authority rule** for `runtime` is the capability `c:update-runtime`. It is a new variant of the closed
   capability list, so every consumer of cert-issuer capabilities has to be redeployed before a certificate
-  carries it (old consumers reject an unknown variant as malformed).
+  carries it (old consumers reject an unknown variant as malformed). Cedar is asked first, per section
+  (`update-runtime` on `Section::"<agent>/<section>"`, `authority-distribution.md`) and the capability is the
+  fallback. A credentials document needs no capability of its own, and none is planned (David, 2026-10-14).
 - **Admission specifications become a section.** `proposals.md` made `admission` a document type of its own,
   addressed to a proposal kind. Here it is the `admission` section of the controller's runtime documents, with
   the kind inside the body. One fewer type and one fewer path; the rules and the fail-closed behaviour are
@@ -247,11 +249,11 @@ the same in each (`algorithm` is `ed25519` or `ecdsa-p256-sha256`; the chain is 
                "section": "credentials", "version": 1,
                "body": { "credentials": [
                  { "name": "github-sei", "host_pattern": "github.com", "kind": "token", "username": "oauth2",
-                   "secret": "<RSA-OAEP ciphertext, base64, bound to git-repo-observer / credentials / secret / 1>" } ] } },
+                   "secret": "<hybrid escrowed secret, as text, bound to git-repo-observer / credentials / secret / 1>" } ] } },
   "signature": { "...": "same shape" } }
 ```
 
-What the observer escrows after decrypting is not the bare token: it is `{host_pattern, kind, username, token}`, so that
+The text encoding of the hybrid ciphertext is not decided. What the observer escrows after decrypting is not the bare token: it is `{host_pattern, kind, username, token}`, so that
 a `RetrieveSecret` after a restart brings the binding back with the secret, and the host check cannot be lost.
 
 ### The two messages between the agents
@@ -320,6 +322,11 @@ one claim per pod, so it is decided together with the partitioning (by repositor
 an emptyDir meanwhile.
 
 ## What changes in the code, in order, tests first
+
+**Amended 2026-10-14 (David):** the credential path through a permanent schedule is built first: the observer's
+`credentials` section and working set, the repository configuration naming a credential, the author's side
+(encrypting to the observer's key), and a Cedar `store` action on the credentials agent. The controller and
+proposals (steps 1, 6 and 7 below) come after.
 
 1. **The admission decision as a pure function**: normalisation, each rule, the order, the attack list from
    `proposals.md` (user information, `ext::`, `file://`, internal addresses, a lookalike host, a very long URL,

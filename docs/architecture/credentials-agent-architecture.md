@@ -395,8 +395,9 @@ different sharing rules:**
   meaningful "operation" to perform on a bearer token other than using
   it directly. These are a pass-through of whatever a `StoreSecretReply`/
   future retrieve-reply payload from the Credentials Agent itself
-  already contained; `CryptoActor` is not a vault for this category,
-  only for the agent's own escrow identity.
+  already contained; `CryptoActor` is not a vault for this category: the credentials agent
+  stays the store. It may cache a secret it has decrypted or retrieved, as an optimization (David, 2026-10-14),
+  so that any actor that needs the secret asks the `CryptoActor` for it by name and need not keep it.
 
 **Local caching.** `CryptoActor` may cache what it learns (another
 agent's escrow public key, once queried, does not need re-querying on

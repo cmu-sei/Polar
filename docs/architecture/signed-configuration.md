@@ -159,6 +159,20 @@ A configuration item can carry credentials: the credentials agent's own item car
 permissions and the usernames and passwords to escrow for a named agent, and other agents' items can
 carry a new credential for that agent. A secret is never plaintext in the repository.
 
+**Decisions (David, 2026-10-14).**
+
+1. A secret travels as ciphertext inside a signed document addressed to the one agent that needs it. The
+   2026-10-07 direction that other agents get secrets only as a name and key (`configuration.md` section 6) is
+   superseded; names are still how everything else refers to a secret.
+2. The ciphertext is the hybrid `EscrowedSecret`, as every other escrowed secret is (AES-256-GCM under a random
+   key, wrapped by RSA-OAEP to the recipient), never a bare RSA-OAEP block.
+3. All of an agent's crypto is bounded inside its CryptoActor, which holds the escrow-key handle. The CryptoActor
+   decrypts; any actor that needs the secret afterwards asks the CryptoActor for it by name, and need not keep
+   it. Whether the CryptoActor caches it is an optimization.
+4. Who may push such a document is the ordinary runtime authority: Cedar first, per section, with the
+   certificate capability as the fallback (`authority-distribution.md`). There is no capability of its own for
+   credentials.
+
 **Which fields.** The schema export marks each variable `secret`. The typed template shows them, the
 tool encrypts them, `check` refuses a plaintext value for one, and the receiver refuses a secret field
 whose value is not ciphertext. The signature covers the ciphertext, so the signed document can be stored
@@ -170,22 +184,27 @@ in the graph and passed over topics as it is.
   to the credentials agent's own escrow public key (`EscrowKeyRequest`), which it stores directly
   (`StoreSecret`).
 - *An item for any other agent*: encrypted to that agent's own escrow public key
-  (`AgentEscrowKeyRequest`). The agent decrypts it with its CryptoActor (`DecryptOwnMessage`; the private
-  key stays in custody), uses it, then **closes the loop** by escrowing it with the credentials agent
+  (`AgentEscrowKeyRequest`). The agent's CryptoActor decrypts it (the private
+  key stays in custody; the secret is a hybrid `EscrowedSecret`, so it is opened with `DecryptOwnEscrowed`,
+  since `DecryptOwnMessage` opens only a raw RSA-OAEP block), uses it, then **closes the loop** by escrowing it with the credentials agent
   (`StoreSecret`) so it can be retrieved later (`RetrieveSecret`, re-encrypted to the agent's own
   certificate). Closing the loop is retried until the credentials agent acknowledges it, and so depends on
   the agent receiving the document again if it restarts first (the scheduler's reconciliation item).
+  Afterwards any actor that needs the secret asks the CryptoActor for it by name.
 - *Noted alternative for other agents:* encrypt to the credentials agent's key and let the agent fetch with
-  `DecryptOnBehalfOf` (policy-checked), as kube-consumer's environment values already work. No re-escrow
+  `DecryptOnBehalfOf` (policy-checked). (The credentials agent's handler and message types exist,
+  `decrypt_on_behalf_of.rs`; no agent calls it yet, checked 2026-10-14.) No re-escrow
   step, at the cost of the per-agent compartmentalisation above.
 
 **Binding.** Each ciphertext is bound to its agent, field name and version as authenticated data, so it
 cannot be moved into another field or document. The signature already pins its place in the signed
-document; this pins it to its recipient.
+document; this pins it to its recipient. `EscrowedSecret` carries the context as AES-GCM authenticated data
+(`encrypt_bound`, `decrypt_bound`, built 2026-10-14). The exact context for an entry in a list is open.
 
-**At the receiver.** Decryption comes after every verification step, through the CryptoHandle the
-infrastructure already holds, and the plaintext is applied and never recorded: the ConfigurationActor's
-history and reports already keep names and never values, and a secret variable is hidden in reports.
+**At the receiver.** Decryption comes after every verification step, and the CryptoActor does it (through the
+CryptoHandle the infrastructure already holds). The plaintext is never recorded: the ConfigurationActor's
+history and reports already keep names and never values, and a secret variable is hidden in reports. Any actor
+that needs the secret asks the CryptoActor for it by name.
 
 **The tool needs the recipient's public key.** The author's machine is not on Cassini, so it cannot ask for
 an escrow key. The credentials agent's HTTP front gets a read-only endpoint, "the public escrow key of agent
@@ -196,8 +215,9 @@ graph. It stays safe only while the private escrow key it was encrypted to stays
 compromise of that key exposes every secret ever pushed to it, because nothing here gives forward secrecy.
 So a secret in the repository is a delivery vehicle: change the credential's value after the agent has
 stored it, and prefer having the git server refuse unsigned pushes so a plaintext secret cannot be slipped
-in. The encryption scheme is the one the CryptoActor already uses (`EncryptForRecipient`); confirm its
-properties when this is built.
+in. The encryption scheme is the hybrid `EscrowedSecret` the CryptoActor already uses (`EncryptForRecipient`),
+decided on 2026-10-14 for every secret in a document. Its properties were checked then: it had no authenticated
+data, which the binding above now adds.
 
 ## Authority
 
