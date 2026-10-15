@@ -46,7 +46,7 @@
 //! 4096-bit/SHA-256-OAEP) that an arbitrary secret should not be
 //! assumed to fit under.
 
-use aes_gcm::aead::{Aead, Generate, Key as AesKey, KeyInit};
+use aes_gcm::aead::{Aead, Generate, Key as AesKey, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use rkyv::{Archive, Deserialize, Serialize};
 use rsa::pkcs8::DecodePublicKey;
@@ -90,10 +90,28 @@ impl EscrowedSecret {
     /// The only public constructor -- the one place plaintext ever
     /// becomes an `EscrowedSecret`.
     pub fn encrypt(plaintext: &[u8], recipient_public_key_pem: &str) -> Result<Self, EscrowError> {
+        Self::encrypt_bound(plaintext, recipient_public_key_pem, b"")
+    }
+
+    /// As `encrypt`, and the ciphertext is bound to `context` as AES-GCM authenticated data: it opens only
+    /// for a reader who supplies the same bytes (`decrypt_bound`). The context is not stored in the secret.
+    /// A signed document uses it to pin each secret field to its agent, section, field and version, so a
+    /// ciphertext cannot be moved into another field or document. An empty context is the secret `encrypt`
+    /// has always made.
+    pub fn encrypt_bound(
+        plaintext: &[u8],
+        recipient_public_key_pem: &str,
+        context: &[u8],
+    ) -> Result<Self, EscrowError> {
         let recipient_public_key = RsaPublicKey::from_public_key_pem(recipient_public_key_pem)
             .map_err(|e| EscrowError::InvalidPublicKey(e.to_string()))?;
 
-        Self::encrypt_to_parsed_key(plaintext, &recipient_public_key, recipient_public_key_pem)
+        Self::encrypt_to_parsed_key_bound(
+            plaintext,
+            &recipient_public_key,
+            recipient_public_key_pem,
+            context,
+        )
     }
 
     /// The same, real operation as `encrypt`, for callers that
@@ -117,12 +135,33 @@ impl EscrowedSecret {
         recipient_public_key: &RsaPublicKey,
         recipient_public_key_pem: &str,
     ) -> Result<Self, EscrowError> {
+        Self::encrypt_to_parsed_key_bound(
+            plaintext,
+            recipient_public_key,
+            recipient_public_key_pem,
+            b"",
+        )
+    }
+
+    /// `encrypt_to_parsed_key`, bound to `context` (see `encrypt_bound`).
+    pub fn encrypt_to_parsed_key_bound(
+        plaintext: &[u8],
+        recipient_public_key: &RsaPublicKey,
+        recipient_public_key_pem: &str,
+        context: &[u8],
+    ) -> Result<Self, EscrowError> {
         let aes_key = AesKey::<Aes256Gcm>::generate();
         let nonce = Nonce::generate();
         let cipher = Aes256Gcm::new(&aes_key);
 
         let ciphertext = cipher
-            .encrypt(&nonce, plaintext)
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad: context,
+                },
+            )
             .map_err(|_| EscrowError::Encryption)?;
 
         let mut rng = rand::rng();
@@ -147,11 +186,23 @@ impl EscrowedSecret {
     /// requirement in "Secret escrow" (credentials-agent-architecture.md)
     /// that this can't be left to Rust's ordinary `Drop`.
     pub fn decrypt(&self, private_key: &RsaPrivateKey) -> Result<Zeroizing<Vec<u8>>, EscrowError> {
-        self.decrypt_with(|wrapped| {
-            private_key
-                .decrypt(Oaep::<Sha256>::new(), wrapped)
-                .map_err(|e| e.to_string())
-        })
+        self.decrypt_bound(private_key, b"")
+    }
+
+    /// `decrypt` for a secret made with `encrypt_bound`: opens only with the context it was bound to.
+    pub fn decrypt_bound(
+        &self,
+        private_key: &RsaPrivateKey,
+        context: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, EscrowError> {
+        self.decrypt_with_bound(
+            |wrapped| {
+                private_key
+                    .decrypt(Oaep::<Sha256>::new(), wrapped)
+                    .map_err(|e| e.to_string())
+            },
+            context,
+        )
     }
 
     /// Decrypts when the private key cannot be handed over, as when it is held in the kernel keyring and
@@ -160,6 +211,16 @@ impl EscrowedSecret {
     pub fn decrypt_with(
         &self,
         unwrap: impl FnOnce(&[u8]) -> Result<Vec<u8>, String>,
+    ) -> Result<Zeroizing<Vec<u8>>, EscrowError> {
+        self.decrypt_with_bound(unwrap, b"")
+    }
+
+    /// `decrypt_with` for a secret made with `encrypt_bound`: the context is checked here, after the key is
+    /// unwrapped, so a holder that only unwraps still cannot open a secret under the wrong context.
+    pub fn decrypt_with_bound(
+        &self,
+        unwrap: impl FnOnce(&[u8]) -> Result<Vec<u8>, String>,
+        context: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, EscrowError> {
         let aes_key_bytes = unwrap(&self.encrypted_key).map_err(EscrowError::KeyUnwrap)?;
         let aes_key_bytes = Zeroizing::new(aes_key_bytes);
@@ -171,7 +232,13 @@ impl EscrowedSecret {
             Nonce::try_from(self.nonce.as_slice()).map_err(|_| EscrowError::MalformedKey)?;
 
         let plaintext = cipher
-            .decrypt(&nonce, self.ciphertext.as_slice())
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: self.ciphertext.as_slice(),
+                    aad: context,
+                },
+            )
             .map_err(|_| EscrowError::Decryption)?;
 
         Ok(Zeroizing::new(plaintext))
@@ -341,5 +408,89 @@ mod tests {
             EscrowedSecret::encrypt_to_parsed_key(b"data", &public_key, &public_key_pem).unwrap();
 
         assert_eq!(secret.encrypted_to_pem(), public_key_pem);
+    }
+
+    #[test]
+    fn a_secret_bound_to_a_context_opens_only_with_that_context() {
+        let (private_key, public_key_pem) = test_recipient_keypair();
+        let ctx = b"git-repo-observer|credentials|token|3";
+        let secret = EscrowedSecret::encrypt_bound(b"the token", &public_key_pem, ctx).unwrap();
+
+        assert_eq!(
+            secret.decrypt_bound(&private_key, ctx).unwrap().as_slice(),
+            b"the token"
+        );
+        // Moved to another field, another version or another agent: it does not open.
+        for other in [
+            &b"git-repo-observer|credentials|username|3"[..],
+            b"git-repo-observer|credentials|token|4",
+            b"other-agent|credentials|token|3",
+            b"",
+        ] {
+            assert!(
+                matches!(
+                    secret.decrypt_bound(&private_key, other),
+                    Err(EscrowError::Decryption)
+                ),
+                "opened with {:?}",
+                String::from_utf8_lossy(other)
+            );
+        }
+        // And the plain decrypt, which binds to nothing, does not open it either.
+        assert!(matches!(
+            secret.decrypt(&private_key),
+            Err(EscrowError::Decryption)
+        ));
+    }
+
+    #[test]
+    fn a_secret_bound_to_nothing_is_the_secret_encrypt_has_always_made() {
+        // Secrets already stored were made without a context. They must still open, and a secret bound to the
+        // empty context must be one the old decrypt opens.
+        let (private_key, public_key_pem) = test_recipient_keypair();
+        let old = EscrowedSecret::encrypt(b"stored before", &public_key_pem).unwrap();
+        assert_eq!(
+            old.decrypt_bound(&private_key, b"").unwrap().as_slice(),
+            b"stored before"
+        );
+        let empty =
+            EscrowedSecret::encrypt_bound(b"bound to nothing", &public_key_pem, b"").unwrap();
+        assert_eq!(
+            empty.decrypt(&private_key).unwrap().as_slice(),
+            b"bound to nothing"
+        );
+    }
+
+    #[test]
+    fn a_holder_that_will_only_unwrap_the_key_still_checks_the_context() {
+        let (private_key, public_key_pem) = test_recipient_keypair();
+        let secret =
+            EscrowedSecret::encrypt_bound(b"in custody", &public_key_pem, b"ctx-a").unwrap();
+        let unwrap = |wrapped: &[u8]| {
+            private_key
+                .decrypt(Oaep::<Sha256>::new(), wrapped)
+                .map_err(|e| e.to_string())
+        };
+        assert_eq!(
+            secret
+                .decrypt_with_bound(unwrap, b"ctx-a")
+                .unwrap()
+                .as_slice(),
+            b"in custody"
+        );
+        assert!(matches!(
+            secret.decrypt_with_bound(unwrap, b"ctx-b"),
+            Err(EscrowError::Decryption)
+        ));
+    }
+
+    #[test]
+    fn the_context_is_not_stored_in_the_secret() {
+        // The reader supplies it; it is not a field a tamperer could rewrite along with the ciphertext.
+        let (_, public_key_pem) = test_recipient_keypair();
+        let secret =
+            EscrowedSecret::encrypt_bound(b"x", &public_key_pem, b"agent|section|field|1").unwrap();
+        let bytes = format!("{secret:?}");
+        assert!(!bytes.contains("agent|section"));
     }
 }
