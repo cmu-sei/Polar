@@ -165,7 +165,9 @@ def apply_file [output_dir: string, filename: string, changed: list<string> = []
         ^kubectl delete --ignore-not-found -f $manifest
     }
     let rollers = ($users | where kind in ["Deployment" "StatefulSet"])
-    let before = ($rollers | each {|u| generation_of $u.ns ($u.kind | str downcase) $u.name })
+    # Each in a record: `each` drops a null (a Deployment that does not exist yet has no generation), which would
+    # shift every later one out of its place.
+    let before = ($rollers | each {|u| { generation: (generation_of $u.ns ($u.kind | str downcase) $u.name) } })
     let applied = (do { ^kubectl apply -f $manifest } | complete)
     print ($applied.stdout | str trim)
     if $applied.exit_code != 0 {
@@ -181,7 +183,7 @@ def apply_file [output_dir: string, filename: string, changed: list<string> = []
         let kind = ($u.kind | str downcase)
         let hit = ($u.configmaps | where {|c| $c in ($changed ++ $now_changed) })
         let after = (generation_of $u.ns $kind $u.name)
-        if (workload_needs_restart ($before | get $it.index) $after $hit) {
+        if (workload_needs_restart ($before | get $it.index | get generation) $after $hit) {
             note $"($kind)/($u.name): restarting it, its ConfigMap changed, ($hit | str join ', ')"
             ^kubectl -n $u.ns rollout restart $"($kind)/($u.name)"
         }
