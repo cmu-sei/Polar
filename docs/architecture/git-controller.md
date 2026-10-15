@@ -1,3 +1,26 @@
+<!--
+  ACE Tool
+
+  Copyright 2026 Carnegie Mellon University.
+
+  NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+  FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+  PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+  MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+  TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+  Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+  for full terms.
+
+  [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+  distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+  This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+  DM26-0670
+-->
+
 # The git agents: observer, processor, and a controller
 
 Status, 2026-10-14 (design agreed with David 2026-10-12). The observer's `credentials` section and its use are built (2026-10-14, step 3: `git/observe/src/credentials.rs`); the minimal controller is (2026-10-14, step 4: `git/controller`, it announces the `repositories` section, with no proposals, admission, status or backoff); the observer's per-repository status is built (2026-10-15, see "Status and checkpoints"; the controller does not read it yet); the full controller and the checkpoints are not; the `runtime` document type, replay, `c:update-runtime`, `polar-sign runtime` and `RetrieveSecret` are (each section says which). It replaces the
