@@ -1,21 +1,14 @@
 //! What the git observer reads from its configuration, declared once.
 //!
-//! `POLAR_GIT_AGENT_CONFIG` and `POLAR_CACHE_ROOT` were read from the process environment where the
-//! supervisor started, so an agent given a configuration document could not have them, and nothing
-//! could list them or check them before the pod started.
+//! `POLAR_CACHE_ROOT` was read from the process environment where the supervisor started, so an agent
+//! given a configuration document could not have it, and nothing could list it or check it before the
+//! pod started. (`POLAR_GIT_AGENT_CONFIG`, the path of a `git.yaml` of credentials, is gone: credentials
+//! reach the observer in its `credentials` runtime section.)
 
 use polar_env::{Config, ConfigError, Defaulted, Described, Section};
 use std::path::PathBuf;
 
-pub const DEFAULT_AGENT_CONFIG: &str = "git.yaml";
 pub const DEFAULT_CACHE_ROOT: &str = ".polar/cache";
-
-pub static AGENT_CONFIG: Defaulted<String> = Defaulted::text(
-    "POLAR_GIT_AGENT_CONFIG",
-    "path to the YAML file of per-repository credentials (git.yaml); a file that is not there \
-     means no repository is pre-configured, and one that is there and does not parse stops the agent",
-    DEFAULT_AGENT_CONFIG,
-);
 
 pub static CACHE_ROOT: Defaulted<String> = Defaulted::text(
     "POLAR_CACHE_ROOT",
@@ -24,7 +17,7 @@ pub static CACHE_ROOT: Defaulted<String> = Defaulted::text(
     DEFAULT_CACHE_ROOT,
 );
 
-static VARIABLES: &[&dyn Described] = &[&AGENT_CONFIG, &CACHE_ROOT];
+static VARIABLES: &[&dyn Described] = &[&CACHE_ROOT];
 
 /// The section the git observer registers.
 pub static SECTION: Section = Section {
@@ -34,14 +27,12 @@ pub static SECTION: Section = Section {
 };
 
 pub struct ObserverSettings {
-    pub agent_config: PathBuf,
     pub cache_root: PathBuf,
 }
 
 impl ObserverSettings {
     pub fn read(config: &Config) -> Result<Self, ConfigError> {
         Ok(Self {
-            agent_config: PathBuf::from(config.read(&AGENT_CONFIG)?),
             cache_root: PathBuf::from(config.read(&CACHE_ROOT)?),
         })
     }
@@ -75,21 +66,16 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_required_and_the_defaults_are_the_old_ones() {
+    fn nothing_is_required_and_the_default_is_the_old_one() {
         let settings = ObserverSettings::read(&config(&[])).unwrap();
-        assert_eq!(settings.agent_config, PathBuf::from("git.yaml"));
         assert_eq!(settings.cache_root, PathBuf::from(".polar/cache"));
         assert!(config(&[]).check().is_empty());
     }
 
     #[test]
     fn what_is_set_is_used() {
-        let settings = ObserverSettings::read(&config(&[
-            ("POLAR_GIT_AGENT_CONFIG", "/etc/git/git.yaml"),
-            ("POLAR_CACHE_ROOT", "/tmp/polar-cache"),
-        ]))
-        .unwrap();
-        assert_eq!(settings.agent_config, PathBuf::from("/etc/git/git.yaml"));
+        let settings =
+            ObserverSettings::read(&config(&[("POLAR_CACHE_ROOT", "/tmp/polar-cache")])).unwrap();
         assert_eq!(
             settings.absolute_cache_root().unwrap(),
             PathBuf::from("/tmp/polar-cache")

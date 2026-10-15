@@ -1,15 +1,14 @@
 #![deny(clippy::disallowed_methods)]
 
-use git_agent_common::GitHttpCredential;
 use git_agent_common::GitRepositoryMessage;
 use git_agent_common::RepoObservationConfig;
 use git2::{Cred, CredentialType, FetchOptions, Oid, RemoteCallbacks, Repository};
-use polar::cassini::{CassiniClient, TcpClient};
+use polar::cassini::TcpClient;
 use polar::graph::nodes::git::RepoId;
 use polar::topics::GIT_REPOSITORY_EVENTS;
+use polar_agent_builder::CryptoClient;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SpawnErr, SupervisionEvent, async_trait};
-use rkyv::{Archive, Deserialize, Serialize, rancor, to_bytes};
-use serde::Deserialize as SerdeDeserialize;
+use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,87 +24,6 @@ pub mod supervisor;
 
 fn git_time_to_epoch_ms(t: &git2::Time) -> i64 {
     t.seconds() * 1000
-}
-
-/* ============================
- * Credentials
- * ============================
- */
-
-/// Operator-supplied per-repo credential configuration, loaded from YAML at
-/// agent startup. Keyed by normalized repo URL — see `normalize_repo_url`.
-#[derive(Debug, SerdeDeserialize)]
-pub struct GitAgentConfig {
-    pub repos: std::collections::HashMap<String, RepoConfig>,
-}
-
-#[derive(Debug, SerdeDeserialize)]
-pub struct RepoConfig {
-    pub http: Option<HttpCredentialConfig>,
-}
-
-#[derive(Debug, SerdeDeserialize)]
-pub struct HttpCredentialConfig {
-    pub token: String,
-    #[serde(default)]
-    pub username: Option<String>,
-}
-
-pub enum CredentialLookup {
-    Configured(GitHttpCredential),
-    NotConfigured,
-    /// An entry exists for this repo but contains no usable credential
-    /// (empty token). This is an operator error in the config file —
-    /// log loudly, but proceed as if unconfigured.
-    Misconfigured,
-}
-
-impl GitAgentConfig {
-    pub fn load(path: &std::path::Path) -> Result<Self, std::io::Error> {
-        let raw = match std::fs::read_to_string(path) {
-            Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // No static credential config provided -- treat as zero
-                // pre-configured repos, matching credentials_for_url's
-                // existing NotConfigured/public-repo convention. This lets
-                // the agent run entirely off dynamic, scheduler-driven
-                // repo discovery without requiring a static git.yaml.
-                return Ok(GitAgentConfig {
-                    repos: std::collections::HashMap::new(),
-                });
-            }
-            Err(e) => return Err(e),
-        };
-        let parsed: RawGitAgentConfig = serde_yaml::from_str(&raw)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let repos = parsed
-            .repos
-            .into_iter()
-            .map(|(k, v)| (RepoId::normalize_repo_url(&k), v))
-            .collect();
-        Ok(GitAgentConfig { repos })
-    }
-
-    pub fn credentials_for_url(&self, normalized_url: &str) -> CredentialLookup {
-        match self.repos.get(normalized_url) {
-            None => CredentialLookup::NotConfigured,
-            Some(RepoConfig { http: None }) => CredentialLookup::NotConfigured,
-            Some(RepoConfig { http: Some(c) }) if c.token.is_empty() => {
-                CredentialLookup::Misconfigured
-            }
-            Some(RepoConfig { http: Some(c) }) => {
-                CredentialLookup::Configured(GitHttpCredential::Token {
-                    token: c.token.clone(),
-                    username: c.username.clone(),
-                })
-            }
-        }
-    }
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct RawGitAgentConfig {
-    repos: std::collections::HashMap<String, RepoConfig>,
 }
 
 /* ============================
@@ -146,38 +64,9 @@ pub trait GitCredentialProvider: Send + Sync {
     ) -> Result<Cred, git2::Error>;
 }
 
-/// A credential provider backed by a `GitHttpCredential` value received
-/// from the scheduler at task dispatch time.
-///
-/// This replaces the old `StaticCredentialProvider` which loaded credentials
-/// from a file at agent startup. Credentials are now per-task, not per-agent.
-pub struct TaskCredentialProvider {
-    credential: GitHttpCredential,
-}
-
-impl TaskCredentialProvider {
-    pub fn new(credential: GitHttpCredential) -> Self {
-        Self { credential }
-    }
-}
-
-impl GitCredentialProvider for TaskCredentialProvider {
-    fn credentials(
-        &self,
-        _url: &str,
-        _username_from_url: Option<&str>,
-        allowed: CredentialType,
-    ) -> Result<Cred, git2::Error> {
-        if !allowed.contains(CredentialType::USER_PASS_PLAINTEXT) {
-            return Err(git2::Error::from_str("unsupported credential type"));
-        }
-        self.credential.clone().into_git2_cred()
-    }
-}
-
 /// A no-op credential provider for public repositories.
 ///
-/// Used when `RepoObservationConfig::credentials` is `None`.
+/// Used when `RepoObservationConfig::credential` is `None`.
 /// Git2 will attempt unauthenticated access.
 pub struct PublicRepoProvider;
 
@@ -191,19 +80,6 @@ impl GitCredentialProvider for PublicRepoProvider {
         Err(git2::Error::from_str(
             "no credentials configured for this repository",
         ))
-    }
-}
-
-/// Construct a credential provider from an optional `GitHttpCredential`.
-///
-/// `None` produces a `PublicRepoProvider` — unauthenticated access.
-/// `Some(credential)` produces a `TaskCredentialProvider`.
-pub fn credential_provider_for(
-    credential: Option<GitHttpCredential>,
-) -> Arc<dyn GitCredentialProvider> {
-    match credential {
-        Some(cred) => Arc::new(TaskCredentialProvider::new(cred)),
-        None => Arc::new(PublicRepoProvider),
     }
 }
 
@@ -241,17 +117,26 @@ pub struct GitRepoSupervisorState {
     cache_root: PathBuf,
     workers: HashMap<RepoId, ActorRef<GitRepoWorkerMsg>>,
     tcp_client: TcpClient,
+    crypto: Arc<dyn CryptoClient>,
 }
 
 pub struct GitRepoSupervisorArgs {
     cache_root: PathBuf,
     tcp_client: TcpClient,
+    /// Where each worker asks for the credential its repository names.
+    crypto: Arc<dyn CryptoClient>,
 }
 
 #[derive(Serialize, Deserialize, Archive, Debug)]
 pub enum RepoSupervisorMessage {
-    SpawnWorker { config: RepoObservationConfig },
-    StopWorker { repo_id: RepoId },
+    SpawnWorker {
+        config: RepoObservationConfig,
+    },
+    StopWorker {
+        repo_id: RepoId,
+    },
+    /// The `credentials` section was replaced: a repository that was waiting for its credential tries again.
+    CredentialsChanged,
 }
 
 /// What a failed attempt to start a repository's worker means for the supervisor of all of them.
@@ -296,6 +181,7 @@ impl Actor for GitRepoSupervisor {
         Ok(GitRepoSupervisorState {
             cache_root: args.cache_root,
             tcp_client: args.tcp_client,
+            crypto: args.crypto,
             workers: HashMap::new(),
         })
     }
@@ -311,11 +197,9 @@ impl Actor for GitRepoSupervisor {
                 trace!("Received SpawnWorker message");
                 let repo_id = config.repo_id.clone();
 
-                let credential_provider = credential_provider_for(config.credentials.clone());
-
                 let args = GitRepoWorkerArgs {
                     config,
-                    credential_provider,
+                    crypto: state.crypto.clone(),
                     repo_path: state.cache_root.join(repo_id.to_string()),
                     tcp_client: state.tcp_client.clone(),
                 };
@@ -332,6 +216,13 @@ impl Actor for GitRepoSupervisor {
                         state.workers.insert(repo_id, worker);
                     }
                     Err(e) => tolerate_spawn_failure(&repo_id, e)?,
+                }
+            }
+            RepoSupervisorMessage::CredentialsChanged => {
+                for worker in state.workers.values() {
+                    if let Err(e) = worker.cast(GitRepoWorkerMsg::CredentialsChanged) {
+                        warn!("could not tell a worker the credentials changed: {e}");
+                    }
                 }
             }
             RepoSupervisorMessage::StopWorker { repo_id } => {
@@ -375,23 +266,33 @@ impl Actor for GitRepoSupervisor {
 pub enum GitRepoWorkerMsg {
     /// Fetch + export new data incrementally.
     Observe,
+    /// The `credentials` section was replaced. A worker waiting for its credential tries at once; any other
+    /// ignores it, since it asks for its credential again at every fetch.
+    CredentialsChanged,
 }
 
 pub struct GitRepoWorker;
 
 pub struct GitRepoWorkerState {
     config: RepoObservationConfig,
+    repo_path: PathBuf,
     tcp_client: TcpClient,
-    repo: Repository,
+    crypto: Arc<dyn CryptoClient>,
+    /// Cloned or opened by the first attempt that has what it needs, not before: a repository whose
+    /// credential has not arrived has no clone yet.
+    repo: Option<Repository>,
     last_seen: HashMap<String, Oid>,
-    credential_provider: Arc<dyn GitCredentialProvider>,
+    /// The last attempt could not go ahead (its credential is missing or unusable, or the clone failed).
+    waiting: bool,
+    /// The next scheduled attempt, replaced whenever one runs so there is never more than one.
+    next: Option<tokio::task::JoinHandle<Result<(), ractor::MessagingErr<GitRepoWorkerMsg>>>>,
 }
 
 pub struct GitRepoWorkerArgs {
     config: RepoObservationConfig,
     repo_path: PathBuf,
     tcp_client: TcpClient,
-    credential_provider: Arc<dyn GitCredentialProvider>,
+    crypto: Arc<dyn CryptoClient>,
 }
 
 fn on_commit(
@@ -563,6 +464,91 @@ impl GitRepoWorker {
 
         Ok(newest_seen)
     }
+    /// One attempt to observe the repository: ask for the credential it names, clone it if that has not
+    /// been done, then fetch and publish. An attempt that cannot go ahead because the credential is
+    /// missing or unusable, or the clone failed, is logged and leaves the worker waiting for the next
+    /// (the next fetch time, or the credentials changing); it is not an error. A failure of the fetch
+    /// itself is, as it always was.
+    async fn attempt(&self, state: &mut GitRepoWorkerState) -> Result<(), ActorProcessingErr> {
+        let provider = match credentials::resolve(&*state.crypto, &state.config).await {
+            credentials::Resolution::Ready(provider) => provider,
+            credentials::Resolution::Pending => {
+                info!(
+                    "{} is waiting for the credential it names",
+                    state.config.repo_id
+                );
+                state.waiting = true;
+                return Ok(());
+            }
+            credentials::Resolution::Failed(why) => {
+                warn!("{} is not observed: {why}", state.config.repo_id);
+                state.waiting = true;
+                return Ok(());
+            }
+        };
+
+        if state.repo.is_none() {
+            match Self::open_or_clone_bare(
+                &state.repo_path,
+                &state.config.repo_url,
+                provider.clone(),
+                state.config.shallow_depth,
+            ) {
+                Ok(repo) => {
+                    if state.config.refs.is_empty() {
+                        state.config.refs = Self::resolve_default_refs(&repo);
+                        info!(
+                            "no refs configured for {:?}, defaulting to {:?}",
+                            state.config.repo_id, state.config.refs
+                        );
+                    }
+                    state.repo = Some(repo);
+                }
+                Err(e) => {
+                    error!(
+                        "{} could not be cloned, so it is not observed yet: {e}",
+                        state.config.repo_id
+                    );
+                    state.waiting = true;
+                    return Ok(());
+                }
+            }
+        }
+        state.waiting = false;
+
+        let Some(repo) = state.repo.as_ref() else {
+            return Ok(());
+        };
+        Self::observe_repository(
+            repo,
+            &provider,
+            &state.config,
+            &mut state.last_seen,
+            |ref_name, commit| {
+                on_commit(
+                    state.config.repo_id.clone(),
+                    ref_name,
+                    commit,
+                    state.tcp_client.clone(),
+                )
+                .map_err(|e| error!("commit emission failed: {e}"))
+                .ok();
+            },
+            |ref_name, old, new| {
+                emit_ref_update(
+                    state.config.repo_id.clone(),
+                    ref_name,
+                    old,
+                    new,
+                    state.tcp_client.clone(),
+                )
+                .map_err(|e| error!("ref update emission failed: {e}"))
+                .ok();
+            },
+        )?;
+        Ok(())
+    }
+
     pub fn observe_repository<F>(
         repo: &Repository,
         credential_provider: &Arc<dyn GitCredentialProvider>,
@@ -627,35 +613,18 @@ impl Actor for GitRepoWorker {
         args: GitRepoWorkerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
-
-        match GitRepoWorker::open_or_clone_bare(
-            &args.repo_path,
-            &args.config.repo_url,
-            args.credential_provider.clone(),
-            args.config.shallow_depth,
-        ) {
-            Ok(repo) => {
-                let mut config = args.config;
-                if config.refs.is_empty() {
-                    config.refs = Self::resolve_default_refs(&repo);
-                    info!(
-                        "no refs configured for {:?}, defaulting to {:?}",
-                        config.repo_id, config.refs
-                    );
-                }
-                Ok(GitRepoWorkerState {
-                    credential_provider: args.credential_provider,
-                    config,
-                    tcp_client: args.tcp_client,
-                    repo,
-                    last_seen: HashMap::new(),
-                })
-            }
-            Err(e) => {
-                error!("Failed to initialize repository for observation. {e}");
-                Err(e.into())
-            }
-        }
+        // Nothing is cloned here: the repository may name a credential that has not arrived, and the first
+        // attempt (post_start) is the one that finds out.
+        Ok(GitRepoWorkerState {
+            config: args.config,
+            repo_path: args.repo_path,
+            tcp_client: args.tcp_client,
+            crypto: args.crypto,
+            repo: None,
+            last_seen: HashMap::new(),
+            waiting: false,
+            next: None,
+        })
     }
 
     async fn post_start(
@@ -677,41 +646,249 @@ impl Actor for GitRepoWorker {
         match msg {
             GitRepoWorkerMsg::Observe => {
                 trace!("Received Observe message");
+                if let Some(earlier) = state.next.take() {
+                    earlier.abort();
+                }
 
-                GitRepoWorker::observe_repository(
-                    &state.repo,
-                    &state.credential_provider,
-                    &state.config,
-                    &mut state.last_seen,
-                    |ref_name, commit| {
-                        on_commit(
-                            state.config.repo_id.clone(),
-                            ref_name,
-                            commit,
-                            state.tcp_client.clone(),
-                        )
-                        .map_err(|e| error!("commit emission failed: {e}"))
-                        .ok();
-                    },
-                    |ref_name, old, new| {
-                        emit_ref_update(
-                            state.config.repo_id.clone(),
-                            ref_name,
-                            old,
-                            new,
-                            state.tcp_client.clone(),
-                        )
-                        .map_err(|e| error!("ref update emission failed: {e}"))
-                        .ok();
-                    },
-                )?;
+                self.attempt(state).await?;
 
-                myself.send_after(
+                state.next = Some(myself.send_after(
                     std::time::Duration::from_secs(state.config.frequency),
                     || GitRepoWorkerMsg::Observe,
-                );
+                ));
+            }
+            GitRepoWorkerMsg::CredentialsChanged => {
+                if state.waiting {
+                    debug!(
+                        "the credentials changed; {} tries again",
+                        state.config.repo_id
+                    );
+                    myself.cast(GitRepoWorkerMsg::Observe)?;
+                }
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credentials::test_support::{Answer, Recorder};
+    use cassini_client::TcpClientMessage;
+    use std::sync::Mutex;
+
+    /// Takes whatever the worker would publish, and says nothing.
+    struct Sink {
+        received: Arc<Mutex<Vec<TcpClientMessage>>>,
+    }
+
+    #[async_trait]
+    impl Actor for Sink {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _: ActorRef<Self::Msg>,
+            _: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            self.received.lock().unwrap().push(message);
+            Ok(())
+        }
+    }
+
+    struct Rig {
+        worker: ActorRef<GitRepoWorkerMsg>,
+        crypto: Arc<Recorder>,
+        received: Arc<Mutex<Vec<TcpClientMessage>>>,
+        cache: tempfile::TempDir,
+    }
+
+    async fn start(config: RepoObservationConfig) -> Rig {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (sink, _) = Actor::spawn(
+            None,
+            Sink {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        let crypto = Arc::new(Recorder::default());
+        let cache = tempfile::tempdir().unwrap();
+        let (worker, _) = Actor::spawn(
+            None,
+            GitRepoWorker,
+            GitRepoWorkerArgs {
+                repo_path: cache.path().join("clone"),
+                config,
+                tcp_client: TcpClient::from_actor_ref(sink),
+                crypto: crypto.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        Rig {
+            worker,
+            crypto,
+            received,
+            cache,
+        }
+    }
+
+    fn asked(rig: &Rig) -> usize {
+        rig.crypto.asked.lock().unwrap().len()
+    }
+
+    async fn until(what: &str, mut condition: impl FnMut() -> bool) {
+        for _ in 0..600 {
+            if condition() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    async fn settle() {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    /// A repository that is reached over https with a credential, at a host nothing listens on.
+    fn private_repo() -> RepoObservationConfig {
+        RepoObservationConfig::new(
+            RepoId::from_url("https://localhost:1/o/r.git"),
+            "https://localhost:1/o/r.git".into(),
+            Vec::new(),
+            None,
+            Vec::new(),
+        )
+        .with_credential("gh")
+    }
+
+    #[tokio::test]
+    async fn a_repository_whose_credential_has_not_arrived_waits_and_clones_nothing() {
+        let rig = start(private_repo()).await;
+        until("the first attempt", || asked(&rig) == 1).await;
+        settle().await;
+        assert_eq!(asked(&rig), 1, "it asked again before anything changed");
+        assert!(!rig.cache.path().join("clone").exists());
+        assert!(rig.received.lock().unwrap().is_empty());
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_repository_tries_again_at_once_when_the_credentials_change() {
+        let rig = start(private_repo()).await;
+        until("the first attempt", || asked(&rig) == 1).await;
+        // Its frequency is 900 s, so only the message can make the second attempt happen now.
+        rig.worker
+            .cast(GitRepoWorkerMsg::CredentialsChanged)
+            .unwrap();
+        until("a second attempt", || asked(&rig) == 2).await;
+        settle().await;
+        assert_eq!(asked(&rig), 2, "one message made more than one attempt");
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_credential_that_has_arrived_is_used_for_the_clone_and_a_clone_that_fails_waits_for_the_next_attempt()
+     {
+        let rig = start(private_repo()).await;
+        until("the first attempt", || asked(&rig) == 1).await;
+        *rig.crypto.answer.lock().unwrap() = Answer::Found {
+            username: "svc",
+            secret: b"tok",
+        };
+        rig.worker
+            .cast(GitRepoWorkerMsg::CredentialsChanged)
+            .unwrap();
+        until("a second attempt", || asked(&rig) == 2).await;
+        assert_eq!(
+            rig.crypto.asked.lock().unwrap()[1],
+            ("gh".to_string(), "localhost".to_string())
+        );
+        // Nothing listens at the host, so the clone fails; the worker is still alive and still waiting.
+        settle().await;
+        rig.worker
+            .cast(GitRepoWorkerMsg::CredentialsChanged)
+            .unwrap();
+        until("a third attempt", || asked(&rig) == 3).await;
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_credential_bound_to_another_host_is_not_used_and_nothing_is_cloned() {
+        let rig = start(private_repo()).await;
+        *rig.crypto.answer.lock().unwrap() = Answer::HostNotBound;
+        until("the first attempt", || asked(&rig) >= 1).await;
+        settle().await;
+        assert!(!rig.cache.path().join("clone").exists());
+        assert!(rig.received.lock().unwrap().is_empty());
+        rig.worker.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_public_repository_is_observed_without_asking_for_a_credential() {
+        let origin = tempfile::tempdir().unwrap();
+        let repo = Repository::init_bare(origin.path()).unwrap();
+        let sig = git2::Signature::now("t", "t@example.org").unwrap();
+        let tree = repo
+            .find_tree(repo.treebuilder(None).unwrap().write().unwrap())
+            .unwrap();
+        let oid = repo
+            .commit(Some("refs/heads/main"), &sig, &sig, "first", &tree, &[])
+            .unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let url = origin.path().to_string_lossy().to_string();
+        let config = RepoObservationConfig::new(
+            RepoId::from_url(&url),
+            url,
+            vec!["origin".into()],
+            None,
+            vec!["refs/remotes/origin/main".into()],
+        );
+        let rig = start(config).await;
+        until("the commit to be published", || {
+            !rig.received.lock().unwrap().is_empty()
+        })
+        .await;
+        assert_eq!(asked(&rig), 0);
+        assert!(rig.cache.path().join("clone").exists());
+        let _ = oid;
+        rig.worker.stop(None);
+    }
+
+    // Paused time, so that "the old timer would have fired by now" is exact and not a race.
+    #[tokio::test(start_paused = true)]
+    async fn an_attempt_made_early_replaces_the_scheduled_one_instead_of_adding_to_it() {
+        let mut config = private_repo();
+        config.frequency = 10;
+        let rig = start(config).await;
+        until("the first attempt", || asked(&rig) == 1).await;
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        rig.worker
+            .cast(GitRepoWorkerMsg::CredentialsChanged)
+            .unwrap();
+        until("the early attempt", || asked(&rig) == 2).await;
+        // The first schedule would fire at 10 s; the early attempt moved it to 13 s.
+        tokio::time::advance(std::time::Duration::from_secs(8)).await;
+        settle().await;
+        assert_eq!(asked(&rig), 2, "the earlier schedule still fired");
+        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        until("the rescheduled attempt", || asked(&rig) == 3).await;
+        rig.worker.stop(None);
     }
 }

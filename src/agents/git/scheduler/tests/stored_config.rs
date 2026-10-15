@@ -44,5 +44,5 @@ async fn a_stored_configuration_is_returned_when_present_and_none_when_not() {
     assert_eq!(fetched.remotes, ["origin"]);
     assert_eq!(fetched.refs, ["refs/heads/main"]);
     // Credentials are None until the credentials agent is wired in.
-    assert!(fetched.credentials.is_none());
+    assert!(fetched.credential.is_none());
 }

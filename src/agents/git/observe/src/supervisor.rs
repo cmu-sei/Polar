@@ -5,20 +5,21 @@
 //! started when the client registered, and a registration that came again (after a dropped
 //! connection) tried to start it a second time and ended the agent.
 
+use crate::credentials;
 use crate::settings::ObserverSettings;
 use crate::{
-    GitAgentConfig, GitRepoSupervisor, GitRepoSupervisorArgs, REPO_SUPERVISOR_NAME,
-    RepoSupervisorMessage,
+    GitRepoSupervisor, GitRepoSupervisorArgs, REPO_SUPERVISOR_NAME, RepoSupervisorMessage,
 };
 use cassini_types::ClientEvent;
 use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS, RepoObservationConfig};
 use polar::cassini::{CassiniClient, TcpClient, UnsubscribeRequest};
 use polar_agent_builder::{
-    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
-    InfrastructureSupervisorMessage, Subscription,
+    AgentBuilder, ConfigurationHandle, Configured, CryptoHandle, HealthClient, HealthHandle,
+    InfrastructureEvent, InfrastructureSupervisorMessage, Subscription,
 };
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 /// What the observer needs to drain: the fetch in flight (up to 30 s; a worker fetches inside its
@@ -36,6 +37,8 @@ pub enum RootSupervisorMessage {
     Observe(Box<RepoObservationConfig>),
     /// The infrastructure has decided the agent should end: finish, then say so.
     PrepareShutdown,
+    /// A runtime section was replaced.
+    RuntimeChanged { section: String },
 }
 
 pub struct RootSupervisor;
@@ -45,6 +48,8 @@ pub struct RootSupervisorState {
     repo_supervisor: Option<ActorRef<RepoSupervisorMessage>>,
     healthcheck: HealthHandle,
     infrastructure: ActorRef<InfrastructureSupervisorMessage>,
+    crypto: CryptoHandle,
+    configuration: ConfigurationHandle,
     shutting_down: bool,
 }
 
@@ -58,6 +63,53 @@ impl RootSupervisor {
                 warn!("Failed to deserialize a repository configuration event: {e}");
                 None
             }
+        }
+    }
+}
+
+impl RootSupervisor {
+    /// Reads the latest `credentials` section, hands it to the CryptoActor, and tells the workers, so that a
+    /// repository waiting for a credential tries again. A body that does not read is logged and left: the
+    /// builder judged it before accepting it, so this is a disagreement between the two, not an author's
+    /// mistake.
+    async fn apply_credentials(state: &RootSupervisorState) {
+        let value = match state.configuration.runtime(credentials::SECTION_NAME).await {
+            Ok(Some(value)) => value,
+            Ok(None) => return,
+            Err(e) => {
+                warn!("could not read the credentials section: {e}");
+                return;
+            }
+        };
+        let entries = match credentials::parse(&value.body) {
+            Ok(entries) => entries,
+            Err(problems) => {
+                warn!(
+                    version = value.version,
+                    "the credentials section does not read: {}",
+                    problems.join("; ")
+                );
+                return;
+            }
+        };
+        if let Err(e) = credentials::apply(
+            &state.crypto,
+            crate::agent::AGENT_NAME,
+            value.version,
+            &entries,
+        )
+        .await
+        {
+            error!(
+                version = value.version,
+                "the credentials section was not applied: {e}"
+            );
+            return;
+        }
+        if let Some(repo_supervisor) = &state.repo_supervisor
+            && let Err(e) = repo_supervisor.cast(RepoSupervisorMessage::CredentialsChanged)
+        {
+            warn!("could not tell the repositories the credentials changed: {e}");
         }
     }
 }
@@ -77,14 +129,6 @@ impl Actor for RootSupervisor {
         debug!("{myself:?} starting");
         let settings = ObserverSettings::read(configured.config())?;
 
-        // Startup validation: fail fast if the credential config is malformed. NOTE: not
-        // currently threaded into the forwarding of a repository's configuration; whether per-repo
-        // credential injection happens elsewhere is still to be settled with whoever wrote
-        // GitAgentConfig.
-        let config_path = settings.agent_config.clone();
-        let _git_agent_config = GitAgentConfig::load(&config_path).map_err(|e| {
-            ActorProcessingErr::from(format!("failed to load {}: {e}", config_path.display()))
-        })?;
         let cache_root = settings
             .absolute_cache_root()
             .map_err(|_| ActorProcessingErr::from("Failed to determine cache root"))?;
@@ -116,12 +160,27 @@ impl Actor for RootSupervisor {
                 }
             });
 
+        // The agent declares that it needs encryption, so the builder gives it the CryptoActor.
+        let crypto = resources
+            .crypto
+            .clone()
+            .ok_or("the builder gave no CryptoActor, which this agent needs for its credentials")?;
+        resources
+            .configuration
+            .runtime_changes()
+            .subscribe(myself.clone(), |changed| {
+                Some(RootSupervisorMessage::RuntimeChanged {
+                    section: changed.section,
+                })
+            });
+
         let (repo_supervisor, _) = Actor::spawn_linked(
             Some(REPO_SUPERVISOR_NAME.to_string()),
             GitRepoSupervisor,
             GitRepoSupervisorArgs {
                 tcp_client: resources.tcp_client.clone(),
                 cache_root,
+                crypto: Arc::new(crypto.clone()),
             },
             myself.get_cell(),
         )
@@ -132,6 +191,8 @@ impl Actor for RootSupervisor {
             repo_supervisor: Some(repo_supervisor),
             healthcheck: resources.healthcheck,
             infrastructure: resources.infrastructure,
+            crypto,
+            configuration: resources.configuration,
             shutting_down: false,
         })
     }
@@ -165,6 +226,11 @@ impl Actor for RootSupervisor {
                     repo_supervisor.cast(RepoSupervisorMessage::SpawnWorker { config: *config })?;
                 } else {
                     return Err("Failed to find repo supervisor".into());
+                }
+            }
+            RootSupervisorMessage::RuntimeChanged { section } => {
+                if section == credentials::SECTION_NAME {
+                    Self::apply_credentials(state).await;
                 }
             }
             RootSupervisorMessage::PrepareShutdown => {

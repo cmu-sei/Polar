@@ -17,14 +17,18 @@ impl PolarAgent for GitObserver {
     const NAME: &'static str = AGENT_NAME;
     const PURPOSE: &'static str =
         "Watches git repositories it is told of and publishes their commits and ref updates";
-    const NEEDS: &'static [Capability] = &[];
+    const NEEDS: &'static [Capability] = &[Capability::Encryption];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
     const SECTIONS: &'static [&'static Section] = &[&settings::SECTION];
+    const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] =
+        &[&crate::credentials::CREDENTIALS];
     const HELP: Option<&'static str> = Some(
         "The git observer subscribes to repository configuration events on Cassini. For each \
          repository it is told of it clones the repository into its cache, and on the frequency \
          that event gives it fetches, walks the new commits and publishes them and the ref \
-         updates. It never touches the graph.",
+         updates. It never touches the graph. A repository that needs a credential names it; the \
+         credentials come in the `credentials` runtime section, as ciphertext only this agent can \
+         open, and each is used only for the hosts it is bound to.",
     );
 
     async fn start(configured: Configured) -> Result<(), StartError> {

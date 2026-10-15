@@ -6,11 +6,6 @@ pub const GIT_REPO_EVENTS: &str = "git.repo.events";
 pub const GIT_REPO_PROCESSING_TOPIC: &str = "polar.git.processor";
 
 /* ============================
- * Credentials
- * ============================
- */
-
-/* ============================
  * Shared types
  * ============================
  */
@@ -20,10 +15,10 @@ pub const GIT_REPO_PROCESSING_TOPIC: &str = "polar.git.processor";
 /// This is *policy*, not state.
 /// It must be supplied externally (scheduler, config, graph).
 ///
-/// Credentials are included here so the observer never needs to load
-/// them from the environment or a static file. The scheduler is responsible
-/// for sourcing credentials at dispatch time. `None` means public repo —
-/// attempt unauthenticated access.
+/// A repository that needs a credential names it (`credential`); it never carries one. The observer
+/// holds the credentials it was given in a signed `credentials` document, in its CryptoActor, and
+/// uses one only for the hosts that credential is bound to. `None` means a public repository:
+/// unauthenticated access.
 #[derive(Serialize, Deserialize, Archive, Debug, Clone)]
 pub struct RepoObservationConfig {
     pub repo_id: RepoId,
@@ -40,9 +35,9 @@ pub struct RepoObservationConfig {
     pub shallow_depth: Option<usize>,
     /// Frequency of observation in seconds.
     pub frequency: u64,
-    /// Credentials for authenticating to the remote.
-    /// None means public repo — attempt unauthenticated clone/fetch.
-    pub credentials: Option<GitHttpCredential>,
+    /// The name of the credential to authenticate to the remote with, as the observer's `credentials`
+    /// section names it. None means a public repository: unauthenticated clone and fetch.
+    pub credential: Option<String>,
 }
 
 impl RepoObservationConfig {
@@ -65,61 +60,14 @@ impl RepoObservationConfig {
             max_depth: 100,
             shallow_depth,
             frequency: 900,
-            credentials: None,
+            credential: None,
         }
     }
 
-    /// Construct with explicit credentials.
-    pub fn new_with_credentials(
-        repo_id: RepoId,
-        repo_url: String,
-        remotes: Vec<String>,
-        shallow_depth: Option<usize>,
-        refs: Vec<String>,
-        credentials: GitHttpCredential,
-    ) -> Self {
-        Self {
-            credentials: Some(credentials),
-            ..Self::new(repo_id, repo_url, remotes, shallow_depth, refs)
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Archive, Debug, Clone)]
-pub enum GitHttpCredential {
-    /// Traditional username + password. Both fields are meaningful.
-    UserPass { username: String, password: String },
-
-    /// Token-based auth. The token is the only secret.
-    /// The implementation supplies a conventional dummy username
-    /// (e.g. "oauth2") to satisfy the HTTP Basic Auth protocol requirement.
-    Token {
-        token: String,
-        username: Option<String>,
-    },
-}
-
-impl GitHttpCredential {
-    /// Reduces either variant to the plain (username, password) pair
-    /// HTTP Basic Auth actually needs -- the Token variant's "oauth2"
-    /// dummy username convention (documented on the variant itself)
-    /// lives here as the single source of truth for that mapping,
-    /// reused by into_git2_cred below rather than duplicated.
-    pub fn as_userpass(&self) -> (String, String) {
-        match self {
-            GitHttpCredential::UserPass { username, password } => {
-                (username.clone(), password.clone())
-            }
-            GitHttpCredential::Token { token, username } => (
-                username.clone().unwrap_or_else(|| "oauth2".to_string()),
-                token.clone(),
-            ),
-        }
-    }
-
-    pub fn into_git2_cred(self) -> Result<git2::Cred, git2::Error> {
-        let (username, password) = self.as_userpass();
-        git2::Cred::userpass_plaintext(&username, &password)
+    /// The same repository, to be reached with the credential called `name`.
+    pub fn with_credential(mut self, name: impl Into<String>) -> Self {
+        self.credential = Some(name.into());
+        self
     }
 }
 

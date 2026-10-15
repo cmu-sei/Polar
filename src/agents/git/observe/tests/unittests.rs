@@ -3,7 +3,7 @@
  * ============================
  */
 
-use git_agent_common::{GitHttpCredential, RepoObservationConfig};
+use git_agent_common::RepoObservationConfig;
 use git_repo_observer::*;
 use git2::{Commit, CredentialType, Oid, Repository};
 use polar::graph::nodes::git::RepoId;
@@ -59,59 +59,7 @@ fn linear_history(repo: &Repository, ref_name: &str, count: usize) -> Vec<Oid> {
     commits
 }
 
-// --- GitHttpCredential tests ---
-
-#[test]
-fn token_credential_produces_userpass() {
-    let cred = GitHttpCredential::Token {
-        token: "token".into(),
-        username: None,
-    };
-    let (username, password) = cred.as_userpass();
-    assert_eq!(username, "oauth2");
-    assert_eq!(password, "token");
-}
-
-#[test]
-fn userpass_credential_produces_userpass() {
-    let cred = GitHttpCredential::UserPass {
-        username: "alice".into(),
-        password: "secret".into(),
-    };
-    let (username, password) = cred.as_userpass();
-    assert_eq!(username, "alice");
-    assert_eq!(password, "secret");
-}
-
-#[test]
-fn task_provider_resolves_userpass_credential_type() {
-    let cred = GitHttpCredential::Token {
-        token: "tok".into(),
-        username: None,
-    };
-    let provider = TaskCredentialProvider::new(cred);
-    let result = provider.credentials(
-        "https://gitlab.com/group/repo.git",
-        None,
-        CredentialType::USER_PASS_PLAINTEXT,
-    );
-    assert!(result.is_ok());
-}
-
-#[test]
-fn task_provider_rejects_unsupported_credential_type() {
-    let cred = GitHttpCredential::Token {
-        token: "tok".into(),
-        username: None,
-    };
-    let provider = TaskCredentialProvider::new(cred);
-    let result = provider.credentials(
-        "https://gitlab.com/group/repo.git",
-        None,
-        CredentialType::SSH_KEY,
-    );
-    assert!(result.is_err());
-}
+// --- Providers ---
 
 #[test]
 fn public_repo_provider_always_errors() {
@@ -122,33 +70,6 @@ fn public_repo_provider_always_errors() {
         CredentialType::USER_PASS_PLAINTEXT,
     );
     assert!(result.is_err());
-}
-
-#[test]
-fn credential_provider_for_none_returns_public_provider() {
-    let provider = credential_provider_for(None);
-    let result = provider.credentials(
-        "https://github.com/org/repo.git",
-        None,
-        CredentialType::USER_PASS_PLAINTEXT,
-    );
-    // PublicRepoProvider always returns an error — that's correct behavior
-    assert!(result.is_err());
-}
-
-#[test]
-fn credential_provider_for_some_returns_task_provider() {
-    let cred = GitHttpCredential::Token {
-        token: "tok".into(),
-        username: None,
-    };
-    let provider = credential_provider_for(Some(cred));
-    let result = provider.credentials(
-        "https://gitlab.com/group/repo.git",
-        None,
-        CredentialType::USER_PASS_PLAINTEXT,
-    );
-    assert!(result.is_ok());
 }
 
 // --- Walker / observer tests (unchanged from before) ---
@@ -307,54 +228,6 @@ fn force_push_emits_ref_updated_with_old_and_new_tips() {
     assert!(new_oids.contains(&new_tip));
     assert!(!new_oids.contains(&old_tip));
 }
-#[test]
-fn token_credential_with_username_override_uses_override() {
-    let cred = GitHttpCredential::Token {
-        token: "tok".into(),
-        username: Some("svc-polar-observer".into()),
-    };
-    let (username, password) = cred.as_userpass();
-    assert_eq!(username, "svc-polar-observer");
-    assert_eq!(password, "tok");
-}
-
-#[test]
-fn token_credential_without_override_defaults_to_oauth2() {
-    let cred = GitHttpCredential::Token {
-        token: "tok".into(),
-        username: None,
-    };
-    let (username, password) = cred.as_userpass();
-    assert_eq!(username, "oauth2");
-    assert_eq!(password, "tok");
-}
-
-#[test]
-fn token_credential_into_git2_cred_succeeds_with_and_without_override() {
-    for username in [None, Some("svc-polar-observer".to_string())] {
-        let cred = GitHttpCredential::Token {
-            token: "tok".into(),
-            username,
-        };
-        assert!(cred.into_git2_cred().is_ok());
-    }
-}
-
-#[test]
-fn task_provider_resolves_with_username_override() {
-    let cred = GitHttpCredential::Token {
-        token: "tok".into(),
-        username: Some("svc-polar-observer".into()),
-    };
-    let provider = TaskCredentialProvider::new(cred);
-    let result = provider.credentials(
-        "https://gitea.internal:3000/acme/widgets.git",
-        None,
-        CredentialType::USER_PASS_PLAINTEXT,
-    );
-    assert!(result.is_ok());
-}
-
 // One repository that cannot be started (an unreachable host, bad credentials) must not end the
 // supervisor of all the others: its failure is logged and the supervisor carries on.
 #[test]

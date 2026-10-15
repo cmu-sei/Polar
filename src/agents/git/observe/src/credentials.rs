@@ -6,13 +6,18 @@
 //! opening anything, and each entry is handed to the CryptoActor, which opens it, keeps it with its binding and
 //! escrows it. This agent never has the plaintext, and a problem is reported by entry and field, never by value.
 
+use crate::GitCredentialProvider;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use credentials_agent_common::escrow_secret::EscrowedSecret;
+use git_agent_common::RepoObservationConfig;
+use git2::{Cred, CredentialType};
 use polar_agent_builder::runtime::SectionAuthority;
 use polar_agent_builder::{CryptoClient, RuntimeSection};
-use polar_crypto::registry::{SecretBinding, SecretKind, pattern_problem};
+use polar_crypto::registry::{SecretBinding, SecretKind, UseRefusal, pattern_problem};
+use polar_crypto::{CryptoError, Zeroizing};
 use serde_json::Value;
+use std::sync::Arc;
 use tracing::{info, warn};
 
 /// What the section is called in a document.
@@ -29,7 +34,7 @@ pub static CREDENTIALS: RuntimeSection = RuntimeSection {
     name: SECTION_NAME,
     doc: "Credentials the observer may use, each only for the hosts it names. Replaced whole by each version, so an entry left out is withdrawn.",
     body: r#"{"credentials": {"list_of": {"name": {"type": "text of lowercase letters, digits and hyphens", "required": true, "doc": "what a repository calls the credential"}, "host_pattern": {"type": "host pattern", "required": true, "doc": "the only hosts this credential is ever sent to: a host name, or *. and a domain"}, "kind": {"type": "token | user-password", "required": true}, "username": {"type": "text", "required": false, "doc": "required for a user-password; for a token the default is oauth2"}, "secret": {"type": "ciphertext", "required": true, "secret": true, "doc": "base64 of an EscrowedSecret for this agent, bound to git-repo-observer|credentials|<version>|<name>|secret"}}}}"#,
-    validate: validate,
+    validate,
 };
 
 /// One entry, as the document gives it. The secret is still the base64 of the ciphertext.
@@ -235,7 +240,7 @@ pub async fn apply(
     agent: &str,
     version: u64,
     entries: &[Entry],
-) -> Result<Applied, polar_crypto::CryptoError> {
+) -> Result<Applied, CryptoError> {
     let mut applied = Applied::default();
     for entry in entries {
         let secret = match STANDARD.decode(&entry.secret) {
@@ -283,14 +288,216 @@ pub async fn apply(
     Ok(applied)
 }
 
+/// The host a credential is asked for: the host of an `https` URL with no user information in it. A
+/// credential is never offered for any other scheme, so it cannot go over a connection that is not
+/// encrypted, and a URL that carries its own login is refused rather than quietly overridden.
+pub fn host_of(repo_url: &str) -> Result<String, String> {
+    let url =
+        url::Url::parse(repo_url).map_err(|_| "the repository URL cannot be read".to_string())?;
+    if url.scheme() != "https" {
+        return Err("a credential is only used for an https repository".to_string());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("the repository URL carries a login of its own".to_string());
+    }
+    let host = match url.host() {
+        Some(url::Host::Domain(domain)) => domain.to_string(),
+        Some(_) => {
+            return Err("a credential is only used for a host name, not an address".to_string());
+        }
+        None => return Err("the repository URL has no host".to_string()),
+    };
+    // libgit2 reads the URL for itself, and a credential must go where it was checked for. A URL the two
+    // could read differently (a backslash, an `@`, an empty or odd authority) is refused: the text between
+    // `https://` and the first `/`, `?` or `#` must be the host, and a port, and nothing else.
+    let authority = repo_url
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .unwrap_or_default();
+    let (name, port) = match authority.rsplit_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (authority, None),
+    };
+    let plain = port.is_none_or(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    if !plain || !name.eq_ignore_ascii_case(&host) {
+        return Err("the repository URL is not one a credential may be used for".to_string());
+    }
+    Ok(host)
+}
+
+/// What the CryptoActor gave for one repository: the user name and the secret, wiped when dropped. It
+/// answers git's request for credentials with them and with nothing else.
+pub struct ResolvedProvider {
+    username: String,
+    secret: Zeroizing<Vec<u8>>,
+}
+
+impl GitCredentialProvider for ResolvedProvider {
+    fn credentials(
+        &self,
+        _url: &str,
+        _username_from_url: Option<&str>,
+        allowed: CredentialType,
+    ) -> Result<Cred, git2::Error> {
+        if !allowed.contains(CredentialType::USER_PASS_PLAINTEXT) {
+            return Err(git2::Error::from_str("unsupported credential type"));
+        }
+        let password = std::str::from_utf8(&self.secret)
+            .map_err(|_| git2::Error::from_str("the credential is not text"))?;
+        Cred::userpass_plaintext(&self.username, password)
+    }
+}
+
+/// Whether a repository can be reached now, and with what.
+pub enum Resolution {
+    /// Go ahead: a public repository, or the credential it names.
+    Ready(Arc<dyn GitCredentialProvider>),
+    /// The credential it names has not arrived. The repository waits, and tries again when the section changes
+    /// and on its own frequency.
+    Pending,
+    /// Not reachable with the credential it names, and why: the host is not one the credential is bound to, the
+    /// URL is not one a credential may be used for, or the CryptoActor could not answer. Nothing is sent.
+    Failed(String),
+}
+
+/// Asks the CryptoActor for the credential a repository names, for the repository's host.
+pub async fn resolve(crypto: &dyn CryptoClient, config: &RepoObservationConfig) -> Resolution {
+    let Some(name) = &config.credential else {
+        return Resolution::Ready(Arc::new(crate::PublicRepoProvider));
+    };
+    let host = match host_of(&config.repo_url) {
+        Ok(host) => host,
+        Err(why) => return Resolution::Failed(why),
+    };
+    match crypto.git_credential(name.clone(), host).await {
+        Ok(credential) => Resolution::Ready(Arc::new(ResolvedProvider {
+            username: credential.username,
+            secret: credential.secret,
+        })),
+        Err(CryptoError::SecretNotRegistered(_)) => Resolution::Pending,
+        Err(CryptoError::Use(UseRefusal::HostNotBound)) => Resolution::Failed(format!(
+            "the credential `{name}` is not bound to this repository's host"
+        )),
+        Err(other) => {
+            Resolution::Failed(format!("the credential `{name}` cannot be used: {other}"))
+        }
+    }
+}
+
+/// A CryptoActor that records what it is asked and answers as it is told.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use async_trait::async_trait;
-    use polar_crypto::CryptoError;
     use polar_crypto::registry::GitCredential;
-    use serde_json::json;
     use std::sync::Mutex;
+
+    /// Records what the observer asks of the CryptoActor.
+    #[derive(Default)]
+    pub(crate) struct Recorder {
+        pub(crate) registered: Mutex<Vec<Registered>>,
+        pub(crate) replaced: Mutex<Vec<(String, Vec<String>)>>,
+        pub(crate) refuse: Vec<&'static str>,
+        pub(crate) withdraw: Vec<String>,
+        pub(crate) replace_fails: bool,
+        /// What `git_credential` answers, and what it was asked.
+        pub(crate) answer: Mutex<Answer>,
+        pub(crate) asked: Mutex<Vec<(String, String)>>,
+    }
+
+    /// What was registered: name, section, ciphertext, context, binding.
+    pub(crate) type Registered = (String, String, Vec<u8>, Vec<u8>, SecretBinding);
+
+    /// What the fake CryptoActor says to a request for a git credential.
+    #[derive(Clone, Default)]
+    pub(crate) enum Answer {
+        Found {
+            username: &'static str,
+            secret: &'static [u8],
+        },
+        #[default]
+        NotRegistered,
+        HostNotBound,
+    }
+
+    #[async_trait]
+    impl CryptoClient for Recorder {
+        async fn store_secret(&self, _: String, _: Vec<u8>) -> Result<(), CryptoError> {
+            unreachable!()
+        }
+        async fn decrypt_own_message(&self, _: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
+            unreachable!()
+        }
+        async fn encrypt_for_recipient(
+            &self,
+            _: String,
+            _: Vec<u8>,
+        ) -> Result<Vec<u8>, CryptoError> {
+            unreachable!()
+        }
+        async fn ensure_bootstrapped(&self) -> Result<(), CryptoError> {
+            unreachable!()
+        }
+        async fn retrieve_secret(
+            &self,
+            _: String,
+        ) -> Result<Option<polar_crypto::Zeroizing<Vec<u8>>>, CryptoError> {
+            unreachable!()
+        }
+        async fn register_secret(
+            &self,
+            name: String,
+            section: String,
+            secret: Vec<u8>,
+            context: Vec<u8>,
+            binding: SecretBinding,
+        ) -> Result<(), CryptoError> {
+            if self.refuse.contains(&name.as_str()) {
+                return Err(CryptoError::DecryptFailed("does not open".to_string()));
+            }
+            self.registered
+                .lock()
+                .unwrap()
+                .push((name, section, secret, context, binding));
+            Ok(())
+        }
+        async fn load_secret(&self, _: String, _: String) -> Result<bool, CryptoError> {
+            unreachable!()
+        }
+        async fn replace_section(
+            &self,
+            section: String,
+            keep: Vec<String>,
+        ) -> Result<Vec<String>, CryptoError> {
+            if self.replace_fails {
+                return Err(CryptoError::NoReply);
+            }
+            self.replaced.lock().unwrap().push((section, keep));
+            Ok(self.withdraw.clone())
+        }
+        async fn git_credential(
+            &self,
+            name: String,
+            host: String,
+        ) -> Result<GitCredential, CryptoError> {
+            self.asked.lock().unwrap().push((name.clone(), host));
+            match self.answer.lock().unwrap().clone() {
+                Answer::Found { username, secret } => Ok(GitCredential {
+                    username: username.to_string(),
+                    secret: Zeroizing::new(secret.to_vec()),
+                }),
+                Answer::NotRegistered => Err(CryptoError::SecretNotRegistered(name)),
+                Answer::HostNotBound => Err(CryptoError::Use(UseRefusal::HostNotBound)),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{Answer, Recorder};
+    use super::*;
+    use serde_json::json;
 
     /// The public half of one key, made once: generating an RSA key is slow.
     fn public_pem() -> &'static str {
@@ -558,76 +765,6 @@ mod tests {
         );
     }
 
-    /// Records what the observer asks of the CryptoActor.
-    #[derive(Default)]
-    struct Recorder {
-        registered: Mutex<Vec<(String, String, Vec<u8>, Vec<u8>, SecretBinding)>>,
-        replaced: Mutex<Vec<(String, Vec<String>)>>,
-        refuse: Vec<&'static str>,
-        withdraw: Vec<String>,
-        replace_fails: bool,
-    }
-
-    #[async_trait]
-    impl CryptoClient for Recorder {
-        async fn store_secret(&self, _: String, _: Vec<u8>) -> Result<(), CryptoError> {
-            unreachable!()
-        }
-        async fn decrypt_own_message(&self, _: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
-            unreachable!()
-        }
-        async fn encrypt_for_recipient(
-            &self,
-            _: String,
-            _: Vec<u8>,
-        ) -> Result<Vec<u8>, CryptoError> {
-            unreachable!()
-        }
-        async fn ensure_bootstrapped(&self) -> Result<(), CryptoError> {
-            unreachable!()
-        }
-        async fn retrieve_secret(
-            &self,
-            _: String,
-        ) -> Result<Option<polar_crypto::Zeroizing<Vec<u8>>>, CryptoError> {
-            unreachable!()
-        }
-        async fn register_secret(
-            &self,
-            name: String,
-            section: String,
-            secret: Vec<u8>,
-            context: Vec<u8>,
-            binding: SecretBinding,
-        ) -> Result<(), CryptoError> {
-            if self.refuse.contains(&name.as_str()) {
-                return Err(CryptoError::DecryptFailed("does not open".to_string()));
-            }
-            self.registered
-                .lock()
-                .unwrap()
-                .push((name, section, secret, context, binding));
-            Ok(())
-        }
-        async fn load_secret(&self, _: String, _: String) -> Result<bool, CryptoError> {
-            unreachable!()
-        }
-        async fn replace_section(
-            &self,
-            section: String,
-            keep: Vec<String>,
-        ) -> Result<Vec<String>, CryptoError> {
-            if self.replace_fails {
-                return Err(CryptoError::NoReply);
-            }
-            self.replaced.lock().unwrap().push((section, keep));
-            Ok(self.withdraw.clone())
-        }
-        async fn git_credential(&self, _: String, _: String) -> Result<GitCredential, CryptoError> {
-            unreachable!()
-        }
-    }
-
     fn entries(names: &[&str]) -> Vec<Entry> {
         let body = json!({"credentials": names.iter().map(|n| good_entry(n)).collect::<Vec<_>>()});
         parse(&body).unwrap()
@@ -715,6 +852,155 @@ mod tests {
         assert!(
             apply(&crypto, "git-repo-observer", 1, &entries(&["a"]))
                 .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_host_is_the_host_of_an_https_url_and_nothing_else_is_accepted() {
+        assert_eq!(
+            host_of("https://github.com/org/repo.git").unwrap(),
+            "github.com"
+        );
+        assert_eq!(
+            host_of("https://GitHub.com:8443/o/r.git").unwrap(),
+            "github.com"
+        );
+        for refused in [
+            "http://github.com/o/r.git",
+            "git://github.com/o/r.git",
+            "ssh://git@github.com/o/r.git",
+            "file:///srv/r.git",
+            "/srv/r.git",
+            "local",
+            "https://user@github.com/o/r.git",
+            "https://user:pw@github.com/o/r.git",
+            "https://127.0.0.1/o/r.git",
+            "https://[::1]/o/r.git",
+            "https:///o/r.git",
+            "https://evil.example.org\\@github.com/o/r.git",
+            "https://github.com\\.evil.example.org/o/r.git",
+            "https://github.com:/o/r.git",
+            "https://github.com:80a/o/r.git",
+            "HTTPS://github.com/o/r.git",
+        ] {
+            assert!(host_of(refused).is_err(), "{refused}");
+        }
+    }
+
+    fn named(url: &str) -> RepoObservationConfig {
+        RepoObservationConfig::new(
+            polar::graph::nodes::git::RepoId::from_url(url),
+            url.to_string(),
+            Vec::new(),
+            None,
+            Vec::new(),
+        )
+        .with_credential("gh")
+    }
+
+    #[test]
+    fn a_refused_url_says_why() {
+        let why = |url: &str| host_of(url).unwrap_err();
+        assert!(why("http://github.com/o/r.git").contains("only used for an https"));
+        assert!(why("https://u:p@github.com/o/r.git").contains("login of its own"));
+        assert!(why("https://127.0.0.1/o/r.git").contains("not an address"));
+        assert!(
+            why("https://github.com:/o/r.git").contains("not one a credential may be used for")
+        );
+        assert!(why("https://github.com:80a/o/r.git").contains("cannot be read"));
+        assert!(why("nonsense").contains("cannot be read"));
+    }
+
+    #[tokio::test]
+    async fn a_public_repository_asks_for_nothing() {
+        let crypto = Recorder::default();
+        let mut config = named("https://github.com/o/r.git");
+        config.credential = None;
+        assert!(matches!(
+            resolve(&crypto, &config).await,
+            Resolution::Ready(_)
+        ));
+        assert!(crypto.asked.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_credential_is_asked_for_by_name_and_the_repositorys_host() {
+        let crypto = Recorder::default();
+        *crypto.answer.lock().unwrap() = Answer::Found {
+            username: "svc",
+            secret: b"tok",
+        };
+        let Resolution::Ready(provider) =
+            resolve(&crypto, &named("https://git.example.org/o/r.git")).await
+        else {
+            panic!("it should be ready");
+        };
+        assert_eq!(
+            *crypto.asked.lock().unwrap(),
+            vec![("gh".to_string(), "git.example.org".to_string())]
+        );
+        assert!(
+            provider
+                .credentials("u", None, CredentialType::USER_PASS_PLAINTEXT)
+                .is_ok()
+        );
+        assert!(
+            provider
+                .credentials("u", None, CredentialType::SSH_KEY)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_credential_that_has_not_arrived_is_pending_not_failed() {
+        let crypto = Recorder::default();
+        assert!(matches!(
+            resolve(&crypto, &named("https://github.com/o/r.git")).await,
+            Resolution::Pending
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_credential_for_another_host_fails_and_says_which_credential() {
+        let crypto = Recorder::default();
+        *crypto.answer.lock().unwrap() = Answer::HostNotBound;
+        let Resolution::Failed(why) =
+            resolve(&crypto, &named("https://evil.example.org/o/r.git")).await
+        else {
+            panic!("it should fail");
+        };
+        assert!(why.contains("`gh`") && why.contains("not bound"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn a_url_a_credential_may_not_be_used_for_is_refused_before_the_cryptoactor_is_asked() {
+        let crypto = Recorder::default();
+        *crypto.answer.lock().unwrap() = Answer::Found {
+            username: "svc",
+            secret: b"tok",
+        };
+        for url in [
+            "http://github.com/o/r.git",
+            "https://u:p@github.com/o/r.git",
+        ] {
+            assert!(
+                matches!(resolve(&crypto, &named(url)).await, Resolution::Failed(_)),
+                "{url}"
+            );
+        }
+        assert!(crypto.asked.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_secret_that_is_not_text_is_not_offered_to_git() {
+        let provider = ResolvedProvider {
+            username: "svc".to_string(),
+            secret: Zeroizing::new(vec![0xff, 0xfe]),
+        };
+        assert!(
+            provider
+                .credentials("u", None, CredentialType::USER_PASS_PLAINTEXT)
                 .is_err()
         );
     }

@@ -23,7 +23,7 @@ pub fn default_config(repo_id: RepoId, repo_url: String) -> RepoObservationConfi
 /// The stored configuration for a repository, if any, read through the graph controller.
 ///
 /// The graph-stored config does not yet include credentials: they will be sourced from the
-/// credentials agent at dispatch time. Until then `credentials` is always `None`, so the result is
+/// credentials agent at dispatch time. Until then `credential` is always `None`, so the result is
 /// suitable for public repositories only.
 pub async fn fetch_repo_observation_config(
     controller: &GraphController,
@@ -91,6 +91,6 @@ mod tests {
         assert_eq!(config.remotes, [DEFAULT_REMOTE]);
         assert_eq!(config.refs, [DEFAULT_REF]);
         assert_eq!(config.shallow_depth, Some(DEFAULT_SHALLOW_DEPTH));
-        assert!(config.credentials.is_none());
+        assert!(config.credential.is_none());
     }
 }
