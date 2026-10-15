@@ -11,3 +11,4 @@ rkyv = { workspace = true }
 polar.workspace = true
 serde_yaml.workspace = true
 serde.workspace = true
+url.workspace = true

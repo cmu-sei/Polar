@@ -1,3 +1,5 @@
+pub mod remote;
+
 use polar::graph::nodes::git::RepoId;
 use rkyv::{Archive, Deserialize, Serialize};
 
