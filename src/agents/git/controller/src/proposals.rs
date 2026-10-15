@@ -62,6 +62,7 @@ fn report(claim: &Claim, decision: &Decision) -> ProposalDecision {
         last_seen: claim.last_seen,
         announcements: claim.announcements,
         decided_at: claim.decided_at,
+        held: true,
     }
 }
 
@@ -148,6 +149,7 @@ impl Table {
                 last_seen: now,
                 announcements: 1,
                 decided_at: now,
+                held: false,
             }))
         };
 
@@ -551,6 +553,30 @@ mod tests {
             }
         }
         assert!(t.is_empty());
+    }
+
+    #[test]
+    fn a_refusal_is_not_held_and_a_decision_about_a_held_claim_is() {
+        let mut t = Table::default();
+        for (proposer, url) in [
+            (None, "https://github.com/o/r"),
+            (Some(JIRA), "ext::sh"),
+            (Some("stranger"), "https://github.com/o/r"),
+        ] {
+            let Received::Refused(d) = t.receive(proposer, url, &evidence("X"), Some(&rules()), T0)
+            else {
+                panic!()
+            };
+            assert!(!d.held, "{url}");
+        }
+        held(&mut t, JIRA, "https://github.com/o/r", T0);
+        let decided = settle(&mut t, Some(&rules()), T0 + 1);
+        assert!(decided.iter().all(|d| d.held), "{decided:?}");
+        let gone = t.expire(T0 + 10_000_000, 1000);
+        assert!(
+            gone.iter().all(|d| d.held),
+            "an expired claim was held until it expired"
+        );
     }
 
     #[test]

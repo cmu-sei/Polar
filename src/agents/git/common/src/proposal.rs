@@ -101,6 +101,11 @@ pub struct ProposalDecision {
     pub announcements: u32,
     /// When this decision was made, in milliseconds since the epoch.
     pub decided_at: i64,
+    /// Whether the controller holds the proposal in its table. A refusal the controller makes outright (no publisher
+    /// identity, an unreadable URL, an identity the rules do not list, a full table) is published for whoever is
+    /// listening but is not held, and what is not held is not unbounded in the graph either: the processor
+    /// writes only the decisions about proposals that are held.
+    pub held: bool,
 }
 
 #[cfg(test)]
@@ -123,6 +128,7 @@ mod tests {
             last_seen: 2,
             announcements: 3,
             decided_at: 4,
+            held: true,
         }
     }
 
@@ -150,6 +156,7 @@ mod tests {
                 repo_id: None,
                 proposer: None,
                 rule: None,
+                held: false,
                 ..decision()
             },
         ] {

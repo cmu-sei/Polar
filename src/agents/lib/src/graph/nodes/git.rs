@@ -66,6 +66,12 @@ pub enum GitNodeKey {
     Author {
         email: String,
     },
+
+    /// One proposer's proposal that a repository be observed, and what the git controller decided about it. The
+    /// id is the repository's id and the proposer's identity, so a proposal announced again is the same node.
+    Proposal {
+        id: String,
+    },
 }
 
 impl GraphNodeKey for GitNodeKey {
@@ -88,6 +94,10 @@ impl GraphNodeKey for GitNodeKey {
                     (format!("{prefix}_name"), name.clone().into()),
                 ],
             ),
+            GitNodeKey::Proposal { id } => (
+                format!("({prefix}:GitProposal {{ id: ${prefix}_id }})"),
+                vec![(format!("{prefix}_id"), id.clone().into())],
+            ),
             GitNodeKey::Author { email } => (
                 format!("({prefix}:GitAuthor {{ email: ${prefix}_email }})"),
                 vec![
@@ -96,5 +106,32 @@ impl GraphNodeKey for GitNodeKey {
                 ],
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_proposal_is_matched_by_its_id_under_its_own_label() {
+        let (pattern, params) = GitNodeKey::Proposal {
+            id: "https_github.com_o_r|jira".into(),
+        }
+        .cypher_match("p");
+        assert_eq!(pattern, "(p:GitProposal { id: $p_id })");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].0, "p_id");
+    }
+
+    #[test]
+    fn a_proposal_is_not_a_repository_and_does_not_collide_with_one() {
+        let (proposal, _) = GitNodeKey::Proposal { id: "x".into() }.cypher_match("n");
+        let (repository, _) = GitNodeKey::Repository {
+            repo_id: RepoId::new("x".into()),
+        }
+        .cypher_match("n");
+        assert_ne!(proposal, repository);
+        assert!(proposal.contains("GitProposal") && !proposal.contains("GitRepository"));
     }
 }

@@ -250,6 +250,20 @@ have yet) or `failing`, and then `observation_reason` says why: `the credential 
 `the clone failed: …` or `the fetch failed: …`. The times are milliseconds since the epoch
 (`date -d @$((ms/1000))`). A repository the observer has not yet reported has none of these properties.
 
+What agents have proposed, and what became of it (needs the controller and processor images that publish and read decisions):
+
+```cypher
+MATCH (p:GitProposal)
+RETURN p.url, p.proposer, p.state, p.rule, p.reason, p.announcements, p.evidence
+ORDER BY p.decided_at DESC
+```
+
+`state` is `accepted`, `rejected` (`rule` says which rule refused it), `pending` (`rule` says what it waits for: `no admission rules`, `awaiting
+approval`, `no credential`, `name resolution`) or `expired` (its proposer stopped announcing it). An accepted one is linked to its repository:
+`MATCH (p:GitProposal {state: 'accepted'})-[:PROPOSES]->(r:GitRepository) RETURN p.url, r.observation_state`. A proposal the controller refused
+outright (an unreadable URL, an identity the rules do not list) is only in the controller's log:
+`kubectl -n polar logs job/git-repo-controller -c git-repo-controller | grep 'proposal of'`.
+
 Each signed document also has an outcome node in the graph (`ConfigurationOutcome`, linked with `HAD_OUTCOME`); a
 refused document is there with the reason and signer.
 

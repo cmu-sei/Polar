@@ -234,6 +234,18 @@ it announces (the signed `repositories` entry wins), and publishes every decisio
 and the lookups happen on a blocking thread with a 60 s limit so a slow resolver cannot stop the controller from announcing.
 `git-discovery-harness` now publishes a proposal, and the observer image carries it, to try this from inside the cluster.
 
+## Built 2026-10-15: the graph shows the decisions (step 3)
+
+The git processor subscribes to `polar.git.proposals.decisions` and writes each decision onto a `(:GitProposal {id})` node, the id being the
+repository's id and the proposer's identity (so one proposer's proposal of one repository is one node, decided again each time the word changes):
+`url`, `proposer`, `repo_id`, `state` (`accepted`, `rejected`, `pending`, `expired`), `rule` (the rule that refused it, or what it waits for; cleared
+when there is none), `reason`, `first_seen`, `last_seen`, `announcements`, `decided_at` (milliseconds since the epoch) and `evidence` (a list of
+`source: reference`). An accepted proposal is linked `(:GitProposal)-[:PROPOSES]->(:GitRepository)`; one that is not accepted is not, so the
+repositories in the graph remain the ones that are observed. Decided while building: **only a decision about a proposal the controller holds
+is written** (`held` on the decision). The controller also publishes the refusals it makes outright (no publisher identity, an unreadable URL, an
+identity the rules do not list, a full table), and those would let a misbehaving proposer make as many nodes as it likes. They are in the
+controller's log. `last_seen` is as of the decision, not as of now, since a decision is published when it changes and not at every announcement.
+
 ## Build order, tests first
 
 1. The decision procedure as a pure function: normalisation, each rule, the order, and an attack list (user

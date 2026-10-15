@@ -3,6 +3,7 @@
 
 use chrono::Utc;
 use git_agent_common::GitRepositoryMessage;
+use git_agent_common::proposal::{ProposalDecision, ProposalState};
 use git_agent_common::status::ObservationStatus;
 use polar::graph::controller::{GraphOp, GraphValue, IntoGraphKey, Property, rel};
 use polar::graph::nodes::git::GitNodeKey;
@@ -151,6 +152,79 @@ pub fn for_status(status: ObservationStatus) -> Vec<GraphOp> {
         .into_key(),
         props,
     }]
+}
+
+/// What the git controller decided about one proposer's proposal that a repository be observed, written to the
+/// graph so a person can see which proposals were accepted, which wait and for what, and which were refused and
+/// by which rule, without reading the controller's log.
+///
+/// Only a decision about a proposal the controller holds is written (`held`): the controller holds a bounded
+/// number, and the ones it refuses outright (no publisher identity, an unreadable URL, an identity the rules do
+/// not list) are published for whoever listens but would otherwise let a misbehaving proposer make as many nodes
+/// as it likes.
+///
+/// The node is keyed by repository and proposer, so a proposal decided again is the same node with the latest
+/// word on it: `rule` is cleared when there is none, so a reason does not outlive what it explained. `last_seen`
+/// is when the proposer last announced it as of the decision, not as of now: a decision is published when it
+/// changes, not at every announcement. An accepted proposal is linked to its repository; a proposal that is not
+/// accepted is not, so the repositories in the graph stay the ones that are observed.
+pub fn for_decision(decision: ProposalDecision) -> Vec<GraphOp> {
+    let (true, Some(repo_id), Some(proposer)) =
+        (decision.held, decision.repo_id, decision.proposer)
+    else {
+        return vec![];
+    };
+    let proposal = GitNodeKey::Proposal {
+        id: format!("{repo_id}|{proposer}"),
+    };
+    let evidence = decision
+        .evidence
+        .iter()
+        .map(|e| {
+            GraphValue::String(match &e.reference {
+                Some(reference) => format!("{}: {reference}", e.source),
+                None => e.source.clone(),
+            })
+        })
+        .collect();
+    let accepted = decision.state == ProposalState::Accepted;
+    let mut ops = vec![GraphOp::UpsertNode {
+        key: proposal.clone().into_key(),
+        props: vec![
+            Property("url".into(), GraphValue::String(decision.url)),
+            Property("proposer".into(), GraphValue::String(proposer)),
+            Property("repo_id".into(), GraphValue::String(repo_id.to_string())),
+            Property(
+                "state".into(),
+                GraphValue::String(decision.state.as_str().into()),
+            ),
+            Property(
+                "rule".into(),
+                match decision.rule {
+                    Some(rule) => GraphValue::String(rule),
+                    None => GraphValue::Null,
+                },
+            ),
+            Property("reason".into(), GraphValue::String(decision.reason)),
+            Property("first_seen".into(), GraphValue::I64(decision.first_seen)),
+            Property("last_seen".into(), GraphValue::I64(decision.last_seen)),
+            Property(
+                "announcements".into(),
+                GraphValue::I64(i64::from(decision.announcements)),
+            ),
+            Property("decided_at".into(), GraphValue::I64(decision.decided_at)),
+            Property("evidence".into(), GraphValue::List(evidence)),
+        ],
+    }];
+    if accepted {
+        ops.push(GraphOp::EnsureEdge {
+            from: proposal.into_key(),
+            to: GitNodeKey::Repository { repo_id }.into_key(),
+            rel_type: "PROPOSES".into(),
+            props: vec![],
+        });
+    }
+    ops
 }
 
 /// The operations for any event the observer publishes.
@@ -327,5 +401,185 @@ mod tests {
             prop(&props, "observation_state"),
             Some(GraphValue::String("pending-credential".into()))
         );
+    }
+
+    use git_agent_common::proposal::Evidence;
+
+    fn decision(state: ProposalState) -> ProposalDecision {
+        ProposalDecision {
+            repo_id: Some(RepoId::new("https_github.com_o_r".into())),
+            url: "https://github.com/o/r".into(),
+            proposer: Some("jira-consumer.polar.serviceaccount.cluster.local".into()),
+            state,
+            rule: Some("awaiting approval".into()),
+            reason: "the rules require a person to approve it".into(),
+            evidence: vec![
+                Evidence {
+                    source: "jira".into(),
+                    reference: Some("ABC-12".into()),
+                },
+                Evidence {
+                    source: "gitlab".into(),
+                    reference: None,
+                },
+            ],
+            first_seen: 10,
+            last_seen: 20,
+            announcements: 3,
+            decided_at: 30,
+            held: true,
+        }
+    }
+
+    fn node_of(ops: &[GraphOp]) -> (String, Vec<(String, GraphValue)>) {
+        match ops.first() {
+            Some(GraphOp::UpsertNode { key, props }) => (
+                key.cypher_match("n").1[0].1.clone().to_string(),
+                props
+                    .iter()
+                    .map(|Property(k, v)| (k.to_string(), v.clone()))
+                    .collect(),
+            ),
+            other => panic!("expected an UpsertNode first, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_decision_about_a_held_proposal_is_one_node_with_what_a_person_needs() {
+        let ops = for_decision(decision(ProposalState::Pending));
+        assert_eq!(
+            ops.len(),
+            1,
+            "a proposal that is not accepted is not linked to a repository"
+        );
+        let (_, props) = node_of(&ops);
+        assert_eq!(
+            prop(&props, "url"),
+            Some(GraphValue::String("https://github.com/o/r".into()))
+        );
+        assert_eq!(
+            prop(&props, "proposer"),
+            Some(GraphValue::String(
+                "jira-consumer.polar.serviceaccount.cluster.local".into()
+            ))
+        );
+        assert_eq!(
+            prop(&props, "state"),
+            Some(GraphValue::String("pending".into()))
+        );
+        assert_eq!(
+            prop(&props, "rule"),
+            Some(GraphValue::String("awaiting approval".into()))
+        );
+        assert_eq!(
+            prop(&props, "reason"),
+            Some(GraphValue::String(
+                "the rules require a person to approve it".into()
+            ))
+        );
+        assert_eq!(
+            prop(&props, "repo_id"),
+            Some(GraphValue::String("https_github.com_o_r".into()))
+        );
+        assert_eq!(prop(&props, "first_seen"), Some(GraphValue::I64(10)));
+        assert_eq!(prop(&props, "last_seen"), Some(GraphValue::I64(20)));
+        assert_eq!(prop(&props, "announcements"), Some(GraphValue::I64(3)));
+        assert_eq!(prop(&props, "decided_at"), Some(GraphValue::I64(30)));
+        assert_eq!(
+            prop(&props, "evidence"),
+            Some(GraphValue::List(vec![
+                GraphValue::String("jira: ABC-12".into()),
+                GraphValue::String("gitlab".into()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn the_same_repository_and_proposer_are_the_same_node_whatever_was_decided() {
+        let id = |state| {
+            let ops = for_decision(decision(state));
+            node_of(&ops).0
+        };
+        assert_eq!(id(ProposalState::Pending), id(ProposalState::Accepted));
+        assert_eq!(id(ProposalState::Accepted), id(ProposalState::Expired));
+        let mut other_proposer = decision(ProposalState::Pending);
+        other_proposer.proposer = Some("gitlab-consumer.polar.serviceaccount.cluster.local".into());
+        assert_ne!(
+            node_of(&for_decision(other_proposer)).0,
+            id(ProposalState::Pending)
+        );
+        let mut other_repo = decision(ProposalState::Pending);
+        other_repo.repo_id = Some(RepoId::new("https_github.com_o_other".into()));
+        assert_ne!(
+            node_of(&for_decision(other_repo)).0,
+            id(ProposalState::Pending)
+        );
+    }
+
+    #[test]
+    fn an_accepted_proposal_is_linked_to_the_repository_it_proposed() {
+        let ops = for_decision(decision(ProposalState::Accepted));
+        assert_eq!(ops.len(), 2);
+        match &ops[1] {
+            GraphOp::EnsureEdge {
+                from, to, rel_type, ..
+            } => {
+                assert_eq!(rel_type.to_string(), "PROPOSES");
+                assert!(from.cypher_match("a").0.contains("GitProposal"));
+                let (pattern, params) = to.cypher_match("b");
+                assert!(pattern.contains("GitRepository"));
+                assert_eq!(params[0].1.clone().to_string(), "https_github.com_o_r");
+            }
+            other => panic!("{other:?}"),
+        }
+        for state in [
+            ProposalState::Pending,
+            ProposalState::Rejected,
+            ProposalState::Expired,
+        ] {
+            assert_eq!(for_decision(decision(state)).len(), 1, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn a_rule_that_there_no_longer_is_is_cleared_so_an_old_one_does_not_outlive_what_it_explained()
+    {
+        let mut accepted = decision(ProposalState::Accepted);
+        accepted.rule = None;
+        let (_, props) = node_of(&for_decision(accepted));
+        assert_eq!(prop(&props, "rule"), Some(GraphValue::Null));
+        assert_eq!(
+            prop(&props, "state"),
+            Some(GraphValue::String("accepted".into()))
+        );
+    }
+
+    #[test]
+    fn what_the_controller_did_not_hold_is_not_written() {
+        let mut refused = decision(ProposalState::Rejected);
+        refused.held = false;
+        assert!(for_decision(refused).is_empty());
+        let mut unreadable = decision(ProposalState::Rejected);
+        unreadable.repo_id = None;
+        assert!(
+            for_decision(unreadable).is_empty(),
+            "no repository, no node"
+        );
+        let mut anonymous = decision(ProposalState::Rejected);
+        anonymous.proposer = None;
+        assert!(for_decision(anonymous).is_empty(), "no proposer, no node");
+    }
+
+    #[test]
+    fn every_state_has_its_word_on_the_node() {
+        for (state, word) in [
+            (ProposalState::Accepted, "accepted"),
+            (ProposalState::Rejected, "rejected"),
+            (ProposalState::Pending, "pending"),
+            (ProposalState::Expired, "expired"),
+        ] {
+            let (_, props) = node_of(&for_decision(decision(state)));
+            assert_eq!(prop(&props, "state"), Some(GraphValue::String(word.into())));
+        }
     }
 }

@@ -10,6 +10,7 @@ use crate::SERVICE_NAME;
 use crate::ops;
 use cassini_types::ClientEvent;
 use git_agent_common::GitRepositoryMessage;
+use git_agent_common::proposal::{PROPOSAL_DECISIONS_TOPIC, ProposalDecision};
 use git_agent_common::status::{GIT_REPO_OBSERVATION_STATUS, ObservationStatus};
 use polar::graph::controller::{GraphControllerMsg, GraphSignal};
 use polar::topics::GIT_REPOSITORY_EVENTS;
@@ -40,6 +41,8 @@ pub enum GitProcessorMessage {
     Event(GitRepositoryMessage),
     /// What the observer says became of its latest attempt at a repository, decoded.
     Status(ObservationStatus),
+    /// What the git controller decided about a proposal, decoded.
+    Decision(ProposalDecision),
     GraphSignal(GraphSignal),
     /// The health check ended the pod's life; the infrastructure waits for
     /// `ProceedWithShutdown`.
@@ -71,9 +74,24 @@ pub fn decode_status(payload: &[u8]) -> Option<ObservationStatus> {
     }
 }
 
+/// What was published on the decisions topic. Anything that does not decode is logged and dropped. The bytes are
+/// copied to where rkyv wants them first.
+pub fn decode_decision(payload: &[u8]) -> Option<ProposalDecision> {
+    let mut aligned = rkyv::util::AlignedVec::<16>::new();
+    aligned.extend_from_slice(payload);
+    match rkyv::from_bytes::<ProposalDecision, rkyv::rancor::Error>(&aligned) {
+        Ok(decision) => Some(decision),
+        Err(e) => {
+            warn!("Failed to deserialize a proposal decision: {e}");
+            None
+        }
+    }
+}
+
 pub fn subscriptions(supervisor: &ActorRef<GitProcessorMessage>) -> Vec<Subscription> {
     let events = supervisor.clone();
     let statuses = supervisor.clone();
+    let decisions = supervisor.clone();
     vec![
         Subscription::new(GIT_REPOSITORY_EVENTS, move |incoming| {
             if let Some(event) = decode(&incoming.payload)
@@ -87,6 +105,13 @@ pub fn subscriptions(supervisor: &ActorRef<GitProcessorMessage>) -> Vec<Subscrip
                 && let Err(e) = statuses.cast(GitProcessorMessage::Status(status))
             {
                 error!("failed to hand a status to the supervisor: {e}");
+            }
+        }),
+        Subscription::new(PROPOSAL_DECISIONS_TOPIC, move |incoming| {
+            if let Some(decision) = decode_decision(&incoming.payload)
+                && let Err(e) = decisions.cast(GitProcessorMessage::Decision(decision))
+            {
+                error!("failed to hand a decision to the supervisor: {e}");
             }
         }),
     ]
@@ -187,6 +212,15 @@ impl Actor for GitProcessorSupervisor {
                     warn!("draining -- a status will be lost on exit");
                 } else if let Some(controller) = &state.graph_controller {
                     for op in ops::for_status(status) {
+                        controller.cast(GraphControllerMsg::Op(op))?;
+                    }
+                }
+            }
+            GitProcessorMessage::Decision(decision) => {
+                if state.drain.is_draining() {
+                    warn!("draining -- a decision will be lost on exit");
+                } else if let Some(controller) = &state.graph_controller {
+                    for op in ops::for_decision(decision) {
                         controller.cast(GraphControllerMsg::Op(op))?;
                     }
                 }
@@ -316,6 +350,43 @@ mod tests {
         }
     }
 
+    fn a_decision() -> git_agent_common::proposal::ProposalDecision {
+        use git_agent_common::proposal::{Evidence, ProposalDecision, ProposalState};
+        ProposalDecision {
+            repo_id: Some(RepoId::new("r".into())),
+            url: "https://github.com/o/r".into(),
+            proposer: Some("jira".into()),
+            state: ProposalState::Accepted,
+            rule: None,
+            reason: "accepted".into(),
+            evidence: vec![Evidence {
+                source: "jira".into(),
+                reference: None,
+            }],
+            first_seen: 1,
+            last_seen: 2,
+            announcements: 3,
+            decided_at: 4,
+            held: true,
+        }
+    }
+
+    #[test]
+    fn a_decision_the_controller_published_decodes() {
+        let decision = a_decision();
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&decision).unwrap();
+        assert_eq!(decode_decision(&bytes), Some(decision.clone()));
+        let mut shifted = vec![0u8];
+        shifted.extend_from_slice(&bytes);
+        assert_eq!(decode_decision(&shifted[1..]), Some(decision));
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_decision_are_dropped() {
+        assert!(decode_decision(b"not a decision").is_none());
+        assert!(decode_decision(&[]).is_none());
+    }
+
     #[tokio::test]
     async fn the_processor_listens_for_events_and_for_statuses() {
         // Both topics, by name: a subscription that is missing is a feature that silently does nothing.
@@ -330,6 +401,10 @@ mod tests {
         );
         assert!(
             topics.contains(&GIT_REPO_OBSERVATION_STATUS.to_string()),
+            "{topics:?}"
+        );
+        assert!(
+            topics.contains(&git_agent_common::proposal::PROPOSAL_DECISIONS_TOPIC.to_string()),
             "{topics:?}"
         );
         supervisor.stop(None);
