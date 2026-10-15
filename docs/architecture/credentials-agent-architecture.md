@@ -486,6 +486,13 @@ David):
 | `LoadSecret { name }` | At start, asks the credentials agent for `<identity>/<name>` (`RetrieveSecret`) and registers what comes back, binding included. | whether it was found, or a policy denial |
 | `GitCredential { name, host }` | Checks that `host` matches the binding. | a username and token for libgit2, wiped when dropped (the username defaults to `oauth2` for a token), or a refusal: unknown secret, host not bound, kind not usable for git |
 
+A **host pattern** is a bare host name, matched case-insensitively and exactly (`github.com`), or `*.` followed by
+a domain (`*.example.org`), which matches that domain with one or more labels before it, at any depth
+(`api.example.org`, `a.b.example.org`), but not the bare domain and not a lookalike (`evilexample.org`; a dot is
+required). Decided 2026-10-14 (David). The host being checked must itself be a bare name: a port, userinfo, a
+trailing dot or an IP address never matches (normalising a URL and the network guard are the caller's job,
+`proposals.md`).
+
 `StoreSecret` and `RetrieveSecret` stay as they are, since the harness and the escrow-keypair flow use them.
 Decrypting an `EscrowedSecret` under a context is internal to `RegisterSecret`: no public message returns the
 plaintext of a registered secret.
