@@ -11,7 +11,7 @@ pub static ROLE: Required<String> = Required::text(
 
 pub static SECRET_NAME: Defaulted<String> = Defaulted::text(
     "HARNESS_SECRET_NAME",
-    "the name of the secret both pods use",
+    "the name of the secret both pods use, under the owner's identity (`<identity>/<name>`): an identity may store only under its own name, so the owner stores it and the intruder is refused",
     "harness-secret",
 );
 

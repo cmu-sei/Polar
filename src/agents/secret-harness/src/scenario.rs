@@ -4,7 +4,8 @@
 //! The owner stores a secret, retrieves it, replaces it, and on every later round retrieves it again to
 //! show that nothing the intruder did changed it. The intruder, a different identity, tries to retrieve
 //! it, tries to retrieve a name nothing holds (and must be told the same thing, so a refusal says nothing
-//! about whether a secret exists), and tries to store the same name (and must find it taken).
+//! about whether a secret exists), and tries to store the same name (and must be refused by policy: the name is in
+//! the owner's namespace, so the refusal is the same whether or not the name is held).
 
 use credentials_agent_common::secret::StoreRefusalReason;
 use polar_agent_builder::crypto::CryptoClient;
@@ -132,7 +133,7 @@ pub async fn intruder_round<C: CryptoClient>(c: &C, secret: &str) -> Vec<Check> 
         "the intruder cannot take the name over",
         matches!(
             &taken,
-            Err(CryptoError::Refused(StoreRefusalReason::NameTaken))
+            Err(CryptoError::Refused(StoreRefusalReason::PolicyDenied))
         ),
         format!("{taken:?}"),
     ));
@@ -208,7 +209,7 @@ mod tests {
                 lets_anyone_retrieve: false,
                 lets_anyone_store: false,
                 says_when_absent: None,
-                refuses_with: StoreRefusalReason::NameTaken,
+                refuses_with: StoreRefusalReason::PolicyDenied,
                 ignores_replacement: false,
             };
             (make("owner"), make("intruder"))
@@ -291,6 +292,20 @@ mod tests {
             .filter(|c| !c.passed)
             .map(|c| c.name)
             .collect()
+    }
+
+    #[tokio::test]
+    async fn an_intruder_told_the_name_is_taken_has_learned_it_exists_and_that_is_a_failed_check() {
+        // Policy answers before the ledger does, so an identity that may not store under a name is refused the
+        // same way whether or not the name is held. A reply of NameTaken to the intruder would give that away.
+        let (owner, mut intruder) = Fake::pair();
+        owner_round(&owner, "s", 0).await;
+        intruder.refuses_with = StoreRefusalReason::NameTaken;
+        let checks = intruder_round(&intruder, "s").await;
+        assert_eq!(
+            failed(&checks),
+            vec!["the intruder cannot take the name over"]
+        );
     }
 
     #[tokio::test]
