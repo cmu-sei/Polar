@@ -221,6 +221,20 @@ store under an existing name is refused today, and stays refused); the `entities
 secret by name for what policy needs to change after the fact (`frozen`), but an annotation cannot replace a
 stored label. This is what lets "any `git-token`" be a rule from the first day.
 
+**The details (decided 2026-10-14, David; built with the store check).**
+
+- `labels` is a map of text to text on `StoreSecretRequest`, recorded in the `SecretStored` event (a `serde`
+  default, so entries written before it still read), and each label is an attribute of the `Secret` entity.
+- At most 8 labels. A key is lowercase letters, digits and underscores, starting with a letter, 1 to 32
+  characters, so it is a plain Cedar attribute name. A value is printable ASCII, 1 to 128 characters.
+- `owner` (from the ledger), `namespace` (computed from the name) and `frozen` (the annotation) are reserved and
+  refused as labels.
+- A label cannot change once stored. The owner may replace the secret's value, but a replacement whose labels
+  differ is refused (`LabelsChanged`); to change a label, store under a new name.
+- The `CryptoActor` attaches one label, `kind`, equal to the binding's kind (`token` or `user-password`), so the
+  example above is `resource.kind == "token"`. No vocabulary specific to git is invented: the binding's hosts
+  say where a secret goes.
+
 ## Storing is governed by policy
 
 Decided 2026-10-14 (David). `StoreSecret` asks policy before the ledger accepts a name: action `store`, resource
