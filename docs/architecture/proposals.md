@@ -20,9 +20,9 @@ should start observing that repository (pull it, collect statistics) without a p
 What exists today, read from the code, 2026-10-11:
 
 - Nothing in the Jira agents detects a repository. The proposing side is new work.
-- The git observer's repositories come from `RepoObservationConfig` messages (`git.repo.config.events`, or a
-  `git.yaml` file), each carrying its own `credentials`. The git scheduler that sends them is slated for
-  retirement. Credentials travel inside the message.
+- The git observer's repositories come from `RepoObservationConfig` messages (`git.repo.config.events`; the `git.yaml` file is gone),
+  each naming the credential it needs (`credential`, 2026-10-14; it used to carry its own `credentials`). The git
+  scheduler that sends them is slated for retirement.
 - The broker tells a subscriber who published a message (`published_by`, from the publisher's verified mTLS
   certificate) whenever the publisher allows it, which is the default.
 - `polar-policy` is a Cedar wrapper whose request takes an identity, an action and a resource as strings, with
@@ -168,8 +168,7 @@ verifiable without trusting the broker and would be kept in the graph as evidenc
 ## What changes in the code
 
 - Jira processor: a publisher of `observe-repo` proposals.
-- Git observer: the receiver, which replaces its `git.repo.config.events` and `git.yaml` path and its inline
-  credentials. It holds the set and re-evaluates on change.
+- Git observer: the receiver, which replaces its `git.repo.config.events` path. It holds the set and re-evaluates on change.
 - Scheduler processor: the ledger, and the replay.
 - Builder: a proposal helper (declare a kind, receive, normalise through a hook, report decisions on the outcome
   path) so each receiving agent writes only its subject type, key and constraints.

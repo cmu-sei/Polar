@@ -1,6 +1,6 @@
 # The git agents: observer, processor, and a controller
 
-Status, 2026-10-14 (design agreed with David 2026-10-12). The controller, the observer's credentials section and the status events are not built; the `runtime` document type, replay, `c:update-runtime`, `polar-sign runtime` and `RetrieveSecret` are (each section says which). It replaces the
+Status, 2026-10-14 (design agreed with David 2026-10-12). The observer's `credentials` section and its use are built (2026-10-14, step 3: `git/observe/src/credentials.rs`); the controller and the status events are not; the `runtime` document type, replay, `c:update-runtime`, `polar-sign runtime` and `RetrieveSecret` are (each section says which). It replaces the
 git scheduler (`git/scheduler`, migrated onto the builder on 2026-10-12 as it was, for the move only) and
 settles three things that `proposals.md` and `signed-configuration.md` left open for the git agents: who
 receives proposals, how a credential reaches the observer, and how per-repository settings travel.
@@ -11,8 +11,8 @@ It was built before the credentials agent and the polar scheduler existed, and i
 
 - It decides defaults for a repository and reads `RepoObservationConfig` nodes from the graph that nothing
   writes. The schedule data belongs to the schedules repository, through the polar scheduler.
-- Its configuration events carry `credentials` inline, always `None`. Credentials belong to the credentials
-  agent.
+- Its configuration events carried `credentials` inline, always `None`. Credentials belong to the credentials
+  agent; the event now names a credential (`credential`) and carries none. (Done 2026-10-14.)
 - A repository whose worker failed to start is never started again, and nothing can say whether a
   repository is being observed as expected.
 - The stored `max_depth` is handed on as the shallow fetch depth (the constructor's fourth argument).
@@ -75,8 +75,8 @@ later, at init: the CryptoActor retrieves (RetrieveSecret { name }) each credent
 ```
 
 The controller never sees a credential. A repository names the credential it wants (`"credential": "github-sei"`);
-the observer has, or fetches, the secret by that name (stored under its own identity as a prefix,
-`<identity>/github-sei`; `credentials-policy.md`). A repository whose credential the observer lacks is
+the observer has the secret by that name (stored under its own identity as a prefix,
+`<identity>/github-sei`; `credentials-policy.md`). Decided 2026-10-14 (David), step 3: it does not fetch it back with `LoadSecret`. The section is replayed to the observer every time it starts, which registers the credentials again; a fetch could bring back an older copy of a credential whose newer version failed to register, or one the section has since withdrawn. If the schedules repository is unreachable when the observer starts, its repositories stay pending until it is back. A repository whose credential the observer lacks is
 `pending: no credential` in the status it reports, and becomes active when the credential arrives. Decided
 2026-10-14 (David): the repository and its credential reach the observer by different routes, so the repository can
 come first. Its worker does not fail: it stays pending and tries again when the `credentials` section changes and on

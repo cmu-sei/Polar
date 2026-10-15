@@ -113,6 +113,6 @@ In short: the observer reports reality; processors argue about what it means.
 
 A repository names the credential it wants, and the value reaches the observer in a signed runtime document
 addressed to it; the observer keeps it with the credentials agent and fetches it from there (`git-controller.md`,
-"A credential"). Today the observer still carries two older paths that are to be removed: the static `git.yaml`
-credentials file, which it loads and does not use, and the inline `credentials` field of the configuration event,
-which the scheduler always sends as `None`.
+"A credential"). The two older paths are gone (2026-10-14): the static `git.yaml` credentials file, which it loaded and did
+not use, and the inline `credentials` field of the configuration event, which the scheduler always sent as `None`
+(the event now carries the credential's name).

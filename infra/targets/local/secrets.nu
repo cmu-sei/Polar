@@ -71,14 +71,6 @@ def main [target_dir: string, repo_root: string] {
         kubectl_upsert_secret "oci-registry-auth" "polar" ["oci-registry-auth={}"]
     }
 
-    # git-config — StaticCredentialConfig JSON for the git observer
-    let git_config = ($target_dir | path join "conf/git.json")
-    if ($git_config | path exists) {
-        kubectl_upsert_secret "git-config" "polar" [] [$"git.json=($git_config)"]
-    } else {
-        print $"    WARNING: git.json not found at ($target_dir)/conf/git.json — git observer will not start"
-    }
-
     print ""
     print "  secrets: done"
     print ""

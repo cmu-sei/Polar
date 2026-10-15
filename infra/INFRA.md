@@ -190,7 +190,7 @@ infra/
     overrides.dhall      values for the custom charts
     config.nuon          overrides for the catalog (cluster facts, per-workload fields)
     secrets.sops.yaml  secrets.nu   encrypted secrets and the script that creates them
-    conf/                static config files (neo4j conf, git.json, ...)
+    conf/                static config files (neo4j conf, ...)
 ```
 
 The numeric prefixes on the layers are deliberate: the dependency order shows in

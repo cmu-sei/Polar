@@ -497,7 +497,7 @@ trailing dot or an IP address never matches (normalising a URL and the network g
 later version leaves out is withdrawn. Each registered secret is tagged with the section it came from, and one more
 message, `ReplaceSection { section, keep }`, drops every secret registered under `section` whose name is not in
 `keep`. The agent sends it after registering the entries of each new version. `LoadSecret` is then only asked for
-names the current section lists, so a withdrawn secret does not return after a restart from the escrowed copy. The
+names the current section lists, so a withdrawn secret does not return after a restart from the escrowed copy. (The git observer does not use `LoadSecret` at all: the replay of its section registers the credentials again at every start; see `git-controller.md`.) The
 escrowed copy itself stays in the ledger, which has no delete.
 
 `StoreSecret` and `RetrieveSecret` stay as they are, since the harness and the escrow-keypair flow use them.

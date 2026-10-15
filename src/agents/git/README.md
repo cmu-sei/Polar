@@ -105,13 +105,12 @@ Cache invalidation strategy is currently manual/policy-driven and not automatic.
 ### Running the Observer
 
 **Setup**
-The Git Observer is configured via a JSON file in a similar fashion to many docker-compatible tooling.
-
-Ensure one of these files exists before running the agent.
+The Git Observer is told which repositories to observe on `git.repo.config.events`. A private repository names a
+credential; the credentials themselves reach the observer in its signed `credentials` runtime section, and it uses
+each only for the hosts that credential is bound to (`docs/architecture/git-controller.md`). There is no
+credentials file and no `GIT_AGENT_CONFIG`.
 
 ```bash
-## Ensure you set the environment variable to point the agent to a json file containing necessary credentials.
-export GIT_AGENT_CONFIG="git.json"
 cargo run -p git-repo-observer
 ```
 
