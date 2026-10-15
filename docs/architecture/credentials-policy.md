@@ -228,6 +228,16 @@ Decided 2026-10-14 (David). `StoreSecret` asks policy before the ledger accepts 
 name owned it, so another identity could store `github-sei` before the observer did, and the observer's own
 store would be refused as `NameTaken` and its credential left pending. Not built.
 
+**Naming (decided 2026-10-14, David).** A secret is named `<identity>/<name>`, for example
+`git-repo-observer/github-sei`, as the agent's own escrow keypair already is
+(`agent_escrow_keypair_secret_name`, identity-scoped). The credentials agent builds the `Secret` entity from the
+validated name and sets its `namespace`, as an `Identity`, from the prefix. The first `store` rule is
+`permit (principal, action == Action::"store", resource) when { resource.namespace == principal };`, the same
+shape as the retrieve rule on `owner`, so an identity can store only under its own name. Cedar's `like` takes
+only a literal pattern, so the prefix is computed by the agent and not matched in the policy. A repository still
+names its credential by the short name (`github-sei`), and the observer resolves it to
+`<its own identity>/github-sei`. The identity is the one policy knows an agent by, its workload name.
+
 ## `DecryptOnBehalfOf` and the resource it names
 
 The request carries the ciphertext itself and a `resource_id` the caller asserts. The agent does not resolve a

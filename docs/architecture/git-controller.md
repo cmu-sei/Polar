@@ -75,7 +75,8 @@ later, at init: the CryptoActor retrieves (RetrieveSecret { name }) each credent
 ```
 
 The controller never sees a credential. A repository names the credential it wants (`"credential": "github-sei"`);
-the observer has, or fetches, the secret by that name. A repository whose credential the observer lacks is
+the observer has, or fetches, the secret by that name (stored under its own identity as a prefix,
+`<identity>/github-sei`; `credentials-policy.md`). A repository whose credential the observer lacks is
 `pending: no credential` in the status it reports, and becomes active when the credential arrives.
 
 ### Status and checkpoints
