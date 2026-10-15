@@ -36,7 +36,11 @@
 //! escrow-keypair bootstrap flow -- retrieve-first, issuance-as-
 //! fallback, escrowing the newly-issued result, and now kernel-
 //! keyring custody, attempted transparently on first real use and
-//! cached as an opaque handle afterward. RetrieveOwnEscrowKeypair and
+//! cached as an opaque handle afterward. It also holds the secrets that reach the
+//! agent, each with the binding that says where it may go (`registry`), escrows them
+//! with the credentials agent, and performs named operations on them, so a caller
+//! gets the result of an operation and never the secret (`RegisterSecret`,
+//! `LoadSecret`, `GitCredential`). RetrieveOwnEscrowKeypair and
 //! EnsureOwnEscrowKeypair, this crate's own former, public messages
 //! for that flow, are deliberately no longer exposed at all: the
 //! whole point of a hard, single boundary for every key operation is
@@ -152,6 +156,12 @@ pub enum CryptoError {
     RetrieveSecretDenied(String),
     #[error("no usable escrow public key exists for identity {0:?} -- that agent may never have completed automated escrow-identity issuance")]
     RecipientKeyNotFound(String),
+    #[error("no secret is registered under {0:?}")]
+    SecretNotRegistered(String),
+    #[error(transparent)]
+    Use(#[from] registry::UseRefusal),
+    #[error(transparent)]
+    Record(#[from] registry::RecordError),
 }
 
 /// This actor's own, cached escrow keypair -- either a real, opaque
@@ -232,17 +242,37 @@ pub enum CryptoMessage {
         plaintext: Vec<u8>,
         reply: RpcReplyPort<Result<Vec<u8>, CryptoError>>,
     },
-    /// Opens an `EscrowedSecret` (its `rkyv` bytes, the form `EncryptForRecipient` returns and a signed
-    /// document carries) that was encrypted to this identity's own escrow public key, and returns the
-    /// plaintext, wiped when dropped. `context` is the authenticated data the secret was bound to when it
-    /// was made (`EscrowedSecret::encrypt_bound`): a secret opens only under the same bytes, so one cannot
-    /// be moved into another field or document. The private key stays in its custody; only the unwrap is
-    /// done with it. Bytes that are not an escrowed secret are `Err(Serialization)`, and a wrong context
-    /// or a tampered secret is `Err(DecryptFailed)`.
-    DecryptOwnEscrowed {
+    /// Registers a secret that arrived in a signed document. `secret` is an `EscrowedSecret` (its `rkyv` bytes)
+    /// encrypted to this identity's own escrow public key, and `context` is what it was bound to when it was made
+    /// (`EscrowedSecret::encrypt_bound`): it opens only under that. It is decrypted here, with the key in its
+    /// custody, and kept with its `binding`, the hosts it may be used for. Then the secret and its binding are
+    /// escrowed together with the credentials agent under `<identity>/<name>`, in the background and retried
+    /// until acknowledged, so a restart gets both back (`LoadSecret`). The reply does not wait for that: it is
+    /// `Ok` once the secret is registered, and refused, with nothing registered or escrowed, if the binding is
+    /// not usable, the bytes are not an escrowed secret, or it does not open under `context`. A name registered
+    /// again replaces the earlier secret and stops escrowing it. The plaintext never leaves this actor except
+    /// through an operation on it, such as `GitCredential`.
+    RegisterSecret {
+        name: String,
         secret: Vec<u8>,
         context: Vec<u8>,
-        reply: RpcReplyPort<Result<zeroize::Zeroizing<Vec<u8>>, CryptoError>>,
+        binding: registry::SecretBinding,
+        reply: RpcReplyPort<Result<(), CryptoError>>,
+    },
+    /// Asks the credentials agent for `<identity>/<name>` and registers what comes back, binding included, for an
+    /// agent that has started again. `Ok(false)` is a name nothing is stored under; policy refusing is
+    /// `Err(RetrieveSecretDenied)`. A record that is not a credential registers nothing.
+    LoadSecret {
+        name: String,
+        reply: RpcReplyPort<Result<bool, CryptoError>>,
+    },
+    /// The credential git is given to reach `host` with the registered secret `name`: a username and the secret,
+    /// wiped when dropped. Refused if no secret is registered under the name, if the binding does not name the
+    /// host, or if its kind or content cannot be given to git. The caller never has the secret otherwise.
+    GitCredential {
+        name: String,
+        host: String,
+        reply: RpcReplyPort<Result<registry::GitCredential, CryptoError>>,
     },
     /// Runs this identity's own escrow-keypair bootstrap sequence --
     /// retrieve-first, issuance-as-fallback, real, empirical kernel-
@@ -301,6 +331,8 @@ pub struct CryptoActorArgs {
     /// them from its snapshot of the environment. `None` is for agents not yet on the
     /// builder (polar-init): the actor then reads the process, as it always did.
     pub settings: Option<environment::CryptoSettings>,
+    /// How long to wait before trying to escrow a registered secret again, and the most that wait grows to.
+    pub escrow_retry: (Duration, Duration),
 }
 
 impl CryptoActorArgs {
@@ -313,7 +345,15 @@ impl CryptoActorArgs {
             tcp_client,
             router,
             settings: None,
+            escrow_retry: (Duration::from_secs(1), Duration::from_secs(30)),
         }
+    }
+
+    /// Escrow a registered secret again after `initial`, doubling up to `most`, until the credentials agent
+    /// acknowledges it.
+    pub fn with_escrow_retry(mut self, initial: Duration, most: Duration) -> Self {
+        self.escrow_retry = (initial, most);
+        self
     }
 
     /// Start on these settings instead of reading the process.
@@ -363,7 +403,24 @@ pub struct CryptoActorState {
     own_identity: String,
     /// Where the token and the key number are, from the settings the actor started with.
     paths: KeyPaths,
+    /// The secrets that reached this agent, by name, each with the binding that says where it may go
+    /// (docs/architecture/credentials-agent-architecture.md, "Named operations on registered secrets").
+    registry: Registry,
+    /// The task escrowing each registered secret, by name. A newer registration of the name replaces it, and
+    /// every one is stopped when the actor is.
+    escrow_tasks: EscrowTasks,
+    escrow_retry: (Duration, Duration),
 }
+
+/// A secret and where it may be used. The secret is wiped when it is dropped.
+struct RegisteredSecret {
+    binding: registry::SecretBinding,
+    secret: zeroize::Zeroizing<Vec<u8>>,
+}
+
+type Registry = Arc<tokio::sync::Mutex<std::collections::HashMap<String, RegisteredSecret>>>;
+type EscrowTasks =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>;
 
 pub struct CryptoActor;
 
@@ -461,6 +518,9 @@ impl Actor for CryptoActor {
                 service_account_token: settings.service_account_token_path,
                 escrow_key_handle: settings.escrow_key_handle_path,
             },
+            registry: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            escrow_tasks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            escrow_retry: args.escrow_retry,
         })
     }
 
@@ -473,6 +533,10 @@ impl Actor for CryptoActor {
         _myself: ActorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        for (_, task) in state.escrow_tasks.lock().unwrap().drain() {
+            task.abort();
+        }
+        state.registry.lock().await.clear();
         if let Some(EscrowKeypairHandle::KernelBacked(serial)) =
             state.escrow_keypair_handle.lock().await.take()
         {
@@ -623,47 +687,44 @@ impl Actor for CryptoActor {
                         store_secret_reply_router,
                         cached_key,
                         name,
-                        plaintext,
+                        &plaintext,
                     )
                     .await;
                     let _ = reply.send(result);
                 });
             }
-            CryptoMessage::DecryptOwnEscrowed {
+            CryptoMessage::RegisterSecret {
+                name,
                 secret,
                 context,
+                binding,
                 reply,
             } => {
                 // Spawned, not awaited inline, for the same reason as the arms around it: the first use
                 // bootstraps the key over the broker.
-                let tcp_client = state.tcp_client.clone();
-                let retrieve_agent_escrow_keypair_reply_router =
-                    state.retrieve_agent_escrow_keypair_reply_router.clone();
-                let agent_escrow_issuance_reply_router =
-                    state.agent_escrow_issuance_reply_router.clone();
-                let escrow_key_reply_router = state.escrow_key_reply_router.clone();
-                let store_secret_reply_router = state.store_secret_reply_router.clone();
-                let cached_key = state.cached_credentials_agent_escrow_key.clone();
-                let escrow_keypair_handle = state.escrow_keypair_handle.clone();
-                let own_identity = state.own_identity.clone();
-                let paths = state.paths.clone();
+                let shared = state.shared();
                 tokio::spawn(async move {
-                    let result = handle_decrypt_own_escrowed(
-                        tcp_client,
-                        retrieve_agent_escrow_keypair_reply_router,
-                        agent_escrow_issuance_reply_router,
-                        escrow_key_reply_router,
-                        store_secret_reply_router,
-                        cached_key,
-                        escrow_keypair_handle,
-                        own_identity,
-                        paths,
-                        secret,
-                        context,
-                    )
-                    .await;
+                    let result = register_secret(shared, name, secret, context, binding).await;
                     let _ = reply.send(result);
                 });
+            }
+            CryptoMessage::LoadSecret { name, reply } => {
+                let shared = state.shared();
+                tokio::spawn(async move {
+                    let result = load_secret(shared, name).await;
+                    let _ = reply.send(result);
+                });
+            }
+            CryptoMessage::GitCredential { name, host, reply } => {
+                let result = {
+                    let registry = state.registry.lock().await;
+                    match registry.get(&name) {
+                        None => Err(CryptoError::SecretNotRegistered(name)),
+                        Some(held) => registry::git_credential(&held.binding, &held.secret, &host)
+                            .map_err(CryptoError::Use),
+                    }
+                };
+                let _ = reply.send(result);
             }
             CryptoMessage::DecryptOwnMessage { ciphertext, reply } => {
                 // Same reasoning as StoreSecret's own arm above --
@@ -791,7 +852,7 @@ async fn handle_store_secret(
     store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
     cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
     name: String,
-    plaintext: Vec<u8>,
+    plaintext: &[u8],
 ) -> Result<(), CryptoError> {
     let escrow_key_pem = {
         let mut cached = cached_key.lock().await;
@@ -805,7 +866,7 @@ async fn handle_store_secret(
         }
     };
 
-    let secret = EscrowedSecret::encrypt(&plaintext, &escrow_key_pem)?;
+    let secret = EscrowedSecret::encrypt(plaintext, &escrow_key_pem)?;
 
     let reply = publish_store_secret_request(
         &tcp_client,
@@ -1063,7 +1124,7 @@ async fn handle_ensure_own_escrow_keypair(
         store_secret_reply_router,
         cached_key,
         agent_escrow_keypair_secret_name(&own_identity),
-        csr_output.private_key_pem.clone().into_bytes(),
+        csr_output.private_key_pem.as_bytes(),
     )
     .await?;
 
@@ -1228,9 +1289,169 @@ async fn handle_decrypt_own_message(
     }
 }
 
-/// The real handler behind CryptoMessage::DecryptOwnEscrowed: read the bytes as an `EscrowedSecret`, make
+/// What the tasks started for the registry need from the actor, cloned out of its state: they run outside the
+/// mailbox, since they wait on the credentials agent.
+#[derive(Clone)]
+struct Shared {
+    tcp_client: ActorRef<TcpClientMessage>,
+    escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
+    store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
+    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
+    agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
+    retrieve_secret_reply_router:
+        Arc<ReplyRouter<credentials_agent_common::retrieve_secret::RetrieveSecretReply>>,
+    cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
+    escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
+    own_identity: String,
+    paths: KeyPaths,
+    registry: Registry,
+    escrow_tasks: EscrowTasks,
+    escrow_retry: (Duration, Duration),
+}
+
+impl CryptoActorState {
+    fn shared(&self) -> Shared {
+        Shared {
+            tcp_client: self.tcp_client.clone(),
+            escrow_key_reply_router: self.escrow_key_reply_router.clone(),
+            store_secret_reply_router: self.store_secret_reply_router.clone(),
+            retrieve_agent_escrow_keypair_reply_router: self
+                .retrieve_agent_escrow_keypair_reply_router
+                .clone(),
+            agent_escrow_issuance_reply_router: self.agent_escrow_issuance_reply_router.clone(),
+            retrieve_secret_reply_router: self.retrieve_secret_reply_router.clone(),
+            cached_key: self.cached_credentials_agent_escrow_key.clone(),
+            escrow_keypair_handle: self.escrow_keypair_handle.clone(),
+            own_identity: self.own_identity.clone(),
+            paths: self.paths.clone(),
+            registry: self.registry.clone(),
+            escrow_tasks: self.escrow_tasks.clone(),
+            escrow_retry: self.escrow_retry,
+        }
+    }
+}
+
+/// The name a secret is escrowed under: the identity that stores it is the prefix, so only that identity may
+/// store under it (docs/architecture/credentials-policy.md, "Storing is governed by policy").
+fn escrow_name(own_identity: &str, name: &str) -> String {
+    format!("{own_identity}/{name}")
+}
+
+/// The real handler behind CryptoMessage::RegisterSecret: refuse an unusable binding first, then open the
+/// secret, keep it with its binding, and start escrowing both.
+async fn register_secret(
+    shared: Shared,
+    name: String,
+    secret: Vec<u8>,
+    context: Vec<u8>,
+    binding: registry::SecretBinding,
+) -> Result<(), CryptoError> {
+    binding.check()?;
+    let plaintext = handle_decrypt_own_escrowed(
+        shared.tcp_client.clone(),
+        shared.retrieve_agent_escrow_keypair_reply_router.clone(),
+        shared.agent_escrow_issuance_reply_router.clone(),
+        shared.escrow_key_reply_router.clone(),
+        shared.store_secret_reply_router.clone(),
+        shared.cached_key.clone(),
+        shared.escrow_keypair_handle.clone(),
+        shared.own_identity.clone(),
+        shared.paths.clone(),
+        secret,
+        context,
+    )
+    .await?;
+    // The form that is escrowed also proves the secret is text and the binding is whole.
+    let record = registry::escrow_form(&binding, &plaintext)?;
+    shared.registry.lock().await.insert(
+        name.clone(),
+        RegisteredSecret {
+            binding,
+            secret: plaintext,
+        },
+    );
+    info!(secret = %name, "secret registered");
+    start_escrow(&shared, name, record);
+    Ok(())
+}
+
+/// Escrows `record` under the identity-prefixed name in the background, until the credentials agent acknowledges
+/// it. A failure is retried after a wait that doubles up to the most; a refusal for the wrong escrow key forgets
+/// the cached key and retries; any other refusal is deterministic, so it is reported and not retried. A newer
+/// registration of the name replaces this task.
+fn start_escrow(shared: &Shared, name: String, record: zeroize::Zeroizing<Vec<u8>>) {
+    let task = shared.clone();
+    let task_name = name.clone();
+    let handle = tokio::spawn(async move {
+        let escrow_name = escrow_name(&task.own_identity, &task_name);
+        let (mut wait, most) = task.escrow_retry;
+        loop {
+            let result = handle_store_secret(
+                task.tcp_client.clone(),
+                task.escrow_key_reply_router.clone(),
+                task.store_secret_reply_router.clone(),
+                task.cached_key.clone(),
+                escrow_name.clone(),
+                &record,
+            )
+            .await;
+            match result {
+                Ok(()) => {
+                    info!(secret = %task_name, "secret escrowed with the credentials agent");
+                    break;
+                }
+                Err(CryptoError::Refused(StoreRefusalReason::WrongEscrowKey)) => {
+                    warn!(secret = %task_name, "the escrow key was not the current one; asking again");
+                    *task.cached_key.lock().await = None;
+                }
+                Err(CryptoError::Refused(reason)) => {
+                    error!(secret = %task_name, ?reason, "the credentials agent refused to escrow the secret, and trying again cannot change that");
+                    break;
+                }
+                Err(error) => {
+                    warn!(secret = %task_name, %error, "escrowing the secret failed; will try again");
+                }
+            }
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(most);
+        }
+    });
+    if let Some(earlier) = shared.escrow_tasks.lock().unwrap().insert(name, handle) {
+        earlier.abort();
+    }
+}
+
+/// The real handler behind CryptoMessage::LoadSecret.
+async fn load_secret(shared: Shared, name: String) -> Result<bool, CryptoError> {
+    let found = handle_retrieve_secret(
+        shared.tcp_client.clone(),
+        shared.retrieve_secret_reply_router.clone(),
+        shared.retrieve_agent_escrow_keypair_reply_router.clone(),
+        shared.agent_escrow_issuance_reply_router.clone(),
+        shared.escrow_key_reply_router.clone(),
+        shared.store_secret_reply_router.clone(),
+        shared.cached_key.clone(),
+        shared.escrow_keypair_handle.clone(),
+        shared.own_identity.clone(),
+        shared.paths.clone(),
+        escrow_name(&shared.own_identity, &name),
+    )
+    .await?;
+    let Some(record) = found else {
+        return Ok(false);
+    };
+    let (binding, secret) = registry::from_escrow_form(&record)?;
+    shared
+        .registry
+        .lock()
+        .await
+        .insert(name, RegisteredSecret { binding, secret });
+    Ok(true)
+}
+
+/// Opens an `EscrowedSecret` addressed to this identity, for `register_secret`: read the bytes as one, make
 /// sure this identity's escrow key is in hand, and open the secret under `context` with that key, which
-/// never leaves its custody.
+/// never leaves its custody. Not a message: no caller has the plaintext of a registered secret.
 #[allow(clippy::too_many_arguments)]
 async fn handle_decrypt_own_escrowed(
     tcp_client: ActorRef<TcpClientMessage>,
@@ -1619,6 +1840,23 @@ mod tests {
         retrievable_secrets: Vec<(String, Vec<u8>)>,
         /// If true every RetrieveSecretRequest is answered Denied, as policy would.
         deny_retrieval: bool,
+        /// Every StoreSecretRequest, as (name, decrypted plaintext), in the order they arrived and whatever
+        /// they were answered.
+        stored: Option<StoreLog>,
+        /// While true every store is answered Failed, as when the ledger cannot be appended to.
+        failing_stores: Option<Arc<std::sync::atomic::AtomicBool>>,
+        /// How the first stores are answered, in order; after that, Stored.
+        store_script: std::sync::Mutex<std::collections::VecDeque<StoreScript>>,
+    }
+
+    /// What the fake credentials agent was asked to store, as (name, decrypted plaintext), in arrival order.
+    type StoreLog = Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+
+    /// A scripted answer to a store.
+    #[derive(Clone, Copy)]
+    enum StoreScript {
+        Failed,
+        Refused(StoreRefusalReason),
     }
 
     #[async_trait]
@@ -1699,10 +1937,30 @@ mod tests {
                     if let Ok(mut guard) = self.last_stored_secret_plaintext.lock() {
                         *guard = Some(decrypted.to_vec());
                     }
+                    if let Some(stored) = &self.stored {
+                        stored
+                            .lock()
+                            .unwrap()
+                            .push((envelope.payload.name.clone(), decrypted.to_vec()));
+                    }
+                    let failing = self
+                        .failing_stores
+                        .as_ref()
+                        .is_some_and(|f| f.load(std::sync::atomic::Ordering::SeqCst));
+                    let scripted = self.store_script.lock().unwrap().pop_front();
+                    let answer = match (failing, scripted) {
+                        (true, _) | (_, Some(StoreScript::Failed)) => StoreSecretReply::Failed {
+                            detail: "scripted".to_string(),
+                        },
+                        (_, Some(StoreScript::Refused(reason))) => {
+                            StoreSecretReply::Refused { reason }
+                        }
+                        (false, None) => StoreSecretReply::Stored,
+                    };
 
                     let reply = Envelope {
                         correlation_id: envelope.correlation_id,
-                        payload: StoreSecretReply::Stored,
+                        payload: answer,
                     };
                     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
                         .unwrap()
@@ -1872,6 +2130,9 @@ mod tests {
         retrievable_secrets: Vec<(String, Vec<u8>)>,
         /// Every retrieval is denied by policy.
         deny_retrieval: bool,
+        stored: Option<StoreLog>,
+        failing_stores: Option<Arc<std::sync::atomic::AtomicBool>>,
+        store_script: Vec<StoreScript>,
     }
 
     /// A temporary file standing in for the in-cluster, mounted service-account token.
@@ -1942,6 +2203,9 @@ mod tests {
                 agent_escrow_key_queries: agent_escrow_key_queries.clone(),
                 retrievable_secrets: config.retrievable_secrets,
                 deny_retrieval: config.deny_retrieval,
+                stored: config.stored,
+                failing_stores: config.failing_stores,
+                store_script: std::sync::Mutex::new(config.store_script.into_iter().collect()),
             },
             (),
         )
@@ -1959,11 +2223,16 @@ mod tests {
         let (crypto_actor, _) = Actor::spawn(
             None,
             CryptoActor,
-            CryptoActorArgs::new(fake_agent, router).with_settings(environment::CryptoSettings {
-                own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
-                service_account_token_path: service_account_token_path.clone(),
-                escrow_key_handle_path: escrow_key_handle_path.clone(),
-            }),
+            CryptoActorArgs::new(fake_agent, router)
+                .with_settings(environment::CryptoSettings {
+                    own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
+                    service_account_token_path: service_account_token_path.clone(),
+                    escrow_key_handle_path: escrow_key_handle_path.clone(),
+                })
+                .with_escrow_retry(
+                    std::time::Duration::from_millis(5),
+                    std::time::Duration::from_millis(20),
+                ),
         )
         .await
         .unwrap();
@@ -2196,73 +2465,533 @@ mod tests {
         stop_and_release_key(&crypto_actor).await;
     }
 
-    #[tokio::test]
-    async fn decrypt_own_escrowed_opens_a_secret_bound_to_its_context_and_only_that_one() {
-        use credentials_agent_common::escrow_secret::EscrowedSecret;
+    // ---- registered secrets, and what is done with them ---------------------------------------------------------
+
+    use registry::{GitCredential, RecordError, SecretBinding, SecretKind, UseRefusal};
+
+    /// An actor holding an escrow key a test can encrypt to, beside a credentials agent that records every store.
+    struct Rig {
+        actor: ActorRef<CryptoMessage>,
+        public_pem: String,
+        identity: String,
+        stored: StoreLog,
+        failing: Arc<std::sync::atomic::AtomicBool>,
+        key_queries: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    /// `held` are secrets the credentials agent holds for this identity, by short name.
+    async fn rig(
+        script: Vec<StoreScript>,
+        held: Vec<(&str, Vec<u8>)>,
+        deny_retrieval: bool,
+    ) -> Rig {
         let mut rng = rand::rng();
-        let escrowed_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let escrowed_key_pem =
-            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&escrowed_key, rsa::pkcs8::LineEnding::LF)
-                .unwrap();
+        let key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pem =
+            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&key, rsa::pkcs8::LineEnding::LF).unwrap();
         let public_pem = rsa::pkcs8::EncodePublicKey::to_public_key_pem(
-            &escrowed_key.to_public_key(),
+            &key.to_public_key(),
             rsa::pkcs8::LineEnding::LF,
         )
         .unwrap();
-
-        let ((crypto_actor, _), _, _) =
+        let identity = format!("test-agent-{}", uuid::Uuid::new_v4());
+        let stored = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let retrievable_secrets = held
+            .into_iter()
+            .map(|(name, bytes)| (format!("{identity}/{name}"), bytes))
+            .collect();
+        let ((actor, key_queries), _, _) =
             spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
-                stored_escrow_keypair_pem: Some(escrowed_key_pem.to_string()),
+                stored_escrow_keypair_pem: Some(pem.to_string()),
                 issue_agent_escrow_certificates: false,
+                identity: Some(identity.clone()),
+                retrievable_secrets,
+                deny_retrieval,
+                stored: Some(stored.clone()),
+                failing_stores: Some(failing.clone()),
+                store_script: script,
                 ..Default::default()
             })
             .await;
+        Rig {
+            actor,
+            public_pem,
+            identity,
+            stored,
+            failing,
+            key_queries,
+        }
+    }
 
-        let context = b"git-repo-observer|credentials|token|2".to_vec();
-        let escrowed =
-            EscrowedSecret::encrypt_bound(b"a token, in a document", &public_pem, &context)
-                .unwrap();
-        let secret = rkyv::to_bytes::<rkyv::rancor::Error>(&escrowed)
+    fn escrowed_bytes(rig: &Rig, plaintext: &[u8], context: &[u8]) -> Vec<u8> {
+        let escrowed = EscrowedSecret::encrypt_bound(plaintext, &rig.public_pem, context).unwrap();
+        rkyv::to_bytes::<rkyv::rancor::Error>(&escrowed)
             .unwrap()
-            .to_vec();
+            .to_vec()
+    }
 
-        // Its own context: opens.
-        let opened = ractor::call!(crypto_actor, |reply| CryptoMessage::DecryptOwnEscrowed {
-            secret: secret.clone(),
-            context: context.clone(),
+    fn token_binding(host: &str) -> SecretBinding {
+        SecretBinding {
+            host_pattern: host.to_string(),
+            kind: SecretKind::Token,
+            username: None,
+        }
+    }
+
+    async fn register(
+        rig: &Rig,
+        name: &str,
+        plaintext: &[u8],
+        context: &[u8],
+        binding: SecretBinding,
+    ) -> Result<(), CryptoError> {
+        let secret = escrowed_bytes(rig, plaintext, context);
+        ractor::call!(rig.actor, |reply| CryptoMessage::RegisterSecret {
+            name: name.to_string(),
+            secret,
+            context: context.to_vec(),
+            binding,
             reply,
         })
         .unwrap()
-        .expect("opens under its own context");
-        assert_eq!(opened.as_slice(), b"a token, in a document");
+    }
 
-        // Any other (another field, another version, none): refused as a failed decrypt.
-        for other in [&b"git-repo-observer|credentials|token|3"[..], b""] {
-            let refused = ractor::call!(crypto_actor, |reply| CryptoMessage::DecryptOwnEscrowed {
-                secret: secret.clone(),
-                context: other.to_vec(),
-                reply,
-            })
-            .unwrap();
+    async fn git_credential(
+        rig: &Rig,
+        name: &str,
+        host: &str,
+    ) -> Result<GitCredential, CryptoError> {
+        ractor::call!(rig.actor, |reply| CryptoMessage::GitCredential {
+            name: name.to_string(),
+            host: host.to_string(),
+            reply,
+        })
+        .unwrap()
+    }
+
+    async fn load(rig: &Rig, name: &str) -> Result<bool, CryptoError> {
+        ractor::call!(rig.actor, |reply| CryptoMessage::LoadSecret {
+            name: name.to_string(),
+            reply,
+        })
+        .unwrap()
+    }
+
+    async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+        for _ in 0..600 {
+            if condition() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    async fn settle() {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+
+    fn stored_len(rig: &Rig) -> usize {
+        rig.stored.lock().unwrap().len()
+    }
+
+    fn secret_of(record: &[u8]) -> String {
+        String::from_utf8(registry::from_escrow_form(record).unwrap().1.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_registered_secret_is_given_to_git_for_a_bound_host_and_never_for_another() {
+        let r = rig(vec![], vec![], false).await;
+        register(
+            &r,
+            "github",
+            b"ghp-token",
+            b"ctx-1",
+            token_binding("github.com"),
+        )
+        .await
+        .unwrap();
+        let got = git_credential(&r, "github", "github.com").await.unwrap();
+        assert_eq!(got.username, "oauth2");
+        assert_eq!(got.secret.as_slice(), b"ghp-token");
+        for host in ["evil.example.org", "github.com.evil.org", "github.com:443"] {
+            let refused = git_credential(&r, "github", host).await;
             assert!(
-                matches!(refused, Err(CryptoError::DecryptFailed(_))),
-                "{:?}: {refused:?}",
-                String::from_utf8_lossy(other)
+                matches!(refused, Err(CryptoError::Use(UseRefusal::HostNotBound))),
+                "{host}: {refused:?}"
             );
         }
+        stop_and_release_key(&r.actor).await;
+    }
 
-        // Bytes that are not an escrowed secret are a serialization error, not a panic.
-        let garbage = ractor::call!(crypto_actor, |reply| CryptoMessage::DecryptOwnEscrowed {
-            secret: b"not an escrowed secret".to_vec(),
-            context: context.clone(),
+    #[tokio::test]
+    async fn a_secret_nothing_registered_is_refused_by_name() {
+        let r = rig(vec![], vec![], false).await;
+        let refused = git_credential(&r, "github", "github.com").await;
+        assert!(
+            matches!(refused, Err(CryptoError::SecretNotRegistered(_))),
+            "{refused:?}"
+        );
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn a_secret_made_for_another_context_is_refused_and_nothing_is_registered_or_escrowed() {
+        let r = rig(vec![], vec![], false).await;
+        let secret = escrowed_bytes(
+            &r,
+            b"ghp-token",
+            b"git-repo-observer|credentials|1|github|secret",
+        );
+        let refused = ractor::call!(r.actor, |reply| CryptoMessage::RegisterSecret {
+            name: "github".to_string(),
+            secret: secret.clone(),
+            context: b"git-repo-observer|credentials|1|other|secret".to_vec(),
+            binding: token_binding("github.com"),
             reply,
         })
         .unwrap();
         assert!(
-            matches!(garbage, Err(CryptoError::Serialization(_))),
-            "{garbage:?}"
+            matches!(refused, Err(CryptoError::DecryptFailed(_))),
+            "{refused:?}"
         );
-        stop_and_release_key(&crypto_actor).await;
+        assert!(matches!(
+            git_credential(&r, "github", "github.com").await,
+            Err(CryptoError::SecretNotRegistered(_))
+        ));
+        settle().await;
+        assert_eq!(stored_len(&r), 0);
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn bytes_that_are_not_an_escrowed_secret_are_a_serialization_error_and_register_nothing()
+    {
+        let r = rig(vec![], vec![], false).await;
+        let refused = ractor::call!(r.actor, |reply| CryptoMessage::RegisterSecret {
+            name: "github".to_string(),
+            secret: b"not an escrowed secret".to_vec(),
+            context: b"ctx".to_vec(),
+            binding: token_binding("github.com"),
+            reply,
+        })
+        .unwrap();
+        assert!(
+            matches!(refused, Err(CryptoError::Serialization(_))),
+            "{refused:?}"
+        );
+        assert!(git_credential(&r, "github", "github.com").await.is_err());
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn a_binding_that_is_not_usable_is_refused_and_registers_and_escrows_nothing() {
+        let r = rig(vec![], vec![], false).await;
+        let refused = register(&r, "github", b"ghp-token", b"ctx", token_binding("*")).await;
+        assert!(
+            matches!(
+                refused,
+                Err(CryptoError::Record(RecordError::BadBinding(_)))
+            ),
+            "{refused:?}"
+        );
+        assert!(git_credential(&r, "github", "github.com").await.is_err());
+        settle().await;
+        assert_eq!(stored_len(&r), 0);
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn a_user_and_password_without_a_username_is_held_but_not_given_to_git() {
+        let r = rig(vec![], vec![], false).await;
+        let binding = SecretBinding {
+            host_pattern: "git.example.org".to_string(),
+            kind: SecretKind::UserPassword,
+            username: None,
+        };
+        register(&r, "internal", b"hunter2", b"ctx", binding)
+            .await
+            .unwrap();
+        let refused = git_credential(&r, "internal", "git.example.org").await;
+        assert!(
+            matches!(refused, Err(CryptoError::Use(UseRefusal::NoUsername))),
+            "{refused:?}"
+        );
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn registering_escrows_the_secret_with_its_binding_under_the_identity_prefixed_name() {
+        let r = rig(vec![], vec![], false).await;
+        let binding = SecretBinding {
+            host_pattern: "github.com".to_string(),
+            kind: SecretKind::Token,
+            username: Some("daveman1010221".to_string()),
+        };
+        register(&r, "github", b"ghp-token", b"ctx", binding.clone())
+            .await
+            .unwrap();
+        wait_until("the escrow", || stored_len(&r) >= 1).await;
+        let (name, record) = r.stored.lock().unwrap()[0].clone();
+        assert_eq!(name, format!("{}/github", r.identity));
+        let (escrowed_binding, secret) = registry::from_escrow_form(&record).unwrap();
+        assert_eq!(escrowed_binding, binding);
+        assert_eq!(secret.as_slice(), b"ghp-token");
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn registering_does_not_wait_for_the_escrow_and_the_secret_is_usable_meanwhile() {
+        let r = rig(vec![], vec![], false).await;
+        r.failing.store(true, std::sync::atomic::Ordering::SeqCst);
+        register(
+            &r,
+            "github",
+            b"ghp-token",
+            b"ctx",
+            token_binding("github.com"),
+        )
+        .await
+        .unwrap();
+        assert!(git_credential(&r, "github", "github.com").await.is_ok());
+        wait_until("a retry", || stored_len(&r) >= 2).await;
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn an_escrow_that_fails_is_retried_until_it_is_acknowledged_and_then_stops() {
+        let r = rig(
+            vec![StoreScript::Failed, StoreScript::Failed],
+            vec![],
+            false,
+        )
+        .await;
+        register(
+            &r,
+            "github",
+            b"ghp-token",
+            b"ctx",
+            token_binding("github.com"),
+        )
+        .await
+        .unwrap();
+        wait_until("three attempts", || stored_len(&r) >= 3).await;
+        settle().await;
+        assert_eq!(
+            stored_len(&r),
+            3,
+            "two failures, then the acknowledgement, then nothing more"
+        );
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn an_escrow_refused_for_a_reason_retrying_cannot_fix_is_not_retried() {
+        for reason in [
+            StoreRefusalReason::NameTaken,
+            StoreRefusalReason::AnonymousPublisherNotAllowed,
+        ] {
+            let r = rig(vec![StoreScript::Refused(reason)], vec![], false).await;
+            register(
+                &r,
+                "github",
+                b"ghp-token",
+                b"ctx",
+                token_binding("github.com"),
+            )
+            .await
+            .unwrap();
+            wait_until("the attempt", || stored_len(&r) >= 1).await;
+            settle().await;
+            assert_eq!(stored_len(&r), 1, "{reason:?}");
+            // It is still held, and usable, in this agent.
+            assert!(git_credential(&r, "github", "github.com").await.is_ok());
+            stop_and_release_key(&r.actor).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_escrow_refused_for_the_wrong_escrow_key_is_retried_with_the_current_key() {
+        let r = rig(
+            vec![StoreScript::Refused(StoreRefusalReason::WrongEscrowKey)],
+            vec![],
+            false,
+        )
+        .await;
+        register(
+            &r,
+            "github",
+            b"ghp-token",
+            b"ctx",
+            token_binding("github.com"),
+        )
+        .await
+        .unwrap();
+        wait_until("a second attempt", || stored_len(&r) >= 2).await;
+        settle().await;
+        assert_eq!(stored_len(&r), 2);
+        assert!(
+            r.key_queries.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "the cached key was kept after the credentials agent said it was wrong"
+        );
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn registering_a_name_again_replaces_it_and_stops_escrowing_the_old_value() {
+        let r = rig(vec![], vec![], false).await;
+        r.failing.store(true, std::sync::atomic::Ordering::SeqCst);
+        register(
+            &r,
+            "github",
+            b"old-token",
+            b"ctx-1",
+            token_binding("github.com"),
+        )
+        .await
+        .unwrap();
+        wait_until("an attempt for the old value", || stored_len(&r) >= 1).await;
+        register(
+            &r,
+            "github",
+            b"new-token",
+            b"ctx-2",
+            token_binding("github.com"),
+        )
+        .await
+        .unwrap();
+        r.failing.store(false, std::sync::atomic::Ordering::SeqCst);
+        wait_until("the new value escrowed", || {
+            r.stored
+                .lock()
+                .unwrap()
+                .last()
+                .is_some_and(|(_, record)| secret_of(record) == "new-token")
+        })
+        .await;
+        settle().await;
+        let entries = r.stored.lock().unwrap().clone();
+        let first_new = entries
+            .iter()
+            .position(|(_, record)| secret_of(record) == "new-token")
+            .unwrap();
+        assert!(
+            entries[first_new..]
+                .iter()
+                .all(|(_, record)| secret_of(record) == "new-token"),
+            "the old value was escrowed after it was replaced"
+        );
+        let got = git_credential(&r, "github", "github.com").await.unwrap();
+        assert_eq!(got.secret.as_slice(), b"new-token");
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn a_stopped_actor_stops_trying_to_escrow() {
+        let r = rig(vec![], vec![], false).await;
+        r.failing.store(true, std::sync::atomic::Ordering::SeqCst);
+        register(
+            &r,
+            "github",
+            b"ghp-token",
+            b"ctx",
+            token_binding("github.com"),
+        )
+        .await
+        .unwrap();
+        wait_until("an attempt", || stored_len(&r) >= 1).await;
+        stop_and_release_key(&r.actor).await;
+        let at_stop = stored_len(&r);
+        settle().await;
+        assert_eq!(
+            stored_len(&r),
+            at_stop,
+            "it kept trying after it was stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn loading_registers_what_the_credentials_agent_holds_under_the_prefixed_name_and_does_not_escrow_it_again()
+     {
+        let binding = SecretBinding {
+            host_pattern: "*.example.org".to_string(),
+            kind: SecretKind::Token,
+            username: None,
+        };
+        let record = registry::escrow_form(&binding, b"ghp-token").unwrap();
+        let r = rig(vec![], vec![("github", record.to_vec())], false).await;
+        assert!(load(&r, "github").await.unwrap());
+        let got = git_credential(&r, "github", "git.example.org")
+            .await
+            .unwrap();
+        assert_eq!(got.secret.as_slice(), b"ghp-token");
+        assert!(git_credential(&r, "github", "github.com").await.is_err());
+        settle().await;
+        assert_eq!(stored_len(&r), 0);
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn loading_a_name_nothing_holds_is_false_and_registers_nothing() {
+        let r = rig(vec![], vec![], false).await;
+        assert!(!load(&r, "github").await.unwrap());
+        assert!(git_credential(&r, "github", "github.com").await.is_err());
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn loading_a_secret_policy_denies_is_an_error_that_says_so() {
+        let binding = token_binding("github.com");
+        let record = registry::escrow_form(&binding, b"ghp-token").unwrap();
+        let r = rig(vec![], vec![("github", record.to_vec())], true).await;
+        let refused = load(&r, "github").await;
+        assert!(
+            matches!(refused, Err(CryptoError::RetrieveSecretDenied(_))),
+            "{refused:?}"
+        );
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn loading_something_that_is_not_a_credential_registers_nothing() {
+        let r = rig(vec![], vec![("github", b"just some bytes".to_vec())], false).await;
+        let refused = load(&r, "github").await;
+        assert!(
+            matches!(refused, Err(CryptoError::Record(RecordError::Malformed))),
+            "{refused:?}"
+        );
+        assert!(git_credential(&r, "github", "github.com").await.is_err());
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn no_refusal_repeats_the_secret() {
+        let r = rig(vec![], vec![], false).await;
+        register(
+            &r,
+            "github",
+            b"ghp-super-secret",
+            b"ctx",
+            token_binding("github.com"),
+        )
+        .await
+        .unwrap();
+        let refused = git_credential(&r, "github", "evil.example.org")
+            .await
+            .unwrap_err();
+        assert!(!format!("{refused} {refused:?}").contains("ghp-super-secret"));
+        let wrong_context = ractor::call!(r.actor, |reply| CryptoMessage::RegisterSecret {
+            name: "other".to_string(),
+            secret: escrowed_bytes(&r, b"ghp-super-secret", b"ctx-a"),
+            context: b"ctx-b".to_vec(),
+            binding: token_binding("github.com"),
+            reply,
+        })
+        .unwrap()
+        .unwrap_err();
+        assert!(!format!("{wrong_context} {wrong_context:?}").contains("ghp-super-secret"));
+        stop_and_release_key(&r.actor).await;
     }
 
     #[tokio::test]

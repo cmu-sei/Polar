@@ -12,6 +12,7 @@
 //! network connection needed at all.
 
 use async_trait::async_trait;
+use polar_crypto::registry::{GitCredential, SecretBinding};
 use polar_crypto::{CryptoError, CryptoMessage};
 use ractor::ActorRef;
 
@@ -39,6 +40,25 @@ pub trait CryptoClient: Send + Sync {
         &self,
         name: String,
     ) -> Result<Option<polar_crypto::Zeroizing<Vec<u8>>>, CryptoError>;
+
+    /// See CryptoMessage::RegisterSecret's own doc comment.
+    async fn register_secret(
+        &self,
+        name: String,
+        secret: Vec<u8>,
+        context: Vec<u8>,
+        binding: SecretBinding,
+    ) -> Result<(), CryptoError>;
+
+    /// See CryptoMessage::LoadSecret's own doc comment.
+    async fn load_secret(&self, name: String) -> Result<bool, CryptoError>;
+
+    /// See CryptoMessage::GitCredential's own doc comment.
+    async fn git_credential(
+        &self,
+        name: String,
+        host: String,
+    ) -> Result<GitCredential, CryptoError>;
 }
 
 /// The real, live implementation of CryptoClient -- a thin wrapper
@@ -117,6 +137,44 @@ impl CryptoClient for CryptoHandle {
     ) -> Result<Option<polar_crypto::Zeroizing<Vec<u8>>>, CryptoError> {
         let result = ractor::call!(self.actor, |reply| CryptoMessage::RetrieveSecret {
             name,
+            reply,
+        });
+        flatten_call_result(result)
+    }
+
+    async fn register_secret(
+        &self,
+        name: String,
+        secret: Vec<u8>,
+        context: Vec<u8>,
+        binding: SecretBinding,
+    ) -> Result<(), CryptoError> {
+        let result = ractor::call!(self.actor, |reply| CryptoMessage::RegisterSecret {
+            name,
+            secret,
+            context,
+            binding,
+            reply,
+        });
+        flatten_call_result(result)
+    }
+
+    async fn load_secret(&self, name: String) -> Result<bool, CryptoError> {
+        let result = ractor::call!(self.actor, |reply| CryptoMessage::LoadSecret {
+            name,
+            reply
+        });
+        flatten_call_result(result)
+    }
+
+    async fn git_credential(
+        &self,
+        name: String,
+        host: String,
+    ) -> Result<GitCredential, CryptoError> {
+        let result = ractor::call!(self.actor, |reply| CryptoMessage::GitCredential {
+            name,
+            host,
             reply,
         });
         flatten_call_result(result)

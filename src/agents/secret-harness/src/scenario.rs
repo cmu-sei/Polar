@@ -247,6 +247,25 @@ mod tests {
                 )),
             }
         }
+        async fn register_secret(
+            &self,
+            _: String,
+            _: Vec<u8>,
+            _: Vec<u8>,
+            _: polar_crypto::registry::SecretBinding,
+        ) -> Result<(), CryptoError> {
+            Err(CryptoError::NoReply)
+        }
+        async fn load_secret(&self, _: String) -> Result<bool, CryptoError> {
+            Err(CryptoError::NoReply)
+        }
+        async fn git_credential(
+            &self,
+            _: String,
+            _: String,
+        ) -> Result<polar_crypto::registry::GitCredential, CryptoError> {
+            Err(CryptoError::NoReply)
+        }
         async fn decrypt_own_message(&self, _: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
             Err(CryptoError::NoReply)
         }
