@@ -77,7 +77,12 @@ later, at init: the CryptoActor retrieves (RetrieveSecret { name }) each credent
 The controller never sees a credential. A repository names the credential it wants (`"credential": "github-sei"`);
 the observer has, or fetches, the secret by that name (stored under its own identity as a prefix,
 `<identity>/github-sei`; `credentials-policy.md`). A repository whose credential the observer lacks is
-`pending: no credential` in the status it reports, and becomes active when the credential arrives.
+`pending: no credential` in the status it reports, and becomes active when the credential arrives. Decided
+2026-10-14 (David): the repository and its credential reach the observer by different routes, so the repository can
+come first. Its worker does not fail: it stays pending and tries again when the `credentials` section changes and on
+its own frequency tick (the status event itself comes later). A credential a later version of the section leaves out
+is withdrawn: the CryptoActor drops it (`ReplaceSection`, `credentials-agent-architecture.md`) and a repository naming
+it is pending again.
 
 ### Status and checkpoints
 

@@ -493,6 +493,13 @@ required). Decided 2026-10-14 (David). The host being checked must itself be a b
 trailing dot or an IP address never matches (normalising a URL and the network guard are the caller's job,
 `proposals.md`).
 
+**Replace by section** (decided 2026-10-14, David; to build in step 3). A runtime section is replaced whole, so an entry a
+later version leaves out is withdrawn. Each registered secret is tagged with the section it came from, and one more
+message, `ReplaceSection { section, keep }`, drops every secret registered under `section` whose name is not in
+`keep`. The agent sends it after registering the entries of each new version. `LoadSecret` is then only asked for
+names the current section lists, so a withdrawn secret does not return after a restart from the escrowed copy. The
+escrowed copy itself stays in the ledger, which has no delete.
+
 `StoreSecret` and `RetrieveSecret` stay as they are, since the harness and the escrow-keypair flow use them.
 Decrypting an `EscrowedSecret` under a context is internal to `RegisterSecret`: no public message returns the
 plaintext of a registered secret.
