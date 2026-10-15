@@ -19,7 +19,7 @@ pub const GIT_REPO_PROCESSING_TOPIC: &str = "polar.git.processor";
 /// holds the credentials it was given in a signed `credentials` document, in its CryptoActor, and
 /// uses one only for the hosts that credential is bound to. `None` means a public repository:
 /// unauthenticated access.
-#[derive(Serialize, Deserialize, Archive, Debug, Clone)]
+#[derive(Serialize, Deserialize, Archive, Debug, Clone, PartialEq)]
 pub struct RepoObservationConfig {
     pub repo_id: RepoId,
     pub repo_url: String,

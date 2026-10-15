@@ -17,6 +17,9 @@ use tracing::{debug, error, info, instrument, trace, warn};
 pub const SERVICE_NAME: &str = "polar.git.observer";
 pub const REPO_SUPERVISOR_NAME: &str = "polar.git.observer.repo.supervisor";
 
+/// How long a worker that is being replaced is given to stop: it may be in the middle of a fetch.
+const WORKER_GRACE: ractor::concurrency::Duration = ractor::concurrency::Duration::from_secs(30);
+
 pub mod agent;
 pub mod credentials;
 pub mod settings;
@@ -24,6 +27,21 @@ pub mod supervisor;
 
 fn git_time_to_epoch_ms(t: &git2::Time) -> i64 {
     t.seconds() * 1000
+}
+
+/// The refs to read in the clone for the refs an author asked for. A bare clone's `refs/heads/main` stops
+/// moving after the clone; a fetch advances only `refs/remotes/<remote>/main`. So a configured `refs/heads/X`
+/// is read from `refs/remotes/<remote>/X`, the remote being the first one fetched (`origin` when none is
+/// named). Anything else (`refs/remotes/...`, `refs/tags/...`, a name that is not a full ref) is taken as
+/// written, and an empty list stays empty, for the default branch to be found after the clone.
+pub fn tracked_refs(remotes: &[String], refs: &[String]) -> Vec<String> {
+    let remote = remotes.first().map(String::as_str).unwrap_or("origin");
+    refs.iter()
+        .map(|r| match r.strip_prefix("refs/heads/") {
+            Some(branch) => format!("refs/remotes/{remote}/{branch}"),
+            None => r.clone(),
+        })
+        .collect()
 }
 
 /* ============================
@@ -113,9 +131,15 @@ pub fn send_event(
 /// you have already made a mistake.
 pub struct GitRepoSupervisor;
 
+/// A worker that is running, and the configuration it was started with, as announced.
+struct RunningWorker {
+    actor: ActorRef<GitRepoWorkerMsg>,
+    config: RepoObservationConfig,
+}
+
 pub struct GitRepoSupervisorState {
     cache_root: PathBuf,
-    workers: HashMap<RepoId, ActorRef<GitRepoWorkerMsg>>,
+    workers: HashMap<RepoId, RunningWorker>,
     tcp_client: TcpClient,
     crypto: Arc<dyn CryptoClient>,
 }
@@ -197,6 +221,31 @@ impl Actor for GitRepoSupervisor {
                 trace!("Received SpawnWorker message");
                 let repo_id = config.repo_id.clone();
 
+                // The same announcement again is nothing to do. A changed one replaces the worker: the
+                // clone in the cache is reused, so only the settings change.
+                match state.workers.get(&repo_id) {
+                    Some(running) if running.config == config => {
+                        debug!("worker for {repo_id} already running with this configuration");
+                        return Ok(());
+                    }
+                    Some(_) => {
+                        info!("the configuration of {repo_id} changed; restarting its worker");
+                        if let Some(old) = state.workers.remove(&repo_id)
+                            && let Err(e) = old
+                                .actor
+                                .stop_and_wait(
+                                    Some("configuration changed".into()),
+                                    Some(WORKER_GRACE),
+                                )
+                                .await
+                        {
+                            warn!("the old worker for {repo_id} did not stop in time: {e:?}");
+                        }
+                    }
+                    None => {}
+                }
+
+                let announced = config.clone();
                 let args = GitRepoWorkerArgs {
                     config,
                     crypto: state.crypto.clone(),
@@ -212,15 +261,21 @@ impl Actor for GitRepoSupervisor {
                 )
                 .await
                 {
-                    Ok((worker, _)) => {
-                        state.workers.insert(repo_id, worker);
+                    Ok((actor, _)) => {
+                        state.workers.insert(
+                            repo_id,
+                            RunningWorker {
+                                actor,
+                                config: announced,
+                            },
+                        );
                     }
                     Err(e) => tolerate_spawn_failure(&repo_id, e)?,
                 }
             }
             RepoSupervisorMessage::CredentialsChanged => {
                 for worker in state.workers.values() {
-                    if let Err(e) = worker.cast(GitRepoWorkerMsg::CredentialsChanged) {
+                    if let Err(e) = worker.actor.cast(GitRepoWorkerMsg::CredentialsChanged) {
                         warn!("could not tell a worker the credentials changed: {e}");
                     }
                 }
@@ -228,7 +283,7 @@ impl Actor for GitRepoSupervisor {
             RepoSupervisorMessage::StopWorker { repo_id } => {
                 // The clone stays in the cache: it is reused if the repository is observed again.
                 match state.workers.remove(&repo_id) {
-                    Some(worker) => worker.stop(Some("asked to stop".into())),
+                    Some(worker) => worker.actor.stop(Some("asked to stop".into())),
                     None => warn!("asked to stop the worker for {repo_id}, which is not running"),
                 }
             }
@@ -245,11 +300,15 @@ impl Actor for GitRepoSupervisor {
         match event {
             SupervisionEvent::ActorFailed(cell, reason) => {
                 error!("worker {cell:?} failed: {reason:?}");
-                state.workers.retain(|_, w| w.get_id() != cell.get_id());
+                state
+                    .workers
+                    .retain(|_, w| w.actor.get_id() != cell.get_id());
             }
             SupervisionEvent::ActorTerminated(cell, _, reason) => {
                 warn!("worker {cell:?} terminated: {reason:?}");
-                state.workers.retain(|_, w| w.get_id() != cell.get_id());
+                state
+                    .workers
+                    .retain(|_, w| w.actor.get_id() != cell.get_id());
             }
             _ => {}
         }
@@ -615,8 +674,10 @@ impl Actor for GitRepoWorker {
         debug!("{myself:?} starting");
         // Nothing is cloned here: the repository may name a credential that has not arrived, and the first
         // attempt (post_start) is the one that finds out.
+        let mut config = args.config;
+        config.refs = tracked_refs(&config.remotes, &config.refs);
         Ok(GitRepoWorkerState {
-            config: args.config,
+            config,
             repo_path: args.repo_path,
             tcp_client: args.tcp_client,
             crypto: args.crypto,
@@ -746,6 +807,217 @@ mod tests {
             received,
             cache,
         }
+    }
+
+    #[test]
+    fn a_branch_is_read_from_the_remote_tracking_ref_a_fetch_advances() {
+        let origin = vec!["origin".to_string()];
+        let refs = |r: &[&str]| r.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            tracked_refs(&origin, &refs(&["refs/heads/main", "refs/heads/feature/x"])),
+            refs(&["refs/remotes/origin/main", "refs/remotes/origin/feature/x"])
+        );
+        // the first remote is the one fetched; none named is origin
+        assert_eq!(
+            tracked_refs(
+                &["upstream".to_string(), "origin".to_string()],
+                &refs(&["refs/heads/dev"])
+            ),
+            refs(&["refs/remotes/upstream/dev"])
+        );
+        assert_eq!(
+            tracked_refs(&[], &refs(&["refs/heads/dev"])),
+            refs(&["refs/remotes/origin/dev"])
+        );
+        // anything else is as written, and nothing stays nothing
+        assert_eq!(
+            tracked_refs(
+                &origin,
+                &refs(&["refs/remotes/origin/main", "refs/tags/v1", "HEAD", "main"])
+            ),
+            refs(&["refs/remotes/origin/main", "refs/tags/v1", "HEAD", "main"])
+        );
+        assert!(tracked_refs(&origin, &[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_worker_reads_the_refs_a_fetch_advances_not_the_ones_the_clone_froze() {
+        let origin = tempfile::tempdir().unwrap();
+        let repo = Repository::init_bare(origin.path()).unwrap();
+        let sig = git2::Signature::now("t", "t@example.org").unwrap();
+        let tree = repo
+            .find_tree(repo.treebuilder(None).unwrap().write().unwrap())
+            .unwrap();
+        repo.commit(Some("refs/heads/main"), &sig, &sig, "first", &tree, &[])
+            .unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let url = origin.path().to_string_lossy().to_string();
+        let mut config = RepoObservationConfig::new(
+            RepoId::from_url(&url),
+            url,
+            vec!["origin".into()],
+            None,
+            vec!["refs/heads/main".into()],
+        );
+        config.frequency = 1;
+        let rig = start(config).await;
+        until("the first commit", || {
+            published_commits(&rig.received).contains(&"first".to_string())
+        })
+        .await;
+        // A second commit arrives at the origin; only a fetch into refs/remotes can show it.
+        let first = repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_commit()
+            .unwrap();
+        repo.commit(
+            Some("refs/heads/main"),
+            &sig,
+            &sig,
+            "second",
+            &tree,
+            &[&first],
+        )
+        .unwrap();
+        until("the second commit", || {
+            published_commits(&rig.received).contains(&"second".to_string())
+        })
+        .await;
+        rig.worker.stop(None);
+    }
+
+    /// The messages of the commits the worker has published so far.
+    fn published_commits(received: &Mutex<Vec<TcpClientMessage>>) -> Vec<String> {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                TcpClientMessage::Publish { payload, .. } => {
+                    let mut aligned = rkyv::util::AlignedVec::<16>::new();
+                    aligned.extend_from_slice(payload);
+                    match rkyv::from_bytes::<GitRepositoryMessage, rkyv::rancor::Error>(&aligned) {
+                        Ok(GitRepositoryMessage::CommitDiscovered { message, .. }) => Some(message),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    struct SupervisorRig {
+        supervisor: ActorRef<RepoSupervisorMessage>,
+        crypto: Arc<Recorder>,
+        _cache: tempfile::TempDir,
+    }
+
+    async fn start_supervisor() -> SupervisorRig {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (sink, _) = Actor::spawn(None, Sink { received }, ()).await.unwrap();
+        let crypto = Arc::new(Recorder::default());
+        let cache = tempfile::tempdir().unwrap();
+        let (supervisor, _) = Actor::spawn(
+            None,
+            GitRepoSupervisor,
+            GitRepoSupervisorArgs {
+                cache_root: cache.path().to_path_buf(),
+                tcp_client: TcpClient::from_actor_ref(sink),
+                crypto: crypto.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        SupervisorRig {
+            supervisor,
+            crypto,
+            _cache: cache,
+        }
+    }
+
+    fn private_repo_at(url: &str) -> RepoObservationConfig {
+        RepoObservationConfig::new(
+            RepoId::from_url(url),
+            url.into(),
+            vec!["origin".into()],
+            None,
+            Vec::new(),
+        )
+        .with_credential("gh")
+    }
+
+    #[tokio::test]
+    async fn the_same_announcement_again_changes_nothing_and_a_changed_one_replaces_the_worker() {
+        let rig = start_supervisor().await;
+        let asked = || rig.crypto.asked.lock().unwrap().len();
+        let config = private_repo_at("https://localhost:1/restart/r.git");
+        rig.supervisor
+            .cast(RepoSupervisorMessage::SpawnWorker {
+                config: config.clone(),
+            })
+            .unwrap();
+        until("the first attempt", || asked() == 1).await;
+
+        // Announced again, unchanged: no new worker, so no new attempt.
+        rig.supervisor
+            .cast(RepoSupervisorMessage::SpawnWorker {
+                config: config.clone(),
+            })
+            .unwrap();
+        settle().await;
+        assert_eq!(
+            asked(),
+            1,
+            "an identical announcement started another attempt"
+        );
+
+        // Announced with a setting changed: the old worker is stopped and a new one starts.
+        let mut changed = config.clone();
+        changed.frequency = 901;
+        rig.supervisor
+            .cast(RepoSupervisorMessage::SpawnWorker { config: changed })
+            .unwrap();
+        until("the new worker's first attempt", || asked() == 2).await;
+
+        // Only the new worker is alive: telling the workers makes exactly one more attempt.
+        rig.supervisor
+            .cast(RepoSupervisorMessage::CredentialsChanged)
+            .unwrap();
+        until("one more attempt", || asked() == 3).await;
+        settle().await;
+        assert_eq!(asked(), 3, "the replaced worker is still running");
+        rig.supervisor.stop(None);
+    }
+
+    #[tokio::test]
+    async fn repositories_are_restarted_one_at_a_time_each_by_its_own_change() {
+        let rig = start_supervisor().await;
+        let asked = || rig.crypto.asked.lock().unwrap().len();
+        let (a, b) = (
+            private_repo_at("https://localhost:1/two/a.git"),
+            private_repo_at("https://localhost:1/two/b.git"),
+        );
+        for config in [a.clone(), b.clone()] {
+            rig.supervisor
+                .cast(RepoSupervisorMessage::SpawnWorker { config })
+                .unwrap();
+        }
+        until("both first attempts", || asked() == 2).await;
+        let mut changed = a.clone();
+        changed.max_depth = 7;
+        rig.supervisor
+            .cast(RepoSupervisorMessage::SpawnWorker { config: changed })
+            .unwrap();
+        until("a's new worker", || asked() == 3).await;
+        rig.supervisor
+            .cast(RepoSupervisorMessage::CredentialsChanged)
+            .unwrap();
+        // a's new worker and b's untouched one: two attempts, not three.
+        until("both asked again", || asked() == 5).await;
+        settle().await;
+        assert_eq!(asked(), 5);
+        rig.supervisor.stop(None);
     }
 
     fn asked(rig: &Rig) -> usize {
