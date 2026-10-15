@@ -42,6 +42,14 @@ pub enum VerifyError {
     KeyUsage,
     #[error("the signature does not verify")]
     BadSignature,
+    #[error("the certificate is not made for encrypting to: it does not permit key encipherment")]
+    NotForEncryption,
+    #[error("the certificate to encrypt to is a CA certificate")]
+    LeafIsCa,
+    #[error("the certificate does not name `{expected}`")]
+    WrongIdentity { expected: String },
+    #[error("the certificate's public key cannot be read: {0}")]
+    NoUsableKey(String),
     #[error(transparent)]
     Canonical(#[from] CanonicalError),
 }
@@ -107,6 +115,97 @@ fn issued_by(
     valid_at(issuer, now)?;
     cert.verify_signature(Some(&issuer.tbs_certificate.subject_pki))
         .map_err(|_| VerifyError::ChainBroken(name_of(cert)))
+}
+
+/// The public key of the agent `identity`, from its escrow certificate, if the certificate can be believed:
+/// valid at `now`, chaining to one of `trust`'s anchors, not a CA, made for key encipherment, and carrying
+/// `identity` as a DNS name exactly. `chain_pem` is the certificate first and then, if there are any, the
+/// certificates that lead to the anchor (the anchor itself may be the last).
+///
+/// This is what lets an author outside the cluster encrypt a credential to an agent on the word of a
+/// gateway that speaks plain HTTP: the answer is believed because of what it is, not where it came from.
+pub fn verify_escrow_certificate(
+    chain_pem: &str,
+    trust: &Trust,
+    now: i64,
+    identity: &str,
+) -> Result<String, VerifyError> {
+    let blocks = pem_blocks(chain_pem);
+    if blocks.is_empty() {
+        return Err(VerifyError::BadCertificate(
+            "no certificate was given".to_string(),
+        ));
+    }
+    let mut ders = blocks
+        .iter()
+        .map(|pem| cert::der_from_pem(pem).map_err(VerifyError::BadCertificate))
+        .collect::<Result<Vec<_>, _>>()?;
+    if ders.len() > 1 && trust.anchors.contains(ders.last().expect("non-empty")) {
+        ders.pop();
+    }
+    if ders.len() > MAX_CHAIN {
+        return Err(VerifyError::ChainTooLong(ders.len()));
+    }
+    let certs = ders
+        .iter()
+        .map(|der| cert::parse(der).map_err(VerifyError::BadCertificate))
+        .collect::<Result<Vec<_>, _>>()?;
+    let leaf = certs.first().expect("non-empty");
+
+    valid_at(leaf, now)?;
+    for pair in certs.windows(2) {
+        issued_by(&pair[0], &pair[1], now)?;
+    }
+    let top = certs.last().expect("non-empty");
+    let anchored = trust.anchors.iter().any(|der| {
+        cert::parse(der)
+            .map(|anchor| issued_by(top, &anchor, now).is_ok())
+            .unwrap_or(false)
+    });
+    if !anchored {
+        return Err(VerifyError::UntrustedRoot);
+    }
+
+    if matches!(leaf.basic_constraints(), Ok(Some(bc)) if bc.value.ca) {
+        return Err(VerifyError::LeafIsCa);
+    }
+    match leaf.key_usage() {
+        Ok(Some(usage)) if usage.value.key_encipherment() => {}
+        _ => return Err(VerifyError::NotForEncryption),
+    }
+    let names_it = leaf
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .is_some_and(|san| {
+            san.value.general_names.iter().any(|name| {
+                matches!(name, x509_parser::extensions::GeneralName::DNSName(dns) if *dns == identity)
+            })
+        });
+    if !names_it {
+        return Err(VerifyError::WrongIdentity {
+            expected: identity.to_string(),
+        });
+    }
+
+    cert_issuer_common::public_key::extract_public_key_pem(&blocks[0])
+        .map_err(|e| VerifyError::NoUsableKey(e.to_string()))
+}
+
+/// The certificates in a PEM string, one string each, in order.
+fn pem_blocks(text: &str) -> Vec<String> {
+    const END: &str = "-----END CERTIFICATE-----";
+    let mut blocks = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("-----BEGIN CERTIFICATE-----") {
+        let Some(end) = rest[start..].find(END) else {
+            break;
+        };
+        let stop = start + end + END.len();
+        blocks.push(format!("{}\n", rest[start..stop].trim()));
+        rest = &rest[stop..];
+    }
+    blocks
 }
 
 pub fn verify(document: &Document, trust: &Trust, now: i64) -> Result<SignerInfo, VerifyError> {
