@@ -16,7 +16,7 @@
       # Group 4: its client certificate and its server certificate, one of each, come from the credentials agent.
       issuer: "credentials-agent"
       env: [
-        { name: "POLAR_GIT_SERVER_ADMINS", value: "76c6f812-689e-4ebe-818e-65de5761cc9a" }
+        { name: "POLAR_GIT_SERVER_ADMINS", value: "e4e478c6-519d-4894-841a-dc11a1c1f734" }
       ]
     }
     # The OCI registry resolver is not part of this cluster (David, 2026-10-14). It is in the catalog, and the
