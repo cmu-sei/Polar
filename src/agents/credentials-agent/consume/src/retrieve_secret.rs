@@ -98,6 +98,7 @@ impl RetrieveSecretHandler {
         };
         let facts = polar_policy::Facts {
             owner: stored.as_ref().map(|s| s.stored_by.clone()),
+            ..Default::default()
         };
 
         // No decision (the policy is not running yet, or failed) is never a grant.

@@ -119,7 +119,19 @@ pub struct Facts {
     /// The identity that owns the resource (for a secret, the one that escrowed it), as `Identity::"owner"`
     /// in the attribute `owner`, so `resource.owner == principal` says "the requester owns it".
     pub owner: Option<String>,
+    /// The identity whose namespace the resource's name is in, as `Identity::"namespace"` in the attribute
+    /// `namespace`, so `resource.namespace == principal` says "the requester is storing under its own name". The
+    /// asker computes it from the name; it is absent when the name has no namespace, and a rule on it then cannot
+    /// be satisfied.
+    pub namespace: Option<String>,
+    /// The resource's labels, each a string attribute under its own name (`resource.kind`). A label cannot take
+    /// the name of a fact above or of `frozen`; such a request is refused.
+    pub labels: std::collections::BTreeMap<String, String>,
 }
+
+/// Attributes of a resource that the evaluator gives it, or a policy document may add, and that a label
+/// therefore cannot take.
+const RESERVED_RESOURCE_ATTRIBUTES: [&str; 3] = ["owner", "namespace", "frozen"];
 
 pub struct PolicyActorArgs {
     pub permissions_actor: ActorRef<polar_permissions::PermissionsMessage>,
@@ -279,15 +291,37 @@ impl PolicyActor {
                 .map(|g| serde_json::json!({ "type": "Group", "id": g }))
                 .collect::<Vec<_>>()
         })];
-        // The resource, with the attributes its owner's records give it. Built from the parsed id and not
-        // from the text, like the principal.
-        if let Some(owner) = &facts.owner {
+        // The resource, with the attributes its records give it. Built from the parsed id and not from the
+        // text, like the principal. Only the attributes that exist are given, so a rule on one that does not
+        // cannot be satisfied.
+        if facts.owner.is_some() || facts.namespace.is_some() || !facts.labels.is_empty() {
+            let mut attrs = serde_json::Map::new();
+            for (key, value) in &facts.labels {
+                if RESERVED_RESOURCE_ATTRIBUTES.contains(&key.as_str()) {
+                    return Err(PolicyError::RequestConstruction(format!(
+                        "a label cannot be named {key:?}: the evaluator gives the resource that attribute"
+                    )));
+                }
+                attrs.insert(key.clone(), serde_json::Value::String(value.clone()));
+            }
+            if let Some(owner) = &facts.owner {
+                attrs.insert(
+                    "owner".to_string(),
+                    serde_json::json!({ "__entity": { "type": "Identity", "id": owner } }),
+                );
+            }
+            if let Some(namespace) = &facts.namespace {
+                attrs.insert(
+                    "namespace".to_string(),
+                    serde_json::json!({ "__entity": { "type": "Identity", "id": namespace } }),
+                );
+            }
             entities_json.push(serde_json::json!({
                 "uid": {
                     "type": resource_uid.type_name().to_string(),
                     "id": resource_uid.id().unescaped(),
                 },
-                "attrs": { "owner": { "__entity": { "type": "Identity", "id": owner } } },
+                "attrs": attrs,
                 "parents": []
             }));
         }
@@ -798,6 +832,203 @@ mod tests {
     fn owned_by(owner: &str) -> Facts {
         Facts {
             owner: Some(owner.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn in_namespace(namespace: &str) -> Facts {
+        Facts {
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn labelled(pairs: &[(&str, &str)]) -> Facts {
+        Facts {
+            labels: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    const STORE_IN_OWN_NAMESPACE: &str = r#"permit (principal, action == Action::"store", resource) when { resource.namespace == principal };"#;
+
+    #[tokio::test]
+    async fn a_rule_on_the_namespace_lets_an_identity_store_in_its_own_and_not_another() {
+        let actor = spawn_policy_actor().await;
+        load(&actor, STORE_IN_OWN_NAMESPACE).await;
+        let secret = r#"Secret::"git-repo-observer/github""#;
+        assert_eq!(
+            ask_with(
+                &actor,
+                "git-repo-observer",
+                r#"Action::"store""#,
+                secret,
+                in_namespace("git-repo-observer")
+            )
+            .await,
+            Decision::Allow
+        );
+        // The rule applied and did not match: silence, and the floor decides.
+        assert_eq!(
+            ask_with(
+                &actor,
+                "someone-else",
+                r#"Action::"store""#,
+                secret,
+                in_namespace("git-repo-observer")
+            )
+            .await,
+            Decision::NotDetermined
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_with_no_namespace_cannot_satisfy_a_namespace_rule() {
+        let actor = spawn_policy_actor().await;
+        load(&actor, STORE_IN_OWN_NAMESPACE).await;
+        let decision = ask_with(
+            &actor,
+            "git-repo-observer",
+            r#"Action::"store""#,
+            r#"Secret::"github""#,
+            Facts::default(),
+        )
+        .await;
+        assert_eq!(decision, Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn a_namespace_whose_name_has_quotes_is_that_name_and_no_other() {
+        let actor = spawn_policy_actor().await;
+        load(&actor, STORE_IN_OWN_NAMESPACE).await;
+        let tricky = r#"a"b\c"#;
+        assert_eq!(
+            ask_with(
+                &actor,
+                tricky,
+                r#"Action::"store""#,
+                r#"Secret::"s""#,
+                in_namespace(tricky)
+            )
+            .await,
+            Decision::Allow
+        );
+        assert_eq!(
+            ask_with(
+                &actor,
+                "a",
+                r#"Action::"store""#,
+                r#"Secret::"s""#,
+                in_namespace(tricky)
+            )
+            .await,
+            Decision::NotDetermined
+        );
+    }
+
+    #[tokio::test]
+    async fn a_label_is_an_attribute_of_the_secret_a_rule_can_speak_of() {
+        let actor = spawn_policy_actor().await;
+        load(
+            &actor,
+            r#"permit (principal, action == Action::"retrieve", resource) when { resource has kind && resource.kind == "token" };"#,
+        )
+        .await;
+        let secret = r#"Secret::"s""#;
+        assert_eq!(
+            ask_with(
+                &actor,
+                "anyone",
+                r#"Action::"retrieve""#,
+                secret,
+                labelled(&[("kind", "token")])
+            )
+            .await,
+            Decision::Allow
+        );
+        assert_eq!(
+            ask_with(
+                &actor,
+                "anyone",
+                r#"Action::"retrieve""#,
+                secret,
+                labelled(&[("kind", "user-password")])
+            )
+            .await,
+            Decision::NotDetermined
+        );
+        // A secret with no such label is not matched, and the `has` guard keeps that from being an error.
+        assert_eq!(
+            ask_with(
+                &actor,
+                "anyone",
+                r#"Action::"retrieve""#,
+                secret,
+                Facts::default()
+            )
+            .await,
+            Decision::NotDetermined
+        );
+    }
+
+    #[tokio::test]
+    async fn a_label_value_with_quotes_is_that_value_and_no_other() {
+        let actor = spawn_policy_actor().await;
+        load(
+            &actor,
+            r#"permit (principal, action == Action::"retrieve", resource) when { resource has kind && resource.kind == "a\"b" };"#,
+        )
+        .await;
+        assert_eq!(
+            ask_with(
+                &actor,
+                "anyone",
+                r#"Action::"retrieve""#,
+                r#"Secret::"s""#,
+                labelled(&[("kind", "a\"b")])
+            )
+            .await,
+            Decision::Allow
+        );
+        assert_eq!(
+            ask_with(
+                &actor,
+                "anyone",
+                r#"Action::"retrieve""#,
+                r#"Secret::"s""#,
+                labelled(&[("kind", "a")])
+            )
+            .await,
+            Decision::NotDetermined
+        );
+    }
+
+    #[tokio::test]
+    async fn a_label_cannot_take_the_place_of_a_fact_the_ledger_or_the_name_gives() {
+        let actor = spawn_policy_actor().await;
+        load(&actor, BASELINE).await;
+        for key in ["owner", "namespace", "frozen"] {
+            let facts = Facts {
+                owner: Some("the-real-owner".to_string()),
+                labels: [(key.to_string(), "x".to_string())].into_iter().collect(),
+                ..Default::default()
+            };
+            let answer = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+                requester_identity: "someone".to_string(),
+                requester_certificate_pem: None,
+                action: r#"Action::"retrieve""#.to_string(),
+                resource: r#"Secret::"s""#.to_string(),
+                facts,
+                reply,
+            })
+            .unwrap();
+            assert!(
+                matches!(answer, Err(PolicyError::RequestConstruction(_))),
+                "a label named {key} was taken: {answer:?}"
+            );
         }
     }
 
