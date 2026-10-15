@@ -247,7 +247,8 @@ pub enum CryptoMessage {
     /// (`EscrowedSecret::encrypt_bound`): it opens only under that. It is decrypted here, with the key in its
     /// custody, and kept with its `binding`, the hosts it may be used for. Then the secret and its binding are
     /// escrowed together with the credentials agent under `<identity>/<name>`, in the background and retried
-    /// until acknowledged, so a restart gets both back (`LoadSecret`). The reply does not wait for that: it is
+    /// until acknowledged, so a restart gets both back (`LoadSecret`). It is stored with one label, `kind`, equal
+    /// to the binding's kind, which policy can speak of. The reply does not wait for that: it is
     /// `Ok` once the secret is registered, and refused, with nothing registered or escrowed, if the binding is
     /// not usable, the bytes are not an escrowed secret, or it does not open under `context`. A name registered
     /// again replaces the earlier secret and stops escrowing it. The plaintext never leaves this actor except
@@ -1354,6 +1355,7 @@ async fn register_secret(
     binding: registry::SecretBinding,
 ) -> Result<(), CryptoError> {
     binding.check()?;
+    let binding_kind = binding.kind;
     let plaintext = handle_decrypt_own_escrowed(
         shared.tcp_client.clone(),
         shared.retrieve_agent_escrow_keypair_reply_router.clone(),
@@ -1378,15 +1380,26 @@ async fn register_secret(
         },
     );
     info!(secret = %name, "secret registered");
-    start_escrow(&shared, name, record);
+    // The one label a secret is stored with: what kind of credential it is, so policy can speak of it.
+    let labels = std::collections::BTreeMap::from([(
+        "kind".to_string(),
+        binding_kind.as_label().to_string(),
+    )]);
+    start_escrow(&shared, name, record, labels);
     Ok(())
 }
 
 /// Escrows `record` under the identity-prefixed name in the background, until the credentials agent acknowledges
-/// it. A failure is retried after a wait that doubles up to the most; a refusal for the wrong escrow key forgets
-/// the cached key and retries; any other refusal is deterministic, so it is reported and not retried. A newer
-/// registration of the name replaces this task.
-fn start_escrow(shared: &Shared, name: String, record: zeroize::Zeroizing<Vec<u8>>) {
+/// it, with the `kind` label policy can speak of. A failure is retried after a wait that doubles up to the most;
+/// a refusal for the wrong escrow key forgets the cached key and retries; so does one because the agent's
+/// certificate is not on record yet; any other refusal (policy, labels, the name) is deterministic, so it is
+/// reported and not retried. A newer registration of the name replaces this task.
+fn start_escrow(
+    shared: &Shared,
+    name: String,
+    record: zeroize::Zeroizing<Vec<u8>>,
+    labels: std::collections::BTreeMap<String, String>,
+) {
     let task = shared.clone();
     let task_name = name.clone();
     let handle = tokio::spawn(async move {
@@ -1400,7 +1413,7 @@ fn start_escrow(shared: &Shared, name: String, record: zeroize::Zeroizing<Vec<u8
                 task.cached_key.clone(),
                 escrow_name.clone(),
                 &record,
-                Default::default(),
+                labels.clone(),
             )
             .await;
             match result {
@@ -1411,6 +1424,10 @@ fn start_escrow(shared: &Shared, name: String, record: zeroize::Zeroizing<Vec<u8
                 Err(CryptoError::Refused(StoreRefusalReason::WrongEscrowKey)) => {
                     warn!(secret = %task_name, "the escrow key was not the current one; asking again");
                     *task.cached_key.lock().await = None;
+                }
+                Err(CryptoError::Refused(StoreRefusalReason::RequesterCertificateNotFound)) => {
+                    // Its certificate is not on record yet, as happens just after it was issued: try again.
+                    warn!(secret = %task_name, "the credentials agent has no certificate on record for this agent yet; will try again");
                 }
                 Err(CryptoError::Refused(reason)) => {
                     error!(secret = %task_name, ?reason, "the credentials agent refused to escrow the secret, and trying again cannot change that");
@@ -1857,8 +1874,9 @@ mod tests {
         store_script: std::sync::Mutex<std::collections::VecDeque<StoreScript>>,
     }
 
-    /// What the fake credentials agent was asked to store, as (name, decrypted plaintext), in arrival order.
-    type StoreLog = Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+    /// What the fake credentials agent was asked to store, as (name, decrypted plaintext, labels), in arrival order.
+    type StoreLog =
+        Arc<std::sync::Mutex<Vec<(String, Vec<u8>, std::collections::BTreeMap<String, String>)>>>;
 
     /// A scripted answer to a store.
     #[derive(Clone, Copy)]
@@ -1946,10 +1964,11 @@ mod tests {
                         *guard = Some(decrypted.to_vec());
                     }
                     if let Some(stored) = &self.stored {
-                        stored
-                            .lock()
-                            .unwrap()
-                            .push((envelope.payload.name.clone(), decrypted.to_vec()));
+                        stored.lock().unwrap().push((
+                            envelope.payload.name.clone(),
+                            decrypted.to_vec(),
+                            envelope.payload.labels.clone(),
+                        ));
                     }
                     let failing = self
                         .failing_stores
@@ -2741,7 +2760,7 @@ mod tests {
             .await
             .unwrap();
         wait_until("the escrow", || stored_len(&r) >= 1).await;
-        let (name, record) = r.stored.lock().unwrap()[0].clone();
+        let (name, record, _labels) = r.stored.lock().unwrap()[0].clone();
         assert_eq!(name, format!("{}/github", r.identity));
         let (escrowed_binding, secret) = registry::from_escrow_form(&record).unwrap();
         assert_eq!(escrowed_binding, binding);
@@ -2875,19 +2894,19 @@ mod tests {
                 .lock()
                 .unwrap()
                 .last()
-                .is_some_and(|(_, record)| secret_of(record) == "new-token")
+                .is_some_and(|(_, record, _)| secret_of(record) == "new-token")
         })
         .await;
         settle().await;
         let entries = r.stored.lock().unwrap().clone();
         let first_new = entries
             .iter()
-            .position(|(_, record)| secret_of(record) == "new-token")
+            .position(|(_, record, _)| secret_of(record) == "new-token")
             .unwrap();
         assert!(
             entries[first_new..]
                 .iter()
-                .all(|(_, record)| secret_of(record) == "new-token"),
+                .all(|(_, record, _)| secret_of(record) == "new-token"),
             "the old value was escrowed after it was replaced"
         );
         let got = git_credential(&r, "github", "github.com").await.unwrap();
@@ -2970,6 +2989,79 @@ mod tests {
             "{refused:?}"
         );
         assert!(git_credential(&r, "github", "github.com").await.is_err());
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn the_escrow_carries_a_kind_label_equal_to_the_bindings_kind() {
+        for (kind, expected) in [
+            (SecretKind::Token, "token"),
+            (SecretKind::UserPassword, "user-password"),
+        ] {
+            let r = rig(vec![], vec![], false).await;
+            let binding = SecretBinding {
+                host_pattern: "github.com".to_string(),
+                kind,
+                username: Some("alice".to_string()),
+            };
+            register(&r, "github", b"ghp-token", b"ctx", binding)
+                .await
+                .unwrap();
+            wait_until("the escrow", || stored_len(&r) >= 1).await;
+            let (_, _, labels) = r.stored.lock().unwrap()[0].clone();
+            assert_eq!(labels.len(), 1, "{labels:?}");
+            assert_eq!(labels.get("kind").map(String::as_str), Some(expected));
+            stop_and_release_key(&r.actor).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_escrow_refused_for_a_policy_or_a_label_reason_is_not_retried() {
+        for reason in [
+            StoreRefusalReason::PolicyDenied,
+            StoreRefusalReason::InvalidLabels,
+            StoreRefusalReason::LabelsChanged,
+            StoreRefusalReason::InvalidSecretName,
+        ] {
+            let r = rig(vec![StoreScript::Refused(reason)], vec![], false).await;
+            register(
+                &r,
+                "github",
+                b"ghp-token",
+                b"ctx",
+                token_binding("github.com"),
+            )
+            .await
+            .unwrap();
+            wait_until("the attempt", || stored_len(&r) >= 1).await;
+            settle().await;
+            assert_eq!(stored_len(&r), 1, "{reason:?}");
+            stop_and_release_key(&r.actor).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_escrow_refused_because_the_certificate_is_not_on_record_yet_is_retried() {
+        let r = rig(
+            vec![StoreScript::Refused(
+                StoreRefusalReason::RequesterCertificateNotFound,
+            )],
+            vec![],
+            false,
+        )
+        .await;
+        register(
+            &r,
+            "github",
+            b"ghp-token",
+            b"ctx",
+            token_binding("github.com"),
+        )
+        .await
+        .unwrap();
+        wait_until("a second attempt", || stored_len(&r) >= 2).await;
+        settle().await;
+        assert_eq!(stored_len(&r), 2);
         stop_and_release_key(&r.actor).await;
     }
 

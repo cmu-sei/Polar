@@ -83,6 +83,17 @@ pub enum SecretKind {
     UserPassword,
 }
 
+impl SecretKind {
+    /// The `kind` label a secret of this kind is stored with, which policy can speak of (`resource.kind`). The
+    /// same text the kind is written with in the escrowed record.
+    pub fn as_label(&self) -> &'static str {
+        match self {
+            SecretKind::Token => "token",
+            SecretKind::UserPassword => "user-password",
+        }
+    }
+}
+
 /// Where a secret may be used, and what it is. Escrowed with the secret, so a restart brings it back with it
 /// and the host check cannot be lost.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -365,6 +376,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(!format!("{err} {err:?}").contains("super-secret-token"));
+    }
+
+    #[test]
+    fn a_kinds_label_is_the_name_it_is_written_with() {
+        for kind in [SecretKind::Token, SecretKind::UserPassword] {
+            let written = serde_json::to_value(kind).unwrap();
+            assert_eq!(
+                written,
+                serde_json::Value::String(kind.as_label().to_string())
+            );
+        }
+        assert_eq!(SecretKind::Token.as_label(), "token");
+        assert_eq!(SecretKind::UserPassword.as_label(), "user-password");
     }
 
     #[test]
