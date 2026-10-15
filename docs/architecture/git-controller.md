@@ -1,6 +1,6 @@
 # The git agents: observer, processor, and a controller
 
-Status, 2026-10-14 (design agreed with David 2026-10-12). The observer's `credentials` section and its use are built (2026-10-14, step 3: `git/observe/src/credentials.rs`); the minimal controller is (2026-10-14, step 4: `git/controller`, it announces the `repositories` section, with no proposals, admission, status or backoff); the full controller and the status events are not; the `runtime` document type, replay, `c:update-runtime`, `polar-sign runtime` and `RetrieveSecret` are (each section says which). It replaces the
+Status, 2026-10-14 (design agreed with David 2026-10-12). The observer's `credentials` section and its use are built (2026-10-14, step 3: `git/observe/src/credentials.rs`); the minimal controller is (2026-10-14, step 4: `git/controller`, it announces the `repositories` section, with no proposals, admission, status or backoff); the observer's per-repository status is built (2026-10-15, see "Status and checkpoints"; the controller does not read it yet); the full controller and the checkpoints are not; the `runtime` document type, replay, `c:update-runtime`, `polar-sign runtime` and `RetrieveSecret` are (each section says which). It replaces the
 git scheduler (deleted 2026-10-14; it had been migrated onto the builder on 2026-10-12 as it was, for the move only) and
 settles three things that `proposals.md` and `signed-configuration.md` left open for the git agents: who
 receives proposals, how a credential reaches the observer, and how per-repository settings travel.
@@ -89,6 +89,24 @@ it is pending again.
 The observer publishes, per repository, on `polar.git.observation.status`: last successful fetch, last error,
 current tips. The controller consumes it for liveness (stalled, failing, backing off); the processor may write
 it to the graph for visibility.
+
+**Built 2026-10-15 (observer and processor; not yet seen on a cluster).** After every attempt, including one that
+cannot go ahead, the observer publishes an `ObservationStatus` (`git-agent-common/src/status.rs`) on
+`polar.git.observation.status`: `repo_id`, `state`, `reason`, `last_success`, `tips`, `consecutive_failures`,
+`observed_at`. Only three states exist so far: `observing`, `pending-credential` (waiting is not failing, and
+resets the count) and `failing` (the reason says whether the credential cannot be used for the host, the clone
+failed or the fetch failed). `starting` and `stopped` are not emitted: a worker's first attempt follows its start at
+once, and removal of a repository is deferred. Timestamps are epoch milliseconds, like every other
+`observed_at` the observer writes (this document first said RFC 3339). A reason is made fit to show before it is
+published (`sanitize_reason`: one line, no login in a URL, at most 300 characters); the observer never holds a
+credential's plaintext, so none can reach it, but a remote's error text is not trusted to be tidy. A failed
+**fetch** no longer ends the worker: it is a `failing` status and the next attempt (the frequency tick, or a change
+of credentials) fetches again, as a failed clone already did. The git processor subscribes to the topic and writes the
+latest word onto the repository's node (`observation_state`, `observation_reason`,
+`observation_consecutive_failures`, `observation_checked_at`, and `observation_last_success` only when the observer
+knows one, so a replaced pod does not erase its predecessor's); a reason is cleared when the next attempt has none.
+The topic needs no broker rule: the broker's permission checks are on its control plane, not on topics. The
+controller does not consume the status yet (liveness and backoff belong to path 2).
 
 A starting observer asks the processor over Cassini (request and reply) for the last observed tip of each ref,
 so a replaced pod does not walk history it already published. The processor reads the newest `POINTS_TO` edge

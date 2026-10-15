@@ -237,6 +237,19 @@ MATCH (c:GitCommit) RETURN count(c)
 Expect: the repository, and commits (the first walk covers up to 100 per ref). The processor logs the writes:
 `kubectl -n polar logs -l job-name=git-repo-processor --tail=40`.
 
+What the observer is doing with each repository (needs the observer and processor images that publish status):
+
+```cypher
+MATCH (r:GitRepository)
+RETURN r.id, r.observation_state, r.observation_reason, r.observation_consecutive_failures,
+       r.observation_last_success, r.observation_checked_at
+```
+
+`observation_state` is `observing`, `pending-credential` (the repository names a credential the observer does not
+have yet) or `failing`, and then `observation_reason` says why: `the credential cannot be used: …`,
+`the clone failed: …` or `the fetch failed: …`. The times are milliseconds since the epoch
+(`date -d @$((ms/1000))`). A repository the observer has not yet reported has none of these properties.
+
 Each signed document also has an outcome node in the graph (`ConfigurationOutcome`, linked with `HAD_OUTCOME`); a
 refused document is there with the reason and signer.
 
@@ -246,6 +259,9 @@ refused document is there with the reason and signer.
   `withdrawn=1`; the repository stops being fetched successfully (`is waiting for the credential it names`).
 - **A wrong host.** Change `host_pattern` to `gitlab.com` at version 3. The repository must not be cloned, and the
   observer must say its credential is not bound to this host.
+- **See each state.** With no `credentials` document the repository is `pending-credential`. With `host_pattern`
+  `gitlab.com` it is `failing` with `the credential cannot be used: …`. With the right one it becomes `observing`
+  and the reason is gone. (Each appears within a minute of the document being applied; no pod restart is needed.)
 - **A change of settings.** `psign template git-repo-controller --settings`, uncomment
   `POLAR_GIT_CONTROLLER_REPUBLISH_SECS`, give it `15`, sign and push; the controller's announcements speed up.
 
@@ -287,4 +303,5 @@ If the Corefile says `10.0.2.3`, the node is running the old image: `just load-n
 
 Path 2 (proposals from other agents and their approval), the removal of a repository from a later version of
 `repositories` (the observer keeps observing it until its pod restarts), the GitLab discovery flow (dropped until
-proposals), the observer's network guard (private addresses are not yet refused), and per-repository status events.
+proposals) and the observer's network guard (private addresses are not yet refused). The controller does not read
+the status events yet.
