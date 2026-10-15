@@ -153,6 +153,13 @@ every proposal and decision for people to read, and **is never read back to rebu
 rule for everything else (`git-controller.md`, "What has to exist first"). Wherever the text below says the processor
 replays proposals to a receiver, read: the proposers re-announce. The ledger stays as a projection, not a source.
 
+**Expiry (David, 2026-10-15).** An accepted proposal that its proposer stops announcing **expires**: the controller drops it
+after a time limit without a fresh announcement (a dynamic variable, to be decided with the build, default 24 hours). The
+soft state is a short-term cache and is explicitly not expected to survive. An entry a person wants kept for good belongs in
+the signed `repositories` section. Dropping an entry means the observer must stop its worker, which needs the removal
+protocol (`git-controller.md`, "The `runtime` document type" decisions: the observer stops what is missing from the
+whole announced set, or an explicit retire event); until that is built an expired entry only leaves the announcement.
+
 Agents here are short-lived Jobs without storage of their own, and the receiver must not be the only place a
 proposal is remembered. So:
 
