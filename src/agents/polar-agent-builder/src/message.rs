@@ -154,14 +154,22 @@ mod tests {
         async fn register_secret(
             &self,
             _name: String,
+            _section: String,
             _secret: Vec<u8>,
             _context: Vec<u8>,
             _binding: polar_crypto::registry::SecretBinding,
         ) -> Result<(), CryptoError> {
             Ok(())
         }
-        async fn load_secret(&self, _name: String) -> Result<bool, CryptoError> {
+        async fn load_secret(&self, _name: String, _section: String) -> Result<bool, CryptoError> {
             Ok(false)
+        }
+        async fn replace_section(
+            &self,
+            _section: String,
+            _keep: Vec<String>,
+        ) -> Result<Vec<String>, CryptoError> {
+            Ok(Vec::new())
         }
         async fn git_credential(
             &self,

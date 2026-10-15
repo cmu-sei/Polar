@@ -45,13 +45,21 @@ pub trait CryptoClient: Send + Sync {
     async fn register_secret(
         &self,
         name: String,
+        section: String,
         secret: Vec<u8>,
         context: Vec<u8>,
         binding: SecretBinding,
     ) -> Result<(), CryptoError>;
 
     /// See CryptoMessage::LoadSecret's own doc comment.
-    async fn load_secret(&self, name: String) -> Result<bool, CryptoError>;
+    async fn load_secret(&self, name: String, section: String) -> Result<bool, CryptoError>;
+
+    /// See CryptoMessage::ReplaceSection's own doc comment. The names dropped.
+    async fn replace_section(
+        &self,
+        section: String,
+        keep: Vec<String>,
+    ) -> Result<Vec<String>, CryptoError>;
 
     /// See CryptoMessage::GitCredential's own doc comment.
     async fn git_credential(
@@ -145,12 +153,14 @@ impl CryptoClient for CryptoHandle {
     async fn register_secret(
         &self,
         name: String,
+        section: String,
         secret: Vec<u8>,
         context: Vec<u8>,
         binding: SecretBinding,
     ) -> Result<(), CryptoError> {
         let result = ractor::call!(self.actor, |reply| CryptoMessage::RegisterSecret {
             name,
+            section,
             secret,
             context,
             binding,
@@ -159,12 +169,26 @@ impl CryptoClient for CryptoHandle {
         flatten_call_result(result)
     }
 
-    async fn load_secret(&self, name: String) -> Result<bool, CryptoError> {
+    async fn load_secret(&self, name: String, section: String) -> Result<bool, CryptoError> {
         let result = ractor::call!(self.actor, |reply| CryptoMessage::LoadSecret {
             name,
+            section,
             reply
         });
         flatten_call_result(result)
+    }
+
+    async fn replace_section(
+        &self,
+        section: String,
+        keep: Vec<String>,
+    ) -> Result<Vec<String>, CryptoError> {
+        let result = ractor::call!(self.actor, |reply| CryptoMessage::ReplaceSection {
+            section,
+            keep,
+            reply
+        });
+        result.map_err(|e| CryptoError::BrokerUnreachable(e.to_string()))
     }
 
     async fn git_credential(

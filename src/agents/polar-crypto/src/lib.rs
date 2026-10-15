@@ -255,6 +255,8 @@ pub enum CryptoMessage {
     /// through an operation on it, such as `GitCredential`.
     RegisterSecret {
         name: String,
+        /// The runtime section the secret came from, which `ReplaceSection` speaks of.
+        section: String,
         secret: Vec<u8>,
         context: Vec<u8>,
         binding: registry::SecretBinding,
@@ -265,7 +267,18 @@ pub enum CryptoMessage {
     /// `Err(RetrieveSecretDenied)`. A record that is not a credential registers nothing.
     LoadSecret {
         name: String,
+        /// The runtime section the secret belongs to, as for `RegisterSecret`.
+        section: String,
         reply: RpcReplyPort<Result<bool, CryptoError>>,
+    },
+    /// A runtime section was replaced whole: drops every secret registered under `section` whose name is not in
+    /// `keep`, stops escrowing it, and replies with the names dropped (sorted). Secrets of other sections, and
+    /// those registered without this section, are untouched. The copy already escrowed with the credentials
+    /// agent stays, since the ledger has no delete; `LoadSecret` is only asked for names a section lists.
+    ReplaceSection {
+        section: String,
+        keep: Vec<String>,
+        reply: RpcReplyPort<Vec<String>>,
     },
     /// The credential git is given to reach `host` with the registered secret `name`: a username and the secret,
     /// wiped when dropped. Refused if no secret is registered under the name, if the binding does not name the
@@ -415,6 +428,8 @@ pub struct CryptoActorState {
 
 /// A secret and where it may be used. The secret is wiped when it is dropped.
 struct RegisteredSecret {
+    /// The runtime section it came from.
+    section: String,
     binding: registry::SecretBinding,
     secret: zeroize::Zeroizing<Vec<u8>>,
 }
@@ -697,6 +712,7 @@ impl Actor for CryptoActor {
             }
             CryptoMessage::RegisterSecret {
                 name,
+                section,
                 secret,
                 context,
                 binding,
@@ -706,16 +722,47 @@ impl Actor for CryptoActor {
                 // bootstraps the key over the broker.
                 let shared = state.shared();
                 tokio::spawn(async move {
-                    let result = register_secret(shared, name, secret, context, binding).await;
+                    let result =
+                        register_secret(shared, name, section, secret, context, binding).await;
                     let _ = reply.send(result);
                 });
             }
-            CryptoMessage::LoadSecret { name, reply } => {
+            CryptoMessage::LoadSecret {
+                name,
+                section,
+                reply,
+            } => {
                 let shared = state.shared();
                 tokio::spawn(async move {
-                    let result = load_secret(shared, name).await;
+                    let result = load_secret(shared, name, section).await;
                     let _ = reply.send(result);
                 });
+            }
+            CryptoMessage::ReplaceSection {
+                section,
+                keep,
+                reply,
+            } => {
+                let mut dropped: Vec<String> = {
+                    let mut registry = state.registry.lock().await;
+                    let dropped: Vec<String> = registry
+                        .iter()
+                        .filter(|(name, held)| held.section == section && !keep.contains(name))
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    for name in &dropped {
+                        registry.remove(name);
+                    }
+                    dropped
+                };
+                dropped.sort();
+                for name in &dropped {
+                    if let Some(task) = state.escrow_tasks.lock().unwrap().remove(name) {
+                        task.abort();
+                    }
+                    info!(secret = %name, %section, "secret withdrawn by its section");
+                }
+                let _ = reply.send(dropped);
             }
             CryptoMessage::GitCredential { name, host, reply } => {
                 let result = {
@@ -1350,6 +1397,7 @@ fn escrow_name(own_identity: &str, name: &str) -> String {
 async fn register_secret(
     shared: Shared,
     name: String,
+    section: String,
     secret: Vec<u8>,
     context: Vec<u8>,
     binding: registry::SecretBinding,
@@ -1375,6 +1423,7 @@ async fn register_secret(
     shared.registry.lock().await.insert(
         name.clone(),
         RegisteredSecret {
+            section,
             binding,
             secret: plaintext,
         },
@@ -1447,7 +1496,7 @@ fn start_escrow(
 }
 
 /// The real handler behind CryptoMessage::LoadSecret.
-async fn load_secret(shared: Shared, name: String) -> Result<bool, CryptoError> {
+async fn load_secret(shared: Shared, name: String, section: String) -> Result<bool, CryptoError> {
     let found = handle_retrieve_secret(
         shared.tcp_client.clone(),
         shared.retrieve_secret_reply_router.clone(),
@@ -1466,11 +1515,14 @@ async fn load_secret(shared: Shared, name: String) -> Result<bool, CryptoError> 
         return Ok(false);
     };
     let (binding, secret) = registry::from_escrow_form(&record)?;
-    shared
-        .registry
-        .lock()
-        .await
-        .insert(name, RegisteredSecret { binding, secret });
+    shared.registry.lock().await.insert(
+        name,
+        RegisteredSecret {
+            section,
+            binding,
+            secret,
+        },
+    );
     Ok(true)
 }
 
@@ -2566,6 +2618,38 @@ mod tests {
         }
     }
 
+    /// The section the tests register under unless a test says otherwise.
+    const SECTION: &str = "credentials";
+
+    async fn register_in(
+        rig: &Rig,
+        section: &str,
+        name: &str,
+        plaintext: &[u8],
+        context: &[u8],
+        binding: SecretBinding,
+    ) -> Result<(), CryptoError> {
+        let secret = escrowed_bytes(rig, plaintext, context);
+        ractor::call!(rig.actor, |reply| CryptoMessage::RegisterSecret {
+            name: name.to_string(),
+            section: section.to_string(),
+            secret,
+            context: context.to_vec(),
+            binding,
+            reply,
+        })
+        .unwrap()
+    }
+
+    async fn replace_section(rig: &Rig, section: &str, keep: &[&str]) -> Vec<String> {
+        ractor::call!(rig.actor, |reply| CryptoMessage::ReplaceSection {
+            section: section.to_string(),
+            keep: keep.iter().map(|k| k.to_string()).collect(),
+            reply,
+        })
+        .unwrap()
+    }
+
     async fn register(
         rig: &Rig,
         name: &str,
@@ -2576,6 +2660,7 @@ mod tests {
         let secret = escrowed_bytes(rig, plaintext, context);
         ractor::call!(rig.actor, |reply| CryptoMessage::RegisterSecret {
             name: name.to_string(),
+            section: SECTION.to_string(),
             secret,
             context: context.to_vec(),
             binding,
@@ -2600,6 +2685,7 @@ mod tests {
     async fn load(rig: &Rig, name: &str) -> Result<bool, CryptoError> {
         ractor::call!(rig.actor, |reply| CryptoMessage::LoadSecret {
             name: name.to_string(),
+            section: SECTION.to_string(),
             reply,
         })
         .unwrap()
@@ -2673,6 +2759,7 @@ mod tests {
         );
         let refused = ractor::call!(r.actor, |reply| CryptoMessage::RegisterSecret {
             name: "github".to_string(),
+            section: SECTION.to_string(),
             secret: secret.clone(),
             context: b"git-repo-observer|credentials|1|other|secret".to_vec(),
             binding: token_binding("github.com"),
@@ -2698,6 +2785,7 @@ mod tests {
         let r = rig(vec![], vec![], false).await;
         let refused = ractor::call!(r.actor, |reply| CryptoMessage::RegisterSecret {
             name: "github".to_string(),
+            section: SECTION.to_string(),
             secret: b"not an escrowed secret".to_vec(),
             context: b"ctx".to_vec(),
             binding: token_binding("github.com"),
@@ -3066,6 +3154,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacing_a_section_drops_what_it_no_longer_lists_and_keeps_what_it_does() {
+        let r = rig(vec![], vec![], false).await;
+        for name in ["kept", "dropped-b", "dropped-a"] {
+            register(&r, name, b"tok", b"ctx", token_binding("github.com"))
+                .await
+                .unwrap();
+        }
+        let dropped = replace_section(&r, SECTION, &["kept"]).await;
+        assert_eq!(
+            dropped,
+            vec!["dropped-a".to_string(), "dropped-b".to_string()]
+        );
+        assert!(git_credential(&r, "kept", "github.com").await.is_ok());
+        for name in ["dropped-a", "dropped-b"] {
+            assert!(
+                matches!(
+                    git_credential(&r, name, "github.com").await,
+                    Err(CryptoError::SecretNotRegistered(_))
+                ),
+                "{name}"
+            );
+        }
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn replacing_a_section_leaves_the_secrets_of_other_sections_alone() {
+        let r = rig(vec![], vec![], false).await;
+        register_in(
+            &r,
+            "elsewhere",
+            "other",
+            b"tok",
+            b"ctx",
+            token_binding("github.com"),
+        )
+        .await
+        .unwrap();
+        register(&r, "mine", b"tok", b"ctx", token_binding("github.com"))
+            .await
+            .unwrap();
+        let dropped = replace_section(&r, SECTION, &[]).await;
+        assert_eq!(dropped, vec!["mine".to_string()]);
+        assert!(git_credential(&r, "other", "github.com").await.is_ok());
+        // a section nothing was registered under drops nothing
+        assert!(replace_section(&r, "nothing-here", &[]).await.is_empty());
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn a_name_registered_again_under_another_section_belongs_to_that_one() {
+        let r = rig(vec![], vec![], false).await;
+        register(&r, "moved", b"tok", b"ctx", token_binding("github.com"))
+            .await
+            .unwrap();
+        register_in(
+            &r,
+            "elsewhere",
+            "moved",
+            b"tok",
+            b"ctx",
+            token_binding("github.com"),
+        )
+        .await
+        .unwrap();
+        assert!(replace_section(&r, SECTION, &[]).await.is_empty());
+        assert!(git_credential(&r, "moved", "github.com").await.is_ok());
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
+    async fn a_withdrawn_secret_is_no_longer_escrowed() {
+        // Every attempt fails, so the escrow keeps retrying until the secret is withdrawn.
+        let r = rig(vec![], vec![], false).await;
+        r.failing.store(true, std::sync::atomic::Ordering::SeqCst);
+        register(&r, "github", b"tok", b"ctx", token_binding("github.com"))
+            .await
+            .unwrap();
+        wait_until("a first attempt", || stored_len(&r) >= 1).await;
+        replace_section(&r, SECTION, &[]).await;
+        settle().await;
+        let attempts = stored_len(&r);
+        settle().await;
+        settle().await;
+        assert_eq!(
+            stored_len(&r),
+            attempts,
+            "it kept escrowing a withdrawn secret"
+        );
+        stop_and_release_key(&r.actor).await;
+    }
+
+    #[tokio::test]
     async fn no_refusal_repeats_the_secret() {
         let r = rig(vec![], vec![], false).await;
         register(
@@ -3083,6 +3264,7 @@ mod tests {
         assert!(!format!("{refused} {refused:?}").contains("ghp-super-secret"));
         let wrong_context = ractor::call!(r.actor, |reply| CryptoMessage::RegisterSecret {
             name: "other".to_string(),
+            section: SECTION.to_string(),
             secret: escrowed_bytes(&r, b"ghp-super-secret", b"ctx-a"),
             context: b"ctx-b".to_vec(),
             binding: token_binding("github.com"),
