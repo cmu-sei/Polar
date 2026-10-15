@@ -19,13 +19,9 @@
         { name: "POLAR_GIT_SERVER_ADMINS", value: "381258d0-9180-40c8-a0b0-074739719963" }
       ]
     }
-    # The cluster pulls from the development registry over plain http, and so must the resolver.
-    oci-registry-resolver: {
-      issuer: "credentials-agent"
-      env: [
-        { name: "OCI_INSECURE_REGISTRIES", value: "10.0.2.2:5000" }
-      ]
-    }
+    # The OCI registry resolver is not part of this cluster (David, 2026-10-14). It is in the catalog, and the
+    # `local` target still runs it.
+    oci-registry-resolver: { enabled: false }
     # Rollout of cert-issuer isolation (docs/architecture/cert-issuer-isolation.md, phase 6), in groups. A
     # workload on the credentials agent gets its certificates through the observer, so the credentials agent
     # has a record of it. Group 1 is the secret harness, which is the check on the rest.

@@ -356,9 +356,18 @@ image references, pull secrets, storage classes, hostnames, URLs.
   cluster: { registry: "registry.example.com" }     # any field of cluster.nuon
   workloads: {
     "jira-observer": { backoff_limit: 5 }           # any field of a workload entry
+    "oci-registry-resolver": { enabled: false }     # leave a catalog workload out of this target
   }
 }
 ```
+
+**A target leaves a workload out** with `enabled: false`. The catalog is every workload there is, and every
+command resolves the ones a target runs, so a disabled workload is not resolved, checked, rendered, listed,
+given an image build, or part of the cert-issuer floor for that target. Resolving it by name says it is not enabled
+there. Two things are checked: `enabled` is `true` or `false` and nothing else, and a workload the target disables
+is not still in its `apply_order` (its manifests are not rendered, so `up.nu` would skip them silently). The catalog
+entry is untouched, so another target runs the workload. (A key under `workloads` that names no workload is still
+ignored without a word.)
 
 ---
 

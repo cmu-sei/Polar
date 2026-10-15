@@ -32,6 +32,17 @@ def resolve [name: string] {
     ^nu $RESOLVER json $name | from json
 }
 
+# The target a test reads a workload under: local-minimal, unless that target leaves it out (`enabled: false`),
+# in which case `local`, which runs the whole catalog.
+def target_for [name: string] {
+    if ($name in (^nu $RESOLVER names | from json)) { "local-minimal" } else { "local" }
+}
+
+# The record for a workload under another target, for what local-minimal does not run.
+def resolve_for [target: string, name: string] {
+    ^nu $RESOLVER json $name --target $target | from json
+}
+
 # The settings the rules read.
 def settings [name: string] {
     ^nu $RESOLVER settings $name | from json
@@ -39,11 +50,11 @@ def settings [name: string] {
 
 # What the agent will be given for a variable: from its environment, or, for an agent that reads
 # a configuration document, from the document the resolver wrote.
-def env_value [r: record, name: string] {
+def env_value [r: record, name: string, target: string = "local-minimal"] {
     if ($r.env | where name == "POLAR_CONFIG" | is-empty) {
         $r.env | where name == $name | get -o 0.value
     } else {
-        let maps = (^nu $RESOLVER resources $r.name | from json | get config_maps)
+        let maps = (^nu $RESOLVER resources $r.name --target $target | from json | get config_maps)
         $maps | first | get content | from json | get sections | each {|s| $s.variables } | flatten
         | where name == $name | get -o 0.value
     }
@@ -75,14 +86,15 @@ def main [] {
     let tests = {
         "every workload's budget is in what the agent is given, as the code declared": {
             for w in ($BUDGETS | transpose name secs) {
-                let r = (resolve $w.name)
-                assert equal (env_value $r "POLAR_SHUTDOWN_BUDGET_SECS") ($w.secs | into string) $"($w.name)"
+                let t = (target_for $w.name)
+                let r = (resolve_for $t $w.name)
+                assert equal (env_value $r "POLAR_SHUTDOWN_BUDGET_SECS" $t) ($w.secs | into string) $"($w.name)"
             }
         }
 
         "the grace period is the budget plus the margin": {
             for w in ($BUDGETS | transpose name secs) {
-                let r = (resolve $w.name)
+                let r = (resolve_for (target_for $w.name) $w.name)
                 assert equal $r.termination_grace_secs ($w.secs + 10) $"($w.name)"
             }
         }
@@ -90,8 +102,9 @@ def main [] {
         "the grace period is never set separately from the budget": {
             # It is derived, so a workload entry cannot make the two disagree.
             for w in ($BUDGETS | transpose name secs) {
-                let r = (resolve $w.name)
-                assert (($r.termination_grace_secs) > (env_value $r "POLAR_SHUTDOWN_BUDGET_SECS" | into int)) $"($w.name)"
+                let t = (target_for $w.name)
+                let r = (resolve_for $t $w.name)
+                assert (($r.termination_grace_secs) > (env_value $r "POLAR_SHUTDOWN_BUDGET_SECS" $t | into int)) $"($w.name)"
             }
         }
 
@@ -354,20 +367,20 @@ def main [] {
         }
 
         "the resolver reads its registry credentials from a Secret, mounted read-only where it is told to look": {
-            let r = (resolve "oci-registry-resolver")
+            let r = (resolve_for "local" "oci-registry-resolver")
             let volume = ($r.volumes | where name == "oci-registry-auth")
             assert equal ($volume | length) 1
             assert equal ($volume | first | get secret) "oci-registry-auth"
             assert equal ($volume | first | get items) [{ key: "oci-registry-auth", path: "config.json" }]
             assert equal ($r.mounts | where name == "oci-registry-auth" | first | get path) "/etc/oci-registry-auth"
             assert ($r.mounts | where name == "oci-registry-auth" | first | get read_only)
-            assert equal (env_value $r "DOCKER_CONFIG") "/etc/oci-registry-auth"
+            assert equal (env_value $r "DOCKER_CONFIG" "local") "/etc/oci-registry-auth"
         }
 
         "the resolver speaks http to the cluster's own development registry, which the target names": {
-            let r = (resolve "oci-registry-resolver")
+            let r = (resolve_for "local" "oci-registry-resolver")
             let cluster = (open ($RESOLVER | path dirname | path join "config/cluster.nuon"))
-            assert ((env_value $r "OCI_INSECURE_REGISTRIES") | str contains $cluster.registry)
+            assert ((env_value $r "OCI_INSECURE_REGISTRIES" "local") | str contains $cluster.registry)
         }
 
         "the git observer is a plain agent: Cassini only, its cache in the pod, and no graph": {
