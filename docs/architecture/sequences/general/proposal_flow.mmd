@@ -2,43 +2,45 @@ sequenceDiagram
     actor Admin
     participant Proposer as Jira consumer
     participant Cassini
-    participant Receiver as Git observer
+    participant Controller as Git controller
+    participant Observer as Git observer
     participant Processor as Scheduler processor
     participant Graph as Neo4j
     participant Creds as Credentials agent
 
-    Note over Admin,Receiver: Admission rules first, signed and delivered like configuration
-    Admin->>Processor: signed admission spec for observe-repo
-    Processor-)Cassini: admission spec
-    Cassini-)Receiver: admission spec
-    Receiver->>Receiver: verify for itself, until then accept nothing
+    Note over Admin,Controller: Admission rules first: a signed runtime document, section admission
+    Admin->>Processor: signed runtime document for the controller
+    Processor-)Cassini: document on the controller's configuration topic
+    Cassini-)Controller: document
+    Controller->>Controller: verify for itself, until then accept nothing
 
     Note over Proposer,Graph: A proposal
     Proposer-)Cassini: Proposal kind, subject, evidence
     Cassini-)Processor: Proposal, publisher named by the broker
     Processor->>Graph: write a Proposal node
-    Cassini-)Receiver: Proposal, publisher named by the broker
-    Receiver->>Receiver: normalise, then apply the rules in order
+    Cassini-)Controller: Proposal, publisher named by the broker
+    Controller->>Controller: normalise, then apply the rules in order
     alt rejected
-        Receiver-)Cassini: ProposalDecision rejected and the rule
+        Controller-)Cassini: ProposalDecision rejected and the rule
     else pending
-        Receiver-)Cassini: ProposalDecision pending and what for
+        Controller-)Cassini: ProposalDecision pending and what for
     else accepted
-        Receiver->>Creds: RetrieveSecret for the bound name
-        Creds-->>Receiver: re-encrypted to the agent's certificate
-        Receiver->>Receiver: add the repository to its set
-        Receiver-)Cassini: ProposalDecision accepted
+        Controller-)Cassini: ProposalDecision accepted
+        Controller-)Observer: repository to observe, naming its credential
+        Observer->>Creds: RetrieveSecret for that credential, if it does not hold it
+        Creds-->>Observer: re-encrypted to the agent's own escrow key
+        Observer->>Observer: host binding and network guard, then clone
     end
     Cassini-)Processor: ProposalDecision
     Processor->>Graph: write a decision node, linked to the proposal
 
-    Note over Admin,Receiver: Approval and credentials are edits to the signed rules
-    Admin->>Processor: a new signed admission spec
-    Processor-)Cassini: admission spec
-    Cassini-)Receiver: admission spec
-    Receiver->>Receiver: re-evaluate every pending proposal
+    Note over Admin,Observer: Approval and credentials are signed edits
+    Admin->>Processor: a new admission section (an approval), or a credentials document for the observer
+    Processor-)Cassini: document
+    Cassini-)Controller: admission section, re-evaluate every pending proposal
+    Cassini-)Observer: credentials section, decrypt and escrow with StoreSecret
 
-    Note over Processor,Receiver: A restarted receiver gets them again
-    Processor-)Cassini: replay the kind's proposals
-    Cassini-)Receiver: Proposal
-    Receiver->>Receiver: re-evaluate against the current rules
+    Note over Processor,Controller: A restarted controller gets them again
+    Processor-)Cassini: replay the documents and the kind's proposals
+    Cassini-)Controller: documents, then proposals
+    Controller->>Controller: re-evaluate against the current rules
