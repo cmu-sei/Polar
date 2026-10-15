@@ -477,7 +477,18 @@ name with an expiry and without escrow, and later operations name it like any ot
 `CryptoActor` never blocks waiting on an I/O actor (the deadlock above).
 
 First built, for the git credential path: the registry entry with its binding and escrow, and one operation, the
-git credential for a host. The I/O actors and derived tokens come later.
+git credential for a host. The I/O actors and derived tokens come later. The messages (decided 2026-10-14,
+David):
+
+| Message | Does | Returns |
+|---|---|---|
+| `RegisterSecret { name, secret, context, binding }` | Decrypts `secret` (the `EscrowedSecret` bytes) under `context`, keeps the value with its binding (`host_pattern`, `kind`, `username`), and starts escrowing both together under `<identity>/<name>` with `StoreSecret`, retried until acknowledged. | `Ok` once registered, without waiting for the acknowledgement |
+| `LoadSecret { name }` | At start, asks the credentials agent for `<identity>/<name>` (`RetrieveSecret`) and registers what comes back, binding included. | whether it was found, or a policy denial |
+| `GitCredential { name, host }` | Checks that `host` matches the binding. | a username and token for libgit2, wiped when dropped (the username defaults to `oauth2` for a token), or a refusal: unknown secret, host not bound, kind not usable for git |
+
+`StoreSecret` and `RetrieveSecret` stay as they are, since the harness and the escrow-keypair flow use them.
+Decrypting an `EscrowedSecret` under a context is internal to `RegisterSecret`: no public message returns the
+plaintext of a registered secret.
 
 ## Escrow-key and certificate-lookup queries
 
