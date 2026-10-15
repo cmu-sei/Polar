@@ -2327,6 +2327,7 @@ mod agent_escrow_keypair_bootstrap_wiring_tests {
                     secret: stored_secret,
                     stored_by: "git-observer".to_string(),
                     timestamp: 1000,
+                    labels: Default::default(),
                 },
                 reply,
             },

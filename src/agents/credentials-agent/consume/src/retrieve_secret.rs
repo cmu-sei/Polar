@@ -98,7 +98,12 @@ impl RetrieveSecretHandler {
         };
         let facts = polar_policy::Facts {
             owner: stored.as_ref().map(|s| s.stored_by.clone()),
-            ..Default::default()
+            namespace: credentials_agent_common::secret::namespace_of(&request.name)
+                .map(str::to_string),
+            labels: stored
+                .as_ref()
+                .map(|s| s.labels.clone())
+                .unwrap_or_default(),
         };
 
         // No decision (the policy is not running yet, or failed) is never a grant.
@@ -375,6 +380,17 @@ pub(crate) mod tests {
         plaintext: &[u8],
         stored_by: &str,
     ) {
+        store_secret_labelled(ledger, escrow_keypair, name, plaintext, stored_by, &[]).await
+    }
+
+    pub(crate) async fn store_secret_labelled(
+        ledger: &ActorRef<LedgerMessage>,
+        escrow_keypair: &EscrowKeypair,
+        name: &str,
+        plaintext: &[u8],
+        stored_by: &str,
+        labels: &[(&str, &str)],
+    ) {
         let secret = EscrowedSecret::encrypt(plaintext, escrow_keypair.public_key_pem()).unwrap();
         append(
             ledger,
@@ -383,6 +399,10 @@ pub(crate) mod tests {
                 secret,
                 stored_by: stored_by.to_string(),
                 timestamp: 1000,
+                labels: labels
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
             },
         )
         .await;
@@ -666,6 +686,78 @@ pub(crate) mod tests {
             RetrieveSecretReply::Refused {
                 reason: RetrieveRefusalReason::InvalidSecretName
             }
+        );
+    }
+
+    /// A requester with both certificates, a policy holding `rule`, and a secret stored by someone else.
+    async fn retrieving_under(
+        rule: &str,
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> RetrieveSecretReply {
+        let ledger = spawn_test_ledger().await;
+        let escrow_keypair = crate::escrow::tests::test_keypair();
+        let handler = RetrieveSecretHandler {
+            escrow_keypair: escrow_keypair.clone(),
+            ledger: ledger.clone(),
+            policy: registered_policy(Some(rule.to_string())).await,
+        };
+        seed_mtls_certificate(&ledger, "requester").await;
+        seed_escrow_certificate(&ledger, "requester").await;
+        store_secret_labelled(
+            &ledger,
+            &escrow_keypair,
+            name,
+            b"a secret",
+            "someone-else",
+            labels,
+        )
+        .await;
+        handler
+            .handle(request(name), Some("requester".to_string()))
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_rule_on_a_stored_secrets_label_decides_whether_it_is_retrieved() {
+        let rule = r#"permit(principal, action == Action::"retrieve", resource) when { resource has kind && resource.kind == "token" };"#;
+        let found = retrieving_under(rule, "someone-else/github", &[("kind", "token")]).await;
+        assert!(
+            matches!(found, RetrieveSecretReply::Found { .. }),
+            "{found:?}"
+        );
+        let denied =
+            retrieving_under(rule, "someone-else/github", &[("kind", "user-password")]).await;
+        assert!(
+            matches!(denied, RetrieveSecretReply::Denied { .. }),
+            "{denied:?}"
+        );
+        let unlabelled = retrieving_under(rule, "someone-else/github", &[]).await;
+        assert!(
+            matches!(unlabelled, RetrieveSecretReply::Denied { .. }),
+            "{unlabelled:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rule_on_the_namespace_of_the_name_sees_it_when_a_secret_is_retrieved() {
+        let rule = r#"permit(principal, action == Action::"retrieve", resource) when { resource has namespace && resource.namespace == principal };"#;
+        // Stored by someone else, but under the requester's namespace.
+        let found = retrieving_under(rule, "requester/github", &[]).await;
+        assert!(
+            matches!(found, RetrieveSecretReply::Found { .. }),
+            "{found:?}"
+        );
+        let other = retrieving_under(rule, "someone-else/github", &[]).await;
+        assert!(
+            matches!(other, RetrieveSecretReply::Denied { .. }),
+            "{other:?}"
+        );
+        // A name with no namespace is in nobody's.
+        let none = retrieving_under(rule, "github", &[]).await;
+        assert!(
+            matches!(none, RetrieveSecretReply::Denied { .. }),
+            "{none:?}"
         );
     }
 }

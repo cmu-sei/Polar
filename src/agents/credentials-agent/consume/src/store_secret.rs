@@ -63,6 +63,7 @@ impl StoreSecretHandler {
             secret: request.secret,
             stored_by,
             timestamp: polar::time::now_millis(),
+            labels: request.labels,
         };
 
         match ractor::rpc::call(

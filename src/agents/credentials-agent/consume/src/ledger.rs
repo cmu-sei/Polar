@@ -77,6 +77,8 @@ pub struct LedgerActorState {
 pub enum SecretStoreError {
     /// Another identity stored a secret by this name.
     NameTaken,
+    /// The identity that stored it is storing it again, with other labels.
+    LabelsChanged,
     /// The ledger could not append it.
     Ledger(String),
 }
@@ -267,14 +269,16 @@ impl Actor for LedgerActor {
             LedgerMessage::StoreSecret { event, reply } => {
                 let result = match &event {
                     CredentialsEvent::SecretStored {
-                        name, stored_by, ..
-                    } => {
-                        if state.credentials_state.may_store_secret(name, stored_by) {
+                        name,
+                        stored_by,
+                        labels,
+                        ..
+                    } => state
+                        .credentials_state
+                        .check_store(name, stored_by, labels)
+                        .and_then(|()| {
                             append_and_project(state, &event).map_err(SecretStoreError::Ledger)
-                        } else {
-                            Err(SecretStoreError::NameTaken)
-                        }
-                    }
+                        }),
                     _ => Err(SecretStoreError::Ledger(
                         "not a SecretStored event".to_string(),
                     )),

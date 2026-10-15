@@ -130,6 +130,8 @@ pub struct AccountCertificateRecord {
 pub struct StoredSecret {
     pub secret: credentials_agent_common::escrow_secret::EscrowedSecret,
     pub stored_by: String,
+    /// What it was stored with. Policy speaks of them (`resource.kind`), and they cannot change.
+    pub labels: std::collections::BTreeMap<String, String>,
 }
 
 /// The Credentials Agent's derived state -- entirely a function of
@@ -362,6 +364,7 @@ impl CredentialsState {
                 name,
                 secret,
                 stored_by,
+                labels,
                 ..
             } => {
                 // Overwrites any prior entry for this name -- the
@@ -373,6 +376,7 @@ impl CredentialsState {
                     StoredSecret {
                         secret: secret.clone(),
                         stored_by: stored_by.clone(),
+                        labels: labels.clone(),
                     },
                 );
             }
@@ -545,12 +549,24 @@ impl CredentialsState {
     /// The current, escrowed secret stored under `name`, if any --
     /// always the most recently stored one; a superseded prior value
     /// remains in the event log but is no longer returned here.
-    /// Whether `by` may store a secret under `name`: it may if no secret is held by that name, or if the
-    /// one held was stored by `by`. The identity that stored a secret owns it, and only it replaces it.
-    pub fn may_store_secret(&self, name: &str, by: &str) -> bool {
-        self.stored_secrets
-            .get(name)
-            .is_none_or(|held| held.stored_by == by)
+    /// Whether `by` may store a secret under `name` with `labels`: it may if no secret is held by that name, or
+    /// if the one held was stored by `by` with the same labels. The identity that stored a secret owns it, and
+    /// only it replaces it; and a label cannot change once stored, so a replacement carries the same ones. Another
+    /// identity is told the name is taken before anything is said about labels.
+    pub fn check_store(
+        &self,
+        name: &str,
+        by: &str,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), crate::ledger::SecretStoreError> {
+        match self.stored_secrets.get(name) {
+            None => Ok(()),
+            Some(held) if held.stored_by != by => Err(crate::ledger::SecretStoreError::NameTaken),
+            Some(held) if held.labels != *labels => {
+                Err(crate::ledger::SecretStoreError::LabelsChanged)
+            }
+            Some(_) => Ok(()),
+        }
     }
 
     pub fn secret_for(&self, name: &str) -> Option<&StoredSecret> {
@@ -662,8 +678,9 @@ mod tests {
     fn only_the_identity_that_stored_a_secret_may_store_that_name_again() {
         let keypair = crate::escrow::tests::test_keypair();
         let mut state = CredentialsState::default();
-        assert!(
-            state.may_store_secret("github-sei", "anyone"),
+        assert_eq!(
+            state.check_store("github-sei", "anyone", &Default::default()),
+            Ok(()),
             "a free name is anyones"
         );
         state.apply(&CredentialsEvent::SecretStored {
@@ -675,14 +692,109 @@ mod tests {
             .unwrap(),
             stored_by: "git-repo-observer".to_string(),
             timestamp: 1,
+            labels: Default::default(),
         });
-        assert!(state.may_store_secret("github-sei", "git-repo-observer"));
-        assert!(!state.may_store_secret("github-sei", "someone-else"));
-        assert!(
-            !state.may_store_secret("github-sei", "git-repo-observer "),
+        let none = std::collections::BTreeMap::new();
+        assert_eq!(
+            state.check_store("github-sei", "git-repo-observer", &none),
+            Ok(())
+        );
+        assert_eq!(
+            state.check_store("github-sei", "someone-else", &none),
+            Err(crate::ledger::SecretStoreError::NameTaken)
+        );
+        assert_eq!(
+            state.check_store("github-sei", "git-repo-observer ", &none),
+            Err(crate::ledger::SecretStoreError::NameTaken),
             "the name is exact"
         );
-        assert!(state.may_store_secret("another-name", "someone-else"));
+        assert_eq!(
+            state.check_store("another-name", "someone-else", &none),
+            Ok(())
+        );
+    }
+
+    fn labelled(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn stored_with_labels(by: &str, labels: &[(&str, &str)]) -> CredentialsEvent {
+        let keypair = crate::escrow::tests::test_keypair();
+        CredentialsEvent::SecretStored {
+            name: "git-repo-observer/github".to_string(),
+            secret: credentials_agent_common::escrow_secret::EscrowedSecret::encrypt(
+                b"one",
+                keypair.public_key_pem(),
+            )
+            .unwrap(),
+            stored_by: by.to_string(),
+            timestamp: 1,
+            labels: labelled(labels),
+        }
+    }
+
+    #[test]
+    fn a_stored_secret_keeps_its_labels() {
+        let mut state = CredentialsState::default();
+        state.apply(&stored_with_labels(
+            "git-repo-observer",
+            &[("kind", "token")],
+        ));
+        assert_eq!(
+            state.secret_for("git-repo-observer/github").unwrap().labels,
+            labelled(&[("kind", "token")])
+        );
+    }
+
+    #[test]
+    fn the_owner_may_replace_the_value_with_the_same_labels_and_not_with_different_ones() {
+        let mut state = CredentialsState::default();
+        state.apply(&stored_with_labels(
+            "git-repo-observer",
+            &[("kind", "token"), ("team", "a")],
+        ));
+        let name = "git-repo-observer/github";
+        // The same labels, however they are listed: allowed.
+        assert_eq!(
+            state.check_store(
+                name,
+                "git-repo-observer",
+                &labelled(&[("team", "a"), ("kind", "token")])
+            ),
+            Ok(())
+        );
+        for different in [
+            labelled(&[("kind", "user-password"), ("team", "a")]),
+            labelled(&[("kind", "token")]),
+            labelled(&[("kind", "token"), ("team", "a"), ("extra", "x")]),
+            labelled(&[]),
+        ] {
+            assert_eq!(
+                state.check_store(name, "git-repo-observer", &different),
+                Err(crate::ledger::SecretStoreError::LabelsChanged),
+                "{different:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn another_identity_is_told_the_name_is_taken_before_anything_about_labels() {
+        let mut state = CredentialsState::default();
+        state.apply(&stored_with_labels(
+            "git-repo-observer",
+            &[("kind", "token")],
+        ));
+        assert_eq!(
+            state.check_store(
+                "git-repo-observer/github",
+                "someone-else",
+                &labelled(&[("kind", "other")])
+            ),
+            Err(crate::ledger::SecretStoreError::NameTaken)
+        );
     }
 
     #[test]
@@ -697,6 +809,7 @@ mod tests {
             .unwrap(),
             stored_by: by.to_string(),
             timestamp: 1,
+            labels: Default::default(),
         };
         let mut state = CredentialsState::default();
         assert!(state.secret_for("github-sei").is_none());

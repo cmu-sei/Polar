@@ -60,6 +60,15 @@ pub const MAX_LABEL_VALUE: usize = 128;
 /// the name, and `frozen` is the annotation a policy document can add.
 pub const RESERVED_LABEL_KEYS: [&str; 3] = ["owner", "namespace", "frozen"];
 
+/// The identity whose namespace a secret's name is in: what comes before the first `/`, when something comes
+/// after it. `git-repo-observer/github` is in `git-repo-observer`'s. A name with no `/`, or nothing on either
+/// side of it, is in nobody's namespace, and neither is `agent-escrow-keypair:<identity>`, which has its own
+/// rule (docs/architecture/credentials-policy.md, "Storing is governed by policy").
+pub fn namespace_of(name: &str) -> Option<&str> {
+    let (namespace, rest) = name.split_once('/')?;
+    (!namespace.is_empty() && !rest.is_empty()).then_some(namespace)
+}
+
 /// What is wrong with a set of labels, if anything, naming the key at fault and never repeating a value. A key is
 /// lowercase letters, digits and underscores starting with a letter (a plain Cedar attribute name); a value is
 /// printable ASCII; neither is empty; and the reserved keys are refused.
@@ -303,6 +312,30 @@ mod tests {
         let problem = validate_labels(&labels(&[("k", "caf\u{e9}-SECRET-looking")])).unwrap_err();
         assert!(problem.contains("\"k\""), "{problem}");
         assert!(!problem.contains("SECRET"), "{problem}");
+    }
+
+    #[test]
+    fn the_namespace_of_a_name_is_what_comes_before_the_first_slash() {
+        assert_eq!(
+            namespace_of("git-repo-observer/github"),
+            Some("git-repo-observer")
+        );
+        assert_eq!(namespace_of("a.b.c/d/e"), Some("a.b.c"));
+        assert_eq!(namespace_of("a/b"), Some("a"));
+    }
+
+    #[test]
+    fn a_name_with_nothing_on_either_side_of_the_slash_has_no_namespace() {
+        for name in [
+            "github",
+            "",
+            "/github",
+            "a/",
+            "/",
+            "agent-escrow-keypair:x.y",
+        ] {
+            assert_eq!(namespace_of(name), None, "{name:?}");
+        }
     }
 
     #[test]

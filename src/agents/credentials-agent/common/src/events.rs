@@ -266,6 +266,10 @@ pub enum CredentialsEvent {
         /// Broker-verified (published_by), never self-reported.
         stored_by: String,
         timestamp: i64,
+        /// What the secret was stored with: attributes policy can speak of (`resource.kind`), which cannot change
+        /// once stored. Absent means none, which is how every secret stored before labels existed reads.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        labels: std::collections::BTreeMap<String, String>,
     },
     /// Published internally by the consumer itself once a signed
     /// CertType::Service certificate has actually been produced, for
@@ -798,5 +802,65 @@ mod tests {
         );
         assert!(policy.admin_effect().is_none());
         assert!(sample_grant().admin_effect().is_none());
+    }
+
+    fn a_secret_stored_with(labels: &[(&str, &str)]) -> CredentialsEvent {
+        let mut rng = rand::rng();
+        let key = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let pem = rsa::pkcs8::EncodePublicKey::to_public_key_pem(
+            &key.to_public_key(),
+            rsa::pkcs8::LineEnding::LF,
+        )
+        .unwrap();
+        CredentialsEvent::SecretStored {
+            name: "git-repo-observer/github".to_string(),
+            secret: crate::escrow_secret::EscrowedSecret::encrypt(b"s", &pem).unwrap(),
+            stored_by: "git-repo-observer".to_string(),
+            timestamp: 1,
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_secret_stored_before_labels_existed_still_reads_and_has_none() {
+        let with = a_secret_stored_with(&[("kind", "token")]);
+        let mut json = serde_json::to_value(&with).unwrap();
+        // The event as it was written before the field: no `labels` at all.
+        json["SecretStored"]
+            .as_object_mut()
+            .unwrap()
+            .remove("labels")
+            .expect("labels were written");
+        let read: CredentialsEvent = serde_json::from_value(json).unwrap();
+        match read {
+            CredentialsEvent::SecretStored { labels, .. } => assert!(labels.is_empty()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn labels_on_a_stored_secret_round_trip_through_json_and_rkyv() {
+        let original = a_secret_stored_with(&[("kind", "token"), ("team", "a b")]);
+        let json = serde_json::to_string(&original).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CredentialsEvent>(&json).unwrap(),
+            original
+        );
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original)
+            .unwrap()
+            .to_vec();
+        assert_eq!(
+            rkyv::from_bytes::<CredentialsEvent, rkyv::rancor::Error>(&bytes).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn an_event_with_no_labels_is_written_without_the_field() {
+        let json = serde_json::to_value(a_secret_stored_with(&[])).unwrap();
+        assert!(json["SecretStored"].get("labels").is_none(), "{json}");
     }
 }
