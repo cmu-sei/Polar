@@ -144,6 +144,14 @@ moment it needs it (`RetrieveSecret`, through its CryptoActor). The secret itsel
 
 ## Persistence, replay, removal
 
+**Amended 2026-10-15 (David): proposals are soft state.** The receiver (the git controller) keeps the proposals it has
+seen in memory only, and the proposers announce again, as the controller itself announces its desired set every 60
+seconds. A restarted controller has its pending proposals back after the proposers' next announcement, and what it
+needs from signed content (the rules, the approvals) comes back by the replay of signed documents. The graph shows
+every proposal and decision for people to read, and **is never read back to rebuild the receiver's set**, which is the
+rule for everything else (`git-controller.md`, "What has to exist first"). Wherever the text below says the processor
+replays proposals to a receiver, read: the proposers re-announce. The ledger stays as a projection, not a source.
+
 Agents here are short-lived Jobs without storage of their own, and the receiver must not be the only place a
 proposal is remembered. So:
 
