@@ -2710,6 +2710,7 @@ dependencies = [
  "git-agent-common",
  "polar",
  "polar-agent-builder",
+ "polar-crypto",
  "polar-env",
  "ractor",
  "rkyv",

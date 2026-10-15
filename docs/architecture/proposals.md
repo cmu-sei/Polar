@@ -185,6 +185,36 @@ verifiable without trusting the broker and would be kept in the graph as evidenc
 - `polar-signing` and `signed.rs`: a document `type`. Configuration documents today have none; adding it is
   part of this (see the decisions).
 
+## Built 2026-10-15: the decision (step 1)
+
+`git/controller/src/admission.rs` is the decision as a pure function (`decide`), with the rules read from a signed
+`admission` section body (`Rules::parse`) and the canonical form of a URL in `git-agent-common` (`canonical_repository`).
+Tests were written first; thirty-eight deliberate breakages of it and thirteen of the URL reading were each caught. It is
+not wired to anything yet. Decided while building, in the places this document was silent (David, say if you disagree):
+
+- **What is passed on is the canonical URL**, never the text that arrived: only `https`, a host name (never an
+  address, in any spelling), no login, no query, no `%` anywhere (it can hide a `/`, a `\` or a dot segment from one
+  reader and not another), no empty path segment, at least one segment, no trailing dot on the host, at most 2048
+  characters, a fragment dropped, a default port dropped, dot segments resolved, a trailing slash dropped.
+  Two spellings of one repository have one id (`.git` or not).
+- **Host patterns are matched by the same function the observer's CryptoActor uses** (`polar_crypto::registry`), so
+  the controller never accepts a repository for a host the observer would refuse the credential for.
+- **`organisations`** is per host pattern; the first path segment is compared without regard to case; a host no
+  entry names is not restricted.
+- **`hosts` and `proposers` are required** in the rules. A list of proposers that is empty lets nobody propose.
+  **`require_approval` defaults to true.** `limits` default to 500 entries and 20 distinct repositories per proposer
+  per hour. Every list is bounded at 1000.
+- **Counting is the caller's:** `Standing.accepted_entries` leaves out the proposal's own entry, and
+  `proposed_this_hour` counts distinct repositories (an announcement repeated every minute is not a flood).
+- **The network guard allows only ordinary public addresses**: it refuses this network, private, shared,
+  loopback, link-local (cloud metadata), documentation, benchmarking, multicast and reserved IPv4; for IPv6 it
+  allows only global unicast (`2000::/3`) minus documentation, Teredo and 6to4, and refuses IPv4-mapped. One bad
+  address among good ones refuses the name. A name that does not resolve is **pending**, not rejected: a failed
+  lookup is not the proposer's fault, and the next announcement asks again.
+- **A bound credential is preferred to `anonymous`, and the first binding that matches wins.**
+- The guard here is at decision time. The observer must check again when it connects, so a name that changes its
+  answer is caught (step 6); until then an accepted repository is only as safe as the answer at decision time.
+
 ## Build order, tests first
 
 1. The decision procedure as a pure function: normalisation, each rule, the order, and an attack list (user

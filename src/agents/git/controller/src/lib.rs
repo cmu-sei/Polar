@@ -1,5 +1,6 @@
 #![deny(clippy::disallowed_methods)]
 
+pub mod admission;
 pub mod agent;
 pub mod desired;
 pub mod settings;
