@@ -1,0 +1,21 @@
+[package]
+name = "git-repo-controller"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cassini-types.workspace = true
+git-agent-common.workspace = true
+polar.workspace = true
+polar-agent-builder.workspace = true
+polar-env.workspace = true
+ractor.workspace = true
+rkyv.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+cassini-client.workspace = true

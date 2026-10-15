@@ -2700,6 +2700,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "git-repo-controller"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "cassini-client",
+ "cassini-types",
+ "git-agent-common",
+ "polar",
+ "polar-agent-builder",
+ "polar-env",
+ "ractor",
+ "rkyv",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "git-repo-observer"
 version = "1.0.0"
 dependencies = [
