@@ -338,6 +338,25 @@ credential. The minimal controller **replaces the git scheduler** (which is remo
 cluster); it has no proposals, admission rules, status events or backoff. Those (steps 1 and 7 below, and the rest
 of step 6) come after, as path 2.
 
+**Decided 2026-10-14 (David), for the minimal controller:**
+
+- **Discovery is dropped for now.** The git scheduler was the only subscriber of `polar.git.repositories.discovery`
+  (the GitLab consumer publishes it). With it gone, nothing observes a discovered GitLab project until path 2, when
+  the GitLab consumer becomes a proposer under the admission rules. The `repositories` section is the only source.
+- **The controller republishes the whole desired set** on `git.repo.config.events` once at start (after the replay
+  delivers its section), whenever the section changes, and every `POLAR_GIT_CONTROLLER_REPUBLISH_SECS` seconds
+  (a dynamic variable, default 60, at least 5). Cassini keeps nothing for a subscriber that is not there yet, so an
+  observer that starts or restarts later would otherwise never hear.
+- **The observer restarts a worker whose configuration changed** (stop and start; the clone in the cache is reused)
+  and ignores an announcement identical to what the worker runs. **Removal is deferred:** a repository dropped from a
+  later version keeps being observed until the pod restarts. It needs a protocol decision (the whole set with the
+  observer stopping what is missing, or an explicit retire event), made with status and backoff in path 2.
+- **The observer translates the refs.** A bare clone's `refs/heads/main` stops moving after the clone; a fetch
+  advances only `refs/remotes/origin/main`. Authors write the remote's refs (`refs/heads/main`); the observer reads a
+  configured `refs/heads/X` from `refs/remotes/<first remote>/X` when it sets a worker up. `refs/remotes/…` and
+  `refs/tags/…` are taken as written, and an empty list still means the observer's default branch. (The scheduler's
+  default `refs/heads/main` would have seen the first commit and no other.)
+
 1. **The admission decision as a pure function**: normalisation, each rule, the order, the attack list from
    `proposals.md` (user information, `ext::`, `file://`, internal addresses, a lookalike host, a very long URL,
    a flood from one proposer). Tests before any wiring.
