@@ -90,7 +90,7 @@ The observer publishes, per repository, on `polar.git.observation.status`: last 
 current tips. The controller consumes it for liveness (stalled, failing, backing off); the processor may write
 it to the graph for visibility.
 
-**Built 2026-10-15 (observer and processor; not yet seen on a cluster).** After every attempt, including one that
+**Built 2026-10-15 (observer and processor); seen on a cluster the same day for `observing`, `pending-credential` and `failing` with a credential bound to another host; a failed fetch and a failed clone are only unit-tested.** After every attempt, including one that
 cannot go ahead, the observer publishes an `ObservationStatus` (`git-agent-common/src/status.rs`) on
 `polar.git.observation.status`: `repo_id`, `state`, `reason`, `last_success`, `tips`, `consecutive_failures`,
 `observed_at`. Only three states exist so far: `observing`, `pending-credential` (waiting is not failing, and
