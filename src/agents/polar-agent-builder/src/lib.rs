@@ -22,7 +22,7 @@
 pub mod agent;
 pub mod authority;
 pub use agent::{Configured, PolarAgent, StartError, run};
-pub use authority::PolicyLookup;
+pub use authority::{LookupError, PolicyLookup};
 pub mod capability;
 pub use capability::Capability;
 pub mod configuration;

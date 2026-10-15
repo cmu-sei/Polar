@@ -438,7 +438,7 @@ impl PolicyLookup {
 
     /// What policy says about `action` on `resource` for the requester. An error means no decision was
     /// reached (no policy actor yet, it did not answer, or it failed), never a decision: a caller that
-    /// is told this must refuse.
+    /// is told this must refuse. The same as [`PolicyLookup::decide`], with the error as text.
     pub async fn check(
         &self,
         requester_identity: &str,
@@ -447,8 +447,33 @@ impl PolicyLookup {
         resource: &str,
         facts: polar_policy::Facts,
     ) -> Result<polar_policy::Decision, String> {
+        self.decide(
+            requester_identity,
+            requester_certificate_pem,
+            action,
+            resource,
+            facts,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+
+    /// What policy says, with the reason it said nothing told apart: [`LookupError::NoPolicyLoaded`] is a policy
+    /// that is running and has been given no rules, which a caller with a floor to fall back to (a store, on a
+    /// fresh cluster) can act on, and [`LookupError::Unavailable`] is no answer at all, which no caller may
+    /// treat as a decision.
+    pub async fn decide(
+        &self,
+        requester_identity: &str,
+        requester_certificate_pem: Option<String>,
+        action: &str,
+        resource: &str,
+        facts: polar_policy::Facts,
+    ) -> Result<polar_policy::Decision, LookupError> {
         let Some(policy) = self.actor() else {
-            return Err("the policy is not running yet, so nothing can be decided".to_string());
+            return Err(LookupError::Unavailable(
+                "the policy is not running yet, so nothing can be decided".to_string(),
+            ));
         };
         match ractor::rpc::call(
             &policy,
@@ -465,12 +490,41 @@ impl PolicyLookup {
         .await
         {
             Ok(ractor::rpc::CallResult::Success(Ok(decision))) => Ok(decision),
-            Ok(ractor::rpc::CallResult::Success(Err(e))) => Err(e.to_string()),
-            Ok(other) => Err(format!("unexpected CallResult: {other:?}")),
-            Err(e) => Err(e.to_string()),
+            Ok(ractor::rpc::CallResult::Success(Err(
+                polar_policy::PolicyError::NoPolicyLoaded,
+            ))) => Err(LookupError::NoPolicyLoaded),
+            Ok(ractor::rpc::CallResult::Success(Err(e))) => {
+                Err(LookupError::Unavailable(e.to_string()))
+            }
+            Ok(other) => Err(LookupError::Unavailable(format!(
+                "unexpected CallResult: {other:?}"
+            ))),
+            Err(e) => Err(LookupError::Unavailable(e.to_string())),
         }
     }
 }
+
+/// Why policy gave no decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LookupError {
+    /// The policy actor is running and has no rules.
+    NoPolicyLoaded,
+    /// There was no answer: no policy actor, it did not reply, or it failed.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for LookupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LookupError::NoPolicyLoaded => {
+                write!(f, "{}", polar_policy::PolicyError::NoPolicyLoaded)
+            }
+            LookupError::Unavailable(why) => write!(f, "{why}"),
+        }
+    }
+}
+
+impl std::error::Error for LookupError {}
 
 /// How the rest of an agent uses authority, without touching ractor: the actors it evaluates with, the
 /// revoked serials, and the ports its own actors listen on.
@@ -1043,6 +1097,109 @@ mod actor_tests {
             )
             .await;
         assert!(answer.unwrap_err().contains("not running yet"));
+    }
+
+    #[tokio::test]
+    async fn a_policy_that_is_running_with_nothing_loaded_is_told_apart_from_one_that_is_not_running()
+     {
+        // Nothing is running under this name: the lookup cannot reach a policy at all.
+        let absent = PolicyLookup::for_service("nobody-has-started-this-either")
+            .decide(
+                "alice",
+                None,
+                r#"Action::"x""#,
+                r#"Thing::"t""#,
+                Default::default(),
+            )
+            .await;
+        assert!(
+            matches!(&absent, Err(LookupError::Unavailable(why)) if why.contains("not running yet")),
+            "{absent:?}"
+        );
+
+        // The policy actor is running and has been given no rules: that is a state a caller can act on.
+        let rig = rig().await;
+        let lookup = PolicyLookup::named(rig.service.clone() + ".policy");
+        let empty = lookup
+            .decide(
+                "alice",
+                None,
+                r#"Action::"x""#,
+                r#"Thing::"t""#,
+                Default::default(),
+            )
+            .await;
+        assert_eq!(empty, Err(LookupError::NoPolicyLoaded));
+    }
+
+    #[tokio::test]
+    async fn the_string_form_of_the_lookup_says_what_it_always_did() {
+        let rig = rig().await;
+        let lookup = PolicyLookup::named(rig.service.clone() + ".policy");
+        let answer = lookup
+            .check(
+                "alice",
+                None,
+                r#"Action::"x""#,
+                r#"Thing::"t""#,
+                Default::default(),
+            )
+            .await;
+        assert_eq!(answer.unwrap_err(), "no policy set has been loaded yet");
+    }
+
+    #[tokio::test]
+    async fn a_request_policy_cannot_build_is_unavailable_and_not_mistaken_for_no_policy() {
+        let rig = rig().await;
+        let lookup = PolicyLookup::named(rig.service.clone() + ".policy");
+        rig.handle.snapshot(
+            snapshot(&[policy(
+                1,
+                1,
+                r#"permit(principal == Identity::"alice", action == Action::"x", resource);"#,
+            )]),
+            Some(CREDENTIALS.into()),
+        );
+        settle().await;
+        // Rules are loaded, but this resource is not an entity: policy fails, and that is no answer.
+        let answer = lookup
+            .decide(
+                "alice",
+                None,
+                r#"Action::"x""#,
+                "this is not an entity",
+                Default::default(),
+            )
+            .await;
+        assert!(
+            matches!(answer, Err(LookupError::Unavailable(_))),
+            "{answer:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn once_rules_are_loaded_the_typed_lookup_gives_the_decision() {
+        let rig = rig().await;
+        let lookup = PolicyLookup::named(rig.service.clone() + ".policy");
+        rig.handle.snapshot(
+            snapshot(&[policy(
+                1,
+                1,
+                r#"permit(principal == Identity::"alice", action == Action::"x", resource);"#,
+            )]),
+            Some(CREDENTIALS.into()),
+        );
+        settle().await;
+        let decision = lookup
+            .decide(
+                "alice",
+                None,
+                r#"Action::"x""#,
+                r#"Thing::"t""#,
+                Default::default(),
+            )
+            .await;
+        assert_eq!(decision, Ok(polar_policy::Decision::Allow));
     }
 
     #[tokio::test]
