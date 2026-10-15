@@ -237,6 +237,30 @@ here, "authenticated by the author's user certificate", could not be built as wr
    `permanent/<agent>/<section>.dhall` (a configuration document: `permanent/<agent>/configuration.dhall`), commits
    it and pushes with the author's certificate. Without `--push` it only writes the file.
 
+**Built 2026-10-15** (`polar-sign` `template`, `sign`, `--push`; the gateway route; `verify_escrow_certificate`;
+`nu infra/resolve.nu scaffolds <dir>`). Not yet seen on a cluster. What an author does, with the observer's
+credentials as the example:
+
+```
+nu infra/resolve.nu scaffolds ~/.config/polar-admin/scaffolds        # once, and after an agent changes
+polar-sign template git-repo-observer credentials --out creds.json    # also: <agent> --settings, or <agent> alone to list
+$EDITOR creds.json                                                    # fill in; a secret is typed as it is, or `-`
+printf '%s\n' "$TOKEN" | polar-sign sign creds.json --push           # checks, seals, signs, commits and pushes
+```
+
+The file is JSON with `//` comment lines and forgiven trailing commas: `agent`, `version`, an optional `id`, and either
+`section` and `body` or `settings`. `sign` reads the agent's scaffold from `--scaffold` or
+`<dir>/scaffolds/<agent>.json`, asks the credentials agent's gateway (`--observer-url`, `POLAR_OBSERVER_URL`, or
+`http://localhost:8081`) for the escrow certificate only if there is a plaintext secret to seal, and pushes to
+`--repo` (or `POLAR_SCHEDULES_URL`) using the author's certificate for the Polar git server and a conventional
+commit message (`feat(<agent>): <section> version <n>`). What it checks from the scaffold is the structure and the
+kind of each value; the agent's own validation judges the rest when the document arrives. A field marked `secret`
+in a section's description is the only thing it seals, bound to the entry's `name`; an agent's secret *setting*
+cannot be set by a document yet, and the tool says so.
+
+An empty list is written as Dhall `([] : List {})`, which evaluates back to `[]`, so a version that withdraws every
+credential or observes no repository can be signed.
+
 The folder per agent needs no change in the polar scheduler's observer: it already takes any path under
 `permanent/`. The tool replaces only its own file, so one agent's section is one file and a new version replaces the
 old in place (git keeps the history). A runtime section's secret entries are named by the entry's `name` field, which

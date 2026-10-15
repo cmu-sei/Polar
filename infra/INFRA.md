@@ -165,6 +165,8 @@ infra/
   admin.nu               what to do with ~/.config/polar-admin that belongs to another cluster
   browser.nu             step 10: does the browser hold this cluster's CA and the user's certificate, and has
                          Neo4j's password been changed (read-only)
+  resolve.nu scaffolds   writes every agent's `--scaffold` to a folder (`~/.config/polar-admin/scaffolds`), which
+                         `polar-sign template` and `polar-sign sign` read
   egress.nu              the check at the end of up.nu: can a pod reach a host outside the cluster, and if not, why
                          (a note, never a failure)
   config/                the catalog

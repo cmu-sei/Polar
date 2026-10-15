@@ -750,6 +750,23 @@ def "main names" [--target: string = $DEFAULT_TARGET] {
     print (all_workloads $target | get name | to json --raw)
 }
 
+# Writes the scaffold of every agent in the catalog to `dir`, one `<agent>.json` each: what `polar-sign template`
+# and `polar-sign sign` read to know what each agent takes (its runtime sections, the settings a signed document
+# may change, their defaults and which fields are secret). An author keeps them in `scaffolds/` next to their
+# certificate (`~/.config/polar-admin/scaffolds`). The scaffold comes from the agent itself (the source with
+# cargo, the built image with POLAR_AGENT_SOURCE=images), never from a copy.
+def "main scaffolds" [dir: string, --target: string = $DEFAULT_TARGET] {
+    mkdir $dir
+    let agents = (all_workloads $target | where kind == "agent")
+    for w in $agents {
+        let scaffold = (scaffold_of $w.name $w)
+        let name = ($scaffold | get agent.name)
+        $scaffold | to json | save --force ($dir | path join $"($name).json")
+        print $"  ($name)"
+    }
+    print $"wrote (($agents | length)) scaffold\(s\) to ($dir)"
+}
+
 # Show what a workload resolves to and where each value came from.
 def "main explain" [
     name: string

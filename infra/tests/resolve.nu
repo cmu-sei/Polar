@@ -502,6 +502,25 @@ def main [] {
             }
         }
 
+        "scaffolds writes one file for each agent, named by the name the agent gives itself": {
+            # Stand-in scaffolds, so nothing is built: one per workload, each naming its agent differently from
+            # the workload, to show the file is named by what the agent says.
+            let stubs = (mktemp --directory)
+            let out = (mktemp --directory)
+            let names = (^nu $RESOLVER names | from json)
+            for n in $names {
+                { agent: { name: $"agent-of-($n)" }, sections: [], runtime: [] } | to json | save --force ($stubs | path join $"($n).json")
+            }
+            let agents = ($names | where {|n| (resolve $n).kind == "agent" } | length)
+            with-env { POLAR_SCAFFOLD_DIR: $stubs } { ^nu $RESOLVER scaffolds $out | ignore }
+            let written = (ls $out | get name | each {|f| $f | path basename } | sort)
+            assert equal ($written | length) $agents
+            assert ($written | all {|f| $f | str starts-with "agent-of-" })
+            let one = (open ($out | path join ($written | first)))
+            assert ($one.agent.name | str starts-with "agent-of-")
+            rm -rf $stubs $out
+        }
+
         "a graph agent presents the pod's one client certificate to Neo4j and does not ask for a second": {
             # Two client certificates for one pod instance is what the credentials agent refuses (and a second
             # would revoke the first), and the second was the same identity and type with no extra names, so
