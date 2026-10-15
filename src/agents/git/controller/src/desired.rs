@@ -35,7 +35,7 @@ pub static REPOSITORIES: RuntimeSection = RuntimeSection {
     authority: SectionAuthority::Runtime,
     name: SECTION_NAME,
     doc: "The repositories to observe, and how. Replaced whole by each version.",
-    body: r#"{"repositories": {"list_of": {"url": {"type": "https URL of a host name", "required": true, "doc": "the key of the entry; no login in it, and no port other than digits"}, "refs": {"type": "list of full ref names, such as refs/heads/main", "required": false, "default": "the repository's default branch"}, "frequency_secs": {"type": "whole number, 60 to 604800", "required": false, "default": 900}, "max_depth": {"type": "whole number, 1 to 10000", "required": false, "default": 100, "doc": "commits walked per ref, a safety bound"}, "shallow_depth": {"type": "whole number, 1 to 10000", "required": false, "doc": "depth of a shallow fetch; unset is a full incremental fetch"}, "credential": {"type": "name of a credential", "required": false, "doc": "by name; the controller never sees its value"}}}}"#,
+    body: r#"{"repositories": {"list_of": {"url": {"type": "https URL of a host name", "required": true, "doc": "the key of the entry; no login in it, and no port other than digits"}, "refs": {"type": "list of full ref names, such as refs/heads/main", "required": false, "doc": "the branches to observe, by the remote's names; left out, the repository's default branch"}, "frequency_secs": {"type": "whole number, 60 to 604800", "required": false, "default": 900}, "max_depth": {"type": "whole number, 1 to 10000", "required": false, "default": 100, "doc": "commits walked per ref, a safety bound"}, "shallow_depth": {"type": "whole number, 1 to 10000", "required": false, "doc": "depth of a shallow fetch; unset is a full incremental fetch"}, "credential": {"type": "name of a credential", "required": false, "doc": "by name; the controller never sees its value"}}}}"#,
     validate,
 };
 
@@ -257,6 +257,24 @@ mod tests {
     #[test]
     fn the_section_is_declared_soundly() {
         assert!(polar_agent_builder::runtime::check_declarations(&[&REPOSITORIES]).is_empty());
+    }
+
+    #[test]
+    fn the_description_a_scaffold_gives_has_defaults_of_the_kind_each_type_promises() {
+        // polar-sign puts a default into a template as it is, so a default must be the value, not prose
+        let body: Value = serde_json::from_str(REPOSITORIES.body).unwrap();
+        let entry = &body["repositories"]["list_of"];
+        for (name, spec) in entry.as_object().unwrap() {
+            let Some(default) = spec.get("default") else {
+                continue;
+            };
+            let kind = spec["type"].as_str().unwrap();
+            if kind.starts_with("whole number") {
+                assert!(default.is_u64(), "{name}");
+            } else if kind.starts_with("list of") {
+                assert!(default.is_array(), "{name}");
+            }
+        }
     }
 
     #[test]
