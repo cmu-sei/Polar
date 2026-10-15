@@ -3,6 +3,7 @@
 use crate::status::{Outcome, StatusTracker};
 use git_agent_common::GitRepositoryMessage;
 use git_agent_common::RepoObservationConfig;
+use git_agent_common::RepositorySet;
 use git_agent_common::status::{GIT_REPO_OBSERVATION_STATUS, ObservationStatus};
 use git2::{Cred, CredentialType, FetchOptions, Oid, RemoteCallbacks, Repository};
 use polar::cassini::TcpClient;
@@ -190,6 +191,12 @@ pub enum RepoSupervisorMessage {
     },
     /// The `credentials` section was replaced: a repository that was waiting for its credential tries again.
     CredentialsChanged,
+    /// Everything the controller wants observed. Each repository is started, or replaced if its settings
+    /// changed, or left alone if it is as announced; and if the set is `complete`, the workers of repositories
+    /// it does not name are stopped.
+    Reconcile {
+        set: RepositorySet,
+    },
 }
 
 /// What a failed attempt to start a repository's worker means for the supervisor of all of them.
@@ -209,6 +216,70 @@ pub fn tolerate_spawn_failure(repo_id: &RepoId, error: SpawnErr) -> Result<(), A
             Ok(())
         }
         other => Err(other.into()),
+    }
+}
+
+impl GitRepoSupervisor {
+    /// Makes sure a worker is running for `config`: starts one, or replaces the one running if the settings
+    /// changed, or leaves it alone if it is as announced.
+    async fn ensure_worker(
+        myself: &ActorRef<RepoSupervisorMessage>,
+        state: &mut GitRepoSupervisorState,
+        config: RepoObservationConfig,
+    ) -> Result<(), ActorProcessingErr> {
+        trace!("Received SpawnWorker message");
+        let repo_id = config.repo_id.clone();
+
+        // The same announcement again is nothing to do. A changed one replaces the worker: the
+        // clone in the cache is reused, so only the settings change.
+        match state.workers.get(&repo_id) {
+            Some(running) if running.config == config => {
+                debug!("worker for {repo_id} already running with this configuration");
+                return Ok(());
+            }
+            Some(_) => {
+                info!("the configuration of {repo_id} changed; restarting its worker");
+                if let Some(old) = state.workers.remove(&repo_id)
+                    && let Err(e) = old
+                        .actor
+                        .stop_and_wait(Some("configuration changed".into()), Some(WORKER_GRACE))
+                        .await
+                {
+                    warn!("the old worker for {repo_id} did not stop in time: {e:?}");
+                }
+            }
+            None => {}
+        }
+
+        let announced = config.clone();
+        let args = GitRepoWorkerArgs {
+            config,
+            crypto: state.crypto.clone(),
+            clone: state.clone,
+            repo_path: state.cache_root.join(repo_id.to_string()),
+            tcp_client: state.tcp_client.clone(),
+        };
+
+        match Actor::spawn_linked(
+            Some(format!("{SERVICE_NAME}.{}.worker", repo_id)),
+            GitRepoWorker,
+            args,
+            myself.clone().into(),
+        )
+        .await
+        {
+            Ok((actor, _)) => {
+                state.workers.insert(
+                    repo_id,
+                    RunningWorker {
+                        actor,
+                        config: announced,
+                    },
+                );
+            }
+            Err(e) => tolerate_spawn_failure(&repo_id, e)?,
+        }
+        Ok(())
     }
 }
 
@@ -248,60 +319,28 @@ impl Actor for GitRepoSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match msg {
             RepoSupervisorMessage::SpawnWorker { config } => {
-                trace!("Received SpawnWorker message");
-                let repo_id = config.repo_id.clone();
-
-                // The same announcement again is nothing to do. A changed one replaces the worker: the
-                // clone in the cache is reused, so only the settings change.
-                match state.workers.get(&repo_id) {
-                    Some(running) if running.config == config => {
-                        debug!("worker for {repo_id} already running with this configuration");
-                        return Ok(());
-                    }
-                    Some(_) => {
-                        info!("the configuration of {repo_id} changed; restarting its worker");
-                        if let Some(old) = state.workers.remove(&repo_id)
-                            && let Err(e) = old
-                                .actor
-                                .stop_and_wait(
-                                    Some("configuration changed".into()),
-                                    Some(WORKER_GRACE),
-                                )
-                                .await
-                        {
-                            warn!("the old worker for {repo_id} did not stop in time: {e:?}");
+                Self::ensure_worker(&myself, state, config).await?;
+            }
+            RepoSupervisorMessage::Reconcile { set } => {
+                let named: std::collections::HashSet<RepoId> =
+                    set.repositories.iter().map(|c| c.repo_id.clone()).collect();
+                for config in set.repositories {
+                    Self::ensure_worker(&myself, state, config).await?;
+                }
+                if set.complete {
+                    let gone: Vec<RepoId> = state
+                        .workers
+                        .keys()
+                        .filter(|id| !named.contains(*id))
+                        .cloned()
+                        .collect();
+                    for repo_id in gone {
+                        // The clone stays in the cache: it is reused if the repository is named again.
+                        if let Some(worker) = state.workers.remove(&repo_id) {
+                            info!("{repo_id} is no longer in the set; stopping its worker");
+                            worker.actor.stop(Some("no longer in the set".into()));
                         }
                     }
-                    None => {}
-                }
-
-                let announced = config.clone();
-                let args = GitRepoWorkerArgs {
-                    config,
-                    crypto: state.crypto.clone(),
-                    clone: state.clone,
-                    repo_path: state.cache_root.join(repo_id.to_string()),
-                    tcp_client: state.tcp_client.clone(),
-                };
-
-                match Actor::spawn_linked(
-                    Some(format!("{SERVICE_NAME}.{}.worker", repo_id)),
-                    GitRepoWorker,
-                    args,
-                    myself.into(),
-                )
-                .await
-                {
-                    Ok((actor, _)) => {
-                        state.workers.insert(
-                            repo_id,
-                            RunningWorker {
-                                actor,
-                                config: announced,
-                            },
-                        );
-                    }
-                    Err(e) => tolerate_spawn_failure(&repo_id, e)?,
                 }
             }
             RepoSupervisorMessage::CredentialsChanged => {
@@ -1548,5 +1587,162 @@ mod tests {
         tokio::time::advance(std::time::Duration::from_secs(3)).await;
         until("the rescheduled attempt", || asked(&rig) == 3).await;
         rig.worker.stop(None);
+    }
+
+    fn set(urls: &[&str], complete: bool) -> RepositorySet {
+        RepositorySet {
+            repositories: urls.iter().map(|u| private_repo_at(u)).collect(),
+            complete,
+        }
+    }
+
+    /// How many workers there are: each one that is waiting for its credential asks once when told they changed.
+    async fn workers_in(rig: &SupervisorRig) -> usize {
+        settle().await;
+        let before = rig.crypto.asked.lock().unwrap().len();
+        rig.supervisor
+            .cast(RepoSupervisorMessage::CredentialsChanged)
+            .unwrap();
+        settle().await;
+        rig.crypto.asked.lock().unwrap().len() - before
+    }
+
+    fn reconcile(rig: &SupervisorRig, set: RepositorySet) {
+        rig.supervisor
+            .cast(RepoSupervisorMessage::Reconcile { set })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_set_starts_a_worker_for_each_repository_in_it() {
+        let rig = start_supervisor().await;
+        reconcile(
+            &rig,
+            set(
+                &[
+                    "https://localhost:1/set/a.git",
+                    "https://localhost:1/set/b.git",
+                    "https://localhost:1/set/c.git",
+                ],
+                false,
+            ),
+        );
+        assert_eq!(workers_in(&rig).await, 3);
+        rig.supervisor.stop(None);
+    }
+
+    #[tokio::test]
+    async fn the_same_set_again_changes_nothing_and_a_changed_repository_is_replaced() {
+        let rig = start_supervisor().await;
+        let urls = [
+            "https://localhost:1/again/a.git",
+            "https://localhost:1/again/b.git",
+        ];
+        reconcile(&rig, set(&urls, true));
+        assert_eq!(workers_in(&rig).await, 2);
+        let asks_before = rig.crypto.asked.lock().unwrap().len();
+        reconcile(&rig, set(&urls, true));
+        settle().await;
+        assert_eq!(
+            rig.crypto.asked.lock().unwrap().len(),
+            asks_before,
+            "an identical set started new workers"
+        );
+        let mut changed = set(&urls, true);
+        changed.repositories[0].frequency = 901;
+        reconcile(&rig, changed);
+        settle().await;
+        assert_eq!(
+            rig.crypto.asked.lock().unwrap().len(),
+            asks_before + 1,
+            "only the changed repository should have a new worker"
+        );
+        assert_eq!(
+            workers_in(&rig).await,
+            2,
+            "the replaced worker is still running"
+        );
+        rig.supervisor.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_complete_set_stops_the_workers_it_does_not_name() {
+        let rig = start_supervisor().await;
+        reconcile(
+            &rig,
+            set(
+                &[
+                    "https://localhost:1/drop/a.git",
+                    "https://localhost:1/drop/b.git",
+                    "https://localhost:1/drop/c.git",
+                ],
+                true,
+            ),
+        );
+        assert_eq!(workers_in(&rig).await, 3);
+        reconcile(&rig, set(&["https://localhost:1/drop/b.git"], true));
+        assert_eq!(workers_in(&rig).await, 1);
+        rig.supervisor.stop(None);
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_set_stops_nothing_but_still_starts_what_is_new() {
+        let rig = start_supervisor().await;
+        reconcile(
+            &rig,
+            set(
+                &[
+                    "https://localhost:1/inc/a.git",
+                    "https://localhost:1/inc/b.git",
+                ],
+                true,
+            ),
+        );
+        assert_eq!(workers_in(&rig).await, 2);
+        reconcile(&rig, set(&["https://localhost:1/inc/c.git"], false));
+        assert_eq!(
+            workers_in(&rig).await,
+            3,
+            "the two it did not name must survive, and c start"
+        );
+        rig.supervisor.stop(None);
+    }
+
+    #[tokio::test]
+    async fn an_empty_set_stops_everything_only_if_it_is_complete() {
+        let rig = start_supervisor().await;
+        reconcile(
+            &rig,
+            set(
+                &[
+                    "https://localhost:1/empty/a.git",
+                    "https://localhost:1/empty/b.git",
+                ],
+                true,
+            ),
+        );
+        assert_eq!(workers_in(&rig).await, 2);
+        reconcile(&rig, set(&[], false));
+        assert_eq!(
+            workers_in(&rig).await,
+            2,
+            "an incomplete empty set stopped workers"
+        );
+        reconcile(&rig, set(&[], true));
+        assert_eq!(workers_in(&rig).await, 0);
+        rig.supervisor.stop(None);
+    }
+
+    #[tokio::test]
+    async fn a_repository_that_was_dropped_is_observed_again_when_a_later_set_names_it() {
+        let rig = start_supervisor().await;
+        let url = "https://localhost:1/back/a.git";
+        reconcile(&rig, set(&[url], true));
+        assert_eq!(workers_in(&rig).await, 1);
+        reconcile(&rig, set(&[], true));
+        assert_eq!(workers_in(&rig).await, 0);
+        reconcile(&rig, set(&[url], true));
+        assert_eq!(workers_in(&rig).await, 1);
+        rig.supervisor.stop(None);
     }
 }

@@ -11,7 +11,7 @@ use crate::{
     GitRepoSupervisor, GitRepoSupervisorArgs, REPO_SUPERVISOR_NAME, RepoSupervisorMessage,
 };
 use cassini_types::ClientEvent;
-use git_agent_common::{ConfigurationEvent, GIT_REPO_CONFIG_EVENTS, RepoObservationConfig};
+use git_agent_common::{GIT_REPO_CONFIG_EVENTS, RepositorySet};
 use polar::cassini::{CassiniClient, TcpClient, UnsubscribeRequest};
 use polar_agent_builder::{
     AgentBuilder, ConfigurationHandle, Configured, CryptoHandle, HealthClient, HealthHandle,
@@ -33,8 +33,8 @@ const WORKERS_GRACE: Duration = Duration::from_secs(30);
 pub enum RootSupervisorMessage {
     /// Lifecycle events from the Cassini client.
     ClientEvent { event: ClientEvent },
-    /// A repository to observe, decoded from the configuration topic.
-    Observe(Box<RepoObservationConfig>),
+    /// The set of repositories to observe, decoded from the configuration topic.
+    Observe(Box<RepositorySet>),
     /// The infrastructure has decided the agent should end: finish, then say so.
     PrepareShutdown,
     /// A runtime section was replaced.
@@ -56,11 +56,11 @@ pub struct RootSupervisorState {
 impl RootSupervisor {
     /// What was published on the configuration topic. Anything that does not decode is logged and
     /// dropped, never fatal.
-    pub fn decode(payload: &[u8]) -> Option<RepoObservationConfig> {
-        match rkyv::from_bytes::<ConfigurationEvent, rkyv::rancor::Error>(payload) {
-            Ok(event) => Some(event.config),
+    pub fn decode(payload: &[u8]) -> Option<RepositorySet> {
+        match rkyv::from_bytes::<RepositorySet, rkyv::rancor::Error>(payload) {
+            Ok(set) => Some(set),
             Err(e) => {
-                warn!("Failed to deserialize a repository configuration event: {e}");
+                warn!("Failed to deserialize a set of repositories: {e}");
                 None
             }
         }
@@ -136,11 +136,11 @@ impl Actor for RootSupervisor {
 
         let deliver_to = myself.clone();
         let configuration = Subscription::new(GIT_REPO_CONFIG_EVENTS, move |incoming| {
-            if let Some(config) = Self::decode(&incoming.payload)
+            if let Some(set) = Self::decode(&incoming.payload)
                 && let Err(e) =
-                    deliver_to.send_message(RootSupervisorMessage::Observe(Box::new(config)))
+                    deliver_to.send_message(RootSupervisorMessage::Observe(Box::new(set)))
             {
-                warn!("failed to hand a repository to the supervisor: {e}");
+                warn!("failed to hand a set of repositories to the supervisor: {e}");
             }
         });
 
@@ -217,14 +217,14 @@ impl Actor for RootSupervisor {
                 }
                 _ => (),
             },
-            RootSupervisorMessage::Observe(config) => {
+            RootSupervisorMessage::Observe(set) => {
                 if state.shutting_down {
                     warn!(
-                        "shutting down -- not starting to observe {}",
-                        config.repo_url
+                        "shutting down -- not starting to observe {} repositories",
+                        set.repositories.len()
                     );
                 } else if let Some(repo_supervisor) = &state.repo_supervisor {
-                    repo_supervisor.cast(RepoSupervisorMessage::SpawnWorker { config: *config })?;
+                    repo_supervisor.cast(RepoSupervisorMessage::Reconcile { set: *set })?;
                 } else {
                     return Err("Failed to find repo supervisor".into());
                 }
@@ -302,6 +302,7 @@ impl Actor for RootSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use git_agent_common::RepoObservationConfig;
     use polar::graph::nodes::git::RepoId;
 
     #[test]
@@ -311,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_event_decodes_to_the_repository_it_named() {
+    fn a_set_decodes_to_the_repositories_it_named_and_whether_it_is_complete() {
         let id = RepoId::from_url("https://example.org/org/repo.git");
         let config = RepoObservationConfig::new(
             id,
@@ -320,9 +321,23 @@ mod tests {
             Some(50),
             vec!["refs/heads/main".into()],
         );
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&ConfigurationEvent { config }).unwrap();
-        let decoded = RootSupervisor::decode(&bytes).expect("it decodes");
-        assert_eq!(decoded.repo_url, "https://example.org/org/repo.git");
-        assert_eq!(decoded.refs, vec!["refs/heads/main".to_string()]);
+        for complete in [true, false] {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&RepositorySet {
+                repositories: vec![config.clone()],
+                complete,
+            })
+            .unwrap();
+            let decoded = RootSupervisor::decode(&bytes).expect("it decodes");
+            assert_eq!(decoded.complete, complete);
+            assert_eq!(decoded.repositories.len(), 1);
+            assert_eq!(
+                decoded.repositories[0].repo_url,
+                "https://example.org/org/repo.git"
+            );
+            assert_eq!(
+                decoded.repositories[0].refs,
+                vec!["refs/heads/main".to_string()]
+            );
+        }
     }
 }

@@ -3,6 +3,7 @@
 pub mod admission;
 pub mod agent;
 pub mod desired;
+pub mod proposals;
 pub mod settings;
 pub mod supervisor;
 

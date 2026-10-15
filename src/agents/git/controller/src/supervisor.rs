@@ -10,7 +10,7 @@ use crate::desired;
 use crate::settings;
 use cassini_types::ClientEvent;
 use git_agent_common::{
-    ConfigurationEvent, GIT_REPO_CONFIG_EVENTS, RepoObservationConfig, publish_event,
+    GIT_REPO_CONFIG_EVENTS, RepoObservationConfig, RepositorySet, publish_event,
 };
 use polar::cassini::TcpClient;
 use polar_agent_builder::{
@@ -35,20 +35,24 @@ pub enum RootSupervisorMessage {
     PrepareShutdown,
 }
 
-/// Announces every configuration, one event each. One that cannot be published is logged and does not stop the
-/// rest. Returns how many were published.
-pub fn announce(client: &TcpClient, configs: &[RepoObservationConfig]) -> usize {
-    let mut published = 0;
-    for config in configs {
-        let event = ConfigurationEvent {
-            config: config.clone(),
-        };
-        match publish_event(client, GIT_REPO_CONFIG_EVENTS, &event) {
-            Ok(()) => published += 1,
-            Err(e) => warn!("could not announce {}: {e}", config.repo_id),
+/// Announces the whole set in one message: all of it or none of it, so that an observer which gets it knows what
+/// is no longer wanted. `complete` says whether the observer may stop the workers the set does not name.
+/// Returns whether it was published; one that cannot be is logged, and the next announcement tries again.
+pub fn announce(client: &TcpClient, configs: &[RepoObservationConfig], complete: bool) -> bool {
+    let set = RepositorySet {
+        repositories: configs.to_vec(),
+        complete,
+    };
+    match publish_event(client, GIT_REPO_CONFIG_EVENTS, &set) {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(
+                "could not announce the set of {} repositories: {e}",
+                configs.len()
+            );
+            false
         }
     }
-    published
 }
 
 pub struct RootSupervisor;
@@ -172,14 +176,14 @@ impl Actor for RootSupervisor {
                     && Self::load(state).await
                     && !state.shutting_down
                 {
-                    announce(&state.tcp_client, &state.desired);
+                    announce(&state.tcp_client, &state.desired, false);
                 }
             }
             RootSupervisorMessage::Republish => {
                 if state.shutting_down {
                     return Ok(());
                 }
-                announce(&state.tcp_client, &state.desired);
+                announce(&state.tcp_client, &state.desired, false);
                 let wait = match state.configuration.current().await {
                     Ok(config) => {
                         settings::read_interval(&config).unwrap_or(settings::republish_interval(60))
@@ -236,7 +240,6 @@ impl Actor for RootSupervisor {
 mod tests {
     use super::*;
     use cassini_client::TcpClientMessage;
-    use git_agent_common::ConfigurationEvent;
     use polar::graph::nodes::git::RepoId;
     use std::sync::{Arc, Mutex};
 
@@ -280,8 +283,7 @@ mod tests {
         .with_credential("gh")
     }
 
-    #[tokio::test]
-    async fn every_repository_is_announced_once_on_the_configuration_topic_in_order() {
+    async fn sink() -> (TcpClient, Arc<Mutex<Vec<TcpClientMessage>>>) {
         let received = Arc::new(Mutex::new(Vec::new()));
         let (sink, _) = Actor::spawn(
             None,
@@ -292,51 +294,79 @@ mod tests {
         )
         .await
         .unwrap();
-        let client = TcpClient::from_actor_ref(sink);
+        (TcpClient::from_actor_ref(sink), received)
+    }
+
+    fn sets(received: &Mutex<Vec<TcpClientMessage>>) -> Vec<RepositorySet> {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|message| {
+                let TcpClientMessage::Publish { topic, payload, .. } = message else {
+                    panic!("not a publish: {message:?}");
+                };
+                assert_eq!(topic, GIT_REPO_CONFIG_EVENTS);
+                let mut aligned = rkyv::util::AlignedVec::<16>::new();
+                aligned.extend_from_slice(payload);
+                rkyv::from_bytes::<RepositorySet, rkyv::rancor::Error>(&aligned)
+                    .expect("a set the observer can decode")
+            })
+            .collect()
+    }
+
+    async fn until_published(received: &Mutex<Vec<TcpClientMessage>>, n: usize) {
+        for _ in 0..200 {
+            if received.lock().unwrap().len() >= n {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn the_whole_set_is_one_message_on_the_configuration_topic_in_order() {
+        let (client, received) = sink().await;
         let configs = [
             config("https://github.com/o/a"),
             config("https://github.com/o/b"),
         ];
-
-        assert_eq!(announce(&client, &configs), 2);
-        for _ in 0..200 {
-            if received.lock().unwrap().len() == 2 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-        let received = received.lock().unwrap();
-        assert_eq!(received.len(), 2);
-        let mut urls = Vec::new();
-        for message in received.iter() {
-            let TcpClientMessage::Publish { topic, payload, .. } = message else {
-                panic!("not a publish: {message:?}");
-            };
-            assert_eq!(topic, GIT_REPO_CONFIG_EVENTS);
-            let mut aligned = rkyv::util::AlignedVec::<16>::new();
-            aligned.extend_from_slice(payload);
-            let event = rkyv::from_bytes::<ConfigurationEvent, rkyv::rancor::Error>(&aligned)
-                .expect("an event the observer can decode");
-            assert_eq!(event.config.credential.as_deref(), Some("gh"));
-            urls.push(event.config.repo_url);
-        }
+        assert!(announce(&client, &configs, true));
+        until_published(&received, 1).await;
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let sets = sets(&received);
+        assert_eq!(sets.len(), 1, "one message, not one per repository");
+        assert!(sets[0].complete);
+        let urls: Vec<&str> = sets[0]
+            .repositories
+            .iter()
+            .map(|c| c.repo_url.as_str())
+            .collect();
         assert_eq!(urls, ["https://github.com/o/a", "https://github.com/o/b"]);
+        assert_eq!(sets[0].repositories[0].credential.as_deref(), Some("gh"));
     }
 
     #[tokio::test]
-    async fn an_empty_set_announces_nothing() {
-        let received = Arc::new(Mutex::new(Vec::new()));
-        let (sink, _) = Actor::spawn(
-            None,
-            Sink {
-                received: received.clone(),
-            },
-            (),
-        )
-        .await
-        .unwrap();
-        assert_eq!(announce(&TcpClient::from_actor_ref(sink), &[]), 0);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(received.lock().unwrap().is_empty());
+    async fn whether_the_set_is_complete_is_what_the_caller_said() {
+        let (client, received) = sink().await;
+        assert!(announce(
+            &client,
+            &[config("https://github.com/o/a")],
+            false
+        ));
+        assert!(announce(&client, &[config("https://github.com/o/a")], true));
+        until_published(&received, 2).await;
+        let flags: Vec<bool> = sets(&received).iter().map(|s| s.complete).collect();
+        assert_eq!(flags, [false, true]);
+    }
+
+    #[tokio::test]
+    async fn an_empty_set_is_announced_as_given_and_it_is_the_supervisors_to_decide_whether_to() {
+        let (client, received) = sink().await;
+        assert!(announce(&client, &[], true));
+        until_published(&received, 1).await;
+        let sets = sets(&received);
+        assert_eq!(sets.len(), 1);
+        assert!(sets[0].repositories.is_empty() && sets[0].complete);
     }
 }

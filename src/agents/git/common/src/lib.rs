@@ -1,3 +1,4 @@
+pub mod proposal;
 pub mod remote;
 pub mod status;
 
@@ -74,9 +75,18 @@ impl RepoObservationConfig {
     }
 }
 
-#[derive(Serialize, Deserialize, Archive, Debug)]
-pub struct ConfigurationEvent {
-    pub config: RepoObservationConfig,
+/// Every repository the controller wants observed, announced together on [`GIT_REPO_CONFIG_EVENTS`]. One message
+/// is all-or-nothing, so an observer that gets it knows the whole set and can stop what is not in it; a message
+/// per repository could not say that one had been dropped.
+///
+/// `complete` says whether the set may be taken as everything. The controller sends `false` while it has not had
+/// time to hear its proposers again after a start (a set sent then would drop every repository only a proposal
+/// had added, to bring them back a minute later), and an observer starts and replaces from such a set but
+/// stops nothing.
+#[derive(Serialize, Deserialize, Archive, Debug, Clone, PartialEq)]
+pub struct RepositorySet {
+    pub repositories: Vec<RepoObservationConfig>,
+    pub complete: bool,
 }
 
 #[derive(Serialize, Deserialize, Archive, Debug)]
@@ -153,4 +163,43 @@ where
             share_identity: true,
         })
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_set_survives_the_wire() {
+        let config = RepoObservationConfig::new(
+            RepoId::from_url("https://example.org/o/r"),
+            "https://example.org/o/r".into(),
+            vec!["origin".into()],
+            None,
+            vec![],
+        )
+        .with_credential("gh");
+        for complete in [true, false] {
+            let set = RepositorySet {
+                repositories: vec![config.clone()],
+                complete,
+            };
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&set).unwrap();
+            let back = rkyv::from_bytes::<RepositorySet, rkyv::rancor::Error>(&bytes).unwrap();
+            assert_eq!(back, set);
+        }
+    }
+
+    #[test]
+    fn an_empty_set_is_a_set() {
+        let set = RepositorySet {
+            repositories: vec![],
+            complete: true,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&set).unwrap();
+        assert_eq!(
+            rkyv::from_bytes::<RepositorySet, rkyv::rancor::Error>(&bytes).unwrap(),
+            set
+        );
+    }
 }
