@@ -99,6 +99,7 @@ Rules for `observe-repo`, as an example of what a kind's schema might declare:
 | `approved` | URLs an administrator has approved |
 | `denied` | URLs that are never accepted, and are removed if present |
 | `credentials` | bindings from a host pattern to the **name** of an escrowed secret |
+| `anonymous` | host patterns where no credential is needed. Decided 2026-10-15 (David): a separate list, so a host with neither a binding nor an entry here is `pending: no credential` and "this host is public" is a signed, deliberate statement |
 | `limits` | most entries, and most proposals per proposer per hour |
 
 Until a receiver holds a verified specification for a kind, it **accepts nothing**. It fails closed, and the
@@ -125,7 +126,7 @@ For each proposal the receiver applies, in this order, and records the first rul
    issue that names `http://169.254.169.254/` or an internal service must never make an agent connect there.
 6. The limits hold.
 7. If `require_approval`, it is `pending: awaiting approval` unless listed in `approved`.
-8. A credential binding for the host exists, or the rules allow anonymous access to it. If neither, it is
+8. A credential binding for the host exists, or the host matches `anonymous`. If neither, it is
    `pending: no credential`.
 9. Otherwise it is **accepted**.
 
