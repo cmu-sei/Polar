@@ -81,7 +81,9 @@ fn object_lines(fields: &[(String, Field)], depth: usize, agent: &str) -> Vec<St
                         value: vec![line],
                     });
                 } else {
-                    comments.push(format!("{pad}// {}", line.trim_start()));
+                    // With the comma it would need, so that taking the slashes off leaves a valid line wherever it
+                    // is (a trailing comma is forgiven by the reader, so it also does at the end).
+                    comments.push(format!("{pad}// {},", line.trim_start()));
                     parts.push(Part {
                         comments,
                         value: Vec::new(),
@@ -113,14 +115,14 @@ fn object_lines(fields: &[(String, Field)], depth: usize, agent: &str) -> Vec<St
             }
         }
     }
-    let last = parts.iter().rposition(|p| !p.value.is_empty());
     let mut lines = Vec::new();
-    for (i, part) in parts.into_iter().enumerate() {
+    for part in parts {
         lines.extend(part.comments);
         let n = part.value.len();
+        // A comma after every value, the last included: the reader forgives the last, and an author who takes the
+        // slashes off a commented field below it needs no comma of their own.
         for (j, line) in part.value.into_iter().enumerate() {
-            let comma = j + 1 == n && Some(i) != last;
-            lines.push(if comma { format!("{line},") } else { line });
+            lines.push(if j + 1 == n { format!("{line},") } else { line });
         }
     }
     lines
@@ -229,7 +231,7 @@ pub fn settings_template(scaffold: &Scaffold) -> Result<String, String> {
             );
         } else {
             let value = v.default.clone().unwrap_or(json!(""));
-            comment(&mut out, 2, &format!("\"{}\": {value}", v.name));
+            comment(&mut out, 2, &format!("\"{}\": {value},", v.name));
         }
     }
     out.push(format!("{INDENT}}}"));
@@ -270,15 +272,10 @@ mod tests {
         )
     }
 
-    /// The file as a strict JSON reader sees it once the comment lines are gone: the template itself must be
-    /// right, without leaning on the forgiving reader (which would accept a comma too many).
+    /// The file as the signer reads it (comment lines gone, a trailing comma forgiven). A comma missing between two
+    /// values, or a value left out, is an error here.
     fn strict(text: &str) -> Value {
-        let without_comments: Vec<&str> = text
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect();
-        serde_json::from_str(&without_comments.join("\n"))
-            .unwrap_or_else(|e| panic!("not strict JSON: {e}\n{text}"))
+        lenient::parse(text).unwrap_or_else(|e| panic!("{e}\n{text}"))
     }
 
     #[test]
@@ -414,7 +411,7 @@ mod tests {
     fn the_settings_template_offers_only_the_dynamic_settings_all_commented_out() {
         let text = settings_template(&with_settings()).unwrap();
         assert!(text.contains("// RUST_LOG (text - default \"info\")"));
-        assert!(text.contains("// \"RUST_LOG\": \"info\""));
+        assert!(text.contains("// \"RUST_LOG\": \"info\","));
         assert!(
             !text.contains("POLAR_SHUTDOWN_BUDGET_SECS"),
             "a static setting is not offered"
@@ -435,10 +432,31 @@ mod tests {
     #[test]
     fn uncommenting_a_setting_gives_a_file_that_still_reads() {
         let text = settings_template(&with_settings()).unwrap();
-        let edited = text.replace("// \"RUST_LOG\": \"info\"", "\"RUST_LOG\": \"debug\"");
+        let edited = text.replace("// \"RUST_LOG\": \"info\",", "\"RUST_LOG\": \"debug\",");
         assert_eq!(
             lenient::parse(&edited).unwrap()["settings"],
             json!({"RUST_LOG": "debug"})
+        );
+    }
+
+    #[test]
+    fn taking_the_slashes_off_an_optional_field_in_the_middle_leaves_a_file_that_reads() {
+        let s = scaffold(
+            json!([{"name": "s", "doc": "", "body": {
+                "a": {"type": "text", "required": true},
+                "b": {"type": "text", "required": false},
+                "c": {"type": "whole number", "required": false},
+                "d": {"type": "text", "required": true}
+            }}]),
+            json!([]),
+        );
+        let text = runtime_template(&s, "s").unwrap();
+        let edited = text
+            .replace("// \"b\": \"\",", "\"b\": \"x\",")
+            .replace("// \"c\": 0,", "\"c\": 7,");
+        assert_eq!(
+            lenient::parse(&edited).unwrap()["body"],
+            json!({"a": "", "d": "", "b": "x", "c": 7})
         );
     }
 
