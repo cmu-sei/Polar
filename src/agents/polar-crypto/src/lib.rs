@@ -688,6 +688,7 @@ impl Actor for CryptoActor {
                         cached_key,
                         name,
                         &plaintext,
+                        Default::default(),
                     )
                     .await;
                     let _ = reply.send(result);
@@ -853,6 +854,7 @@ async fn handle_store_secret(
     cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
     name: String,
     plaintext: &[u8],
+    labels: std::collections::BTreeMap<String, String>,
 ) -> Result<(), CryptoError> {
     let escrow_key_pem = {
         let mut cached = cached_key.lock().await;
@@ -871,7 +873,11 @@ async fn handle_store_secret(
     let reply = publish_store_secret_request(
         &tcp_client,
         &store_secret_reply_router,
-        StoreSecretRequest { name, secret },
+        StoreSecretRequest {
+            name,
+            secret,
+            labels,
+        },
     )
     .await?;
 
@@ -1125,6 +1131,7 @@ async fn handle_ensure_own_escrow_keypair(
         cached_key,
         agent_escrow_keypair_secret_name(&own_identity),
         csr_output.private_key_pem.as_bytes(),
+        Default::default(),
     )
     .await?;
 
@@ -1393,6 +1400,7 @@ fn start_escrow(shared: &Shared, name: String, record: zeroize::Zeroizing<Vec<u8
                 task.cached_key.clone(),
                 escrow_name.clone(),
                 &record,
+                Default::default(),
             )
             .await;
             match result {

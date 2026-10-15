@@ -121,6 +121,7 @@ mod tests {
         StoreSecretRequest {
             name: name.to_string(),
             secret: EscrowedSecret::encrypt(plaintext, w.keypair.public_key_pem()).unwrap(),
+            labels: Default::default(),
         }
     }
 
@@ -231,6 +232,7 @@ mod tests {
         let wrong = StoreSecretRequest {
             name: "s".to_string(),
             secret: EscrowedSecret::encrypt(b"x", other_key.public_key_pem()).unwrap(),
+            labels: Default::default(),
         };
         assert_eq!(
             w.handler.handle(wrong, Some("alice".into())).await,
