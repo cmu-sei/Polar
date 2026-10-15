@@ -24,7 +24,7 @@ observed**, **by whom**, and **whether it is working**.
 
 | Part | Does | Does not |
 |---|---|---|
-| **Observer** (`git-repo-observer`) | Clones, fetches, walks commits, publishes commit and ref events. Holds credentials in a working set. Enforces, at the point of use, that a credential only goes to a host its binding names, and the network guard. Reports per-repository status. | Decide what to observe. Touch the graph. |
+| **Observer** (`git-repo-observer`) | Clones, fetches, walks commits, publishes commit and ref events. Registers its credentials with its CryptoActor and uses one only through it, which enforces that a credential goes only to a host its binding names. Enforces the network guard. Reports per-repository status. | Decide what to observe. Touch the graph. |
 | **Processor** (`git-repo-processor`) | Writes commits, refs and status to the graph. Answers the observer's checkpoint request. | Decide anything. |
 | **Controller** (`git-repo-controller`, new; replaces the scheduler) | Builds the desired set of repositories from signed runtime documents and admitted proposals. Receives proposals and decides them. Tells the observer what to observe. Watches status, retries, backs off, paces. Later: assigns repositories to observers. | Hold a credential or see a plaintext one. Hold the authoritative copy of any schedule. |
 | **Polar scheduler** | Carries signed documents from the schedules repository, writes the ledger (every document, proposal, decision and outcome) to the graph, replays to an agent that has just started. | Decide. |
@@ -69,9 +69,9 @@ the two checks it makes itself (below).
 
 ```
 author --encrypts to the observer's escrow public key, signs--> runtime document, section "credentials"
-   --> observer: verify, the CryptoActor decrypts it (key in custody), add to the working set,
-                 StoreSecret to the credentials agent (retried until acknowledged)
-later, at init: RetrieveSecret { name } for each name it needs, before anything else
+   --> observer: verify, register it with the CryptoActor under its name and binding; the CryptoActor decrypts it
+                 (key in custody) and escrows it with the credentials agent (StoreSecret, retried until acknowledged)
+later, at init: the CryptoActor retrieves (RetrieveSecret { name }) each credential the observer needs, before anything else
 ```
 
 The controller never sees a credential. A repository names the credential it wants (`"credential": "github-sei"`);
@@ -253,7 +253,7 @@ the same in each (`algorithm` is `ed25519` or `ecdsa-p256-sha256`; the chain is 
   "signature": { "...": "same shape" } }
 ```
 
-The text encoding of the hybrid ciphertext is not decided. What the observer escrows after decrypting is not the bare token: it is `{host_pattern, kind, username, token}`, so that
+The text encoding of the hybrid ciphertext is not decided. What is escrowed after decrypting is not the bare token: it is `{host_pattern, kind, username, token}`, so that
 a `RetrieveSecret` after a restart brings the binding back with the secret, and the host check cannot be lost.
 
 ### The two messages between the agents
@@ -280,7 +280,7 @@ with `state` one of `starting`, `observing`, `pending-credential`, `failing`, `s
 It does not take the controller's word for these, because it is the one holding a credential and opening
 connections:
 
-1. A credential goes only to a host matching its `host_pattern`. A repository naming a credential whose pattern
+1. A credential goes only to a host matching its `host_pattern`; the CryptoActor enforces it when the observer asks to use the credential for a host (`credentials-agent-architecture.md`, "Named operations on registered secrets"). A repository naming a credential whose pattern
    does not match its host is `failing`, with the reason, and nothing is sent.
 2. The network guard, at connect time: a private, loopback, link-local or cluster address is refused, and checked
    again at connect so a name that changes its answer is caught. Only `https`; git's own protocol list is

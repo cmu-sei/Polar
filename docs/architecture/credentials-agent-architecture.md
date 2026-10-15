@@ -396,8 +396,10 @@ different sharing rules:**
   it directly. These are a pass-through of whatever a `StoreSecretReply`/
   future retrieve-reply payload from the Credentials Agent itself
   already contained; `CryptoActor` is not a vault for this category: the credentials agent
-  stays the store. It may cache a secret it has decrypted or retrieved, as an optimization (David, 2026-10-14),
-  so that any actor that needs the secret asks the `CryptoActor` for it by name and need not keep it.
+  stays the store. A secret that has reached the agent is registered with the `CryptoActor`, and an actor that
+  needs it asks for a named operation with it, not for the plaintext (see "Named operations on registered
+  secrets", below). Whether the `CryptoActor` also caches what it has decrypted or retrieved is an
+  optimization (David, 2026-10-14).
 
 **Local caching.** `CryptoActor` may cache what it learns (another
 agent's escrow public key, once queried, does not need re-querying on
@@ -447,6 +449,35 @@ connection is needed to avoid it — one connection, one `TcpClientActor`,
 shared safely by both the agent's own ordinary traffic and
 `CryptoActor`'s own Credentials-Agent traffic, precisely because
 neither side of that sharing ever blocks the other.
+
+### Named operations on registered secrets (decided 2026-10-14, David; not built)
+
+A secret that reaches an agent, in a signed document (`signed-configuration.md`) or from the credentials agent
+(`RetrieveSecret`), is **registered** with the `CryptoActor` under its name, together with its **binding**: the
+hosts it may be used for, and its kind. An actor that needs the secret does not ask for the plaintext. It asks
+the `CryptoActor` to perform a **named operation** with it, for example "the git credential for host H", and
+receives only the operation's result. The `CryptoActor` enforces the binding: an operation for a host the binding
+does not name is refused. So the rule that a credential only goes to its own hosts is enforced where the secret
+lives, and every use of a secret passes through one place. The operations are a fixed set the `CryptoActor`
+implements, not closures supplied by callers, since a closure could simply return the plaintext.
+
+- **The `CryptoActor` makes no network calls.** Operations that need I/O are carried out by other actors (an HTTP
+  client actor, a GraphQL actor, and so on, each added when a use needs it). Such an actor is mostly pure
+  decision logic around a thin effectful edge: preparing a request from the operation, the secret and the
+  binding, and interpreting the response, are pure functions, and only sending is the edge. The key-holding
+  actor therefore has no network surface.
+- **Git is different.** libgit2 does its own network I/O and asks for a credential through a callback, so for git
+  the operation hands the caller a short-lived username and token (wiped when dropped) for the host the binding
+  names.
+- **Escrow.** A registered secret and its binding are escrowed together with the credentials agent
+  (`StoreSecret`, retried until acknowledged), so a restarted agent gets both back with `RetrieveSecret`.
+
+Proposed, not yet confirmed: a result that is itself a secret (a token from a login) is registered under a new
+name with an expiry and without escrow, and later operations name it like any other secret; and the
+`CryptoActor` never blocks waiting on an I/O actor (the deadlock above).
+
+First built, for the git credential path: the registry entry with its binding and escrow, and one operation, the
+git credential for a host. The I/O actors and derived tokens come later.
 
 ## Escrow-key and certificate-lookup queries
 

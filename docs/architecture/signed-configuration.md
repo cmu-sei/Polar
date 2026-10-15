@@ -167,8 +167,9 @@ carry a new credential for that agent. A secret is never plaintext in the reposi
 2. The ciphertext is the hybrid `EscrowedSecret`, as every other escrowed secret is (AES-256-GCM under a random
    key, wrapped by RSA-OAEP to the recipient), never a bare RSA-OAEP block.
 3. All of an agent's crypto is bounded inside its CryptoActor, which holds the escrow-key handle. The CryptoActor
-   decrypts; any actor that needs the secret afterwards asks the CryptoActor for it by name, and need not keep
-   it. Whether the CryptoActor caches it is an optimization.
+   decrypts and registers the secret with its binding; an actor that needs the secret afterwards asks the
+   CryptoActor to perform a named operation with it and receives only the result, never the plaintext
+   (`credentials-agent-architecture.md`, "Named operations on registered secrets").
 4. Who may push such a document is the ordinary runtime authority: Cedar first, per section, with the
    certificate capability as the fallback (`authority-distribution.md`). There is no capability of its own for
    credentials.
@@ -190,7 +191,7 @@ in the graph and passed over topics as it is.
   (`StoreSecret`) so it can be retrieved later (`RetrieveSecret`, re-encrypted to the agent's own
   certificate). Closing the loop is retried until the credentials agent acknowledges it, and so depends on
   the agent receiving the document again if it restarts first (the scheduler's reconciliation item).
-  Afterwards any actor that needs the secret asks the CryptoActor for it by name.
+  Afterwards an actor that needs the secret asks the CryptoActor to use it (a named operation).
 - *Noted alternative for other agents:* encrypt to the credentials agent's key and let the agent fetch with
   `DecryptOnBehalfOf` (policy-checked). (The credentials agent's handler and message types exist,
   `decrypt_on_behalf_of.rs`; no agent calls it yet, checked 2026-10-14.) No re-escrow
@@ -203,8 +204,8 @@ document; this pins it to its recipient. `EscrowedSecret` carries the context as
 
 **At the receiver.** Decryption comes after every verification step, and the CryptoActor does it (through the
 CryptoHandle the infrastructure already holds). The plaintext is never recorded: the ConfigurationActor's
-history and reports already keep names and never values, and a secret variable is hidden in reports. Any actor
-that needs the secret asks the CryptoActor for it by name.
+history and reports already keep names and never values, and a secret variable is hidden in reports. An actor
+that needs the secret asks the CryptoActor to use it (a named operation).
 
 **The tool needs the recipient's public key.** The author's machine is not on Cassini, so it cannot ask for
 an escrow key. The credentials agent's HTTP front gets a read-only endpoint, "the public escrow key of agent
