@@ -1,4 +1,26 @@
 #!/usr/bin/env nu
+
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
 # infra/tests/charts.nu
 #
 # What the hand-written service charts tell `polar-init`: Neo4j's server certificate and the ACE job's
@@ -66,6 +88,18 @@ def main [] {
             assert ($text | str contains "server:/etc/neo4j-tls:ecdsa-p256:")
             let vars = (init_env ($out | path join "neo4j-statefulset.yaml"))
             assert ((value_of $vars "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP") == "true")
+        }
+
+        "Neo4j's configuration reaches its ConfigMap exactly, whatever characters it has": {
+            # It is written into a Dhall string on the way, where a quote ends the string, a backslash starts an
+            # escape and ${ starts an interpolation.
+            let dir = (mktemp --directory)
+            mkdir ($dir | path join "conf")
+            let conf = "# a \"quoted\" word, a back\\slash, a ${brace} and a $dollar\nserver.x=1\n"
+            $conf | save --force ($dir | path join "conf/neo4j-ssl.conf")
+            let out = (render neo4j { target_dir: $dir })
+            let map = (open --raw ($out | path join "neo4j-configmap.yaml") | from yaml)
+            assert equal ($map | get data | get "neo4j.conf") $conf
         }
 
         "the ACE job's client certificate is requested from the credentials agent": {
