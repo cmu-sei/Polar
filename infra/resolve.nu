@@ -41,8 +41,25 @@ def load_cluster [target: string] {
     open ($CONFIG | path join "cluster.nuon") | merge deep $overrides
 }
 
-def all_workloads [] {
+# Every workload the catalog defines, whatever a target says.
+def catalog_workloads [] {
     glob ($CONFIG | path join "workloads/*.nuon") | sort | each {|f| open $f } | flatten
+}
+
+# The workloads a target leaves out: `enabled: false` under workloads.<name> in its config.
+def disabled_in [target: string] {
+    target_config $target
+    | get -o workloads
+    | default {}
+    | transpose name override
+    | where {|w| ($w.override | describe | str starts-with "record") and (($w.override | get -o enabled) == false) }
+    | get name
+}
+
+# The workloads of the catalog that this target runs.
+def all_workloads [target: string] {
+    let off = (disabled_in $target)
+    catalog_workloads | where {|w| not ($w.name in $off) }
 }
 
 # <service> -> { dns, port, addr }, from services.nuon and the cluster domain.
@@ -236,9 +253,12 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     let images = (open ($INFRA | path join "images.nuon"))
     let vars = (service_vars $services $cluster)
 
-    let found = (all_workloads | where name == $name)
+    let found = (catalog_workloads | where name == $name)
     if ($found | is-empty) {
-        error make { msg: $"no workload named '($name)'. Known: (all_workloads | get name | str join ', ')" }
+        error make { msg: $"no workload named '($name)'. Known: (catalog_workloads | get name | str join ', ')" }
+    }
+    if ($name in (disabled_in $target)) {
+        error make { msg: $"workload '($name)' is not enabled in target '($target)': its config sets `enabled: false`" }
     }
     let entry = ($found | first)
     let ov = (target_config $target | get -o workloads | default {} | get -o $name | default {})
@@ -539,12 +559,14 @@ def check_capabilities [] {
 
 # Everything that can be wrong with the configuration, found without a cluster.
 def check_all [target: string] {
-    let names = (all_workloads | get name)
+    let names = (all_workloads $target | get name)
     mut problems: list<any> = []
+
+    for p in (enabled_problems $target) { $problems = ($problems | append $p) }
 
     for p in (check_capabilities) { $problems = ($problems | append $p) }
 
-    let dupes = ($names | uniq --repeated)
+    let dupes = (catalog_workloads | get name | uniq --repeated)
     for d in $dupes { $problems = ($problems | append $"workload name '($d)' is defined more than once") }
 
     let results = ($names | each {|n|
@@ -582,9 +604,36 @@ def check_all [target: string] {
     { problems: $problems, pending: $issuance.pending }
 }
 
+# What is wrong with how a target says which workloads it runs: `enabled` is true or false and nothing else, and
+# a workload it disables is not still in its apply order (its manifests are not rendered, so `up.nu` would skip
+# them without a word).
+def enabled_problems [target: string] {
+    let overrides = (target_config $target | get -o workloads | default {} | transpose name override
+        | where {|w| $w.override | describe | str starts-with "record" })
+    mut problems: list<string> = []
+    for w in $overrides {
+        let enabled = ($w.override | get -o enabled)
+        if $enabled != null and ($enabled | describe) != "bool" {
+            $problems = ($problems | append $"target ($target): workloads.($w.name).enabled must be true or false")
+        }
+    }
+    let target_file = ($INFRA | path join $"targets/($target)/target.nu")
+    if ($target_file | path exists) {
+        let order = (try { ^$nu.current-exe $target_file | from nuon | get -o apply_order | default [] } catch { [] })
+        for n in (disabled_in $target) {
+            for file in [$"($n)-resources.yaml" $"($n).yaml"] {
+                if $file in $order {
+                    $problems = ($problems | append $"target ($target): apply_order lists ($file), but the target disables ($n)")
+                }
+            }
+        }
+    }
+    $problems
+}
+
 # The floor of cert-issuer for this target, written from the catalog: what each workload is issued, resolved.
 def floor_of [target: string] {
-    let records = (all_workloads | get name | each {|n|
+    let records = (all_workloads $target | get name | each {|n|
         let r = (resolve $n $target)
         { who: $n, namespace: $r.namespace, service_account: $r.service_account, issuer: $r.issuer, bootstrap: $r.bootstrap, certs: $r.certs }
     })
@@ -684,21 +733,21 @@ def compare [expected: record, actual: record] {
 
 def main [] { help main }
 
-# List the workloads in the catalog.
-def "main list" [] {
-    all_workloads | select name kind image | each {|w| $w }
+# List the workloads a target runs.
+def "main list" [--target: string = $DEFAULT_TARGET] {
+    all_workloads $target | select name kind image | each {|w| $w }
 }
 
 # The images the agents of the catalog run, as a JSON array. Those whose workloads say
 # `config: "document"` are asked for their scaffold when the catalog is rendered, so they have to
 # be built first: `up.nu` builds exactly these before it renders.
-def "main document-images" [] {
-    print (all_workloads | where {|w| ($w.config? | default "env") == "document" } | get image | uniq | to json --raw)
+def "main document-images" [--target: string = $DEFAULT_TARGET] {
+    print (all_workloads $target | where {|w| ($w.config? | default "env") == "document" } | get image | uniq | to json --raw)
 }
 
 # The workload names, as a JSON array (for scripts that render each one).
 def "main names" [--target: string = $DEFAULT_TARGET] {
-    print (all_workloads | get name | to json --raw)
+    print (all_workloads $target | get name | to json --raw)
 }
 
 # Show what a workload resolves to and where each value came from.
@@ -811,7 +860,7 @@ def "main check" [--target: string = $DEFAULT_TARGET] {
         for p in $found.pending { print $"  ($p)" }
     }
     if ($problems | is-empty) {
-        print $"ok: (all_workloads | length) workloads resolve cleanly for ($target)"
+        print $"ok: (all_workloads $target | length) workloads resolve cleanly for ($target)"
     } else {
         for p in $problems { print -e $"  ERROR: ($p)" }
         exit 1

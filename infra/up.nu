@@ -285,9 +285,9 @@ def step_preflight [config: record] {
 # will be given, when the catalog is rendered. They are asked in their built image, the artifact
 # that deploys, so those images exist before the render. (The images step later builds the rest
 # and finds these already built.)
-def step_agent_images [] {
+def step_agent_images [target: string] {
     ^just registry-up
-    let names = (^$nu.current-exe infra/resolve.nu document-images | from json)
+    let names = (^$nu.current-exe infra/resolve.nu document-images --target $target | from json)
     print $"  ($names | length) agent image\(s\) the render asks: ($names | str join ', ')"
     try { images sync (images named $names) } catch {|e| fail $e.msg }
     ok "agent images built and pushed"
@@ -570,7 +570,7 @@ def main [
         print $"[($it.index + 1)/($total)] ($s.title)"
         match $s.id {
             "preflight" => { step_preflight $config }
-            "agent-images" => { step_agent_images }
+            "agent-images" => { step_agent_images $target }
             "render" => { step_render $target }
             "images" => { step_images $config }
             "namespaces" => { apply_file $config.output_dir "namespaces.yaml" }

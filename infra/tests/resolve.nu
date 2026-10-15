@@ -118,6 +118,68 @@ def main [] {
             assert equal $c.image $c.package
         }
 
+        "a workload a target disables is left out of what is listed and rendered for that target, and only that target": {
+            with_target { workloads: { kube-observer: { enabled: false } } } {|t|
+                let names = (^nu $RESOLVER names --target $t | from json)
+                assert (not ("kube-observer" in $names)) "the disabled workload was listed"
+                assert ("kube-consumer" in $names) "a workload that is not disabled was dropped"
+                assert ("kube-observer" in (^nu $RESOLVER names | from json)) "the default target lost it"
+            }
+        }
+
+        "the images of a workload a target disables are not built for it": {
+            with_target { workloads: { kube-observer: { enabled: false } } } {|t|
+                let with = (^nu $RESOLVER document-images | from json)
+                let without = (^nu $RESOLVER document-images --target $t | from json)
+                assert ("kube-observer" in $with)
+                assert (not ("kube-observer" in $without)) "its image would be built for nothing"
+                assert ("kube-consumer" in $without)
+            }
+        }
+
+        "resolving a workload the target disables says so, and does not pretend it is unknown": {
+            with_target { workloads: { kube-observer: { enabled: false } } } {|t|
+                let off = (do { ^nu $RESOLVER json kube-observer --target $t } | complete)
+                assert ($off.exit_code != 0)
+                assert ($off.stderr | str contains "not enabled") $off.stderr
+                assert ($off.stderr | str contains $t) $off.stderr
+                let unknown = (do { ^nu $RESOLVER json no-such-workload --target $t } | complete)
+                assert ($unknown.stderr | str contains "no workload named") $unknown.stderr
+            }
+        }
+
+        "enabled is true or false and nothing else": {
+            with_target { workloads: { kube-observer: { enabled: "no" } } } {|t|
+                let r = (do { ^nu $RESOLVER check --target $t } | complete)
+                assert ($r.exit_code != 0)
+                assert (($r.stdout + $r.stderr) | str contains "enabled") ($r.stdout + $r.stderr)
+            }
+        }
+
+        "a disabled workload that is still in the target's apply order is a problem, named": {
+            with_target { workloads: { kube-observer: { enabled: false } } } {|t|
+                let target_nu = ($INFRA | path join "targets" $t "target.nu")
+                '{ apply_order: ["kube-observer-resources.yaml", "kube-observer.yaml", "kube-consumer.yaml"] } | to nuon' | save --force $target_nu
+                let r = (do { ^nu $RESOLVER check --target $t } | complete)
+                let out = ($r.stdout + $r.stderr)
+                assert ($r.exit_code != 0) $out
+                assert ($out | str contains "kube-observer.yaml") $out
+                assert ($out | str contains "kube-observer-resources.yaml") $out
+                assert (not ($out | str contains "kube-consumer.yaml")) "a workload that is enabled was named"
+            }
+        }
+
+        "a target that disables a workload and leaves it out of its apply order checks clean": {
+            # Starting from a real target's configuration: a bare one has no Jira address and fails for that alone.
+            let real = (open ($INFRA | path join "targets/local-minimal/config.nuon"))
+            with_target ($real | merge deep { workloads: { kube-observer: { enabled: false } } }) {|t|
+                let target_nu = ($INFRA | path join "targets" $t "target.nu")
+                '{ apply_order: ["kube-consumer.yaml"] } | to nuon' | save --force $target_nu
+                let r = (do { ^nu $RESOLVER check --target $t } | complete)
+                assert equal $r.exit_code 0 ($r.stdout + $r.stderr)
+            }
+        }
+
         "the health settings the agent validates are in what the agent is given": {
             let r = (resolve "kube-consumer")
             assert equal (env_value $r "POLAR_HEALTH_REJUVENATION_SECS") "300"
