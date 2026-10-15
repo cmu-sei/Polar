@@ -41,9 +41,9 @@
 //! for that flow, are deliberately no longer exposed at all: the
 //! whole point of a hard, single boundary for every key operation is
 //! that no caller outside this crate should ever hold a raw
-//! RsaPrivateKey, kernel-backed or not. DecryptOwnMessage is the
-//! real, current way any other actor decrypts something addressed to
-//! this identity -- ciphertext in, plaintext out, with no way to
+//! RsaPrivateKey, kernel-backed or not. DecryptOwnMessage opens a
+//! raw RSA-OAEP block addressed to this identity and DecryptOwnEscrowed opens a hybrid
+//! EscrowedSecret (bound to a context) -- ciphertext in, plaintext out, with no way to
 //! observe which custody mode produced it. See credentials-agent-
 //! architecture.md's own "Agent escrow bootstrap" section for the
 //! full, intended sequence, and polar-kernel-keyring's own crate for
@@ -203,9 +203,10 @@ pub enum CryptoMessage {
     },
     /// Decrypts `ciphertext` -- something a peer encrypted with real,
     /// standard OAEP to this identity's own escrow public key -- and
-    /// returns the real plaintext. This is the one, sole way any
-    /// other actor in this process ever decrypts something addressed
-    /// to this identity: no message in this crate's own, public API
+    /// returns the real plaintext. This opens only a raw RSA-OAEP
+    /// block, which has a size ceiling of roughly 440 bytes; a hybrid
+    /// EscrowedSecret is opened with DecryptOwnEscrowed. Either way, no
+    /// message in this crate's own, public API
     /// ever hands back a raw RsaPrivateKey, kernel-backed handle, or
     /// anything else about how this identity's own key is actually
     /// held. The full retrieve-first/issuance-fallback/escrow

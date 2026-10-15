@@ -489,7 +489,7 @@ right now, not why one might be missing. Backed directly by
 non-revoked certificate can exist per identity at any time (see
 "Source of truth," above, on reissue superseding a prior certificate).
 
-**Agent escrow-key query** (not yet built -- see "What is deferred"):
+**Agent escrow-key query** (built: `AgentEscrowKeyRequest`, which `CryptoActor` uses for `EncryptForRecipient`):
 the analogous lookup for an *agent's own* escrow public key (its
 service identity, per "Agent escrow identity," above), as opposed to
 either the Credentials Agent's own escrow key or an agent's ephemeral
@@ -843,38 +843,13 @@ requestable here.
 - OCSP, as a live alternative or complement to a periodically-published
   CRL. The CRL is the simpler mechanism to get working first; OCSP is a
   documented, real future upgrade, not a rejected idea.
-- The general secret-retrieve flow itself -- the decrypt-reencrypt-
-  destroy relay described in "Secret escrow," above, for the general
-  case (an agent retrieving a secret it, or another agent, stored
-  earlier, re-encrypted to that agent's own already-stable escrow
-  certificate). Store, and everything store depends on, is built; this
-  specific relay is not.
-- `CryptoActor` itself, in full: the process-local actor described
-  above, its kernel-keyring integration and runtime capability
-  detection, its in-memory fallback custody path, its local cache, and
-  its delegation relationship with `TcpClientActor` for the
-  "encrypt and send" flow. Expected to be its own, standalone crate
-  (mirroring `polar-health`), not credentials-agent-specific.
-- The agent escrow-identity CSR flow described in "Agent escrow
-  identity" and "Automated agent escrow-identity issuance," above, in
-  full: the CSR submission path itself, the automated-issuance
-  permission-embedding logic, and the agent escrow-key query (a third
-  query alongside the two described in "Escrow-key and
-  certificate-lookup queries").
-- The ephemeral X25519/HKDF key-exchange mechanism described in "Agent
-  escrow bootstrap," above -- specific to the one-time "retrieve my
-  own escrow keypair for the first time" response, where no stable
-  requester key yet exists to encrypt to normally.
-- The init container's own extension to attempt kernel-keyring setup
-  as part of its existing handshake, including the runtime-dependent
-  question of whether a given deployment's container-runtime
-  configuration actually shares a session-keyring across a pod's
-  containers at all.
+- `CryptoActor`'s delegation to `TcpClientActor` for the "encrypt and send" flow (publishing a payload
+  encrypted to a named recipient in one call). The `CryptoActor` itself is built.
 - Sourcing agent-specific (rather than uniform) permission sets for
   automated agent escrow-identity issuance from the scheduler agent,
   once the scheduler's own credential-schedule work exists.
 - Extending the observer to proxy the escrow-key and certificate-lookup
-  queries (and the future agent escrow-key query) for external,
+  queries (and the agent escrow-key query) for external,
   non-Cassini callers, the way it already does for issuance -- all are
   internal-agent-only today.
 - A real "infrastructure failure vs. deterministic refusal" reply
@@ -885,6 +860,19 @@ requestable here.
   was corrected to avoid.
 - A checkpoint/compaction mechanism for the event log, if unbounded
   growth ever becomes an actual, measured problem.
+
+## Built since this section was written
+
+Several items above were listed as deferred and have been built (checked against the code, 2026-10-14):
+
+- the general secret-retrieve flow: `RetrieveSecret` (`retrieve_secret.rs`, with the policy check);
+- `CryptoActor` (`polar-crypto`), with kernel-keyring custody and an in-memory fallback, and its cache of other
+  agents' escrow public keys;
+- the agent escrow-identity issuance flow and the agent escrow-key query (`agent_escrow_issuance`,
+  `agent_escrow_key`);
+- the ephemeral key exchange for the first retrieval of one's own escrow keypair (`ephemeral_exchange`);
+- the init container's escrow-key bootstrap and hand-off of a key handle to the workload (`EnsureBootstrapped`,
+  `POLAR_ESCROW_KEY_HANDLE`).
 
 ## See also
 

@@ -13,7 +13,7 @@ intended. The directories and samples are provisional until the designs below ex
 |---|---|---|---|
 | Example | the git agent's settings and credentials | the Jira consumer: "a repo was found in issue Y" | "back up your data now" |
 | Author | a person, through the repository | an agent | an admin, through a tool |
-| Signed by | the author's user certificate | the proposing agent's workload certificate | the admin's user certificate |
+| Signed by | the author's user certificate | not signed in version one: the broker names the publisher (`proposals.md`) | the admin's user certificate |
 | Meaning | desired state: the latest replaces the earlier | add to a set, with no admin step | do something once |
 | Replay protection | a version that only rises | idempotent by key (the repo URL) | a unique id and an expiry |
 | Kept as state | yes | yes, as a durable set with provenance | no: replaying it would run it again |
@@ -34,7 +34,7 @@ that a backup was requested, by whom, when, that it was delivered, and what beca
 
 ## Configuration
 
-What the repository holds, and the only kind it holds: desired state a person authors and signs. The signed
+What the repository holds: desired state a person authors and signs. It is signed the same way whatever the document type: `configuration`, `runtime` (`git-controller.md`) or `admission` (`proposals.md`). The signed
 document, its verification and the ConfigurationActor are in `signed-configuration.md`. It targets an agent by
 its name for now; instance ids come later if they are needed. A schedule's timing is not a separate field: it
 becomes a typed Dynamic variable of the agent, as the older notes proposed.

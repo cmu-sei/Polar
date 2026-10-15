@@ -25,9 +25,8 @@
 //! the submitted EscrowedSecret is genuinely encrypted to this
 //! agent's own current escrow key, and that the publish carrying it
 //! has real, broker-verified attribution -- then appends
-//! CredentialsEvent::SecretStored to the ledger. Retrieve is
-//! deliberately not built yet -- see escrow_secret.rs's own doc
-//! comment for why.
+//! CredentialsEvent::SecretStored to the ledger. Retrieval is
+//! in retrieve_secret.rs.
 
 use crate::escrow::EscrowKeypair;
 use crate::ledger::{LedgerMessage, SecretStoreError};

@@ -108,3 +108,11 @@ Ref edges are **never** created during commit discovery. This avoids incorrect a
 This design trades immediacy for correctness and extensibility. By emitting raw facts and deferring interpretation, the system avoids hard-coding assumptions about Git semantics, supports multiple concurrent processors, and allows the graph model to evolve without touching the observer.
 
 In short: the observer reports reality; processors argue about what it means.
+
+### Credentials
+
+A repository names the credential it wants, and the value reaches the observer in a signed runtime document
+addressed to it; the observer keeps it with the credentials agent and fetches it from there (`git-controller.md`,
+"A credential"). Today the observer still carries two older paths that are to be removed: the static `git.yaml`
+credentials file, which it loads and does not use, and the inline `credentials` field of the configuration event,
+which the scheduler always sends as `None`.
