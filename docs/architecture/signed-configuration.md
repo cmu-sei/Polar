@@ -214,8 +214,33 @@ history and reports already keep names and never values, and a secret variable i
 that needs the secret asks the CryptoActor to use it (a named operation).
 
 **The tool needs the recipient's public key.** The author's machine is not on Cassini, so it cannot ask for
-an escrow key. The credentials agent's HTTP front gets a read-only endpoint, "the public escrow key of agent
-X", authenticated by the author's user certificate and returning the public key only. Not built.
+an escrow key. The credentials agent's HTTP front gets a read-only route, `POST /agent-escrow-key`
+(`{"identity": ...}`), that returns the agent's **escrow certificate**, not a bare key. **Decided 2026-10-15
+(David):** the route takes no authentication, because the gateway is plain HTTP (it cannot see a client
+certificate) and what it returns is public; the tool does the protecting. It checks that the certificate chains
+to the CA in the author's `ca.pem`, is valid now, may be used for key encipherment and names the agent asked
+for, and only then encrypts to its key. A swapped key on the way back fails that check. The earlier sentence
+here, "authenticated by the author's user certificate", could not be built as written and is replaced by this.
+
+**The author's flow (decided 2026-10-15, David).** One program, `polar-sign`, and nothing to remember:
+
+1. `polar-sign template <agent> <section>` prints a file for that runtime section (or, with `--settings`, for the
+   settings the agent lets a signed document change), with the defaults the agent declares, a comment on every
+   field, and the secret fields marked. It is generated from the agent's own `--scaffold`, which the catalog's
+   resolver already collects (`infra/resolve.nu scaffolds <dir>` exports them), so it always matches what the
+   agent accepts.
+2. The author edits it. A secret is typed as plaintext (or `-` to be asked on standard input).
+3. `polar-sign sign <file>` checks the edits against the same description (required fields, no strangers, lists
+   and objects where they belong), refuses a setting that is a secret, encrypts the section's secret fields to the
+   agent's verified escrow certificate, signs with the author's certificate and key, and writes the signed Dhall.
+4. With `--push` it also clones or updates the schedules repository, writes the file to
+   `permanent/<agent>/<section>.dhall` (a configuration document: `permanent/<agent>/configuration.dhall`), commits
+   it and pushes with the author's certificate. Without `--push` it only writes the file.
+
+The folder per agent needs no change in the polar scheduler's observer: it already takes any path under
+`permanent/`. The tool replaces only its own file, so one agent's section is one file and a new version replaces the
+old in place (git keeps the history). A runtime section's secret entries are named by the entry's `name` field, which
+is the `entry-name` of the binding context.
 
 **A property to keep in mind.** Ciphertext committed to git stays in its history, in every clone, and in the
 graph. It stays safe only while the private escrow key it was encrypted to stays private; a later
@@ -262,7 +287,7 @@ warning at first, an error if configured so.
 
 - **`polar-signing` (library).** Canonical encoding, sign, verify, chain and key-usage checks, and the
   authority trait. Used by the ConfigurationActor (verify) and the tools (sign).
-- **`polar-sign` (binary).** Git signing mode; `sign`, `check` and `verify` for configuration documents
+- **`polar-sign` (binary).** (Built 2026-10-15: `template`, `sign` and `--push` as in "The author's flow".) Git signing mode; `sign`, `check` and `verify` for configuration documents
   (`check` and `verify` usable as CI on the schedules repository); `template` (generate an agent's
   typed template); `setup`. Good `--help`, and an optional configuration file for the key and
   certificate paths, in the platform's standard configuration directory, so no `just` is needed.
