@@ -56,7 +56,10 @@ impl AgentEscrowKeyHandler {
         };
 
         match cert_issuer_common::public_key::extract_public_key_pem(&record.certificate_pem) {
-            Ok(public_key_pem) => AgentEscrowKeyReply::Found { public_key_pem },
+            Ok(public_key_pem) => AgentEscrowKeyReply::Found {
+                public_key_pem,
+                certificate_pem: record.certificate_pem,
+            },
             Err(e) => {
                 // The certificate itself was successfully retrieved --
                 // this means the certificate PEM this agent stored is
@@ -179,8 +182,16 @@ mod tests {
             .await;
 
         match reply {
-            AgentEscrowKeyReply::Found { public_key_pem } => {
+            AgentEscrowKeyReply::Found {
+                public_key_pem,
+                certificate_pem: replied_certificate,
+            } => {
                 assert_eq!(public_key_pem, expected_public_key_pem);
+                assert_eq!(
+                    replied_certificate.trim(),
+                    certificate_pem.trim(),
+                    "the certificate returned is the one stored"
+                );
             }
             other => panic!("expected Found, got {other:?}"),
         }

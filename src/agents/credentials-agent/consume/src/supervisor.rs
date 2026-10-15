@@ -2072,11 +2072,15 @@ mod agent_escrow_wiring_tests {
                 .unwrap();
         assert_eq!(reply_envelope.correlation_id, "test-correlation-id-2");
         match reply_envelope.payload {
-            AgentEscrowKeyReply::Found { public_key_pem } => {
+            AgentEscrowKeyReply::Found {
+                public_key_pem,
+                certificate_pem: replied_certificate,
+            } => {
                 let expected =
                     cert_issuer_common::public_key::extract_public_key_pem(&certificate_pem)
                         .unwrap();
                 assert_eq!(public_key_pem, expected);
+                assert_eq!(replied_certificate.trim(), certificate_pem.trim());
             }
             other => panic!("expected Found, got {other:?}"),
         }

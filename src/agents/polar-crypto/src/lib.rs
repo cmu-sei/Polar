@@ -1711,7 +1711,7 @@ async fn handle_encrypt_for_recipient(
                 .await?;
 
                 let pem = match reply {
-                    AgentEscrowKeyReply::Found { public_key_pem } => public_key_pem,
+                    AgentEscrowKeyReply::Found { public_key_pem, .. } => public_key_pem,
                     AgentEscrowKeyReply::NotFound => {
                         return Err(CryptoError::RecipientKeyNotFound(recipient_identity));
                     }
@@ -2162,6 +2162,7 @@ mod tests {
                     let reply_payload = match &self.recipient_public_key_pem {
                         Some(pem) => AgentEscrowKeyReply::Found {
                             public_key_pem: pem.clone(),
+                            certificate_pem: String::new(),
                         },
                         None => AgentEscrowKeyReply::NotFound,
                     };

@@ -35,6 +35,7 @@ use axum::response::{IntoResponse, Response};
 use cassini_client::TcpClientMessage;
 use credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC;
+use credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_ISSUANCE_REQUESTS_TOPIC;
 use credentials_agent_common::CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC;
@@ -44,6 +45,7 @@ use credentials_agent_common::account_claim::{
 use credentials_agent_common::admin_action::{
     AdminActionRefusal, AdminActionReply, SignedAdminAction,
 };
+use credentials_agent_common::agent_escrow_key::{AgentEscrowKeyReply, AgentEscrowKeyRequest};
 use credentials_agent_common::identity::{
     IdentityNormalizationRefusalReason, IdentityNormalizationReply, IdentityNormalizationRequest,
 };
@@ -116,6 +118,7 @@ pub struct ObserverState {
     pub account_reply_router: Arc<ReplyRouter<AccountReply>>,
     pub admin_action_reply_router: Arc<ReplyRouter<AdminActionReply>>,
     pub workload_issuance_reply_router: Arc<ReplyRouter<WorkloadIssuanceReply>>,
+    pub agent_escrow_key_reply_router: Arc<ReplyRouter<AgentEscrowKeyReply>>,
 }
 
 /// One request relayed to the consumer and the wait for its reply: the exchange every handler
@@ -321,6 +324,63 @@ fn identity_reply_to_response(reply: IdentityNormalizationReply) -> Response {
         IdentityNormalizationReply::Refused { reason } => match reason {
             IdentityNormalizationRefusalReason::TokenInvalid => StatusCode::UNAUTHORIZED,
         },
+    };
+    (status, Json(reply)).into_response()
+}
+
+/// Longest identity the agent escrow-key route will relay.
+const MAX_IDENTITY: usize = 253;
+
+/// How long the route waits for the consumer: it reads the ledger and nothing else.
+const AGENT_ESCROW_KEY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Why `identity` is not a name worth asking the consumer about, if it is not. The observer's own
+/// well-formedness check and never a trust decision: letters, digits, dots, hyphens and underscores, as every
+/// agent identity is written.
+fn identity_problem(identity: &str) -> Option<&'static str> {
+    if identity.is_empty() || identity.len() > MAX_IDENTITY {
+        Some("the identity must be 1 to 253 characters")
+    } else if !identity
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        Some("the identity may have only letters, digits, dots, hyphens and underscores")
+    } else {
+        None
+    }
+}
+
+/// POST /agent-escrow-key -- an agent's escrow certificate, for someone outside the cluster who needs to
+/// encrypt to that agent (`polar-sign`). Takes no authentication: the gateway is plain HTTP and cannot see a
+/// client certificate, and the answer is a public certificate. The caller does the protecting, by checking that
+/// the certificate chains to the CA it trusts and names the agent it asked for
+/// (docs/architecture/signed-configuration.md, "The tool needs the recipient's public key").
+pub async fn agent_escrow_key(
+    State(state): State<Arc<ObserverState>>,
+    Json(request): Json<AgentEscrowKeyRequest>,
+) -> Response {
+    if let Some(problem) = identity_problem(&request.identity) {
+        return (StatusCode::BAD_REQUEST, problem).into_response();
+    }
+    match relay(
+        &state.broker_client,
+        &state.agent_escrow_key_reply_router,
+        CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
+        "agent escrow key",
+        request,
+        AGENT_ESCROW_KEY_TIMEOUT,
+    )
+    .await
+    {
+        Ok(reply) => agent_escrow_key_reply_to_response(reply),
+        Err(response) => response,
+    }
+}
+
+fn agent_escrow_key_reply_to_response(reply: AgentEscrowKeyReply) -> Response {
+    let status = match &reply {
+        AgentEscrowKeyReply::Found { .. } => StatusCode::OK,
+        AgentEscrowKeyReply::NotFound => StatusCode::NOT_FOUND,
     };
     (status, Json(reply)).into_response()
 }
@@ -597,6 +657,7 @@ mod tests {
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
             workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
+            agent_escrow_key_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -630,6 +691,7 @@ mod tests {
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
             workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
+            agent_escrow_key_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -661,6 +723,7 @@ mod tests {
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
             workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
+            agent_escrow_key_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = issue(
@@ -714,6 +777,7 @@ mod tests {
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
             workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
+            agent_escrow_key_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         // A credential with no readable exp claim falls back to the
@@ -835,6 +899,7 @@ mod tests {
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
             workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
+            agent_escrow_key_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = identity(
@@ -863,6 +928,7 @@ mod tests {
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
             workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
+            agent_escrow_key_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         let response = identity(
@@ -909,6 +975,7 @@ mod tests {
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
             workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
+            agent_escrow_key_reply_router: Arc::new(ReplyRouter::new()),
         });
 
         tokio::time::pause();
@@ -1036,6 +1103,7 @@ mod account_tests {
             account_reply_router,
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
             workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
+            agent_escrow_key_reply_router: Arc::new(ReplyRouter::new()),
         })
     }
 
@@ -1412,6 +1480,7 @@ mod workload_tests {
             account_reply_router: Arc::new(ReplyRouter::new()),
             admin_action_reply_router: Arc::new(ReplyRouter::new()),
             workload_issuance_reply_router: router,
+            agent_escrow_key_reply_router: Arc::new(ReplyRouter::new()),
         });
         (state, relayed)
     }
@@ -1535,5 +1604,244 @@ mod workload_tests {
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(relayed.lock().unwrap().is_empty());
+    }
+
+    struct FakeKeyBroker {
+        reply_router: Arc<ReplyRouter<AgentEscrowKeyReply>>,
+        canned_reply: AgentEscrowKeyReply,
+        asked: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait]
+    impl Actor for FakeKeyBroker {
+        type Msg = TcpClientMessage;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            message: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::Publish { topic, payload, .. } = message
+                && let Ok(envelope) = rkyv::from_bytes::<
+                    Envelope<AgentEscrowKeyRequest>,
+                    rkyv::rancor::Error,
+                >(&payload)
+            {
+                self.asked
+                    .lock()
+                    .unwrap()
+                    .push((topic, envelope.payload.identity));
+                self.reply_router
+                    .deliver(&envelope.correlation_id, self.canned_reply.clone());
+            }
+            Ok(())
+        }
+    }
+
+    type Asked = Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+    async fn key_state(canned_reply: AgentEscrowKeyReply) -> (Arc<ObserverState>, Asked) {
+        let router = Arc::new(ReplyRouter::new());
+        let asked: Asked = Arc::default();
+        let (broker, _) = Actor::spawn(
+            None,
+            FakeKeyBroker {
+                reply_router: router.clone(),
+                canned_reply,
+                asked: asked.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        let state = Arc::new(ObserverState {
+            broker_client: broker.into(),
+            issuance_reply_router: Arc::new(ReplyRouter::new()),
+            identity_reply_router: Arc::new(ReplyRouter::new()),
+            account_reply_router: Arc::new(ReplyRouter::new()),
+            admin_action_reply_router: Arc::new(ReplyRouter::new()),
+            workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
+            agent_escrow_key_reply_router: router,
+        });
+        (state, asked)
+    }
+
+    async fn json_of(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    #[tokio::test]
+    async fn an_agents_escrow_certificate_is_returned_with_200_and_asked_for_by_identity() {
+        let (state, asked) = key_state(AgentEscrowKeyReply::Found {
+            public_key_pem: "KEY".to_string(),
+            certificate_pem: "CERT".to_string(),
+        })
+        .await;
+        let response = agent_escrow_key(
+            State(state),
+            Json(AgentEscrowKeyRequest {
+                identity: "git-repo-observer.polar.serviceaccount.cluster.local".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_of(response).await;
+        assert_eq!(body["Found"]["certificate_pem"], "CERT");
+        assert_eq!(body["Found"]["public_key_pem"], "KEY");
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![(
+                CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC.to_string(),
+                "git-repo-observer.polar.serviceaccount.cluster.local".to_string()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_with_no_escrow_certificate_is_404() {
+        let (state, _) = key_state(AgentEscrowKeyReply::NotFound).await;
+        let response = agent_escrow_key(
+            State(state),
+            Json(AgentEscrowKeyRequest {
+                identity: "nobody".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn an_identity_that_is_not_a_name_is_refused_before_the_consumer_is_asked() {
+        let (state, asked) = key_state(AgentEscrowKeyReply::NotFound).await;
+        let too_long = "a".repeat(MAX_IDENTITY + 1);
+        for identity in [
+            "",
+            "has space",
+            "slash/x",
+            "pipe|x",
+            "new\nline",
+            "é",
+            &too_long,
+        ] {
+            let response = agent_escrow_key(
+                State(state.clone()),
+                Json(AgentEscrowKeyRequest {
+                    identity: identity.to_string(),
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{identity:?}");
+        }
+        assert!(asked.lock().unwrap().is_empty());
+        // and the longest allowed, and the usual forms, are relayed
+        for identity in [
+            "a".repeat(MAX_IDENTITY),
+            "git-repo-observer".to_string(),
+            "a_b.c-d".to_string(),
+        ] {
+            let response = agent_escrow_key(
+                State(state.clone()),
+                Json(AgentEscrowKeyRequest { identity }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        assert_eq!(asked.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_reply_from_the_consumer_is_a_gateway_timeout() {
+        let router = Arc::new(ReplyRouter::new());
+        let (broker, _) = Actor::spawn(
+            None,
+            FakeKeyBroker {
+                reply_router: Arc::new(ReplyRouter::new()), // delivers to a router nobody waits on
+                canned_reply: AgentEscrowKeyReply::NotFound,
+                asked: Arc::default(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        let state = Arc::new(ObserverState {
+            broker_client: broker.into(),
+            issuance_reply_router: Arc::new(ReplyRouter::new()),
+            identity_reply_router: Arc::new(ReplyRouter::new()),
+            account_reply_router: Arc::new(ReplyRouter::new()),
+            admin_action_reply_router: Arc::new(ReplyRouter::new()),
+            workload_issuance_reply_router: Arc::new(ReplyRouter::new()),
+            agent_escrow_key_reply_router: router,
+        });
+        let response = agent_escrow_key(
+            State(state),
+            Json(AgentEscrowKeyRequest {
+                identity: "git-repo-observer".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    /// One raw HTTP exchange with the routes the pod serves, over a real socket.
+    async fn http(state: Arc<ObserverState>, request: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = crate::supervisor::routes(state);
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        server.abort();
+        response
+    }
+
+    fn post(path: &str, body: &str) -> String {
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn the_pod_serves_the_agent_escrow_key_route_to_a_plain_unauthenticated_post() {
+        let (state, _) = key_state(AgentEscrowKeyReply::Found {
+            public_key_pem: "KEY".to_string(),
+            certificate_pem: "CERT-PEM".to_string(),
+        })
+        .await;
+        let response = http(
+            state.clone(),
+            &post("/agent-escrow-key", r#"{"identity":"git-repo-observer"}"#),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("CERT-PEM"), "{response}");
+        // a route that is not served is not found, and the new one is not a GET
+        let missing = http(state.clone(), &post("/agent-escrow-keys", "{}")).await;
+        assert!(missing.starts_with("HTTP/1.1 404"), "{missing}");
+        let get = http(
+            state,
+            "GET /agent-escrow-key HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(get.starts_with("HTTP/1.1 405"), "{get}");
     }
 }

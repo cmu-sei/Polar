@@ -55,7 +55,13 @@ pub struct AgentEscrowKeyRequest {
     Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
 )]
 pub enum AgentEscrowKeyReply {
-    Found { public_key_pem: String },
+    /// The key, and the certificate it is in. The certificate is what a caller outside the cluster checks: it
+    /// chains to the CA the caller already trusts and names the agent, so the key can be believed without
+    /// believing the channel it came over.
+    Found {
+        public_key_pem: String,
+        certificate_pem: String,
+    },
     NotFound,
 }
 
@@ -90,6 +96,8 @@ mod tests {
     fn agent_escrow_key_reply_found_round_trips_through_both() {
         let original = AgentEscrowKeyReply::Found {
             public_key_pem: "-----BEGIN PUBLIC KEY-----\nfake\n-----END PUBLIC KEY-----\n"
+                .to_string(),
+            certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
                 .to_string(),
         };
 

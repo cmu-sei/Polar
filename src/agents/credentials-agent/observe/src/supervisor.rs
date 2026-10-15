@@ -35,20 +35,22 @@
 //!    would count as completion and nothing would restart it.
 
 use crate::handler::{
-    ObserverState, account, admin_action, identity, issue, workload_issue, workload_session,
+    ObserverState, account, admin_action, agent_escrow_key, identity, issue, workload_issue,
+    workload_session,
 };
 use axum::Router;
 use axum::routing::post;
 use cassini_types::ClientEvent;
 use credentials_agent_common::account_claim::AccountReply;
 use credentials_agent_common::admin_action::AdminActionReply;
+use credentials_agent_common::agent_escrow_key::AgentEscrowKeyReply;
 use credentials_agent_common::identity::IdentityNormalizationReply;
 use credentials_agent_common::issuance::IssuanceReply;
 use credentials_agent_common::workload_issuance::WorkloadIssuanceReply;
 use credentials_agent_common::{
     CREDENTIALS_ACCOUNT_REPLIES_TOPIC, CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC,
-    CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC, CREDENTIALS_ISSUANCE_REPLIES_TOPIC,
-    CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC, CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC,
+    CREDENTIALS_ISSUANCE_REPLIES_TOPIC, CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC,
 };
 use polar::request_reply::{Envelope, ReplyRouter};
 use polar_agent_builder::{
@@ -87,6 +89,7 @@ pub struct ReplyRouters {
     pub account: Arc<ReplyRouter<AccountReply>>,
     pub admin_action: Arc<ReplyRouter<AdminActionReply>>,
     pub workload_issuance: Arc<ReplyRouter<WorkloadIssuanceReply>>,
+    pub agent_escrow_key: Arc<ReplyRouter<AgentEscrowKeyReply>>,
 }
 
 macro_rules! reply_subscription {
@@ -136,6 +139,12 @@ pub fn reply_subscriptions(routers: &ReplyRouters) -> Vec<Subscription> {
             routers.workload_issuance,
             "workload issuance"
         ),
+        reply_subscription!(
+            CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
+            AgentEscrowKeyReply,
+            routers.agent_escrow_key,
+            "agent escrow key"
+        ),
     ]
 }
 
@@ -170,6 +179,22 @@ pub struct ObserverSupervisorState {
     http: Option<HttpServer>,
 }
 
+/// Every route the observer serves. Written once so a test can serve exactly what the pod does.
+pub(crate) fn routes(state: Arc<ObserverState>) -> Router {
+    Router::new()
+        .route("/issue", post(issue))
+        .route("/identity", post(identity))
+        .route("/account", post(account))
+        .route("/admin-action", post(admin_action))
+        // The public escrow certificate of an agent, for someone outside the cluster to encrypt to.
+        .route("/agent-escrow-key", post(agent_escrow_key))
+        // A workload's own request, before it has a certificate: open a session, then ask with the token sealed
+        // to it. The observer relays both and never holds the token.
+        .route("/workload/session", post(workload_session))
+        .route("/workload/issue", post(workload_issue))
+        .with_state(state)
+}
+
 async fn start_http(
     state: Arc<ObserverState>,
     port: u16,
@@ -183,16 +208,7 @@ async fn start_http(
         })?;
     info!("{SERVICE_NAME} listening on 0.0.0.0:{port}");
 
-    let app = Router::new()
-        .route("/issue", post(issue))
-        .route("/identity", post(identity))
-        .route("/account", post(account))
-        .route("/admin-action", post(admin_action))
-        // A workload's own request, before it has a certificate: open a session, then ask with the token sealed
-        // to it. The observer relays both and never holds the token.
-        .route("/workload/session", post(workload_session))
-        .route("/workload/issue", post(workload_issue))
-        .with_state(state);
+    let app = routes(state);
 
     let shutdown = Arc::new(Notify::new());
     let stopping = Arc::new(AtomicBool::new(false));
@@ -261,6 +277,7 @@ impl Actor for ObserverSupervisor {
             account_reply_router: routers.account.clone(),
             admin_action_reply_router: routers.admin_action.clone(),
             workload_issuance_reply_router: routers.workload_issuance.clone(),
+            agent_escrow_key_reply_router: routers.agent_escrow_key.clone(),
         });
 
         let http = start_http(observer.clone(), settings.port).await?;
@@ -368,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn subscribes_to_exactly_the_five_reply_topics() {
+    fn subscribes_to_exactly_the_six_reply_topics() {
         let subs = reply_subscriptions(&ReplyRouters::default());
         let mut topics: Vec<&str> = subs.iter().map(|s| s.topic.as_str()).collect();
         topics.sort_unstable();
@@ -378,6 +395,7 @@ mod tests {
             CREDENTIALS_ACCOUNT_REPLIES_TOPIC,
             CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC,
             CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC,
+            CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
         ];
         expected.sort_unstable();
         assert_eq!(topics, expected);
@@ -403,6 +421,31 @@ mod tests {
         ));
         assert!(issuance.try_recv().is_err());
         assert!(admin.try_recv().is_err());
+    }
+
+    #[test]
+    fn the_agent_escrow_key_reply_topic_delivers_to_its_router_and_no_other() {
+        let routers = ReplyRouters::default();
+        let subs = reply_subscriptions(&routers);
+        let mut key = routers.agent_escrow_key.register("c-key".to_string());
+        let mut identity = routers.identity.register("c-key".to_string());
+        let mut issuance = routers.issuance.register("c-key".to_string());
+
+        deliver!(
+            subs,
+            CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
+            "c-key",
+            AgentEscrowKeyReply::Found {
+                public_key_pem: "key".to_string(),
+                certificate_pem: "cert".to_string(),
+            }
+        );
+        assert!(matches!(
+            key.try_recv(),
+            Ok(AgentEscrowKeyReply::Found { .. })
+        ));
+        assert!(identity.try_recv().is_err());
+        assert!(issuance.try_recv().is_err());
     }
 
     #[test]

@@ -322,6 +322,7 @@ mod tests {
                         correlation_id: envelope.correlation_id,
                         payload: AgentEscrowKeyReply::Found {
                             public_key_pem: self.recipient_public_key_pem.clone(),
+                            certificate_pem: String::new(),
                         },
                     };
                     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
