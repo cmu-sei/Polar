@@ -323,10 +323,14 @@ an emptyDir meanwhile.
 
 ## What changes in the code, in order, tests first
 
-**Amended 2026-10-14 (David):** the credential path through a permanent schedule is built first: the observer's
-`credentials` section and working set, the repository configuration naming a credential, the author's side
-(encrypting to the observer's key), and a Cedar `store` action on the credentials agent. The controller and
-proposals (steps 1, 6 and 7 below) come after.
+**Amended 2026-10-14 (David):** the credential path through a permanent schedule is built first. It includes the
+observer's `credentials` section and its use of the CryptoActor, the repository configuration naming a
+credential, the author's side (encrypting to the observer's key), a Cedar `store` action on the credentials
+agent, and a **minimal controller**: `git-repo-controller` on the builder, which declares the `repositories`
+section, holds the latest version and publishes each repository on `git.repo.config.events` naming its
+credential. The minimal controller **replaces the git scheduler** (which is removed from the catalog and the
+cluster); it has no proposals, admission rules, status events or backoff. Those (steps 1 and 7 below, and the rest
+of step 6) come after, as path 2.
 
 1. **The admission decision as a pure function**: normalisation, each rule, the order, the attack list from
    `proposals.md` (user information, `ext::`, `file://`, internal addresses, a lookalike host, a very long URL,
