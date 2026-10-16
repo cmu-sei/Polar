@@ -39,7 +39,7 @@ use validate.nu *
 use rules.nu [job_replacement_problems, apply_order_problems]
 
 def main [
-    target: string        # Target name: local, sandbox, ace
+    target: string        # Target name: local, local-minimal, sandbox-local
 ] {
     let infra_root  = ($env.PWD | path join "infra")
     let target_file = ($infra_root | path join $"targets/($target)/target.nu")

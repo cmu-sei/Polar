@@ -36,7 +36,8 @@ once, then go to the recipe you need.
 ## Why this exists
 
 Polar needs infrastructure across several deployment targets: a local
-cluster for development, a sandbox AKS environment (not built yet), and more to come. Each shares a large amount of structural intent
+cluster for development, a `sandbox-local` target (not built yet) for developing a Flux-based deployment, which a cloud
+cluster (AKS, AWS) would then reuse, and more to come. Each shares a large amount of structural intent
 but differs in image registries, TLS configuration, storage classes, service
 topology and platform tooling (Flux, Istio, and so on).
 
