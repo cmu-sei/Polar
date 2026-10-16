@@ -79,6 +79,15 @@ Last updated: 2026-10-10.
   `dependsOn`, the Flux layer and mirrored controller images, a gitops mode in `up.nu`, SOPS-encrypted secrets.
   Jobs need `force: true`; the CA, the admin flow and the schedules seed stay imperative. `git revert` rolls back
   manifests only, not data, secrets or certificates.
+  **Stage 1 done, 2026-10-16: the render is deterministic.** `infra/tests/render-determinism.nu [target] [--with-cache]`
+  renders `local-minimal` with the cache off twice and once under another user, timezone, locale and CI variable
+  with no `KUBECONFIG`, and with a cold and a warm cache, and compares the 51 files byte for byte: all identical.
+  A render from a second checkout at a different path was identical too (by hand). The output has no Secret documents
+  (secrets are created apart from the render) and does not mention the checkout path, the home directory or the user.
+  What stage 2 meets: our own images are `:latest` (`cert-issuer`, `polar-init`, `polar-nu-init`), so Flux could
+  not see one change, and need tags or digests; the git server's config document carries its default seed root, a
+  `/nix/store/...-polar-git-server-seeds` path, so those manifests change with that image build; and the agents'
+  Job images did not appear in a scan for `image:`, which is worth a look before the output is split per layer.
 - **Open: `src/deploy/`.** Dead, but `scripts/pipeline/render-manifests.nu` renders its tree for Flux, and
   `cyclops.yaml` (the removed build orchestrator, under `src/agents/build-orchestrator` in history) is its config;
   a colleague's branch may bring cyclops back. Remove it with `scripts/polar-init.nu` and `scripts/setup-neo4j.sh`
