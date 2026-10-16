@@ -95,7 +95,12 @@ ignore = [
     #{ id = "RUSTSEC-0000-0000", reason = "you can specify a reason the advisory is ignored" },
     #"a-crate-that-is-yanked@0.1.1", # you can also ignore yanked crate versions if you wish
     #{ crate = "a-crate-that-is-yanked@0.1.1", reason = "you can specify why you are ignoring the yanked crate" },
-    "duplicate"
+    "duplicate",
+    { id = "RUSTSEC-2023-0071", reason = "Marvin attack on the rsa crate's private-key operations; rsa arrives only through jsonwebtoken, which here verifies signatures with public keys, and key generation is not a timing oracle. No patched version exists." },
+    # Unmaintained, not vulnerable; each is pulled in by a dependency and goes when that dependency moves.
+    { id = "RUSTSEC-2024-0384", reason = "instant: unmaintained; pulled in by cassini-backoff (our backoff fork)." },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile: unmaintained; thin wrapper over rustls-pki-types, to migrate." },
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml: unmaintained; pulled in by a YAML dependency, to migrate." },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
@@ -117,6 +122,7 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BlueOak-1.0.0",
+    "CDLA-Permissive-2.0",
     "CC0-1.0",
     "ISC",
     "MIT",
