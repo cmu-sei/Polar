@@ -64,9 +64,10 @@ Last updated: 2026-10-10.
   `ServiceBuilder`; the scaffold lists `optional` and tags the variables. The git server is the first user: the
   same binary ran with no cluster, served clone and push by certificate, refused an unlisted certificate (403) and
   no certificate, and logged the push (README in `src/agents/polar-git-server`). The catalog side did not change: the
-  resolved record of the git server is byte-identical, and `resolve.nu check` passes for all 15 workloads. Open:
-  the cluster-mode run of the rebuilt image against a live broker (unit tests cover the cluster path; the image
-  has not been rebuilt and deployed), running the image outside a cluster, joining a cluster from outside, and
+  resolved record of the git server is byte-identical, and `resolve.nu check` passes for all 15 workloads. In the
+  dev cluster the rebuilt image replaced the pod, connected to Cassini over TLS, registered with the broker and
+  stayed up with no restarts. Open: a push through the cluster's server being published as `RepoChanged` (the
+  pod has not been pushed to since), running the image outside a cluster, joining a cluster from outside, and
   making other capabilities optional.
 - **Cleanup.** Removed `policy-config`, the empty `ace` target, the internal GitLab CI, the Neo4j backup scripts,
   `task-done.sh`, `setup_ai.sh`, `startup_notes.md`, and the local build output; the `sandbox` target became
