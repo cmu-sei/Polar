@@ -285,10 +285,14 @@ falls back to compiling `polar-admin-grant` and `polar-sign` from this
 checkout, which needs a Rust toolchain and takes a few minutes.
 
 ```bash
+# Building from source (builds every image; the first cold build takes a long while):
 nu infra/up.nu local-minimal --dev --user <name> --email <email>
+
+# Images already in your registry (given to you; see "Loading prebuilt images"). No --dev: nothing is built:
+nu infra/up.nu local-minimal --user <name> --email <email>
 ```
 
-It prints its plan first, then builds and pushes the images the target
+With `--dev` it prints its plan first, then builds and pushes the images the target
 needs (`--dev`; the first cold build takes a long while), creates the
 namespaces and the cluster CA, applies the target, waits for the core
 pods, starts the port-forwards, runs the admin flow and signs and pushes
@@ -397,29 +401,37 @@ see **Using your own target**, below, for pointing a target's
 
 ### Loading prebuilt images
 
-If someone gives you a registry that already holds the images (instead of
-you building them), copy them into the registry your cluster pulls from
-with `skopeo`. It streams each image from one registry to the other: no
-Docker daemon, no `docker pull`, `docker save` or tarball in between.
+If the images are published for you (a registry account such as `docker.io/<account>`), one command copies the ones for **this
+machine's architecture** into the registry your cluster pulls from. It streams each image from one registry to the other with
+`skopeo`: no Docker daemon, no `docker pull`, `docker save` or tarball in between.
 
 ```bash
-SRC=<registry and path the images are published under>
-DEST=localhost:5000                      # the registry your cluster pulls from
-nu infra/images.nu list                  # the names and tags to copy
-skopeo copy --dest-tls-verify=false \
-  docker://$SRC/<name>:<tag> docker://$DEST/<name>:<tag>
+just registry-up                                       # if you have not started the registry yet
+nu infra/images.nu import --from docker.io/<account>   # amd64 or arm64, from `uname -m`; --arch to choose
 ```
 
-Copy every image in that list except Neo4j (build it yourself, step 3
-above, then `just images-push neo4j`); that includes `polar-tools`, the image
-the tools in **Installing the Polar tools** come out of. Keep
-the names and tags the list gives. Drop
-`--dest-tls-verify=false` for a registry that serves HTTPS, and add
+It reads `<from>/polar-<image>:<tag>-<arch>` (for example `polar-cassini:latest-arm64`), writes each as `<image>:<tag>` in your
+registry (`POLAR_REGISTRY`, default `localhost:5000`), copies the third-party images from their own registries (`--skip-mirrors` to
+leave those), and records the digests. Name images to import only those (`nu infra/images.nu import cassini --from …`). Add
+`--src-authfile <file>` for a private source and `--src-insecure` for a source that serves plain HTTP.
+
+Neo4j is not published: build it yourself (step 3 above), then `just images-push neo4j`. `polar-tools` is imported with the rest;
+it is the image the tools in **Installing the Polar tools** come out of. Then run
+`nu infra/up.nu <target> --user <name> --email <email>` **without `--dev`**, so it uses the images already in the registry instead
+of building them.
+
+Doing it by hand, one image at a time:
+
+```bash
+skopeo copy --dest-tls-verify=false \
+  docker://<registry>/<account>/polar-<name>:<tag>-<arch> docker://localhost:5000/<name>:<tag>
+```
+
+`nu infra/images.nu list` prints every image name and tag. Drop `--dest-tls-verify=false` for a registry that serves HTTPS, and add
 `--dest-creds user:password` (or `--dest-authfile`) if it needs a login.
-The images are built for one architecture; copy the ones that match your
-nodes. Then run `nu infra/up.nu <target> --user <name> --email <email>`
-**without `--dev`**, so it uses the images already in the registry instead of
-building them.
+
+To publish images for others, `nu infra/images.nu publish --to docker.io/<account> --arch arm64 [--authfile <file>]` builds them for
+that architecture (cross-built with Nix when it is not yours) and pushes them under those names.
 
 ### Installing the Polar tools
 

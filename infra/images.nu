@@ -141,22 +141,52 @@ def in_registry [row: record] {
     $r.exit_code == 0
 }
 
-def arch [] {
-    match (^uname -m | str trim) {
-        "x86_64" => "amd64"
+# The architecture name of a machine type (`uname -m`), as images are tagged and published.
+export def arch_of [machine: string] {
+    match $machine {
+        "x86_64" | "amd64" => "amd64"
         "aarch64" | "arm64" => "arm64"
-        $other => $other
+        $other => (error make --unspanned { msg: $"no images are published for the architecture '($other)'; use amd64 or arm64" })
     }
 }
 
+# The Nix system that builds images for an architecture name.
+export def system_of [arch: string] {
+    match (arch_of $arch) {
+        "amd64" => "x86_64-linux"
+        _ => "aarch64-linux"
+    }
+}
+
+# Where a published image lives: `<from>/polar-<image>:<tag>-<arch>`. Public registries such as Docker Hub give an account one
+# level of names, so the image name carries the `polar-` prefix and the architecture is in the tag. `import` and `publish` agree on this.
+export def published_ref [from: string, row: record, arch: string] {
+    $"($from | str trim --right --char '/')/polar-($row.image):($row.tag)-(arch_of $arch)"
+}
+
+# The rows `import` and `publish` handle: the images this repository builds (not mirrors of third-party images, and not the
+# Neo4j archive, which is built elsewhere), all of them or only those named.
+export def published_rows [table: list, names: list<string>] {
+    let rows = ($table | where kind == "nix")
+    if ($names | is-empty) { return $rows }
+    let unknown = ($names | where {|n| $n not-in ($rows | get image) })
+    if ($unknown | is-not-empty) {
+        error make --unspanned { msg: $"not an image this repository builds: ($unknown | str join ', ')" }
+    }
+    $rows | where {|r| $r.image in $names }
+}
+
+def arch [] { arch_of (^uname -m | str trim) }
+
 # The docker-archive for a row, building it first when it is a nix row.
 # Returns null for rows with nothing to push.
-def archive [row: record] {
+def archive [row: record, system: string = ""] {
     match $row.kind {
         "nix" => {
-            let platform = $"(^uname -m | str trim)-linux"
-            mkdir result
-            let out = $"result/($row.image)"
+            let platform = if ($system | is-empty) { $"(^uname -m | str trim)-linux" } else { $system }
+            let dir = if ($system | is-empty) { "result" } else { $"result/($system)" }
+            mkdir $dir
+            let out = $"($dir)/($row.image)"
             try {
                 ^nix build -L $".#packages.($platform).($row.attr)" -o $out
             } catch {
@@ -338,7 +368,15 @@ def rows_for [names: list<string>, all: bool] {
 def "main build" [
     ...names: string
     --all
+    --arch: string = ""   # build for another architecture (amd64 or arm64); the archives go under result/<system>/
 ] {
+    if ($arch | is-not-empty) {
+        let system = (system_of $arch)
+        let rows = ((rows_for $names $all) | where kind == "nix")
+        for row in $rows { print $"  ($row.image) for ($system)"; print $"      built: (archive $row $system)" }
+        print $"built ($rows | length) image\(s\) for ($system); the archives are under result/($system)/"
+        return
+    }
     let n = (run_stage "build" (rows_for $names $all))
     print $"built ($n) image\(s\); the archives are under result/"
 }
@@ -404,6 +442,94 @@ def "main lock promote" [] {
 
 def "main lock show" [] {
     lock effective | sort-by image tag arch
+}
+
+# Copies the images published for this machine's architecture (or --arch) into the registry, under the names and tags the table
+# gives, so a cluster can start without building anything. Reads `<from>/polar-<image>:<tag>-<arch>` (see `publish`), then also
+# copies the third-party images (--skip-mirrors leaves those). Neo4j is not published: build it (README, step 3).
+def "main import" [
+    ...names: string             # only these images (default: every image this repository builds)
+    --from: string               # where the images are published, e.g. docker.io/<account>
+    --arch: string = ""          # amd64 or arm64 (default: this machine's)
+    --src-authfile: string = ""  # credentials for a private source
+    --src-insecure               # the source serves plain HTTP or a certificate that is not trusted
+    --skip-mirrors
+] {
+    if ($from | is-empty) { error make --unspanned { msg: "say where the images are published: --from docker.io/<account>" } }
+    require_registry
+    let want = if ($arch | is-empty) { arch } else { arch_of $arch }
+    let rows = (published_rows (load_table) $names)
+    let evict = (runtime) == "u7s" and (node_present)
+    print $"importing ($rows | length) image\(s\) for ($want) from ($from) into (registry)"
+    let auth = (if ($src_authfile | is-empty) { [] } else { ["--src-authfile" $src_authfile] }) ++ (if $src_insecure { ["--src-tls-verify=false"] } else { [] })
+    mut failures = []
+    for it in ($rows | enumerate) {
+        let row = $it.item
+        let ref = (published_ref $from $row $want)
+        print $"  [($it.index + 1)/($rows | length)] ($ref)"
+        let r = (do { ^skopeo copy --retry-times 3 --format v2s2 ...$auth --dest-tls-verify=false $"docker://($ref)" $"docker://(registry)/(dest $row)" } | complete)
+        if $r.exit_code != 0 {
+            let why = ($r.stderr | lines | last 1 | str join "")
+            print $"      FAILED: ($why)"
+            $failures = ($failures | append { image: $row.image, error: $why })
+        } else {
+            record_digest $row
+            if $evict { evict_row $row }
+        }
+    }
+    if not $skip_mirrors and ($names | is-empty) {
+        let mirrors = (load_table | where kind == "mirror")
+        print $"copying ($mirrors | length) third-party image\(s\) from their registries"
+        for row in $mirrors {
+            let err = (try { mirror_row $row; null } catch {|e| $e.msg })
+            if $err != null { $failures = ($failures | append { image: $row.image, error: $err }) }
+        }
+    }
+    if ($failures | is-not-empty) {
+        print ""
+        print $"($failures | length) failed:"
+        for f in $failures { print $"  ($f.image): ($f.error)" }
+        error make --unspanned { msg: $"($failures | length) image\(s\) could not be imported. Were they published for ($want)?" }
+    }
+    print "imported. Neo4j is not published: build it (README, step 3), then `just images-push neo4j`."
+}
+
+# Builds the images for an architecture (cross-built with Nix when it is not this machine's) and pushes each to
+# `<to>/polar-<image>:<tag>-<arch>`, which `import` reads. The account's login comes from --authfile (a skopeo/docker auth file)
+# or skopeo's usual places; it is never printed.
+def "main publish" [
+    ...names: string             # only these images (default: every image this repository builds)
+    --to: string                 # e.g. docker.io/<account>
+    --arch: string = ""          # amd64 or arm64 (default: this machine's)
+    --authfile: string = ""
+] {
+    if ($to | is-empty) { error make --unspanned { msg: "say where to publish: --to docker.io/<account>" } }
+    let want = if ($arch | is-empty) { arch } else { arch_of $arch }
+    let system = (system_of $want)
+    let rows = (published_rows (load_table) $names)
+    let auth = if ($authfile | is-empty) { [] } else { ["--dest-authfile" $authfile] }
+    mut failures = []
+    for it in ($rows | enumerate) {
+        let row = $it.item
+        let ref = (published_ref $to $row $want)
+        print $"  [($it.index + 1)/($rows | length)] ($row.image) -> ($ref)"
+        let err = (try {
+            let a = (archive $row $system)
+            let r = (do { ^skopeo copy --retry-times 3 --format v2s2 ...$auth $"docker-archive:($a)" $"docker://($ref)" } | complete)
+            if $r.exit_code != 0 { error make --unspanned { msg: ($r.stderr | lines | last 1 | str join "") } }
+            null
+        } catch {|e| $e.msg })
+        if $err != null {
+            print $"      FAILED: ($err)"
+            $failures = ($failures | append { image: $row.image, error: $err })
+        }
+    }
+    if ($failures | is-not-empty) {
+        print $"($failures | length) of ($rows | length) failed:"
+        for f in $failures { print $"  ($f.image): ($f.error)" }
+        error make --unspanned { msg: $"($failures | length) image\(s\) were not published" }
+    }
+    print $"published ($rows | length) image\(s\) for ($want) to ($to)"
 }
 
 # List the images in the table.
