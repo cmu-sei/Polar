@@ -91,14 +91,44 @@ everything the build pipeline needs:
 ```bash
 just dev-container
 
+# state that has to outlive the container; create it first, so it is yours and not root's
+mkdir -p ~/.config/polar-admin ~/.cache/polar-sign
+
 podman run --rm -it --name polar-dev \
-  --user 0 --userns=keep-id \
+  --user 0 --userns=keep-id --network=host \
   -e CREATE_USER="$USER" \
   -e CREATE_UID="$(id -u)" \
   -e CREATE_GID="$(id -g)" \
   -v $PWD:/workspace \
+  -v ${KUBECONFIG:-$HOME/.kube/config}:/kube/config:ro -e KUBECONFIG=/kube/config \
+  -v $HOME/.config/polar-admin:/home/$USER/.config/polar-admin \
+  -v $HOME/.cache/polar-sign:/home/$USER/.cache/polar-sign \
+  -v $HOME/.ssh/<your key>:/run/sops-key:ro -e SOPS_AGE_SSH_PRIVATE_KEY_FILE=/run/sops-key \
   localhost/polar-dev:latest
 ```
+
+What each mount is for:
+
+- `--network=host`: the container reaches the cluster's API, the local
+  registry on `localhost:5000` and the port-forwards `up.nu` starts exactly
+  as the host does.
+- `/kube/config`: your kubeconfig, so `kubectl` and the tools reach your
+  cluster. The cluster address in it must be reachable from the container
+  (with `--network=host`, `127.0.0.1` is the host's).
+- `~/.config/polar-admin`: your certificate, key and the cluster CA. They
+  belong on the host, so they survive the container and your browser can use
+  them.
+- `~/.cache/polar-sign`: the tool's clone of the schedules repository.
+- the SSH key, read-only: the private key you were added to the secrets file
+  with, for `sops` (see **Secrets setup**). It is mounted outside your home on
+  purpose: the container's entrypoint takes ownership of everything under
+  `/home/$USER`, which a read-only mount refuses.
+
+The dev container has no `podman`. The steps that need it (`just registry-up`,
+and `up.nu` reading an agent's scaffold from its image) have to run on
+the host, or you can start the registry on the host first and let `up.nu`
+run on the host with the tools installed from `polar-tools`. Importing the
+certificate into a browser (step 7) is a host step in any case.
 
 **On an ARM Mac:** you need a dev container image to get started.
 Reach out to the developers if you do not have one.
