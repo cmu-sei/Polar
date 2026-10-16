@@ -303,9 +303,9 @@ def main [] {
             # The scaffold taken from the image in the local registry, the artifact that deploys,
             # must give the record the source tree gives. Skipped, and said so, where there is no
             # podman or the image has not been pushed.
-            let have = (which podman | is-not-empty) and (try { (^curl -sf $"(($env.POLAR_REGISTRY? | default 'localhost:5000'))/v2/kube-consumer/tags/list" | from json | get tags | is-not-empty) } catch { false })
+            let have = ((which podman | is-not-empty) or (which docker | is-not-empty)) and (try { (^curl -sf $"(($env.POLAR_REGISTRY? | default 'localhost:5000'))/v2/kube-consumer/tags/list" | from json | get tags | is-not-empty) } catch { false })
             if not $have {
-                print "        (skipped: no podman, or kube-consumer is not in the local registry)"
+                print "        (skipped: no podman or docker, or kube-consumer is not in the local registry)"
             } else {
                 for n in ["kube-consumer" "credentials-agent"] {
                     let from_source = (^nu $RESOLVER json $n | from json)

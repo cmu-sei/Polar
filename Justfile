@@ -57,14 +57,14 @@ _load result:
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "${POLAR_SKIP_LOAD:-}" ]; then
-        echo "POLAR_SKIP_LOAD set — skipping podman load of {{result}}"
+        echo "POLAR_SKIP_LOAD set — skipping load of {{result}}"
         exit 0
     fi
-    if ! command -v podman >/dev/null 2>&1; then
-        echo "podman not found — skipping load of {{result}} (build-only)"
+    if ! command -v {{_runtime}} >/dev/null 2>&1; then
+        echo "{{_runtime}} not found — skipping load of {{result}} (build-only)"
         exit 0
     fi
-    podman load -i "{{result}}"
+    {{_runtime}} load -i "{{result}}"
 
 # ── Agent containers ──────────────────────────────────────────────────────────
 
@@ -653,6 +653,8 @@ user-cert-install username=env_var('USER'):
 # (product code has no default; this is only the dev convenience.)
 
 _admin_dir    := env_var('HOME') + "/.config/polar-admin"
+# The container runtime: POLAR_CONTAINER_RUNTIME, else podman or docker, whichever is installed (Polar provides neither).
+_runtime      := env_var_or_default('POLAR_CONTAINER_RUNTIME', `if command -v podman >/dev/null 2>&1; then echo podman; elif command -v docker >/dev/null 2>&1; then echo docker; else echo podman; fi`)
 # The admin tool: polar-admin-grant on PATH (see `nu infra/tools.nu install`), else built from this checkout.
 _admin_grant  := `if command -v polar-admin-grant >/dev/null 2>&1; then echo polar-admin-grant; else echo "cargo run -q --manifest-path $(pwd)/src/agents/Cargo.toml -p polar-admin-grant --"; fi`
 _observer_url := env_var_or_default('POLAR_OBSERVER_URL', 'http://localhost:8081')
@@ -1059,10 +1061,10 @@ _registry_port := "5000"
 # the host, and configure your cluster's node(s) to pull from wherever
 # this registry is reachable on their end.
 registry-up:
-    podman run -d --name polar-registry -p {{_registry_port}}:{{_registry_port}} docker.io/library/registry:2 2>/dev/null || echo "Container 'polar-registry' already running."
+    {{_runtime}} run -d --name polar-registry -p {{_registry_port}}:{{_registry_port}} docker.io/library/registry:2 2>/dev/null || echo "Container 'polar-registry' already running."
 
 registry-down:
-    podman rm -f polar-registry
+    {{_runtime}} rm -f polar-registry
 
 registry-status:
     curl -sf http://{{_registry_host}}:{{_registry_port}}/v2/ && echo "registry reachable"

@@ -45,6 +45,7 @@
 
 use rules.nu *
 use document.nu *
+use runtime.nu [container_runtime, entrypoint_for, insecure_pull_flags]
 
 const INFRA = (path self | path dirname)
 const CONFIG = ($INFRA | path join "config")
@@ -186,19 +187,20 @@ def pushed_image_ref [images: list, name: string, who: string] {
 def run_in_image [ref: string, args: list<string>, extra: list<string> = []] {
     # A pull of a tag that has moved leaves the image it replaced behind, untagged, and every
     # `up.nu --dev` moves them all. Remember which it was, and remove it once the new one is here.
-    let before = (^podman image inspect --format '{{.Id}}' $ref | complete | get stdout | str trim)
-    let pulled = (^podman pull -q ...(registry_flags) $ref | complete)
+    let rt = (container_runtime)
+    let before = (^$rt image inspect --format '{{.Id}}' $ref | complete | get stdout | str trim)
+    let pulled = (^$rt pull -q ...(insecure_pull_flags $rt (registry_flags)) $ref | complete)
     if $pulled.exit_code != 0 {
         error make { msg: $"cannot pull ($ref): ($pulled.stderr | str trim). Build and push it first: nu infra/images.nu push <image>" }
     }
-    let after = (^podman image inspect --format '{{.Id}}' $ref | str trim)
+    let after = (^$rt image inspect --format '{{.Id}}' $ref | str trim)
     if ($before | is-not-empty) and $before != $after {
         # Fails, harmlessly, if something still uses it.
-        ^podman rmi $before | complete | ignore
+        ^$rt rmi $before | complete | ignore
     }
-    let config = (^podman image inspect --format '{{json .Config}}' $ref | from json)
-    let entrypoint = (image_command $config | to json --raw)
-    ^podman run --rm --network none --entrypoint $entrypoint ...$extra $ref ...$args | complete
+    let config = (^$rt image inspect --format '{{json .Config}}' $ref | from json)
+    let e = (entrypoint_for $rt (image_command $config))
+    ^$rt run --rm --network none --entrypoint $e.entrypoint ...$extra $ref ...$e.leading ...$args | complete
 }
 
 # The scaffold the agent prints about itself (`<agent> --scaffold`): from the binary, never from a

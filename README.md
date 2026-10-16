@@ -68,7 +68,8 @@ deployed to Kubernetes.
   assume a specific one; see **Using your own target**, below)
 - A Neo4j instance populated with work-item data (see **Data source**,
   below)
-- [Nix](https://nixos.org) with flakes enabled, `podman`, `direnv`,
+- [Nix](https://nixos.org) with flakes enabled, a container runtime (`podman` or
+  `docker`: Polar does not provide one, so install whichever you use), `direnv`,
   [`just`](https://github.com/casey/just), `nushell` and `kubectl` — or
   use the provided dev container (see below), which already has the
   build tools. The full list is in **Bring a cluster up**, below.
@@ -78,8 +79,8 @@ deployed to Kubernetes.
   `up.nu` runs (`polar-admin-grant`, `polar-sign`, `cassini-c2`) come as
   static binaries in the `polar-tools` image (see **Installing the Polar
   tools**). What `up.nu` still needs on your `PATH`: `nushell`, `dhall`,
-  `kubectl`, `skopeo`, `podman`, `sops`/`rage` and `git`. The dev
-  container has all of them except `podman` (below), so use it unless you
+  `kubectl`, `skopeo`, a container runtime, `sops`/`rage` and `git`. The dev
+  container has all of them except the container runtime (below), so use it unless you
   already have those installed
 
 ### Dev container
@@ -107,6 +108,10 @@ podman run --rm -it --name polar-dev \
   localhost/polar-dev:latest
 ```
 
+With `docker`, run the same command as `docker run` and leave out
+`--userns=keep-id`, which is a podman option (docker, running as root, keeps
+the host's user ids on bind mounts as they are).
+
 What each mount is for:
 
 - `--network=host`: the container reaches the cluster's API, the local
@@ -124,7 +129,7 @@ What each mount is for:
   purpose: the container's entrypoint takes ownership of everything under
   `/home/$USER`, which a read-only mount refuses.
 
-The dev container has no `podman`. The steps that need it (`just registry-up`,
+The dev container has no container runtime (install `podman` or `docker` on the host). The steps that need one (`just registry-up`,
 and `up.nu` reading an agent's scaffold from its image) have to run on
 the host, or you can start the registry on the host first and let `up.nu`
 run on the host with the tools installed from `polar-tools`. Importing the
@@ -137,7 +142,7 @@ The container has the Polar tools (`polar-sign`, `polar-admin-grant`,
 `cassini-c2`, `cassini-client`, `user-cert-fetcher`, `cert-client`,
 `cert-issuer-setup`) on its `PATH`, built as static binaries, together with
 `nu`, `just`, `kubectl`, `skopeo`, `dhall`, `sops`, `rage`, `git` and a Rust
-toolchain. It does not run `podman` itself; see **Bring a cluster up** for
+toolchain. It does not run containers itself; see **Bring a cluster up** for
 which steps need it.
 
 Inside the container, at `/workspace`:
@@ -195,7 +200,8 @@ unless it says otherwise.
 **What you need before you start** (the dev shell from `direnv allow`
 provides most of the tools):
 
-- Nix with flakes, `podman` (the local registry in step 2 runs in it),
+- Nix with flakes, a container runtime, `podman` or `docker` (the local registry
+  in step 2 runs in it, and `up.nu` uses it to read each agent's scaffold),
   `just`, `nushell`, `kubectl`, `skopeo`, `dhall`, `sops` and `rage`.
 - A Kubernetes cluster, and admin access to it (step 1).
 - A checkout of the sibling repository **`nix-neo4j`** at
@@ -243,6 +249,11 @@ pushes to (default `localhost:5000`) and `registry` in
 `infra/config/cluster.nuon` to the address the cluster's nodes pull from.
 Also set `POLAR_CLUSTER_RUNTIME=none` unless your cluster is a rootless
 podman dev node (see **Images**).
+
+The scripts use `podman` or `docker`, whichever is installed (`podman` first).
+To choose, set `POLAR_CONTAINER_RUNTIME=docker` (or `podman`); `up.nu` says
+which it found in its first step, and stops with a clear message if neither is
+installed.
 
 **3. Build the Neo4j image.** In the `nix-neo4j` checkout:
 

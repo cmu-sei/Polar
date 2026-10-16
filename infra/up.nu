@@ -38,7 +38,7 @@
 # human is required (closing the browser, the Neo4j password).
 #
 # Steps (each enabled only when the target needs it):
-#   preflight   cluster reachable, run from the repo root                 always
+#   preflight   cluster reachable, a container runtime (podman or docker) is installed, run from the repo root   always
 #   agent-images build and push the images of the agents that describe          --dev
 #               themselves, before the render asks them (--scaffold, --check)
 #   render      nu infra/render.nu <target>                               always
@@ -64,6 +64,7 @@ use forwards.nu [ensure_observer_forward]
 use egress.nu [egress_report, kube_probe, probe_url]
 use seed.nu
 use tools.nu
+use runtime.nu [container_runtime]
 use plan.nu [build_forwards, build_plan, deployed_charts]
 use apply.nu [any_pod_ready, changed_configmaps, config_users, gate_after, job_verdict, jobs_in, stale_images, workload_needs_restart]
 
@@ -292,6 +293,8 @@ def step_preflight [config: record] {
         fail $"cluster not reachable: ($nodes.stderr | str trim)"
     }
     ok $"cluster reachable, ($nodes.stdout | lines | length) node\(s\)"
+    let rt = (try { container_runtime } catch {|e| fail $e.msg })
+    ok $"container runtime: ($rt)"
 
     # The secrets step needs the SOPS files to decrypt unless the secrets are already there. Found out here, in
     # seconds, and not after the images are built: a shell without the dev shell's SOPS variables was told so
