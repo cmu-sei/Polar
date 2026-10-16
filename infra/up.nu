@@ -63,6 +63,7 @@ use browser.nu [browser_expected, browser_found, browser_problems, neo4j_answer,
 use forwards.nu [ensure_observer_forward]
 use egress.nu [egress_report, kube_probe, probe_url]
 use seed.nu
+use tools.nu
 use plan.nu [build_forwards, build_plan, deployed_charts]
 use apply.nu [any_pod_ready, changed_configmaps, config_users, gate_after, job_verdict, jobs_in, stale_images, workload_needs_restart]
 
@@ -340,7 +341,8 @@ def step_ca [] {
     if $have_ca {
         ok "secret/cert-issuer-ca already exists, skipping bootstrap-ca"
     } else {
-        ^cargo run -q --manifest-path src/agents/Cargo.toml -p polar-admin-grant -- bootstrap-ca
+        let t = (tools command "polar-admin-grant")
+        ^($t | first) ...($t | skip 1) bootstrap-ca
         if $env.LAST_EXIT_CODE != 0 { fail "bootstrap-ca failed" }
         ok "cluster CA created"
     }
@@ -516,10 +518,11 @@ def step_seed [target: string, username: string, mail: string] {
 
     let existing = (^git -C $repo ls-files | lines)
     let todo = (seed missing (seed documents) $existing)
+    let sign = (tools command "polar-sign")
     for d in $todo {
         note $"signing ($d.section) for ($d.agent), version ($d.version)"
         let signed = (seed body_json $d $root
-            | ^cargo run -q --manifest-path src/agents/Cargo.toml -p polar-sign -- runtime --agent $d.agent --section $d.section --version $d.version --body-file - --user $username)
+            | ^($sign | first) ...($sign | skip 1) runtime --agent $d.agent --section $d.section --version $d.version --body-file - --user $username)
         if $env.LAST_EXIT_CODE != 0 { fail "polar-sign runtime failed" }
         let target_file = ($repo | path join $d.path)
         mkdir ($target_file | path dirname)

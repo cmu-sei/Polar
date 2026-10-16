@@ -24,9 +24,9 @@
 use policy_config::get_latest_commit;
 
 fn main() {
-    let repo_url = "https://github.com/cmu-sei/Polar.git"; // Change for GitLab if needed
+    let repo_url = "https://git.example.com/your-org/your-repo.git"; // Change for GitLab if needed
     let repo_path = "/tmp/my_repo"; // Local directory
-    let username = "daveman1010221"; // Your GitHub/GitLab username
+    let username = "your-username"; // Your GitHub/GitLab username
     let token = "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; // OAuth or Personal Access Token
 
     match get_latest_commit(repo_url, repo_path, username, token) {

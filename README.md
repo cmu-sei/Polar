@@ -73,12 +73,14 @@ deployed to Kubernetes.
   use the provided dev container (see below), which already has the
   build tools. The full list is in **Bring a cluster up**, below.
   **If you are given prebuilt images** (see **Loading prebuilt images**,
-  under **Images**) you do not build them and so do not need Nix to do
-  that, but `up.nu` still needs the toolchain around it: `nushell`, `dhall`,
-  `kubectl`, `skopeo`, `podman`, `sops`/`rage`, and a Rust toolchain, which
-  it uses to build the two small admin tools (`polar-admin-grant` and
-  `polar-sign`) from this checkout. The dev container has all of it, so
-  use it unless you already have those installed
+  under **Images**) you do not build them and do not need Nix for that.
+  You also do not compile anything to install: the command-line tools
+  `up.nu` runs (`polar-admin-grant`, `polar-sign`, `cassini-c2`) come as
+  static binaries in the `polar-tools` image (see **Installing the Polar
+  tools**). What `up.nu` still needs on your `PATH`: `nushell`, `dhall`,
+  `kubectl`, `skopeo`, `podman`, `sops`/`rage` and `git`. The dev
+  container has all of them except `podman` (below), so use it unless you
+  already have those installed
 
 ### Dev container
 
@@ -100,6 +102,13 @@ podman run --rm -it --name polar-dev \
 
 **On an ARM Mac:** you need a dev container image to get started.
 Reach out to the developers if you do not have one.
+
+The container has the Polar tools (`polar-sign`, `polar-admin-grant`,
+`cassini-c2`, `cassini-client`, `user-cert-fetcher`, `cert-client`,
+`cert-issuer-setup`) on its `PATH`, built as static binaries, together with
+`nu`, `just`, `kubectl`, `skopeo`, `dhall`, `sops`, `rage`, `git` and a Rust
+toolchain. It does not run `podman` itself; see **Bring a cluster up** for
+which steps need it.
 
 Inside the container, at `/workspace`:
 
@@ -229,6 +238,11 @@ export SOPS_AGE_SSH_PRIVATE_KEY_FILE=$HOME/.ssh/<your key>
 
 **5. Bring Polar up.**
 
+First put the tools on your `PATH` (**Installing the Polar tools**,
+below): `nu infra/tools.nu install ~/.local/bin`. Without them `up.nu`
+falls back to compiling `polar-admin-grant` and `polar-sign` from this
+checkout, which needs a Rust toolchain and takes a few minutes.
+
 ```bash
 nu infra/up.nu local-minimal --dev --user <name> --email <email>
 ```
@@ -340,13 +354,45 @@ skopeo copy --dest-tls-verify=false \
 ```
 
 Copy every image in that list except Neo4j (build it yourself, step 3
-above, then `just images-push neo4j`), under the same name and tag as the list gives. Drop
+above, then `just images-push neo4j`); that includes `polar-tools`, the image
+the tools in **Installing the Polar tools** come out of. Keep
+the names and tags the list gives. Drop
 `--dest-tls-verify=false` for a registry that serves HTTPS, and add
 `--dest-creds user:password` (or `--dest-authfile`) if it needs a login.
 The images are built for one architecture; copy the ones that match your
 nodes. Then run `nu infra/up.nu <target> --user <name> --email <email>`
 **without `--dev`**, so it uses the images already in the registry instead of
 building them.
+
+### Installing the Polar tools
+
+The tools you run yourself are `polar-sign` (sign and push configuration),
+`polar-admin-grant` (create and claim accounts, bootstrap the CA),
+`cassini-c2` (ask the broker to shut down), `cassini-client` (the broker's
+client, for applications that are not written in Rust), `user-cert-fetcher`
+(self-service user certificates), and `cert-client` and `cert-issuer-setup`
+(the local PKI). They are built as **static binaries** for each
+architecture, so a copy runs on any Linux of that architecture, and they
+ship in the `polar-tools` image. Nothing has to be compiled to use them.
+Copy them out into a directory of your choosing and put it on your `PATH`:
+
+```bash
+nu infra/tools.nu install ~/.local/bin
+# or from an image somewhere else:
+nu infra/tools.nu install ~/.local/bin --from docker://registry.example.org/polar-tools:latest
+```
+
+This needs only `skopeo` and `tar`. By default it reads
+`polar-tools:latest` from `POLAR_REGISTRY` (default `localhost:5000`); load the
+image into that registry as described under **Loading prebuilt images**,
+or point `--from` at it. `polar-sign` also needs `git` on your `PATH`.
+
+`up.nu`, the `Justfile`'s admin recipes and `cassini-shutdown.nu` use the
+tool from your `PATH` when it is there. When it is not, they fall back to
+building it from this checkout with `cargo run`, which is what a developer
+with a Rust toolchain wants. To build the images and the tools yourself:
+`just images-push polar-tools`, or `nix build .#polarPkgs.polarTools.tools`
+for the binaries alone.
 
 ### Customize a target
 

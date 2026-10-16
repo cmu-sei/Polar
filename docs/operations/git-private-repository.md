@@ -142,12 +142,14 @@ Expect: `git-repo-controller.json` and `git-repo-observer.json` among the files.
 to ask the source tree with cargo instead of the pushed images.)
 
 ```fish
-function psign; cargo run -q --manifest-path ~/Documents/projects/Polar/src/agents/Cargo.toml -p polar-sign -- $argv; end
-psign template git-repo-observer                                 # lists the sections it takes
+nu infra/tools.nu install ~/.local/bin          # once: copies polar-sign and the other tools out of the polar-tools image
+fish_add_path ~/.local/bin
+polar-sign template git-repo-observer           # lists the sections it takes
 ```
 
-(`psign` is a function for this shell only; the name avoids the `ps` command. Once `polar-sign` is built or installed,
-use it directly. The first run compiles it.)
+(`polar-sign` is a static binary: nothing is compiled, and it needs only `git` on your `PATH`. The image comes from
+the registry in `POLAR_REGISTRY`; `--from` takes any `skopeo` reference to it. With a Rust toolchain and no image you
+can build it from this checkout instead: `cargo build --release -p polar-sign` in `src/agents`.)
 
 ## Step 5. The repository, first (so the observer has to wait)
 
@@ -155,7 +157,7 @@ Putting the repository first shows the wait-and-retry behaviour: the controller 
 credential the observer does not have yet.
 
 ```fish
-psign template git-repo-controller repositories --out /tmp/repos.json
+polar-sign template git-repo-controller repositories --out /tmp/repos.json
 $EDITOR /tmp/repos.json
 ```
 
@@ -171,7 +173,7 @@ Then:
 
 ```fish
 set host polar-git-server.polar.svc.cluster.local
-psign sign /tmp/repos.json --user alice \
+polar-sign sign /tmp/repos.json --user alice \
   --repo https://$host:8443/polar-schedules.git \
   --git-config http.curloptResolve=$host:8443:127.0.0.1 --push
 ```
@@ -199,7 +201,7 @@ id) `is waiting for the credential it names`, and no clone is attempted.
 ## Step 6. The credential
 
 ```fish
-psign template git-repo-observer credentials --out /tmp/creds.json
+polar-sign template git-repo-observer credentials --out /tmp/creds.json
 $EDITOR /tmp/creds.json
 ```
 
@@ -218,7 +220,7 @@ Then pipe the token in; it is never typed, shown or written:
 
 ```fish
 kubectl -n polar get secret git-observer-credentials -o jsonpath='{.data.token}' | base64 -d \
-  | psign sign /tmp/creds.json --user alice \
+  | polar-sign sign /tmp/creds.json --user alice \
     --repo https://$host:8443/polar-schedules.git \
     --git-config http.curloptResolve=$host:8443:127.0.0.1 --push
 ```
@@ -298,7 +300,7 @@ refused document is there with the reason and signer.
 - **See each state.** With no `credentials` document the repository is `pending-credential`. With `host_pattern`
   `gitlab.com` it is `failing` with `the credential cannot be used: …`. With the right one it becomes `observing`
   and the reason is gone. (Each appears within a minute of the document being applied; no pod restart is needed.)
-- **A change of settings.** `psign template git-repo-controller --settings`, uncomment
+- **A change of settings.** `polar-sign template git-repo-controller --settings`, uncomment
   `POLAR_GIT_CONTROLLER_REPUBLISH_SECS`, give it `15`, sign and push; the controller's announcements speed up.
 
 ## If something does not appear

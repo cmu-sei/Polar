@@ -76,7 +76,8 @@
           { attrPath = "rage"; flakeInput = null; }
           { attrPath = "cosign"; flakeInput = null; }
           { attrPath = "skopeo"; flakeInput = null; }
-          { attrPath = "default"; flakeInput = "cassini-client"; }
+          { attrPath = "kubectl"; flakeInput = null; }
+          { attrPath = "default"; flakeInput = "polar-tools"; }
           { attrPath = "git"; flakeInput = null; }
           { attrPath = "curl"; flakeInput = null; }
           { attrPath = "dhall"; flakeInput = null; }

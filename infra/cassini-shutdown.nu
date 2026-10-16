@@ -58,6 +58,8 @@ export def shutdown_env [token: string, admin_dir: string, user: string, local_p
     }
 }
 
+use tools.nu
+
 def main [
     --user: string = ""       # whose certificate to sign in with; the current user by default
     --token: string = ""      # use this instead of the cluster's Secret (to try a wrong one)
@@ -90,8 +92,8 @@ def main [
         if not $up { error make { msg: $"the port-forward to the broker never came up on ($port)" } }
         print $"  asking the broker to shut down, as ($user)"
         let ran = (do {
-            cd ($INFRA | path join "../src/agents")
-            with-env $env_vars { ^cargo run -q -p cassini-c2 } | complete
+            let t = (tools command "cassini-c2")
+            with-env $env_vars { run-external ($t | first) ...($t | skip 1) } | complete
         })
         # cargo's own warnings are not the tool's answer
         print ($ran | get stderr | lines | where {|l| not ($l =~ '^(warning|help|\s+(-->|\||=)|\s*[0-9]+ \||\s*$)') } | str join "\n")

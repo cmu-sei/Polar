@@ -48,6 +48,7 @@
   {image: "cassini",     tag: "latest", kind: "nix", attr: "polarPkgs.cassini.cassiniImage"}
   {image: "cert-issuer", tag: "latest", kind: "nix", attr: "certIssuerImage"}
   {image: "polar-init",     tag: "latest", kind: "nix", attr: "polarInitImage"}
+  {image: "polar-tools",    tag: "latest", kind: "nix", attr: "polarPkgs.polarTools.image"}
   {image: "polar-nu-init",  tag: "latest", kind: "nix", attr: "nuInitImage"}
   {image: "ace-viz",        tag: "latest", kind: "nix", attr: "aceImage"}
 

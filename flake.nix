@@ -98,6 +98,9 @@
             polar-healthcheck = {
               packages.${system}.default = polarPkgs.healthcheck;
             };
+            polar-tools = {
+              packages.${system}.default = polarPkgs.polarTools.tools;
+            };
             ace-python-env = {
               packages.${system}.default = acePkgs.venvNoCheck;
             };

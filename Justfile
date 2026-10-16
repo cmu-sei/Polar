@@ -672,6 +672,8 @@ user-cert-install username=env_var('USER'):
 # (product code has no default; this is only the dev convenience.)
 
 _admin_dir    := env_var('HOME') + "/.config/polar-admin"
+# The admin tool: polar-admin-grant on PATH (see `nu infra/tools.nu install`), else built from this checkout.
+_admin_grant  := `if command -v polar-admin-grant >/dev/null 2>&1; then echo polar-admin-grant; else echo "cargo run -q --manifest-path $(pwd)/src/agents/Cargo.toml -p polar-admin-grant --"; fi`
 _observer_url := env_var_or_default('POLAR_OBSERVER_URL', 'http://localhost:8081')
 
 # Step 1: fetch the CA, then redeem the one-shot bootstrap credential.
@@ -680,7 +682,7 @@ admin-bootstrap:
     mkdir -p {{_admin_dir}}
     chmod 700 {{_admin_dir}}
     kubectl -n polar get configmap polar-ca -o jsonpath='{.data.ca\.pem}' > {{_admin_dir}}/ca.pem
-    cd src/agents && cargo run -q -p polar-admin-grant -- \
+    {{_admin_grant}} \
         --observer-url {{_observer_url}} bootstrap \
         --cert-out {{_admin_dir}}/bootstrap-admin.crt \
         --key-out  {{_admin_dir}}/bootstrap-admin.key
@@ -695,7 +697,7 @@ admin-bootstrap:
 # Usage: just admin-provision alice alice@example.org
 #        just admin-provision operator ops@example.org alice
 admin-provision username email signer="bootstrap-admin":
-    cd src/agents && cargo run -q -p polar-admin-grant -- \
+    {{_admin_grant}} \
         --cert {{_admin_dir}}/{{signer}}.crt \
         --key  {{_admin_dir}}/{{signer}}.key \
         --observer-url {{_observer_url}} provision-account \
@@ -712,7 +714,7 @@ admin-provision username email signer="bootstrap-admin":
 # key never leaves this machine) and writes ~/.config/polar-admin/<username>.{crt,key}.
 # Usage: just admin-claim alice alice@example.org
 admin-claim username email:
-    cd src/agents && cargo run -q -p polar-admin-grant -- \
+    {{_admin_grant}} \
         --observer-url {{_observer_url}} claim \
         --username {{username}} --email {{email}} \
         --cert-out {{_admin_dir}}/{{username}}.crt \
