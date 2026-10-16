@@ -386,6 +386,14 @@ per architecture. `images.nu` records the digest after every push and mirror (an
 the lock has no digest for. A digest pin also ends the stale-node-cache problem for a pinned target: the node's cache is
 keyed by digest.
 
+**The platform version.** One version for every Polar image, calculated, not chosen: `nu infra/semver.nu suggest` classifies every
+non-merge commit since the previous release (the latest `vX.Y.Z` tag, else `infra/release-baseline.nuon`) and the highest significance
+wins. A conventional commit header is trusted; a revert and what it reverts cancel; a message that is not conventional is *inferred*
+from its leading verb (never as breaking) or, if it says nothing and touches code, counted as a patch; a `BREAKING CHANGE:` footer makes any
+commit breaking. `infra/release-overrides.nuon` corrects a commit by sha without rewriting history. Until the major version is 1, breaking
+bumps the minor version and a feature or a fix the patch. From the baseline (v0.1.0, before the first conventional commit) the history
+gives `v0.2.0`, with or without the inferred commits (`infra/tests/semver.nu` replays it).
+
 A target can also group its files into **layers** (`apply_layers`; `local-minimal` has six: platform,
 cert-issuer, data, cassini, identity, agents). A layer is a set of files applied together after the layers it
 `depends_on` are healthy, with the workloads to wait for in `wait_for` (the same pod selectors and

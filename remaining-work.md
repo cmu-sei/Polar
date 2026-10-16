@@ -84,6 +84,12 @@ Last updated: 2026-10-10.
   with no `KUBECONFIG`, and with a cold and a warm cache, and compares the 51 files byte for byte: all identical.
   A render from a second checkout at a different path was identical too (by hand). The output has no Secret documents
   (secrets are created apart from the render) and does not mention the checkout path, the home directory or the user.
+  **Stage 3b done, 2026-10-16: the platform version is calculated.** `infra/semver.nu` (`nu infra/semver.nu suggest`),
+  `release-baseline.nuon` (v0.1.0 before the first conventional commit, af152e6) and `release-overrides.nuon`. Replaying 976 commits
+  gives v0.2.0 (two breaking commits: `feat(credentials-agent)!` and a `chore(dev-env)` footer that breaks a dev helper only), the same
+  from the conventional commits alone; 225 were not conventional (177 of them one contributor's), 63 inferred, 138 unclassified.
+  Open: `release.nu` around it; enforcing conventional commits on the server, since the local hook let 225 through; and whether the
+  dev-env commit should be overridden as not breaking the platform. A `.mailmap` was not made: it needs email addresses.
   **Stage 3a done, 2026-10-16: Flux's controllers and the image lock.** `nu infra/flux.nu export` renders the controllers
   (fluxcd 2.9.6) into the repository; `sandbox-local` is `local-minimal` plus a `flux` layer (52 files, 7 layers). The image lock
   (`infra/lock.nu`, `images.nu lock ...`, `pin_images` in a target) names every image of the render by digest: 44 of 44 in

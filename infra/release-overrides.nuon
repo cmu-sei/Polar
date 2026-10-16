@@ -1,0 +1,32 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# infra/release-overrides.nuon
+#
+# Corrections to how a commit counts toward the next version, without rewriting anyone's history. Needed because a commit
+# message that is not a conventional commit cannot say it is breaking, and the classifier cannot guess that. One record per
+# commit, found by the start of its sha (7 or more characters):
+#
+#   { sha: "1a2b3c4", reason: "why", type: "feat", breaking: true }
+#
+# `type` replaces the commit's type (feat, fix, docs, chore, ...); `breaking` replaces whether it is breaking; `ignore: true`
+# leaves it out (a commit that changes nothing that ships). Every field but `sha` and `reason` is optional.
+[]
