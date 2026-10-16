@@ -523,8 +523,9 @@ impl<M: ractor::Message> ServiceBuilder<M> {
         self
     }
 
-    /// For a service that implements [`PolarAgent`] with `CASSINI_CLIENT = false`: takes what
-    /// `run` already judged.
+    /// For a service that implements [`PolarAgent`] with `CASSINI_CLIENT = false`, or one whose
+    /// Cassini is optional and the deployment does not provide it
+    /// (`Configured::cassini_enabled` is false): takes what `run` already judged.
     pub fn into_configured(mut self, configured: Configured) -> ConfiguredService<M> {
         self.requires = configured.required.clone();
         ConfiguredService {
@@ -968,6 +969,7 @@ mod tests {
         let configured = Configured {
             startup,
             required,
+            optional_off: Vec::new(),
             self_test: false,
             commands: &BOTH,
             runtime: &[],
@@ -997,6 +999,7 @@ mod tests {
         let configured = Configured {
             startup,
             required: required.clone(),
+            optional_off: Vec::new(),
             self_test: false,
             commands: &[],
             runtime: &[],

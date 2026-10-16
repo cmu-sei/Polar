@@ -382,6 +382,14 @@ actor, the signal listener, the shutdown funnel with its budget and watchdog, an
 client or the subscriptions, since it is what the client connects to. It is told once that Cassini
 is connected, because it has nothing to connect to. The five-phase drain is the broker's own.
 
+A service can also be a Cassini client only sometimes. A `PolarAgent` that lists `Cassini` in
+`OPTIONAL` (with `CASSINI_CLIENT = false`) is built with `AgentBuilder` when the deployment
+provides `cassini` in `POLAR_CAPABILITIES`, and with `ServiceBuilder` when it does not or when the
+variable is unset. `run` computes that list once, before judging the environment, so the client's
+variables are demanded exactly when the client is wanted; `Configured::cassini_enabled` tells the
+agent which builder to use, and the scaffold lists the capability under `optional` with its
+variables present and tagged. Only Cassini can be optional so far. The git server is the first.
+
 - **What starts a shutdown.** Anything that starts it for an agent: the health actor's verdict or
   its death, SIGTERM or SIGINT, a child of the infrastructure dying. Each reaches the broker as the
   `PrepareShutdown` event, which starts the five phases (stop accepting connections, drain

@@ -107,6 +107,14 @@ pub trait PolarAgent: Sized + 'static {
     /// health check, the signals and the shutdown handshake, and no router, client or
     /// subscriptions. It must also turn `SELF_TEST` off and not list `Cassini` in `NEEDS`.
     const CASSINI_CLIENT: bool = true;
+    /// Capabilities the agent uses when its deployment provides them and does without when it
+    /// does not, so one binary can run as part of a cluster or on its own. Only `Cassini` may be
+    /// optional so far, and then `CASSINI_CLIENT` must be off: the agent is a Cassini client
+    /// exactly when `POLAR_CAPABILITIES` lists `cassini`. A deployment that says nothing (the
+    /// variable is unset) provides nothing optional, so an agent started with no cluster around
+    /// it runs on its own. `Configured::cassini_enabled` says which way it went, and `start`
+    /// builds with `AgentBuilder` or with `ServiceBuilder` to match.
+    const OPTIONAL: &'static [Capability] = &[];
     /// The commands the agent accepts (docs/architecture/commands.md): each with its arguments, how long it
     /// may run and how the scheduler may deliver it. They appear in the schema export, and the agent
     /// registers a handler for each with `AgentBuilder::with_command`; it does not start if the two
@@ -130,6 +138,8 @@ pub trait PolarAgent: Sized + 'static {
 pub struct Configured {
     pub(crate) startup: Startup,
     pub(crate) required: Vec<Capability>,
+    /// The optional capabilities the deployment did not provide, which the agent does without.
+    pub(crate) optional_off: Vec<Capability>,
     pub(crate) self_test: bool,
     /// What the agent declared it accepts.
     pub(crate) commands: &'static [CommandSpec],
@@ -167,6 +177,13 @@ impl Configured {
         self.startup.shutdown_budget
     }
 
+    /// Whether the agent is a Cassini client in this deployment: always for an agent, and for one
+    /// whose Cassini is optional, exactly when the deployment provides it. Build with
+    /// `AgentBuilder` when it is and with `ServiceBuilder` when it is not.
+    pub fn cassini_enabled(&self) -> bool {
+        self.required.contains(&Capability::Cassini)
+    }
+
     /// Sets logging up as the deployment says (`RUST_LOG`, `POLAR_TRACE_FILTER`,
     /// `JAEGER_OTLP_ENDPOINT` in the snapshot), and starts exporting traces when an endpoint is
     /// given. Call it first in `start`. It cannot fail: the snapshot was judged before this ran.
@@ -178,6 +195,13 @@ impl Configured {
                 eprintln!("ERROR: cannot read the logging settings: {error}");
                 polar::init_logging(service_name.to_string());
             }
+        }
+        for capability in &self.optional_off {
+            tracing::info!(
+                "running without {capability}: the deployment did not provide it ({} does not \
+                 list it)",
+                crate::capability::PROVIDED_ENV
+            );
         }
     }
 
@@ -197,6 +221,7 @@ impl Configured {
         let configured = Self {
             startup,
             required: Vec::new(),
+            optional_off: Vec::new(),
             self_test: false,
             commands: &[],
             runtime: &[],
@@ -218,6 +243,9 @@ pub struct AgentDocument {
     pub agent: AgentInfo,
     /// The capabilities the agent's code requires.
     pub requires: Vec<String>,
+    /// The capabilities it uses when the deployment provides them and does without otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub optional: Vec<String>,
     /// The least the deployment may give the agent to drain, in seconds.
     pub shutdown_budget_minimum_secs: u64,
     /// The commands the agent accepts, with their arguments: what a signed command may be.
@@ -286,6 +314,25 @@ pub(crate) fn needs_of<A: PolarAgent>() -> Vec<Capability> {
     needs
 }
 
+/// What `A` uses in a deployment that provides `provided` (the value of `POLAR_CAPABILITIES`, if
+/// it is set): what it needs, and the optional capabilities the deployment lists. A deployment
+/// that says nothing provides nothing optional.
+pub(crate) fn effective_of<A: PolarAgent>(provided: Option<&str>) -> Vec<Capability> {
+    let mut used = needs_of::<A>();
+    let listed = provided.map(Capability::parse_list).unwrap_or_default();
+    for capability in A::OPTIONAL {
+        if listed.contains(capability) && !used.contains(capability) {
+            used.push(*capability);
+        }
+    }
+    used
+}
+
+/// Whether `A` does without the Cassini client when its deployment does not provide one.
+fn cassini_optional<A: PolarAgent>() -> bool {
+    A::OPTIONAL.contains(&Capability::Cassini)
+}
+
 /// The sections that apply to `A`, each with the capability that brings it in (none for the
 /// ones every agent has, and for its own).
 fn sections_of<A: PolarAgent>() -> Vec<(Option<Capability>, &'static Section)> {
@@ -298,6 +345,15 @@ fn sections_of<A: PolarAgent>() -> Vec<(Option<Capability>, &'static Section)> {
             environment::sections_for(&[capability])
                 .into_iter()
                 .map(|section| (Some(capability), section)),
+        );
+    }
+    // The sections of the optional capabilities are in the scaffold, so a deployment that
+    // provides them can fill them; they are judged only when it does (see `effective_of`).
+    for capability in A::OPTIONAL {
+        sections.extend(
+            environment::sections_for(&[*capability])
+                .into_iter()
+                .map(|section| (Some(*capability), section)),
         );
     }
     sections.extend(A::SECTIONS.iter().map(|section| (None, *section)));
@@ -319,6 +375,7 @@ pub fn scaffold_document<A: PolarAgent>() -> AgentDocument {
             .iter()
             .map(|c| c.as_str().to_string())
             .collect(),
+        optional: A::OPTIONAL.iter().map(|c| c.as_str().to_string()).collect(),
         shutdown_budget_minimum_secs: A::SHUTDOWN_BUDGET.as_secs(),
         commands: A::COMMANDS
             .iter()
@@ -425,7 +482,7 @@ fn problems_of<A: PolarAgent>(loaded: &Loaded) -> Vec<String> {
         &loaded.env,
         Source::File,
         A::SECTIONS,
-        &needs_of::<A>(),
+        &effective_of::<A>(loaded.env.var(crate::capability::PROVIDED_ENV).as_deref()),
         Some(A::SHUTDOWN_BUDGET),
     ) {
         problems.extend(error.problems());
@@ -522,6 +579,15 @@ pub fn help_text<A: PolarAgent>() -> String {
     let mut text = format!("{}\n\n{}\n\n", A::NAME, A::PURPOSE);
     match A::HELP {
         Some(help) => text.push_str(&format!("{}\n\n", help.trim())),
+        None if cassini_optional::<A>() => text.push_str(&format!(
+            "{} is a Polar service that runs on its own or as part of a cluster. When its \
+             deployment provides the cassini capability (POLAR_CAPABILITIES lists it) it connects \
+             to the Cassini broker as a client with its own certificate; otherwise it does \
+             without. It reports its health and drains before it exits. Its configuration is a \
+             document (see --scaffold); a value it does not find there it takes from the default \
+             its declaration gives.\n\n",
+            A::NAME
+        )),
         None if A::CASSINI_CLIENT => text.push_str(&format!(
             "{} is a Polar agent: it connects to the Cassini broker as a client with its own \
              certificate, reports its health, and drains before it exits. Its configuration \
@@ -546,12 +612,19 @@ pub fn help_text<A: PolarAgent>() -> String {
         ));
     } else {
         text.push_str(&format!(
-            "Capabilities it needs from its deployment: {} (it is not a Cassini client)\n",
+            "Capabilities it needs from its deployment: {} (it is not always a Cassini client)\n",
             if names.is_empty() {
                 "none".to_string()
             } else {
                 names.join(", ")
             }
+        ));
+    }
+    if !A::OPTIONAL.is_empty() {
+        let optional: Vec<&str> = A::OPTIONAL.iter().map(|c| c.as_str()).collect();
+        text.push_str(&format!(
+            "Capabilities it uses when its deployment provides them: {}\n",
+            optional.join(", ")
         ));
     }
     text.push_str(&format!(
@@ -606,7 +679,7 @@ pub fn declaration_problems<A: PolarAgent>() -> Vec<String> {
         problems.push("the shutdown budget is under a second".to_string());
     }
     if !A::CASSINI_CLIENT {
-        if A::SELF_TEST {
+        if A::SELF_TEST && !cassini_optional::<A>() {
             problems.push(
                 "the agent is not a Cassini client but SELF_TEST is on: a service has no broker \
                  to publish its probes to; set SELF_TEST = false"
@@ -622,6 +695,35 @@ pub fn declaration_problems<A: PolarAgent>() -> Vec<String> {
         }
     }
     problems.extend(surface_problems::<A>());
+    let mut optional_seen: Vec<Capability> = Vec::new();
+    for capability in A::OPTIONAL {
+        if *capability != Capability::Cassini {
+            problems.push(format!(
+                "{} cannot be optional: only cassini can be so far",
+                capability.as_str()
+            ));
+        }
+        if A::NEEDS.contains(capability) {
+            problems.push(format!(
+                "{} is listed both in NEEDS and in OPTIONAL",
+                capability.as_str()
+            ));
+        }
+        if optional_seen.contains(capability) {
+            problems.push(format!(
+                "{} is listed more than once in OPTIONAL",
+                capability.as_str()
+            ));
+        }
+        optional_seen.push(*capability);
+    }
+    if cassini_optional::<A>() && A::CASSINI_CLIENT {
+        problems.push(
+            "cassini is optional but CASSINI_CLIENT is on: an agent that is always a client cannot \
+             do without it; set CASSINI_CLIENT = false"
+                .to_string(),
+        );
+    }
     let mut seen: Vec<Capability> = Vec::new();
     for capability in A::NEEDS {
         if seen.contains(capability) {
@@ -722,21 +824,19 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
             return 1;
         }
     };
-    let startup = match startup::prepare_from(
-        &*env,
-        source,
-        A::SECTIONS,
-        &needs_of::<A>(),
-        Some(A::SHUTDOWN_BUDGET),
-    ) {
-        Ok(startup) => startup,
-        Err(error) => {
-            for problem in error.problems() {
-                eprintln!("ERROR: {problem}");
+    // What the agent uses here: what it needs, and the optional capabilities the deployment
+    // provides. A deployment that does not say runs the agent on its own.
+    let used = effective_of::<A>(env.var(crate::capability::PROVIDED_ENV).as_deref());
+    let startup =
+        match startup::prepare_from(&*env, source, A::SECTIONS, &used, Some(A::SHUTDOWN_BUDGET)) {
+            Ok(startup) => startup,
+            Err(error) => {
+                for problem in error.problems() {
+                    eprintln!("ERROR: {problem}");
+                }
+                return 1;
             }
-            return 1;
-        }
-    };
+        };
     let bad_commands = surface_problems::<A>();
     if !bad_commands.is_empty() {
         for problem in &bad_commands {
@@ -746,8 +846,13 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
     }
     let configured = Configured {
         startup,
-        required: needs_of::<A>(),
-        self_test: A::SELF_TEST && A::CASSINI_CLIENT,
+        optional_off: A::OPTIONAL
+            .iter()
+            .filter(|capability| !used.contains(capability))
+            .copied()
+            .collect(),
+        self_test: A::SELF_TEST && used.contains(&Capability::Cassini),
+        required: used,
         commands: A::COMMANDS,
         runtime: A::RUNTIME,
         hooks: Hooks::real(),
@@ -1354,6 +1459,271 @@ mod tests {
         let status = run_with::<Watched>(&[], |_: &str| None::<String>);
         assert_eq!(status, 1);
         assert!(!WATCHED_STARTED.load(Ordering::SeqCst));
+    }
+
+    // -- an optional Cassini client ----------------------------------------------------------
+
+    static EITHER_RAN: AtomicBool = AtomicBool::new(false);
+    static EITHER_CASSINI: AtomicBool = AtomicBool::new(false);
+
+    /// A service that runs on its own or as part of a cluster.
+    struct Either;
+
+    impl PolarAgent for Either {
+        const NAME: &'static str = "either";
+        const PURPOSE: &'static str = "Runs alone or in a cluster";
+        const NEEDS: &'static [Capability] = &[];
+        const OPTIONAL: &'static [Capability] = &[Capability::Cassini];
+        const CASSINI_CLIENT: bool = false;
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+        async fn start(configured: Configured) -> Result<(), StartError> {
+            EITHER_CASSINI.store(configured.cassini_enabled(), Ordering::SeqCst);
+            EITHER_RAN.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The Cassini variables and the capabilities a deployment gives `Either`, as the process
+    /// environment of a run with no document.
+    fn either_process(capabilities: Option<&'static str>, cassini: bool) -> impl Env + 'static {
+        move |name: &str| {
+            if name == "POLAR_CAPABILITIES" {
+                return capabilities.map(str::to_string);
+            }
+            if cassini {
+                CASSINI_ENV
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            } else {
+                None
+            }
+        }
+    }
+
+    /// A document for `Either`: the Cassini values if asked, the capabilities if given.
+    fn either_file(name: &str, cassini: bool, capabilities: Option<&str>) -> String {
+        let mut doc = scaffold_document::<Either>();
+        for variable in doc
+            .document
+            .sections
+            .iter_mut()
+            .flat_map(|s| s.variables.iter_mut())
+        {
+            if variable.name == "POLAR_CAPABILITIES" {
+                variable.value = capabilities.map(|c| DocValue::Literal(c.to_string()));
+            } else if cassini {
+                if variable.secret {
+                    variable.value = Some(DocValue::Reference {
+                        env: format!("SECRET_FOR_{}", variable.name),
+                    });
+                } else if let Some((_, value)) =
+                    CASSINI_ENV.iter().find(|(key, _)| *key == variable.name)
+                {
+                    variable.value = Some(DocValue::Literal(value.to_string()));
+                }
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("polar-agent-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        path.display().to_string()
+    }
+
+    #[test]
+    fn an_optional_capability_is_used_only_when_the_deployment_provides_it() {
+        assert!(
+            effective_of::<Either>(None).is_empty(),
+            "no deployment, no client"
+        );
+        assert!(effective_of::<Either>(Some("")).is_empty());
+        assert!(effective_of::<Either>(Some("graph-write,tracing")).is_empty());
+        assert_eq!(
+            effective_of::<Either>(Some("tracing, cassini")),
+            vec![Capability::Cassini]
+        );
+        // An agent that is always a client is one whatever the deployment says.
+        assert_eq!(
+            effective_of::<Example>(None)[0],
+            Capability::Cassini,
+            "an agent still is"
+        );
+        // A service with nothing optional does not become a client because the deployment has one.
+        assert_eq!(effective_of::<Serving>(Some("cassini")), Vec::new());
+    }
+
+    #[test]
+    fn an_agent_with_an_optional_cassini_client_declares_itself_soundly() {
+        assert_eq!(declaration_problems::<Either>(), Vec::<String>::new());
+    }
+
+    struct OptionalGraph;
+
+    impl PolarAgent for OptionalGraph {
+        const NAME: &'static str = "optional-graph";
+        const PURPOSE: &'static str = "Tries to make the graph optional";
+        const NEEDS: &'static [Capability] = &[];
+        const OPTIONAL: &'static [Capability] = &[Capability::GraphWrite];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
+    struct AlwaysAndOptional;
+
+    impl PolarAgent for AlwaysAndOptional {
+        const NAME: &'static str = "always-and-optional";
+        const PURPOSE: &'static str = "Is a client and may do without";
+        const NEEDS: &'static [Capability] = &[];
+        const OPTIONAL: &'static [Capability] = &[Capability::Cassini];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
+    struct NeededAndOptional;
+
+    impl PolarAgent for NeededAndOptional {
+        const NAME: &'static str = "needed-and-optional";
+        const PURPOSE: &'static str = "Needs it and may do without";
+        const NEEDS: &'static [Capability] = &[Capability::Cassini, Capability::GraphWrite];
+        const OPTIONAL: &'static [Capability] = &[Capability::GraphWrite, Capability::GraphWrite];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn contradictory_optional_declarations_are_told_so() {
+        let problems = declaration_problems::<OptionalGraph>();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("graph-write cannot be optional")),
+            "{problems:?}"
+        );
+        let problems = declaration_problems::<AlwaysAndOptional>();
+        assert!(
+            problems.iter().any(|p| p.contains("CASSINI_CLIENT")),
+            "an agent that is always a client cannot do without: {problems:?}"
+        );
+        let problems = declaration_problems::<NeededAndOptional>();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("both in NEEDS and in OPTIONAL")),
+            "{problems:?}"
+        );
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("more than once in OPTIONAL")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn the_scaffold_lists_what_is_optional_and_asks_for_its_variables_without_demanding_them() {
+        let document = scaffold_document::<Either>();
+        assert!(document.requires.is_empty());
+        assert_eq!(document.optional, vec!["cassini".to_string()]);
+        let client = document
+            .document
+            .sections
+            .iter()
+            .find(|s| s.name == "cassini-client")
+            .expect("the optional capability's section is in the scaffold");
+        assert_eq!(client.capability.as_deref(), Some("cassini"));
+        // An agent without optional capabilities exports exactly what it did before.
+        let json = serde_json::to_value(scaffold_document::<Example>()).unwrap();
+        assert!(json.get("optional").is_none(), "no empty list is written");
+    }
+
+    #[test]
+    fn the_help_says_it_runs_on_its_own_or_in_a_cluster() {
+        let text = help_text::<Either>();
+        assert!(
+            text.contains("runs on its own or as part of a cluster"),
+            "{text}"
+        );
+        assert!(
+            text.contains("when its deployment provides them: cassini"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_configuration_without_cassini_is_sound_when_the_deployment_does_not_provide_it() {
+        for (label, capabilities) in [
+            ("unset", None),
+            ("empty", Some("")),
+            ("other", Some("tracing")),
+        ] {
+            let config = either_file(&format!("alone-{label}"), false, capabilities);
+            assert_eq!(
+                check::<Either>(Path::new(&config), with_secrets()),
+                Vec::<String>::new(),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deployment_that_provides_cassini_must_configure_it() {
+        let missing = either_file("cluster-missing", false, Some("cassini"));
+        let problems = check::<Either>(Path::new(&missing), with_secrets());
+        assert!(
+            problems.iter().any(|p| p.contains("BROKER_ADDR")),
+            "the client's settings are demanded once Cassini is provided: {problems:?}"
+        );
+        let whole = either_file("cluster-whole", true, Some("cassini"));
+        assert_eq!(
+            check::<Either>(Path::new(&whole), with_secrets()),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn the_same_service_starts_alone_and_in_a_cluster() {
+        // On its own: nothing in the environment.
+        EITHER_RAN.store(false, Ordering::SeqCst);
+        EITHER_CASSINI.store(true, Ordering::SeqCst);
+        assert_eq!(run_with::<Either>(&[], either_process(None, false)), 1);
+        assert!(
+            EITHER_RAN.load(Ordering::SeqCst),
+            "it started with no cluster"
+        );
+        assert!(
+            !EITHER_CASSINI.load(Ordering::SeqCst),
+            "and without a Cassini client"
+        );
+
+        // In a cluster: the deployment provides Cassini and configures it.
+        EITHER_RAN.store(false, Ordering::SeqCst);
+        assert_eq!(
+            run_with::<Either>(&[], either_process(Some("cassini"), true)),
+            1
+        );
+        assert!(EITHER_RAN.load(Ordering::SeqCst));
+        assert!(
+            EITHER_CASSINI.load(Ordering::SeqCst),
+            "it was told to be a client"
+        );
+
+        // Provided but not configured: refused, as an agent's missing settings always are.
+        EITHER_RAN.store(false, Ordering::SeqCst);
+        assert_eq!(
+            run_with::<Either>(&[], either_process(Some("cassini"), false)),
+            1
+        );
+        assert!(
+            !EITHER_RAN.load(Ordering::SeqCst),
+            "it did not start half-configured"
+        );
     }
 
     // -- commands ---------------------------------------------------------------------------
