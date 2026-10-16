@@ -21,9 +21,12 @@
    DM26-0670
 */
 
-//! Supervisor for the git server, on the agent builder like the other migrated agents: health
-//! check, router and the Cassini client come from `AgentBuilder`, and the mTLS listener runs
-//! under this supervisor.
+//! Supervisor for the git server, on the agent builder like the other migrated agents. It runs
+//! as part of a Polar cluster or on its own, with the same binary: when its deployment provides
+//! the Cassini capability, health, the router and the Cassini client come from `AgentBuilder`
+//! and an accepted push is published on Cassini; otherwise `ServiceBuilder` gives it the health
+//! check and the shutdown handshake and a push is only logged. The mTLS listener runs under this
+//! supervisor either way.
 //!
 //! Shutdown, in order, when the health check ends the pod's life:
 //!
@@ -38,14 +41,14 @@ use crate::access::RuntimeAcl;
 use crate::config::ServerFile;
 use crate::git::GitRunner;
 use crate::http::{ServerState, router};
-use crate::notify::{CassiniNotifier, PushLog, Tee};
+use crate::notify::{CassiniNotifier, Notifier, PushLog, Tee};
 use crate::settings::GitServerSettings;
 use crate::store::RepoStore;
 use crate::tls::{serve_tls, server_config};
 use cassini_types::ClientEvent;
 use polar_agent_builder::{
     AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
-    InfrastructureSupervisorMessage,
+    InfrastructureSupervisorMessage, ServiceBuilder,
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use std::path::Path;
@@ -101,19 +104,42 @@ impl Actor for GitServerSupervisor {
         info!("{myself:?} starting");
 
         let settings = GitServerSettings::read(configured.config())?;
-        let resources = AgentBuilder::new(myself.clone(), SERVICE_NAME)
-            .with_lifecycle_handler(|event| Some(GitServerSupervisorMessage::ClientEvent { event }))
-            .into_configured(configured)
-            .build()
-            .await?;
+        // In a cluster the deployment provides Cassini and the server is a client of the broker;
+        // on its own it has the health check and the shutdown handshake and no broker.
+        let (healthcheck, infrastructure_events, infrastructure, tcp_client) =
+            if configured.cassini_enabled() {
+                let resources = AgentBuilder::new(myself.clone(), SERVICE_NAME)
+                    .with_lifecycle_handler(|event| {
+                        Some(GitServerSupervisorMessage::ClientEvent { event })
+                    })
+                    .into_configured(configured)
+                    .build()
+                    .await?;
+                (
+                    resources.healthcheck,
+                    resources.infrastructure_events,
+                    resources.infrastructure,
+                    Some(resources.tcp_client),
+                )
+            } else {
+                info!("{SERVICE_NAME} is running on its own: pushes are logged, not published");
+                let resources = ServiceBuilder::new(myself.clone(), SERVICE_NAME)
+                    .into_configured(configured)
+                    .build()
+                    .await?;
+                (
+                    resources.healthcheck,
+                    resources.infrastructure_events,
+                    resources.infrastructure,
+                    None,
+                )
+            };
 
-        resources
-            .infrastructure_events
-            .subscribe(myself.clone(), |event| match event {
-                InfrastructureEvent::PrepareShutdown => {
-                    Some(GitServerSupervisorMessage::PrepareShutdown)
-                }
-            });
+        infrastructure_events.subscribe(myself.clone(), |event| match event {
+            InfrastructureEvent::PrepareShutdown => {
+                Some(GitServerSupervisorMessage::PrepareShutdown)
+            }
+        });
 
         let file = ServerFile::parse(&settings.repos)?.with_admins(settings.admins.clone());
 
@@ -131,17 +157,19 @@ impl Actor for GitServerSupervisor {
             file.acl(),
             Some(root.join("runtime-acl.json")),
         )?);
+        let mut notifiers: Vec<Arc<dyn Notifier>> =
+            vec![Arc::new(PushLog::new(root.join("push-log.jsonl")))];
+        if let Some(client) = &tcp_client {
+            notifiers.push(Arc::new(CassiniNotifier::new(
+                client.as_actor_ref().clone(),
+            )));
+        }
         let app = router(ServerState {
             store,
             authorizer: acl.clone(),
             runtime: acl,
             runner: GitRunner::default(),
-            notifier: Arc::new(Tee(vec![
-                Arc::new(PushLog::new(root.join("push-log.jsonl"))),
-                Arc::new(CassiniNotifier::new(
-                    resources.tcp_client.as_actor_ref().clone(),
-                )),
-            ])),
+            notifier: Arc::new(Tee(notifiers)),
             max_body: MAX_BODY,
         });
 
@@ -166,8 +194,8 @@ impl Actor for GitServerSupervisor {
         ));
 
         Ok(GitServerSupervisorState {
-            healthcheck: resources.healthcheck,
-            infrastructure: resources.infrastructure,
+            healthcheck,
+            infrastructure,
             listener: Some(Listener { stop, active, task }),
         })
     }

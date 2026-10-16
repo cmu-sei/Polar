@@ -107,6 +107,19 @@ names as constants in its common crate (as credentials-agent-common does), and s
 (`polar-git-server-common`). The scheduler observer subscribes, so with the managed server it
 need not poll; against another remote it keeps polling.
 
+## Running on its own
+
+The same binary runs inside a Polar cluster and on its own. Cassini is an optional capability of
+the server (`OPTIONAL = [Cassini]` in its `PolarAgent` declaration, `CASSINI_CLIENT = false`): it is
+a Cassini client exactly when the deployment lists `cassini` in `POLAR_CAPABILITIES`. The catalog's
+`agent` kind provides it, so in a cluster nothing changes. A deployment that says nothing (the
+variable unset) provides nothing optional, so a server started by hand, in a container or under
+systemd, with only its five `POLAR_GIT_SERVER_*` settings, has no broker connection, no router
+and no Cassini variables to set. It then keeps the health check and the shutdown handshake of
+`ServiceBuilder`, serves, authenticates by certificate against whatever CA it is given, and logs each accepted push to `push-log.jsonl`;
+it publishes no `RepoChanged`. When `cassini` is provided, the client's settings become required
+as for any agent, and a half-configured server refuses to start. How to run it: the crate's `README.md`.
+
 ## Authorship, and degraded mode
 
 The server's own record of pushes says who pushed what and when: `push-log.jsonl` beside the

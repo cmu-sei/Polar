@@ -33,13 +33,16 @@ impl PolarAgent for GitServer {
     const NAME: &'static str = SERVICE_NAME;
     const PURPOSE: &'static str = "Hosts Polar's configuration repositories over git smart HTTP, authenticating users and agents by their mTLS certificates";
     const NEEDS: &'static [Capability] = &[];
+    // It runs on its own or in a cluster: a Cassini client when its deployment provides Cassini.
+    const OPTIONAL: &'static [Capability] = &[Capability::Cassini];
+    const CASSINI_CLIENT: bool = false;
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
     const SECTIONS: &'static [&'static Section] = &[&crate::settings::SECTION];
     const HELP: Option<&'static str> = Some(
         "The git server serves the repositories its configuration file declares to the user's own \
-         git client. Every connection presents a certificate chaining to the Polar CA; the \
+         git client. Every connection presents a certificate chaining to its CA; the \
          identity in it decides what that caller may read or push, per repository. After a push \
-         is accepted it publishes the change on Cassini. Repositories are created and seeded \
+         is accepted it logs it and, in a Polar cluster, publishes the change on Cassini. Repositories are created and seeded \
          from the configuration the first time, and never overwritten after that.",
     );
 
