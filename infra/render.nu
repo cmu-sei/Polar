@@ -37,6 +37,7 @@
 
 use validate.nu *
 use rules.nu [job_replacement_problems, apply_order_problems]
+use layers.nu [layer_problems]
 
 def main [
     target: string        # Target name: local, local-minimal, sandbox-local
@@ -157,6 +158,18 @@ def main [
     print "Checking CA provisioning consistency..."
     check_ca_provisioning $output_dir $cert_issuer_ca_configmap
     print ""
+    # Last, because the checks above add files (serviceaccounts.yaml) that the layers must hold too.
+    if ($config.apply_layers? | default [] | is-not-empty) {
+        print "Checking the layers hold everything rendered..."
+        let rendered = (glob ($output_dir | path join "*.yaml") | each {|f| $f | path basename } | sort)
+        let layer_issues = (layer_problems $config.apply_layers $rendered)
+        if ($layer_issues | is-not-empty) {
+            for p in $layer_issues { print -e $"  ERROR: ($p)" }
+            exit 1
+        }
+        print $"  ok: ($config.apply_layers | length) layers hold the ($rendered | length) files"
+        print ""
+    }
 
     print "=== Render complete ==="
     print $"  output: ($output_dir)"

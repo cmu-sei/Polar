@@ -370,6 +370,15 @@ facts still passed to the custom charts (`neo4j_bolt_addr`, `cert_issuer_url`,
 `polar_init_image`, `identity_lifetime_overrides`, and so on). Different targets
 can have completely different orderings.
 
+A target can also group its files into **layers** (`apply_layers`; `local-minimal` has six: platform,
+cert-issuer, data, cassini, identity, agents). A layer is a set of files applied together after the layers it
+`depends_on` are healthy, with the workloads to wait for in `wait_for` (the same pod selectors and
+StatefulSets `up.nu` waits for). Where a target declares layers, its `apply_order` is derived from them, so
+`up.nu` applies exactly what it did, and `render.nu` fails when a rendered file is in no layer or in two.
+`nu infra/layers.nu split <target> <dest>` copies a render into `<dest>/<layer>/` with a `layers.json`:
+the shape a GitOps tool reconciles one layer at a time (see the Flux plan in `remaining-work.md`).
+Declare a new file in the layer it belongs to; the chain is linear, each layer after the one before it.
+
 **`overrides.dhall`** is a flat record merged over each custom chart's
 `values.dhall`. It holds only what differs from the defaults for this target:
 image references, pull secrets, storage classes, hostnames, URLs.
@@ -550,9 +559,10 @@ at least that or the agent refuses to start (see
    nu infra/resolve.nu check
    nu infra/resolve.nu explain foo-observer
    ```
-6. **Apply order**: add `foo-observer.yaml` to `apply_order` in the target's
-   `target.nu`, and `foo-observer-resources.yaml` *before* it if the workload has
-   resources. This list is still hand-maintained.
+6. **Apply order**: add `foo-observer.yaml` to the right layer of `apply_layers` in the
+   target's `target.nu` (or to `apply_order` in a target without layers), and
+   `foo-observer-resources.yaml` *before* it if the workload has resources. This list is
+   still hand-maintained, and `render.nu` refuses a file that is in none.
 7. **Render, compare, bring up** (see [Verifying a change](#verifying-a-change)).
 
 The ServiceAccount is automatic: the workload runs as `service_account` (default:
@@ -841,7 +851,7 @@ beside one that may still be alive), but it is an outage until someone acts.
 - **Access to the outside is checked once, at the end of `up.nu`, and only reported.** A pod runs `git ls-remote` against one public repository (`POLAR_EGRESS_PROBE_URL` changes it) and `up.nu` says whether the name resolved and the host answered. It is a note because a cluster used offline works. The probe runs in the `polar-scheduler-observer` pod, the one image with a git CLI, so if that pod is not running the check says it was skipped. On a cluster whose CoreDNS forwards to a resolver that pods cannot reach, pods resolve nothing outside the cluster, and this check says so.
 - **Service-account token ordering.** On a fresh cluster, a `kubernetes.io/service-account-token` Secret is populated by the token controller only after its ServiceAccount exists, so the first apply may need repeating. `serviceaccounts.yaml` precedes `kube-observer-resources.yaml` in `apply_order`, which should avoid it, but this has only been exercised on an existing cluster.
 - **The catalog has two kinds, `agent` and `service`.** All the agents are in it; the custom charts are ace, cert-issuer, jaeger, keycloak, neo4j and postgres.
-- **`apply_order` is hand-maintained** in each `target.nu`. It should be derived from the catalog (resources before the Job).
+- **`apply_order` (and the layers it comes from) is hand-maintained** in each `target.nu`; only `local-minimal` has layers so far. It should be derived from the catalog (resources before the Job).
 - **`render.nu` passes cluster facts to custom charts through a `match` on the chart name,** and `target.nu` carries values (`cert_issuer_url`, `polar_init_image`, ...) that the catalog derives elsewhere. That is data written as control flow, and a duplicated fact.
 - **Only the kube agents declare capabilities in Rust.** Other agents still hard-code health arguments and Cassini/Neo4j endpoints; they move to the builder one pair at a time.
 - **`POLAR_CAPABILITIES` unset is a warning, not an error,** so an agent run outside the cluster still starts. A deployment that forgets to set it is therefore not caught by the builder; the catalog sets it for every workload it renders.

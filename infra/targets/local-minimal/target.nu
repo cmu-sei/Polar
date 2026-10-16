@@ -29,6 +29,112 @@ def main [] {
     let target_dir = ($infra_root | path join "targets/local-minimal")
     let layers     = ($infra_root | path join "layers")
 
+    # Applied in this order, each layer after the one before it is healthy. `apply_order` is what they add up to.
+    let apply_layers = [
+        # the namespaces, accounts and storage everything else sits on
+        {
+            name: "platform"
+            depends_on: []
+            wait_for: []
+            files: [
+                "namespaces.yaml"
+                "serviceaccounts.yaml"
+                "local-path-provisioner.yaml"
+                "storage-class.yaml"
+            ]
+        }
+        # the CA's issuer, which every other workload gets its certificate from
+        {
+            name: "cert-issuer"
+            depends_on: ["platform"]
+            wait_for: [ { kind: "pods", ns: "polar", ref: "name=cert-issuer", label: "cert-issuer" } ]
+            files: [
+                "cert-issuer-pvc.yaml"
+                "cert-issuer-configmap.yaml"
+                "cert-issuer-service.yaml"
+                "cert-issuer-deployment.yaml"
+            ]
+        }
+        # the graph database, the relational store and the identity provider
+        {
+            name: "data"
+            depends_on: ["cert-issuer"]
+            wait_for: [ { kind: "statefulset", ns: "polar-graph", ref: "statefulset/polar-neo4j", label: "neo4j" } ]
+            files: [
+                "neo4j-configmap.yaml"
+                "neo4j-init-script-configmap.yaml"
+                "neo4j-pvcs.yaml"
+                "neo4j-service.yaml"
+                "neo4j-statefulset.yaml"
+                "postgres-pvc.yaml"
+                "postgres-service.yaml"
+                "postgres-statefulset.yaml"
+                "keycloak-service.yaml"
+                "keycloak-deployment.yaml"
+            ]
+        }
+        # the broker; a client that starts before it attaches to one that is going away, so it is a layer of its own
+        {
+            name: "cassini"
+            depends_on: ["data"]
+            wait_for: [ { kind: "pods", ns: "polar", ref: "job-name=cassini", label: "cassini" } ]
+            files: [
+                "cassini-resources.yaml"
+                "cassini.yaml"
+            ]
+        }
+        # the credentials agent and its HTTP front, which issue the agents' certificates
+        {
+            name: "identity"
+            depends_on: ["cassini"]
+            wait_for: [
+            { kind: "pods", ns: "polar", ref: "job-name=credentials-agent", label: "credentials-agent" }
+            { kind: "pods", ns: "polar", ref: "job-name=credentials-agent-observer", label: "credentials-agent-observer" }
+        ]
+            files: [
+                "credentials-agent-resources.yaml"
+                "credentials-agent.yaml"
+                "credentials-agent-observer-resources.yaml"
+                "credentials-agent-observer.yaml"
+            ]
+        }
+        # everything else: tracing, ACE and the agents
+        {
+            name: "agents"
+            depends_on: ["identity"]
+            wait_for: []
+            files: [
+                "jaeger.yaml"
+                "ace-rbac.yaml"
+                "ace.yaml"
+                "kube-observer-resources.yaml"
+                "kube-observer.yaml"
+                "kube-consumer-resources.yaml"
+                "kube-consumer.yaml"
+                "jira-observer-resources.yaml"
+                "jira-observer.yaml"
+                "jira-processor-resources.yaml"
+                "jira-processor.yaml"
+                "git-repo-observer-resources.yaml"
+                "git-repo-observer.yaml"
+                "git-repo-processor-resources.yaml"
+                "git-repo-processor.yaml"
+                "git-repo-controller-resources.yaml"
+                "git-repo-controller.yaml"
+                "polar-git-server-resources.yaml"
+                "polar-git-server.yaml"
+                "polar-scheduler-observer-resources.yaml"
+                "polar-scheduler-observer.yaml"
+                "polar-scheduler-resources.yaml"
+                "polar-scheduler.yaml"
+                "secret-harness-owner-resources.yaml"
+                "secret-harness-owner.yaml"
+                "secret-harness-intruder-resources.yaml"
+                "secret-harness-intruder.yaml"
+            ]
+        }
+    ]
+
     {
         name       : "local-minimal"
         repo_root  : $repo_root
@@ -51,59 +157,8 @@ def main [] {
             ($layers | path join "2-services/keycloak/main.nu")
         ]
 
-        apply_order : [
-            "namespaces.yaml"
-            "serviceaccounts.yaml"
-            "local-path-provisioner.yaml"
-            "storage-class.yaml"
-            "cert-issuer-pvc.yaml"
-            "cert-issuer-configmap.yaml"
-            "cert-issuer-service.yaml"
-            "cert-issuer-deployment.yaml"
-            "neo4j-configmap.yaml"
-            "neo4j-init-script-configmap.yaml"
-            "neo4j-pvcs.yaml"
-            "neo4j-service.yaml"
-            "neo4j-statefulset.yaml"
-            "postgres-pvc.yaml"
-            "postgres-service.yaml"
-            "postgres-statefulset.yaml"
-            "keycloak-service.yaml"
-            "keycloak-deployment.yaml"
-            "cassini-resources.yaml"
-            "cassini.yaml"
-            "credentials-agent-resources.yaml"
-            "credentials-agent.yaml"
-            "credentials-agent-observer-resources.yaml"
-            "credentials-agent-observer.yaml"
-            "jaeger.yaml"
-            "ace-rbac.yaml"
-            "ace.yaml"
-            "kube-observer-resources.yaml"
-            "kube-observer.yaml"
-            "kube-consumer-resources.yaml"
-            "kube-consumer.yaml"
-            "jira-observer-resources.yaml"
-            "jira-observer.yaml"
-            "jira-processor-resources.yaml"
-            "jira-processor.yaml"
-            "git-repo-observer-resources.yaml"
-            "git-repo-observer.yaml"
-            "git-repo-processor-resources.yaml"
-            "git-repo-processor.yaml"
-            "git-repo-controller-resources.yaml"
-            "git-repo-controller.yaml"
-            "polar-git-server-resources.yaml"
-            "polar-git-server.yaml"
-            "polar-scheduler-observer-resources.yaml"
-            "polar-scheduler-observer.yaml"
-            "polar-scheduler-resources.yaml"
-            "polar-scheduler.yaml"
-            "secret-harness-owner-resources.yaml"
-            "secret-harness-owner.yaml"
-            "secret-harness-intruder-resources.yaml"
-            "secret-harness-intruder.yaml"
-        ]
+        apply_layers : $apply_layers
+        apply_order : ($apply_layers | each {|l| $l.files } | flatten)
 
         neo4j_bolt_addr       : "bolt+s://polar-db-svc.polar-graph.svc.cluster.local:7687"
         enable_tls            : true
