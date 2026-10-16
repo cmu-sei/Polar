@@ -40,7 +40,9 @@
 # The shebang above requires `nu` on PATH. In the dev container, `nu` is
 # provided by the Nix environment — no additional configuration needed.
 
-use ./core
+# The colour helpers (core/mod.nu) and the loggers (core/logging.nu): `use ./core` alone brings in neither by name.
+use ./core *
+use ./core/logging.nu *
 
 const COMPONENT = "polar-static-analysis"
 # ---------------------------------------------------------------------------
@@ -123,6 +125,7 @@ def run-tool [
 def tool-definitions [manifest: string, output_dir: string] {
     [
         {
+            key: "deny"
             name: "cargo deny"
             outfile: $"($output_dir)/cargo_deny.txt"
             cmd: [
@@ -132,6 +135,7 @@ def tool-definitions [manifest: string, output_dir: string] {
             ]
         }
         {
+            key: "clippy"
             name: "cargo clippy"
             outfile: $"($output_dir)/cargo_clippy.txt"
             cmd: [
@@ -144,6 +148,7 @@ def tool-definitions [manifest: string, output_dir: string] {
             ]
         }
         {
+            key: "udeps"
             name: "cargo udeps"
             outfile: $"($output_dir)/cargo_udeps.txt"
             cmd: [
@@ -153,6 +158,7 @@ def tool-definitions [manifest: string, output_dir: string] {
             ]
         }
         {
+            key: "semver-checks"
             name: "cargo semver-checks"
             outfile: $"($output_dir)/cargo_semver.txt"
             cmd: [
@@ -161,6 +167,7 @@ def tool-definitions [manifest: string, output_dir: string] {
             ]
         }
         {
+            key: "geiger"
             name: "cargo geiger"
             outfile: $"($output_dir)/cargo_geiger.txt"
             cmd: [
@@ -169,6 +176,7 @@ def tool-definitions [manifest: string, output_dir: string] {
             ]
         }
         {
+            key: "hack"
             name: "cargo hack (feature powerset)"
             outfile: $"($output_dir)/cargo_hack.txt"
             cmd: [
@@ -302,23 +310,35 @@ def main [
     --output-path: string = "./pipeline-out"            # Directory for output files
     --skip-summary                                      # Skip summary report generation
     --no-progress                                       # (reserved; progress always shown for now)
+    --only: string = ""                                 # Comma-separated: deny, clippy, udeps, semver-checks, geiger, hack, noseyparker, mutants (default: all)
 ] {
+    let chosen = ($only | split row "," | each {|t| $t | str trim } | where {|t| $t != "" })
+    let known = ["deny" "clippy" "udeps" "semver-checks" "geiger" "hack" "noseyparker" "mutants"]
+    let unknown = ($chosen | where {|t| $t not-in $known })
+    if ($unknown | is-not-empty) {
+        log-error --component $COMPONENT $"unknown tool\(s\) in --only: ($unknown | str join ', '). Known: ($known | str join ', ')"
+        exit 2
+    }
+    # No --only means every tool, as before.
+    let want = {|t| ($chosen | is-empty) or ($t in $chosen) }
+
     let manifest  = $manifest_path
     let output_dir = $output_path
 
     mkdir $output_dir
 
     # Preflight
-    check-tools [
-        cargo
-        cargo-deny
-        cargo-udeps
-        cargo-semver-checks
-        cargo-geiger
-        cargo-hack
-        cargo-mutants
-        noseyparker-cli
-    ]
+    let needed = ([
+        [always cargo]
+        [deny cargo-deny]
+        [udeps cargo-udeps]
+        [semver-checks cargo-semver-checks]
+        [geiger cargo-geiger]
+        [hack cargo-hack]
+        [mutants cargo-mutants]
+        [noseyparker noseyparker-cli]
+    ] | where {|r| $r.0 == "always" or (do $want $r.0) } | each {|r| $r.1 })
+    check-tools $needed
 
     log-info --component $COMPONENT (bold "\n=== Polar Static Analysis ===\n")
     log-info --component $COMPONENT $"Manifest : ($manifest)"
@@ -330,7 +350,7 @@ def main [
     # ------------------------------------------------------------------
     log-info --component $COMPONENT (bold "Phase 1 — parallel tools\n")
 
-    let tools = (tool-definitions $manifest $output_dir)
+    let tools = (tool-definitions $manifest $output_dir | where {|t| do $want $t.key })
 
     # par-each runs all tool closures in parallel across a thread pool.
     # Each closure captures its tool record by value, runs the command,
@@ -343,54 +363,60 @@ def main [
     # ------------------------------------------------------------------
     # Phase 2: noseyparker (sequential — it manages its own datastore)
     # ------------------------------------------------------------------
-    log-info --component $COMPONENT ""
-    log-info --component $COMPONENT (bold "Phase 2 — noseyparker\n")
+    let np_results = if (do $want "noseyparker") {
+        log-info --component $COMPONENT ""
+        log-info --component $COMPONENT (bold "Phase 2 — noseyparker\n")
 
-    let np_datastore = $"($output_dir)/noseyparker_datastore"
-    let np_scan_out  = $"($output_dir)/noseyparker_scan.txt"
-    let np_report    = $"($output_dir)/noseyparker_report.txt"
+        let np_datastore = $"($output_dir)/noseyparker_datastore"
+        let np_scan_out  = $"($output_dir)/noseyparker_scan.txt"
+        let np_report    = $"($output_dir)/noseyparker_report.txt"
 
-    rm -rf $np_datastore
+        rm -rf $np_datastore
 
-    let np_scan_result = run-tool "noseyparker-cli scan" $np_scan_out [
-        noseyparker-cli scan
-        --datastore $np_datastore
-        .
-    ]
+        let np_scan_result = run-tool "noseyparker-cli scan" $np_scan_out [
+            noseyparker-cli scan
+            --datastore $np_datastore
+            .
+        ]
 
-    # Report is generated regardless of scan exit code (0 = no findings is fine)
-    noseyparker-cli report --datastore $np_datastore out+err> $np_report
+        # Report is generated regardless of scan exit code (0 = no findings is fine)
+        noseyparker-cli report --datastore $np_datastore out+err> $np_report
 
-    let np_report_result = {
-        name: "noseyparker report"
-        outfile: $np_report
-        exit_code: 0   # report always exits 0; findings are in the file
-        duration_sec: 0
-    }
+        [
+            $np_scan_result
+            {
+                name: "noseyparker report"
+                outfile: $np_report
+                exit_code: 0   # report always exits 0; findings are in the file
+                duration_sec: 0
+            }
+        ]
+    } else { [] }
 
     # ------------------------------------------------------------------
     # Phase 3: cargo mutants (sequential — spawns its own workers)
     # ------------------------------------------------------------------
-    log-info --component $COMPONENT ""
-    log-info --component $COMPONENT (bold "Phase 3 — cargo mutants (this will take a while)\n")
+    let mutants_results = if (do $want "mutants") {
+        log-info --component $COMPONENT ""
+        log-info --component $COMPONENT (bold "Phase 3 — cargo mutants (this will take a while)\n")
 
-    let mutants_out     = $"($output_dir)/cargo_mutants.txt"
-    let mutants_out_dir = $"($output_dir)/mutants.out"
+        let mutants_out     = $"($output_dir)/cargo_mutants.txt"
+        let mutants_out_dir = $"($output_dir)/mutants.out"
 
-    let mutants_result = run-tool "cargo mutants" $mutants_out [
-        cargo mutants
-        --manifest-path $manifest
-        --output $mutants_out_dir
-    ]
+        [ (run-tool "cargo mutants" $mutants_out [
+            cargo mutants
+            --manifest-path $manifest
+            --output $mutants_out_dir
+        ]) ]
+    } else { [] }
 
     # ------------------------------------------------------------------
     # Collect all results and summarise
     # ------------------------------------------------------------------
     let all_results = (
         $parallel_results
-        | append $np_scan_result
-        | append $np_report_result
-        | append $mutants_result
+        | append $np_results
+        | append $mutants_results
     )
 
     log-info --component $COMPONENT ""

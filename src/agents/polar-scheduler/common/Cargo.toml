@@ -23,6 +23,7 @@
 name = "polar-scheduler-common"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 rkyv.workspace = true

@@ -23,6 +23,7 @@
 name = "polar-scheduler-observer"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [lib]
 path = "src/lib.rs"

@@ -23,6 +23,7 @@
 name = "mock-agent"
 version = "1.0.0"
 edition = "2021"
+license.workspace = true
 
 [dependencies]
 cassini-client = { path = "../../../cassini/client" }
