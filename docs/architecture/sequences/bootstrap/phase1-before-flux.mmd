@@ -1,0 +1,101 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+%% Phase 1 of the sandbox-local bootstrap: everything up.nu does before Flux takes over.
+%% (new) marks the proposed Flux deployment. Every other step is the code in infra/ today.
+sequenceDiagram
+    autonumber
+    actor Op as Operator
+    participant Up as infra/up.nu
+    participant Img as infra/images.nu
+    participant Nix as nix build
+    participant Reg as registry :5000<br/>(container polar-registry)
+    participant Ren as infra/render.nu
+    participant Cat as render-catalog.nu<br/>resolve.nu, dhall
+    participant Lay as layers.nu (new)
+    participant Dep as deploy-repo.nu (new)
+    participant DGit as deployment git server (new)<br/>polar-git-server container
+    participant Adm as polar-admin-grant<br/>(infra/tools.nu)
+    participant Sec as targets/T/secrets.nu
+    participant Fx as flux.nu (new)
+    participant K as Kubernetes API
+
+    Op->>Up: nu infra/up.nu sandbox-local --user U --email E
+    Up->>Up: read targets/T/target.nu (one nuon record: charts, layers, waits)<br/>build_plan (plan.nu) prints the steps and why any is skipped
+
+    Note over Up,K: 1 preflight
+    Up->>K: kubectl get nodes (KUBECONFIG is set, cluster reachable)
+    Up->>Up: a container runtime exists (infra/runtime.nu: podman or docker)<br/>the SOPS files decrypt (secrets-lib.nu)
+
+    Note over Up,Reg: 2 agent images (only with --dev, else the registry must already hold them)
+    Up->>Reg: just registry-up: run registry:2 as polar-registry on :5000
+    Up->>Cat: resolve.nu document-images: which agents describe themselves
+    Up->>Img: images sync (the agents the render will ask)
+    Img->>Nix: nix build the flake attribute of IMAGE for ARCH, linked at result/IMAGE
+    Nix-->>Img: result/IMAGE (docker archive)
+    Img->>Reg: skopeo copy docker-archive to docker://localhost:5000/IMAGE:TAG<br/>mirror third-party images, push the Neo4j archive
+    Note over Img,Reg: u7s only: podman exec u7s ctr images rm drops the node's cached copy of a rebuilt image
+
+    Note over Up,K: 3 render
+    Up->>Ren: POLAR_AGENT_SOURCE=images nu infra/render.nu T
+    Ren->>Ren: load target.nu, empty manifests/
+    Ren->>Cat: each chart's main.nu: namespaces, storage, cert-issuer,<br/>jaeger, ace, neo4j, postgres, keycloak (dhall to YAML)
+    Ren->>Cat: render-catalog.nu: per catalog workload, resolve.nu json<br/>(runs IMAGE --scaffold with no network) then json-to-dhall, dhall-to-yaml<br/>(render cache in ~/.cache/polar)
+    Cat-->>Ren: manifests/NAME.yaml and NAME-resources.yaml
+    Ren->>Ren: checks: apply order, service accounts (writes serviceaccounts.yaml),<br/>Job replacement, cert-issuer identity, CA provisioning, layers
+    Ren-->>Up: manifests/ (51 files for local-minimal), identical on every run
+
+    Note over Up,Reg: 4 images (only with --dev): what the rendered manifests reference
+    Up->>Img: images needed (reads image: from manifests/), then sync as in step 2
+
+    Note over Up,DGit: 5 split, deployment host, publish (new)
+    Up->>Lay: layers.nu split T WORK (platform, cert-issuer, data, cassini, identity, agents)
+    Lay-->>Up: WORK/LAYER/FILE.yaml and WORK/layers.json
+    Up->>Dep: deploy-repo.nu ensure T
+    Dep->>Dep: first time only: ~/.config/polar-deploy/T/ gets a CA, a server certificate,<br/>and client certificates for "pipeline" (writes) and "flux" (reads), made with openssl
+    Dep->>DGit: start the container from registry polar-git-server with POLAR_GIT_SERVER_*<br/>repos: deploy-T, writers [pipeline], readers [flux] (no Cassini, no cluster)
+    Up->>Dep: deploy-repo.nu publish T WORK
+    Dep->>Dep: assemble the tree: layers/, flux/ (GitRepository and one Kustomization per layer,<br/>generated from layers.json), provenance.json (polar commit, image digests,<br/>tree hash), a README saying the tree is generated
+    Dep->>DGit: git commit signed with the pipeline certificate (x509), push over mTLS as "pipeline"
+    DGit->>DGit: ACL check by certificate identity, append push-log.jsonl
+    Dep->>DGit: verify: fresh clone as "flux", check the signature against the CA,<br/>the tree hash equals the one recorded
+    Dep-->>Up: deployment repo at COMMIT
+
+    Note over Up,K: 6 namespaces (before any secret can be made)
+    Up->>K: kubectl apply manifests/namespaces.yaml
+
+    Note over Up,K: 7 cluster CA
+    Up->>K: kubectl get secret cert-issuer-ca (done already? skip)
+    Up->>Adm: polar-admin-grant bootstrap-ca
+    Adm->>K: straight to the API with your kubeconfig, not through Cassini (there is no broker yet):<br/>Secret cert-issuer-ca (the CA key and certificate), ConfigMap polar-ca (the certificate)<br/>created once and never overwritten: a second run fails with 409
+
+    Note over Up,K: 8 secrets (then, today, every manifest in apply order)
+    Up->>Sec: secrets.nu TARGET_DIR REPO_ROOT
+    Sec->>Sec: sops decrypt secrets.sops.yaml and user.sops.yaml (rage with your SSH key)
+    Sec->>K: upsert neo4j-secret, polar-graph-pw, cassini-shutdown-token, jira-secret,<br/>oci-registry-auth, keycloak-admin-secret, keycloak-db-secret
+    Note over Up,K: In gitops mode the apply loop that follows today is replaced by Flux
+
+    Note over Up,K: 9 install Flux (new)
+    Up->>K: Secret flux-system/deploy-repo-auth (tls.crt, tls.key, ca.crt for the "flux" identity)
+    Up->>Fx: flux.nu install T
+    Fx->>K: apply the Flux controllers (images from the registry), wait for the CRDs
+    Fx->>K: apply GitRepository (the deployment repo) and the layer Kustomizations,<br/>read from the commit just published
+    Fx-->>Up: Flux is running and has the repo's address

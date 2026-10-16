@@ -1,0 +1,106 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+%% Phase 3 of the sandbox-local bootstrap: what up.nu does once the workloads run.
+%% These steps exist today (infra/up.nu step_forwards, step_admin, step_seed, step_browser,
+%% report_egress) and run unchanged after Flux. Each checks whether it is already done.
+%% The bootstrap-admin hop between polar-admin-grant and the credentials agent is drawn in
+%% general/admin_bootstrap_identity.mmd.
+sequenceDiagram
+    autonumber
+    actor Op as Operator
+    participant Up as infra/up.nu
+    participant Fwd as just port-forwards-up<br/>(kubectl port-forward loops)
+    participant Adm as just admin-*<br/>polar-admin-grant
+    participant CAg as credentials agent<br/>observer :8081, Cassini,<br/>consumer, cert-issuer
+    participant K as Kubernetes API
+    participant Sign as polar-sign
+    participant Git as git client
+    participant GS as polar-git-server<br/>(in the cluster)
+    participant Sch as polar-scheduler-observer<br/>and polar-scheduler
+    participant Brw as just user-cert-install<br/>(Librewolf certificate store)
+    participant N4 as Neo4j :7473
+
+    Note over Up,K: 1 wait for the core services
+    Up->>K: wait_pods: pods name=cert-issuer, job-name=cassini, credentials-agent,<br/>credentials-agent-observer, and rollout status of statefulset polar-neo4j<br/>(polar-graph), up to 10 minutes
+
+    Note over Up,Fwd: 2 port-forwards (only those the target needs)
+    Up->>Fwd: pgrep for each svc/NAME, start the missing ones:<br/>observer 8081, neo4j 7473, git 8443 (logs in files, restarted if they drop)
+
+    Note over Up,CAg: 3 admin flow, files land in ~/.config/polar-admin
+    Up->>K: read ConfigMap polar-ca (this cluster's CA)
+    Up->>Up: a stored ca.pem from another cluster? move the directory aside to<br/>polar-admin.old-TIMESTAMP, delete nothing
+    Up->>Adm: just admin-bootstrap (skipped if bootstrap-admin.crt exists)
+    Adm->>K: polar-ca to ca.pem
+    Adm->>CAg: polar-admin-grant bootstrap: a CSR and the Kubernetes credential
+    CAg-->>Adm: bootstrap-admin.crt and .key (the key never left this machine)
+    Up->>Adm: just admin-provision U E (skipped if U.crt exists)
+    Adm->>CAg: provision-account, signed with the bootstrap certificate:<br/>permissions, capabilities (provision-account, grant, update-configuration,<br/>run-command, update-policy, update-runtime, update-groups)
+    CAg-->>Adm: the account exists and the bootstrap certificate is spent
+    Up->>Adm: just admin-claim U E
+    Adm->>CAg: claim: a keypair made here, a CSR sent
+    CAg-->>Adm: U.crt, U.key, U.chain.pem
+
+    Note over Up,GS: 4 seed the schedules repository with the first signed policy
+    Up->>K: wait_pods: polar-git-server, polar-scheduler-observer, polar-scheduler, credentials-agent
+    Up->>Up: openssl x509 -ext subjectAltName on U.crt:<br/>the seed documents must name agents that exist
+    Up->>Git: git clone polar-schedules over mTLS with U's certificate<br/>(through the 8443 forward, 6 tries 5 seconds apart)
+    Git->>GS: clone
+    alt the server refuses (403): it does not know U's identity as an administrator
+        GS-->>Up: refused
+        Up-->>Op: stop and say what to do (seed refused_hint)
+        Op->>Op: set POLAR_GIT_SERVER_ADMINS in config.nuon to<br/>U's first DNS name (once per fresh cluster)
+        Op->>Up: run the same command again
+        Note over Up,GS: the second run renders, splits and publishes again, Flux applies the changed<br/>layer, the git server restarts, and this step starts over at its first wait
+    else the server accepts
+        GS-->>Git: the repository
+    end
+    loop each seed document not yet in the repository
+        Up->>Sign: polar-sign runtime --agent A --section S --version N --body-file - --user U<br/>(the body on standard input from seed.nu)
+        Sign-->>Up: a signed document, written to permanent/A/S.dhall in the clone
+    end
+    Up->>Git: git add, commit "feat(seed): ...", push (as U)
+    Git->>GS: push: ACL by U's identity, append push-log.jsonl
+    GS->>Sch: RepoChanged on Cassini
+    Sch->>GS: pull polar-schedules (the observer), the scheduler hands each agent its documents
+    Sch->>CAg: the signed policy document
+    CAg->>CAg: verify the signature and the signer's capabilities (update-policy), apply and publish the policy
+    Up->>K: kubectl logs credentials-agent until it says the policy is published (3 minutes)
+
+    Note over Up,N4: 5 browser certificate and Neo4j password
+    Up->>Brw: read the Librewolf certificate store (read-only): does it trust this CA<br/>and hold U's current certificate?
+    alt something is missing or stale
+        Up->>Op: PAUSE: close Librewolf so its store is not locked
+        Op->>Up: press Enter
+        Up->>Brw: just user-cert-install U: remove the old Polar certificates,<br/>import ca.pem and U's PKCS12 (nix-shell with nssTools)
+    end
+    Up->>K: read Secret polar-graph-pw
+    Up->>N4: probe https://localhost:7473 with U's certificate and that password (retries for 2 minutes)
+    alt Neo4j still has its factory password
+        Up->>Op: PAUSE: show the password from Secret neo4j-secret, ask to set it in the browser
+    else it already has the Secret's password
+        N4-->>Up: accepted
+    end
+
+    Note over Up,K: 6 report
+    Up->>K: kubectl -n polar get pods
+    Up->>K: egress probe: git ls-remote against a public repository from inside the<br/>polar-scheduler-observer pod. Only a note, never a failure
+    Up-->>Op: Target T is up

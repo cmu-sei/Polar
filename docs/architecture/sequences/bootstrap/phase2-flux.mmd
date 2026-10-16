@@ -1,0 +1,70 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+%% Phase 2 of the sandbox-local bootstrap: Flux reconciles the deployment repo, layer by layer.
+%% All of it is new. The layers, their order and what each waits for are declared in
+%% infra/targets/T/target.nu (apply_layers) and travel in the repo as flux/ and layers.json.
+sequenceDiagram
+    autonumber
+    participant Up as infra/flux.nu wait (new)<br/>called by up.nu
+    participant SC as Flux source-controller
+    participant DGit as deployment git server
+    participant KC as Flux kustomize-controller
+    participant K as Kubernetes API
+    participant Reg as registry :5000<br/>(nodes pull from 10.0.2.2:5000 on u7s)
+    participant W as workloads of the layer
+
+    Up->>K: ask for an immediate reconcile of the GitRepository,<br/>then poll each Kustomization until Ready
+
+    SC->>DGit: git clone over mTLS, presenting the "flux" certificate<br/>(Secret deploy-repo-auth), trusting ca.crt
+    DGit->>DGit: the identity "flux" is a reader of deploy-T: allowed
+    DGit-->>SC: the tree at COMMIT (layers/, flux/, provenance.json)
+    SC->>K: artifact for COMMIT, GitRepository Ready
+
+    Note over KC,W: each layer is a Kustomization that dependsOn the one before
+    KC->>K: platform: namespaces, serviceaccounts, local-path-provisioner, storage-class
+    KC->>K: cert-issuer: PVC, ConfigMap, Service, Deployment
+    K->>Reg: kubelet pulls the image
+    K->>W: cert-issuer starts using Secret cert-issuer-ca and ConfigMap polar-ca,<br/>both made in phase 1
+    KC->>KC: health: pods name=cert-issuer are ready, then the next layer
+
+    KC->>K: data: neo4j, postgres, keycloak (their init containers run polar-init<br/>to get a certificate)
+    KC->>KC: health: statefulset polar-neo4j has rolled out
+
+    KC->>K: cassini: cassini-resources, cassini (a Job)
+    KC->>KC: health: pods job-name=cassini are ready.<br/>This is the gate: a client that starts first attaches to a broker<br/>that is about to go away
+
+    KC->>K: identity: credentials-agent and credentials-agent-observer (Jobs)
+    KC->>KC: health: both pods are ready
+
+    KC->>K: agents: jaeger, ace, kube, jira, git, polar-git-server, scheduler,<br/>secret-harness (Jobs, long-running)
+    Note over KC,W: A Job that runs until replaced never completes, so wait: true cannot be used here.<br/>Health checks of our own are needed. jira-observer fails when no Jira is set up: expected.
+
+    KC->>K: record each Kustomization Ready at COMMIT
+    Up->>K: all six Ready at COMMIT?
+    alt a layer is unhealthy
+        Up-->>Up: name the layer and Flux's message, exit non-zero
+        Note over Up,KC: run the same command again: nothing is redone, it waits
+    else all Ready
+        Up-->>Up: phase 2 is done
+    end
+
+    Note over SC,K: Afterwards, with no one running anything: Flux checks the repo on an interval,<br/>applies a new commit, prunes what left the repo, and puts back what was edited in the cluster.<br/>A Job whose spec changed is recreated (force). A Job restarts on a rebuilt image or a changed<br/>ConfigMap only if the tag or a config checksum in its pod template changes (to design).

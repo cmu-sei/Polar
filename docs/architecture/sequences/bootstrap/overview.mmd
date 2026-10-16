@@ -1,0 +1,59 @@
+%% ACE Tool
+%%
+%% Copyright 2026 Carnegie Mellon University.
+%%
+%% NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+%% FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+%% EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+%% PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+%% MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+%% TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+%%
+%% Licensed under a MIT (SEI)-style license, please see license.txt or contact
+%% permission@sei.cmu.edu for full terms.
+%%
+%% [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+%% distribution.  Please see Copyright notice for non-US Government use and distribution.
+%%
+%% This Software includes and/or makes use of Third-Party Software each subject to its own license.
+%%
+%% DM26-0670
+
+%% The whole bootstrap of a Polar cluster from the sandbox-local target, in three phases.
+%% Steps marked (new) are the proposed Flux deployment and are not built. The rest runs today
+%% (infra/up.nu, traced in docs/architecture/cluster-bootstrap.md).
+sequenceDiagram
+    autonumber
+    actor Op as Operator
+    participant Up as infra/up.nu
+    participant Host as Host services<br/>registry :5000<br/>deployment git server (new)
+    participant K as Kubernetes API
+    participant Flux as Flux controllers (new)
+    participant W as Polar workloads
+
+    Op->>Up: nu infra/up.nu sandbox-local --user U --email E
+
+    rect rgb(235, 219, 178)
+    Note over Op,W: PHASE 1 - before Flux. up.nu does what cannot be GitOps
+    Up->>Host: build and push images, start the registry<br/>(infra/images.nu, just registry-up)
+    Up->>Up: render the manifests (infra/render.nu)<br/>split them into layers (infra/layers.nu) (new)
+    Up->>Host: sign, commit and push the layers to the deployment repo (new)
+    Up->>K: apply namespaces, make the cluster CA,<br/>create the secrets (polar-admin-grant, secrets.nu)
+    Up->>K: install Flux, give it the repo's address and certificate (new)
+    end
+
+    rect rgb(215, 227, 190)
+    Note over Op,W: PHASE 2 - Flux. Layers are reconciled in order
+    Flux->>Host: pull the deployment repo over mTLS (new)
+    Flux->>K: apply platform, cert-issuer, data, cassini, identity, agents,<br/>each after the one before is healthy (new)
+    K->>W: pods start and get their certificates
+    Up->>K: wait until every layer reports Ready (new)
+    end
+
+    rect rgb(204, 220, 232)
+    Note over Op,W: PHASE 3 - after Flux. up.nu does what needs running workloads
+    Up->>W: port-forwards, then the admin flow (accounts and certificates)
+    Up->>W: sign and push the first policy to the schedules repository
+    Up->>Op: ask to close the browser, import the certificate, check Neo4j
+    Up->>Op: report that the target is up
+    end
