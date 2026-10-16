@@ -28,7 +28,7 @@
 # the Secret the secrets step made (`cassini-shutdown-token`), not a constant. The broker then runs
 # its five phases and exits, and the Job starts a new pod.
 #
-#   nu infra/cassini-shutdown.nu                 # as the admin in ~/.config/polar-admin (djshepard)
+#   nu infra/cassini-shutdown.nu                 # as the admin in ~/.config/polar-admin
 #   nu infra/cassini-shutdown.nu --user alice
 #   just cassini-shutdown
 #
@@ -59,11 +59,12 @@ export def shutdown_env [token: string, admin_dir: string, user: string, local_p
 }
 
 def main [
-    --user: string = "djshepard"
+    --user: string = ""       # whose certificate to sign in with; the current user by default
     --token: string = ""      # use this instead of the cluster's Secret (to try a wrong one)
     --port: int = 18080       # the local end of the forward
     --namespace: string = "polar"
 ] {
+    let user = (if ($user | is-empty) { $env.USER? | default "" } else { $user })
     let admin_dir = ($env.HOME | path join ".config/polar-admin")
     for f in [$"($user).crt" $"($user).key" "ca.pem"] {
         if not ($admin_dir | path join $f | path exists) {

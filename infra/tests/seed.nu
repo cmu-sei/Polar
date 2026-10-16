@@ -157,7 +157,7 @@ def main [] {
                 let with = "X509v3 Subject Alternative Name:\n    DNS:abc, URI:c:grant, URI:c:update-policy, URI:c:update-runtime"
                 assert equal (lacks $without (documents)) ["c:update-policy"]
                 assert equal (lacks $with (documents)) []
-                assert ((lacks_hint "djshepard" ["c:update-policy"]) | str contains "c:update-policy")
+                assert ((lacks_hint "alice" ["c:update-policy"]) | str contains "c:update-policy")
             }
         }
         {

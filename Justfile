@@ -560,10 +560,10 @@ ci:
 # nickname alone, because NSS gives a new certificate for the same subject the
 # old one's nickname (usually "Imported Certificate"). Nothing else is touched.
 #
-# Usage: just user-cert-install            (defaults to djshepard)
+# Usage: just user-cert-install            (defaults to the current user)
 #        just user-cert-install alice
 # POLAR_NSS_DB=<profile dir> overrides which profile is used (for testing on a copy).
-user-cert-install username="djshepard":
+user-cert-install username=env_var('USER'):
     #!/usr/bin/env bash
     set -euo pipefail
     DIR="$HOME/.config/polar-admin"
@@ -692,8 +692,8 @@ admin-bootstrap:
 # list does not have it; provision another, or reissue.
 # The bootstrap certificate is spent by the first provisioning, so a later account is provisioned
 # by an account that already holds c:provision-account: name it as the signer.
-# Usage: just admin-provision djshepard djshepard@sei.cmu.edu
-#        just admin-provision operator ops@example.org djshepard
+# Usage: just admin-provision alice alice@example.org
+#        just admin-provision operator ops@example.org alice
 admin-provision username email signer="bootstrap-admin":
     cd src/agents && cargo run -q -p polar-admin-grant -- \
         --cert {{_admin_dir}}/{{signer}}.crt \
@@ -710,7 +710,7 @@ admin-provision username email signer="bootstrap-admin":
 
 # Step 3: claim the provisioned account. Generates the keypair locally (the
 # key never leaves this machine) and writes ~/.config/polar-admin/<username>.{crt,key}.
-# Usage: just admin-claim djshepard djshepard@sei.cmu.edu
+# Usage: just admin-claim alice alice@example.org
 admin-claim username email:
     cd src/agents && cargo run -q -p polar-admin-grant -- \
         --observer-url {{_observer_url}} claim \
@@ -864,9 +864,9 @@ _git_host := "polar-git-server.polar.svc.cluster.local"
 # The git configuration that makes `git` present your Polar certificate to the Polar git server.
 # Prints it; changes nothing. GIT_SSL_CAINFO in the environment overrides http.sslCAInfo, so unset
 # it (in fish: set -e GIT_SSL_CAINFO) or use `just polar-git-clone`, which does it for one command.
-# Usage: just polar-git-config            (as djshepard)
+# Usage: just polar-git-config            (as the current user)
 #        just polar-git-config alice
-polar-git-config user="djshepard":
+polar-git-config user=env_var('USER'):
     #!/usr/bin/env bash
     set -euo pipefail
     DIR="$HOME/.config/polar-admin"
@@ -888,7 +888,7 @@ polar-git-config user="djshepard":
 # without touching your git configuration. Needs the port-forward (just port-forwards-up git).
 # Usage: just polar-git-clone polar-schedules
 #        just polar-git-clone polar-schedules ~/work/schedules alice
-polar-git-clone repo dest="" user="djshepard":
+polar-git-clone repo dest="" user=env_var('USER'):
     #!/usr/bin/env bash
     set -euo pipefail
     DIR="$HOME/.config/polar-admin"
@@ -904,9 +904,9 @@ polar-git-clone repo dest="" user="djshepard":
 
 # Ask the Cassini broker in the cluster to shut down in order, over the wire, with the shutdown token
 # from its Secret and your certificate (just user-cert-install). The Job starts a new broker.
-# Usage: just cassini-shutdown            (as djshepard)
+# Usage: just cassini-shutdown            (as the current user)
 #        just cassini-shutdown alice
-cassini-shutdown user="djshepard":
+cassini-shutdown user=env_var('USER'):
     nu infra/cassini-shutdown.nu --user {{user}}
 
 # What the secret harness pods say about the credentials agent's secret policy, and whether it held

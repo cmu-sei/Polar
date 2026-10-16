@@ -29,8 +29,8 @@ This document provides an overview of the Polar workspace structure, key files, 
 
 Polar is a knowledge graph framework that collects infrastructure data and loads it into a graph database (currently Neo4j). It uses a pub/sub architecture with mutual TLS for secure communication between components. The project is built primarily in Rust and uses Nix for reproducible builds.
 
-**Copyright:** 2024 Carnegie Mellon University  
-**License:** MIT-style license  
+**Copyright:** 2026 Carnegie Mellon University  
+**License:** MIT (SEI)-style license  
 **Primary Language:** Rust  
 **Build System:** Nix + Flakes + Cargo
 
@@ -371,8 +371,8 @@ Each agent requires:
 
 ## License
 
-Copyright 2024 Carnegie Mellon University.  
-Licensed under a MIT-style license.  
+Copyright 2026 Carnegie Mellon University.  
+Licensed under a MIT (SEI)-style license.  
 See `license.txt` for full terms.
 
 ## Distribution Statement

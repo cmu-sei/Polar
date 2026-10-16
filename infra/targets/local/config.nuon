@@ -28,7 +28,7 @@
   cluster: {}
   workloads: {
     # Who administers the git server in development: the DNS names in the certificates of the
-    # accounts `just admin-claim` made on this cluster (djshepard, operator). They belong to this
+    # accounts `just admin-claim` made on this cluster (alice, operator). They belong to this
     # cluster's ledger and change when it is reset: read them with
     #   openssl x509 -in ~/.config/polar-admin/<user>.crt -noout -ext subjectAltName
     polar-git-server: {
@@ -44,8 +44,8 @@
     }
     jira-observer: {
       env: [
-        { name: "JIRA_URL", value: "https://daveman1010220.atlassian.net" }
-        { name: "JIRA_EMAIL", value: "daveman1010220@gmail.com" }
+        { name: "JIRA_URL", value: "https://example.atlassian.net" }
+        { name: "JIRA_EMAIL", value: "jira-user@example.org" }
       ]
     }
   }

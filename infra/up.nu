@@ -26,7 +26,7 @@
 # Brings a Polar cluster up from a target, end to end. Run it from the repo
 # root with KUBECONFIG pointing at the cluster:
 #
-#   nu infra/up.nu local-minimal --dev --user djshepard --email djshepard@sei.cmu.edu
+#   nu infra/up.nu local-minimal --dev --user alice --email alice@example.org
 #
 # It is target-aware: what to do is derived from the target's own config (the
 # charts it deploys, its apply order, whether it provisions the cluster CA), so
@@ -284,7 +284,7 @@ def step_preflight [config: record] {
         fail "run this from the repo root (infra/render.nu not found)"
     }
     if ($env.KUBECONFIG? | default "" | is-empty) {
-        fail "KUBECONFIG is not set (fish: set -gx KUBECONFIG (pwd)/kubeconfig in the nix-usernetes directory)"
+        fail "KUBECONFIG is not set (point it at your cluster's kubeconfig, e.g. export KUBECONFIG=<path to kubeconfig>)"
     }
     let nodes = (do { ^kubectl get nodes -o name } | complete)
     if $nodes.exit_code != 0 {

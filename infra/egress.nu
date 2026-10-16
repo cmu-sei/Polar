@@ -61,7 +61,7 @@ export def egress_lines [verdict: string, url: string, stderr: string] {
         "dns" => [
             $"pods cannot resolve names outside the cluster \(git could not resolve the host in ($url)\). Anything that reads a repository outside the cluster, such as the git agents, will fail until they can. If you are working offline, ignore this."
             "CoreDNS sends names it does not own to the upstream in its Corefile. Its errors: kubectl -n kube-system logs -l k8s-app=kube-dns --tail=20"
-            "With nix-usernetes that upstream is the host's systemd-resolved, through a second listener on 127.0.0.1:5300 \(services.resolved.settings.Resolve.DNSStubListenerExtra on the host\). Is it there: ss -lun 'sport = :5300'"
+            "If the cluster's DNS forwards to a resolver that runs only on the host (a second systemd-resolved listener, say), is that listener there: ss -lun 'sport = :5300' (the port is whatever the cluster forwards to)"
         ]
         "unreachable" => [
             $"pods resolved the name but could not connect to ($url), or the attempt hung. Check the host's network, VPN and firewall. If you are working offline, ignore this."

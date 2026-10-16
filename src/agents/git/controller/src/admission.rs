@@ -976,21 +976,21 @@ mod tests {
         let mut rules = base();
         rules
             .organisations
-            .insert("github.com".into(), vec!["cmu-sei".into()]);
+            .insert("github.com".into(), vec!["example-org".into()]);
         assert!(matches!(
-            ask("https://github.com/cmu-sei/Polar.git", &rules),
+            ask("https://github.com/example-org/project.git", &rules),
             Decision::Accepted(_)
         ));
         assert!(matches!(
-            ask("https://github.com/CMU-SEI/Polar.git", &rules),
+            ask("https://github.com/example-org/project.git", &rules),
             Decision::Accepted(_)
         ));
         assert!(rejected(Rule::Organisation)(&ask(
-            "https://github.com/someone-else/Polar.git",
+            "https://github.com/someone-else/project.git",
             &rules
         )));
         assert!(rejected(Rule::Organisation)(&ask(
-            "https://github.com/cmu-sei-evil/x",
+            "https://github.com/example-org-evil/x",
             &rules
         )));
         assert!(
@@ -1206,12 +1206,12 @@ mod tests {
         let mut rules = base();
         rules.credentials = vec![Binding {
             host: "*.example.org".into(),
-            name: "example-sei".into(),
+            name: "example-cred".into(),
         }];
         let Decision::Accepted(a) = ask("https://git.example.org/o/r", &rules) else {
             panic!()
         };
-        assert_eq!(a.credential.as_deref(), Some("example-sei"));
+        assert_eq!(a.credential.as_deref(), Some("example-cred"));
         let Decision::Accepted(a) = ask("https://github.com/o/r", &rules) else {
             panic!()
         };
@@ -1385,12 +1385,12 @@ mod tests {
         json!({
             "kind": "observe-repo",
             "hosts": ["github.com", "*.example.org"],
-            "organisations": { "github.com": ["CMU-SEI"] },
+            "organisations": { "github.com": ["example-org"] },
             "proposers": [JIRA],
             "require_approval": true,
-            "approved": ["https://github.com/cmu-sei/Polar.git"],
-            "denied": ["https://github.com/cmu-sei/bad"],
-            "credentials": [ { "host": "*.example.org", "name": "example-sei" } ],
+            "approved": ["https://github.com/example-org/project.git"],
+            "denied": ["https://github.com/example-org/bad"],
+            "credentials": [ { "host": "*.example.org", "name": "example-cred" } ],
             "anonymous": ["github.com"],
             "limits": { "max_entries": 50, "per_proposer_per_hour": 5 }
         })
@@ -1406,7 +1406,7 @@ mod tests {
         assert_eq!(rules.hosts, ["github.com", "*.example.org"]);
         assert_eq!(
             rules.organisations["github.com"],
-            ["cmu-sei"],
+            ["example-org"],
             "organisations are kept in lower case"
         );
         assert_eq!(rules.proposers, [JIRA]);
@@ -1414,14 +1414,18 @@ mod tests {
         assert!(
             rules
                 .approved
-                .contains(&id("https://github.com/cmu-sei/Polar"))
+                .contains(&id("https://github.com/example-org/project"))
         );
-        assert!(rules.denied.contains(&id("https://github.com/cmu-sei/bad")));
+        assert!(
+            rules
+                .denied
+                .contains(&id("https://github.com/example-org/bad"))
+        );
         assert_eq!(
             rules.credentials,
             [Binding {
                 host: "*.example.org".into(),
-                name: "example-sei".into()
+                name: "example-cred".into()
             }]
         );
         assert_eq!(rules.anonymous, ["github.com"]);

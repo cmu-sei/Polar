@@ -67,8 +67,8 @@ enum Command {
         /// The item's id; a new one if not given.
         #[arg(long)]
         id: Option<String>,
-        /// Whose certificate and key to sign with: <dir>/<user>.crt and .key.
-        #[arg(long, default_value = "djshepard")]
+        /// Whose certificate and key to sign with: <dir>/<user>.crt and .key. Required: it is never assumed.
+        #[arg(long)]
         user: String,
         /// Where they are; ~/.config/polar-admin by default.
         #[arg(long)]
@@ -98,7 +98,7 @@ enum Command {
         body_file: Option<PathBuf>,
         #[arg(long)]
         id: Option<String>,
-        #[arg(long, default_value = "djshepard")]
+        #[arg(long)]
         user: String,
         #[arg(long)]
         dir: Option<PathBuf>,
@@ -137,7 +137,7 @@ enum Command {
     Sign {
         /// The file made from a template.
         file: PathBuf,
-        #[arg(long, default_value = "djshepard")]
+        #[arg(long)]
         user: String,
         #[arg(long)]
         dir: Option<PathBuf>,

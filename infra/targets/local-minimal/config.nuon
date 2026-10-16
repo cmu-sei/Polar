@@ -30,7 +30,7 @@
   cluster: { issuance: { floor_enforced: true } }
   workloads: {
     # Who administers the git server in development: the DNS names in the certificates of the
-    # accounts `just admin-claim` made on this cluster (djshepard, operator, seeder). They belong to this
+    # accounts `just admin-claim` made on this cluster (alice, operator, seeder). They belong to this
     # cluster's ledger and change when it is reset: read them with
     #   openssl x509 -in ~/.config/polar-admin/<user>.crt -noout -ext subjectAltName
     polar-git-server: {
@@ -40,7 +40,7 @@
         { name: "POLAR_GIT_SERVER_ADMINS", value: "e4e478c6-519d-4894-841a-dc11a1c1f734" }
       ]
     }
-    # The OCI registry resolver is not part of this cluster (David, 2026-10-14). It is in the catalog, and the
+    # The OCI registry resolver is not part of this cluster (2026-10-14). It is in the catalog, and the
     # `local` target still runs it.
     oci-registry-resolver: { enabled: false }
     # Rollout of cert-issuer isolation (docs/architecture/cert-issuer-isolation.md, phase 6), in groups. A
@@ -64,8 +64,8 @@
     jira-observer: {
       issuer: "credentials-agent"
       env: [
-        { name: "JIRA_URL", value: "https://daveman1010220.atlassian.net" }
-        { name: "JIRA_EMAIL", value: "daveman1010220@gmail.com" }
+        { name: "JIRA_URL", value: "https://example.atlassian.net" }
+        { name: "JIRA_EMAIL", value: "jira-user@example.org" }
       ]
     }
   }
