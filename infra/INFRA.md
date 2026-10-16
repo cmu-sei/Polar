@@ -370,6 +370,10 @@ facts still passed to the custom charts (`neo4j_bolt_addr`, `cert_issuer_url`,
 `polar_init_image`, `identity_lifetime_overrides`, and so on). Different targets
 can have completely different orderings.
 
+`sandbox-local` is the target for a Flux-based deployment: `local-minimal` plus a `flux` layer holding the controllers
+(`nu infra/flux.nu export` regenerates them; see `docs/architecture/cluster-bootstrap.md`). Until its gitops mode exists, `up.nu`
+applies it like any other target.
+
 A target can also group its files into **layers** (`apply_layers`; `local-minimal` has six: platform,
 cert-issuer, data, cassini, identity, agents). A layer is a set of files applied together after the layers it
 `depends_on` are healthy, with the workloads to wait for in `wait_for` (the same pod selectors and

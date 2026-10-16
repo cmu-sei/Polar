@@ -122,7 +122,7 @@ probe). The bootstrap-admin exchange itself is drawn in `sequences/general/admin
 
 ## Not settled, to decide before building
 
-1. Where the Flux controllers come from (rendered into the repository or installed by a script), and mirroring their images.
+1. ~~Where the Flux controllers come from.~~ Decided: rendered into the repository. `nu infra/flux.nu export` generates `flux-controllers.yaml` from the pinned `fluxcd` (2.9.6, controllers v1.9.6), the `flux` chart copies it with the images pointed at the node registry, and two mirror rows in `images.nuon` bring the images in. It is a layer of `sandbox-local`, applied for now by `up.nu` like every other layer.
 2. How the nodes reach the deployment git server on the host (`10.0.2.2:PORT` on u7s; different elsewhere).
 3. The git server running as a container outside a cluster: tested as a plain process, not yet as the image.
 4. Verifying a signature on push (the server rejects an unsigned or invalidly signed commit to `deploy-T`): not built.

@@ -39,6 +39,8 @@
   # ── Infrastructure ──────────────────────────────────────────────────────
   {image: "neo4j",    tag: "5.26.2", kind: "external", path: "~/Documents/projects/nix-neo4j/result-neo4j-image", env: "POLAR_NEO4J_IMAGE"}
   {image: "jaeger",   tag: "2.13.0", kind: "mirror", upstream: "cr.jaegertracing.io/jaegertracing/jaeger:2.13.0"}
+  {image: "flux-source-controller",    tag: "v1.9.6", kind: "mirror", upstream: "ghcr.io/fluxcd/source-controller:v1.9.6"}
+  {image: "flux-kustomize-controller", tag: "v1.9.6", kind: "mirror", upstream: "ghcr.io/fluxcd/kustomize-controller:v1.9.6"}
   {image: "keycloak", tag: "26.7.1", kind: "mirror", upstream: "quay.io/keycloak/keycloak:26.7.1"}
   {image: "postgres", tag: "16",     kind: "mirror", upstream: "docker.io/library/postgres:16"}
   {image: "busybox",  tag: "latest", kind: "mirror", upstream: "docker.io/library/busybox:latest"}
