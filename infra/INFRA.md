@@ -394,6 +394,15 @@ commit breaking. `infra/release-overrides.nuon` corrects a commit by sha without
 bumps the minor version and a feature or a fix the patch. From the baseline (v0.1.0, before the first conventional commit) the history
 gives `v0.2.0`, with or without the inferred commits (`infra/tests/semver.nu` replays it).
 
+**The changelog.** `nu infra/changelog.nu preview|write` writes the section of `CHANGELOG.md` for a release, from the same
+classification that chose the version, so the two cannot disagree. A section has, only where there is something to say: the highlights
+(a few sentences a person writes at the release), the breaking changes with what each says to do (from its `BREAKING CHANGE:` footer),
+the images that changed (from the lock), then the features, fixes and performance changes grouped by scope, one sentence that counts
+what is not listed (documentation, housekeeping, refactoring, tests), and a collapsed list of the changes that were not written as
+conventional commits. A type that was inferred from a commit's wording carries a dagger. A list longer than `fold_over` (40) becomes a
+count per scope with the entries collapsed, which is how the first release, 368 features, stays readable. Writing replaces only that
+version's section; older sections, including hand edits, are untouched. The look is `infra/changelog.nuon`.
+
 A target can also group its files into **layers** (`apply_layers`; `local-minimal` has six: platform,
 cert-issuer, data, cassini, identity, agents). A layer is a set of files applied together after the layers it
 `depends_on` are healthy, with the workloads to wait for in `wait_for` (the same pod selectors and

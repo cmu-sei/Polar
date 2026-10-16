@@ -1,0 +1,55 @@
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# infra/changelog.nuon
+#
+# How CHANGELOG.md looks. Read by `nu infra/changelog.nu`; change it to change the look, not the code.
+{
+  title: "Changelog"
+  intro: "All notable changes to the platform are documented in this file, newest first. It is generated at each release by `nu infra/changelog.nu`, from the same classification of commits that chooses the version. A release is one version for every Polar image."
+
+  # The sections that list entries, in order. `source` says which: breaking, images, feature, fix or perf.
+  # `emoji` may be empty.
+  groups: [
+    { source: "breaking", title: "Breaking changes", emoji: "💥" }
+    { source: "images",   title: "Images",           emoji: "📦" }
+    { source: "feature",  title: "Features",         emoji: "🚀" }
+    { source: "fix",      title: "Bug fixes",        emoji: "🐛" }
+    { source: "perf",     title: "Performance",      emoji: "⚡" }
+  ]
+
+  # What is counted and not listed: the commit type, and what to call it in the sentence that says how many.
+  folded: {
+    docs: "documentation"
+    refactor: "refactoring"
+    test: "test"
+    chore: "housekeeping"
+    build: "build"
+    style: "style"
+    ci: "CI"
+  }
+
+  # A section with more entries than this shows a count for each scope, and the entries in a collapsed list.
+  fold_over: 40
+
+  # Where the repository is, for the link to a release's full diff. Empty means no link.
+  repository: ""
+}

@@ -84,6 +84,10 @@ Last updated: 2026-10-10.
   with no `KUBECONFIG`, and with a cold and a warm cache, and compares the 51 files byte for byte: all identical.
   A render from a second checkout at a different path was identical too (by hand). The output has no Secret documents
   (secrets are created apart from the render) and does not mention the checkout path, the home directory or the user.
+  **Stage 3c done, 2026-10-16: the changelog.** `infra/changelog.nu` (`preview`, `write`) and `infra/changelog.nuon`: breaking changes with their
+  footer text, the images that changed, features, fixes and performance by scope, a count of what is not listed, and the unclassified
+  changes collapsed; a long list folds to counts per scope. 16 tests, including one exact-output (golden) section. The first release's
+  preview is 1,185 lines, almost all of it the collapsed lists. `release.nu` will call `write` and pause for the highlights.
   **Stage 3b done, 2026-10-16: the platform version is calculated.** `infra/semver.nu` (`nu infra/semver.nu suggest`),
   `release-baseline.nuon` (v0.1.0 before the first conventional commit, af152e6) and `release-overrides.nuon`. Replaying 976 commits
   gives v0.2.0 (two breaking commits: `feat(credentials-agent)!` and a `chore(dev-env)` footer that breaks a dev helper only), the same

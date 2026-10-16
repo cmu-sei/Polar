@@ -47,6 +47,8 @@
 
 const CONVENTIONAL = r#'^(?<type>feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(?<scope>\([^)]*\))?(?<bang>!)?:\s'#
 const BREAKING_FOOTER = r#'(?m)^(?<b>BREAKING[ -]CHANGE):'#
+const BREAKING_NOTE = r#'(?ms)^BREAKING[ -]CHANGE:[ \t]*(?<text>.*?)(?:\n\n|\z)'#
+const HEADER = r#'^[a-z]+(\([^)]*\))?!?:\s+'#
 const REVERTS = r#'(?m)^This reverts commit (?<sha>[0-9a-f]{7,40})'#
 const DOC_PATH = r#'(^|/)(docs?|tests?)/|\.md$|remaining-work|\.svg$|\.png$|\.mmd$'#
 const HERE = (path self | path dirname)
@@ -99,6 +101,17 @@ export def has_breaking_footer [body: string] {
     ($body | parse --regex $BREAKING_FOOTER) | is-not-empty
 }
 
+# What a BREAKING CHANGE footer says, on one line; "" when there is none.
+export def breaking_note [body: string] {
+    let m = ($body | parse --regex $BREAKING_NOTE)
+    if ($m | is-empty) { "" } else { $m | first | get text | str replace --all --regex '\s+' ' ' | str trim }
+}
+
+# A subject without its `type(scope)!:` prefix.
+export def description_of [subject: string] {
+    $subject | str trim | str replace --regex $HEADER ''
+}
+
 # Does a path ship nothing (docs and tests)?
 def is_docs_path [file: string] { $file =~ $DOC_PATH }
 
@@ -127,7 +140,7 @@ def significance_of [type: string, breaking: bool] {
     }
 }
 
-# How one commit counts: { sha, subject, kind, type, breaking, significance, note }. A commit is
+# How one commit counts: { sha, subject, kind, type, scope, description, breaking, breaking_note, significance, note }. A commit is
 # { sha, author, subject, body, files }. `kind` is conventional, inferred, unclassified or override.
 export def classify [c: record, overrides: list = []] {
     let conventional = (parse_conventional $c.subject)
@@ -149,7 +162,18 @@ export def classify [c: record, overrides: list = []] {
             { kind: "override", type: ($o.type? | default $base.type), breaking: ($o.breaking? | default $base.breaking), note: $o.reason }
         }
     }
-    { sha: $c.sha, subject: $c.subject, kind: $fin.kind, type: $fin.type, breaking: $fin.breaking, significance: (significance_of $fin.type $fin.breaking), note: $fin.note }
+    {
+        sha: $c.sha
+        subject: $c.subject
+        kind: $fin.kind
+        type: $fin.type
+        scope: (if $conventional != null { $conventional.scope } else { "" })
+        description: (description_of $c.subject)
+        breaking: $fin.breaking
+        breaking_note: (breaking_note $c.body)
+        significance: (significance_of $fin.type $fin.breaking)
+        note: $fin.note
+    }
 }
 
 # A revert and the commit it reverts, both in the range, change nothing together: both stop counting.
@@ -181,6 +205,7 @@ export def suggest_version [previous: string, commits: list, overrides: list = [
         next: (bump $previous $significance)
         significance: $significance
         commits: ($classified | length)
+        entries: $classified
         by_significance: ($ORDER | reverse | each {|s| { significance: $s, count: ($classified | where significance == $s | length) } })
         breaking: ($classified | where significance == "breaking" | select sha subject kind note)
         inferred: ($classified | where kind == "inferred" and significance != "none" | select sha subject type)
