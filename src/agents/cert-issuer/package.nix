@@ -104,8 +104,6 @@ let
       chown ${polarUid}:${polarGid} ./etc/cert-issuer
     '';
 
-    enableFakechroot = true;
-
     config = {
       Entrypoint = [ "${server}/bin/cert-issuer" ];
       Cmd        = [];
