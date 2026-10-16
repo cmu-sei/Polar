@@ -23,7 +23,8 @@
 #
 # What `nu infra/release.nu` checks before it lets a release happen. A gate that fails and is `blocking` stops the release; a
 # gate that is not blocking is reported and does not. Gates run cheapest first. Skip one for a single run with `--skip-gate NAME`
-# (it is then said, in the output, that it was skipped).
+# (it is then said, in the output, that it was skipped). A gate with `after_images: true` is run by `release.nu run` after the images are
+# built and the lock is written (it needs the digests), and before anything is committed; `release.nu gates` runs every gate.
 {
   # The targets that deploy by digest, whose render must be identical on every run (infra/tests/render-determinism.nu).
   determinism_targets: ["sandbox-local"]
@@ -37,6 +38,6 @@
     { name: "secrets",     blocking: true,  what: "no secret in the published history beyond the accepted ones (infra/release-secrets-baseline.nuon)" }
     { name: "clippy",      blocking: false, what: "clippy with warnings denied; report-only until the workspace's warnings are cleared" }
     { name: "resolve",     blocking: true,  what: "every workload of the catalog resolves (infra/resolve.nu check)" }
-    { name: "determinism", blocking: true,  what: "the render of each pinned target is identical on every run" }
+    { name: "determinism", blocking: true,  after_images: true, what: "the render of each pinned target is identical on every run (a release runs it once the lock is written, since a pinned render needs the digests)" }
   ]
 }

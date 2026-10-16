@@ -316,7 +316,10 @@ def "main run" [
     if ($problems | is-not-empty) { for p in $problems { print -e $"  ERROR: ($p)" }; exit 1 }
 
     print "== gates"
-    let g = (run_gates $cfg [] (csv $skip_gate))
+    let skips = (csv $skip_gate)
+    let before_cfg = ($cfg | update gates ($cfg.gates | where {|x| not ($x.after_images? | default false) }))
+    let after_cfg = ($cfg | update gates ($cfg.gates | where {|x| $x.after_images? | default false }))
+    let g = (run_gates $before_cfg [] ($skips | where {|n| $n in ($before_cfg.gates | get name) }))
     if ($g.failed_blocking | is-not-empty) {
         print -e $"  ERROR: blocking gates failed: ($g.failed_blocking | str join ', '). Nothing was changed."
         exit 1
@@ -366,8 +369,17 @@ def "main run" [
     let problems = (lock lock_problems (lock effective))
     if ($problems | is-not-empty) { for p in $problems { print -e $"  ERROR: ($p)" }; exit 1 }
     lock promote | ignore
-    ^nu ($HERE | path join "changelog.nu") write --version $chosen --highlights $notes
     if ($aside | path exists) { ^rm -f $aside }
+    if ($after_cfg.gates | is-not-empty) {
+        print ""
+        print "== gates that need the lock"
+        let after = (run_gates $after_cfg [] ($skips | where {|n| $n in ($after_cfg.gates | get name) }))
+        if ($after.failed_blocking | is-not-empty) {
+            print -e $"  ERROR: blocking gates failed: ($after.failed_blocking | str join ', '). infra/images.lock.nuon is written and uncommitted; nothing was committed or tagged."
+            exit 1
+        }
+    }
+    ^nu ($HERE | path join "changelog.nu") write --version $chosen --highlights $notes
 
     let go = if $yes { true } else { (input $"commit and tag v($chosen)? [y/N] " | str trim | str lowercase) in ["y" "yes"] }
     if not $go { print "  stopped before committing. infra/images.lock.nuon and CHANGELOG.md are written and uncommitted."; return }
