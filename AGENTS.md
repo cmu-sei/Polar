@@ -58,7 +58,6 @@ src/agents/
 ├── provenance/       # Provenance agents (linker, resolver, common)
 ├── polar-scheduler/  # Scheduler agents (observer, processor, common)
 ├── config-ops/       # Configuration operations
-├── policy-config/    # Policy configuration
 └── logger/           # Event logger
 ```
 

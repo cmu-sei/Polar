@@ -60,7 +60,6 @@ let binaries =
       , "pipeline-manifest.pinned.json"
       , "polar-scheduler"
       , "polar-scheduler-observer"
-      , "policy-config"
       , "provenance-linker"
       , "provenance-resolver"
       , "scheduler"

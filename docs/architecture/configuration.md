@@ -137,8 +137,8 @@ arrives. Open questions, not decisions:
   one the rest of the system uses, and a signature can be checked back to the CA; `polar-policy`
   wraps Cedar, so "may this signer set this variable on this agent" is a policy question the
   system already knows how to ask; `cert-issuer` verifies OIDC token signatures (`oidc.rs`). What
-  does not exist: any signing or verifying of configuration. `policy-config` only clones and
-  pulls the policy repository, and `jwt-utils` states it verifies nothing. Still to decide: the
+  does not exist: any signing or verifying of configuration. `jwt-utils` states it verifies
+  nothing. Still to decide: the
   signed form (a detached signature over a canonical encoding of the schedule, or signed git
   commits), and what the receiver checks (chain to the CA, signer authorized by policy for that
   variable and agent, version newer than the last applied).

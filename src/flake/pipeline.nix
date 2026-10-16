@@ -190,11 +190,6 @@
         (u:
           u.Artifact {
             "content_type" = "elf-binary-set";
-            name = "policy-config";
-          })
-        (u:
-          u.Artifact {
-            "content_type" = "elf-binary-set";
             name = "provenance-linker";
           })
         (u:
@@ -352,11 +347,6 @@
           u.Artifact {
             "content_type" = "elf-binary-set";
             name = "polar-scheduler-observer";
-          })
-        (u:
-          u.Artifact {
-            "content_type" = "elf-binary-set";
-            name = "policy-config";
           })
         (u:
           u.Artifact {

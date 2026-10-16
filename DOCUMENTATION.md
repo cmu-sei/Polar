@@ -100,7 +100,6 @@ Contains the main Rust workspace with multiple agents:
 - **openapi/** - OpenAPI specification agents
 - **polar-scheduler/** - Scheduler agent for managing schedules
   - docs/ - Scheduler design documentation
-- **policy-config/** - Policy configuration
 - **provenance/** - Provenance tracking agents
   - linker/ - Links artifacts across systems
   - resolver/ - Resolves artifact references
