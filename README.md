@@ -200,13 +200,17 @@ unless it says otherwise.
 **What you need before you start** (the dev shell from `direnv allow`
 provides most of the tools):
 
-- Nix with flakes, a container runtime, `podman` or `docker` (the local registry
-  in step 2 runs in it, and `up.nu` uses it to read each agent's scaffold),
-  `just`, `nushell`, `kubectl`, `skopeo`, `dhall`, `sops` and `rage`.
+- A container runtime, `podman` or `docker` (the local registry in step 2
+  runs in it, and `up.nu` uses it to read each agent's scaffold), `just`,
+  `nushell`, `kubectl`, `skopeo`, `dhall`, `sops` and `rage`.
+- **Images, one of two ways** (step 2b): published ones you copy into your
+  registry (no build), or ones you build from this checkout, which needs Nix
+  with flakes.
 - A Kubernetes cluster, and admin access to it (step 1).
 - A checkout of the sibling repository **`nix-neo4j`** at
   `~/Documents/projects/nix-neo4j`, which builds the Neo4j image Polar
-  deploys.
+  deploys. Neo4j is the one image that is built even when you use published
+  images, so this needs Nix either way.
 - Your SSH key listed as an age recipient of the target's secrets file
   (see **Secrets setup**), so `sops` can decrypt it.
 
@@ -254,6 +258,16 @@ The scripts use `podman` or `docker`, whichever is installed (`podman` first).
 To choose, set `POLAR_CONTAINER_RUNTIME=docker` (or `podman`); `up.nu` says
 which it found in its first step, and stops with a clear message if neither is
 installed.
+
+**2b. Get the Polar images into that registry, one of two ways.**
+
+- *Published images (no build):* `nu infra/images.nu import --from docker.io/<account>`
+  copies the images for this machine's architecture. See **Loading prebuilt
+  images**, under **Images**. Then bring Polar up **without `--dev`** (step 5).
+- *Build from source:* nothing to do now; `up.nu local-minimal --dev` (step 5)
+  builds and pushes them. This is the way when you have changed code.
+
+Either way, build Neo4j yourself (step 3).
 
 **3. Build the Neo4j image.** In the `nix-neo4j` checkout:
 
