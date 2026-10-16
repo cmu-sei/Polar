@@ -39,6 +39,9 @@ cargo test --workspace -- --nocapture
 
 # Run tests for a specific package
 cargo test --package <pkg> -- --nocapture
+
+# Static analysis (run before any commit)
+just static-analysis
 ```
 
 ## Repo Structure

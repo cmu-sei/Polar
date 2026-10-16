@@ -529,6 +529,10 @@ lint:
 fmt:
     cargo fmt --all
 
+# Run static analysis tools
+static-analysis:
+    nu scripts/pipeline/static-tools.nu --manifest-path src/agents/Cargo.toml
+
 # Import your claimed user certificate (and the Polar CA) into Librewolf.
 # Reads ~/.config/polar-admin/<username>.{crt,key} and ca.pem, which `claim`
 # and `bootstrap` wrote. Close Librewolf first so the NSS db is not locked.
