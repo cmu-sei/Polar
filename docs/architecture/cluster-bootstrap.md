@@ -126,7 +126,7 @@ probe). The bootstrap-admin exchange itself is drawn in `sequences/general/admin
 2. How the nodes reach the deployment git server on the host (`10.0.2.2:PORT` on u7s; different elsewhere).
 3. The git server running as a container outside a cluster: tested as a plain process, not yet as the image.
 4. Verifying a signature on push (the server rejects an unsigned or invalidly signed commit to `deploy-T`): not built.
-5. Pinning images: the manifests name `:latest`; `provenance.json` would record digests, but Flux needs the manifests to change.
+5. ~~Pinning images.~~ Built for `sandbox-local`: `infra/lock.nu`, `infra/images.lock.nuon` and `images.dev.lock.nuon`, `images.nu lock refresh|show|promote`, and the render's `pin_images` pass. All 44 image lines of its render carry a digest, and a node pulled one by digest from the plain-HTTP registry. The committed lock does not exist yet: a release writes it from one coherent build (the dev registry holds agents built at different commits).
 6. Restarting a Job on a rebuilt image or a changed ConfigMap, which `apply.nu` does today and Flux does not.
 7. Whether `POLAR_GIT_SERVER_ADMINS` is committed.
 

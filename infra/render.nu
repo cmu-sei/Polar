@@ -38,6 +38,7 @@
 use validate.nu *
 use rules.nu [job_replacement_problems, apply_order_problems]
 use layers.nu [layer_problems]
+use lock.nu [effective, lock_problems, pin_text]
 
 def main [
     target: string        # Target name: local, local-minimal, sandbox-local
@@ -158,6 +159,36 @@ def main [
     print "Checking CA provisioning consistency..."
     check_ca_provisioning $output_dir $cert_issuer_ca_configmap
     print ""
+    # A target that deploys by digest names every image of the node registry by digest, from the image lock. An
+    # image the lock does not know is an error, never left on a tag.
+    if ($config.pin_images? | default false) {
+        print "Pinning images by digest..."
+        let cluster = (open ($infra_root | path join "config" "cluster.nuon"))
+        let rows = (effective)
+        let lock_issues = (lock_problems $rows)
+        if ($lock_issues | is-not-empty) {
+            for p in $lock_issues { print -e $"  ERROR: ($p)" }
+            exit 1
+        }
+        mut missing = []
+        mut pinned = 0
+        for f in (glob ($output_dir | path join "*.yaml")) {
+            let text = (open --raw $f)
+            let r = (pin_text $text $rows $cluster.registry $cluster.arch)
+            if $r.text != $text { $r.text | save --force $f }
+            $missing = ($missing | append $r.missing)
+            $pinned = $pinned + $r.pinned
+        }
+        let unknown = ($missing | uniq | sort)
+        if ($unknown | is-not-empty) {
+            print -e $"  ERROR: the image lock has no ($cluster.arch) digest for: ($unknown | str join ', ')"
+            print -e "  Push them (nu infra/images.nu push NAME) or record what the registry holds (nu infra/images.nu lock refresh)."
+            exit 1
+        }
+        print $"  ok: ($pinned) image references pinned"
+        print ""
+    }
+
     # Last, because the checks above add files (serviceaccounts.yaml) that the layers must hold too.
     if ($config.apply_layers? | default [] | is-not-empty) {
         print "Checking the layers hold everything rendered..."

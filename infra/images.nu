@@ -55,6 +55,8 @@
 #                          anything else skips that)
 #   POLAR_NEO4J_IMAGE      path to the Neo4j docker-archive (overrides the table)
 
+use lock.nu
+
 const TABLE = (path self | path dirname | path join "images.nuon")
 const CLUSTER = (path self | path dirname | path join "config" "cluster.nuon")
 
@@ -179,24 +181,38 @@ def archive [row: record] {
 
 # ── Steps ───────────────────────────────────────────────────────────────────
 
+# The digest the registry holds for a row, written to this machine's image lock (infra/lock.nu). The digest is
+# how the image was pushed, so it is read from the registry now and not computed from the archive.
+def record_digest [row: record] {
+    let r = (do { ^skopeo inspect --tls-verify=false --format '{{.Digest}}' $"docker://(registry)/(dest $row)" } | complete)
+    if $r.exit_code != 0 {
+        error make --unspanned { msg: $"cannot read the digest of (dest $row) from (registry): ($r.stderr | str trim)" }
+    }
+    lock record $row.image $row.tag (arch) ($r.stdout | str trim)
+}
+
+# The format is named, not left to skopeo's default: the digest of the manifest depends on it.
 def push_archive [row: record, a: string] {
     try {
-        ^skopeo copy $"docker-archive:($a)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
+        ^skopeo copy --format v2s2 $"docker-archive:($a)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
     } catch {
         error make --unspanned { msg: $"skopeo could not push the archive to (registry)" }
     }
+    record_digest $row
 }
 
 # Upstream registries fail transiently (a 503 on a blob is common), hence the retries.
 def mirror_row [row: record] {
     if (in_registry $row) {
         print "      already in the registry"
+        record_digest $row
     } else {
         try {
             ^skopeo copy --retry-times 3 --override-os linux --override-arch (arch) $"docker://($row.upstream)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
         } catch {
             error make --unspanned { msg: $"skopeo could not copy ($row.upstream) into (registry)" }
         }
+        record_digest $row
     }
 }
 
@@ -253,6 +269,9 @@ def do_row [stage: string, row: record, evict: bool] {
                 push_archive $row $a
                 if $stage == "sync" and $evict { evict_row $row }
             }
+        } else if $stage != "build" and (in_registry $row) {
+            # Nothing to push because the registry already has it (an external archive): its digest is still the lock's.
+            record_digest $row
         }
     }
 }
@@ -349,6 +368,42 @@ def "main sync" [
 ] {
     let n = (run_stage "sync" (rows_for $names $all))
     print $"synced ($n) image\(s\) to (registry)"
+}
+
+# The image lock (infra/lock.nu). `refresh` records the digest of every image the registry already holds, without
+# building or pushing anything; `promote` makes this machine's lock the committed one, for a release; `show` prints
+# the lock a render would use.
+def "main lock refresh" [
+    ...names: string        # only these images (default: every row)
+] {
+    require_registry
+    let rows = (if ($names | is-empty) { load_table } else { named $names })
+    mut recorded = 0
+    mut absent = []
+    for row in $rows {
+        if (in_registry $row) {
+            record_digest $row
+            $recorded = $recorded + 1
+        } else {
+            $absent = ($absent | append $"($row.image):($row.tag)")
+        }
+    }
+    print $"recorded the digest of ($recorded) image\(s\) in (lock dev_path)"
+    if ($absent | is-not-empty) { print $"not in the registry, so not recorded: ($absent | str join ', ')" }
+}
+
+def "main lock promote" [] {
+    let problems = (lock lock_problems (lock effective))
+    if ($problems | is-not-empty) {
+        for p in $problems { print -e $"  ERROR: ($p)" }
+        error make --unspanned { msg: "the lock has problems; nothing was written" }
+    }
+    let rows = (lock promote)
+    print $"wrote ($rows | length) entries to (lock committed_path)"
+}
+
+def "main lock show" [] {
+    lock effective | sort-by image tag arch
 }
 
 # List the images in the table.

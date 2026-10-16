@@ -84,6 +84,13 @@ Last updated: 2026-10-10.
   with no `KUBECONFIG`, and with a cold and a warm cache, and compares the 51 files byte for byte: all identical.
   A render from a second checkout at a different path was identical too (by hand). The output has no Secret documents
   (secrets are created apart from the render) and does not mention the checkout path, the home directory or the user.
+  **Stage 3a done, 2026-10-16: Flux's controllers and the image lock.** `nu infra/flux.nu export` renders the controllers
+  (fluxcd 2.9.6) into the repository; `sandbox-local` is `local-minimal` plus a `flux` layer (52 files, 7 layers). The image lock
+  (`infra/lock.nu`, `images.nu lock ...`, `pin_images` in a target) names every image of the render by digest: 44 of 44 in
+  `sandbox-local`, and a node pulled one by digest. Open: the committed `images.lock.nuon` (a release writes it), `release.nu`
+  with the static-analysis gate (deny and noseyparker blocking, clippy report-only until its warnings are cleared, `--only` for
+  `static-tools.nu`), semver from conventional commits with a prompt, `service.version` from the digest, the deployment git
+  server, `deploy-repo.nu` and `flux.nu install|wait`, and Job restart on a config change.
   **Stage 2 done, 2026-10-16: the render is split into layers.** `local-minimal` declares `apply_layers`
   (platform, cert-issuer, data, cassini, identity, agents; a linear chain, `wait_for` copied from what `up.nu`
   waits for); its `apply_order` is derived from them and equals the old list exactly (51 files, same order).

@@ -374,6 +374,18 @@ can have completely different orderings.
 (`nu infra/flux.nu export` regenerates them; see `docs/architecture/cluster-bootstrap.md`). Until its gitops mode exists, `up.nu`
 applies it like any other target.
 
+**The image lock.** A manifest that names an image by tag alone does not say which bytes run: a rebuilt image under the
+same tag is a different image behind the same name, and a GitOps tool cannot see the change. A target with
+`pin_images: true` (`sandbox-local`) has every image of the node registry written as `name:tag@sha256:...`, from the
+lock (`infra/lock.nu`): `infra/images.lock.nuon`, committed, with this machine's `infra/images.dev.lock.nuon` (ignored)
+laid over it. An entry is `{image, tag, arch, digest}`, and `arch` (`cluster.nuon`) picks the digest, since an image has one
+per architecture. `images.nu` records the digest after every push and mirror (and pushes with an explicit
+`--format v2s2`: the digest depends on how an image is pushed, so it is read from the registry, never recomputed);
+`nu infra/images.nu lock refresh` records what the registry already holds, `lock show` prints what a render would use, and
+`lock promote` makes this machine's lock the committed one, which a release does. A render fails, listing them, for an image
+the lock has no digest for. A digest pin also ends the stale-node-cache problem for a pinned target: the node's cache is
+keyed by digest.
+
 A target can also group its files into **layers** (`apply_layers`; `local-minimal` has six: platform,
 cert-issuer, data, cassini, identity, agents). A layer is a set of files applied together after the layers it
 `depends_on` are healthy, with the workloads to wait for in `wait_for` (the same pod selectors and

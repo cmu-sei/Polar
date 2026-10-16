@@ -156,6 +156,9 @@ def main [] {
 
         required_env : []
 
+        # Every image of the node registry is named by digest in the render (infra/lock.nu).
+        pin_images : true
+
         overrides : ($target_dir | path join "overrides.dhall")
 
         charts : [

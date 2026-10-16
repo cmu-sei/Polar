@@ -39,6 +39,10 @@
   # gateway to the host registry started by `just registry-up`.
   registry: "10.0.2.2:5000"
 
+  # The architecture of the cluster's nodes, which decides which digest of the image lock a pinned render uses
+  # (an image has one digest per architecture): "amd64" or "arm64".
+  arch: "amd64"
+
   # Audience of the projected ServiceAccount token presented to cert-issuer.
   sa_token_audience: "polar-cert-issuer.local"
 
