@@ -296,6 +296,13 @@ the cluster's first policy. It stops for a person only where one is
 needed. After any failure or pause, **run the same command again**: every
 step checks whether it is already done.
 
+Use `--dev` when you have changed code and want the images rebuilt (and
+every Job restarted to pick them up). Once the images are in the registry
+you do not need it: run the same command without `--dev` to resume, to
+bring a cluster up from images you were given, or to finish a run that
+stopped at a person's step. It skips the build stages and leaves the
+running pods alone.
+
 **6. If it stops at the policy step, set the git server's administrator.**
 The Polar git server takes its administrators by identity, and an identity
 belongs to one cluster, so a new cluster needs its own. The step says:
@@ -337,6 +344,15 @@ Things that look wrong and are not:
   `just port-forwards-up`.
 - **A Job that is slow to replace a pod you deleted by hand.** The Job
   controller waits longer after each failure, up to about six minutes.
+- **`clone attempt 1 failed ... unexpected eof` while seeding the
+  schedules repository.** The git server had just restarted (it does when
+  its settings change). The step retries and goes on.
+- **`[polar] TLS certs missing -> building .#tlsCerts ... ERROR`** printed
+  by `just user-cert-install` or another recipe that starts a nested
+  `nix-shell`. Your dev shell was entered before the flake last changed and
+  still carries an old startup hook. It is harmless: what you asked for
+  still happens. Leave the dev shell and enter it again (or `direnv
+  reload`) to make it stop; do this after pulling changes to `flake.nix`.
 
 **To start over:** wipe the cluster the way your distribution does,
 then repeat steps 1, 5, 6 and 7. `up.nu` notices when
