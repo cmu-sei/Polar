@@ -30,7 +30,7 @@
 #   first and again   the same conditions, so the pipeline itself is deterministic
 #   other environment a different user, timezone, locale and CI variable, and no KUBECONFIG
 #
-# and compares the three output directories byte for byte. It then looks in the output for the checkout's
+# and compares the three output directories byte for byte, and the per-layer split of each (infra/layers.nu). It then looks in the output for the checkout's
 # path, the home directory and the user's name, none of which belong in a manifest. The cache is a separate
 # question (it must not change what is rendered); `POLAR_CACHE_DIR=... nu infra/tests/render-determinism.nu --with-cache`
 # also renders with a cold and then a warm cache and compares those.
@@ -40,6 +40,8 @@
 # runtime. It takes a few minutes. It replaces the target's output directory (`manifests/`), as any render does.
 #
 #   nu infra/tests/render-determinism.nu [target] [--with-cache]
+
+use ../layers.nu [split_into]
 
 def render [target: string, name: string, env_vars: record, hide: list<string>, work: string, cache: bool] {
     let base = { POLAR_AGENT_SOURCE: ($env.POLAR_AGENT_SOURCE? | default "images") }
@@ -86,6 +88,24 @@ def main [
             print -e $"  FAIL  ($pair | get 0) differs:"
             for line in ($d | first 10) { print -e $"          ($line)" }
             $problems = ($problems | append $"($pair | get 0) differs")
+        }
+    }
+
+    # The layers a render is split into are part of what is committed, so they must come out the same too.
+    let layers = (nu $"infra/targets/($target)/target.nu" | from nuon | get -o apply_layers | default [])
+    if ($layers | is-not-empty) {
+        for pair in [["first" $first] ["again" $again] ["other environment" $other]] {
+            split_into $layers ($pair | get 1) ($work | path join $"split-($pair | get 0 | str replace ' ' '-')")
+        }
+        for name in ["again" "other-environment"] {
+            let d = (differences ($work | path join "split-first") ($work | path join $"split-($name)"))
+            if ($d | is-empty) {
+                print $"  ok    the split of the ($name) render is identical to the first split"
+            } else {
+                print -e $"  FAIL  the split of the ($name) render differs:"
+                for line in ($d | first 10) { print -e $"          ($line)" }
+                $problems = ($problems | append $"the split of the ($name) render differs")
+            }
         }
     }
 

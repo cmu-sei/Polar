@@ -84,6 +84,23 @@ Last updated: 2026-10-10.
   with no `KUBECONFIG`, and with a cold and a warm cache, and compares the 51 files byte for byte: all identical.
   A render from a second checkout at a different path was identical too (by hand). The output has no Secret documents
   (secrets are created apart from the render) and does not mention the checkout path, the home directory or the user.
+  **Stage 2 done, 2026-10-16: the render is split into layers.** `local-minimal` declares `apply_layers`
+  (platform, cert-issuer, data, cassini, identity, agents; a linear chain, `wait_for` copied from what `up.nu`
+  waits for); its `apply_order` is derived from them and equals the old list exactly (51 files, same order).
+  `infra/layers.nu check|split` and `render.nu` refuse a rendered file in no layer or in two;
+  `infra/tests/layers.nu` has 10 tests; a real split is lossless and byte-identical, and
+  `render-determinism.nu` covers it. Not done: `local` has no layers yet.
+  **The three phases of a GitOps bring-up.** (1) Before Flux, by `up.nu`: preflight, build or fetch images,
+  render, apply the `platform` layer, the cluster CA, the secrets, install Flux, commit and push the artifact.
+  (2) Flux: reconcile the layers in order and report Ready. (3) After Flux, by `up.nu` (what needs running
+  workloads): port-forwards, the admin flow (needs the credentials agent), the seed of the schedules repository
+  and the signed policy (needs the git server), the browser certificate and the Neo4j password check, the
+  egress report. These steps already check whether they are done, so they run unchanged after a Flux
+  reconcile. Wrinkles for stage 3: `cassini` is its own layer because `apply.nu` gates on it (a client that starts
+  before its broker attaches to one going away); an agent Job runs until it is replaced, so a Kustomization over
+  Jobs cannot use `wait: true` and needs health checks of its own; `apply.nu` also restarts a Job when its
+  image was rebuilt under the same tag or its ConfigMap changed, and Flux's `force: true` only recreates a Job
+  whose spec changed, so pinned images and a config checksum in the Job's pod template are required.
   What stage 2 meets: all 19 of our own images in the render are `:latest` (every agent, `polar-init` which appears
   17 times, `polar-nu-init`, `cert-issuer`, `ace-viz`, `secret-harness`), against 5 third-party images with real
   versions, so Flux could not see one change and they need tags or digests; and the git server's config document
