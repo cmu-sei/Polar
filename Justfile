@@ -529,25 +529,6 @@ lint:
 fmt:
     cargo fmt --all
 
-# Run static analysis tools
-static-analysis:
-    sh scripts/static-tools.sh --manifest-path src/agents/Cargo.toml
-
-# Run CI pipeline locally
-ci:
-    podman run --rm \
-        --name polar-dev \
-        --env-file=ci.env \
-        --env CI_COMMIT_REF_NAME=$(git symbolic-ref --short HEAD) \
-        --env CI_COMMIT_SHORT_SHA=$(git rev-parse --short=8 HEAD) \
-        --env SSL_CERT_FILE="./src/conf/certs/proxy-ca.pem" \
-        --user 0 \
-        --userns=keep-id \
-        -v $(pwd):/workspace:rw \
-        -p 2222:2223 \
-        polar-dev:0.1.0 \
-        bash -c "start.sh; chmod +x scripts/gitlab-ci.sh; chmod +x scripts/static-tools.sh; scripts/gitlab-ci.sh"
-
 # Import your claimed user certificate (and the Polar CA) into Librewolf.
 # Reads ~/.config/polar-admin/<username>.{crt,key} and ca.pem, which `claim`
 # and `bootstrap` wrote. Close Librewolf first so the NSS db is not locked.

@@ -48,7 +48,6 @@ Polar is a knowledge graph framework that collects infrastructure data and loads
 ├── my.env                       # Current environment configuration
 ├── .envrc                       # Environment configuration for direnv
 ├── .gitignore                   # Git ignore rules
-├── .gitlab-ci.yml              # GitLab CI/CD configuration
 ├── settings.json                # VSCode settings
 ├── DOCUMENTATION.md             # This file
 ├── pi/                          # (Ignored per user request)
@@ -159,11 +158,8 @@ Documentation for the CI/CD pipeline using Nix and GitLab CI.
 ### `scripts/` - Utility Scripts
 
 - `dev_stack.sh` - Starts local development stack
-- `gitlab-ci.sh` - Local GitLab CI simulation
 - `render-manifests.sh` - Renders Kubernetes manifests from Dhall
 - `setup-neo4j.sh` - Neo4j setup script
-- `static-tools.sh` - Static analysis tools runner
-- `backup/` - Backup utilities
 - `loaders/` - Data loader scripts
 
 ### `var/` - Variable Data
@@ -274,9 +270,6 @@ cargo test --package polar -- --nocapture
 ```bash
 # Start local development stack
 ./scripts/dev_stack.sh
-
-# Run static analysis
-./scripts/static-tools.sh
 ```
 
 ### Development Container
