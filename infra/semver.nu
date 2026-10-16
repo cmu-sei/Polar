@@ -247,28 +247,42 @@ export def previous_release [] {
 
 def overrides_file [] { $HERE | path join "release-overrides.nuon" }
 
-def "main suggest" [
-    --from: string = ""          # count from this commit or tag instead of the previous release
-] {
+# The evidence and the suggestion as text, for a person to read (`suggest`) and for the release to show before it asks.
+export def suggest_report [s: record, prev: record, rev: string] {
+    mut lines = [
+        $"previous:    v($s.previous), from ($prev.from)"
+        $"commits:     ($s.commits) since ($rev | str substring 0..7)"
+    ]
+    for r in $s.by_significance { $lines = ($lines | append $"             ($r.count | into string | fill --width 4 --alignment right) ($r.significance)") }
+    if ($s.breaking | is-not-empty) {
+        $lines = ($lines | append "breaking:")
+        for b in $s.breaking { $lines = ($lines | append $"  ($b.sha | str substring 0..7)  ($b.subject | str substring 0..90)") }
+    }
+    if ($s.inferred | is-not-empty) { $lines = ($lines | append $"inferred from the wording, not written as conventional commits: ($s.inferred | length) \(feature or fix; never breaking\)") }
+    if ($s.unclassified | is-not-empty) { $lines = ($lines | append $"could not be classified, counted as patches because they touch code: ($s.unclassified | length)") }
+    if ($s.overridden | is-not-empty) { $lines = ($lines | append $"overridden in release-overrides.nuon: ($s.overridden | length)") }
+    $lines = ($lines | append (if $s.next == null {
+        "suggested:   nothing to release (only docs, tests and housekeeping)"
+    } else {
+        $"suggested:   v($s.next)  \(($s.significance)\)"
+    }))
+    $lines | str join "\n"
+}
+
+# The suggestion for the commits since the previous release (or `from`), with what it was calculated from.
+export def current_suggestion [from: string = ""] {
     let prev = (previous_release)
     let rev = (if ($from | is-empty) { $prev.rev } else { $from })
     let commits = (commits_between $rev)
     let s = (suggest_version $prev.version $commits (open (overrides_file)))
-    print $"previous:    v($s.previous), from ($prev.from)"
-    print $"commits:     ($s.commits) since ($rev | str substring 0..7)"
-    for r in $s.by_significance { print $"             ($r.count | into string | fill --width 4 --alignment right) ($r.significance)" }
-    if ($s.breaking | is-not-empty) {
-        print "breaking:"
-        for b in $s.breaking { print $"  ($b.sha | str substring 0..7)  ($b.subject | str substring 0..90)" }
-    }
-    if ($s.inferred | is-not-empty) { print $"inferred from the wording, not written as conventional commits: ($s.inferred | length) \(feature or fix; never breaking\)" }
-    if ($s.unclassified | is-not-empty) { print $"could not be classified, counted as patches because they touch code: ($s.unclassified | length)" }
-    if ($s.overridden | is-not-empty) { print $"overridden in release-overrides.nuon: ($s.overridden | length)" }
-    if $s.next == null {
-        print "suggested:   nothing to release (only docs, tests and housekeeping)"
-    } else {
-        print $"suggested:   v($s.next)  \(($s.significance)\)"
-    }
+    { suggestion: $s, previous: $prev, rev: $rev }
+}
+
+def "main suggest" [
+    --from: string = ""          # count from this commit or tag instead of the previous release
+] {
+    let c = (current_suggestion $from)
+    print (suggest_report $c.suggestion $c.previous $c.rev)
 }
 
 def main [] {

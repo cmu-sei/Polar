@@ -84,6 +84,13 @@ Last updated: 2026-10-10.
   with no `KUBECONFIG`, and with a cold and a warm cache, and compares the 51 files byte for byte: all identical.
   A render from a second checkout at a different path was identical too (by hand). The output has no Secret documents
   (secrets are created apart from the render) and does not mention the checkout path, the home directory or the user.
+  **Stage 3d done, 2026-10-16: `release.nu`.** `plan`, `gates`, `secrets` (and `secrets accept`), `run` (see INFRA.md, "The release").
+  Pure helpers have 8 tests. The gates found and we fixed: `rustls` 0.23.45 -> 0.23.46 (four advisories), `CDLA-Permissive-2.0` allowed,
+  `src/deny.toml` now ignores with reasons the `rsa` Marvin advisory (reached only through `jsonwebtoken`, public-key verification) and
+  three unmaintained crates (`instant` via `cassini-backoff`, `rustls-pemfile`, `unsafe-libyaml`), which still want migrating. Thirteen
+  secret findings were reviewed and accepted (12 examples; one legacy dev-compose RabbitMQ login in history only). Open: clippy `-D warnings`
+  (`cassini-types` does not compile its test target under it), a full `run` in a scratch clone, stale RabbitMQ wording in the gitlab/jira/broker
+  READMEs, `Polar.md` and `src/flake/gen-certs.nix`, and the first release version (the history suggests v0.2.0; 1.0.0 was the maintainer's wish).
   **Stage 3c done, 2026-10-16: the changelog.** `infra/changelog.nu` (`preview`, `write`) and `infra/changelog.nuon`: breaking changes with their
   footer text, the images that changed, features, fixes and performance by scope, a count of what is not listed, and the unclassified
   changes collapsed; a long list folds to counts per scope. 16 tests, including one exact-output (golden) section. The first release's

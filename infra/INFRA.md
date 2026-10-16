@@ -403,6 +403,16 @@ conventional commits. A type that was inferred from a commit's wording carries a
 count per scope with the entries collapsed, which is how the first release, 368 features, stays readable. Writing replaces only that
 version's section; older sections, including hand edits, are untouched. The look is `infra/changelog.nuon`.
 
+**The release.** `nu infra/release.nu run` cuts one, and never pushes. It checks the tree is clean and on a branch, runs the gates
+(`gates` alone runs them without releasing; `--only` and `--skip-gate a,b` choose), shows the calculated version and its evidence and
+asks for the version (the default is the suggestion; it must be after the previous release and not yet a tag), asks for the highlights,
+builds and pushes every image once, writes the committed `infra/images.lock.nuon` and the changelog section, and commits
+`chore(release): vX.Y.Z` with an annotated tag. `--dry-run` stops after the changelog preview. The gates (`infra/release.nuon`):
+`unit` (the infra tests), `deny` (advisories, licenses, bans, sources), `secrets` (nothing in the published history beyond
+`infra/release-secrets-baseline.nuon`), `clippy` (report-only until the workspace's warnings are cleared), `resolve` and
+`determinism` (two renders identical). The secret scan shows a finding's rule, path and commit, never what it matched;
+`release.nu secrets accept ID... --reason` (or `--placeholder-like`) records one you have looked at, with the reason.
+
 A target can also group its files into **layers** (`apply_layers`; `local-minimal` has six: platform,
 cert-issuer, data, cassini, identity, agents). A layer is a set of files applied together after the layers it
 `depends_on` are healthy, with the workloads to wait for in `wait_for` (the same pod selectors and
