@@ -27,7 +27,7 @@ A minimal local git HTTP server for Polar development. Serves local git
 working trees over HTTP using `nginx` + `fcgiwrap` + `git-http-backend`.
 
 **This is a development tool only.** It runs on the host via podman and is
-NOT deployed into the Polar cluster. Agents inside the usernetes cluster
+NOT deployed into the Polar cluster. Agents inside the cluster
 reach it via the host's LAN IP.
 
 ## Why this exists
@@ -60,7 +60,7 @@ http://localhost:3000/Polar.git
 http://localhost:3000/polar-schedules.git
 ```
 
-From inside the usernetes cluster:
+From inside the cluster:
 ```
 http://172.26.26.88:3000/Polar.git
 http://172.26.26.88:3000/polar-schedules.git

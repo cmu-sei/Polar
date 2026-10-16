@@ -23,12 +23,12 @@
 
 # Credentials agent policy
 
-Status, 2026-10-12: design, agreed in conversation with David; nothing in it is built except the checks noted
+Status, 2026-10-12: design, agreed in conversation; nothing in it is built except the checks noted
 as built. It says how the credentials agent decides who may have a secret, where that decision's inputs
 (rules, groups, secret attributes) are stored, and how they reach the agent. It is the first user of the
 `runtime` document type in `git-controller.md`.
 
-David's direction: certificates were always a coarse mechanism; signed policy updates are the opportunity to do
+Direction: certificates were always a coarse mechanism; signed policy updates are the opportunity to do
 much better, and the expressiveness gained from Cedar's more advanced features justifies the added complexity.
 
 ## What exists, and what does not (read from the code, 2026-10-12)
@@ -236,7 +236,7 @@ or log. Never the secret or anything derived from it. A refusal then says why.
 
 ## Secrets carry labels from the moment they are stored
 
-Decided 2026-10-12 (David). A secret is stored with a name and ciphertext only today. `StoreSecretRequest` gains
+Decided 2026-10-12. A secret is stored with a name and ciphertext only today. `StoreSecretRequest` gains
 `labels` (a small map of text to text, bounded in count and size), recorded in the `SecretStored` ledger event
 beside `stored_by`, and they become the secret's Cedar attributes under the reserved prefix: a label `kind` is
 `resource.kind`. `owner` stays reserved and comes from `stored_by`. A label cannot be changed once stored (a
@@ -244,7 +244,7 @@ store under an existing name is refused today, and stays refused); the `entities
 secret by name for what policy needs to change after the fact (`frozen`), but an annotation cannot replace a
 stored label. This is what lets "any `git-token`" be a rule from the first day.
 
-**The details (decided 2026-10-14, David; built with the store check).**
+**The details (decided 2026-10-14; built with the store check).**
 
 - `labels` is a map of text to text on `StoreSecretRequest`, recorded in the `SecretStored` event (a `serde`
   default, so entries written before it still read), and each label is an attribute of the `Secret` entity.
@@ -260,7 +260,7 @@ stored label. This is what lets "any `git-token`" be a rule from the first day.
 
 ## Storing is governed by policy
 
-Decided 2026-10-14 (David). `StoreSecret` asks policy before the ledger accepts a name: action `store`, resource
+Decided 2026-10-14. `StoreSecret` asks policy before the ledger accepts a name: action `store`, resource
 `Secret::"<name>"`, with the request's labels as the secret's attributes. Until now the first identity to store a
 name owned it, so another identity could store `github-sei` before the observer did, and the observer's own
 store would be refused as `NameTaken` and its credential left pending. **Built 2026-10-14** (`store_secret.rs`): the
@@ -272,11 +272,11 @@ ledger, atomically, that the name is the requester's to store (`NameTaken`) and 
 is held and one that is not. If policy cannot be reached the store fails and is retried, and never falls back to the
 floor.
 
-**Naming (decided 2026-10-14, David).** A secret is named `<identity>/<name>`, for example
+**Naming (decided 2026-10-14).** A secret is named `<identity>/<name>`, for example
 `git-repo-observer/github-sei`, as the agent's own escrow keypair already is
 (`agent_escrow_keypair_secret_name`, identity-scoped). The credentials agent builds the `Secret` entity from the
 validated name and sets its `namespace`, as an `Identity`, from the prefix. Policy is asked first: action `store`, the signer as principal, resource `Secret::"<name>"` with that
-`namespace`. **Cedar first, with a built-in floor (decided 2026-10-14, David):** if the policy does not speak to the
+`namespace`. **Cedar first, with a built-in floor (decided 2026-10-14):** if the policy does not speak to the
 request, or none is loaded, an identity may store a name in its own namespace, `<identity>/…`, and also
 `agent-escrow-keypair:<its own identity>`, the name its escrow keypair is stored under. The floor is needed
 because every agent escrows its own keypair through this same path when it starts, on a fresh cluster before any

@@ -23,7 +23,7 @@
 
 # Proposals
 
-Status, 2026-10-11: design, decided (see the end); the build has begun with the shared `type` in signed payloads. Direction from David: a proposal is how one agent tells another
+Status, 2026-10-11: design, decided (see the end); the build has begun with the shared `type` in signed payloads. Direction: a proposal is how one agent tells another
 "here is something to add to what you handle", without an administrator editing configuration by hand, and
 the rules for accepting one are signed repository content that the agents interested in that kind read. This
 is the second of the three kinds in `scheduling-kinds.md` (configuration, proposal, command); the sequence is
@@ -101,7 +101,7 @@ fails before anything is signed.
 
 ## Admission specifications
 
-A **new kind of signed repository document**, as David proposed: a specification of the parameters under
+A **new kind of signed repository document**, as proposed: a specification of the parameters under
 which a proposal of a given kind is accepted. It is addressed to a proposal kind, not to an agent, and an agent
 that owns or cares about the kind subscribes to it (`polar-admission-<kind>`). It is signed, verified and
 delivered exactly like a configuration document (same layout, same `polar-signing`, same chain to the pinned
@@ -122,7 +122,7 @@ Rules for `observe-repo`, as an example of what a kind's schema might declare:
 | `approved` | URLs an administrator has approved |
 | `denied` | URLs that are never accepted, and are removed if present |
 | `credentials` | bindings from a host pattern to the **name** of an escrowed secret |
-| `anonymous` | host patterns where no credential is needed. Decided 2026-10-15 (David): a separate list, so a host with neither a binding nor an entry here is `pending: no credential` and "this host is public" is a signed, deliberate statement |
+| `anonymous` | host patterns where no credential is needed. Decided 2026-10-15: a separate list, so a host with neither a binding nor an entry here is `pending: no credential` and "this host is public" is a signed, deliberate statement |
 | `limits` | most entries, and most proposals per proposer per hour |
 
 Until a receiver holds a verified specification for a kind, it **accepts nothing**. It fails closed, and the
@@ -168,7 +168,7 @@ moment it needs it (`RetrieveSecret`, through its CryptoActor). The secret itsel
 
 ## Persistence, replay, removal
 
-**Amended 2026-10-15 (David): proposals are soft state.** The receiver (the git controller) keeps the proposals it has
+**Amended 2026-10-15: proposals are soft state.** The receiver (the git controller) keeps the proposals it has
 seen in memory only, and the proposers announce again, as the controller itself announces its desired set every 60
 seconds. A restarted controller has its pending proposals back after the proposers' next announcement, and what it
 needs from signed content (the rules, the approvals) comes back by the replay of signed documents. The graph shows
@@ -176,7 +176,7 @@ every proposal and decision for people to read, and **is never read back to rebu
 rule for everything else (`git-controller.md`, "What has to exist first"). Wherever the text below says the processor
 replays proposals to a receiver, read: the proposers re-announce. The ledger stays as a projection, not a source.
 
-**Expiry (David, 2026-10-15).** An accepted proposal that its proposer stops announcing **expires**: the controller drops it
+**Expiry (2026-10-15).** An accepted proposal that its proposer stops announcing **expires**: the controller drops it
 after a time limit without a fresh announcement (a dynamic variable, to be decided with the build, default 24 hours). The
 soft state is a short-term cache and is explicitly not expected to survive. An entry a person wants kept for good belongs in
 the signed `repositories` section. Dropping an entry means the observer must stop its worker, which needs the removal
@@ -220,7 +220,7 @@ verifiable without trusting the broker and would be kept in the graph as evidenc
 `git/controller/src/admission.rs` is the decision as a pure function (`decide`), with the rules read from a signed
 `admission` section body (`Rules::parse`) and the canonical form of a URL in `git-agent-common` (`canonical_repository`).
 Tests were written first; thirty-eight deliberate breakages of it and thirteen of the URL reading were each caught. It is
-not wired to anything yet. Decided while building, in the places this document was silent (David, say if you disagree):
+not wired to anything yet. Decided while building, in the places this document was silent (say if you disagree):
 
 - **What is passed on is the canonical URL**, never the text that arrived: only `https`, a host name (never an
   address, in any spelling), no login, no query, no `%` anywhere (it can hide a `/`, a `\` or a dot segment from one
@@ -279,7 +279,7 @@ controller's log. `last_seen` is as of the decision, not as of now, since a deci
 4. The builder helper and the git observer as the first receiver.
 5. The Jira side.
 
-## Decisions (David, 2026-10-11: all four confirmed)
+## Decisions (2026-10-11: all four confirmed)
 
 1. **The receiver decides and the processor is the ledger**, as above, so that no relay is trusted. Confirm,
    or say if you would rather the processor decide.

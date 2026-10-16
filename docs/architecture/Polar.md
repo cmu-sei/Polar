@@ -21,7 +21,6 @@
   DM26-0670
 -->
 
-David Shepard
 
 Morgan Farrah
 

@@ -422,7 +422,7 @@ different sharing rules:**
   stays the store. A secret that has reached the agent is registered with the `CryptoActor`, and an actor that
   needs it asks for a named operation with it, not for the plaintext (see "Named operations on registered
   secrets", below). Whether the `CryptoActor` also caches what it has decrypted or retrieved is an
-  optimization (David, 2026-10-14).
+  optimization (2026-10-14).
 
 **Local caching.** `CryptoActor` may cache what it learns (another
 agent's escrow public key, once queried, does not need re-querying on
@@ -473,7 +473,7 @@ shared safely by both the agent's own ordinary traffic and
 `CryptoActor`'s own Credentials-Agent traffic, precisely because
 neither side of that sharing ever blocks the other.
 
-### Named operations on registered secrets (decided 2026-10-14, David; the registry and `GitCredential` are built)
+### Named operations on registered secrets (decided 2026-10-14; the registry and `GitCredential` are built)
 
 A secret that reaches an agent, in a signed document (`signed-configuration.md`) or from the credentials agent
 (`RetrieveSecret`), is **registered** with the `CryptoActor` under its name, together with its **binding**: the
@@ -500,8 +500,7 @@ name with an expiry and without escrow, and later operations name it like any ot
 `CryptoActor` never blocks waiting on an I/O actor (the deadlock above).
 
 First built, for the git credential path (2026-10-14, `polar-crypto`): the registry entry with its binding and
-escrow, and one operation, the git credential for a host. The I/O actors and derived tokens come later. The messages (decided 2026-10-14,
-David):
+escrow, and one operation, the git credential for a host. The I/O actors and derived tokens come later. The messages (decided 2026-10-14):
 
 | Message | Does | Returns |
 |---|---|---|
@@ -512,11 +511,11 @@ David):
 A **host pattern** is a bare host name, matched case-insensitively and exactly (`github.com`), or `*.` followed by
 a domain (`*.example.org`), which matches that domain with one or more labels before it, at any depth
 (`api.example.org`, `a.b.example.org`), but not the bare domain and not a lookalike (`evilexample.org`; a dot is
-required). Decided 2026-10-14 (David). The host being checked must itself be a bare name: a port, userinfo, a
+required). Decided 2026-10-14. The host being checked must itself be a bare name: a port, userinfo, a
 trailing dot or an IP address never matches (normalising a URL and the network guard are the caller's job,
 `proposals.md`).
 
-**Replace by section** (decided 2026-10-14, David; to build in step 3). A runtime section is replaced whole, so an entry a
+**Replace by section** (decided 2026-10-14; to build in step 3). A runtime section is replaced whole, so an entry a
 later version leaves out is withdrawn. Each registered secret is tagged with the section it came from, and one more
 message, `ReplaceSection { section, keep }`, drops every secret registered under `section` whose name is not in
 `keep`. The agent sends it after registering the entries of each new version. `LoadSecret` is then only asked for

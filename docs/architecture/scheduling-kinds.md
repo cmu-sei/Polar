@@ -23,7 +23,7 @@
 
 # What the scheduler carries: three kinds
 
-Status, 2026-10-11: direction agreed with David; the configuration kind is built, and the other two have designs
+Status, 2026-10-11: direction agreed; the configuration kind is built, and the other two have designs
 (`proposals.md`, `commands.md`) that are waiting on a few decisions, listed at the end of each.
 
 The scheduler began with three directories in the schedules repository (`permanent`, `adhoc`, `ephemeral`).
@@ -70,7 +70,7 @@ result durably with where it came from, and can have an entry removed.
 
 A repository URL taken from a Jira issue is attacker-controlled text. If the git agent cloned whatever it was
 told, and used a stored credential for it, a crafted issue could send that credential to the attacker's host.
-So the receiver applies **admission rules**, and David's direction is that these are themselves a kind of
+So the receiver applies **admission rules**, and the direction is that these are themselves a kind of
 scheduler repository content: specifications that say under what parameters a proposal of a given kind is
 accepted (which hosts or organisations, which proposers, whether it needs approval), signed like any
 configuration, and which agents read for the proposal kinds they care about. Credentials are bound to a host
@@ -102,5 +102,5 @@ agent declares which commands it accepts, in the same schema export that lists i
    `HAD_OUTCOME`, keeping `reported_by` (the broker's identity for the publisher) apart from the agent the
    outcome names. A refusal is therefore visible, with its reason and signer. Outcomes for a proposal or a
    command will use the same path. Not verified on a cluster.
-3. **Proposal design and Command design. Written 2026-10-11, awaiting David's decisions:** `proposals.md` (with `sequences/general/proposal_flow`) and `commands.md` (with `sequences/general/command_flow`). Then their code, each tests first.
+3. **Proposal design and Command design. Written 2026-10-11, awaiting the decisions:** `proposals.md` (with `sequences/general/proposal_flow`) and `commands.md` (with `sequences/general/command_flow`). Then their code, each tests first.
 4. Retire the old `adhoc` and `ephemeral` handling and samples when 3 has replaced them.

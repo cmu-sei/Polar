@@ -65,14 +65,20 @@ deployed to Kubernetes.
 ### Prerequisites
 
 - A Kubernetes cluster (any distribution — this pipeline doesn't
-  assume a specific one; see **Bring your own cluster**, below)
+  assume a specific one; see **Using your own target**, below)
 - A Neo4j instance populated with work-item data (see **Data source**,
   below)
 - [Nix](https://nixos.org) with flakes enabled, `podman`, `direnv`,
   [`just`](https://github.com/casey/just), `nushell` and `kubectl` — or
   use the provided dev container (see below), which already has the
-  build tools. The full list for a local cluster is in **Bring a
-  cluster up**, below
+  build tools. The full list is in **Bring a cluster up**, below.
+  **If you are given prebuilt images** (see **Loading prebuilt images**,
+  under **Images**) you do not build them and so do not need Nix to do
+  that, but `up.nu` still needs the toolchain around it: `nushell`, `dhall`,
+  `kubectl`, `skopeo`, `podman`, `sops`/`rage`, and a Rust toolchain, which
+  it uses to build the two small admin tools (`polar-admin-grant` and
+  `polar-sign`) from this checkout. The dev container has all of it, so
+  use it unless you already have those installed
 
 ### Dev container
 
@@ -131,65 +137,73 @@ skopeo copy docker-archive:<folder>/<image> \
 
 (`nu infra/images.nu list` prints every image name and tag.)
 
-If your local cluster isn't `u7s` (nix-usernetes), set
-`POLAR_CLUSTER_RUNTIME` to anything other than `u7s` (e.g.
-`POLAR_CLUSTER_RUNTIME=none just image <name>`) — the step that drops
-the node's cached copy of a rebuilt image assumes `podman` + `containerd`
-specifically and doesn't apply to a different runtime (Docker Desktop's
-Kubernetes, kind, k3d, Colima, etc.).
+The step that drops a node's cached copy of a rebuilt image is written
+for one kind of dev node (a rootless `podman` container running
+`containerd`, the default `POLAR_CLUSTER_RUNTIME=u7s`). On any other
+cluster (Docker Desktop's Kubernetes, kind, k3d, Colima, a managed
+cluster) set `POLAR_CLUSTER_RUNTIME=none`, e.g.
+`POLAR_CLUSTER_RUNTIME=none just image <name>`.
 
 ### Bring a cluster up: the whole sequence
 
-This is the path from nothing to a running Polar cluster on your own
-machine. Each step says what it does and what to expect; the sections
+This is the path from a Kubernetes cluster to a running Polar cluster.
+Polar does not care which Kubernetes distribution you use: anything that
+meets the list in step 1 will do, and setting one up is outside this
+document. Each step says what it does and what to expect; the sections
 after it go into detail. Every command is run from the repository root
 unless it says otherwise.
 
 **What you need before you start** (the dev shell from `direnv allow`
-provides most of it):
+provides most of the tools):
 
-- Nix with flakes, `podman` (rootless), `just`, `nushell`, `kubectl`,
-  `skopeo`, `dhall`, `sops` and `rage`.
-- A checkout of the sibling repository **`nix-usernetes`** at
-  `~/Documents/projects/nix-usernetes` — it builds `u7s`, the rootless
-  single-node Kubernetes cluster Polar develops against. (The
-  `Justfile` looks for it there: see `_u7s_dir`.)
-- A checkout of **`nix-neo4j`** at `~/Documents/projects/nix-neo4j`,
-  which builds the Neo4j image Polar deploys.
+- Nix with flakes, `podman` (the local registry in step 2 runs in it),
+  `just`, `nushell`, `kubectl`, `skopeo`, `dhall`, `sops` and `rage`.
+- A Kubernetes cluster, and admin access to it (step 1).
+- A checkout of the sibling repository **`nix-neo4j`** at
+  `~/Documents/projects/nix-neo4j`, which builds the Neo4j image Polar
+  deploys.
 - Your SSH key listed as an age recipient of the target's secrets file
   (see **Secrets setup**), so `sops` can decrypt it.
 
-**1. Start the cluster.** In the `nix-usernetes` checkout:
+**1. Have a cluster, and point `kubectl` at it.**
 
 ```bash
-just up            # start the node container (idempotent)
-just init          # initialise Kubernetes in it
-just kubeconfig    # write ./kubeconfig, pointing at 127.0.0.1
+export KUBECONFIG=<path to your kubeconfig>
+kubectl get nodes      # at least one node, Ready
 ```
 
-Back in this repository, point `kubectl` at it (`just cluster-ctx`
-prints the line):
+What Polar asks of the cluster:
 
-```bash
-export KUBECONFIG=~/Documents/projects/nix-usernetes/kubeconfig
-kubectl get nodes      # the node should be Ready
-```
+- **A registry its nodes can pull from** (step 2), and the address the
+  *nodes* use for it in `registry` in `infra/config/cluster.nuon`. That
+  address is often not the one your machine pushes to.
+- **A storage class** for persistent volumes. The `local-minimal` target
+  installs a local-path provisioner and a class named `managed-csi`
+  (`storage.class` in the same file). On a cluster that has its own class,
+  set `storage.class` to it.
+- **The cluster's DNS domain** in `domain` in the same file, if it is not
+  `cluster.local`.
+- **The `pkcs8_key_parser` kernel module** loaded on the nodes
+  (`sudo modprobe pkcs8_key_parser`): the agents' key custody needs it.
+- **Pods that can resolve names and reach the internet**, if you want to
+  observe repositories on GitHub or GitLab. `up.nu` checks this at the end
+  and says what it found. A DNS search domain on the node that makes every
+  lookup slow (some university and corporate networks) is a common cause of
+  slow or timed-out pods; remove it from the node's resolver.
 
-*On a network whose DNS search domain makes lookups slow* (some
-university and corporate Wi-Fi: every in-cluster name takes seconds to
-resolve and pods time out), remove the search line from the node's
-resolver once the node is up, before anything is deployed:
-
-```bash
-podman exec u7s sh -c 'grep -v "^search" /etc/resolv.conf > /tmp/r.new && cat /tmp/r.new > /etc/resolv.conf'
-```
-
-**2. Start the local registry** that the cluster pulls images from:
+**2. Have a registry** the cluster pulls images from, and say where it is.
+For a local cluster, `just registry-up` starts one on `localhost:5000`:
 
 ```bash
 just registry-up        # a registry container on localhost:5000
 just registry-status    # prints "registry reachable" when it is up
 ```
+
+For any other registry, set `POLAR_REGISTRY` to the address this machine
+pushes to (default `localhost:5000`) and `registry` in
+`infra/config/cluster.nuon` to the address the cluster's nodes pull from.
+Also set `POLAR_CLUSTER_RUNTIME=none` unless your cluster is a rootless
+podman dev node (see **Images**).
 
 **3. Build the Neo4j image.** In the `nix-neo4j` checkout:
 
@@ -269,8 +283,8 @@ Things that look wrong and are not:
 - **A Job that is slow to replace a pod you deleted by hand.** The Job
   controller waits longer after each failure, up to about six minutes.
 
-**To start over:** `just cluster-reset` here wipes the node; then
-repeat steps 1, 5, 6 and 7. `up.nu` notices when
+**To start over:** wipe the cluster the way your distribution does,
+then repeat steps 1, 5, 6 and 7. `up.nu` notices when
 `~/.config/polar-admin` holds the previous cluster's CA and moves those
 files aside (it tells you where).
 
@@ -307,8 +321,32 @@ attempted and the stage ends with a summary.
 
 To push to a different registry (a real cluster, or a customer
 environment), set `POLAR_REGISTRY` (default `localhost:5000`), and
-see **Bring your own cluster**, below, for pointing a target's
+see **Using your own target**, below, for pointing a target's
 `overrides.dhall` at it.
+
+### Loading prebuilt images
+
+If someone gives you a registry that already holds the images (instead of
+you building them), copy them into the registry your cluster pulls from
+with `skopeo`. It streams each image from one registry to the other: no
+Docker daemon, no `docker pull`, `docker save` or tarball in between.
+
+```bash
+SRC=<registry and path the images are published under>
+DEST=localhost:5000                      # the registry your cluster pulls from
+nu infra/images.nu list                  # the names and tags to copy
+skopeo copy --dest-tls-verify=false \
+  docker://$SRC/<name>:<tag> docker://$DEST/<name>:<tag>
+```
+
+Copy every image in that list except Neo4j (build it yourself, step 3
+above, then `just images-push neo4j`), under the same name and tag as the list gives. Drop
+`--dest-tls-verify=false` for a registry that serves HTTPS, and add
+`--dest-creds user:password` (or `--dest-authfile`) if it needs a login.
+The images are built for one architecture; copy the ones that match your
+nodes. Then run `nu infra/up.nu <target> --user <name> --email <email>`
+**without `--dev`**, so it uses the images already in the registry instead of
+building them.
 
 ### Customize a target
 
@@ -470,19 +508,16 @@ and a test user, using credentials you provide via `sops` (see
 `keycloak_test_username`/`keycloak_test_password` there before
 running).
 
-### Bring your own cluster
+### Using your own target
 
-This pipeline doesn't assume any particular Kubernetes distribution.
-To deploy against your own cluster:
+The sequence above assumes no particular Kubernetes distribution. To
+deploy to an environment of your own (a shared cluster, a customer's),
+make a target for it:
 
-1. Point `$KUBECONFIG` at it, same as any other `kubectl` workflow.
-2. Push built images to a registry your cluster's nodes can actually
-   pull from (see **Load images into a registry**, above — edit the
-   `Justfile`'s `_registry_host`/`_registry_port` variables to point
-   at it) — a real cluster generally can't import a local image
-   tarball directly the way some local dev tools (`kind load`, `k3d
-   image import`, etc.) can.
-3. Copy `infra/targets/local-minimal/` to a new target directory,
+1. Do steps 1 and 2 of the sequence: a kubeconfig, and a registry the
+   nodes can pull from (a real cluster generally can't import a local
+   image tarball directly the way `kind load` or `k3d image import` can).
+2. Copy `infra/targets/local-minimal/` to a new target directory,
    update `overrides.dhall`'s image references to point at your
    registry, and adjust any hostnames/URLs specific to your
    environment. In particular, `cert-issuer`'s `issuers` list is where
@@ -491,19 +526,19 @@ To deploy against your own cluster:
    means, especially `identityStrategy`'s `clusterDomain` (only needed
    if your cluster's kubelet runs with a non-default
    `--cluster-domain`).
-4. Bring it up (see **Deploy**, above): `nu infra/up.nu <your-target>`. It
+3. Bring it up (see **Deploy**, above): `nu infra/up.nu <your-target>`. It
    creates the namespaces and the CA, applies the target, and runs the admin
    flow, skipping whatever your target doesn't deploy.
-5. Reach your cluster's credentials-agent observer however suits your
+4. Reach your cluster's credentials-agent observer however suits your
    setup and run the admin flow (see **Admin access and your user
    certificate**). The Justfile wrappers default to the dev port-forward
    at `http://localhost:8081`; set `POLAR_OBSERVER_URL` to point them
    elsewhere. The admin tool itself has no default and always takes an
    explicit `--observer-url`.
 
-Some recipes in the `Justfile` (`cluster-reset`, `cluster-status`, and a
-few others) are conveniences for this repo's own local development
-cluster and aren't required for deploying elsewhere.
+Some recipes in the `Justfile` (`cluster-reset`, `cluster-ctx` and a few
+others) are conveniences for the maintainers' own development cluster and
+are not needed to deploy anywhere else.
 
 ### Secrets setup
 

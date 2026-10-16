@@ -151,7 +151,7 @@ matter, handled by mTLS and, for configuration, by signed monotonic versions.
 - The per-topic queue the broker holds when there are no subscribers, and sessions, are in memory
   today. Whether they persist is a separate decision (section 6).
 
-## 5a. Retention, migration and durability (David, 2026-10-08)
+## 5a. Retention, migration and durability (2026-10-08)
 
 **One retention number, `R` = 10 minutes** (decided 2026-10-08; it is roughly what the resources for
 running a broker at full tilt allow). The broker discards a disconnected session, and what was queued
@@ -191,7 +191,7 @@ budget, and the deployment must provide it:
   that outlives the pod, as the credentials agent's ledger is. Two pods never hold it at once,
   because Jobs wait for the old pod to be gone.
 
-**Decided (David, 2026-10-08):** `R` is 10 minutes; the two storage tiers are Ephemeral for observers
+**Decided (2026-10-08):** `R` is 10 minutes; the two storage tiers are Ephemeral for observers
 and Durable for consumers; graph writes are almost entirely MERGE-style, so a repeated delivery is
 safe for them, and the exceptions are an audit item. The dev cluster provides the Durable tier: the
 `managed-csi` storage class (local-path, `ReadWriteOnce`, bound on first use) already backs the

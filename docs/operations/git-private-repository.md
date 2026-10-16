@@ -29,21 +29,20 @@ repository, and the observer clones it and publishes its commits. Everything bel
 tested in pieces with fakes and has **not** been seen on a cluster, so this runbook says what each step should show
 and what to look at when it does not.
 
-Commands are for fish, run from the repo root (`~/Documents/projects/Polar`) unless a step says otherwise.
+Commands are for fish, run from the repository root unless a step says otherwise.
 Nothing here prints a secret. The token goes from its Kubernetes Secret into `polar-sign` through a pipe.
 
 ## What you need
 
-- The cluster's node on the rebuilt image (`fb694c2`, CoreDNS forwards to the host's resolver on `127.0.0.1:5300`).
-- A GitHub token that can read `daveman1010221/mini-swe-agent`, kept in the Secret `git-observer-credentials`
-  (keys `username` and `token`) in the `polar` namespace. **The token pasted into the first session was exposed in a
-  transcript: revoke it and replace it with a fine-grained, read-only token first**, then update the Secret yourself.
+- A Kubernetes cluster whose pods can resolve and reach the internet (see "If the cluster cannot resolve names"), with `kubectl` pointed at it.
+- A GitHub token that can read `example-org/private-repo` (any private GitHub repository will do), kept in the Secret `git-observer-credentials`
+  (keys `username` and `token`) in the `polar` namespace. Use a fine-grained, read-only token, and create the Secret yourself.
 - A connection fast enough for the image builds (Step 1).
 
 ```fish
 sudo modprobe pkcs8_key_parser                                   # the agents' escrow key custody needs it
-podman start polar-registry                                      # the images are pushed here
-set -x KUBECONFIG ~/Documents/projects/nix-usernetes/kubeconfig
+just registry-status                                             # the registry the images are pushed to must be up
+set -x KUBECONFIG <path to your kubeconfig>
 kubectl get nodes                                                # Expect: one node, Ready
 ```
 
@@ -67,13 +66,13 @@ hour cold; later ones reuse the store.)
 ## Step 2. Bring the cluster up
 
 ```fish
-nu infra/up.nu local-minimal --dev --user djshepard --email djshepard@sei.cmu.edu
+nu infra/up.nu local-minimal --dev --user alice --email alice@example.org
 ```
 
 It is resumable: after a failure or a pause, run the same command. It stops for you only where a person is needed:
 
 - **The browser step**, if Librewolf does not hold this cluster's CA and your certificate: close the browser, let
-  it import (`just user-cert-install djshepard`).
+  it import (`just user-cert-install alice`).
 - **The Neo4j password**, only if Neo4j is still on its factory password. The `nix-neo4j` image applies
   `NEO4J_AUTH` on first start, so normally there is no step.
 
@@ -163,8 +162,8 @@ $EDITOR /tmp/repos.json
 Fill in one entry (leave `version` at 1 on a fresh cluster; it must rise with every later document):
 
 ```
-"url": "https://github.com/daveman1010221/mini-swe-agent.git",
-"credential": "mini-swe-agent",
+"url": "https://github.com/example-org/private-repo.git",
+"credential": "private-repo",
 ```
 
 (`credential` is commented out in the template; delete the slashes. Leave `refs` out to observe the default branch.)
@@ -172,7 +171,7 @@ Then:
 
 ```fish
 set host polar-git-server.polar.svc.cluster.local
-psign sign /tmp/repos.json --user djshepard \
+psign sign /tmp/repos.json --user alice \
   --repo https://$host:8443/polar-schedules.git \
   --git-config http.curloptResolve=$host:8443:127.0.0.1 --push
 ```
@@ -194,7 +193,7 @@ kubectl -n polar logs -l job-name=git-repo-observer --tail=60 | grep -iE 'waitin
 ```
 
 Expect: the controller logs `repositories section loaded` with `repositories=1` (it then announces the set every 60 s,
-without a log line each time); the observer logs that `https_github.com_daveman1010221_mini-swe-agent` (the repository's
+without a log line each time); the observer logs that `https_github.com_example-org_private-repo` (the repository's
 id) `is waiting for the credential it names`, and no clone is attempted.
 
 ## Step 6. The credential
@@ -208,7 +207,7 @@ One entry. The username is in the Secret (it is not secret; read it with
 `kubectl -n polar get secret git-observer-credentials -o jsonpath='{.data.username}' | base64 -d`):
 
 ```
-"name": "mini-swe-agent",              <- the name the repository gave in Step 5
+"name": "private-repo",              <- the name the repository gave in Step 5
 "host_pattern": "github.com",
 "kind": "token",
 "secret": "-",                         <- read from standard input
@@ -219,7 +218,7 @@ Then pipe the token in; it is never typed, shown or written:
 
 ```fish
 kubectl -n polar get secret git-observer-credentials -o jsonpath='{.data.token}' | base64 -d \
-  | psign sign /tmp/creds.json --user djshepard \
+  | psign sign /tmp/creds.json --user alice \
     --repo https://$host:8443/polar-schedules.git \
     --git-config http.curloptResolve=$host:8443:127.0.0.1 --push
 ```
@@ -317,18 +316,20 @@ refused document is there with the reason and signer.
 
 ### If the cluster cannot resolve names
 
+A pod that cannot reach `github.com` shows up as `could not be cloned` with a name-resolution error. Check from inside
+the cluster, and fix it in the cluster's own DNS (this is not a Polar setting):
+
 ```fish
-ss -lun 'sport = :5300'                                          # the host listener must be there
-podman exec u7s grep forward /etc/coredns/Corefile               # Expect: forward . 10.0.2.2:5300
+kubectl run dnscheck --rm -it --restart=Never --image=docker.io/library/busybox:latest -- nslookup github.com
 ```
 
-If the Corefile says `10.0.2.3`, the node is running the old image: `just load-node-image`, then
-`just reset && just up && just init && just kubeconfig` (in `nix-usernetes`). If the listener is missing, the host's
-`services.resolved` setting from `/etc/nixos` is not applied.
+Common causes: a node resolver that points at a DNS server pods cannot reach, or a DNS search domain on the node that
+makes every lookup slow (remove it from the node's resolver). CoreDNS forwarding to a resolver that is only
+reachable from the host is another.
 
 ## Afterwards
 
-- Tell me which of the "Expect" lines held and which did not, with the log line (not the value) for any that did not.
+- Note which of the "Expect" lines held and which did not, with the log line (not the value) for any that did not.
 - Delete what holds nothing secret but is no longer needed: `rm /tmp/repos.json /tmp/creds.json`,
   and the tool's clone `rm -rf ~/.cache/polar-sign/schedules` (it holds only signed documents and ciphertext).
 - The documents in `polar-schedules` are ciphertext, but ciphertext in git history stays there: change the token's

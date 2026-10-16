@@ -131,7 +131,7 @@ let cassini : Cassini.Type =
 ### Prerequisites
 
 - `dhall-to-yaml` — converts Dhall expressions to Kubernetes YAML
-- A local Kubernetes cluster — Minikube, Orbstack, or usernetes
+- A local Kubernetes cluster — Minikube, Orbstack, kind or similar
 - Container images built for the components you want to deploy. See [`../agents/README.md`](../agents/README.md) for build instructions. Neo4j uses a stock upstream image; everything else is built from source.
 - Depending on what you're evaluating, you may also need a local GitLab instance, OCI registry, or Git remote.
 

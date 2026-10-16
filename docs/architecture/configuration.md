@@ -128,7 +128,7 @@ It is also the agent that cannot depend on remote configuration to start, becaus
 identity for everyone else. It starts on its environment alone and takes the rest when it
 arrives. Open questions, not decisions:
 
-- **Authenticity (direction from David, 2026-10-07).** The user who creates a config signs
+- **Authenticity (direction, 2026-10-07).** The user who creates a config signs
   their work, and the receiver verifies the signature before applying anything. A writable topic
   is not authorization, and neither is a repository a push reached: the signature is what ties a
   change to a person. What exists to build on, found by reading the code (earlier chats could
@@ -147,7 +147,7 @@ arrives. Open questions, not decisions:
 - **Fail closed.** Before any policy has arrived, the credentials agent needs a safe default,
   which should be to refuse, not to allow.
 - **Secrets for other agents (superseded 2026-10-14).** This said that for agents that are not the
-  credentials agent, secrets should travel as a name and key, not as ciphertext on a topic. David
+  credentials agent, secrets should travel as a name and key, not as ciphertext on a topic. This was
   decided otherwise on 2026-10-14, confirming `signed-configuration.md` and `git-controller.md`: a
   secret travels as ciphertext inside a signed document addressed to the one agent that needs it, and
   everything else refers to it by name.
@@ -209,7 +209,7 @@ in `remaining-work.md`.
 ## 9. The agent's own interface (decided 2026-10-09, not yet built)
 
 See `configuration-flow.md` for what exists today and what is missing. This section is the design
-that closes the gaps there, agreed with David on 2026-10-09 after a first proposal (a committed
+that closes the gaps there, agreed on 2026-10-09 after a first proposal (a committed
 contract file per agent, and `needs` kept in the catalog) was rejected: both were copies to keep in
 sync with the code.
 
@@ -222,7 +222,7 @@ Nothing is kept in step by hand, because nobody writes a second copy: they ask t
 
 ### 9.2 What the code declares: a trait every agent implements
 
-(Shape suggested by David on 2026-10-09: make the form of what we require of an agent the form of
+(Shape suggested on 2026-10-09: make the form of what we require of an agent the form of
 a trait, so implementing it is hooking into the infrastructure.)
 
 ```rust

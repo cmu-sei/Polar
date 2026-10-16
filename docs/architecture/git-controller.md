@@ -23,7 +23,7 @@
 
 # The git agents: observer, processor, and a controller
 
-Status, 2026-10-14 (design agreed with David 2026-10-12). The observer's `credentials` section and its use are built (2026-10-14, step 3: `git/observe/src/credentials.rs`); the minimal controller is (2026-10-14, step 4: `git/controller`, it announces the `repositories` section, with no proposals, admission, status or backoff); the observer's per-repository status is built (2026-10-15, see "Status and checkpoints"; the controller does not read it yet); the full controller and the checkpoints are not; the `runtime` document type, replay, `c:update-runtime`, `polar-sign runtime` and `RetrieveSecret` are (each section says which). It replaces the
+Status, 2026-10-14 (design agreed 2026-10-12). The observer's `credentials` section and its use are built (2026-10-14, step 3: `git/observe/src/credentials.rs`); the minimal controller is (2026-10-14, step 4: `git/controller`, it announces the `repositories` section, with no proposals, admission, status or backoff); the observer's per-repository status is built (2026-10-15, see "Status and checkpoints"; the controller does not read it yet); the full controller and the checkpoints are not; the `runtime` document type, replay, `c:update-runtime`, `polar-sign runtime` and `RetrieveSecret` are (each section says which). It replaces the
 git scheduler (deleted 2026-10-14; it had been migrated onto the builder on 2026-10-12 as it was, for the move only) and
 settles three things that `proposals.md` and `signed-configuration.md` left open for the git agents: who
 receives proposals, how a credential reaches the observer, and how per-repository settings travel.
@@ -99,9 +99,9 @@ later, at init: the CryptoActor retrieves (RetrieveSecret { name }) each credent
 
 The controller never sees a credential. A repository names the credential it wants (`"credential": "github-sei"`);
 the observer has the secret by that name (stored under its own identity as a prefix,
-`<identity>/github-sei`; `credentials-policy.md`). Decided 2026-10-14 (David), step 3: it does not fetch it back with `LoadSecret`. The section is replayed to the observer every time it starts, which registers the credentials again; a fetch could bring back an older copy of a credential whose newer version failed to register, or one the section has since withdrawn. If the schedules repository is unreachable when the observer starts, its repositories stay pending until it is back. A repository whose credential the observer lacks is
+`<identity>/github-sei`; `credentials-policy.md`). Decided 2026-10-14, step 3: it does not fetch it back with `LoadSecret`. The section is replayed to the observer every time it starts, which registers the credentials again; a fetch could bring back an older copy of a credential whose newer version failed to register, or one the section has since withdrawn. If the schedules repository is unreachable when the observer starts, its repositories stay pending until it is back. A repository whose credential the observer lacks is
 `pending: no credential` in the status it reports, and becomes active when the credential arrives. Decided
-2026-10-14 (David): the repository and its credential reach the observer by different routes, so the repository can
+2026-10-14: the repository and its credential reach the observer by different routes, so the repository can
 come first. Its worker does not fail: it stays pending and tries again when the `credentials` section changes and on
 its own frequency tick (the status event itself comes later). A credential a later version of the section leaves out
 is withdrawn: the CryptoActor drops it (`ReplaceSection`, `credentials-agent-architecture.md`) and a repository naming
@@ -184,7 +184,7 @@ Rules:
   capability list, so every consumer of cert-issuer capabilities has to be redeployed before a certificate
   carries it (old consumers reject an unknown variant as malformed). Cedar is asked first, per section
   (`update-runtime` on `Section::"<agent>/<section>"`, `authority-distribution.md`) and the capability is the
-  fallback. A credentials document needs no capability of its own, and none is planned (David, 2026-10-14).
+  fallback. A credentials document needs no capability of its own, and none is planned (2026-10-14).
 - **Admission specifications become a section.** `proposals.md` made `admission` a document type of its own,
   addressed to a proposal kind. Here it is the `admission` section of the controller's runtime documents, with
   the kind inside the body. One fewer type and one fewer path; the rules and the fail-closed behaviour are
@@ -213,7 +213,7 @@ them, in a `runtime` list, with the same habit of saying what each field is for.
       "body": {
         "repositories": { "list_of": {
           "url":            { "type": "https URL", "required": true,  "doc": "normalised; the key of the entry" },
-          "refs":           { "type": "list of full ref names", "required": false, "default": "the repository's default branch (decided 2026-10-14, David)" },
+          "refs":           { "type": "list of full ref names", "required": false, "default": "the repository's default branch (decided 2026-10-14)" },
           "frequency_secs": { "type": "whole number, at least 60", "required": false, "default": 900 },
           "max_depth":      { "type": "whole number", "required": false, "default": 100, "doc": "commits walked per ref, a safety bound" },
           "shallow_depth":  { "type": "whole number", "required": false, "doc": "depth of a shallow fetch; unset is a full incremental fetch" },
@@ -352,7 +352,7 @@ connections:
   has already applied. A request that arrives before the observer's initial scan has finished is answered once,
   when it has. **The graph is never read for this**: it is a projection of what was observed, and a state
   rebuilt from it could disagree with the repository. (A first version read the stored documents back from the
-  graph in the processor; David's rule that the graph is never authoritative removed it.)
+  graph in the processor; the rule that the graph is never authoritative removed it.)
 - **`CryptoMessage::RetrieveSecret { name }`: built 2026-10-12.** The crypto actor asks the credentials agent
   for a named secret and decrypts the reply with the agent's own escrow key, which stays in custody
   (`CryptoClient::retrieve_secret`, `Ok(None)` for a name nothing is stored under, the plaintext wiped on
@@ -370,7 +370,7 @@ connections:
 
 ## Sharding (not now)
 
-David does not expect more than one observer pod until production shows the need. The shape that keeps the door
+More than one observer pod is not expected until production shows the need. The shape that keeps the door
 open: the controller owns the assignment (repository to observer instance), the observer receives only what is
 assigned to it, and the configuration topic gains a field or an instance suffix. A PVC for the clone cache is
 one claim per pod, so it is decided together with the partitioning (by repository id), not before. The cache is
@@ -378,7 +378,7 @@ an emptyDir meanwhile.
 
 ## What changes in the code, in order, tests first
 
-**Amended 2026-10-14 (David):** the credential path through a permanent schedule is built first. It includes the
+**Amended 2026-10-14:** the credential path through a permanent schedule is built first. It includes the
 observer's `credentials` section and its use of the CryptoActor, the repository configuration naming a
 credential, the author's side (encrypting to the observer's key), a Cedar `store` action on the credentials
 agent, and a **minimal controller**: `git-repo-controller` on the builder, which declares the `repositories`
@@ -387,7 +387,7 @@ credential. The minimal controller **replaces the git scheduler** (which is remo
 cluster); it has no proposals, admission rules, status events or backoff. Those (steps 1 and 7 below, and the rest
 of step 6) come after, as path 2.
 
-**Decided 2026-10-14 (David), for the minimal controller:**
+**Decided 2026-10-14, for the minimal controller:**
 
 - **Discovery is dropped for now.** The git scheduler was the only subscriber of `polar.git.repositories.discovery`
   (the GitLab consumer publishes it). With it gone, nothing observes a discovered GitLab project until path 2, when
@@ -422,7 +422,7 @@ of step 6) come after, as path 2.
    decided under `admission`, reconciliation and backoff. The git scheduler was deleted with the minimal controller.
 7. **The Jira side** publishes `observe-repo` proposals (`proposals.md`, step 5).
 
-## Decisions (David, 2026-10-12)
+## Decisions (2026-10-12)
 
 1. A separate **git controller** is the control plane. The observer is an executor and the processor a graph
    writer; the git scheduler is retired.
@@ -439,7 +439,7 @@ of step 6) come after, as path 2.
 
 ## Policy for other receivers: decided
 
-Decided 2026-10-12 (David): every receiver evaluates locally, so the builder hosts the policy and permissions actors, and the credentials agent pushes updates to them with an event; see `authority-distribution.md`. The text below is the question as it was first posed.
+Decided 2026-10-12: every receiver evaluates locally, so the builder hosts the policy and permissions actors, and the credentials agent pushes updates to them with an event; see `authority-distribution.md`. The text below is the question as it was first posed.
 
 The credentials agent's policy decides who may have **a secret it holds**, and it evaluates that itself. There is
 a second kind of decision, made by every agent that receives a signed document or command: *may this signer make

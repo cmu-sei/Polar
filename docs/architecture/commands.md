@@ -23,7 +23,7 @@
 
 # Commands
 
-Status, 2026-10-11: design, decided (see the end); the build has begun with the shared `type` in signed payloads, the capability and the command verifier. Direction from David: a command is a one-time instruction from an
+Status, 2026-10-11: design, decided (see the end); the build has begun with the shared `type` in signed payloads, the capability and the command verifier. Direction: a command is a one-time instruction from an
 administrator to an agent, "make a backup of your data now", and above all it must be observable: that it was
 requested, by whom, that it was delivered, and what became of it. This is the third of the three kinds in
 `scheduling-kinds.md`; the sequence is `sequences/general/command_flow.mmd`.
@@ -224,7 +224,7 @@ template, and a command in any real agent (no agent declares one yet).
 3. The processor's ledger: dispatched before published, never dispatched twice, an unanswered command at expiry.
 4. The transport, then `polar-sign`.
 
-## Decisions (David, 2026-10-11: all four confirmed, repository transport first)
+## Decisions (2026-10-11: all four confirmed, repository transport first)
 
 1. **The capability.** A new `c:run-command`, coarse in version one with Cedar later. Confirm.
 2. **The transport.** Repository first, front door later (recommended), or the front door first.

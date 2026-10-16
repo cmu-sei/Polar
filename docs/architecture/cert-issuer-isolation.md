@@ -25,12 +25,12 @@
 
 Status, 2026-10-13: **the floor is built in code and tests and is not enabled anywhere; the rest is analysis.** Finding 2 below was confirmed
 at the handler level by a red test (`cert-issuer/server/tests/issue_extras_test.rs`, uncommitted until the fix
-lands); the rest is from reading the code and the cluster. Written at David's request after the secret-harness run showed that no agent can retrieve a
+lands); the rest is from reading the code and the cluster. Written at the maintainer's request after the secret-harness run showed that no agent can retrieve a
 secret (`RequesterCertificateNotFound`), which traced to agents not obtaining their certificates through the
 credentials agent. Supplements `credentials-agent-architecture.md` ("Core services vs. everything else") and
 `identity-and-bootstrap-update.md`.
 
-## The invariant David wants
+## The invariant wanted
 
 cert-issuer mints Polar's certificates and sits in front of the CA. Nothing may obtain a certificate from it without
 passing the controls the credentials agent applies (credential validation, renewal prevention, grants, the ledger
@@ -93,8 +93,8 @@ the git server's. Every other workload asks for a client certificate.
 
 ### Does the dev cluster enforce NetworkPolicy? No.
 
-The `u7s` cluster (`nix-usernetes`, one node, Kubernetes 1.33) is configured with the CNI chain `ptp` (ipMasq),
-`host-local`, `tuning` and `portmap`, in `flake.nix` (`cniConfig`, `10-u7s.conflist`). `kube-system` runs CoreDNS and
+The development cluster (one node, Kubernetes 1.33) is configured with the CNI chain `ptp` (ipMasq),
+`host-local`, `tuning` and `portmap`. `kube-system` runs CoreDNS and
 nothing that enforces policy; no Calico, Cilium, kube-router or similar is installed. The API server serves the
 `NetworkPolicy` resource, so **an applied policy would be accepted and silently not enforced**. That is worse than
 having none, because it reads as a control. (`flannel` is in the dev shell's package list but the CNI configuration
@@ -124,7 +124,7 @@ each rule was broken on purpose and caught.
 Not built: the `polar-init` observer mode (so nothing can enable the floor yet), the extension of `IssuanceRequest`
 for server certificates, NetworkPolicy emission and the canary, and everything under "The model" below.
 
-## The model (David, 2026-10-13)
+## The model (2026-10-13)
 
 The static configuration is a **capability floor, not a permissions ceiling.** It is what must be true for Polar to
 exist when the credentials agent is not available: a degraded state, meant to be brief and rare. The nominal state
@@ -168,7 +168,7 @@ only thing standing between a pod and the CA.
   - the **token's own identity** is on a short `bootstrap_identities` list and no client certificate is presented:
     the identities that cannot be issued through the credentials agent because they are what it needs to run.
     Candidates: `credentials-agent`, `credentials-agent-observer` (it must have a certificate to reach Cassini at
-    all) and `cassini`. David has said Cassini is questionable; the architecture document says it is a hard
+    all) and `cassini`. Cassini is questionable; the architecture document says it is a hard
     precondition, and the observer's relay path needs a working broker.
 - Anything else is refused at the door with `CallerNotAuthorized`, whatever its token says.
 - The consumer's cert-issuer client must be built with its own identity (`HandshakeClient::for_trust_mode_with_identity`,
@@ -214,14 +214,14 @@ only thing standing between a pod and the CA.
   the door refuses unauthenticated and unlisted callers, the extras are fixed, and `polar-init` is on the observer.
   The documented residual risk is that any pod can still open a connection to cert-issuer, and what it can do with
   that is limited to the bootstrap identities' tokens and `GET /ca`. The dev cluster could also gain enforcement
-  (add a policy engine to `nix-usernetes`), which is the cluster's owner's to decide.
+  (add a policy engine to it), which is the cluster's owner's to decide.
 
 ## Scope: `polar-init` through the observer (2026-10-13, read from the code; nothing built)
 
 What moving the 22 non-bootstrap workloads onto the credentials agent actually takes. Four of the findings below
 change the shape of the floor or of the existing issuance flow, so they are decisions, not just work.
 
-### Correction (David, 2026-10-13): an agent holds two certificates with two lifecycles
+### Correction (2026-10-13): an agent holds two certificates with two lifecycles
 
 The sections below were written as if a pod's identity were its client certificates. It is not:
 
@@ -272,11 +272,11 @@ over Cassini with the certificate it just obtained. The requests across the rend
    names. Cassini, Neo4j and the git server cannot be issued this way.
 3. **The observer is plain HTTP.** `axum::serve` on a `TcpListener`, no TLS. `polar-init` would send the pod's
    service-account token, a bearer credential, in a request body in the clear on the pod network, and receive the
-   certificate back. The token has to be protected before this carries it; David's decision is an ephemeral negotiation, not TLS and another certificate (below).
+   certificate back. The token has to be protected before this carries it; the decision is an ephemeral negotiation, not TLS and another certificate (below).
 4. **The ledger keeps one certificate record per `(identity, instance_binding)`**, which the retrieve handlers read
    for the requester's certificate. Server certificates and second client certificates have nowhere to go.
 
-### Proposed shape (revised 2026-10-13 after David's decisions)
+### Proposed shape (revised 2026-10-13 after the decisions)
 
 - **Several separate requests per pod, on the existing flow. No new request kind.** The consumer's two pod-instance
   rules change just enough: the renewal check and the "superseded" marking are keyed on the certificate **type**
@@ -404,7 +404,7 @@ over Cassini with the certificate it just obtained. The requests across the rend
 
 Phases 1 to 5 can be built and tested without touching the cluster. Phase 6 restarts every pod.
 
-### Settled by David, and what is left
+### Settled, and what is left
 
 Settled: several separate requests (no bundle); an ephemeral negotiation, not TLS on the observer; the allowlist
 lives with cert-issuer because cert-issuer reasons about policy itself; nothing special for agents not yet on the
@@ -431,12 +431,12 @@ negotiation, and what the builder's graph component reads for its Neo4j connecti
 Doing 2 before 4 breaks every workload's startup until 4 is done: the order above is one change set to deploy
 together, or 4's observer mode first behind a flag with 2 following.
 
-## Decisions (David, 2026-10-13)
+## Decisions (2026-10-13)
 
 - **Bootstrap set, for now:** `credentials-agent`, `credentials-agent-observer`, `cassini`. Tightening it is a
   follow-up.
-- **The dev cluster runs on the no-enforcement fallback** for now; adding a policy engine to `nix-usernetes` is a
-  follow-up patch to u7s.
+- **The dev cluster runs on the no-enforcement fallback** for now; adding a policy engine to it is a
+  follow-up.
 - **Starting point:** finding 2, as a red test, before any change.
 
 ## Open questions
@@ -450,7 +450,7 @@ together, or 4's observer mode first behind a flag with 2 following.
    token; it signs nothing, so it is a smaller concern than `/issue`.
 4. **Grants for workloads.** Today a Kubernetes credential needs none. Do you want workload certificates to carry
    `p:` permissions from grants (the mechanism exists), and is that what Neo4j's per-identity access is meant to read?
-5. ~~The dev cluster's enforcement~~ decided above: the fallback now, a u7s patch later.
+5. ~~The dev cluster's enforcement~~ decided above: the fallback now, a policy engine later.
 
 ## What I did not check
 

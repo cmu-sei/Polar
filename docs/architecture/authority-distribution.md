@@ -23,13 +23,13 @@
 
 # Authority distribution: policy and permissions pushed to the leaves
 
-Status, 2026-10-12: design, decided with David; no question is open. Built so far: the three-valued decision in
+Status, 2026-10-12: design, decided; no question is open. Built so far: the three-valued decision in
 `polar-policy`, groups and principals in `polar-permissions`, the `c:update-groups` capability, and in
 `credentials_agent_common` the `AuthorityUpdate` message with its signing and verification (`authority_update`) and
 the state a holder keeps (`authority_state`). The builder now hosts the actors and keeps them current (below). Since then the credentials agent publishes and answers snapshot requests (`authority_publisher.rs`) and its `policy` and `groups` sections feed it (`authority_sections.rs`); the aging and the revision notice below are not built. It supersedes the placement questions in `credentials-policy.md` and the "policy for other
 receivers" note in `git-controller.md`.
 
-## The principle (David, 2026-10-12)
+## The principle (2026-10-12)
 
 The credentials agent is the **ultimate decision authority** for policy and permissions, and it is designed to
 **push decisions out** to be consumed at the endpoints. It is not the runtime extension of the agents that need
@@ -56,7 +56,7 @@ authoritative update is accepted, an **event is raised** to every consumer of it
    sufficient for the credentials agent to sign its own unique work. Leaves pin that key and verify the signature
    on each `AuthorityUpdate`, so an update is believed because of who signed it and not because of who relayed it,
    and it can be stored and replayed. This covers ledger-originated changes (a revocation), which have no
-   author's document to forward. **One key, not two** (David, 2026-10-12): this key is already the identity whose
+   author's document to forward. **One key, not two** (2026-10-12): this key is already the identity whose
    loss is catastrophic and whose custody and recovery are designed accordingly; a second key would add a second
    thing to persist and recover for no gain, since the argument for separating them (a different rotation) does
    not apply to keys that are not rotated, and a leaked private key ends the model whichever uses it. The
@@ -77,13 +77,13 @@ authoritative update is accepted, an **event is raised** to every consumer of it
    against `c:update-policy` and `c:update-groups` and nothing else, always. Cedar never governs its own
    authorship, which avoids a mistaken `forbid` locking out every author and a rule admitting someone to write
    rules. A policy author is demoted by revoking their certificate, which the update signal makes immediate at
-   the leaves. (David, 2026-10-12.)
+   the leaves. (2026-10-12.)
 8. **Cadence.** The credentials agent republishes the current policy and principal data every half hour, or when
    something that must be known changes, whichever comes first, and the half-hour timer restarts whenever an update
    is pushed. Changes set the cadence, and agents rejuvenate often enough that a quiet cluster repairs itself
    at registration.
 
-## Aging, and being told to catch up (David, 2026-10-13)
+## Aging, and being told to catch up (2026-10-13)
 
 **Status: decided, not built.** What an agent holds is a cache of the credentials agent's authority, and the cache
 has a lifetime.

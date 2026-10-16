@@ -23,7 +23,7 @@
 
 # Signed configuration
 
-Status, 2026-10-11: design, agreed with David (including the single-file form below). Built so far: the `polar-signing` library (`src/agents/polar-signing`): the canonical encoding, the two-field document layout, sign, verify and the version-one authority rule, with tests. The ConfigurationActor verifies a signed document before it applies anything (`polar-agent-builder`: `ConfigurationHandle::submit`, `signed.rs`). Delivery is built too: the scheduler processor recognises a signed document, writes a `Configuration` node to the graph, and publishes a `ConfigurationNotification` on `agent.<name>.configuration`, and every builder agent subscribes to its own topic and hands what arrives to `submit`. Not built: `polar-sign`, the Dhall rendering, the outcome events, encryption of secrets, the git integration and everything else below. It is the
+Status, 2026-10-11: design, agreed (including the single-file form below). Built so far: the `polar-signing` library (`src/agents/polar-signing`): the canonical encoding, the two-field document layout, sign, verify and the version-one authority rule, with tests. The ConfigurationActor verifies a signed document before it applies anything (`polar-agent-builder`: `ConfigurationHandle::submit`, `signed.rs`). Delivery is built too: the scheduler processor recognises a signed document, writes a `Configuration` node to the graph, and publishes a `ConfigurationNotification` on `agent.<name>.configuration`, and every builder agent subscribes to its own topic and hands what arrives to `submit`. Not built: `polar-sign`, the Dhall rendering, the outcome events, encryption of secrets, the git integration and everything else below. It is the
 "signed configuration" item in `docs/architecture/configuration.md` section 6, and it sits in front of
 `ConfigurationHandle::apply` (`polar-agent-builder/src/configuration.rs`).
 
@@ -34,7 +34,7 @@ verifies the signature first. A writable topic is not authorization, and neither
 push reached. The signature is what ties a change to a person, and it travels with the change to
 the place that acts on it, so no relay in between has to be trusted.
 
-## Decision (David, 2026-10-11): both forms
+## Decision (2026-10-11): both forms
 
 1. **A signed document** is the trust root. The signature covers the whole configuration item and
    travels inside it: in the repository as one file, then through the observer, the processor and
@@ -182,7 +182,7 @@ A configuration item can carry credentials: the credentials agent's own item car
 permissions and the usernames and passwords to escrow for a named agent, and other agents' items can
 carry a new credential for that agent. A secret is never plaintext in the repository.
 
-**Decisions (David, 2026-10-14).**
+**Decisions (2026-10-14).**
 
 1. A secret travels as ciphertext inside a signed document addressed to the one agent that needs it. The
    2026-10-07 direction that other agents get secrets only as a name and key (`configuration.md` section 6) is
@@ -223,7 +223,7 @@ in the graph and passed over topics as it is.
 **Binding.** Each ciphertext is bound to its agent, field name and version as authenticated data, so it
 cannot be moved into another field or document. The signature already pins its place in the signed
 document; this pins it to its recipient. `EscrowedSecret` carries the context as AES-GCM authenticated data
-(`encrypt_bound`, `decrypt_bound`, built 2026-10-14). **Decided 2026-10-14 (David):** the context is the agent, the
+(`encrypt_bound`, `decrypt_bound`, built 2026-10-14). **Decided 2026-10-14:** the context is the agent, the
 section, the version, the entry's name and the field, joined by `|`, for example
 `git-repo-observer|credentials|1|github-sei|secret`, so each ciphertext fits exactly one entry. The section's
 validation restricts an entry's name to lowercase letters, digits and hyphens (as agent and section names
@@ -238,14 +238,13 @@ that needs the secret asks the CryptoActor to use it (a named operation).
 
 **The tool needs the recipient's public key.** The author's machine is not on Cassini, so it cannot ask for
 an escrow key. The credentials agent's HTTP front gets a read-only route, `POST /agent-escrow-key`
-(`{"identity": ...}`), that returns the agent's **escrow certificate**, not a bare key. **Decided 2026-10-15
-(David):** the route takes no authentication, because the gateway is plain HTTP (it cannot see a client
+(`{"identity": ...}`), that returns the agent's **escrow certificate**, not a bare key. **Decided 2026-10-15:** the route takes no authentication, because the gateway is plain HTTP (it cannot see a client
 certificate) and what it returns is public; the tool does the protecting. It checks that the certificate chains
 to the CA in the author's `ca.pem`, is valid now, may be used for key encipherment and names the agent asked
 for, and only then encrypts to its key. A swapped key on the way back fails that check. The earlier sentence
 here, "authenticated by the author's user certificate", could not be built as written and is replaced by this.
 
-**The author's flow (decided 2026-10-15, David).** One program, `polar-sign`, and nothing to remember:
+**The author's flow (decided 2026-10-15).** One program, `polar-sign`, and nothing to remember:
 
 1. `polar-sign template <agent> <section>` prints a file for that runtime section (or, with `--settings`, for the
    settings the agent lets a signed document change), with the defaults the agent declares, a comment on every
@@ -301,7 +300,7 @@ data, which the binding above now adds.
 ## Authority
 
 **Version one:** the signer's certificate must carry `c:update-configuration`. That is coarse: it permits
-signing any update, to any agent. It is a capability of its own, decided with David (2026-10-11): `c:update-policy`
+signing any update, to any agent. It is a capability of its own, decided (2026-10-11): `c:update-policy`
 is for Cedar policy updates, so a person who changes configuration needs no policy privilege and the reverse, unless
 the repository holds both. It is checked by a small pure function with tests, which also check that
 `c:update-policy` alone is refused for configuration.
