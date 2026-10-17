@@ -155,17 +155,23 @@ pub enum ArtifactNodeKey {
     OCIRegistry {
         hostname: String,
     },
-    /// A human-facing ref (tag or digest), not identity.
-    ContainerImageRef {
-        normalized: String,
-    },
     /// Canonical OCI artifact (manifest / index)
     OCIArtifact {
         digest: String, // sha256:...
     },
-    /// Content-addressed filesystem layer
+    /// A layer blob as a registry stores it, keyed by its *compressed* digest
+    /// (the manifest's layer descriptor). Written from resolver-fetched
+    /// manifests.
     OCILayer {
         digest: String, // sha256:...
+    },
+    /// A layer as the image config identifies it, keyed by its *uncompressed*
+    /// diff ID (`rootfs.diff_ids`) — what SBOM tools such as syft reference.
+    /// Distinct from `OCILayer`: the same layer has a different digest in each
+    /// space, so they must not share a label. Both hang off the image's
+    /// `OCIArtifact` with an `order`; layer i and diff ID i are the same layer.
+    OCILayerDiffId {
+        diff_id: String, // sha256:...
     },
     /// OCI config object
     OCIConfig {
@@ -235,10 +241,6 @@ impl GraphNodeKey for ArtifactNodeKey {
                 format!("({prefix}:OCIRegistry {{ hostname: ${prefix}_hostname }})"),
                 vec![(format!("{prefix}_hostname"), hostname.clone().into())],
             ),
-            Self::ContainerImageRef { normalized } => (
-                format!("({prefix}:ContainerImage {{ normalized: ${prefix}_normalized }})"),
-                vec![(format!("{prefix}_normalized"), normalized.clone().into())],
-            ),
 
             Self::OCIArtifact { digest, .. } => (
                 format!("({prefix}:OCIArtifact {{ digest: ${prefix}_digest }})"),
@@ -248,6 +250,10 @@ impl GraphNodeKey for ArtifactNodeKey {
             Self::OCILayer { digest } => (
                 format!("({prefix}:OCILayer {{ digest: ${prefix}_digest }})"),
                 vec![(format!("{prefix}_digest"), digest.clone().into())],
+            ),
+            Self::OCILayerDiffId { diff_id } => (
+                format!("({prefix}:OCILayerDiffId {{ diff_id: ${prefix}_diff_id }})"),
+                vec![(format!("{prefix}_diff_id"), diff_id.clone().into())],
             ),
             Self::OCIConfig { digest, .. } => (
                 format!("({prefix}:OCIConfig {{ digest: ${prefix}_digest }})"),

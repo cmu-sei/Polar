@@ -11,6 +11,8 @@
 # so rendering must happen in-place rather than into a separate output tree.
 # ===========================================================================
 
+use logging.nu [log-info log-warn log-error]
+
 const DHALL_COMPONENT = "dhall"
 # Render all .dhall files in a single directory to .yaml in the same directory.
 # Non-.dhall files are ignored. Returns a list of { src, out, success } records.

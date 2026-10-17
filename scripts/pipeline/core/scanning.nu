@@ -58,11 +58,11 @@ const COMPONENT = "scan"
 export def resolve-package-purl [index: table, name: string, version: string]: nothing -> any {
     if ($name | is-empty) { return null }
 
-    let exact = ($index | where {|r| $r.name == $name and $r.version == $version })
+    let exact = $index | where {|r| $r.name == $name and $r.version == $version }
     if ($exact | is-not-empty) { return ($exact | first | get purl) }
 
-    let nk = ($name | str downcase | str replace --all "_" "-")
-    let norm = ($index | where {|r| $r.name_norm == $nk and $r.version == $version })
+    let nk = $name | str downcase | str replace --all "_" "-"
+    let norm = $index | where {|r| $r.name_norm == $nk and $r.version == $version }
     if ($norm | is-not-empty) { return ($norm | first | get purl) }
 
     null
@@ -81,11 +81,11 @@ export def resolve-package-purl [index: table, name: string, version: string]: n
 # Roundup to 1 decimal place, per the CVSS v3.1 Appendix A definition
 # (integer arithmetic to avoid binary-float drift).
 def roundup-1dp [x: float]: nothing -> float {
-    let int_input = (($x * 100000) | math round | into int)
+    let int_input = $x * 100000 | math round | into int
     if ($int_input mod 10000) == 0 {
         ($int_input / 100000)
     } else {
-        (((($int_input / 10000) | math floor | into int) + 1) / 10)
+        (($int_input / 10000 | math floor | into int) + 1) / 10
     }
 }
 
@@ -96,23 +96,36 @@ export def cvss3-base-score [vector: string]: nothing -> any {
 
     # "CVSS:3.1/AV:N/AC:L/..." -> { AV: "N", AC: "L", ... }
     let m = ($vector | split row "/" | skip 1 | reduce -f {} {|it, acc|
-        let kv = ($it | split row ":")
+        let kv = $it | split row ":"
         if ($kv | length) == 2 { $acc | insert $kv.0 $kv.1 } else { $acc }
     })
 
-    let scope_changed = (($m.S? | default "U") == "C")
+    let scope_changed = ($m.S? | default "U") == "C"
 
-    let av = ({N: 0.85, A: 0.62, L: 0.55, P: 0.2}   | get -o ($m.AV? | default ""))
-    let ac = ({L: 0.77, H: 0.44}                    | get -o ($m.AC? | default ""))
+    let av = ({
+        N: 0.85
+        A: 0.62
+        L: 0.55
+        P: 0.2
+    } | get -o ($m.AV? | default ""))
+    let ac = {L: 0.77, H: 0.44} | get -o ($m.AC? | default "")
     let pr = (if $scope_changed { {N: 0.85, L: 0.68, H: 0.5} } else { {N: 0.85, L: 0.62, H: 0.27} }
               | get -o ($m.PR? | default ""))
-    let ui = ({N: 0.85, R: 0.62}                    | get -o ($m.UI? | default ""))
-    let ci = ({H: 0.56, L: 0.22, N: 0.0}            | get -o ($m.C? | default ""))
-    let ii = ({H: 0.56, L: 0.22, N: 0.0}            | get -o ($m.I? | default ""))
-    let ai = ({H: 0.56, L: 0.22, N: 0.0}            | get -o ($m.A? | default ""))
+    let ui = {N: 0.85, R: 0.62} | get -o ($m.UI? | default "")
+    let ci = {H: 0.56, L: 0.22, N: 0.0} | get -o ($m.C? | default "")
+    let ii = {H: 0.56, L: 0.22, N: 0.0} | get -o ($m.I? | default "")
+    let ai = {H: 0.56, L: 0.22, N: 0.0} | get -o ($m.A? | default "")
 
     # Any missing/unknown metric → we can't score it honestly.
-    if ([$av $ac $pr $ui $ci $ii $ai] | any {|x| $x == null }) { return null }
+    if ([
+        $av
+        $ac
+        $pr
+        $ui
+        $ci
+        $ii
+        $ai
+    ] | any {|x| $x == null }) { return null }
 
     let iss = (1 - ((1 - $ci) * (1 - $ii) * (1 - $ai)))
     let impact = if $scope_changed {
@@ -125,7 +138,10 @@ export def cvss3-base-score [vector: string]: nothing -> any {
     let exploitability = (8.22 * $av * $ac * $pr * $ui)
     let combined = ($impact + $exploitability)
     let raw = if $scope_changed {
-        ([(1.08 * $combined) 10.0] | math min)
+        ([
+            (1.08 * $combined)
+            10.0
+        ] | math min)
     } else {
         ([$combined 10.0] | math min)
     }
@@ -133,12 +149,12 @@ export def cvss3-base-score [vector: string]: nothing -> any {
 }
 
 # Map a base score to the CVSS v3.1 qualitative band.
-export def cvss-band [score: any]: nothing -> string {
-    if $score == null   { return "unknown" }
-    if $score == 0      { return "none" }
-    if $score < 4.0     { return "low" }
-    if $score < 7.0     { return "medium" }
-    if $score < 9.0     { return "high" }
+export def cvss-band [score]: nothing -> string {
+    if $score == null { return "unknown" }
+    if $score == 0 { return "none" }
+    if $score < 4.0 { return "low" }
+    if $score < 7.0 { return "medium" }
+    if $score < 9.0 { return "high" }
     "critical"
 }
 
@@ -172,50 +188,61 @@ export def cvss-band [score: any]: nothing -> string {
 # One finding entry -> a normalized record, or null if it can't be identified
 # (no advisory — currently only `yanked` entries lack one).
 def normalize-audit-entry [entry: record, index: table, default_kind: string]: nothing -> any {
-    let adv = ($entry.advisory? | default null)
+    let adv = $entry.advisory? | default null
     if $adv == null {
         return null
     }
 
-    let pkg     = ($entry.package? | default {})
-    let name    = ($pkg.name?    | default "")
-    let version = ($pkg.version? | default "")
+    let pkg = $entry.package? | default {}
+    let name = $pkg.name? | default ""
+    let version = $pkg.version? | default ""
 
-    let cvss_vec = ($adv.cvss? | default null)
-    let score    = if ($cvss_vec != null) { (cvss3-base-score $cvss_vec) } else { null }
+    let cvss_vec = $adv.cvss? | default null
+    let score = if $cvss_vec != null { (cvss3-base-score $cvss_vec) } else { null }
 
-    let aliases = ($adv.aliases? | default [])
-    let cve  = ($aliases | where {|a| ($a | str upcase) | str starts-with "CVE" }  | first | default null)
-    let ghsa = ($aliases | where {|a| ($a | str upcase) | str starts-with "GHSA" } | first | default null)
+    let aliases = $adv.aliases? | default []
+    let cve = (
+        $aliases
+        | where {|a| ($a | str upcase) | str starts-with "CVE" }
+        | first
+        | default null
+    )
+    let ghsa = (
+        $aliases
+        | where {|a| ($a | str upcase) | str starts-with "GHSA" }
+        | first
+        | default null
+    )
 
     # `patched`/`unaffected` are semver CONSTRAINTS (">=0.6.1"), not concrete
     # versions — do not present these as "the version to upgrade to" without
     # the comparator; a range is not a target.
-    let patched     = ($entry.versions?.patched?    | default [])
-    let unaffected  = ($entry.versions?.unaffected? | default [])
+    let patched = $entry.versions?.patched? | default []
+    let unaffected = $entry.versions?.unaffected? | default []
 
     {
-        identifier:            ($adv.id? | default "")
-        kind:                  ($entry.kind? | default $default_kind)   # vulnerability | unmaintained | unsound | notice
-        cve_id:                $cve
-        ghsa_id:               $ghsa
-        severity:              (cvss-band $score)   # CVSS-derived; "unknown" absent CVSS — expect this often. Filter on `kind`, not just severity.
-        scanner:                "cargo-audit"
-        affected_package:      (resolve-package-purl $index $name $version)   # null if unresolved
-        patched_constraint:    ($patched    | first | default null)   # e.g. ">=0.6.1" — a range, not a version
-        unaffected_constraint: ($unaffected | first | default null)   # e.g. "<0.9.0"
-        advisory_url:          ($adv.url? | default null)
+        identifier: ($adv.id? | default "")
+        kind: ($entry.kind? | default $default_kind) # vulnerability | unmaintained | unsound | notice
+        cve_id: $cve
+        ghsa_id: $ghsa
+        severity: (cvss-band $score) # CVSS-derived; "unknown" absent CVSS — expect this often. Filter on `kind`, not just severity.
+        scanner: "cargo-audit"
+        affected_package: (resolve-package-purl $index $name $version) # null if unresolved
+        patched_constraint: ($patched | first | default null) # e.g. ">=0.6.1" — a range, not a version
+        unaffected_constraint: ($unaffected | first | default null) # e.g. "<0.9.0", 
+        advisory_url: ($adv.url? | default null)
 
         # Carried for logging / later enrichment; the current processor
         # ignores these fields. cvss keeps the raw vector so an enrichment
         # pass can reband without re-running the scanner.
-        cvss:                  $cvss_vec
-        package_name:          $name
-        package_version:       $version
+        cvss: $cvss_vec
+        package_name: $name
+        package_version: $version
     }
 }
 
 export def parse-cargo-audit [report: record, index: table]: nothing -> list<record> {
+
     # cargo-deny's --audit-compatible-output puts findings as a BARE LIST
     # directly under `vulnerabilities` — no {found, count, list} wrapper the
     # way cargo-audit itself shapes it. Confirmed against a real capture.
@@ -246,7 +273,6 @@ export def parse-cargo-audit [report: record, index: table]: nothing -> list<rec
     ($vuln_findings | append $warning_findings)
     | where {|f| $f != null and ($f.identifier | is-not-empty) }
 }
-
 
 # ---------------------------------------------------------------------------
 # Effectful: run the vulnerability scan, normalize, resolve, emit.
@@ -295,9 +321,7 @@ export def parse-cargo-audit [report: record, index: table]: nothing -> list<rec
 #
 # Returns the normalized findings (for pipeline summaries / assertions).
 # ---------------------------------------------------------------------------
-export def run-vulnerability-scan [
-    manifest_path: path
-]: nothing -> list<record> {
+export def run-vulnerability-scan [manifest_path: path]: nothing -> list<record> {
     if not ($manifest_path | path exists) {
         log-warn $"vulnerability scan: manifest not found at ($manifest_path) — skipping" --component $COMPONENT
         return []
@@ -309,9 +333,13 @@ export def run-vulnerability-scan [
     }
 
     let args = [
-        deny --manifest-path $manifest_path
-        --format json
-        check advisories
+        deny
+        --manifest-path
+        $manifest_path
+        --format
+        json
+        check
+        advisories
         --audit-compatible-output
     ]
 
@@ -321,20 +349,22 @@ export def run-vulnerability-scan [
     # cargo-deny, like cargo-audit before it, exits non-zero when it FINDS
     # advisories — that's the success path, not a failure. Parseable JSON on
     # stdout is the reliable success signal.
-    let report = try { $res.stdout | from json } catch {
-        let msg = ($res.stderr | default $res.stdout | str trim)
+    let report = try {
+        $res.stdout | from json
+    } catch {
+        let msg = $res.stderr | default $res.stdout | str trim
         log-warn $"cargo-deny produced no parseable JSON (exit ($res.exit_code)): ($msg)" --component $COMPONENT
         return []
     }
 
-    let dep_count = ($report.lockfile.dependency-count | default '?')
+    let dep_count = $report.lockfile.dependency-count | default '?'
 
     log-info $"vulnerability scan: auditing ($dep_count) locked deps \(advisory db freshness unavailable from cargo-deny's output\)" --component $COMPONENT
 
     # Entries with no advisory (currently: yanked crates) can't be linked to
     # a RUSTSEC id and are dropped by parse-cargo-audit. Surface what was
     # dropped so "8 findings" doesn't quietly become "7" with no trace.
-    let yanked = ($report.warnings?.yanked? | default [])
+    let yanked = $report.warnings?.yanked? | default []
     for y in $yanked {
         log-warn $"yanked \(no advisory, not emitted as a Finding — no keying scheme yet\): ($y.package.name)@($y.package.version)" --component $COMPONENT
     }
@@ -342,7 +372,7 @@ export def run-vulnerability-scan [
     let findings = (parse-cargo-audit $report $index)
 
     for f in $findings {
-        let has_package = ($f.affected_package | default "" | is-not-empty)
+        let has_package = $f.affected_package | default "" | is-not-empty
         if not $has_package {
             # Unresolved = the vulnerable crate isn't in the SBOM closure.
             # Almost always a dependency-scope mismatch. Emitted with no
@@ -369,8 +399,18 @@ export def run-vulnerability-scan [
         }
     }
 
-    let linked = ($findings | where {|f| ($f.affected_package | default "" | is-not-empty) } | length)
-    let by_kind = ($findings | group-by kind | transpose kind entries | each {|k| $"($k.kind)=($k.entries | length)" } | str join ", ")
+    let linked = (
+        $findings
+        | where {|f| ($f.affected_package | default "" | is-not-empty) }
+        | length
+    )
+    let by_kind = (
+        $findings
+        | group-by kind
+        | transpose kind entries
+        | each {|k| $"($k.kind)=($k.entries | length)" }
+        | str join ", "
+    )
     log-info $"vulnerability scan: ($findings | length) finding\(s\) \(($by_kind)\), ($linked) linked to SBOM package\(s\)" --component $COMPONENT
 
     $findings

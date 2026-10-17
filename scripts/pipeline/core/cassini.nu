@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # Cassini
 # ---------------------------------------------------------------------------
-use logging.nu [log-info log-debug log-error]
+use logging.nu [log-info log-debug log-warn log-error]
 
 export const SUBJECT_PREFIX = "polar.provenance"
 export const BUILD_EVENTS_TOPIC = $"($SUBJECT_PREFIX).events"
@@ -126,7 +126,7 @@ export const CASSINI_SESSION_ENV = "POLAR_CASSINI_SESSION_ID"
 # 3 above. Falls back to a random id outside CI (e.g. running this module
 # locally for development).
 def cassini-base-path []: nothing -> string {
-    let id = ($env.CI_JOB_ID? | default (random uuid))
+    let id = $env.CI_JOB_ID? | default (random uuid)
     $"/tmp/cassini-pipeline-($id)"
 }
 
@@ -163,9 +163,20 @@ export def --env start-cassini-daemon [--timeout: int = 30]: nothing -> record {
             # process this is by killing it — just use it, and make sure
             # stop-cassini-daemon knows not to touch it.
             log-warn $"a daemon is already answering at ($socket) — this should not happen with a per-job socket path \(duplicate CI_JOB_ID, or CASSINI_DAEMON_SOCK set externally?\); reusing it rather than guessing whose it is" --component cassini
-            let pid = (try { open --raw $pid_path | str trim | into int } catch { 0 })
+            let pid = (
+                try {
+                    open --raw $pid_path | str trim | into int
+                } catch { 0 }
+            )
             $env.CASSINI_DAEMON_SOCK = $socket
-            return {socket: $socket, queue: $queue, log: $log, pid: $pid, job_id: -1, owned: false}
+            return {
+                socket: $socket
+                queue: $queue
+                log: $log
+                pid: $pid
+                job_id: -1
+                owned: false
+            }
         }
 
         log-warn $"removing stale cassini state at ($base).\{sock,pid\} — leftover from a job that didn't clean up" --component cassini
@@ -200,13 +211,22 @@ export def --env start-cassini-daemon [--timeout: int = 30]: nothing -> record {
 
     if not $ready {
         log-error $"cassini daemon did not become ready within ($timeout)s — log at ($log):" --component cassini
-        try { open --raw $log | lines | last 20 | each {|l| log-error $l --component cassini} }
+        try {
+            open --raw $log | lines | last 20 | each {|l| log-error $l --component cassini}
+        }
         try { job kill $job_id }
-        try { rm --force $socket; rm --force $pid_path }
+        try {
+            rm --force $socket
+            rm --force $pid_path
+        }
         error make {msg: $"cassini daemon startup timeout \(see ($log)\)"}
     }
 
-    let pid = (try { open --raw $pid_path | str trim | into int } catch { 0 })
+    let pid = (
+        try {
+            open --raw $pid_path | str trim | into int
+        } catch { 0 }
+    )
     if $pid == 0 {
         log-warn "cassini daemon is reachable but its pidfile is missing/unreadable — stop-cassini-daemon will fall back to `job kill`" --component cassini
     }
@@ -214,7 +234,14 @@ export def --env start-cassini-daemon [--timeout: int = 30]: nothing -> record {
     $env.CASSINI_DAEMON_SOCK = $socket
     log-info $"cassini daemon ready \(pid ($pid)\)" --component cassini
 
-    {socket: $socket, queue: $queue, log: $log, pid: $pid, job_id: $job_id, owned: true}
+    {
+        socket: $socket
+        queue: $queue
+        log: $log
+        pid: $pid
+        job_id: $job_id
+        owned: true
+    }
 }
 
 # Stop a daemon started by start-cassini-daemon. Pass the record it returned.
@@ -249,7 +276,10 @@ export def stop-cassini-daemon [daemon: record, --timeout: int = 3]: nothing -> 
     if not $gone {
         log-warn "cassini socket still present after SIGTERM — force killing" --component cassini
         try { kill --force $daemon.pid }
-        try { rm --force $daemon.socket; rm --force ($daemon.socket | str replace ".sock" ".pid") }
+        try {
+            rm --force $daemon.socket
+            rm --force ($daemon.socket | str replace ".sock" ".pid")
+        }
     }
 
     try { job kill $daemon.job_id }

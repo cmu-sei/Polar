@@ -1,4 +1,3 @@
-
 # state.nu — pipeline-scoped singleton state
 #
 # Process-scoped key/value + relational state for the pipeline, backed by
@@ -25,11 +24,11 @@
 
 use ./logging.nu *
 
-const COMPONENT       = "state"
-const TABLE           = "pipeline"
-const SBOM_TABLE      = "sbom_lookup"
-const SBOM_PKG_TABLE  = "sbom_packages"
-const IMG_TABLE       = "image_tarball"
+const COMPONENT = "state"
+const TABLE = "pipeline"
+const SBOM_TABLE = "sbom_lookup"
+const SBOM_PKG_TABLE = "sbom_packages"
+const IMG_TABLE = "image_tarball"
 
 # ---------------------------------------------------------------------------
 # stor helpers
@@ -70,27 +69,26 @@ export def init-pipeline-state [build_id: string]: nothing -> nothing {
 
     ensure-table $TABLE {build_id: str}
     # Replace any prior build_id so a second init in the same process is safe.
-    try { stor open | query db $"DELETE FROM ($TABLE)" }
+    try {
+        stor open | query db $"DELETE FROM ($TABLE)"
+    }
     stor insert --table-name $TABLE --data-record {build_id: $build_id}
 
     ensure-table $SBOM_TABLE {
-        name:            str
-        content_hash:    str
-        root_purl:       str
+        name: str
+        content_hash: str
+        root_purl: str
         component_count: int
-        edge_count:      int
+        edge_count: int
     }
     ensure-table $SBOM_PKG_TABLE {
-        name:                str
-        name_norm:           str
-        version:             str
-        purl:                str
-        sbom_content_hash:   str
+        name: str
+        name_norm: str
+        version: str
+        purl: str
+        sbom_content_hash: str
     }
-    ensure-table $IMG_TABLE {
-        image_name:   str
-        tarball_hash: str
-    }
+    ensure-table $IMG_TABLE {image_name: str, tarball_hash: str}
 
     log-debug "pipeline state initialized" --component $COMPONENT
 }
@@ -136,7 +134,9 @@ export def record-sbom [
     component_count: int
     edge_count: int
 ]: nothing -> table {
-    try { stor open | query db "DELETE FROM sbom_lookup WHERE name = :n" --params {n: $name} }
+    try {
+        stor open | query db "DELETE FROM sbom_lookup WHERE name = :n" --params {n: $name}
+    }
     stor insert --table-name $SBOM_TABLE --data-record {
         name:            $name
         content_hash:    $content_hash
@@ -154,7 +154,9 @@ export def get-sbom-info [name: string]: nothing -> any {
         | ( query db "SELECT name, content_hash, root_purl, component_count, edge_count
                     FROM sbom_lookup WHERE name = :n LIMIT 1" --params {n: $name} )
     } catch { [] }
-    if ($rows | is-empty) { null } else { $rows | first }
+    if ($rows | is-empty) { null } else {
+        $rows | first
+    }
 }
 
 # Every root purl analyzed this run. The set the manifest cross-check tests
@@ -182,15 +184,19 @@ export def check-manifest-purl [manifest_purl: string]: nothing -> record {
     }
 
     let known = (get-sbom-root-purls)
-    if ($manifest_purl in $known) {
+    if $manifest_purl in $known {
         return {status: "match", manifest_purl: $manifest_purl, analyzed_purl: $manifest_purl}
     }
 
     # Same crate name, different version? Split "pkg:cargo/<name>@<version>".
-    let stem = ($manifest_purl | split row "@" | first)
-    let same_crate = ($known | where {|p| ($p | split row "@" | first) == $stem })
+    let stem = $manifest_purl | split row "@" | first
+    let same_crate = $known | where {|p| ($p | split row "@" | first) == $stem }
     if ($same_crate | is-not-empty) {
-        return {status: "version_drift", manifest_purl: $manifest_purl, analyzed_purl: ($same_crate | first)}
+        return {
+            status: "version_drift"
+            manifest_purl: $manifest_purl
+            analyzed_purl: ($same_crate | first)
+        }
     }
 
     {status: "absent", manifest_purl: $manifest_purl, analyzed_purl: null}
@@ -245,7 +251,7 @@ export def lookup-package-purl [name: string, version: string]: nothing -> any {
 
     let norm = try {
         stor open
-        |  ( query db "SELECT purl FROM sbom_packages WHERE name_norm = :n AND version = :v LIMIT 1"
+        | ( query db "SELECT purl FROM sbom_packages WHERE name_norm = :n AND version = :v LIMIT 1"
             --params {n: (norm-name $name), v: $version} )
     } catch { [] }
     if ($norm | is-not-empty) { return ($norm | first | get purl) }
@@ -276,7 +282,9 @@ export def get-all-sbom-packages []: nothing -> table {
 
 # Idempotent per image_name.
 export def record-tarball-hash [image_name: string, tarball_hash: string]: nothing -> table {
-    try { stor open | query db "DELETE FROM image_tarball WHERE image_name = :n" --params {n: $image_name} }
+    try {
+        stor open | query db "DELETE FROM image_tarball WHERE image_name = :n" --params {n: $image_name}
+    }
     stor insert --table-name $IMG_TABLE --data-record {
         image_name:   $image_name
         tarball_hash: $tarball_hash
@@ -291,7 +299,9 @@ export def get-tarball-hash [image_name: string]: nothing -> string {
         stor open
         | query db "SELECT tarball_hash FROM image_tarball WHERE image_name = :n LIMIT 1" --params {n: $image_name}
     } catch { [] }
-    if ($rows | is-empty) { null } else { $rows | first | get tarball_hash }
+    if ($rows | is-empty) { null } else {
+        $rows | first | get tarball_hash
+    }
 }
 
 # ---------------------------------------------------------------------------

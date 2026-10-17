@@ -1,3 +1,4 @@
+use logging.nu [log-info log-warn]
 
 export def process-sboms [
     files: list<record>
@@ -5,6 +6,7 @@ export def process-sboms [
     artifact_dir: path = "pipeline-out"
     --component: string = ""
 ]: nothing -> list<record> {
+
     # Now read whatever landed in artifact_dir.
     let sbom_files = (
         ls $artifact_dir
@@ -81,12 +83,14 @@ export def generate-image-sbom [
         error make {msg: $"Image tarball not found: ($tarball_path) (resolved to ($real_path))"}
     }
 
-    let stem = if ($name | is-not-empty) { $name } else { (
+    let stem = if ($name | is-not-empty) { $name } else {
+        (
         $tarball_path
         | path basename
         | str replace ".tar.gz" ""
         | str replace ".tar" ""
-    ) }
+    )
+    }
     let sbom_filename = $"($stem).image.cdx.json"
     let sbom_path = $output_dir | path join $sbom_filename
 
@@ -241,22 +245,40 @@ export def process-image-sbom [sbom_path: path, image_name: string, --oci_metada
 # without knowing the generator's intent — this is a readable capture, not
 # a machine-evaluable SPDX expression. Null when the component declares no
 # license, which is real and common — not treated as a parse failure.
+# The SHA-256 cargo-cyclonedx records for a component. For registry crates this
+# is the Cargo.lock `checksum` — the sha256 of the published .crate archive —
+# which is exactly what the orchestrator's init container verifies before
+# analyzing a dependency. Null for path/git dependencies, which have no archive.
+def archive-sha256 [comp: record]: nothing -> any {
+    let hash = (
+        $comp.hashes?
+        | default []
+        | where {|h| ($h.alg? | default "") == "SHA-256" }
+        | get -o 0.content
+    )
+    if ($hash | is-empty) { null } else {
+        $hash | str downcase
+    }
+}
+
 def normalize-license [comp: record]: nothing -> any {
-    let entries = ($comp.licenses? | default [])
+    let entries = $comp.licenses? | default []
     if ($entries | is-empty) { return null }
 
     let parts = ($entries | each {|l|
-        let expr = ($l.expression? | default "")
+        let expr = $l.expression? | default ""
         if ($expr | is-not-empty) {
             $expr
         } else {
-            let id = ($l.license?.id? | default "")
-            let name = ($l.license?.name? | default "")
+            let id = $l.license?.id? | default ""
+            let name = $l.license?.name? | default ""
             if ($id | is-not-empty) { $id } else if ($name | is-not-empty) { $name } else { "" }
         }
     } | where { ($in | is-not-empty) })
 
-    if ($parts | is-empty) { null } else { $parts | str join ", " }
+    if ($parts | is-empty) { null } else {
+        $parts | str join ", "
+    }
 }
 
 # Best-effort dependency source classification, derived from purl qualifiers
@@ -293,6 +315,7 @@ export def extract-graph-fragment [doc: record, artifact_content_hash: string]: 
             version: ($root_component.version? | default "")
             component_type: ($root_component.type? | default "application")
             license: (normalize-license $root_component)
+            archive_sha256: (archive-sha256 $root_component)
             source: (derive-source ($root_component.purl? | default ""))
         }
     } else {
@@ -317,6 +340,7 @@ export def extract-graph-fragment [doc: record, artifact_content_hash: string]: 
             version: ($c.version? | default "")
             component_type: ($c.type? | default "library")
             license: (normalize-license $c)
+            archive_sha256: (archive-sha256 $c)
             source: (derive-source ($c.purl? | default ""))
         }
     } | where { ($in.purl | is-not-empty) or ($in.name | is-not-empty) })

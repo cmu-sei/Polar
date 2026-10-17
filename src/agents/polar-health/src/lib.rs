@@ -51,7 +51,8 @@ pub const DEFAULT_JITTER_WINDOW_SECS: u64 = 180;
 /// How long a graph-expecting agent may go without a real successful graph
 /// operation (canary or app-level write) before HealthCheckActor fails itself.
 /// Covers both "never connected" and "was connected, then went dark."
-pub const DEFAULT_GRAPH_DEADLINE_SECS: u64 = 120;
+/// TODO: Idle processors are killed prematurely if left for too long, even if graph connection is live. SEE: https://github.com/cmu-sei/Polar/issues/246
+pub const DEFAULT_GRAPH_DEADLINE_SECS: u64 = u64::MAX;
 
 // ---------------------------------------------------------------------------
 // HealthStatus — typed status enum
@@ -249,8 +250,8 @@ impl DepCertEndpoint {
 
         let addr = format!("{}:{}", self.host, self.port);
 
-        let stream = TcpStream::connect(&addr)
-            .map_err(|e| format!("failed to connect to {addr}: {e}"))?;
+        let stream =
+            TcpStream::connect(&addr).map_err(|e| format!("failed to connect to {addr}: {e}"))?;
 
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -297,9 +298,9 @@ impl DepCertEndpoint {
             .map_err(|e| format!("system clock error: {e}"))?
             .as_secs() as i64;
 
-        let remaining = not_after.checked_sub(now).ok_or_else(|| {
-            format!("certificate timestamp arithmetic overflow for {addr}")
-        })?;
+        let remaining = not_after
+            .checked_sub(now)
+            .ok_or_else(|| format!("certificate timestamp arithmetic overflow for {addr}"))?;
 
         if remaining < self.min_ttl_secs {
             Err(format!(
@@ -431,7 +432,10 @@ impl std::fmt::Debug for HealthCheckArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HealthCheckArgs")
             .field("expects_graph", &self.expects_graph)
-            .field("rejuvenation_threshold_secs", &self.rejuvenation_threshold_secs)
+            .field(
+                "rejuvenation_threshold_secs",
+                &self.rejuvenation_threshold_secs,
+            )
             .field("dep_cert_endpoints", &self.dep_cert_endpoints)
             .field("prepare_shutdown_port", &"<OutputPort<()>>")
             .finish()
@@ -479,20 +483,19 @@ impl HealthCheckActorState {
         }
 
         for path in &self.cert_paths {
-            let data = fs::read(path)
-                .map_err(|e| format!("failed to read cert '{path}': {e}"))?;
+            let data = fs::read(path).map_err(|e| format!("failed to read cert '{path}': {e}"))?;
 
-            let (_, pem) = parse_x509_pem(&data)
-                .map_err(|e| format!("failed to parse PEM '{path}': {e}"))?;
+            let (_, pem) =
+                parse_x509_pem(&data).map_err(|e| format!("failed to parse PEM '{path}': {e}"))?;
 
             let cert = pem
                 .parse_x509()
                 .map_err(|e| format!("failed to parse x509 in '{path}': {e}"))?;
 
             let not_after = cert.validity().not_after.timestamp();
-            let secs_remaining = not_after.checked_sub(now).ok_or_else(|| {
-                format!("certificate timestamp arithmetic overflow for '{path}'")
-            })?;
+            let secs_remaining = not_after
+                .checked_sub(now)
+                .ok_or_else(|| format!("certificate timestamp arithmetic overflow for '{path}'"))?;
 
             if secs_remaining < self.expiry_threshold_secs {
                 return Err(format!(
@@ -510,10 +513,7 @@ impl HealthCheckActorState {
     /// Returns the minimum seconds remaining across all own certs,
     /// or `None` if no cert paths are configured or none are parseable.
     fn min_cert_ttl(&self) -> Option<i64> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()?
-            .as_secs() as i64;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
 
         self.cert_paths
             .iter()
@@ -712,10 +712,9 @@ impl Actor for HealthCheckActor {
                 state.cassini_connected = true;
                 tracing::debug!("healthcheck: cassini connected");
                 let _ = myself
-                    .send_after(
-                        Duration::from_secs(state.tick_secs),
-                        || HealthCheckMessage::Tick,
-                    )
+                    .send_after(Duration::from_secs(state.tick_secs), || {
+                        HealthCheckMessage::Tick
+                    })
                     .await;
             }
 
@@ -771,11 +770,7 @@ impl Actor for HealthCheckActor {
                 // ----------------------------------------------------------------
                 if let Err(reason) = state.check_certs() {
                     tracing::error!("healthcheck: cert check failed (hard deadline): {reason}");
-                    HealthState::unhealthy(
-                        state.cassini_connected,
-                        state.graph_connected,
-                    )
-                    .write();
+                    HealthState::unhealthy(state.cassini_connected, state.graph_connected).write();
                     return Err(ActorProcessingErr::from(reason));
                 }
 
@@ -798,17 +793,13 @@ impl Actor for HealthCheckActor {
                                 state.graph_connected,
                                 state.expects_graph
                             );
-                            HealthState::unhealthy(
-                                state.cassini_connected,
-                                state.graph_connected,
-                            )
-                            .write();
+                            HealthState::unhealthy(state.cassini_connected, state.graph_connected)
+                                .write();
                             // Don't fail — reschedule tick and wait for recovery.
                             let _ = myself
-                                .send_after(
-                                    Duration::from_secs(state.tick_secs),
-                                    || HealthCheckMessage::Tick,
-                                )
+                                .send_after(Duration::from_secs(state.tick_secs), || {
+                                    HealthCheckMessage::Tick
+                                })
                                 .await;
                             return Ok(());
                         }
@@ -828,23 +819,18 @@ impl Actor for HealthCheckActor {
                                          (cert TTL {min_ttl}s <= threshold {}s)",
                                         state.rejuvenation_threshold_secs
                                     );
-                                    state.rejuvenation_phase =
-                                        RejuvenationPhase::WaitingForDeps;
+                                    state.rejuvenation_phase = RejuvenationPhase::WaitingForDeps;
                                 }
                             }
                         }
 
-                        HealthState::healthy(
-                            state.cassini_connected,
-                            state.graph_connected,
-                        )
-                        .write();
+                        HealthState::healthy(state.cassini_connected, state.graph_connected)
+                            .write();
 
                         let _ = myself
-                            .send_after(
-                                Duration::from_secs(state.tick_secs),
-                                || HealthCheckMessage::Tick,
-                            )
+                            .send_after(Duration::from_secs(state.tick_secs), || {
+                                HealthCheckMessage::Tick
+                            })
                             .await;
                     }
 
@@ -880,10 +866,9 @@ impl Actor for HealthCheckActor {
                         }
 
                         let _ = myself
-                            .send_after(
-                                Duration::from_secs(state.tick_secs),
-                                || HealthCheckMessage::Tick,
-                            )
+                            .send_after(Duration::from_secs(state.tick_secs), || {
+                                HealthCheckMessage::Tick
+                            })
                             .await;
                     }
 
@@ -900,10 +885,9 @@ impl Actor for HealthCheckActor {
                             state.rejuvenation_phase = RejuvenationPhase::WaitingForAck;
                             // Reschedule tick only to catch hard deadlines while waiting
                             let _ = myself
-                                .send_after(
-                                    Duration::from_secs(state.tick_secs),
-                                    || HealthCheckMessage::Tick,
-                                )
+                                .send_after(Duration::from_secs(state.tick_secs), || {
+                                    HealthCheckMessage::Tick
+                                })
                                 .await;
                         } else {
                             let remaining = fire_at_secs.saturating_sub(now);
@@ -911,10 +895,9 @@ impl Actor for HealthCheckActor {
                                 "healthcheck: jitter pending, {remaining}s until shutdown signal"
                             );
                             let _ = myself
-                                .send_after(
-                                    Duration::from_secs(state.tick_secs),
-                                    || HealthCheckMessage::Tick,
-                                )
+                                .send_after(Duration::from_secs(state.tick_secs), || {
+                                    HealthCheckMessage::Tick
+                                })
                                 .await;
                         }
                     }
@@ -924,14 +907,11 @@ impl Actor for HealthCheckActor {
                     // ------------------------------------------------------------
                     RejuvenationPhase::WaitingForAck => {
                         // Nothing to do except reschedule tick to catch hard deadlines.
-                        tracing::debug!(
-                            "healthcheck: waiting for ShutdownAck from supervisor"
-                        );
+                        tracing::debug!("healthcheck: waiting for ShutdownAck from supervisor");
                         let _ = myself
-                            .send_after(
-                                Duration::from_secs(state.tick_secs),
-                                || HealthCheckMessage::Tick,
-                            )
+                            .send_after(Duration::from_secs(state.tick_secs), || {
+                                HealthCheckMessage::Tick
+                            })
                             .await;
                     }
                 }

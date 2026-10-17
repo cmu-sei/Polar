@@ -1,0 +1,26 @@
+[package]
+name = "analysis-scheduler"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+polar.workspace = true
+orchestrator-core.workspace = true
+cassini-types.workspace = true
+neo4rs.workspace = true
+ractor.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+testcontainers.workspace = true
+testcontainers-modules.workspace = true
+
+[[bin]]
+name = "analysis-scheduler"
+path = "src/main.rs"

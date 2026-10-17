@@ -17,11 +17,10 @@
 #   2 — transient failure (cert issuer unreachable, CA unavailable)
 #   3 — internal error
 
-
-let token_path = ($env | get -o POLAR_SA_TOKEN_PATH | default "/home/polar/token")
-let cert_dir   = ($env | get -o POLAR_CERT_DIR       | default "/home/polar/certs")
-let issuer_url = ($env | get -o POLAR_CERT_ISSUER_URL | default "")
-let cert_type  = ($env | get -o POLAR_CERT_TYPE       | default "client")
+let token_path = $env | get -o POLAR_SA_TOKEN_PATH | default "/home/polar/token"
+let cert_dir = $env | get -o POLAR_CERT_DIR | default "/home/polar/certs"
+let issuer_url = $env | get -o POLAR_CERT_ISSUER_URL | default ""
+let cert_type = $env | get -o POLAR_CERT_TYPE | default "client"
 
 if $issuer_url == "" {
     print "POLAR_CERT_ISSUER_URL must be set"
@@ -36,9 +35,16 @@ if not ($token_path | path exists) {
 print $"obtaining ($cert_type) cert from ($issuer_url)"
 
 # Request certificates, hardcoded to use ecdsa-p256 algorithms until it becomes necessary/desirable to use another.
-let extra_sans = ($env | get -o POLAR_EXTRA_SANS | default "" | split row "," | each { str trim } | where { |s| $s != "" })
+let extra_sans = (
+    $env
+    | get -o POLAR_EXTRA_SANS
+    | default ""
+    | split row ","
+    | each { str trim }
+    | where {|s| $s != "" }
+)
 
-let extra_san_flags = ($extra_sans | each { |san| ["--extra-san", $san] } | flatten)
+let extra_san_flags = $extra_sans | each {|san| ["--extra-san", $san] } | flatten
 
 cert-client --cert-issuer-url $issuer_url --token-path $token_path --cert-dir $cert_dir --cert-type $cert_type --key-algorithm ecdsa-p256 ...$extra_san_flags
 

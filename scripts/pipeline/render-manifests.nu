@@ -43,7 +43,7 @@
 #   Then restart OrbStack.
 
 const ARTIFACT_TYPE = "application/vnd.polar.k8s-manifests.v1"
-const MEDIA_TYPE    = "application/yaml"
+const MEDIA_TYPE = "application/yaml"
 
 # Directories rendered in-place but never pushed to the registry.
 # conf — config files embedded into ConfigMaps; must stay next to Dhall sources.
@@ -55,8 +55,8 @@ const RENDER_ONLY_DIRS = ["conf", "flux"]
 # the values are the artifact layer names the Flux Kustomizations reference.
 # Order here determines nothing — apply ordering is declared in flux-kustomization.dhall.
 const MANIFEST_LAYERS = {
-    core:   ["cert-issuer"]        # Files whose stems map to this layer
-    infra:  ["cassini", "neo4j", "jaeger", "storage"]
+    core: ["cert-issuer"] # Files whose stems map to this layer
+    infra: ["cassini", "neo4j", "jaeger", "storage"]
     agents: ["agents", "polar"]
 }
 
@@ -76,15 +76,13 @@ def render-dhall-file [
     if not $ok {
         print $"[ERROR] dhall-to-yaml failed for ($src)"
     }
-    { src: $src, out: $out, success: $ok }
+    {src: $src, out: $out, success: $ok}
 }
 
 # Render all .dhall files in a directory in-place (YAML lands next to the
 # source). Used for render-only directories where relative import paths must
 # stay intact. Generates no kustomization.yaml.
-def render-dhall-dir-inplace [
-    dhall_dir: path
-]: nothing -> list<record> {
+def render-dhall-dir-inplace [dhall_dir: path]: nothing -> list<record> {
     let dhall_files = (
         ls $dhall_dir
         | where type == file
@@ -97,8 +95,8 @@ def render-dhall-dir-inplace [
     }
 
     $dhall_files | each {|file|
-        let stem = ($file.name | path basename | str replace --regex '\.dhall$' '')
-        let out  = ($dhall_dir | path join $"($stem).yaml")
+        let stem = $file.name | path basename | str replace --regex '\.dhall$' ''
+        let out = $dhall_dir | path join $"($stem).yaml"
         render-dhall-file $file.name $out
     }
 }
@@ -124,8 +122,8 @@ def render-dhall-dir-to [
     mkdir $dest_dir
 
     let results = ($dhall_files | each {|file|
-        let stem = ($file.name | path basename | str replace --regex '\.dhall$' '')
-        let out  = ($dest_dir | path join $"($stem).yaml")
+        let stem = $file.name | path basename | str replace --regex '\.dhall$' ''
+        let out = $dest_dir | path join $"($stem).yaml"
         render-dhall-file $file.name $out
     })
 
@@ -140,12 +138,8 @@ def render-dhall-dir-to [
     )
 
     if ($rendered_names | is-not-empty) {
-        let kustomization_path = ($dest_dir | path join "kustomization.yaml")
-        {
-            apiVersion: "kustomize.config.k8s.io/v1beta1"
-            kind: "Kustomization"
-            resources: $rendered_names
-        } | to yaml | save --force $kustomization_path
+        let kustomization_path = $dest_dir | path join "kustomization.yaml"
+        {apiVersion: "kustomize.config.k8s.io/v1beta1", kind: "Kustomization", resources: $rendered_names} | to yaml | save --force $kustomization_path
 
         print $"[INFO] wrote ($dest_dir | path basename)/kustomization.yaml with ($rendered_names | length) resource\(s\)"
     }
@@ -165,14 +159,14 @@ def render-dhall-dir-to [
 # so Flux surfaces it in Kustomization.status.lastAppliedOriginRevision.
 def push-manifests [
     output_dir: path    # Root of the rendered artifact tree
-    registry:   string  # Registry host, e.g. "localhost:31500"
-    repo:       string  # Repository name, e.g. "manifests/polar"
+    registry:   string  # Registry host, e.g. "localhost:31500", 
+    repo:       string  # Repository name, e.g. "manifests/polar", 
     tag:        string  # Tag, e.g. "latest" or a commit SHA
     --revision: string = ""
     --source:   string = ""
 ]: nothing -> record {
-    let ref     = $"($registry)/($repo):($tag)"
-    let tarball = ($output_dir | path join "manifests.tar.gz")
+    let ref = $"($registry)/($repo):($tag)"
+    let tarball = $output_dir | path join "manifests.tar.gz"
 
     # Collect all files under output_dir relative to output_dir itself so
     # tar preserves the core/, infra/, agents/ structure inside the archive.
@@ -183,14 +177,14 @@ def push-manifests [
 
     if ($all_files | is-empty) {
         print $"[WARN] no .yaml files under ($output_dir), skipping push"
-        return { success: false, ref: $ref, digest: "" }
+        return {success: false, ref: $ref, digest: ""}
     }
 
     ^tar -czf $tarball -C ($output_dir | into string) ...$all_files
 
     let file_args = [$"manifests.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip"]
 
-    let created = (date now | format date "%Y-%m-%dT%H:%M:%SZ")
+    let created = date now | format date "%Y-%m-%dT%H:%M:%SZ"
 
     let annotation_args = (
         [["--annotation" $"org.opencontainers.image.created=($created)"]]
@@ -210,9 +204,9 @@ def push-manifests [
     rm --force $tarball
 
     if $result.exit_code != 0 {
-        let msg = ($result.stderr | default $result.stdout | str trim)
+        let msg = $result.stderr | default $result.stdout | str trim
         print $"[ERROR] oras push failed for ($ref): ($msg)"
-        return { success: false, ref: $ref, digest: "" }
+        return {success: false, ref: $ref, digest: ""}
     }
 
     let digest = (
@@ -225,7 +219,7 @@ def push-manifests [
     )
 
     print $"[INFO] pushed ($ref) digest ($digest)"
-    { success: true, ref: $ref, digest: $digest }
+    {success: true, ref: $ref, digest: $digest}
 }
 
 # ---------------------------------------------------------------------------
@@ -234,7 +228,7 @@ def push-manifests [
 
 def main [
     dhall_root:  path    # Root of the deployment tree, e.g. ./local
-    registry:    string  # Registry host:port, e.g. "localhost:31500"
+    registry:    string  # Registry host:port, e.g. "localhost:31500", 
     tag:         string  # OCI tag, e.g. "latest" or a git SHA
     --output_dir:  path = "manifests"   # Output directory for rendered artifact, e.g. ./manifests
     --revision:  string = ""   # org.opencontainers.image.revision annotation
@@ -242,11 +236,11 @@ def main [
     --skip-push                # Render everything but do not push to registry
 ] {
     if not ($dhall_root | path exists) {
-        error make { msg: $"dhall root '($dhall_root)' does not exist" }
+        error make {msg: $"dhall root '($dhall_root)' does not exist"}
     }
 
     # resolve output_dir to an absolute path before using it
-    let output_dir = ($output_dir | path expand --no-symlink)
+    let output_dir = $output_dir | path expand --no-symlink
 
     print $"[INFO] dhall root:  ($dhall_root)"
     print $"[INFO] output dir:  ($output_dir)"
@@ -257,13 +251,13 @@ def main [
     # Rendered in-place so relative Dhall import paths remain valid and local
     # tooling can consume them. Never included in the OCI artifact.
     for name in $RENDER_ONLY_DIRS {
-        let dir = ($dhall_root | path join $name)
+        let dir = $dhall_root | path join $name
         if not ($dir | path exists) { continue }
         print $"[INFO] --- ($name) \(render only, in-place\) ---"
-        let results  = (render-dhall-dir-inplace $dir)
-        let failures = ($results | where success == false)
+        let results = (render-dhall-dir-inplace $dir)
+        let failures = $results | where success == false
         if ($failures | is-not-empty) {
-            error make { msg: $"rendering failed in ($name): ($failures | get src | str join ', ')" }
+            error make {msg: $"rendering failed in ($name): ($failures | get src | str join ', ')"}
         }
         print $"[INFO] ($name): ($results | length) file\(s\) rendered"
     }
@@ -273,9 +267,9 @@ def main [
     # subdirectory in output_dir. Files are rendered from local/polar/ into
     # output_dir/<layer>/ so the Flux Kustomizations can reference each layer
     # at its own path.
-    let polar_src = ($dhall_root | path join "polar")
+    let polar_src = $dhall_root | path join "polar"
     if not ($polar_src | path exists) {
-        error make { msg: $"polar source directory '($polar_src)' does not exist" }
+        error make {msg: $"polar source directory '($polar_src)' does not exist"}
     }
 
     mkdir $output_dir
@@ -287,24 +281,24 @@ def main [
 
     for layer in ($MANIFEST_LAYERS | transpose name stems) {
         let layer_name = $layer.name
-        let stems      = $layer.stems
-        let layer_dir  = ($output_dir | path join $layer_name)
+        let stems = $layer.stems
+        let layer_dir = $output_dir | path join $layer_name
 
         print $"[INFO] --- ($layer_name) ---"
         mkdir $layer_dir
 
         mut layer_results: list<record> = []
         for stem in $stems {
-            let src = ($polar_src | path join $"($stem).dhall")
+            let src = $polar_src | path join $"($stem).dhall"
             if not ($src | path exists) {
                 print $"[WARN] ($stem).dhall not found in ($polar_src), skipping"
                 continue
             }
-            let out = ($layer_dir | path join $"($stem).yaml")
+            let out = $layer_dir | path join $"($stem).yaml"
             $layer_results = ($layer_results | append (render-dhall-file $src $out))
         }
 
-        let failures = ($layer_results | where success == false)
+        let failures = $layer_results | where success == false
         if ($failures | is-not-empty) {
             $all_failures = ($all_failures | append $failures)
         }
@@ -317,12 +311,8 @@ def main [
             | each { path basename }
         )
         if ($rendered_names | is-not-empty) {
-            let kustomization_path = ($layer_dir | path join "kustomization.yaml")
-            {
-                apiVersion: "kustomize.config.k8s.io/v1beta1"
-                kind: "Kustomization"
-                resources: $rendered_names
-            } | to yaml | save --force $kustomization_path
+            let kustomization_path = $layer_dir | path join "kustomization.yaml"
+            {apiVersion: "kustomize.config.k8s.io/v1beta1", kind: "Kustomization", resources: $rendered_names} | to yaml | save --force $kustomization_path
             print $"[INFO] wrote ($layer_name)/kustomization.yaml with ($rendered_names | length) resource\(s\)"
         }
 
@@ -330,7 +320,7 @@ def main [
     }
 
     if ($all_failures | is-not-empty) {
-        error make { msg: $"rendering failed: ($all_failures | get src | str join ', ')" }
+        error make {msg: $"rendering failed: ($all_failures | get src | str join ', ')"}
     }
 
     if $skip_push {
@@ -346,7 +336,7 @@ def main [
     )
 
     if not $push_result.success {
-        error make { msg: "push failed" }
+        error make {msg: "push failed"}
     }
 
     print ""

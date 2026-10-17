@@ -1,84 +1,99 @@
 # Build Processor
 
-The **Build Processor** is the unified graph projection agent for Polar's software supply chain provenance system. It consumes canonical [`ProvenanceEvent`] instances from the Cassini broker and projects them into the Neo4j knowledge graph.
+The build processor writes Polar's software supply-chain facts into the
+knowledge graph: builds, what they produced, findings about packages, and what
+registries actually serve. Every agent that reports such a fact publishes a
+canonical [`ProvenanceEvent`] to `polar.provenance.events`. This agent is the
+one that records it.
 
-## Responsibilities
+## Design
 
-**Build execution lifecycle** — projects `BuildJob`, `BuildStage`, and `Vulnerability` nodes from CI pipeline events. Establishes the `BUILT_BY` edge from `GitCommit` to `BuildJob`, `HAS_STAGE` edges to `BuildStage` nodes, `FOUND_VULNERABILITY` edges to scanner-reported CVEs, `PRODUCED` edges to `BuildArtifact` nodes, and the `IS` type hierarchy edge to `BuildExecution`.
+- **The single writer.** No other agent writes these node types. Agents report
+  facts; this one projects them.
+- **Projection is pure.** `project::project(event, observed_at)` returns the
+  `Vec<GraphOp>` that records the event. Nothing in `project/` touches the
+  graph or the broker. That makes every projection unit-testable and runnable
+  against a real Neo4j as-is.
+- **Every write is an idempotent MERGE.** Replaying the broker log reproduces
+  the same graph. Events about the same nodes may arrive in any order.
+  Timestamped edges are MERGEd on their endpoints alone, with `at` set only on
+  creation, so replays never duplicate them.
+- **One dispatch, no wildcard.** `project()` matches every `ProvenanceEvent`
+  variant explicitly. A new variant doesn't compile until it's routed, and
+  variants with no projection yet warn instead of disappearing.
+- **One mailbox.** The supervisor decodes each event, projects it, and sends the
+  operations in order to the `GraphControllerActor`, which serializes all
+  writes. There are no per-domain actors: projection holds no state, so they
+  would add a hop and split ordering without buying isolation.
 
-**Artifact provenance** — projects `Sbom`, `Package`, `Binary`, `ContainerImage`, `OCILayer`, `BuildArtifact`, and `Artifact` nodes from pipeline artifact events. Establishes the full provenance chain:
+## Modules
+
+The projections are grouped by what the graph is *about*, which also tracks
+whose word each fact is.
+
+| Module | Subject | Reported by | Events |
+|---|---|---|---|
+| `project/execution.rs` | `BuildJob`: what ran, where, how it ended | orchestrator, CI | `ExecutionStarted`, `StageStarted`, `StageCompleted`, `ExecutionCompleted`, `ExecutionFailed`, `ExecutionCancelled`, `PackageAnalysisStarted` |
+| `project/outputs.rs` | what a build produced | the producing build | `ArtifactProduced`, `SbomAnalyzed`, `BinaryLinked`, `ContainerImageCreated` |
+| `project/findings.rs` | facts about packages | scanners, analyzers | `SecurityAdvisoryFound`, `PackageStatusFound`, `AnalysisFindingReported` |
+| `project/registry.rs` | what a registry actually serves | the resolver | `OCIArtifactResolved`, `OCIRegistryDiscovered` |
+
+Not projected:
+- `OCIArtifactDiscovered` and `ArtifactDiscovered` are requests for the resolver. Only the resolved result is recorded.
+- `OCIArtifactCreated` and `ImageRefResolved` have no producer yet. They warn when seen.
+
+## Graph
+
+```text
+execution  (GitCommit)-[:BUILT_BY]->(BuildJob)                     git sources only
+           (BuildJob)-[:EXECUTED_IN]->(KubernetesJob | PodmanPod)
+           (BuildJob)-[:IS]->(BuildExecution)
+           (BuildJob)-[:HAS_STAGE]->(BuildStage)
+           (BuildJob)-[:TRANSITIONED_TO]->(BuildJobState {phase})-[:OF_TYPE]->(State)
+           (BuildJob)-[:ANALYZED {analyzer_image, archive_sha256}]->(Package)
+
+outputs    (BuildJob)-[:PRODUCED]->(BuildArtifact)
+           (BuildArtifact)-[:ANALYZED_AS]->(Sbom)-[:DESCRIBES]->(Package)
+           (Package)-[:DEPENDS_ON]->(Package)
+           (Binary)-[:BUILT_FROM]->(Package),  (Sbom)-[:ATTESTS]->(Binary)
+           (BuildArtifact)-[:INSTANCE_OF]->(OCIArtifact)            pushed images
+           (OCIArtifact)-[:HAS_DIFF_ID {order}]->(OCILayerDiffId)
+
+findings   (BuildJob)-[:REPORTED]->(SecurityAdvisory | PackageStatus | AnalysisFinding)-[:IS]->(Finding)
+           (SecurityAdvisory)-[:AFFECTS]->(Package),  (PackageStatus)-[:CONCERNS]->(Package)
+
+registry   (OCIArtifact)-[:HOSTED_BY]->(OCIRegistry)
+           (OCIArtifact)-[:HAS_LAYER {order}]->(OCILayer)
+           (OCIArtifact)-[:HAS_MANIFEST {platform_*}]->(OCIArtifact)    indexes
 ```
-(BuildJob)-[:IS]->(BuildExecution)
-(BuildJob)-[:PRODUCED]->(BuildArtifact)
-(Binary)-[:BUILT_FROM]->(Package)<-[:DESCRIBES]-(Sbom)
-(ContainerImage)-[:HAS_LAYER]->(OCILayer)
-(BuildArtifact)-[:ANALYZED_AS]->(Sbom)
-(Sbom)-[:ATTESTS]->(Binary)
-```
 
-## Design Philosophy
+Points that are easy to get wrong:
 
-**Stateless projection** — each event is projected independently. Operations use Cypher MERGE semantics and are idempotent: replaying events from the broker produces the same graph state. The broker log is the source of truth; the graph can always be rebuilt.
+- **`BuildJob.completed_at` means finished, not succeeded.** Success is the
+  latest `BuildJobState {phase: 'succeeded'}`.
+- **An image has two layer identities.** `OCILayer` is a registry blob, keyed
+  by compressed digest. `OCILayerDiffId` is the image config's uncompressed
+  diff ID, which SBOM tools reference. Both hang off the same
+  `OCIArtifact {digest}`, and matching `order` pairs them.
+- **Images meet on `OCIArtifact {digest}`.** A pushed build image, the
+  resolver's manifest for it, and k8s's `PodContainer-[:USES_IMAGE]` (written
+  by the kube consumer) all land on this node. Whether those claims agree is a
+  graph query.
+- **`Package.archive_sha256` is first-writer-wins.** A published archive is
+  immutable, so a conflicting later SBOM doesn't replace it.
 
-**Single topic, unified vocabulary** — all agents publish [`ProvenanceEvent`] instances to `polar.provenance.events`. The build processor subscribes to one topic and sees one type regardless of whether the event originated from a CI pipeline stage, the k8s observer, the GitLab observer, or the resolver.
-
-**Two wire formats, one type** — Rust agents serialize `ProvenanceEvent` directly via rkyv. Nushell pipeline stages emit JSON matching variant shapes. Both paths converge at `ProvenanceEvent` before dispatch. No intermediary translation layer.
-
-**Node ownership** — `BuildJob`, `BuildStage`, `Vulnerability`, `Sbom`, `Package`, `Binary`, `ContainerImage`, `OCILayer`, `BuildArtifact` are owned by this processor and freely upserted. `GitCommit` and `BackendJob` are foreign — referenced only via `EnsureEdge`. The authoritative agent owns their properties.
-
-## Actor Tree
-
-```
-BuildProcessorSupervisor
-  ├── TcpClient              — Cassini broker connection
-  ├── GraphControllerActor   — Neo4j connection pool, serializes graph writes
-  ├── BuildActor             — execution lifecycle projection (project_event)
-  └── ProvenanceLinker       — artifact domain projection (SBOM, Binary, OCI)
-```
-
-The supervisor deserializes incoming messages and routes by variant — lifecycle events go to `BuildActor`, artifact domain events go to `ProvenanceLinker`. Neither child actor blocks on the other; both cast graph operations to the shared `GraphControllerActor` which serializes writes into the Neo4j connection pool.
-
-## Event Routing
-
-| Variant | Handler |
-|---|---|
-| `ExecutionStarted`, `StageStarted`, `StageCompleted` | `BuildActor` → `project_event` |
-| `ExecutionCompleted`, `ExecutionFailed`, `ExecutionCancelled` | `BuildActor` → `project_event` |
-| `VulnerabilityFound` | `BuildActor` → `project_event` |
-| `ArtifactProduced`, `SbomAnalyzed`, `BinaryLinked` | `ProvenanceLinker` |
-| `ContainerImageCreated`, `OCIArtifactResolved` | `ProvenanceLinker` |
-| `ImageRefResolved`, `OCIRegistryDiscovered` | `ProvenanceLinker` |
-| `PodContainerUsesImage` | `ProvenanceLinker` |
-| `OCIArtifactDiscovered`, `ImageRefDiscovered` | logged and discarded — resolver handles these |
+Not owned here and only referenced through edges: `GitCommit` (git
+processor), backend job nodes (their observers), `PodContainer` (kube
+consumer).
 
 ## Topics
 
 | Topic | Purpose |
 |---|---|
-| `polar.provenance.events` | Primary — all canonical provenance events |
+| `polar.provenance.events` | All provenance events: rkyv from Rust agents, JSON from nushell stages |
+| `polar.provenance.linker` | Legacy. The GitLab consumer still publishes `OCIRegistryDiscovered` here |
 
-## Graph Schema
-
-Nodes projected by this agent:
-
-| Label | Key | Owner |
-|---|---|---|
-| `BuildJob` | `build_id` | This processor |
-| `BuildJobState` | `(build_id, valid_from)` | This processor |
-| `BuildStage` | `(build_id, stage_id)` | This processor |
-| `BuildExecution` | `type: "BuildExecution"` (singleton) | This processor |
-| `BuildArtifact` | `content_hash` | This processor |
-| `Vulnerability` | `identifier` | This processor |
-| `Artifact` | `type: "Artifact"` (singleton) | This processor |
-| `Sbom` | `artifact_content_hash` | This processor |
-| `Package` | `purl` | This processor |
-| `Binary` | `content_hash` | This processor |
-| `ContainerImage` | `config_digest` | This processor |
-| `OCILayer` | `digest` | This processor |
-| `GitCommit` | `oid` | VCS agent (referenced only) |
-| `BackendJob` | varies by backend | Backend observer (referenced only) |## Setup
-
-Requires the following environment variables:
+## Setup
 
 ```
 GRAPH_DB        — Neo4j database name
@@ -87,14 +102,16 @@ GRAPH_PASSWORD  — Neo4j password
 GRAPH_ENDPOINT  — Bolt endpoint, e.g. bolt+s://neo4j.polar.svc.cluster.local:7687
 ```
 
-Optional mTLS (all three required together or not at all):
+Optional mTLS (all three or none): `GRAPH_CLIENT_CERT`, `GRAPH_CLIENT_KEY`,
+`GRAPH_CA_CERT`. The broker connection uses the standard `cassini-client`
+environment.
 
+## Tests
+
+```sh
+cargo test -p build-processor
+
+# Every projection against a real Neo4j 5.26.2 (needs a container runtime):
+DOCKER_HOST=unix://<podman socket> TESTCONTAINERS_RYUK_DISABLED=true \
+  cargo test -p build-processor --test projection_neo4j -- --ignored
 ```
-GRAPH_CLIENT_CERT — path to client certificate
-GRAPH_CLIENT_KEY  — path to client private key
-GRAPH_CA_CERT     — path to CA certificate
-```
-
-Cassini broker connection is configured via the standard `cassini-client` environment variables.
-
-Once environment is set, build and run with standard `cargo` commands.
