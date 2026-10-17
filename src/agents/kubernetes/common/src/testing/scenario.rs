@@ -65,7 +65,7 @@ use polar::graph::controller::{GraphController, GraphControllerMsg};
 use ractor::ActorProcessingErr;
 use serde::de::DeserializeOwned;
 use std::time::Duration;
-use testcontainers::core::{ContainerPort, IntoContainerPort};
+use testcontainers::core::IntoContainerPort;
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::neo4j::{Neo4j, Neo4jImage};
 use uuid::Uuid;
@@ -238,6 +238,7 @@ pub async fn bootstrap_container() -> Result<(), ActorProcessingErr> {
                 })?;
 
             let container = Neo4j::default()
+                .with_tag("5.26.2") // hardcoding because this is the version we've been using for some time
                 .with_env_var("NEO4J_AUTH", format!("{user}/{password}"))
                 .with_mapped_port(port, 7687.tcp())
                 .start()

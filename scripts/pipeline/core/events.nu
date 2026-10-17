@@ -28,7 +28,7 @@ export const BUILD_EVENTS_TOPIC = $"($SUBJECT_PREFIX).events"
 # build_id is carried on the payload itself for variants that have one —
 # it is not on this envelope.
 def emit [payload: record]: nothing -> nothing {
-    let json = ($payload | to json --raw)
+    let json = $payload | to json --raw
     log-debug $json
     $json | cassini-client publish $BUILD_EVENTS_TOPIC
 }
@@ -63,13 +63,20 @@ export def emit-execution-started [
 }
 
 export def emit-execution-completed [duration_secs: int]: nothing -> nothing {
-    emit {type: "execution_completed", build_id: (get-build-id), duration_secs: $duration_secs}
+    emit {
+        type: "execution_completed"
+        build_id: (get-build-id)
+        duration_secs: $duration_secs
+    }
 }
 
 export def emit-execution-failed [reason: string, --stage: string = ""]: nothing -> nothing {
     mut payload = {
-        build_id: (get-build-id),
-        type: "execution_failed", reason: $reason, stage: null}
+        build_id: (get-build-id)
+        type: "execution_failed"
+        reason: $reason
+        stage: null
+    }
     if ($stage | is-not-empty) {
         $payload = ($payload | upsert stage $stage)
     }
@@ -277,5 +284,39 @@ export def emit-binary-linked [
     if ($binding_digest | is-not-empty) {
         $payload = ($payload | upsert binding_digest $binding_digest)
     }
+    emit $payload
+}
+
+# ── Source analysis ────────────────────────────────────────────────────────────
+#
+# Emit AnalysisFindingReported — one finding from an analyzer run.
+#
+# Analyzer containers call this; they never say which package they analyzed.
+# The orchestrator records that authoritatively (PackageAnalysisStarted) against
+# the same build_id, so a finding cannot be misattributed to a package the
+# analyzer wasn't given. Call init-pipeline-state with $env.POLAR_BUILD_ID first.
+#
+# rule_id should be stable across runs ("build-script", "proc-macro", ...) —
+# within a run, (rule_id, path, line) identifies the finding.
+export def emit-analysis-finding [
+    rule_id: string
+    message: string
+    --severity: string = ""
+    --path: string = ""          # relative to the workspace root
+    --line: int                  # omitted when the finding has no line
+]: nothing -> nothing {
+    mut payload = {
+        type: "analysis_finding_reported"
+        build_id: (get-build-id)
+        rule_id: $rule_id
+        message: $message
+    }
+    for kv in [
+        [severity $severity]
+        [path $path]
+    ] {
+        if ($kv.1 | is-not-empty) { $payload = ($payload | insert $kv.0 $kv.1) }
+    }
+    if $line != null { $payload = ($payload | insert line $line) }
     emit $payload
 }

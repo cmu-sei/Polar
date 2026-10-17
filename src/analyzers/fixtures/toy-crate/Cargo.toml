@@ -1,0 +1,17 @@
+# A deliberately small dependency set for exercising the analysis loop on a
+# laptop: each cargo-manifest rule has something to find, and the whole tree
+# is about a dozen crates rather than Polar's ~770. Cargo.lock is committed so
+# the archive checksums are fixed. See ../README.md.
+[package]
+name = "polar-toy-crate"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace: never part of any parent's.
+[workspace]
+
+[dependencies]
+itoa = "=1.0.18"                                                  # no findings
+serde = { version = "=1.0.229", features = ["derive"] }           # build script; pulls serde_derive (proc-macro)
+libz-sys = { version = "1", default-features = false, features = ["libc"] }  # native links ("z") + build script

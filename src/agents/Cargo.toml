@@ -62,6 +62,11 @@ members = [
     "policy-config",
     "resolver",
     "build-processor",
+    "build-orchestrator/agent",
+    "build-orchestrator/core",
+    "build-orchestrator/k8s",
+    "build-orchestrator/podman",
+    "build-orchestrator/scheduler",
     "polar-scheduler/common",
     "polar-scheduler/observer",
     "polar-scheduler/processor",
@@ -182,6 +187,10 @@ gitlab-schema = { path = "gitlab/schema" }
 harness-common = { path = "cassini/test/common" }
 jira_common = { path = "jira/common" }
 kube-common = { path = "kubernetes/common" }
+
+orchestrator-core = { path = "build-orchestrator/core" }
+orchestrator-backend-k8s = { path = "build-orchestrator/k8s" }
+orchestrator-backend-podman = { path = "build-orchestrator/podman" }
 polar = { path = "lib" }
 polar-health = { path = "polar-health" }
 polar-init = { path = "polar-init" }

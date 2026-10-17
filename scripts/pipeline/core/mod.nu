@@ -22,3 +22,11 @@ export def bold [msg: string] { $"(ansi attr_bold)($msg)(ansi reset)" }
 export def elapsed-ms [start: datetime]: nothing -> int {
     (((date now) - $start) / 1_000_000) | into int
 }
+
+export def commit-sha []: nothing -> string {
+    return (^git rev-parse HEAD | str trim)
+}
+
+export def commit-short-sha []: nothing -> string {
+    return (^git rev-parse HEAD | str trim | str substring 0..8)
+}

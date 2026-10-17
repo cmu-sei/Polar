@@ -85,6 +85,14 @@
         # ── CI Library ──────────────────────────────────────────────────────
         corePipelineLibFiles = pkgs.callPackage ./scripts/pipeline/core/package.nix {};
 
+        # ── Analyzers ───────────────────────────────────────────────────────
+        # Hardened images run by the build orchestrator against verified
+        # dependency source archives. See src/analyzers/.
+        cargoManifestAnalyzer = import ./src/analyzers/cargo-manifest/package.nix {
+          inherit pkgs nix-container-lib inputs system corePipelineLibFiles;
+          cassiniClient = polarPkgs.cassini.client;
+        };
+
         # ── Agent containers ───────────────────────────────────────────────────
         # Regenerate with: cd src/flake && just render-agent
         mkAgentContainer = llamaCppPkg: extraPkgs:
@@ -180,7 +188,10 @@
           gitSchedulerImage    = polarPkgs.gitAgent.schedulerImage;
 
           buildProcessorImage  = polarPkgs.buildProcessor.buildProcessorImage;
+          buildOrchestratorImage = polarPkgs.buildOrchestrator.orchestratorImage;
+          analysisSchedulerImage = polarPkgs.buildOrchestrator.schedulerImage;
           cloneImage           = polarPkgs.buildOrchestrator.cloneImage;
+          cargoManifestAnalyzerImage = cargoManifestAnalyzer.image;
 
           # ── Infrastructure containers ─────────────────────────────────────────
           nuInitImage = polarPkgs.nuInit.image;

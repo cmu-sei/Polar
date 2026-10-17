@@ -1,0 +1,279 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: cyclops-dev
+  name: cyclops-dev
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: object-store
+  name: object-store-credentials
+  namespace: cyclops-dev
+stringData:
+  access-key: cyclops-dev
+  secret-key: cyclops-dev-secret
+type: Opaque
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: object-store
+  name: object-store-data
+  namespace: cyclops-dev
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: "10Gi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: object-store
+  name: object-store
+  namespace: cyclops-dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/managed-by: cyclops-dev
+      app.kubernetes.io/name: object-store
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: cyclops-dev
+        app.kubernetes.io/name: object-store
+    spec:
+      containers:
+        - command:
+            - /bin/sh
+            - "-c"
+            - "mkdir -p /data/cyclops-build-artifacts && exec versitygw --health /health posix /data"
+          env:
+            - name: ROOT_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: access-key
+                  name: object-store-credentials
+            - name: ROOT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: secret-key
+                  name: object-store-credentials
+          image: "versity/versitygw@sha256:eb7f786fcd91e72194e48fcf1ac16302d686bf8e3a71434bdbc067a6efd3fdc7"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 7070
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          name: versitygw
+          ports:
+            - containerPort: 7070
+              name: s3-api
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 7070
+            periodSeconds: 5
+          volumeMounts:
+            - mountPath: /data
+              name: data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: object-store-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: object-store
+  name: object-store
+  namespace: cyclops-dev
+spec:
+  ports:
+    - name: s3-api
+      nodePort: 30900
+      port: 9000
+      targetPort: 7070
+  selector:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: object-store
+  type: NodePort
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: cyclops-jobs
+  name: cyclops-jobs
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: cyclops-jobs
+  name: jobs-quota
+  namespace: cyclops-jobs
+spec:
+  hard:
+    count/jobs.batch: '40'
+    limits.cpu: '4'
+    limits.ephemeral-storage: "16Gi"
+    limits.memory: "6Gi"
+    pods: '4'
+    requests.cpu: '2'
+    requests.ephemeral-storage: "8Gi"
+    requests.memory: "2Gi"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: cyclops-jobs
+  name: jobs-limits
+  namespace: cyclops-jobs
+spec:
+  limits:
+    - default:
+        cpu: "500m"
+        ephemeral-storage: "2Gi"
+        memory: "1Gi"
+      defaultRequest:
+        cpu: "100m"
+        ephemeral-storage: "512Mi"
+        memory: "128Mi"
+      max:
+        cpu: '1'
+        ephemeral-storage: "4Gi"
+        memory: "2Gi"
+      type: Container
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: registry
+  name: registry-data
+  namespace: cyclops-dev
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: "20Gi"
+---
+apiVersion: v1
+data:
+  config.yml: |
+    version: 0.1
+    
+    log:
+      level: info
+      formatter: json
+    
+    storage:
+      filesystem:
+        rootdirectory: /var/lib/registry
+      delete:
+        enabled: true
+      cache:
+        blobdescriptor: inmemory
+    
+    http:
+      addr: :5000
+      headers:
+        X-Content-Type-Options: [nosniff]
+    
+    health:
+      storagedriver:
+        enabled: false
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: registry
+  name: registry-config
+  namespace: cyclops-dev
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: registry
+  name: registry
+  namespace: cyclops-dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/managed-by: cyclops-dev
+      app.kubernetes.io/name: registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: cyclops-dev
+        app.kubernetes.io/name: registry
+    spec:
+      containers:
+        - image: registry:2.8.3
+          name: registry
+          ports:
+            - containerPort: 5000
+              name: registry
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - mountPath: /etc/docker/registry
+              name: config
+              readOnly: true
+            - mountPath: /var/lib/registry
+              name: data
+      volumes:
+        - configMap:
+            name: registry-config
+          name: config
+        - name: data
+          persistentVolumeClaim:
+            claimName: registry-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: registry
+  name: registry
+  namespace: cyclops-dev
+spec:
+  ports:
+    - name: registry
+      nodePort: 30500
+      port: 5000
+      targetPort: 5000
+  selector:
+    app.kubernetes.io/managed-by: cyclops-dev
+    app.kubernetes.io/name: registry
+  type: NodePort

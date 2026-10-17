@@ -105,6 +105,12 @@ let
       healthcheckDrv = healthcheck;
     };
 
+    buildOrchestrator = import ./build-orchestrator/package.nix {
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
+      crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
+    };
+
     ociResolver = import ./resolver/package.nix {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
@@ -150,5 +156,5 @@ let
     };
 in
 {
-    inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer polarInit;
+    inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor buildOrchestrator certIssuer nuInit gitServer polarInit;
 }

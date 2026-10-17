@@ -152,6 +152,12 @@ pub struct PackageRef {
     /// trusting this field for anything load-bearing involving your own
     /// crates.
     pub source: Option<String>,
+    /// Lowercase hex sha256 of the published package archive, from the SBOM
+    /// component's SHA-256 hash (for cargo, the Cargo.lock `checksum`). This
+    /// is the content pin an analysis request needs; None for packages with
+    /// no published archive (path and git dependencies).
+    #[serde(default)]
+    pub archive_sha256: Option<String>,
 }
 
 /// A dependency edge from the CycloneDX `dependencies` array.
@@ -192,6 +198,50 @@ pub struct SbomGraphFragment {
     pub components: Vec<PackageRef>,
     /// Dependency tree edges from the CycloneDX `dependencies` array.
     pub edges: Vec<DependencyEdge>,
+}
+
+/// Payload for [`ProvenanceEvent::PackageAnalysisStarted`].
+///
+/// Projects as `(BuildJob)-[:ANALYZED]->(Package)`. Whether a package has been
+/// analyzed by a given analyzer is then a graph query — which is what lets the
+/// graph, rather than the orchestrator, hold the record of past runs.
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct PackageAnalysisStartedPayload {
+    pub build_id: String,
+    /// Package URL of the analyzed package. Join key to the `Package` node.
+    pub purl: String,
+    /// Lowercase hex sha256 of the archive the analyzer ran against, verified
+    /// by the init container before extraction.
+    pub archive_sha256: String,
+    /// Fully qualified analyzer image reference, pinned by digest. A different
+    /// digest is a different analyzer for the purposes of "has this been analyzed".
+    pub analyzer_image: String,
+}
+
+/// Payload for [`ProvenanceEvent::AnalysisFindingReported`].
+///
+/// Deliberately carries no package reference: the finding belongs to a run
+/// (`build_id`), and the run's `ANALYZED` edge says what was analyzed. The
+/// analyzer cannot misattribute a finding to a package it was not given.
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct AnalysisFindingPayload {
+    pub build_id: String,
+    /// Name of the check that fired, stable across runs, e.g. "build-script".
+    pub rule_id: String,
+    /// Human-readable description of this specific finding.
+    pub message: String,
+    /// Free string; analyzers differ in severity vocabulary.
+    #[serde(default)]
+    pub severity: Option<String>,
+    /// Path relative to the workspace root, when the finding has a location.
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub line: Option<u32>,
 }
 
 /// Payload for a raw pipeline artifact that was produced during a build.
@@ -429,6 +479,22 @@ pub enum ProvenanceEvent {
     /// An OCI container image was built and is available as a local tarball.
     /// See [`ContainerImageCreatedPayload`] for field semantics.
     ContainerImageCreated(ContainerImageCreatedPayload),
+
+    // ── Source analysis ────────────────────────────────────────────────────────
+    // A source analysis run is a build execution like any other: it has a
+    // BuildJob node and the usual lifecycle events, so its outcome and backend
+    // linkage come from the execution projection. These variants add what is
+    // specific to analysis: what was analyzed, by which analyzer, and what it
+    // found.
+    /// The orchestrator started an analyzer against a published package.
+    /// Emitted by the orchestrator, not the analyzer — the orchestrator is the
+    /// only party that authoritatively knows which image ran against which
+    /// verified archive. See [`PackageAnalysisStartedPayload`].
+    PackageAnalysisStarted(PackageAnalysisStartedPayload),
+
+    /// An analyzer reported a finding. Emitted by the analyzer container.
+    /// See [`AnalysisFindingPayload`].
+    AnalysisFindingReported(AnalysisFindingPayload),
 
     // ── Discovery events ───────────────────────────────────────────────────────
     // Emitted by observer agents (GitLab, k8s, registry scanners).

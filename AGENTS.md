@@ -16,30 +16,70 @@ cargo test --workspace -- --nocapture
 
 # Run tests for a specific package
 cargo test --package <pkg> -- --nocapture
+```
 
-# Static analysis (run before any commit)
-./scripts/static-tools.sh
+### Nushell
+
+The CI/CD pipeline library (`scripts/pipeline/core/`), Polar's own pipeline
+(`scripts/pipeline/ci.nu`), the analyzers (`src/analyzers/`) and other repo
+scripts are nushell. They are held to the same bar as the Rust: formatted with
+`nufmt`, linted with `nu-lint`.
+
+```bash
+# Format (nufmt defaults; there is deliberately no nufmt.nuon — see Rules)
+nufmt <files or directories>
+
+# Check formatting without writing (non-zero exit if a file would change)
+nufmt --dry-run <files or directories>
+
+# Lint. Pass the config explicitly: nu-lint 1.2.1 does not pick up
+# .nu-lint.toml on its own. Exits non-zero on warnings or errors; hints are
+# advisory and don't fail the gate.
+nu-lint -c .nu-lint.toml <files or directories>
+
+# Parse check. Library files are modules; scripts with top-level code
+# (ci.nu, polar-init.nu) are checked without --as-module.
+nu -c 'nu-check --as-module <file>'
 ```
 
 ## Repo Structure
 
 ```
-src/agents/
-├── cassini/          # Message broker (broker, client, types, tracing)
-├── lib/              # Shared polar crate — start here for common types
-├── gitlab/           # GitLab agents (observer, consumer, query, schema, common)
-├── jira/             # Jira agents (observer, consumer, query, common)
-├── kubernetes/       # K8s agents (observer, consumer, common)
-├── git/              # Git agents (observer, processor, scheduler, common)
-├── openapi/          # OpenAPI agents (observer, consumer, common)
-├── provenance/       # Provenance agents (linker, resolver, common)
-├── polar-scheduler/  # Scheduler agents (observer, processor, common)
-├── config-ops/       # Configuration operations
-├── policy-config/    # Policy configuration
-└── logger/           # Event logger
+src/agents/               Rust workspace (Cargo.toml lists every member crate)
+├── lib/                  Shared `polar` crate: events, graph controller and node keys,
+│                         topics, Cassini client wrapper. Start here for common types
+├── cassini/              Message broker (broker, client, types, tracing, cassini-c2, test harness)
+├── build-orchestrator/   Cyclops, the authoritative builder: agent, core, k8s and podman
+│                         backends, analysis scheduler
+├── build-processor/      Projects build, artifact, finding and registry events into the graph
+├── resolver/             Resolves discovered image refs to verified registry manifests
+├── git/                  Git agents (observe, process, scheduler, common)
+├── gitlab/               GitLab agents (observe, consume, query, schema, common)
+├── jira/                 Jira agents (observe, process, query, common)
+├── kubernetes/           K8s agents (observe, consume, common)
+├── openapi/              OpenAPI agents (observe, process, common)
+├── polar-scheduler/      Schedule agents (observer, processor, common, test mock agents)
+├── cert-issuer/          Short-lived mTLS client certs for agents (server, client, common)
+├── polar-health/         Shared health types and the HealthCheckActor
+├── polar-healthcheck/    Liveness probe binary
+├── polar-init/           Init container binary for agents
+├── nu-init/              Minimal nushell init container (image only, no crate)
+├── git-server/           Local git HTTP server for development (image only, no crate)
+├── policy-config/        Git-backed configuration repo operations
+└── logger/               Event logger
+
+src/analyzers/            Hardened analyzer images the orchestrator runs against package sources
+src/flake/, src/containers/, src/deploy/, src/conf/   Nix/Dhall build, container and deploy definitions
+scripts/pipeline/         Polar's own CI pipeline (ci.nu) and the instrumented-pipeline
+                          library (core/) that any pipeline can use to emit events
+infra/                    Layered infrastructure rendering (render.nu, Dhall layers, targets)
+docs/architecture/        Architecture docs, one folder per subsystem
 ```
 
-Each agent crate follows: `lib.rs` (exports/constants) + `entrypoint.rs` (binary entry) + feature modules.
+Agent crates have a `main.rs` (a few use `entrypoint.rs`) as the binary
+entry, usually a `lib.rs` for exports and constants, and feature modules
+beside them. Binaries with several parts split them into sibling crates under
+one directory (e.g. `git/observe`, `git/process`).
 
 ## Code Conventions
 
@@ -93,6 +133,24 @@ pub const ACTOR_NAME: &str = "my-actor";
 pub type GraphController<T> = ActorRef<GraphControllerMsg<T>>;
 ```
 
+### Nushell
+
+- Import modules by a path relative to the importing file
+  (`use ../../../scripts/pipeline/core/events.nu [...]`), never through an
+  include path (`nu -I`). Relative imports resolve identically in the repo, in
+  images (which mirror the repo layout), and under `nu-check`/`nu-lint`.
+- Declare input and output types on every `def`; avoid `any` where the type is
+  known (`nothing -> oneof<string, nothing>`, not `nothing -> any`).
+- Build lists with `++=`, not `$x = ($x | append ...)`.
+- A deliberate exception to a lint rule goes on that line,
+  `# nu-lint-ignore: <rule_id>`, with a comment saying why. Lowering a rule for
+  the whole repo in `.nu-lint.toml` needs a stated convention it conflicts
+  with, recorded next to the setting.
+- Event payloads must match the `ProvenanceEvent` shapes in
+  `src/agents/lib/src/events.rs` exactly. When changing an `emit-*` function,
+  capture its real JSON (run it with a stub `cassini-client` on `PATH` that
+  appends stdin to a file) and pin it in a Rust deserialization test.
+
 ### Testing
 
 - Unit tests: `#[cfg(test)]` module in the same file
@@ -110,9 +168,27 @@ pub type GraphController<T> = ActorRef<GraphControllerMsg<T>>;
 4. `cargo test --package <pkg> -- --nocapture` — test the affected package
 5. `cargo test --workspace -- --nocapture` — full suite before marking complete
 
+When the change touches nushell:
+
+1. `nufmt <changed .nu files>`, then `nufmt --dry-run` on them must report no
+   changes. Run it twice if the first pass still reports changes: nufmt 0.1.x
+   occasionally needs a second pass to settle.
+2. `nu-lint -c .nu-lint.toml <changed .nu files>` must exit zero. Don't
+   introduce warnings into files that are currently clean; `src/analyzers/` is
+   clean and must stay clean.
+3. `nu-check` every changed file (see above).
+4. Exercise what changed. Formatting and lint fixes are not exempt: compare
+   outputs before and after (e.g. emitted payloads, analyzer findings on real
+   crates).
+
 ### Rules
 
 - Make the smallest change that fixes the problem. Do not refactor adjacent code unless it is directly blocking the fix.
 - If `cargo check` fails after a change, fix it before moving on — do not accumulate broken state.
 - If a test requires external services (Neo4j, broker), note it and skip rather than fail silently.
 - Do not add dependencies to `Cargo.toml` without a clear reason tied to the task.
+- Do not add a `nufmt.nuon`. In nufmt 0.1.4, writing out the documented
+  defaults is not equivalent to having no config (an explicit `margin: 1` adds
+  blank lines between every top-level item, including consecutive `use`
+  lines), and the result isn't idempotent. The defaults are what the repo is
+  formatted with.

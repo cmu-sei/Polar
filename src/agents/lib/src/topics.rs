@@ -22,8 +22,9 @@
 ///
 /// All agents that observe facts about the software supply chain publish here.
 /// This includes CI pipeline stages (nushell and Rust), the k8s observer,
-/// the GitLab observer, and the resolver. All consumers — the build processor,
-/// the provenance linker — subscribe here and filter on [`ProvenanceEvent`] variant.
+/// the GitLab observer, and the resolver. The build processor is the consumer:
+/// it projects every [`ProvenanceEvent`] variant into the graph. (The kube
+/// consumer gets resolutions for its pods on KUBERNETES_RESOLUTION_EVENTS.)
 ///
 /// Wire formats accepted on this topic:
 /// - rkyv-serialized [`ProvenanceEvent`] (Rust agents)

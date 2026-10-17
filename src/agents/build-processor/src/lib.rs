@@ -1,6 +1,4 @@
-pub mod build;
-pub mod linker;
-pub mod projection;
+//! Build processor: projects provenance events into the knowledge graph.
+//! See `supervisor` for the agent and `project` for the projections.
+pub mod project;
 pub mod supervisor;
-pub const BROKER_CLIENT_NAME: &str = "provenance.linker.tcp";
-pub const AGENT_NAME: &str = "polar.bullds.orchestrator";

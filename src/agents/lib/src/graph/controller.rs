@@ -52,8 +52,10 @@ pub mod rel {
     /// ContainerImage when pushed to different registries.
     pub const REFERS_TO: &str = "REFERS_TO";
 
-    /// A ContainerImage has layers in a specific order.
+    /// An image has layer blobs (compressed digest) in a specific order.
     pub const HAS_LAYER: &str = "HAS_LAYER";
+    /// An image has uncompressed layer diff IDs in a specific order.
+    pub const HAS_DIFF_ID: &str = "HAS_DIFF_ID";
 }
 
 // ── GraphNodeKey trait ─────────────────────────────────────────────────────────

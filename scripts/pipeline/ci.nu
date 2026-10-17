@@ -1,4 +1,3 @@
-
 #!/usr/bin/env nu
 # ci.nu — unified Polar build pipeline
 #
@@ -34,24 +33,20 @@
 #
 # All phases share one artifact directory. Phases 1-3 share one Cassini daemon.
 # Adding a new image = one row in image-manifest. Nothing else changes.
+use core [commit-sha commit-short-sha]
+use core/cargo.nu *
+use core/cassini.nu *
+use core/dhall.nu *
+use core/events.nu *
+use core/hashing.nu *
+use core/logging.nu *
+use core/oci.nu *
+use core/sbom.nu *
+use core/scanning.nu *
+use core/state.nu *
 
-use ./core/state.nu [
-    init-pipeline-state get-build-id
-    record-sbom record-sbom-package get-sbom-info check-manifest-purl
-    lookup-package-purl get-all-sbom-packages
-    record-tarball-hash get-tarball-hash assert-sbom-state-populated
-]
-use ./core/oci.nu *
-use ./core/cassini.nu *
-use ./core/logging.nu *
-use ./core/events.nu *
-use ./core/cargo.nu workspace-root
-use ./core/hashing.nu *
-use ./core/sbom.nu *
-use ./core/scanning.nu [run-vulnerability-scan]
 const COMPONENT = "ci"
 const ELF_BINARY_ARTIFACT = "elf-binary"
-
 
 # ===========================================================================
 # Phase 0: Static analysis
@@ -406,9 +401,7 @@ def generate-workspace-sboms [
     $collected
 }
 
-
 def process-cargo-sboms [sbom_files: list<record>, packages: list<record>]: nothing -> nothing {
-
     for f in $sbom_files {
         let doc = try { open $f.name } catch {|e|
             log-warn $"could not parse ($f.name): ($e.msg)" --component $COMPONENT
@@ -476,7 +469,13 @@ def build-and-link-binaries [
     # root. Every other cargo invocation in this file already passes
     # --manifest-path explicitly; this was the one holdout, working only by
     # coincidence of cwd matching src/agents on every run so far.
-    mut cargo_args = ["build" "--manifest-path" $ws_manifest "--message-format=json" "--locked" "--quiet"]
+    mut cargo_args = [
+        "build"
+        "--manifest-path" $ws_manifest
+        "--message-format=json"
+        "--locked"
+        "--quiet"
+    ]
     if ($filter_package | is-not-empty) { $cargo_args = ($cargo_args | append ["--package" $filter_package]) }
     if $release { $cargo_args = ($cargo_args | append "--release") }
     if ($target | is-not-empty) { $cargo_args = ($cargo_args | append ["--target" $target]) }
@@ -593,7 +592,7 @@ def registry-refs [image_name: string]: nothing -> list<string> {
 
 # A helper that would let us login to multiple registires, should we wish to push to other places
 def login-to-registries []: nothing -> nothing {
-    let ci_reg  = $env.CI_REGISTRY? | default ""
+    let ci_reg = $env.CI_REGISTRY? | default ""
     let ci_user = $env.CI_REGISTRY_USER? | default ""
     let ci_pass = $env.CI_REGISTRY_PASSWORD? | default ""
 
@@ -602,13 +601,21 @@ def login-to-registries []: nothing -> nothing {
         return
     }
 
-    let insecure = ($env.POLAR_REGISTRY_INSECURE? | default "" | is-not-empty)
-    let creds = [{registry: $ci_reg, username: $ci_user, password: $ci_pass, insecure: $insecure}]
+    let insecure = $env.POLAR_REGISTRY_INSECURE? | default "" | is-not-empty
+    let creds = [
+        {
+            registry: $ci_reg
+            username: $ci_user
+            password: $ci_pass
+            insecure: $insecure
+        }
+    ]
 
     registry-login $creds
 }
 
 def process-image [entry: record, image_tag: string, --skip-upload]: nothing -> record {
+
     # Cross-validate the manifest's hardcoded root_purl against what Phase 1
     # actually analyzed. Static image-manifest purls drift silently on the
     # first crate version bump; this makes that loud.
@@ -644,7 +651,6 @@ def process-image [entry: record, image_tag: string, --skip-upload]: nothing -> 
     push-image $entry.name $image_tag (registry-refs $entry.image) $build --root_purl $entry.root_purl
 }
 
-
 def push-image [
     link_name: string
     tag: string
@@ -665,9 +671,9 @@ def push-image [
         log-warn $"No registries configured for ($link_name) — image will not be uploaded anywhere" --component $COMPONENT
     }
 
-    let insecure = ($env.POLAR_REGISTRY_INSECURE? | default "" | is-not-empty)
+    let insecure = $env.POLAR_REGISTRY_INSECURE? | default "" | is-not-empty
     let uploads = ($registries | each {|template|
-        let remote_ref = ($template | str replace "{tag}" $tag)
+        let remote_ref = $template | str replace "{tag}" $tag
         if $insecure {
             upload-image $build.tarball $remote_ref --name $link_name --insecure
         } else {
@@ -683,6 +689,7 @@ def push-image [
 
         # emit an event saying we created a new build artifact
         emit-artifact-produced $upload.digest "oci-image" --name $link_name
+
         # then, emit a second message detailing that this artifact was a container image.
 
         # TODO: well, turns out this is pretty stupid. It's fine to treat all images effectively as build artifacts.
@@ -749,7 +756,7 @@ def main [
 ] {
     let ws_root = (workspace-root)
     let ws_manifest = $ws_root | path join "Cargo.toml"
-    let commit_sha = ($env.CI_COMMIT_SHA? | default (^git rev-parse HEAD | str trim))
+    let commit_sha = commit-sha
 
     # Initialize pipeline-scoped singleton state. All emit-* functions that
     # need build_id (artifact domain events) read it from here rather than
@@ -762,8 +769,8 @@ def main [
     let result = try {
         let start_time = (date now)
 
-        let ref_name   = (^git branch --show-current | str trim)
-        let repo_url   = (^git config --get remote.origin.url | str trim)
+        let ref_name = (^git branch --show-current | str trim)
+        let repo_url = (^git config --get remote.origin.url | str trim)
 
         emit-execution-started $commit_sha $ref_name $repo_url
 
@@ -787,14 +794,16 @@ def main [
         let image_tag = if ($tag | is-not-empty) {
             $tag
         } else {
-            $env.CI_COMMIT_SHORT_SHA? | default ($commit_sha | str substring 0..8) | default "latest"
+            commit-short-sha
         }
 
         let packages = (resolve-packages --package $package)
         log-info $"($packages | length) package\(s\) in scope, image tag: ($image_tag)" --component $COMPONENT
 
         # Phase 1 — Cargo SBOMs
-        let sbom_files = (generate-workspace-sboms $packages $ws_manifest $artifact_dir --target $target)
+        let sbom_files = (
+            generate-workspace-sboms $packages $ws_manifest $artifact_dir --target $target
+        )
         process-cargo-sboms $sbom_files $packages
         log-info $"($sbom_files | length) SBOM\(s\) generated and analyzed" --component $COMPONENT
 
@@ -808,7 +817,11 @@ def main [
             let findings = (
                 run-vulnerability-scan $ws_manifest
             )
-            let unresolved = ($findings | where {|f| ($f.affected_package | default "" | is-empty) } | length)
+            let unresolved = (
+                $findings
+                | where {|f| ($f.affected_package | default "" | is-empty) }
+                | length
+            )
             log-info $"($findings | length) finding\(s\) from vulnerability scan \(($unresolved) unresolved against SBOM\)" --component $COMPONENT
         }
 
@@ -847,21 +860,25 @@ def main [
                 })
 
                 let succeeded = $results | where success == true | length
-                let failed    = $results | where success == false | length
+                let failed = $results | where success == false | length
                 log-info $"($succeeded) image\(s\) succeeded, ($failed) failed" --component $COMPONENT
 
                 if $failed > 0 {
-                    let failures = ($results | where success == false | get image_name | str join ", ")
+                    let failures = (
+                        $results
+                        | where success == false
+                        | get image_name
+                        | str join ", "
+                    )
                     log-warn $"failed images: ($failures)" --component $COMPONENT
                 }
             }
         }
 
         let elapsed = (date now) - $start_time
-        let duration_secs = ($elapsed / 1sec | math round)
+        let duration_secs = $elapsed / 1sec | math round
         emit-execution-completed $duration_secs
         log-info $"pipeline complete \(duration: ($elapsed | format duration 'ms')\)" --component $COMPONENT
-
 
         null
     } catch {|e|

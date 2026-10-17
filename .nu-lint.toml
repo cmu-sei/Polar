@@ -1,0 +1,24 @@
+# nu-lint configuration for Polar's nushell (CI/CD pipeline library, analyzers,
+# infra automation). Defaults apply to every rule not listed here.
+#
+# Gate: nu-lint exits non-zero on warnings and errors; hints are advisory.
+# Lower a rule here only when it conflicts with a deliberate convention, and
+# say which one. For a single deliberate exception, prefer an inline
+#   # nu-lint-ignore: <rule_id>
+# on that line over changing the rule for everyone.
+
+[rules]
+# The emit-* functions in scripts/pipeline/core/events.nu take an event's
+# required fields positionally, mirroring the ProvenanceEvent schema. Changing
+# that is an API change for every caller, not a style fix.
+max_positional_params = "hint"
+
+# CI stages and analyzers fail fast: an uncaught error from `open`, `from toml`
+# and the like stops the run, which the orchestrator records as
+# ExecutionFailed. Wrapping every such call in `try` would hide that.
+catch_builtin_error_try = "hint"
+
+# This rule exists for script entry points (`def main`), where a list argument
+# from the command line arrives as one string. Internal helpers that take a
+# `list` are fine.
+list_param_to_variadic = "hint"
