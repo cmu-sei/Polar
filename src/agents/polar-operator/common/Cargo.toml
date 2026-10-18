@@ -1,0 +1,20 @@
+[package]
+name = "polar-operator-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+# The PolarAgent resource, shared by the operator that reconciles it and the kube
+# agents that observe it.
+[dependencies]
+k8s-openapi.workspace = true
+kube.workspace = true
+# The CustomResource derive generates the CRD's OpenAPI schema with schemars 1,
+# the version kube 3 and k8s-openapi 0.27 already pull in.
+schemars = "1"
+serde.workspace = true
+serde_json.workspace = true
+
+[lib]
+name = "polar_operator_common"
+path = "src/lib.rs"

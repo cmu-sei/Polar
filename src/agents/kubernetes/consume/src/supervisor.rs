@@ -28,6 +28,7 @@ use polar::graph::nodes::builds::ArtifactNodeKey;
 use polar::graph::nodes::kube::KubeNodeKey;
 use polar::health::{DepCertEndpoint, HealthCheckActor, HealthCheckArgs, HealthCheckMessage};
 use polar::topics::KUBERNETES_RESOLUTION_EVENTS;
+use polar_operator_common::PolarAgent;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
 use ractor::SupervisionEvent;
@@ -286,6 +287,13 @@ impl ClusterConsumerSupervisor {
                         &cluster_uid,
                     )?,
                     KIND_KUSTOMIZATION => Self::handle_event::<Kustomization>(
+                        ev,
+                        cache,
+                        graph_controller,
+                        tcp_client,
+                        &cluster_uid,
+                    )?,
+                    polar_operator_common::KIND => Self::handle_event::<PolarAgent>(
                         ev,
                         cache,
                         graph_controller,

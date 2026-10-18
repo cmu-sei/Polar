@@ -94,6 +94,7 @@ mod namespace;
 mod node;
 mod oci_repository;
 mod pod;
+mod polar_agent;
 mod replicaset;
 
 // ---------------------------------------------------------------------------

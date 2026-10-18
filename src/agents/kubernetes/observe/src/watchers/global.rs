@@ -13,6 +13,7 @@ use kube_common::{
     KIND_KUSTOMIZATION, KIND_OCI_REPOSITORY, RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION,
 };
 use polar::cassini::TcpClient;
+use polar_operator_common::PolarAgent;
 use ractor::ActorProcessingErr;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -293,4 +294,14 @@ impl_global_watcher!(
     KustomizationWatcher,
     resource = Kustomization,
     kind = KIND_KUSTOMIZATION
+);
+
+// ---- Polar operator ----
+//
+// PolarAgent resources across every namespace, like the Flux watchers: the
+// operator's CRD is optional, so a cluster without it gets a warning, not a crash.
+impl_global_watcher!(
+    PolarAgentWatcher,
+    resource = PolarAgent,
+    kind = polar_operator_common::KIND
 );

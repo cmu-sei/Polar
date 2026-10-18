@@ -131,6 +131,18 @@ pub enum KubeNodeKey {
         namespace: String,
         cluster_uid: String,
     },
+    /// A `PolarAgent` resource: the Kubernetes deployment of an agent. UID-keyed
+    /// like every watched resource. It `DEPLOYS` the canonical
+    /// `AgentNodeKey::PolarAgent`, which knows nothing of Kubernetes.
+    PolarAgent {
+        uid: String,
+        cluster_uid: String,
+    },
+    PolarAgentResourceState {
+        uid: String,
+        valid_from: String,
+        cluster_uid: String,
+    },
 }
 
 impl GraphNodeKey for KubeNodeKey {
@@ -568,6 +580,41 @@ impl GraphNodeKey for KubeNodeKey {
                 )
             }
             // ----------------------------------------------------------------
+            // Polar operator: PolarAgent
+            // ----------------------------------------------------------------
+            KubeNodeKey::PolarAgent { uid, cluster_uid } => {
+                let uid_k = format!("{prefix}_uid");
+                let cluster_uid_k = format!("{prefix}_cluster_uid");
+                (
+                    format!(
+                        "({prefix}:KubernetesPolarAgent {{ uid: ${uid_k}, cluster_uid: ${cluster_uid_k} }})"
+                    ),
+                    vec![
+                        (uid_k, BoltType::String(uid.clone().into())),
+                        (cluster_uid_k, BoltType::String(cluster_uid.clone().into())),
+                    ],
+                )
+            }
+            KubeNodeKey::PolarAgentResourceState {
+                uid,
+                valid_from,
+                cluster_uid,
+            } => {
+                let uid_k = format!("{prefix}_uid");
+                let vf_k = format!("{prefix}_valid_from");
+                let cluster_uid_k = format!("{prefix}_cluster_uid");
+                (
+                    format!(
+                        "({prefix}:KubernetesPolarAgentState {{ uid: ${uid_k}, valid_from: ${vf_k}, cluster_uid: ${cluster_uid_k} }})"
+                    ),
+                    vec![
+                        (uid_k, BoltType::String(uid.clone().into())),
+                        (vf_k, BoltType::String(valid_from.clone().into())),
+                        (cluster_uid_k, BoltType::String(cluster_uid.clone().into())),
+                    ],
+                )
+            }
+            // ----------------------------------------------------------------
             // Flux kustomize-controller: Kustomization
             // ----------------------------------------------------------------
             KubeNodeKey::FluxKustomization { uid, cluster_uid } => {
@@ -622,6 +669,12 @@ impl KubeNodeKey {
             }
             .into(),
             "Deployment" => KubeNodeKey::Deployment {
+                uid: owner.uid.clone(),
+                cluster_uid: cluster_uid.to_string(),
+            }
+            .into(),
+            // The operator's pods, owned by the PolarAgent resource that declares them.
+            "PolarAgent" => KubeNodeKey::PolarAgent {
                 uid: owner.uid.clone(),
                 cluster_uid: cluster_uid.to_string(),
             }

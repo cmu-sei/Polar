@@ -67,6 +67,9 @@ members = [
     "build-orchestrator/k8s",
     "build-orchestrator/podman",
     "build-orchestrator/scheduler",
+    "polar-operator/common",
+    "polar-operator/operator",
+    "polar-operator/processor",
     "polar-scheduler/common",
     "polar-scheduler/observer",
     "polar-scheduler/processor",
@@ -187,6 +190,7 @@ gitlab-schema = { path = "gitlab/schema" }
 harness-common = { path = "cassini/test/common" }
 jira_common = { path = "jira/common" }
 kube-common = { path = "kubernetes/common" }
+polar-operator-common = { path = "polar-operator/common" }
 
 orchestrator-core = { path = "build-orchestrator/core" }
 orchestrator-backend-k8s = { path = "build-orchestrator/k8s" }

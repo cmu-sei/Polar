@@ -1,0 +1,36 @@
+[package]
+name = "polar-operator"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+futures.workspace = true
+cassini-client.workspace = true
+cassini-types.workspace = true
+k8s-openapi.workspace = true
+kube.workspace = true
+polar.workspace = true
+polar-operator-common.workspace = true
+ractor.workspace = true
+rkyv.workspace = true
+# kube's rustls needs a process-level crypto provider; the workspace's is aws-lc-rs.
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lib]
+name = "polar_operator"
+path = "src/lib.rs"
+
+[[bin]]
+name = "polar-operator"
+path = "src/main.rs"

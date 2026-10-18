@@ -10,6 +10,7 @@ cassini-types.workspace = true
 chrono.workspace = true
 k8s-openapi = { workspace = true }
 kube-common.workspace = true
+polar-operator-common.workspace = true
 neo4rs.workspace = true
 polar.workspace = true
 ractor.workspace = true

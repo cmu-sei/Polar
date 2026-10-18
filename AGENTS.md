@@ -52,6 +52,8 @@ src/agents/               Rust workspace (Cargo.toml lists every member crate)
 ├── build-orchestrator/   Cyclops, the authoritative builder: agent, core, k8s and podman
 │                         backends, analysis scheduler
 ├── build-processor/      Projects build, artifact, finding and registry events into the graph
+├── polar-operator/       The PolarAgent CRD (common), the operator that keeps agents alive
+│                         (operator), and the agent processor that projects their lifecycle
 ├── resolver/             Resolves discovered image refs to verified registry manifests
 ├── git/                  Git agents (observe, process, scheduler, common)
 ├── gitlab/               GitLab agents (observe, consume, query, schema, common)

@@ -567,3 +567,129 @@ pub enum ProvenanceEvent {
         media_type: String,
     },
 }
+
+// ── Agent lifecycle ────────────────────────────────────────────────────────────
+
+/// Where an agent is deployed: the object on a deployment target that declares it.
+///
+/// The agent itself is only its name (what its code declares), so that nothing about
+/// a target is said of the agent. Each target is a variant, as in [`DiscoverySourceRef`].
+#[derive(
+    Clone, Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DeploymentRef {
+    /// A `PolarAgent` resource. `cluster_uid` is the UID of the cluster's kube-system
+    /// namespace (issue #236), as the kube agents scope every node they write.
+    Kubernetes {
+        cluster_uid: String,
+        namespace: String,
+        name: String,
+        uid: String,
+    },
+    // Future targets as they are added, e.g. NomadJob { job_id, namespace }.
+}
+
+/// One run of a deployment, on its target.
+#[derive(
+    Clone, Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InstanceRef {
+    KubernetesPod {
+        cluster_uid: String,
+        pod_uid: String,
+        pod_name: String,
+    },
+}
+
+/// What an operator observes about the deployments it keeps alive, published on
+/// [`crate::topics::AGENT_LIFECYCLE_EVENTS`] and projected by the agent processor.
+///
+/// Every variant names the agent (by the name its code declares) and the deployment,
+/// so a processor that joins late still ties whatever it receives to both. Times are
+/// milliseconds since the Unix epoch, UTC, as the kube consumer writes them.
+///
+/// Capabilities are deliberately absent: a deployment's configuration saying one is
+/// provided asserts nothing about whether it is present. The agent judges that itself
+/// when it starts, and a refusal shows up here as an [`InstanceEnded`](Self::InstanceEnded).
+///
+/// The operator starts instances; configuring them is the scheduler's. An instance's
+/// `identity` is what the scheduler sees register, so the two can be joined.
+#[derive(
+    Clone, Debug, PartialEq, Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize,
+)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentLifecycleEvent {
+    /// What the deployment declares. Sent when it changes, and once for every
+    /// deployment each time the operator starts or reconnects.
+    DeploymentDeclared {
+        agent: String,
+        deployment: DeploymentRef,
+        spec_hash: String,
+        image: String,
+        shutdown_budget_secs: u32,
+        /// The identity its instances run as: the name on their certificates.
+        identity: String,
+        observed_at: i64,
+    },
+
+    /// The operator's view of the deployment moved to another phase (`Running`,
+    /// `BackingOff`, `CrashLoop`, ...).
+    DeploymentPhaseChanged {
+        agent: String,
+        deployment: DeploymentRef,
+        phase: String,
+        message: Option<String>,
+        observed_at: i64,
+    },
+
+    /// An instance was started.
+    InstanceStarted {
+        agent: String,
+        deployment: DeploymentRef,
+        instance: InstanceRef,
+        /// The deployment's instance count when it started: 1 for its first.
+        number: u64,
+        spec_hash: String,
+        started_at: i64,
+    },
+
+    /// An instance ended, and how, as far as the target can tell.
+    InstanceEnded {
+        agent: String,
+        deployment: DeploymentRef,
+        /// `None` when the target no longer says which instance it was.
+        instance: Option<InstanceRef>,
+        /// `Exited`, `Completed`, `Killed`, `OomKilled` or `Lost`.
+        kind: String,
+        exit_code: i32,
+        /// The target's reason (`Error`, `OOMKilled`, `Evicted`, ...).
+        reason: String,
+        /// The instance's own account: its termination message, or its last log lines.
+        message: Option<String>,
+        ran_secs: i64,
+        finished_at: i64,
+    },
+}
+
+impl AgentLifecycleEvent {
+    /// The agent, by the name its code declares.
+    pub fn agent(&self) -> &str {
+        match self {
+            Self::DeploymentDeclared { agent, .. }
+            | Self::DeploymentPhaseChanged { agent, .. }
+            | Self::InstanceStarted { agent, .. }
+            | Self::InstanceEnded { agent, .. } => agent,
+        }
+    }
+
+    pub fn deployment(&self) -> &DeploymentRef {
+        match self {
+            Self::DeploymentDeclared { deployment, .. }
+            | Self::DeploymentPhaseChanged { deployment, .. }
+            | Self::InstanceStarted { deployment, .. }
+            | Self::InstanceEnded { deployment, .. } => deployment,
+        }
+    }
+}

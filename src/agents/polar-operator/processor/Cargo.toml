@@ -1,0 +1,23 @@
+[package]
+name = "agent-processor"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+cassini-types.workspace = true
+polar.workspace = true
+ractor.workspace = true
+rkyv.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lib]
+name = "agent_processor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent-processor"
+path = "src/main.rs"

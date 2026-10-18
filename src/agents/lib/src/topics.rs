@@ -14,6 +14,7 @@
 //! polar.provenance.events     ← all agents publish, all consumers subscribe
 //! polar.provenance.discovery  ← observer agents publish, resolver subscribes
 //! polar.git.repositories      ← git observer publishes, git processor subscribes
+//! polar.agents.lifecycle      ← the operator publishes, the agent processor subscribes
 //! ```
 
 // ── Provenance ─────────────────────────────────────────────────────────────────
@@ -51,6 +52,14 @@ pub const GIT_REPOSITORY_DISCOVERED: &str = "polar.git.repositories.discovery";
 
 pub const GIT_REPOSITORY_EVENTS: &str = "polar.git.repositories.events";
 
-// TODO: Replace "cluster" with a cluster id. Chances are we won't get away wtih constants the moment someone wants to observe multiple clusters
+// ── Agents ─────────────────────────────────────────────────────────────────────
+
+/// Agent lifecycle events.
+///
+/// The operator publishes [`crate::AgentLifecycleEvent`]s here (rkyv): what each
+/// agent is declared to be, its phases, and every instance it starts and sees
+/// end. The agent processor subscribes and writes canonical `PolarAgent` nodes.
+pub const AGENT_LIFECYCLE_EVENTS: &str = "polar.agents.lifecycle";
+
 pub const KUBERNETES_RESOURCES_EVENTS: &str = "polar.kubernetes.cluster.resources";
 pub const KUBERNETES_RESOLUTION_EVENTS: &str = "polar.kubernetes.cluster.resolution";

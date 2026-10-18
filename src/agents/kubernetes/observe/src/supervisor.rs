@@ -23,7 +23,7 @@ use tracing::{instrument, trace};
 
 use crate::{
     GlobalWatcherState, KustomizationWatcher, NamespacedWatcherState, NodeWatcher,
-    OciRepositoryWatcher, TCP_CLIENT_NAME, WatcherMsg, emit_event,
+    OciRepositoryWatcher, PolarAgentWatcher, TCP_CLIENT_NAME, WatcherMsg, emit_event,
 };
 use futures::{StreamExt, TryStreamExt};
 use kube_common::{RESOURCE_APPLIED_ACTION, RESOURCE_DELETED_ACTION, RawKubeEvent};
@@ -51,6 +51,8 @@ pub struct ClusterObserverSupervisorState {
     oci_repository_watcher: Option<Watcher>,
     /// Watches Flux Kustomization resources cluster-wide.
     kustomization_watcher: Option<Watcher>,
+    /// Watches the operator's PolarAgent resources cluster-wide.
+    polar_agent_watcher: Option<Watcher>,
 }
 
 impl ClusterObserverSupervisor {
@@ -106,6 +108,7 @@ impl ClusterObserverSupervisor {
                     node_watcher: None,
                     oci_repository_watcher: None,
                     kustomization_watcher: None,
+                    polar_agent_watcher: None,
                 })
             }
             Err(e) => Err(ActorProcessingErr::from(e)),
@@ -231,6 +234,9 @@ impl Actor for ClusterObserverSupervisor {
                         w.stop(Some("tcp_client_respawn".to_string()));
                     }
                     if let Some(w) = state.kustomization_watcher.take() {
+                        w.stop(Some("tcp_client_respawn".to_string()));
+                    }
+                    if let Some(w) = state.polar_agent_watcher.take() {
                         w.stop(Some("tcp_client_respawn".to_string()));
                     }
                     if let Some(w) = state.node_watcher.take() {
@@ -381,6 +387,27 @@ impl Actor for ClusterObserverSupervisor {
                         debug!(
                             "Kustomization watcher already running; skipping respawn on reconnect"
                         );
+                    }
+
+                    if state.polar_agent_watcher.is_none() {
+                        let agent_watcher_state = GlobalWatcherState {
+                            tcp_client: state.tcp_client.clone(),
+                            kube_client: state.kube_client.clone(),
+                            kind: polar_operator_common::KIND,
+                            cluster_uid: state.cluster_uid.clone(),
+                        };
+
+                        let (agent_watcher, _) = Actor::spawn_linked(
+                            Some("cluster.polar.agents".into()),
+                            PolarAgentWatcher,
+                            agent_watcher_state,
+                            myself.clone().into(),
+                        )
+                        .await?;
+
+                        state.polar_agent_watcher = Some(agent_watcher);
+                    } else {
+                        debug!("PolarAgent watcher already running; skipping respawn on reconnect");
                     }
 
                     if state.node_watcher.is_none() {

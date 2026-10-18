@@ -44,6 +44,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-processor"
+version = "1.0.0"
+dependencies = [
+ "cassini-types",
+ "polar",
+ "ractor",
+ "rkyv",
+ "rustls 0.23.43",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4257,6 +4271,7 @@ dependencies = [
  "kube-common",
  "neo4rs",
  "polar",
+ "polar-operator-common",
  "ractor",
  "rkyv",
  "rustls 0.23.43",
@@ -4314,6 +4329,7 @@ dependencies = [
  "kube-common",
  "neo4rs",
  "polar",
+ "polar-operator-common",
  "ractor",
  "rkyv",
  "rustls 0.23.43",
@@ -5722,6 +5738,43 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "polar-operator"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "cassini-client",
+ "cassini-types",
+ "chrono",
+ "futures",
+ "k8s-openapi",
+ "kube",
+ "polar",
+ "polar-operator-common",
+ "ractor",
+ "rkyv",
+ "rustls 0.23.43",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "polar-operator-common"
+version = "1.0.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
