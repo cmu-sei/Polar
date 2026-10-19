@@ -218,10 +218,10 @@ provides most of the tools):
   registry (no build), or ones you build from this checkout, which needs Nix
   with flakes.
 - A Kubernetes cluster, and admin access to it (step 1).
-- A checkout of the sibling repository **`nix-neo4j`** at
-  `~/Documents/projects/nix-neo4j`, which builds the Neo4j image Polar
-  deploys. Neo4j is the one image that is built even when you use published
-  images, so this needs Nix either way.
+- To build from source (`--dev`), a checkout of the sibling repository
+  **`nix-neo4j`** at `~/Documents/projects/nix-neo4j`, which builds the Neo4j
+  image Polar deploys. With published images you do not need it: Neo4j is
+  published (`polar-neo4j`) and imported with the rest.
 - Your SSH key listed as an age recipient of the target's secrets file, so
   `sops` can decrypt it, or a secrets file of your own if nobody can add you
   (both in **Secrets setup**).
@@ -319,9 +319,8 @@ one (`--dev` with the registry on this machine, or a gitops target) and neither 
 - *Build from source:* nothing to do now; `up.nu local-minimal --dev` (step 5)
   builds and pushes them. This is the way when you have changed code.
 
-Either way, build Neo4j yourself (step 3).
-
-**3. Build the Neo4j image.** In the `nix-neo4j` checkout:
+**3. Building from source: build the Neo4j image.** Skip this with published
+images, which include Neo4j. In the `nix-neo4j` checkout:
 
 ```bash
 nix build -L .#neo4j-image -o result-neo4j-image
