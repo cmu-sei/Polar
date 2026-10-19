@@ -378,7 +378,7 @@ deployment git server (`deploy-repo.nu ensure`), commits the layers there signed
 refuses a head that is not signed) and waits for every layer to be Ready at that commit (`flux.nu wait`). Then it runs the
 steps that need workloads: the admin flow, the seed, the browser. A workload that reads a ConfigMap carries a fingerprint
 of it in its pod template (added when publishing, `polar.dev/config-hash`), so a changed ConfigMap restarts it. Written
-2026-10-19; not yet run on a cluster.
+and run 2026-10-19: a clean `sandbox-local` bring-up reached "is up" with all six layers Ready and the seed applied.
 
 **The image lock.** A manifest that names an image by tag alone does not say which bytes run: a rebuilt image under the
 same tag is a different image behind the same name, and a GitOps tool cannot see the change. A target with

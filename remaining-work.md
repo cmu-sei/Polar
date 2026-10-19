@@ -86,6 +86,17 @@ Last updated: 2026-10-10.
   with no `KUBECONFIG`, and with a cold and a warm cache, and compares the 51 files byte for byte: all identical.
   A render from a second checkout at a different path was identical too (by hand). The output has no Secret documents
   (secrets are created apart from the render) and does not mention the checkout path, the home directory or the user.
+  **Stage 3e done, 2026-10-19: the Flux target runs.** A clean `sandbox-local` bring-up (`nu infra/up.nu sandbox-local --user U --email E --allow-dirty`)
+  reaches "is up": `deploy-repo.nu ensure|publish` (a signed commit on a deployment git server outside the cluster, its own PKI, verified by
+  `flux.nu install` before anything is applied), `flux.nu install|wait`, six Kustomizations Ready at the published commit, the seed applied through a
+  republish. What running it found and fixed: the `data` layer waited for Neo4j, which needs the credentials agent in a later layer (deadlock); Flux's own
+  Job status reader runs before any CEL expression and counts only a completed Job healthy, so a running agent is waited for through its Service's
+  Endpoints; a spec change is not seen by a reconcile already waiting on a health check (the controller was restarted by hand; `install` could do it);
+  the deployment server container needs `--tmpfs /tmp`; and a host search domain whose resolver never answers (`wifi.local.cmu.edu` behind a VPN)
+  made every 4-dot service name wait CoreDNS's 5 s upstream timeout, past the Cassini client's 5 s attempt budget (fixed in nix-usernetes with
+  `--dns-search=.`, uncommitted there). Open: the republish while a layer waits on a health check needs the controller bounce; the server rejecting unsigned
+  pushes; `local` and `local-minimal` as gitops targets; SOPS-encrypted secrets in the repository; the agents' `ndots` (Polar-side hardening against search
+  domains); failed Jira-observer pods accumulate with no Jira to reach (as before).
   **Stage 3d done, 2026-10-16: `release.nu`.** `plan`, `gates`, `secrets` (and `secrets accept`), `run` (see INFRA.md, "The release").
   Pure helpers have 8 tests. The gates found and we fixed: `rustls` 0.23.45 -> 0.23.46 (four advisories), `CDLA-Permissive-2.0` allowed,
   `src/deny.toml` now ignores with reasons the `rsa` Marvin advisory (reached only through `jsonwebtoken`, public-key verification) and
