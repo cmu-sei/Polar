@@ -163,6 +163,15 @@ export def published_ref [from: string, row: record, arch: string] {
     $"($from | str trim --right --char '/')/polar-($row.image):($row.tag)-(arch_of $arch)"
 }
 
+# The rows `import` copies: those `publish` handles, and the images built elsewhere (Neo4j, published from its own repository as
+# polar-<image>:<tag>-<arch> like the rest), all of them or only those named.
+export def import_rows [table: list, names: list<string>] {
+    let external = ($table | where kind == "external" | where {|r| ($names | is-empty) or $r.image in $names })
+    let others = ($names | where {|n| $n not-in ($external | get image) })
+    let built = if ($names | is-not-empty) and ($others | is-empty) { [] } else { published_rows $table $others }
+    $built ++ $external
+}
+
 # The rows `import` and `publish` handle: the images this repository builds (not mirrors of third-party images, and not the
 # Neo4j archive, which is built elsewhere), all of them or only those named.
 export def published_rows [table: list, names: list<string>] {
@@ -448,7 +457,7 @@ def "main lock show" [] {
 
 # Copies the images published for this machine's architecture (or --arch) into the registry, under the names and tags the table
 # gives, so a cluster can start without building anything. Reads `<from>/polar-<image>:<tag>-<arch>` (see `publish`), then also
-# copies the third-party images (--skip-mirrors leaves those). Neo4j is not published: build it (README, step 3).
+# copies the third-party images (--skip-mirrors leaves those). Neo4j is imported with the rest: it is published as polar-neo4j.
 def "main import" [
     ...names: string             # only these images (default: every image this repository builds)
     --from: string               # where the images are published, e.g. docker.io/<account>
@@ -460,7 +469,7 @@ def "main import" [
     if ($from | is-empty) { error make --unspanned { msg: "say where the images are published: --from docker.io/<account>" } }
     require_registry
     let want = if ($arch | is-empty) { arch } else { arch_of $arch }
-    let rows = (published_rows (load_table) $names)
+    let rows = (import_rows (load_table) $names)
     let evict = (runtime) == "u7s" and (node_present)
     print $"importing ($rows | length) image\(s\) for ($want) from ($from) into (registry)"
     let auth = (if ($src_authfile | is-empty) { [] } else { ["--src-authfile" $src_authfile] }) ++ (if $src_insecure { ["--src-tls-verify=false"] } else { [] })
@@ -493,7 +502,7 @@ def "main import" [
         for f in $failures { print $"  ($f.image): ($f.error)" }
         error make --unspanned { msg: $"($failures | length) image\(s\) could not be imported. Were they published for ($want)?" }
     }
-    print "imported. Neo4j is not published: build it (README, step 3), then `just images-push neo4j`."
+    print "imported."
 }
 
 # Builds the images for an architecture (cross-built with Nix when it is not this machine's) and pushes each to

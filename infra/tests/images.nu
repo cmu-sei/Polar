@@ -24,7 +24,7 @@
 # How images are named when they are published and imported, and which ones.
 
 use std/assert
-use ../images.nu [arch_of, published_ref, published_rows, system_of]
+use ../images.nu [arch_of, import_rows, published_ref, published_rows, system_of]
 
 def sample [] {
     [
@@ -71,6 +71,15 @@ def main [] {
                 assert equal (published_rows (sample) ["postgres"] | get image) ["postgres"]
                 assert equal (published_rows (sample) ["postgres" "cassini"] | get image) ["postgres" "cassini"]
                 assert ((try { published_rows (sample) ["neo4j"]; "accepted" } catch {|e| $e.msg }) | str contains "not an image this repository builds")
+            }
+        }
+        {
+            name: "an import takes what is published here and Neo4j, which is published from its own repository; named, only those"
+            body: {
+                assert equal (import_rows (sample) [] | get image) ["cassini" "polar-tools" "neo4j"]
+                assert equal (import_rows (sample) ["neo4j"] | get image) ["neo4j"]
+                assert equal (import_rows (sample) ["cassini" "neo4j"] | get image) ["cassini" "neo4j"]
+                assert equal (import_rows (sample) ["cassini"] | get image) ["cassini"]
             }
         }
     ]
