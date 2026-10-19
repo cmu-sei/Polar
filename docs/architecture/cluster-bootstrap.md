@@ -41,7 +41,7 @@ The sources are the `.mmd` files beside them (regenerate as in `sequences/assets
 `render.nu`, `render-catalog.nu`, `resolve.nu`, `layers.nu`, `secrets.nu` of the target, `tools.nu`, `forwards.nu`, the
 Justfile recipes (`registry-up`, `port-forwards-up`, `admin-bootstrap`, `admin-provision`, `admin-claim`,
 `user-cert-install`), and `polar-admin-grant` and `polar-sign`. **(new)** marks the proposed Flux deployment, none of
-which is built: the deployment git server, `deploy-repo.nu`, `flux.nu`, and Flux itself. Today `up.nu` applies the
+which is built except the deployment host (`deploy-repo.nu ensure`): `deploy-repo.nu publish`, `flux.nu`, and Flux itself. Today `up.nu` applies the
 manifests itself, in `apply_order`, with one gate (Cassini); the Flux target replaces that loop and nothing else.
 
 ## Why three phases
@@ -63,7 +63,7 @@ manifests itself, in `apply_order`, with one gate (Cassini); the Flux target rep
 | 3 | render | `render.nu`, each chart's `main.nu`, `render-catalog.nu`, `resolve.nu`, `dhall` | `manifests/` (51 files), render cache |
 | 4 | images (`--dev`) | `images.nu` | the images the manifests name |
 | 5 | split (new) | `layers.nu split` | one directory per layer and `layers.json` |
-| 5 | deployment host (new) | `deploy-repo.nu ensure` | the deployment PKI; the deployment git server container |
+| 5 | deployment host | `deploy-repo.nu ensure` | the deployment PKI; the deployment git server container. Built 2026-10-19 (`nu infra/deploy-repo.nu ensure <target>`, idempotent; the container is `polar-deploy-<target>` on host port 9443, its repositories in the volume `polar-deploy-<target>-repos`) |
 | 5 | publish (new) | `deploy-repo.nu publish` | a signed commit in `deploy-T` (layers, Flux objects, `provenance.json`, a README) |
 | 6 | namespaces | `up.nu` (`kubectl apply`) | the namespaces |
 | 7 | cluster CA | `polar-admin-grant bootstrap-ca` | Secret `cert-issuer-ca`, ConfigMap `polar-ca`; straight to the API with your kubeconfig, created once and never overwritten (a second run fails with 409) |
