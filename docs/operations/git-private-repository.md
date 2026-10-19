@@ -134,12 +134,12 @@ Expect: `['token', 'username']`.
 ## Step 4. Give `polar-sign` the agents' scaffolds
 
 ```fish
-POLAR_AGENT_SOURCE=images nu infra/resolve.nu scaffolds ~/.config/polar-admin/scaffolds --target local-minimal
+nu infra/resolve.nu scaffolds ~/.config/polar-admin/scaffolds --target local-minimal
 ls ~/.config/polar-admin/scaffolds | grep -E 'git-repo-(observer|controller)'
 ```
 
-Expect: `git-repo-controller.json` and `git-repo-observer.json` among the files. (Leave off `POLAR_AGENT_SOURCE=images`
-to ask the source tree with cargo instead of the pushed images.)
+Expect: `git-repo-controller.json` and `git-repo-observer.json` among the files. (The scaffolds come from the agents'
+images, asked on the cluster, so this needs KUBECONFIG and the images in the registry.)
 
 ```fish
 nu infra/tools.nu install ~/.local/bin          # once: copies polar-sign and the other tools out of the polar-tools image

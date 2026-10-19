@@ -58,9 +58,9 @@ manifests itself, in `apply_order`, with one gate (Cassini); the Flux target rep
 
 | # | Step | Script | Makes |
 |---|---|---|---|
-| 1 | preflight | `up.nu` | nothing. Checks the cluster answers, a container runtime exists, the SOPS files decrypt |
+| 1 | preflight | `up.nu` | nothing. Checks the cluster answers and namespaces can be made, a container runtime exists when a step starts a container here (`--dev`, the deployment host), the SOPS files decrypt; deletes scratch namespaces an interrupted run left behind |
 | 2 | agent images (`--dev`) | `just registry-up`, `resolve.nu document-images`, `images.nu sync`, `nix build`, `skopeo` | the registry container; `result/IMAGE` archives; images in the registry |
-| 3 | render | `render.nu`, each chart's `main.nu`, `render-catalog.nu`, `resolve.nu`, `dhall` | `manifests/` (51 files), render cache |
+| 3 | render | `resolve.nu collect-scaffolds` (`agent-pods.nu`), `render.nu`, each chart's `main.nu`, `render-catalog.nu`, `resolve.nu`, `dhall` | the agents' scaffolds, asked of their images as pods in a scratch namespace (deleted afterwards); `manifests/` (51 files), render cache |
 | 4 | images (`--dev`) | `images.nu` | the images the manifests name |
 | 5 | split (new) | `layers.nu split` | one directory per layer and `layers.json` |
 | 5 | deployment host | `deploy-repo.nu ensure` | the deployment PKI; the deployment git server container. Built 2026-10-19 (`nu infra/deploy-repo.nu ensure <target>`, idempotent; the container is `polar-deploy-<target>` on host port 9443, its repositories in the volume `polar-deploy-<target>-repos`) |

@@ -350,21 +350,29 @@ yet on the builder keep reading the environment and are unaffected. Two things f
 
 ### 9.7 Getting the scaffold at render time
 
-The resolver has to run the agent's own binary, so there is no copy that can go stale:
+The resolver has to run the agent's own binary, so there is no copy that can go stale. It runs the
+built image, the exact artifact that will deploy, **on the cluster** (`infra/agent-pods.nu`, 2026-10-19;
+it replaced running the image with podman, and `cargo run` from the source tree): a bring-up already
+has a cluster, so it needs no container runtime or compiler of its own for this.
 
-- **Locally:** `cargo run -q -p <agent> -- --scaffold`. Incremental after the first build, but a
-  cold run compiles every agent.
-- **For a deploy:** the built image, which is the exact artifact that will run. **Done
-  2026-10-09.** `POLAR_AGENT_SOURCE=images` makes the resolver pull the image from the registry this
-  machine pushes to (`POLAR_REGISTRY`, default `localhost:5000`), read its entrypoint and cmd from
-  its configuration (the nix images set a cmd, not an entrypoint, so `podman run <image> --scaffold`
-  would try to run `--scaffold`), and run that with the flag and no network. The same route runs
-  `--check --config` on the document it rendered, with the file mounted. `up.nu` sets it, and with
-  `--dev` builds and pushes the images of the self-describing agents (`resolve.nu document-images`,
-  from the catalog, not from the render) in a step before the render. Without `--dev` the render
-  asks the images already in the registry, and says which to push when one is missing. The source
-  tree route stays the default for work on a developer's machine, and a test checks that both give
-  the same record.
+- **Scaffolds:** `resolve.nu collect-scaffolds <dir>` looks each image up in the registry this
+  machine pushes to (`POLAR_REGISTRY`, default `localhost:5000`), reads its command from its
+  configuration (the nix images set a Cmd, not an Entrypoint, so a pod's `args` alone would replace
+  it), and runs it with `--scaffold` as a pod named by the image's digest under the nodes' name for the
+  registry (`cluster.registry`). Every image runs once, all at once, in a scratch namespace that is
+  deleted afterwards; a scaffold is cached under its image's digest, so an unchanged image is not run
+  again. The resolver itself only reads the directory (`POLAR_SCAFFOLD_DIR`) and stays a pure
+  function: `up.nu` collects before it renders, and `render.nu` never touches a cluster.
+- **Checks:** `resolve.nu check` runs each agent's `--check --config` on the document it rendered,
+  mounted from a ConfigMap, the same way and in one namespace.
+- **The pods:** no network (a deny-all NetworkPolicy), no ServiceAccount token, the restricted Pod
+  Security profile, a read-only root with a scratch `/tmp`, never restarted. An agent prints its
+  scaffold, or `ok:`, on stdout and each problem as an `ERROR:` line on stderr; a pod's log holds
+  both, so a scaffold that is not JSON is refused and names the agent.
+
+With `--dev`, `up.nu` builds and pushes the images of the self-describing agents (`resolve.nu
+document-images`, from the catalog, not from the render) in a step before the render. Without it the
+render asks the images already in the registry, and says which one is missing.
 
 ### 9.8 Order of work
 

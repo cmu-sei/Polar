@@ -671,9 +671,9 @@ Each variable is declared once, with `polar-env`: name, type, default, what it i
 whether it is secret. The check, the agent's own reads and the documentation all come from
 that declaration. `<agent> --scaffold` lists every variable the agent reads, by section.
 
-`resolve.nu check` asks the agent from its image when `POLAR_AGENT_SOURCE=images` (what `up.nu`
-sets), and otherwise runs it with `cargo run`, which rebuilds it when the code has changed. An
-agent that cannot be run, or does not answer, is an error, never a skipped check. (There used to be
+`resolve.nu check` asks each agent from its image, as a pod on the cluster (`infra/agent-pods.nu`;
+it needs KUBECONFIG and the images in the registry). An agent that cannot be run, or does not answer,
+is an error, never a skipped check. (There used to be
 a separate program, `polar-config-check`, that judged an environment; it is retired, and a catalog
 workload is an agent that describes itself.)
 
