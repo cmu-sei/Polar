@@ -304,12 +304,7 @@ export POLAR_CLUSTER_RUNTIME=none                     # unless the cluster is a 
 
 `POLAR_NODE_REGISTRY` is the prefix of every image in the manifests (default
 `10.0.2.2:5000`, the host as a podman dev node sees it; a target can also set
-`cluster.registry` in its `config.nuon`). A deployment through Flux also needs
-the host's address as the nodes see it, for the deployment git server:
-`--host <ip>` on `flux.nu install`, or `POLAR_DEPLOY_HOST`. It defaults to the
-node registry's host when that is an address (it is not, if you named the
-registry with a hostname). On minikube the host is
-`minikube ssh -- getent hosts host.minikube.internal`.
+`cluster.registry` in its `config.nuon`).
 
 The scripts use `podman` or `docker`, whichever is installed (`podman` first).
 To choose, set `POLAR_CONTAINER_RUNTIME=docker` (or `podman`); `up.nu` says
@@ -376,13 +371,13 @@ step checks whether it is already done.
 
 To deploy with Flux instead, bring up the `sandbox-local` target:
 `nu infra/up.nu sandbox-local --user <name> --email <email>`. It publishes the
-rendered layers, signed, to a deployment git server that runs as a container on
-your host (so it needs `podman` or `docker` here, and `gpgsm` from GnuPG to
-sign), installs Flux and lets it apply them. Add `--allow-dirty` if your working
-tree has uncommitted changes (the signed record says so). On a cluster that is
-not a podman dev node, give the host's address as the nodes see it with
-`POLAR_DEPLOY_HOST` (step 2). `infra/INFRA.md` ("How a target works") explains
-what it does; it has been run on one cluster, a podman dev node.
+rendered layers, signed, to a deployment git server that runs in the cluster, in
+a namespace of its own (`polar-deploy`), installs Flux and lets it apply them. It
+needs `gpgsm` from GnuPG here, to sign; no container runtime. A copy of the signed
+history is kept in `~/.config/polar-deploy/<target>/mirror.git`, and a new
+cluster's server is given it. Add `--allow-dirty` if your working tree has
+uncommitted changes (the signed record says so). `infra/INFRA.md` ("How a target
+works") explains what it does; it has been run on one cluster, a podman dev node.
 
 Use `--dev` when you have changed code and want the images rebuilt (and
 every Job restarted to pick them up). Once the images are in the registry
@@ -580,8 +575,8 @@ the cluster CA, secrets and manifests in the target's apply order, a wait for
 the core pods, the port-forwards, the admin flow, the seed of the schedules
 repository and the browser certificate. A target that deploys with Flux
 (`sandbox-local`) does not apply its manifests: it publishes them, signed, to a
-deployment git server of its own that runs on your host, installs Flux and
-lets it apply them layer by layer (`infra/INFRA.md`, "How a target works", and
+deployment git server of its own that runs in the cluster (in a namespace of its
+own, outside every layer), installs Flux and lets it apply them layer by layer (`infra/INFRA.md`, "How a target works", and
 `docs/architecture/cluster-bootstrap.md`).
 It stops only where a person is needed (closing the browser, the Neo4j
 password), and every step checks whether it is already done, so after a

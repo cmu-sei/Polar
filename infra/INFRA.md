@@ -160,7 +160,7 @@ nu infra/images.nu import --from docker.io/<account>    # copy published images 
 nu infra/images.nu publish --to docker.io/<account> --arch arm64    # publish them (a mirror only when named)
 
 # A Flux (gitops) target: up.nu runs these; each can be run alone
-nu infra/deploy-repo.nu ensure sandbox-local        # the deployment git server (a container on the host) and its PKI
+nu infra/deploy-repo.nu ensure sandbox-local        # the deployment git server (in the cluster, namespace polar-deploy) and its PKI
 nu infra/deploy-repo.nu publish sandbox-local       # commit the layers there, signed with the pipeline's certificate
 nu infra/flux.nu install sandbox-local              # Flux, pointed at it (refuses a head that is not signed)
 nu infra/flux.nu wait sandbox-local                 # until every layer is Ready at the commit that was published
@@ -407,16 +407,19 @@ can have completely different orderings.
 `docs/architecture/cluster-bootstrap.md`. It declares `gitops: true`, so `up.nu` does not apply its layers:
 
 1. It creates the namespaces, the cluster CA and the secrets, which Flux does not own and never prunes.
-2. `deploy-repo.nu ensure` starts the deployment git server, a container on the host and outside the cluster, with a PKI of its own
-   (`~/.config/polar-deploy/<target>/`: a CA, the server's certificate, and client certificates for `pipeline`, which writes, and `flux`,
-   which reads).
+2. `deploy-repo.nu ensure` applies the deployment git server in the cluster, in a namespace of its own (`polar-deploy`) that no layer
+   holds, so Flux neither applies nor prunes it, with a PKI of its own (`~/.config/polar-deploy/<target>/`: a CA, the server's certificate,
+   and client certificates for `pipeline`, which writes, and `flux`, which reads). The CA key never leaves this machine; the cluster holds
+   the server's certificate and key and the CA certificate, in a Secret. The server is `polar-deploy-git.polar-deploy.svc.<domain>` on its
+   certificate; this machine reaches it through a port-forward (`just port-forwards-up deploy`, localhost:9443). A server whose repository
+   is empty (a new cluster) is given the history of the mirror `publish` keeps beside the PKI (`mirror.git`).
 3. `deploy-repo.nu publish` commits the layers there as one tree, signed with the pipeline's certificate (git's x509 support, `gpgsm`, in a
    GnuPG home beside the PKI; it never touches `~/.gnupg` and never prompts). The tree is `layers/<layer>/` (every layer but the `flux`
    one), `flux/` (a GitRepository and a Kustomization per layer), `provenance.json` and a README. It refuses a render that is not there, an
    image not pinned by digest, and a dirty tree unless `up.nu` is given `--allow-dirty`, and it commits nothing when the render has not changed.
 4. `flux.nu install` clones that repository as the `flux` identity and refuses a head that is not signed by the pipeline's certificate before
-   it touches the cluster; then it applies the controllers, a Service named as the server's certificate with an EndpointSlice to the host,
-   the `flux` identity's Secret, and the Flux objects.
+   it touches the cluster; then it applies the controllers, the `flux` identity's Secret, and the Flux objects. Flux reaches the server
+   by its Service.
 5. `flux.nu wait` follows every layer until it is Ready at the published commit. If a layer is waiting on a health check begun under an
    older spec or revision (Flux finishes a reconcile under the spec it began with, up to its ten minute timeout), it restarts the
    kustomize-controller after 15 seconds, at most three times.
@@ -434,8 +437,7 @@ template when it is published (`polar.dev/config-hash`), so a changed ConfigMap 
 `config/cluster.nuon` (`10.0.2.2:5000`, the host as a podman dev node sees it). `render.nu` resolves it once and hands it to the hand-written
 charts in the environment, where their Dhall reads it (`env:POLAR_NODE_REGISTRY as Text`); the render cache's key includes the value of every
 environment variable a Dhall file imports. It is not the registry as this machine reaches it (`POLAR_REGISTRY`, `localhost:5000`: where
-images are pushed and digests asked), and it is not the host's address for the deployment git server (`flux.nu --host`, else
-`POLAR_DEPLOY_HOST`, else the registry's host when that is an address).
+images are pushed and digests asked).
 
 **Cluster inputs.** What belongs to one cluster and exists only after it does is not committed. Today that is the git server's
 administrators: the first admin's identity is made by the admin flow on the live cluster, and the git server must know it. `up.nu`'s seed
@@ -1007,7 +1009,7 @@ beside one that may still be alive), but it is an outage until someone acts.
   burst of pods is retried with a backoff, which slows a bring-up but does not break it. The `u7s` node lifts it.
 - **Third-party images under a version tag (Jaeger, Keycloak, Postgres, the Flux controllers, local-path-provisioner) are still
   `IfNotPresent`,** and `just cluster-load` (an image loaded into a node and not in the registry) does not work with `Always` for ours.
-- **The gitops target has run on one cluster** (the podman dev node). Other runtimes are untried; `flux.nu --host` is how the nodes reach the
-  host, and the deployment git server does not yet reject an unsigned push (`flux.nu install` checks the signature; the server does not).
+- **The gitops target has run on one cluster** (the podman dev node), and with the deployment git server in the cluster not yet at all.
+  The server does not yet reject an unsigned push (`flux.nu install` checks the signature; the server does not).
 
 Open items are tracked in `remaining-work.md`.
