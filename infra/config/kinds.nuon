@@ -28,7 +28,9 @@
     # Every agent is a Cassini client, and sends its traces to Jaeger.
     needs: ["cassini", "tracing"]
     namespace: "polar"
-    pull_policy: "IfNotPresent"
+    # The registry is where an image comes from, and `latest` moves: a node that keeps the first copy it pulled never sees a rebuild
+    # (infra/rules.nu checks that no tag that moves is left to IfNotPresent).
+    pull_policy: "Always"
     pull_secrets: []
 
     # Jobs restart through the Job controller, never in place.

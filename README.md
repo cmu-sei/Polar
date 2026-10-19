@@ -187,9 +187,15 @@ skopeo copy docker-archive:<folder>/<image> \
 The step that drops a node's cached copy of a rebuilt image is written
 for one kind of dev node (a rootless `podman` container running
 `containerd`, the default `POLAR_CLUSTER_RUNTIME=u7s`). On any other
-cluster (Docker Desktop's Kubernetes, kind, k3d, Colima, a managed
-cluster) set `POLAR_CLUSTER_RUNTIME=none`, e.g.
-`POLAR_CLUSTER_RUNTIME=none just image <name>`.
+cluster (Docker Desktop's Kubernetes, kind, k3d, Colima, minikube, a
+managed cluster) set `POLAR_CLUSTER_RUNTIME=none`, e.g.
+`POLAR_CLUSTER_RUNTIME=none just image <name>`. You do not need to clear
+the node yourself: every image of Polar's that is named by a tag that
+moves (`latest`) is pulled with `imagePullPolicy: Always`, so a pod that
+starts gets what your registry serves now. `up.nu` also warns, by name,
+when a running pod's image is not the one the registry serves; if you see
+that on a cluster that has run Polar before, the node predates this and
+kept an old copy (`minikube image rm <image>`, or recreate the cluster).
 
 ### Bring a cluster up: the whole sequence
 

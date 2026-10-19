@@ -70,7 +70,7 @@ use tools.nu
 use runtime.nu [container_runtime]
 use plan.nu [build_forwards, build_plan, deployed_charts, needs_runtime]
 use agent-pods.nu [delete_stale_namespaces]
-use apply.nu [any_pod_ready, changed_configmaps, config_users, gate_after, job_verdict, jobs_in, stale_images, workload_needs_restart]
+use apply.nu [any_pod_ready, changed_configmaps, config_users, gate_after, job_verdict, jobs_in, stale_images, stale_pod_images, stale_pod_report, workload_needs_restart]
 
 def note [msg: string] { print $"  -- ($msg)" }
 def ok [msg: string] { print $"  ok: ($msg)" }
@@ -227,6 +227,26 @@ def pod_ready [ns: string, selector: string] {
     any_pod_ready ($r.stdout | from json | get items)
 }
 
+# Says so when a running pod's image is not the one the registry serves now for its name. A node that kept the first copy it pulled of a
+# tag that moved runs old code, and what it does looks like a bug in the new code. Polar pulls such tags Always, so this means the node
+# is older than that, or something overrode it. A warning and not a failure: a cluster may be meant to run what it runs.
+def report_stale_images [] {
+    let r = (do { ^kubectl get pods -A -o json } | complete)
+    if $r.exit_code != 0 { return }
+    let pods = ($r.stdout | from json | get items)
+    let images = ($pods
+        | each {|p| (($p.status?.containerStatuses? | default []) ++ ($p.status?.initContainerStatuses? | default [])) | each {|c| $c.image? | default "" } }
+        | flatten
+        | uniq
+        | where {|i| ($i != "") and not ($i | str contains "@") })
+    let served = ($images | each {|i| { image: $i, digest: (served_digest $i) } } | where digest != null)
+    let stale = (stale_pod_images $pods $served)
+    if ($stale | is-empty) { return }
+    print ""
+    for l in (stale_pod_report $stale) { note $l }
+    print ""
+}
+
 def wait_pods [waits: list, timeout: duration] {
     let deadline = ((date now) + $timeout)
     mut pending = ($waits | where kind == "pods")
@@ -234,6 +254,7 @@ def wait_pods [waits: list, timeout: duration] {
         $pending = ($pending | where {|w| not (pod_ready $w.ns $w.ref) })
         if ($pending | is-empty) { break }
         if (date now) > $deadline {
+            report_stale_images
             fail $"timed out waiting for pods: ($pending | get label | str join ', ')"
         }
         print $"  waiting for: ($pending | get label | str join ', ')"
@@ -242,7 +263,10 @@ def wait_pods [waits: list, timeout: duration] {
     for w in ($waits | where kind == "statefulset") {
         print $"  waiting for statefulset ($w.label)..."
         ^kubectl -n $w.ns rollout status $w.ref --timeout=600s
-        if $env.LAST_EXIT_CODE != 0 { fail $"statefulset ($w.label) did not become ready" }
+        if $env.LAST_EXIT_CODE != 0 {
+            report_stale_images
+            fail $"statefulset ($w.label) did not become ready"
+        }
     }
     ok "required services are ready"
 }
@@ -708,7 +732,10 @@ def main [
             "publish" => { step_publish $target $allow_dirty }
             "flux" => { step_flux $target }
             "flux-wait" => { step_flux_wait $target }
-            "pods" => { wait_pods $waits 10min }
+            "pods" => {
+                wait_pods $waits 10min
+                report_stale_images
+            }
             "forwards" => { step_forwards $forwards }
             "admin" => { step_admin $username $mail }
             "browser" => { step_browser $username }

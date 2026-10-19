@@ -36,7 +36,7 @@
 #   nu infra/up.nu <target>
 
 use validate.nu *
-use rules.nu [job_replacement_problems, apply_order_problems]
+use rules.nu [job_replacement_problems, apply_order_problems, pull_policy_problems]
 use layers.nu [layer_problems]
 use lock.nu [effective, lock_problems, pin_text]
 
@@ -152,6 +152,10 @@ def main [
     check_job_replacement_policy $output_dir
     print ""
 
+    print "Checking image pull policies..."
+    check_pull_policies $output_dir
+    print ""
+
     print "Checking cert-issuer's TLS identity..."
     check_cert_issuer_identity $output_dir $cert_issuer_url
     print ""
@@ -236,6 +240,16 @@ def check_job_replacement_policy [output_dir: string] {
     let files = (ls $output_dir | get name | where {|f| $f | str ends-with ".yaml" })
     let docs = ($files | reduce --fold [] {|f, acc| $acc ++ (docs_in_file $f) })
     let problems = (job_replacement_problems $docs)
+    for p in $problems { print $"  ERROR: ($p)" }
+    if ($problems | length) > 0 { exit 1 }
+}
+
+# A tag that moves must be pulled Always (infra/rules.nu pull_policy_problems). The check runs on what is about to be applied, wherever
+# a chart got its policy from, so a new chart cannot bring the problem back.
+def check_pull_policies [output_dir: string] {
+    let files = (ls $output_dir | get name | where {|f| $f | str ends-with ".yaml" })
+    let docs = ($files | reduce --fold [] {|f, acc| $acc ++ (docs_in_file $f) })
+    let problems = (pull_policy_problems $docs)
     for p in $problems { print $"  ERROR: ($p)" }
     if ($problems | length) > 0 { exit 1 }
 }

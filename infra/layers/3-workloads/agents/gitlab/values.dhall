@@ -28,7 +28,7 @@
 let Constants = ../../../../schema/constants.dhall
 
 in  { name            = "gitlab-agents"
-    , imagePullPolicy = "IfNotPresent"
+    , imagePullPolicy = "Always"
     , imagePullSecrets = [] : List { name : Optional Text }
 
     , observer =

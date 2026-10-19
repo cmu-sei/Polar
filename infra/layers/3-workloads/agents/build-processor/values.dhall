@@ -29,7 +29,7 @@
 
 let Constants = ../../../../schema/constants.dhall
 
-in  { imagePullPolicy  = "IfNotPresent"
+in  { imagePullPolicy  = "Always"
     , imagePullSecrets = [] : List { name : Optional Text }
 
     , processor =

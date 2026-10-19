@@ -27,7 +27,7 @@ let CaProvisioning = ../../../schema/ca-provisioning.dhall
 
 in  { name             = "cert-issuer"
     , image            = "cert-issuer:latest"
-    , imagePullPolicy  = "IfNotPresent"
+    , imagePullPolicy  = "Always"
     , imagePullSecrets = [] : List { name : Optional Text }
     , port             = 8443
     , caVolumeName     = "cert-issuer-ca"

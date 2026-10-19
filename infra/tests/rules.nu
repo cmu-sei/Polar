@@ -62,6 +62,52 @@ def main [] {
             assert equal (job_replacement_problems $docs | length) 1
         }
 
+        "a tag that moves is recognised, and a version or a digest is not": {
+            assert (is_mutable_ref "10.0.2.2:5000/cassini:latest")
+            assert (is_mutable_ref "10.0.2.2:5000/cassini")
+            assert (is_mutable_ref "cassini")
+            assert (not (is_mutable_ref "10.0.2.2:5000/neo4j:5.26.2"))
+            assert (not (is_mutable_ref "10.0.2.2:5000/cassini:latest@sha256:abc"))
+            assert (not (is_mutable_ref "localhost:5000/postgres:16"))
+        }
+
+        "a container on a tag that moves must be pulled Always; the problem names the object, the container and the image": {
+            let job = { kind: "Job", metadata: { name: "cassini" }, spec: { template: { spec: {
+                containers: [{ name: "cassini", image: "10.0.2.2:5000/cassini:latest", imagePullPolicy: "IfNotPresent" }]
+                initContainers: [{ name: "polar-init", image: "10.0.2.2:5000/polar-init:latest", imagePullPolicy: "Always" }]
+            } } } }
+            let p = (pull_policy_problems [$job])
+            assert equal ($p | length) 1
+            assert (has $p "Job cassini")
+            assert (has $p "container cassini")
+            assert (has $p "10.0.2.2:5000/cassini:latest")
+            assert (has $p "IfNotPresent")
+        }
+
+        "init containers count, an unset policy is left to Kubernetes' own default, and a version or a digest may be IfNotPresent": {
+            let ok = { kind: "StatefulSet", metadata: { name: "db" }, spec: { template: { spec: {
+                containers: [
+                    { name: "db", image: "10.0.2.2:5000/postgres:16", imagePullPolicy: "IfNotPresent" }
+                    { name: "pinned", image: "10.0.2.2:5000/x:latest@sha256:abc", imagePullPolicy: "IfNotPresent" }
+                    { name: "unset", image: "10.0.2.2:5000/y:latest" }
+                ]
+            } } } }
+            assert equal (pull_policy_problems [$ok]) []
+            let bad = { kind: "Deployment", metadata: { name: "d" }, spec: { template: { spec: {
+                containers: [{ name: "c", image: "10.0.2.2:5000/c:latest", imagePullPolicy: "Always" }]
+                initContainers: [{ name: "i", image: "10.0.2.2:5000/polar-init:latest", imagePullPolicy: "IfNotPresent" }]
+            } } } }
+            assert (has (pull_policy_problems [$bad]) "container i")
+        }
+
+        "objects without a pod spec are not asked, and a CronJob's template is": {
+            assert equal (pull_policy_problems [{ kind: "ConfigMap", metadata: { name: "c" }, data: {} } { kind: "Service", metadata: { name: "s" } }]) []
+            let cron = { kind: "CronJob", metadata: { name: "x" }, spec: { jobTemplate: { spec: { template: { spec: {
+                containers: [{ name: "c", image: "r/c:latest", imagePullPolicy: "IfNotPresent" }]
+            } } } } } }
+            assert equal (pull_policy_problems [$cron] | length) 1
+        }
+
         "things that are not Jobs are not asked for the policy": {
             let docs = [
                 { kind: "Deployment", metadata: { name: "cert-issuer" }, spec: {} }

@@ -104,7 +104,7 @@ export def agent_pod [ns: string, name: string, image: string, command: list<str
             containers: [{
                 name: "agent"
                 image: $image
-                imagePullPolicy: "IfNotPresent"
+                imagePullPolicy: "Always"
                 command: $command
                 env: $variables
                 securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
@@ -136,7 +136,10 @@ export def pod_outcome [pod: record] {
         return { state: "done", exit: $terminated.exitCode, reason: ($terminated.reason? | default "") }
     }
     let waiting = ($state.waiting? | default null)
-    if $waiting != null and ($waiting.reason? | default "") in $STUCK_REASONS {
+    # The kubelet limits how fast it asks a registry (5 a second, a burst of 10), and a pull policy of Always asks for every container: a
+    # burst of pods is told "pull QPS exceeded" and the kubelet tries again by itself. That resolves by waiting.
+    let throttled = (($waiting.message? | default "") | str contains "pull QPS exceeded")
+    if $waiting != null and ($waiting.reason? | default "") in $STUCK_REASONS and not $throttled {
         return { state: "stuck", exit: null, reason: $"($waiting.reason): ($waiting.message? | default '')" }
     }
     if ($status.phase? | default "") == "Failed" {

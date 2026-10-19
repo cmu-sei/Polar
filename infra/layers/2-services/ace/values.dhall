@@ -26,7 +26,7 @@
 
 { name             = "ace"
 , image            = "ace-viz:latest"
-, imagePullPolicy  = "IfNotPresent"
+, imagePullPolicy  = "Always"
 , imagePullSecrets = [] : List { name : Optional Text }
 , serviceAccountName = "ace"
 , serviceType      = "ClusterIP"

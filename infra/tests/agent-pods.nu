@@ -105,6 +105,11 @@ def main [] {
                 assert equal (pod_outcome (waiting "ImagePullBackOff")).state "stuck"
                 assert ((pod_outcome (waiting "ErrImagePull")).reason | str starts-with "ErrImagePull")
                 assert equal (pod_outcome (waiting "ContainerCreating")).state "running"
+                # a throttled pull is the kubelet's rate limit, which it retries by itself: not stuck
+                let throttled = { status: { containerStatuses: [{ state: { waiting: { reason: "ErrImagePull", message: "pull QPS exceeded" } } }] } }
+                assert equal (pod_outcome $throttled).state "running"
+                let refused = { status: { containerStatuses: [{ state: { waiting: { reason: "ErrImagePull", message: "manifest unknown" } } }] } }
+                assert equal (pod_outcome $refused).state "stuck"
                 assert equal (pod_outcome { status: { phase: "Pending" } }).state "running"
                 assert equal (pod_outcome {}).state "running"
                 let deadline = (pod_outcome { status: { phase: "Failed", reason: "DeadlineExceeded" } })

@@ -133,6 +133,46 @@ def main [] {
             assert ($stale | first | str contains "sha256:old")
             assert ($stale | first | str contains "sha256:new")
         }
+        "a running container on an image the registry has since replaced is found, named, with both digests; the rest are not": {
+            let pod = {|name, phase, statuses, deleting|
+                { metadata: ({ name: $name, namespace: "polar" } | merge (if $deleting { { deletionTimestamp: "2026-10-19T00:00:00Z" } } else { {} })), status: { phase: $phase, containerStatuses: $statuses } }
+            }
+            let old = { name: "cert-issuer", image: "10.0.2.2:5000/cert-issuer:latest", imageID: "10.0.2.2:5000/cert-issuer@sha256:old" }
+            let same = { name: "cassini", image: "10.0.2.2:5000/cassini:latest", imageID: "10.0.2.2:5000/cassini@sha256:same" }
+            let pinned = { name: "x", image: "10.0.2.2:5000/x:latest@sha256:abc", imageID: "10.0.2.2:5000/x@sha256:abc" }
+            let nostatus = { name: "y", image: "10.0.2.2:5000/y:latest", imageID: "" }
+            let unknown = { name: "z", image: "10.0.2.2:5000/z:latest", imageID: "10.0.2.2:5000/z@sha256:q" }
+            let served = [
+                { image: "10.0.2.2:5000/cert-issuer:latest", digest: "sha256:new" }
+                { image: "10.0.2.2:5000/cassini:latest", digest: "sha256:same" }
+                { image: "10.0.2.2:5000/x:latest@sha256:abc", digest: "sha256:other" }
+                { image: "10.0.2.2:5000/y:latest", digest: "sha256:new" }
+            ]
+            let pods = [
+                (do $pod "cert-issuer-1" "Running" [$old $same] false)
+                (do $pod "cert-issuer-gone" "Running" [$old] true)
+                (do $pod "pending" "Pending" [$old] false)
+                (do $pod "other" "Running" [$pinned $nostatus $unknown] false)
+            ]
+            let stale = (stale_pod_images $pods $served)
+            assert equal ($stale | length) 1
+            let one = ($stale | first)
+            assert equal $one.pod "cert-issuer-1"
+            assert equal $one.container "cert-issuer"
+            assert equal $one.running "sha256:old"
+            assert equal $one.registry "sha256:new"
+            assert equal $one.ns "polar"
+        }
+        "the report names each container with both digests and the image, and says what to do; nothing found is nothing said": {
+            assert equal (stale_pod_report []) []
+            let lines = (stale_pod_report [{ ns: "polar", pod: "cert-issuer-1", container: "cert-issuer", image: "10.0.2.2:5000/cert-issuer:latest", running: "sha256:0123456789abcdef", registry: "sha256:fedcba9876543210" }])
+            assert ($lines.0 | str contains "1 running container")
+            assert ($lines.1 | str contains "polar/cert-issuer-1")
+            assert ($lines.1 | str contains "0123456789a")
+            assert ($lines.1 | str contains "fedcba98765")
+            assert ($lines.1 | str contains "10.0.2.2:5000/cert-issuer:latest")
+            assert (($lines | last) | str contains "minikube image rm")
+        }
         "the jobs in a list of objects are found, and only the jobs": {
             let list = { kind: "List", items: [
                 { kind: "Job", metadata: { name: "a", namespace: "polar" }, status: { succeeded: 1 } }

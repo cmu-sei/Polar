@@ -133,6 +133,38 @@ export def workload_needs_restart [before: any, after: any, changed_configmaps: 
     ($changed_configmaps | is-not-empty) and ($before != null) and ($before == $after)
 }
 
+# The containers of running pods that run a different image than the registry serves now for the name they were started from, as
+# `{ ns, pod, container, image, running, registry }`. `pods` is `kubectl get pods -o json`'s items; `served` is `{ image, digest }` for
+# the names the registry was asked about (a name it said nothing about is not judged, and neither is one pinned by digest, which cannot go
+# stale). This is what a node's kept copy of a tag that moved looks like: the pod is Running, on the old code.
+export def stale_pod_images [pods: list, served: list] {
+    $pods
+    | where {|p| (($p.metadata?.deletionTimestamp? | default null) == null) and (($p.status?.phase? | default "") == "Running") }
+    | each {|p|
+        (($p.status?.containerStatuses? | default []) ++ ($p.status?.initContainerStatuses? | default []))
+        | where {|c| ($c.imageID? | default "") != "" and not ($c.image | str contains "@") }
+        | each {|c|
+            let hit = ($served | where image == $c.image)
+            let running = ($c.imageID | split row "@" | last)
+            if ($hit | is-empty) or (($hit | first | get digest) == $running) { null } else {
+                { ns: $p.metadata.namespace, pod: $p.metadata.name, container: $c.name, image: $c.image, running: $running, registry: ($hit | first | get digest) }
+            }
+        }
+        | compact
+    }
+    | flatten
+}
+
+# What to tell the user about the containers `stale_pod_images` found, one line each and the remedy; empty when there are none.
+export def stale_pod_report [stale: list] {
+    if ($stale | is-empty) { return [] }
+    let short = {|d| $d | str replace "sha256:" "" | str substring 0..11 }
+    let lines = ($stale | each {|s| $"  ($s.ns)/($s.pod) \(($s.container)\) runs (do $short $s.running), the registry has (do $short $s.registry): ($s.image)" })
+    let head = [$"WARNING: ($stale | length) running container\(s\) use an image the registry no longer serves under that name:"]
+    let advice = ["The node kept an older copy of a tag that moved, so these pods run old code. Remove the node's copy of the image (minikube: `minikube image rm <image>`; kind: `docker exec <node> crictl rmi <image>`), delete the pod, or recreate the cluster."]
+    $head | append $lines | append $advice
+}
+
 # The images in `running` (each `{ image, digest }`: what a pod is running) that the registry no longer
 # serves under that tag: `served` is `{ image, digest }` for each the registry answered for. An image the
 # registry did not answer for is never called stale, since nothing is known. Each is a sentence saying so.

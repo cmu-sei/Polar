@@ -73,6 +73,42 @@ export def job_replacement_problems [docs: list]: nothing -> list<string> {
     }
 }
 
+# The pod spec of a rendered object, or null when it has none: a Pod's own, a workload's template, a CronJob's.
+def pod_spec_of [d: record] {
+    match ($d.kind? | default "") {
+        "Pod" => ($d | get -o spec)
+        "CronJob" => ($d | get -o spec.jobTemplate.spec.template.spec)
+        "Job" | "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet" => ($d | get -o spec.template.spec)
+        _ => null
+    }
+}
+
+# Whether an image reference names something that can change under the same name: a tag that is `latest` or absent, with no digest.
+export def is_mutable_ref [ref: string]: nothing -> bool {
+    if ($ref | str contains "@sha256:") { return false }
+    let last = ($ref | split row "/" | last)
+    if not ($last | str contains ":") { return true }
+    ($last | split row ":" | last) == "latest"
+}
+
+# Containers whose image can change under its name but whose pull policy lets a node keep the first copy it pulled. `IfNotPresent` (or
+# `Never`) on `latest` means a node that has run an image once never sees a rebuilt one: the pod runs old code, and what it does looks
+# like a bug in the new code. Kubernetes' own default for such a tag is Always; an unset policy is left to that default.
+export def pull_policy_problems [docs: list]: nothing -> list<string> {
+    $docs | each {|d|
+        let spec = (pod_spec_of $d)
+        if $spec == null { return [] }
+        (($spec | get -o containers | default []) ++ ($spec | get -o initContainers | default []))
+        | where {|c|
+            let policy = ($c | get -o imagePullPolicy)
+            ($policy != null) and ($policy != "Always") and (is_mutable_ref ($c | get -o image | default ""))
+        }
+        | each {|c|
+            $"(($d.kind)) (($d.metadata?.name? | default '?')): container ($c.name) runs ($c.image) with imagePullPolicy ($c.imagePullPolicy). That tag moves, so a node keeps the first copy it pulled and never runs a rebuilt image; use Always"
+        }
+    } | flatten
+}
+
 # Every manifest the catalog rendered must be applied, and a workload's resources (its
 # ConfigMap, token Secret, RBAC) before the Job that uses them: a Job whose ConfigMap is not there
 # yet sits in ContainerCreating. `rendered` and `order` are file names.
