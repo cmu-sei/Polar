@@ -163,11 +163,13 @@ Once built, keep the container running (`podman stop`/`podman start`
 rather than `--rm`-ing it) so subsequent shells skip the rebuild
 entirely.
 
-**If your cluster tooling (`podman`, `skopeo`, and your Kubernetes
-distribution itself) lives on the host rather than inside the dev
-container** — common on a Mac, where the dev container only provides
-the Linux build environment — you need to get the built images out of
-the container before they can be pushed. `just images-build` leaves
+**If your registry is on the host rather than in your cluster, and
+your cluster tooling (`podman`, `skopeo`, and your Kubernetes distribution
+itself) lives on the host too** — common on a Mac, where the dev container only
+provides the Linux build environment — you need to get the built images out of
+the container before they can be pushed. (With the registry in your cluster, as
+the shipped targets keep it, none of this applies: `up.nu --dev` in the dev
+container pushes through a port-forward itself.) `just images-build` leaves
 Nix store symlinks in `result/`; they only resolve inside the
 container's own filesystem. Copying them with a plain `cp` copies the
 symlink itself, not the image data — `ls` will still show the file on
@@ -238,9 +240,11 @@ kubectl get nodes      # at least one node, Ready
 
 What Polar asks of the cluster:
 
-- **A registry its nodes can pull from** (step 2), and the address the
-  *nodes* use for it, which you give as `POLAR_NODE_REGISTRY` (step 2). That
-  address is often not the one your machine pushes to.
+- **A registry its nodes can pull from** (step 2). The shipped targets run one
+  in the cluster itself, so this asks nothing more of it than a storage class.
+  A registry of your own also works, with the address the *nodes* use for it,
+  which you give as `POLAR_NODE_REGISTRY` (step 2); that is often not the one
+  your machine pushes to.
 - **A storage class** for persistent volumes. The `local-minimal` target
   installs a local-path provisioner and a class named `managed-csi`
   (`storage.class` in the same file). On a cluster that has its own class,
@@ -266,9 +270,11 @@ What Polar asks of the cluster:
   it on the nodes (minikube: `minikube start --extra-config=kubelet.registry-pull-qps=0`).
 
 **2. Have a registry** the cluster pulls images from, and say where it is.
+For the shipped targets (`local-minimal`, `sandbox-local`) there is nothing to do:
+their registry is in the cluster, and `up.nu` makes it.
 
 *In the cluster itself* (nothing to run on this machine, no container runtime):
-say so in the target's `config.nuon`, as `local-minimal` does:
+say so in the target's `config.nuon`, as `local-minimal` and `sandbox-local` do:
 
 ```nuon
 cluster: { registry_in_cluster: { node_port: 30500 } }   # local_port (default 5000) and size (default 20Gi) are optional
@@ -288,7 +294,8 @@ authentication yet:** anyone who can reach a node at the NodePort can push and
 pull. It needs a kube-proxy that answers NodePorts on `localhost` (the iptables
 mode does; IPVS and some kube-proxy replacements do not).
 
-*On this machine:* for a local cluster, `just registry-up` starts one on `localhost:5000`:
+*On this machine*, for a target that names a registry instead (and leaves out
+`registry_in_cluster`): for a local cluster, `just registry-up` starts one on `localhost:5000`:
 
 ```bash
 just registry-up        # a registry container on localhost:5000
@@ -314,13 +321,17 @@ To choose, set `POLAR_CONTAINER_RUNTIME=docker` (or `podman`); `up.nu` says
 which it found in its first step, and stops with a clear message if a step needs
 one (`--dev` with the registry on this machine) and neither is installed.
 
-**2b. Get the Polar images into that registry, one of two ways.**
+**2b. Get the Polar images into that registry, one of two ways.** Either way
+there is nothing to run now: `up.nu` does it in step 5.
 
-- *Published images (no build):* `nu infra/images.nu import --from docker.io/<account>`
-  copies the images for this machine's architecture. See **Loading prebuilt
-  images**, under **Images**. Then bring Polar up **without `--dev`** (step 5).
-- *Build from source:* nothing to do now; `up.nu local-minimal --dev` (step 5)
-  builds and pushes them. This is the way when you have changed code.
+- *Published images (no build):* `up.nu <target> --import-from docker.io/<account>`
+  copies the images for this machine's architecture into the registry, as a step
+  after the registry is made and before the render. See **Loading prebuilt
+  images**, under **Images**. For a registry of your own you can also import
+  first (`nu infra/images.nu import --from docker.io/<account>`) and then run
+  `up.nu` with neither flag.
+- *Build from source:* `up.nu <target> --dev` (step 5) builds and pushes them.
+  This is the way when you have changed code.
 
 **3. Building from source: build the Neo4j image.** Skip this with published
 images, which include Neo4j. In the `nix-neo4j` checkout:
@@ -359,8 +370,8 @@ them, rather than installing them on the Mac.
 # Building from source (builds every image; the first cold build takes a long while):
 nu infra/up.nu local-minimal --dev --user <name> --email <email>
 
-# Images already in your registry (given to you; see "Loading prebuilt images"). No --dev: nothing is built:
-nu infra/up.nu local-minimal --user <name> --email <email>
+# Published images (given to you; see "Loading prebuilt images"). Nothing is built:
+nu infra/up.nu local-minimal --import-from docker.io/<account> --user <name> --email <email>
 ```
 
 With `--dev` it prints its plan first, then builds and pushes the images the target
@@ -487,8 +498,18 @@ If the images are published for you (a registry account such as `docker.io/<acco
 machine's architecture** into the registry your cluster pulls from. It streams each image from one registry to the other with
 `skopeo`: no Docker daemon, no `docker pull`, `docker save` or tarball in between.
 
+For a target whose registry is in the cluster (the shipped ones), let `up.nu` do it, since the registry exists only once `up.nu`
+has made it:
+
 ```bash
-just registry-up                                       # if you have not started the registry yet
+nu infra/up.nu local-minimal --import-from docker.io/<account> --user <name> --email <email>
+```
+
+For a registry of your own, or by hand (`nu infra/cluster-registry.nu up <target>` makes the one in the cluster and its forward
+first, and prints the `POLAR_REGISTRY` to use):
+
+```bash
+just registry-up                                       # a registry on this machine, if you have not started it yet
 nu infra/images.nu import --from docker.io/<account>   # amd64 or arm64, from `uname -m`; --arch to choose
 ```
 
@@ -500,8 +521,7 @@ leave those), and records the digests. Name images to import only those (`nu inf
 Neo4j is imported with the rest (it is published as `polar-neo4j`, from its own repository), and so is `polar-tools`, the image
 the tools in **Installing the Polar tools** come out of. Then run
 `nu infra/up.nu <target> --user <name> --email <email>` **without `--dev`**, so it uses the images already in the registry instead
-of building them. `up.nu <target> --import-from docker.io/<account>` does the import itself, as a step before the render; that is the
-way for a target whose registry is in the cluster, which exists only once `up.nu` has applied it.
+of building them.
 
 Doing it by hand, one image at a time:
 
@@ -555,8 +575,10 @@ A "target" is a named deployment profile under `infra/targets/`.
 `infra/targets/<name>/target.nu` lists what each target deploys, and
 `infra/targets/<name>/overrides.dhall` is where you customize hostnames,
 storage classes and other per-deployment values for the hand-written charts.
-The registry is not one of them: it is the one setting `POLAR_NODE_REGISTRY`
-(step 2), which every chart reads.
+The registry is not one of them: a target keeps it in its cluster
+(`cluster.registry_in_cluster` in its `config.nuon`) or names it
+(`cluster.registry`, or `POLAR_NODE_REGISTRY`, step 2), and every chart reads
+the one value that comes out of that.
 
 ### Deploy
 
@@ -572,7 +594,9 @@ scaffold, which `up.nu` asks of the agents' images on your cluster, and
 which `nu infra/resolve.nu collect-scaffolds` does by hand); `infra/up.nu`
 renders and then applies. It is driven by the target's own config, so it runs
 only the steps that target needs and prints the plan first, with the reason for
-every skipped step. For `local-minimal` that is: images (`--dev`), namespaces,
+every skipped step. For `local-minimal` that is: the registry in the cluster
+(and the storage it needs, when the cluster has no storage class yet), the
+import of the published images (`--import-from`), the images (`--dev`), namespaces,
 the cluster CA, secrets and manifests in the target's apply order, a wait for
 the core pods, the port-forwards, the admin flow, the seed of the schedules
 repository and the browser certificate. A target that deploys with Flux
