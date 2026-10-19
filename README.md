@@ -263,7 +263,29 @@ What Polar asks of the cluster:
   it on the nodes (minikube: `minikube start --extra-config=kubelet.registry-pull-qps=0`).
 
 **2. Have a registry** the cluster pulls images from, and say where it is.
-For a local cluster, `just registry-up` starts one on `localhost:5000`:
+
+*In the cluster itself* (nothing to run on this machine, no container runtime):
+say so in the target's `config.nuon`, as `local-minimal` does:
+
+```nuon
+cluster: { registry_in_cluster: { node_port: 30500 } }   # local_port (default 5000) and size (default 20Gi) are optional
+```
+
+`up.nu` then applies it first (namespace `polar-registry`, a Deployment, a claim
+on the target's storage class, a NodePort Service), before anything that pulls an
+image, and starts a port-forward this machine pushes through
+(`localhost:<local_port>`, set as `POLAR_REGISTRY` for the run). The nodes pull
+from `localhost:<node_port>`, which a NodePort answers on every node, over plain
+HTTP: a node's container runtime allows that for `localhost` with no
+configuration. The registry image and, when the target deploys the storage
+chart, the local-path provisioner come from Docker Hub, pinned by digest, since
+the registry cannot hold its own images before it exists. To use it outside
+`up.nu`: `nu infra/cluster-registry.nu up <target>`. **It has no
+authentication yet:** anyone who can reach a node at the NodePort can push and
+pull. It needs a kube-proxy that answers NodePorts on `localhost` (the iptables
+mode does; IPVS and some kube-proxy replacements do not).
+
+*On this machine:* for a local cluster, `just registry-up` starts one on `localhost:5000`:
 
 ```bash
 just registry-up        # a registry container on localhost:5000
@@ -292,7 +314,7 @@ registry with a hostname). On minikube the host is
 The scripts use `podman` or `docker`, whichever is installed (`podman` first).
 To choose, set `POLAR_CONTAINER_RUNTIME=docker` (or `podman`); `up.nu` says
 which it found in its first step, and stops with a clear message if a step needs
-one (`--dev`, or a gitops target) and neither is installed.
+one (`--dev` with the registry on this machine, or a gitops target) and neither is installed.
 
 **2b. Get the Polar images into that registry, one of two ways.**
 
@@ -478,10 +500,11 @@ registry (`POLAR_REGISTRY`, default `localhost:5000`), copies the third-party im
 leave those), and records the digests. Name images to import only those (`nu infra/images.nu import cassini --from …`). Add
 `--src-authfile <file>` for a private source and `--src-insecure` for a source that serves plain HTTP.
 
-Neo4j is not published: build it yourself (step 3 above), then `just images-push neo4j`. `polar-tools` is imported with the rest;
-it is the image the tools in **Installing the Polar tools** come out of. Then run
+Neo4j is imported with the rest (it is published as `polar-neo4j`, from its own repository), and so is `polar-tools`, the image
+the tools in **Installing the Polar tools** come out of. Then run
 `nu infra/up.nu <target> --user <name> --email <email>` **without `--dev`**, so it uses the images already in the registry instead
-of building them.
+of building them. `up.nu <target> --import-from docker.io/<account>` does the import itself, as a step before the render; that is the
+way for a target whose registry is in the cluster, which exists only once `up.nu` has applied it.
 
 Doing it by hand, one image at a time:
 
