@@ -222,8 +222,9 @@ provides most of the tools):
   `~/Documents/projects/nix-neo4j`, which builds the Neo4j image Polar
   deploys. Neo4j is the one image that is built even when you use published
   images, so this needs Nix either way.
-- Your SSH key listed as an age recipient of the target's secrets file
-  (see **Secrets setup**), so `sops` can decrypt it.
+- Your SSH key listed as an age recipient of the target's secrets file, so
+  `sops` can decrypt it, or a secrets file of your own if nobody can add you
+  (both in **Secrets setup**).
 
 **1. Have a cluster, and point `kubectl` at it.**
 
@@ -235,7 +236,7 @@ kubectl get nodes      # at least one node, Ready
 What Polar asks of the cluster:
 
 - **A registry its nodes can pull from** (step 2), and the address the
-  *nodes* use for it in `registry` in `infra/config/cluster.nuon`. That
+  *nodes* use for it, which you give as `POLAR_NODE_REGISTRY` (step 2). That
   address is often not the one your machine pushes to.
 - **A storage class** for persistent volumes. The `local-minimal` target
   installs a local-path provisioner and a class named `managed-csi`
@@ -248,8 +249,18 @@ What Polar asks of the cluster:
 - **Pods that can resolve names and reach the internet**, if you want to
   observe repositories on GitHub or GitLab. `up.nu` checks this at the end
   and says what it found. A DNS search domain on the node that makes every
-  lookup slow (some university and corporate networks) is a common cause of
-  slow or timed-out pods; remove it from the node's resolver.
+  lookup slow (some university and corporate networks, and a VPN) is a common
+  cause of slow or timed-out pods: a lookup of a name inside the cluster tries
+  the node's search domains before the right name, and if your resolver never
+  answers them, an agent gives up (its connect attempt is 5 seconds) before the
+  answer comes. Remove the search domain from the node's resolver.
+- **A kubelet that does not throttle registry requests, or one you can live
+  with.** Polar pulls an image named by a tag that moves (`latest`) with
+  `imagePullPolicy: Always`, which asks your registry for every container that
+  starts. The kubelet limits that to 5 a second with a burst of 10
+  (`registryPullQPS`), so a burst of pods (a bring-up) sees `ErrImagePull: pull
+  QPS exceeded`, backs off and retries: slower, not broken. If you can, raise
+  it on the nodes (minikube: `minikube start --extra-config=kubelet.registry-pull-qps=0`).
 
 **2. Have a registry** the cluster pulls images from, and say where it is.
 For a local cluster, `just registry-up` starts one on `localhost:5000`:
@@ -305,7 +316,8 @@ nix build -L .#neo4j-image -o result-neo4j-image
 the `neo4j` user's password from `NEO4J_AUTH` on its first start, so there
 is no password to change by hand later.
 
-**4. Make sure `sops` can find your key.** Inside the dev shell
+**4. Make sure `sops` can find your key.** (Not a recipient yet and nobody to
+add you? See "If nobody can add you" under **Secrets setup**.) Inside the dev shell
 `SOPS_AGE_BINARY` is already set; set `SOPS_AGE_SSH_PRIVATE_KEY_FILE` to
 the private key you were added with (put it in your `my.env`, see
 `example.env`). Outside the dev shell, export both:
@@ -339,6 +351,16 @@ pods, starts the port-forwards, runs the admin flow and signs and pushes
 the cluster's first policy. It stops for a person only where one is
 needed. After any failure or pause, **run the same command again**: every
 step checks whether it is already done.
+
+To deploy with Flux instead, bring up the `sandbox-local` target:
+`nu infra/up.nu sandbox-local --user <name> --email <email>`. It publishes the
+rendered layers, signed, to a deployment git server that runs as a container on
+your host (so it needs `podman` or `docker` here, and `gpgsm` from GnuPG to
+sign), installs Flux and lets it apply them. Add `--allow-dirty` if your working
+tree has uncommitted changes (the signed record says so). On a cluster that is
+not a podman dev node, give the host's address as the nodes see it with
+`POLAR_DEPLOY_HOST` (step 2). `infra/INFRA.md` ("How a target works") explains
+what it does; it has been run on one cluster, a podman dev node.
 
 Use `--dev` when you have changed code and want the images rebuilt (and
 every Job restarted to pick them up). Once the images are in the registry
@@ -378,6 +400,12 @@ Things that look wrong and are not:
   newest pod.
 - **`jira-observer` failing** when no Jira is set up for the target: its
   credentials come from the target's secrets (see **Secrets setup**).
+- **`ErrImagePull: pull QPS exceeded` or `ImagePullBackOff`, briefly, when
+  many pods start at once.** The kubelet's limit on registry requests (step 1).
+  It retries by itself and the pods start.
+- **A growing pile of failed `jira-observer` pods** when there is no Jira to
+  reach: `just cluster-prune-failed` deletes the failed pods and leaves the
+  running ones.
 - **A port-forward that stops answering** after a pod was replaced:
   forwards follow one pod. Run `just port-forwards-down` and then
   `just port-forwards-up`.
@@ -394,7 +422,7 @@ Things that look wrong and are not:
   reload`) to make it stop; do this after pulling changes to `flake.nix`.
 
 **To start over:** wipe the cluster the way your distribution does,
-then repeat steps 1, 5, 6 and 7. `up.nu` notices when
+then repeat steps 1, 5 and 7 (6 happens by itself). `up.nu` notices when
 `~/.config/polar-admin` holds the previous cluster's CA and moves those
 files aside (it tells you where).
 
@@ -430,9 +458,9 @@ mean every image. A failing image does not stop the stage: the rest are
 attempted and the stage ends with a summary.
 
 To push to a different registry (a real cluster, or a customer
-environment), set `POLAR_REGISTRY` (default `localhost:5000`), and
-see **Using your own target**, below, for pointing a target's
-`overrides.dhall` at it.
+environment), set `POLAR_REGISTRY` to the address this machine pushes to
+(default `localhost:5000`) and `POLAR_NODE_REGISTRY` to the address your
+cluster's nodes pull from (step 2). Nothing in a target needs editing.
 
 ### Loading prebuilt images
 
@@ -505,8 +533,10 @@ for the binaries alone.
 A "target" is a named deployment profile under `infra/targets/`.
 `local-minimal` is a small, single-node profile for local development;
 `infra/targets/<name>/target.nu` lists what each target deploys, and
-`infra/targets/<name>/overrides.dhall` is where you customize
-image references, hostnames, and other per-deployment values.
+`infra/targets/<name>/overrides.dhall` is where you customize hostnames,
+storage classes and other per-deployment values for the hand-written charts.
+The registry is not one of them: it is the one setting `POLAR_NODE_REGISTRY`
+(step 2), which every chart reads.
 
 ### Deploy
 
@@ -676,10 +706,9 @@ make a target for it:
 1. Do steps 1 and 2 of the sequence: a kubeconfig, and a registry the
    nodes can pull from (a real cluster generally can't import a local
    image tarball directly the way `kind load` or `k3d image import` can).
-2. Copy `infra/targets/local-minimal/` to a new target directory,
-   update `overrides.dhall`'s image references to point at your
-   registry, and adjust any hostnames/URLs specific to your
-   environment. In particular, `cert-issuer`'s `issuers` list is where
+2. Copy `infra/targets/local-minimal/` to a new target directory
+   (the registry needs no edit: set `POLAR_NODE_REGISTRY`, step 2), and
+   adjust any hostnames/URLs specific to your environment. In particular, `cert-issuer`'s `issuers` list is where
    trust in Kubernetes and/or an external IdP (Keycloak, Okta, etc.)
    is configured — see the inline comments there for what each field
    means, especially `identityStrategy`'s `clusterDomain` (only needed
@@ -743,6 +772,26 @@ whichever key you use) and ask them to:
    to re-encrypt the existing file with your key now included, then
    commit the file (the recipients live inside it, so you decrypt after
    you pull).
+
+**If nobody can add you** (you are starting without access to anyone's key),
+write a secrets file of your own for the target. The cluster cannot run
+without two values, `neo4j_auth` (`neo4j/<password>`) and `graph_password`
+(the same password); everything else is optional and the secrets step warns
+about what it skips. From the repository root:
+
+```sh
+cd infra/targets/local-minimal
+PUB=$(cut -d' ' -f1,2 ~/.ssh/id_ed25519.pub)       # your public key, not the private one
+printf 'creation_rules:\n  - path_regex: secrets\\.sops\\.yaml$\n    age: >-\n      %s\n' "$PUB" > .sops.yaml
+PW=$(openssl rand -hex 16)
+printf 'neo4j_auth: "neo4j/%s"\ngraph_password: "%s"\n' "$PW" "$PW" > secrets.sops.yaml
+SOPS_CONFIG=.sops.yaml sops --encrypt --in-place secrets.sops.yaml
+```
+
+That replaces the encrypted file that came with the checkout, which you could
+not read. Do not commit it: `git update-index --skip-worktree
+infra/targets/local-minimal/secrets.sops.yaml` keeps it out of `git status`.
+(Tried with sops 3.13.)
 
 If your SSH private key isn't at the default path the devShell
 assumes, set `SOPS_AGE_SSH_PRIVATE_KEY_FILE` in your own `my.env` to
