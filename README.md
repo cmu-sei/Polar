@@ -202,6 +202,41 @@ when a running pod's image is not the one the registry serves; if you see
 that on a cluster that has run Polar before, the node predates this and
 kept an old copy (`minikube image rm <image>`, or recreate the cluster).
 
+### Dev container in the cluster (`bin/polar-dev`)
+
+The same dev container can run as a pod in your cluster, local or in the cloud, so that your own machine needs only
+`kubectl`, `ssh`, `git` and a browser: the builds, the tools and `up.nu` all run in the cluster. You log in to it over SSH
+with your agent forwarded, so `git` in it uses your own key and no git key is kept in the cluster.
+
+```bash
+export KUBECONFIG=<your cluster>          # any cluster; the dev pod is the first thing in it
+bin/polar-dev up                          # make the pod, clone the sources into it, and log in
+```
+
+`up` makes, in a namespace of your own (`polar-dev-<you>`), a ServiceAccount with `cluster-admin` (up.nu applies
+everything, so anyone who can exec into that namespace can do what it can), volumes for the checkout (`/workspace`), the
+Nix store (seeded from the image, so builds are kept across restarts) and your state (atuin's history, `~/.config/polar-admin`
+and `polar-deploy`, `~/.cache`), and the pod, from `docker.io/daveman1010220/polar-dev:latest-<arch>`. It copies your
+`~/.config/polar-deploy` (the deployment PKI and its signed history) and `polar-admin` in, unless the pod has its own
+already, clones `POLAR_DEV_REPO` (`POLAR_DEV_BRANCH`) into `/workspace` if it is empty, and logs you in. In the pod,
+`kubectl` reaches the cluster as the pod's account, and `sops` decrypts with the key you gave it (`POLAR_DEV_SOPS_KEY`,
+kept as a Secret in your namespace: a dedicated key is better than your main one). From there it is the usual sequence,
+from `/workspace`: `nu infra/up.nu <target> --dev ...` or `--import-from docker.io/<account> ...`.
+
+The rest of `bin/polar-dev`:
+
+```bash
+bin/polar-dev attach        # log in again
+bin/polar-dev cert          # copy your certificate out and import it into Librewolf here (up.nu's browser step asks for this)
+bin/polar-dev forward       # Neo4j (https://localhost:7473) and ACE (http://localhost:8050) for a browser here
+bin/polar-dev sync          # copy ~/.config/polar-deploy and polar-admin back here
+bin/polar-dev down          # sync, then stop the pod; --purge removes the namespace and its volumes too
+```
+
+Settings are environment variables, listed at the top of `bin/polar-dev`; on a cluster with no default storage class set
+`POLAR_DEV_STORAGE_CLASS`. The pod's resources (2 CPUs and 8Gi requested, 24Gi of memory at most) and volumes (20Gi, 80Gi
+for the Nix store, 2Gi) are in `infra/dev-pod/`.
+
 ### Bring a cluster up: the whole sequence
 
 This is the path from a Kubernetes cluster to a running Polar cluster.
