@@ -90,7 +90,17 @@ export def health_check [wait: record, docs: list] {
     if $key == "job-name" {
         let found = ($docs | where {|d| ($d.kind? | default "") == "Job" and ($d.metadata?.name? | default "") == $value })
         if ($found | is-empty) { error make --unspanned { msg: $"the layer waits for the pods of Job ($value) and has no such Job" } }
-        return { apiVersion: "batch/v1", kind: "Job", name: $value, namespace: $ns }
+        # Flux's own Job reader (it runs before any expression) counts a Job as healthy only when it has completed, and an
+        # agent never completes. What says the agent is up is the Service that selects its pods: its Endpoints lists only
+        # ready pods, and has a name Flux can be given. A Job with no such Service has nothing to wait for.
+        let labels = ($found | first | get -o spec.template.metadata.labels | default {})
+        let svc = ($docs | where {|d|
+            let selector = ($d | get -o spec.selector | default {})
+            let in_ns = (($d | get -o metadata.namespace | default $ns) == $ns)
+            (($d.kind? | default "") == "Service") and $in_ns and ($selector | is-not-empty) and ($selector | transpose k v | all {|kv| ($labels | get -o $kv.k) == $kv.v })
+        })
+        if ($svc | is-empty) { return null }
+        return { apiVersion: "v1", kind: "Endpoints", name: ($svc | first | get metadata.name), namespace: $ns }
     }
     let found = ($docs | where {|d|
         (($d.kind? | default "") in ["Deployment" "StatefulSet" "DaemonSet"]) and (($d.spec?.template?.metadata?.labels? | default {} | get -o $key) == $value)
@@ -100,20 +110,15 @@ export def health_check [wait: record, docs: list] {
     { apiVersion: $w.apiVersion, kind: $w.kind, name: $w.metadata.name, namespace: ($w.metadata.namespace? | default $ns) }
 }
 
-# A Job is running when a pod of it is ready. It never completes (an agent runs until it is replaced), so the
-# kind needs its own idea of healthy; it is failed only when the Job itself says so.
-export def job_health_expr [] {
-    {
-        apiVersion: "batch/v1"
-        kind: "Job"
-        current: "has(status.ready) && status.ready > 0"
-        failed: "has(status.conditions) && status.conditions.exists(c, c.type == 'Failed' && c.status == 'True')"
-    }
+# An Endpoints object has no `subsets` while no pod is ready (a missing field makes Flux keep waiting), and lists the ready
+# pods' addresses once there are some.
+export def endpoints_health_expr [] {
+    { apiVersion: "v1", kind: "Endpoints", current: "subsets.exists(s, has(s.addresses) && size(s.addresses) > 0)" }
 }
 
 # The Kustomization for one layer. `docs` are the documents of all its files.
 export def kustomization [layer: record, docs: list, forced: bool] {
-    let checks = ($layer.wait_for | each {|w| health_check $w $docs })
+    let checks = ($layer.wait_for | each {|w| health_check $w $docs } | compact)
     let base = {
         apiVersion: "kustomize.toolkit.fluxcd.io/v1"
         kind: "Kustomization"
@@ -133,8 +138,8 @@ export def kustomization [layer: record, docs: list, forced: bool] {
     let with_force = if $forced { $with_deps | update spec ($with_deps.spec | insert force true) } else { $with_deps }
     if ($checks | is-empty) { return $with_force }
     let with_checks = ($with_force | update spec ($with_force.spec | insert healthChecks $checks))
-    if ($checks | any {|c| $c.kind == "Job" }) {
-        $with_checks | update spec ($with_checks.spec | insert healthCheckExprs [(job_health_expr)])
+    if ($checks | any {|c| $c.kind == "Endpoints" }) {
+        $with_checks | update spec ($with_checks.spec | insert healthCheckExprs [(endpoints_health_expr)])
     } else { $with_checks }
 }
 

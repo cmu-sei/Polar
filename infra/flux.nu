@@ -230,7 +230,13 @@ def "main install" [
     if $applied.exit_code != 0 { rm -rf $work; error make --unspanned { msg: "applying the credentials Secret failed" } }
     print $"  ok: secret/($AUTH_SECRET) holds the ($READER) identity"
 
-    for f in $objects { run_ok $"applying ($f | path basename)" { ^kubectl apply -f $f } | print }
+    # The source first, and wait until Flux has fetched the repository: Kustomizations applied before that report
+    # "Source artifact not found" and retry after 30 seconds.
+    let source = ($objects | first)
+    run_ok $"applying ($source | path basename)" { ^kubectl apply -f $source } | print
+    run_ok "waiting for Flux to fetch the deployment repository" { ^kubectl -n $FLUX_NS wait --for=condition=Ready --timeout=180s $"gitrepository/($SOURCE_NAME)" } | ignore
+    print "  ok: Flux has fetched the deployment repository"
+    for f in ($objects | skip 1) { run_ok $"applying ($f | path basename)" { ^kubectl apply -f $f } | print }
     rm -rf $work
     print $"  ok: Flux reconciles the layers of deploy-($target) from ($commit | str substring 0..11); next: nu infra/flux.nu wait ($target)"
 }

@@ -32,7 +32,7 @@ def fails_with [needle: string, body: closure] {
     assert ($r | str contains $needle) $"expected an error containing '($needle)', got: ($r)"
 }
 
-const JOB = "# a comment\n---\napiVersion: batch/v1\nkind: Job\nmetadata:\n  name: cassini\n  namespace: polar\nspec:\n  template:\n    metadata:\n      labels:\n        app: cassini\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: cassini\n"
+const JOB = "# a comment\n---\napiVersion: batch/v1\nkind: Job\nmetadata:\n  name: cassini\n  namespace: polar\nspec:\n  template:\n    metadata:\n      labels:\n        app: cassini\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: cassini-svc\n  namespace: polar\nspec:\n  selector:\n    app: cassini\n"
 const DEPLOY = "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: cert-issuer\n  namespace: polar\nspec:\n  template:\n    metadata:\n      labels:\n        name: cert-issuer\n"
 
 def layers [] {
@@ -78,7 +78,7 @@ def main [] {
             body: {
                 let docs = ((documents $JOB) ++ (documents $DEPLOY))
                 let job = (health_check { kind: "pods", ns: "polar", ref: "job-name=cassini", label: "c" } $docs)
-                assert equal $job { apiVersion: "batch/v1", kind: "Job", name: "cassini", namespace: "polar" }
+                assert equal $job { apiVersion: "v1", kind: "Endpoints", name: "cassini-svc", namespace: "polar" }
                 let dep = (health_check { kind: "pods", ns: "polar", ref: "name=cert-issuer", label: "c" } $docs)
                 assert equal ($dep | select kind name namespace) { kind: "Deployment", name: "cert-issuer", namespace: "polar" }
                 let sts = (health_check { kind: "statefulset", ns: "polar-graph", ref: "statefulset/polar-neo4j", label: "n" } $docs)
@@ -94,7 +94,7 @@ def main [] {
             }
         }
         {
-            name: "a layer with Jobs is forced and gets a health expression for Jobs; one without is neither"
+            name: "a layer with Jobs is forced; a Job is waited for through its Service's Endpoints, and one with no Service is not waited for"
             body: {
                 let layer = { name: "cassini", depends_on: ["data"], wait_for: [{ kind: "pods", ns: "polar", ref: "job-name=cassini", label: "c" }], files: ["c.yaml"] }
                 let k = (kustomization $layer (documents $JOB) true)
@@ -102,9 +102,17 @@ def main [] {
                 assert equal $k.spec.path "./layers/cassini"
                 assert equal $k.spec.dependsOn [{ name: "polar-data" }]
                 assert $k.spec.force
-                assert equal ($k.spec.healthChecks | first | get kind) "Job"
-                assert equal ($k.spec.healthCheckExprs | first | get kind) "Job"
+                assert equal ($k.spec.healthChecks | first | get kind) "Endpoints"
+                assert equal ($k.spec.healthChecks | first | get name) "cassini-svc"
+                assert equal ($k.spec.healthCheckExprs | first | get kind) "Endpoints"
+                assert (($k.spec.healthCheckExprs | first | get current) | str contains "subsets.exists")
                 assert ($k.spec.prune)
+                # a Job whose pods no Service selects has nothing to wait for
+                let lone = "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: lone\n  namespace: polar\nspec:\n  template:\n    metadata:\n      labels:\n        app: lone\n"
+                let l = (kustomization { name: "x", depends_on: [], wait_for: [{ kind: "pods", ns: "polar", ref: "job-name=lone", label: "l" }], files: ["l.yaml"] } (documents $lone) true)
+                assert (($l.spec | get -o healthChecks) == null)
+                assert (($l.spec | get -o healthCheckExprs) == null)
+                assert $l.spec.force
                 let plain = (kustomization { name: "platform", depends_on: [], wait_for: [], files: ["a.yaml"] } [] false)
                 assert (($plain.spec | get -o force) == null)
                 assert (($plain.spec | get -o dependsOn) == null)
