@@ -79,9 +79,11 @@ deployed to Kubernetes.
   `up.nu` runs (`polar-admin-grant`, `polar-sign`, `cassini-c2`) come as
   static binaries in the `polar-tools` image (see **Installing the Polar
   tools**). What `up.nu` still needs on your `PATH`: `nushell`, `dhall`,
-  `kubectl`, `skopeo`, a container runtime, `sops`/`rage` and `git`. The dev
-  container has all of them except the container runtime (below), so use it unless you
-  already have those installed
+  `kubectl`, `skopeo`, `sops`/`rage` and `git`. It asks the agents about
+  themselves on your cluster, so it needs a container runtime only to start
+  the local registry (`just registry-up`), to build images (`--dev`) or for a
+  gitops target's deployment git server. The dev container has all of them
+  (below), so use it unless you already have those installed
 
 ### Dev container
 
@@ -129,11 +131,12 @@ What each mount is for:
   purpose: the container's entrypoint takes ownership of everything under
   `/home/$USER`, which a read-only mount refuses.
 
-The dev container has no container runtime (install `podman` or `docker` on the host). The steps that need one (`just registry-up`,
-and `up.nu` reading an agent's scaffold from its image) have to run on
-the host, or you can start the registry on the host first and let `up.nu`
-run on the host with the tools installed from `polar-tools`. Importing the
-certificate into a browser (step 7) is a host step in any case.
+The dev container has no container runtime. `up.nu` does not need one to
+read the agents' scaffolds, which it asks of their images on your cluster, so
+with prebuilt images in a registry it runs entirely in the container. What does
+need one runs on the host: starting the local registry (`just registry-up`), and
+a gitops target's deployment git server. Importing the certificate into a
+browser (step 7) is a host step in any case.
 
 **On an ARM Mac:** you need a dev container image to get started.
 Reach out to the developers if you do not have one.
@@ -200,9 +203,11 @@ unless it says otherwise.
 **What you need before you start** (the dev shell from `direnv allow`
 provides most of the tools):
 
-- A container runtime, `podman` or `docker` (the local registry in step 2
-  runs in it, and `up.nu` uses it to read each agent's scaffold), `just`,
-  `nushell`, `kubectl`, `skopeo`, `dhall`, `sops` and `rage`.
+- `just`, `nushell`, `kubectl`, `skopeo`, `dhall`, `sops` and `rage`, and a
+  container runtime, `podman` or `docker`, if you run the local registry of step 2
+  yourself (`up.nu` asks each agent for its scaffold as a pod on your cluster, in a
+  namespace of its own that it deletes afterwards, so your account must be able to
+  create namespaces).
 - **Images, one of two ways** (step 2b): published ones you copy into your
   registry (no build), or ones you build from this checkout, which needs Nix
   with flakes.
@@ -256,8 +261,8 @@ podman dev node (see **Images**).
 
 The scripts use `podman` or `docker`, whichever is installed (`podman` first).
 To choose, set `POLAR_CONTAINER_RUNTIME=docker` (or `podman`); `up.nu` says
-which it found in its first step, and stops with a clear message if neither is
-installed.
+which it found in its first step, and stops with a clear message if a step needs
+one (`--dev`, or a gitops target) and neither is installed.
 
 **2b. Get the Polar images into that registry, one of two ways.**
 
@@ -296,7 +301,9 @@ export SOPS_AGE_SSH_PRIVATE_KEY_FILE=$HOME/.ssh/<your key>
 First put the tools on your `PATH` (**Installing the Polar tools**,
 below): `nu infra/tools.nu install ~/.local/bin`. Without them `up.nu`
 falls back to compiling `polar-admin-grant` and `polar-sign` from this
-checkout, which needs a Rust toolchain and takes a few minutes.
+checkout, which needs a Rust toolchain and takes a few minutes. The tools
+are Linux binaries: on a Mac, run `up.nu` in the dev container, which has
+them, rather than installing them on the Mac.
 
 ```bash
 # Building from source (builds every image; the first cold build takes a long while):
@@ -440,7 +447,9 @@ skopeo copy --dest-tls-verify=false \
 `--dest-creds user:password` (or `--dest-authfile`) if it needs a login.
 
 To publish images for others, `nu infra/images.nu publish --to docker.io/<account> --arch arm64 [--authfile <file>]` builds them for
-that architecture (cross-built with Nix when it is not yours) and pushes them under those names.
+that architecture (cross-built with Nix when it is not yours) and pushes them under those names. It uses the login `podman login docker.io`
+stored (or `--authfile`). A third-party mirror (for example `flux-source-controller`) is published only when you name it, and is copied from
+its own registry for that architecture; `import` takes mirrors from their registries, so those copies are for people who cannot reach them.
 
 ### Installing the Polar tools
 

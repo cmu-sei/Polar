@@ -64,10 +64,12 @@ def main [] {
             }
         }
         {
-            name: "only the images this repository builds are published, all or the ones named; an unknown name is an error"
+            name: "by default only the images this repository builds are published; a mirror only when named; an unknown name is an error"
             body: {
                 assert equal (published_rows (sample) [] | get image) ["cassini" "polar-tools"]
                 assert equal (published_rows (sample) ["polar-tools"] | get image) ["polar-tools"]
+                assert equal (published_rows (sample) ["postgres"] | get image) ["postgres"]
+                assert equal (published_rows (sample) ["postgres" "cassini"] | get image) ["postgres" "cassini"]
                 assert ((try { published_rows (sample) ["neo4j"]; "accepted" } catch {|e| $e.msg }) | str contains "not an image this repository builds")
             }
         }

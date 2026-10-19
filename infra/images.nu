@@ -167,13 +167,16 @@ export def published_ref [from: string, row: record, arch: string] {
 # The rows `import` and `publish` handle: the images this repository builds (not mirrors of third-party images, and not the
 # Neo4j archive, which is built elsewhere), all of them or only those named.
 export def published_rows [table: list, names: list<string>] {
-    let rows = ($table | where kind == "nix")
-    if ($names | is-empty) { return $rows }
-    let unknown = ($names | where {|n| $n not-in ($rows | get image) })
+    let built = ($table | where kind == "nix")
+    if ($names | is-empty) { return $built }
+    # A mirror, a third-party image copied from its own registry, is published only when named: a user's `import` takes
+    # mirrors from their upstream registries, so a copy on the hub is for those who cannot reach those.
+    let nameable = ($table | where kind in ["nix" "mirror"])
+    let unknown = ($names | where {|n| $n not-in ($nameable | get image) })
     if ($unknown | is-not-empty) {
-        error make --unspanned { msg: $"not an image this repository builds: ($unknown | str join ', ')" }
+        error make --unspanned { msg: $"not an image this repository builds or mirrors: ($unknown | str join ', ')" }
     }
-    $rows | where {|r| $r.image in $names }
+    $nameable | where {|r| $r.image in $names }
 }
 
 def arch [] { arch_of (^uname -m | str trim) }
@@ -514,8 +517,10 @@ def "main publish" [
         let ref = (published_ref $to $row $want)
         print $"  [($it.index + 1)/($rows | length)] ($row.image) -> ($ref)"
         let err = (try {
-            let a = (archive $row $system)
-            let r = (do { ^skopeo copy --retry-times 3 --format v2s2 ...$auth $"docker-archive:($a)" $"docker://($ref)" } | complete)
+            # What this repository builds goes up from the archive it built; a mirror goes up as its upstream's image for the architecture.
+            let source = if $row.kind == "mirror" { $"docker://($row.upstream)" } else { $"docker-archive:(archive $row $system)" }
+            let platform = if $row.kind == "mirror" { ["--override-os" "linux" "--override-arch" $want] } else { [] }
+            let r = (do { ^skopeo copy --retry-times 3 --format v2s2 ...$platform ...$auth $source $"docker://($ref)" } | complete)
             if $r.exit_code != 0 { error make --unspanned { msg: ($r.stderr | lines | last 1 | str join "") } }
             null
         } catch {|e| $e.msg })
