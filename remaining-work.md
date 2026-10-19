@@ -73,12 +73,12 @@ Last updated: 2026-10-10.
   `task-done.sh`, `setup_ai.sh`, `startup_notes.md`, and the local build output; the `sandbox` target became
   `sandbox-local` (empty). `scripts/pipeline` (the static analysis, SBOM and provenance pipeline) was removed by
   mistake and restored. `event-logger` stays.
-- **Open: Flux target.** `sandbox-local` is to become a Flux-based deployment fed by `up.nu`: git is the source of
+- **Flux target: built and run on 2026-10-19; what is still open is listed in each note below.** `sandbox-local` is a Flux-based deployment fed by `up.nu`: git is the source of
   truth, so the system's provenance can be reasoned about from its earliest setup: the rendered manifests are committed
   and signed to a repository on a deployment git server of our own that runs as a container on the host, outside the
   cluster, with its own PKI (design: `docs/architecture/cluster-bootstrap.md`). The registry carries images only; an OCI
-  artifact pushed with `oras` was an earlier idea and is not the plan. Stages: a deterministic render (two renders, no diff), per-layer output for Kustomizations with
-  `dependsOn`, the Flux layer and mirrored controller images, a gitops mode in `up.nu`, SOPS-encrypted secrets.
+  artifact pushed with `oras` was an earlier idea and is not the plan. Stages, all built: a deterministic render (two renders, no diff), per-layer output for Kustomizations with
+  `dependsOn`, the Flux layer and mirrored controller images, a gitops mode in `up.nu`; not built: SOPS-encrypted secrets in the repository.
   Jobs need `force: true`; the CA, the admin flow and the schedules seed stay imperative. `git revert` rolls back
   manifests only, not data, secrets or certificates.
   **Stage 1 done, 2026-10-16: the render is deterministic.** `infra/tests/render-determinism.nu [target] [--with-cache]`
@@ -94,7 +94,7 @@ Last updated: 2026-10-10.
   Endpoints; a spec change is not seen by a reconcile already waiting on a health check (`flux.nu wait` now notices a wait begun under an older spec or revision, and after 15 s restarts the kustomize-controller, at most three times);
   the deployment server container needs `--tmpfs /tmp`; and a host search domain whose resolver never answers (`wifi.local.cmu.edu` behind a VPN)
   made every 4-dot service name wait CoreDNS's 5 s upstream timeout, past the Cassini client's 5 s attempt budget (fixed in nix-usernetes with
-  `--dns-search=.`, uncommitted there). Open: the server rejecting unsigned
+  `--dns-search=.`, and the kubelet's registry pull limit lifted there for `Always`). Open: the server rejecting unsigned
   pushes; `local` and `local-minimal` as gitops targets; SOPS-encrypted secrets in the repository; the agents' `ndots` (Polar-side hardening against search
   domains); failed Jira-observer pods accumulate with no Jira to reach (as before). Render time (2026-10-19): a warm `sandbox-local` render took about 60 s; an agent's scaffold is now cached by image digest and the 19 hand-written chart renders go through the same cache (`infra/dhall-render.nu`), so a warm render is about 12 s and one with a cold chart cache about 23 s (a render with no cache at all is still over a minute). Not done: resolving all workloads in one process (the catalog section is a few seconds). Agents asked on the cluster (2026-10-19): `--scaffold` and `--check` now run as pods in a scratch namespace on the target's own cluster (`infra/agent-pods.nu`), deleted afterwards, and no longer with podman or `cargo run`; `POLAR_AGENT_SOURCE` is gone. `up.nu` collects the scaffolds into a directory before it renders (`resolve.nu collect-scaffolds`; cached by image digest, 14 images in about 20 s cold) and `render.nu` reads it, so a bring-up from prebuilt images needs no container runtime here, and runs entirely in the dev container (preflight asks for one only for `--dev` and the deployment host). Checked on u7s: the 14 scaffolds byte-identical to podman's, `resolve.nu check` clean for `local-minimal`. Next: phase 2, a registry in the cluster (NodePort on `localhost`, a PVC, pushes through a port-forward), so no runtime is needed for the registry either; phase 3, the deployment git server in the cluster (applied before any Polar layer, its own PKI, outside Flux's layers, an off-cluster clone kept). Also open: pulling from a registry that needs credentials (Docker Hub answers no digest without a token), Neo4j in `images.nu import`, and the port-forwards from the dev container on a Mac, where host networking is the VM's.
   **One registry setting, 2026-10-19.** The registry as the nodes name it (`10.0.2.2:5000` on the podman node) was read from `cluster.nuon` by five scripts and typed again in
@@ -117,9 +117,9 @@ Last updated: 2026-10-10.
   Pure helpers have 8 tests. The gates found and we fixed: `rustls` 0.23.45 -> 0.23.46 (four advisories), `CDLA-Permissive-2.0` allowed,
   `src/deny.toml` now ignores with reasons the `rsa` Marvin advisory (reached only through `jsonwebtoken`, public-key verification) and
   three unmaintained crates (`instant` via `cassini-backoff`, `rustls-pemfile`, `unsafe-libyaml`), which still want migrating. Thirteen
-  secret findings were reviewed and accepted (12 examples; one legacy dev-compose RabbitMQ login in history only). Open: clippy `-D warnings`
-  (`cassini-types` does not compile its test target under it), a full `run` in a scratch clone, stale RabbitMQ wording in the gitlab/jira/broker
-  READMEs, `Polar.md` and `src/flake/gen-certs.nix`, and the first release version (the history suggests v0.2.0; 1.0.0 was the maintainer's wish).
+  secret findings were reviewed and accepted (12 examples; one legacy dev-compose RabbitMQ login in history only). The first release was cut as v1.0.0 (2026-10-16; the history suggested v0.2.0, 1.0.0 was the maintainer's wish). Still open: clippy `-D warnings`
+  (`cassini-types` does not compile its test target under it) and stale RabbitMQ wording in the gitlab/jira/broker
+  READMEs, `Polar.md` and `src/flake/gen-certs.nix`.
   **Stage 3c done, 2026-10-16: the changelog.** `infra/changelog.nu` (`preview`, `write`) and `infra/changelog.nuon`: breaking changes with their
   footer text, the images that changed, features, fixes and performance by scope, a count of what is not listed, and the unclassified
   changes collapsed; a long list folds to counts per scope. 16 tests, including one exact-output (golden) section. The first release's
@@ -128,22 +128,21 @@ Last updated: 2026-10-10.
   `release-baseline.nuon` (v0.1.0 before the first conventional commit, af152e6) and `release-overrides.nuon`. Replaying 976 commits
   gives v0.2.0 (two breaking commits: `feat(credentials-agent)!` and a `chore(dev-env)` footer that breaks a dev helper only), the same
   from the conventional commits alone; 225 were not conventional (177 of them one contributor's), 63 inferred, 138 unclassified.
-  Open: `release.nu` around it; enforcing conventional commits on the server, since the local hook let 225 through; and whether the
-  dev-env commit should be overridden as not breaking the platform. A `.mailmap` was not made: it needs email addresses.
+  Still open: enforcing conventional commits on the server, since the local hook let 225 through; and whether the
+  dev-env commit should be overridden as not breaking the platform (`release.nu` is built). A `.mailmap` was not made: it needs email addresses.
   **Stage 3a done, 2026-10-16: Flux's controllers and the image lock.** `nu infra/flux.nu export` renders the controllers
   (fluxcd 2.9.6) into the repository; `sandbox-local` is `local-minimal` plus a `flux` layer (52 files, 7 layers). The image lock
   (`infra/lock.nu`, `images.nu lock ...`, `pin_images` in a target) names every image of the render by digest: 44 of 44 in
-  `sandbox-local`, and a node pulled one by digest. Open: the committed `images.lock.nuon` (a release writes it), `release.nu`
-  with the static-analysis gate (deny and noseyparker blocking, clippy report-only until its warnings are cleared, `--only` for
-  `static-tools.nu`), semver from conventional commits with a prompt, `service.version` from the digest, the deployment git
-  server, `deploy-repo.nu` and `flux.nu install|wait`, and Job restart on a config change.
+  `sandbox-local`, and a node pulled one by digest. That note listed as open, and since built: the committed `images.lock.nuon` (a release writes it), `release.nu`
+  with the static-analysis gate, semver from conventional commits with a prompt, the deployment git server, `deploy-repo.nu`, `flux.nu install|wait`,
+  and Job restart on a config change. Still open: `service.version` from the digest.
   **Stage 2 done, 2026-10-16: the render is split into layers.** `local-minimal` declares `apply_layers`
   (platform, cert-issuer, data, cassini, identity, agents; a linear chain, `wait_for` copied from what `up.nu`
   waits for); its `apply_order` is derived from them and equals the old list exactly (51 files, same order).
   `infra/layers.nu check|split` and `render.nu` refuse a rendered file in no layer or in two;
   `infra/tests/layers.nu` has 10 tests; a real split is lossless and byte-identical, and
   `render-determinism.nu` covers it. Not done: `local` has no layers yet.
-  **The three phases of a GitOps bring-up.** (1) Before Flux, by `up.nu`: preflight, build or fetch images,
+  **The three phases of a GitOps bring-up** (the plan as first written; `docs/architecture/cluster-bootstrap.md` has the order as built). (1) Before Flux, by `up.nu`: preflight, build or fetch images,
   render, apply the `platform` layer, the cluster CA, the secrets, install Flux, commit and push the artifact.
   (2) Flux: reconcile the layers in order and report Ready. (3) After Flux, by `up.nu` (what needs running
   workloads): port-forwards, the admin flow (needs the credentials agent), the seed of the schedules repository
@@ -153,10 +152,10 @@ Last updated: 2026-10-10.
   before its broker attaches to one going away); an agent Job runs until it is replaced, so a Kustomization over
   Jobs cannot use `wait: true` and needs health checks of its own; `apply.nu` also restarts a Job when its
   image was rebuilt under the same tag or its ConfigMap changed, and Flux's `force: true` only recreates a Job
-  whose spec changed, so pinned images and a config checksum in the Job's pod template are required.
+  whose spec changed, so pinned images and a config checksum in the Job's pod template are required (both built: the image lock and `polar.dev/config-hash`).
   What stage 2 meets: all 19 of our own images in the render are `:latest` (every agent, `polar-init` which appears
   17 times, `polar-nu-init`, `cert-issuer`, `ace-viz`, `secret-harness`), against 5 third-party images with real
-  versions, so Flux could not see one change and they need tags or digests; and the git server's config document
+  versions, so Flux could not see one change and they need tags or digests (solved by the image lock, stage 3a); and the git server's config document
   carries its default seed root, a `/nix/store/...-polar-git-server-seeds` path, so those manifests change with that
   image build. (An earlier scan seemed to miss the agents' Job images; the catalog writes the key quoted, `'image':`.)
 - **Open: `src/deploy/`.** Dead, but `scripts/pipeline/render-manifests.nu` renders its tree for Flux, and
@@ -624,7 +623,7 @@ Dev cluster `u7s`, images rebuilt from this branch (`up.nu local-minimal --dev`,
 - [ ] Docs still say `git-observer.polar...`
 - [ ] `cert-issuer/server/src/main.rs` module comment says "v1 omits TLS"
 - [ ] `src/deploy/` vs `infra/`: confirm `src/deploy/` is dead, then remove or mark
-- [ ] `DOCUMENTATION.md` points at `docs/devops.md`, which does not exist; it and the README still say `nu infra/render.nu <target> --apply` (render no longer applies; `up.nu` does) — point both at `infra/INFRA.md` and `up.nu`
+- [x] `DOCUMENTATION.md` pointed at `docs/devops.md`, which does not exist, and it said `nu infra/render.nu <target> --apply` (render no longer applies; `up.nu` does): fixed 2026-10-19, with its other dead pointers (`attestation_and_issuance.md`, `secrets-management.md`, two scripts), now pointing at `infra/INFRA.md` and `up.nu`
 - [ ] The empty `infra/secrets/` directory tree (from the first pipeline design) is unused; secrets are per target (`secrets.sops.yaml`, `secrets.nu`). Remove it
 - [ ] README Keycloak walkthrough: confirm the HTTPS curl works against the port-forward
 - [ ] `kube-observer` `main.rs` comment says it installs aws-lc-rs but the code installs ring; the comment is stale
@@ -632,7 +631,7 @@ Dev cluster `u7s`, images rebuilt from this branch (`up.nu local-minimal --dev`,
 ## Older backlog (from chats April to August; confirm which are still open)
 
 - [ ] `infra/layers/3-workloads/agents/openapi/deployment.dhall` (the OpenAPI web frontend): still referenced, or safe to remove?
-- [ ] `targets/sandbox/target.nu` is a placeholder; `flux/` and `networking/` charts not populated
+- [x] `targets/sandbox` was a placeholder; it is `targets/sandbox-local` now and the `flux/` chart is built. `networking/` (Istio) is still not used by any target, and `cert-manager/` is unused (cert-issuer replaced it): remove both charts or say why they stay
 - [ ] Slim `polar-init` (was blocked on nix-container-lib Shell selection)
 - [ ] `maxLayers = 20` in package.nix files to speed up containerd image loading
 - [ ] Empty `GITLAB_TOKEN` fails validation in some paths; handle gracefully

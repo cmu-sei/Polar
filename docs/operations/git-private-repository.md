@@ -76,10 +76,12 @@ It is resumable: after a failure or a pause, run the same command. It stops for 
 - **The Neo4j password**, only if Neo4j is still on its factory password. The `nix-neo4j` image applies
   `NEO4J_AUTH` on first start, so normally there is no step.
 
-If the seed step stops with "the Polar git server does not know `<uuid>` as an administrator": that is your account's
-identity on this cluster, and a reset gives a new one. Put it in `POLAR_GIT_SERVER_ADMINS` for `polar-git-server` in
-`infra/targets/local-minimal/config.nuon` (comma-separated, dropping the previous cluster's) and run `up.nu` again;
-it restarts the git server by itself. You need to be an administrator of the git server to push in Step 6.
+Your account's identity on this cluster (the first DNS name in your certificate) is new to the git server, and a reset gives a
+new one. `up.nu` handles it: at the seed step it records the identity in `infra/targets/<target>/cluster-inputs.nuon` (not
+committed; a reset discards it), renders the layers again, and the git server restarts with it before the seed pushes. You
+need to be an administrator of the git server to push in Step 6, and now you are. If the seed still stops with "the Polar git
+server does not know `<uuid>` as an administrator", look at that file and at whether the `polar-git-server` pod restarted
+after the publish (`kubectl -n polar get pods`).
 
 `up.nu` moves `~/.config/polar-admin` aside when it holds another cluster's certificates (`~/.config/polar-admin.old*`).
 That is why the scaffolds are exported in Step 4, after this.

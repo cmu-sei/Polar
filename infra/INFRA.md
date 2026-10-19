@@ -36,8 +36,8 @@ once, then go to the recipe you need.
 ## Why this exists
 
 Polar needs infrastructure across several deployment targets: a local
-cluster for development, a `sandbox-local` target (not built yet) for developing a Flux-based deployment, which a cloud
-cluster (AKS, AWS) would then reuse, and more to come. Each shares a large amount of structural intent
+cluster for development, a `sandbox-local` target for a Flux-based deployment (see [How a target works](#how-a-target-works)),
+which a cloud cluster (AKS, AWS) would then reuse, and more to come. Each shares a large amount of structural intent
 but differs in image registries, TLS configuration, storage classes, service
 topology and platform tooling (Flux, Istio, and so on).
 
@@ -132,8 +132,13 @@ Run everything from the repo root with `KUBECONFIG` pointing at the cluster.
 # Bring a cluster up from a target (resumable: re-run the same command after a failure or pause)
 nu infra/up.nu local-minimal --dev          # --dev builds and pushes the images the target needs
 
-# Only render (never touches a cluster); output goes to manifests/ (gitignored)
-nu infra/render.nu local-minimal
+# Only render (nothing is applied); output goes to manifests/ (gitignored). An agent says what it takes in its own image, so the
+# render needs each agent's scaffold; up.nu collects them from the cluster (cached by the image's digest), and so can you:
+nu infra/resolve.nu collect-scaffolds /tmp/scaffolds --target local-minimal
+POLAR_SCAFFOLD_DIR=/tmp/scaffolds nu infra/render.nu local-minimal
+
+# A cluster whose nodes name the registry differently (the default, 10.0.2.2:5000, is the host as a podman dev node sees it)
+POLAR_NODE_REGISTRY=polar-registry:5000 nu infra/up.nu local-minimal --user U --email E
 
 # Render without the cache, to see the true cost or to rule it out (see "The render cache")
 POLAR_CACHE=off nu infra/render.nu local-minimal
@@ -151,6 +156,14 @@ just images-push kube-observer              # stage 2: build and push to the reg
 just images-mirror                          # stage 3: copy third-party images into the registry
 just image kube-observer                    # every stage, then drop the node's stale cached copy
 just images-all                             # every stage for everything in the table
+nu infra/images.nu import --from docker.io/<account>    # copy published images into your registry (this machine's architecture)
+nu infra/images.nu publish --to docker.io/<account> --arch arm64    # publish them (a mirror only when named)
+
+# A Flux (gitops) target: up.nu runs these; each can be run alone
+nu infra/deploy-repo.nu ensure sandbox-local        # the deployment git server (a container on the host) and its PKI
+nu infra/deploy-repo.nu publish sandbox-local       # commit the layers there, signed with the pipeline's certificate
+nu infra/flux.nu install sandbox-local              # Flux, pointed at it (refuses a head that is not signed)
+nu infra/flux.nu wait sandbox-local                 # until every layer is Ready at the commit that was published
 ```
 
 The `build`, `push` and `mirror` recipes take no names to mean every image. A
@@ -159,9 +172,11 @@ with a summary and a non-zero exit. The node cache step of `image` and
 `images-all` is skipped unless `POLAR_CLUSTER_RUNTIME` is `u7s` (the default) and that dev node exists.
 
 `up.nu` prints its plan first and skips what the target does not need. Its steps:
-preflight, render, images (`--dev`), namespaces, cluster CA, secrets and
-infrastructure, waiting for core services, port-forwards, admin flow, browser
-certificate and Neo4j password. It stops for a human only where a human is
+preflight, agent images and images (`--dev`), render, namespaces, cluster CA, secrets and
+infrastructure, waiting for core services, port-forwards, admin flow, the seed of the schedules repository,
+browser certificate and Neo4j password. A gitops target (`gitops: true`) replaces "secrets and infrastructure" with
+secrets, the deployment git server, publish, install Flux and wait for Flux, and then runs the same steps from "waiting for
+core services" on. It stops for a human only where a human is
 required, and looks first, read-only, so it stops only for what is missing: the browser step when the
 Librewolf profile does not hold this cluster's CA and the user's current certificate (closing the browser
 and importing it), and the Neo4j password step only when Neo4j is still on its factory password. With the
@@ -174,24 +189,40 @@ with the password the agents use and there is no password step at all.
 
 ```
 infra/
-  up.nu                  brings a cluster up from a target (applies)
-  render.nu              renders a target (never applies)
-  resolve.nu             the resolver: explain, json, resources, diff, check
+  up.nu                  brings a cluster up from a target (applies); plan.nu decides what it runs
+  render.nu              renders a target (nothing is applied)
+  resolve.nu             the resolver: explain, json, resources, diff, check, scaffolds, collect-scaffolds
   render-catalog.nu      renders every catalog workload (through the render cache)
+  dhall-render.nu        dhall-to-yaml for the hand-written charts (through the render cache)
   cache.nu               the render cache: where it lives, how a key is made, read or compute
+  digest.nu              an image's digest in a registry, by a manifest HEAD request
+  registry.nu            the registry the nodes pull from: POLAR_NODE_REGISTRY, the target's, the default
+  cluster-inputs.nu      what belongs to one cluster and exists only after it does (the git server's administrators)
+  agent-pods.nu          asks an agent's image about itself (--scaffold, --check) as a pod on the cluster
+  document.nu            how the resolver fills an agent's configuration document
+  rules.nu               checks on what a workload resolves to and on a render (image pull policies, Job replacement)
   compare-manifests.nu   compares two renders by meaning
-  images.nu  images.nuon which images exist, and building/pushing them
+  layers.nu              groups a target's files into layers (check, split)
+  images.nu  images.nuon which images exist, and building, pushing, importing and publishing them
+  lock.nu                the image lock: which bytes each image is (images.lock.nuon; images.dev.lock.nuon is this machine's)
+  release.nu  semver.nu  changelog.nu    a release: the version, the gates, the lock, the changelog and the tag
+  deploy-repo.nu         the deployment git server (ensure) and the signed commit of the layers to it (publish)
+  deploy-objects.nu      what that commit holds besides the manifests: the Flux objects and the provenance
+  flux.nu                Flux: export its controllers, install it, wait for the layers
+  seed.nu                what a cluster is given before anyone writes anything: signed documents
+  secrets-lib.nu         what the targets' secrets.nu scripts share
+  tools.nu  runtime.nu   the standalone Polar tools; which container runtime (podman or docker)
   validate.nu            environment validation helpers
-  apply.nu               the decisions up.nu makes while applying: which Jobs to restart and why
+  apply.nu               the decisions up.nu makes while applying: which Jobs to restart, which images are stale
   retry.nu               try again for a while, and stop at once on a failure that cannot be fixed
   forwards.nu            wait for a port-forward to answer; restart it if it does not
   admin.nu               what to do with ~/.config/polar-admin that belongs to another cluster
-  browser.nu             step 10: does the browser hold this cluster's CA and the user's certificate, and has
-                         Neo4j's password been changed (read-only)
-  resolve.nu scaffolds   writes every agent's `--scaffold` to a folder (`~/.config/polar-admin/scaffolds`), which
-                         `polar-sign template` and `polar-sign sign` read
+  browser.nu             does the browser hold this cluster's CA and the user's certificate, and has Neo4j's
+                         password been changed (read-only)
   egress.nu              the check at the end of up.nu: can a pod reach a host outside the cluster, and if not, why
                          (a note, never a failure)
+  cassini-shutdown.nu  harness.nu  measure-render-cache.nu     asking the broker to stop; reading the secret harness; timing the cache
+  tests/                 one test file per script: nu infra/tests/<name>.nu
   config/                the catalog
     cluster.nuon         domain, namespaces, registry, token audience
     services.nuon        in-cluster services other things connect to
@@ -206,7 +237,8 @@ infra/
   layers/                custom charts, by dependency
     1-platform/          must exist before everything else
       infra/             namespaces, storage
-      services/          cert-manager, flux, networking (targets opt in)
+      services/          flux (the controllers, regenerated by flux.nu export); cert-manager and networking
+                         are unused: cert-issuer replaced cert-manager, and no target renders either
     2-services/          shared services: cert-issuer, cassini, neo4j, jaeger, ...
     3-workloads/agents/  agents not yet in the catalog
     4-observed/          infrastructure Polar observes (empty so far)
@@ -225,7 +257,7 @@ every directory listing.
 
 - **1-platform.** Everything that must exist before any service or workload.
   `infra/` is the raw substrate (namespaces, storage classes) applied first;
-  `services/` holds platform services (cert-manager, Flux, Istio networking). Not
+  `services/` holds platform services (Flux, and the unused cert-manager and Istio networking charts). Not
   every target uses all of them: `local` has no Flux or Istio. That is a target
   declaration, not a chart concern.
 - **2-services.** Shared stateful infrastructure workloads depend on: Neo4j,
@@ -371,14 +403,55 @@ facts still passed to the custom charts (`neo4j_bolt_addr`, `cert_issuer_url`,
 can have completely different orderings.
 
 `sandbox-local` is the target for a Flux-based deployment: `local-minimal` plus a `flux` layer holding the controllers
-(`nu infra/flux.nu export` regenerates them; see `docs/architecture/cluster-bootstrap.md`). It declares `gitops: true`, so `up.nu`
-does not apply its layers. It creates the namespaces, the cluster CA and the secrets (which Flux does not own), starts the
-deployment git server (`deploy-repo.nu ensure`), commits the layers there signed with the pipeline's certificate
-(`publish`; it refuses a dirty tree unless `up.nu` is given `--allow-dirty`), installs Flux (`flux.nu install`, which
-refuses a head that is not signed) and waits for every layer to be Ready at that commit (`flux.nu wait`). Then it runs the
-steps that need workloads: the admin flow, the seed, the browser. A workload that reads a ConfigMap carries a fingerprint
-of it in its pod template (added when publishing, `polar.dev/config-hash`), so a changed ConfigMap restarts it. Written
-and run 2026-10-19: a clean `sandbox-local` bring-up reached "is up" with all six layers Ready and the seed applied.
+(`nu infra/flux.nu export` regenerates them). The design, the artifacts and what was found by running it are in
+`docs/architecture/cluster-bootstrap.md`. It declares `gitops: true`, so `up.nu` does not apply its layers:
+
+1. It creates the namespaces, the cluster CA and the secrets, which Flux does not own and never prunes.
+2. `deploy-repo.nu ensure` starts the deployment git server, a container on the host and outside the cluster, with a PKI of its own
+   (`~/.config/polar-deploy/<target>/`: a CA, the server's certificate, and client certificates for `pipeline`, which writes, and `flux`,
+   which reads).
+3. `deploy-repo.nu publish` commits the layers there as one tree, signed with the pipeline's certificate (git's x509 support, `gpgsm`, in a
+   GnuPG home beside the PKI; it never touches `~/.gnupg` and never prompts). The tree is `layers/<layer>/` (every layer but the `flux`
+   one), `flux/` (a GitRepository and a Kustomization per layer), `provenance.json` and a README. It refuses a render that is not there, an
+   image not pinned by digest, and a dirty tree unless `up.nu` is given `--allow-dirty`, and it commits nothing when the render has not changed.
+4. `flux.nu install` clones that repository as the `flux` identity and refuses a head that is not signed by the pipeline's certificate before
+   it touches the cluster; then it applies the controllers, a Service named as the server's certificate with an EndpointSlice to the host,
+   the `flux` identity's Secret, and the Flux objects.
+5. `flux.nu wait` follows every layer until it is Ready at the published commit. If a layer is waiting on a health check begun under an
+   older spec or revision (Flux finishes a reconcile under the spec it began with, up to its ten minute timeout), it restarts the
+   kustomize-controller after 15 seconds, at most three times.
+
+Then `up.nu` runs the steps that need workloads: the admin flow, the seed and the browser.
+
+How a layer's `wait_for` becomes a Flux health check: a `statefulset` or a Deployment is checked as itself. A Job is not: Flux's own Job
+reader counts a Job as healthy only when it has completed, and an agent never does, so it is waited for through the Endpoints of the Service
+that selects its pods (they have no `subsets` until a pod is ready). A Job with no Service is not waited for. A layer with a Job is applied
+with `force: true`, since a Job's pod template is immutable. A workload that reads a ConfigMap carries a fingerprint of it in its pod
+template when it is published (`polar.dev/config-hash`), so a changed ConfigMap changes the Job and Flux recreates it.
+
+**The registry.** The registry as the nodes name it is the prefix of every image in a manifest, and it is one value, resolved by
+`infra/registry.nu`: `POLAR_NODE_REGISTRY` in the environment, else the target's `cluster.registry` in its `config.nuon`, else
+`config/cluster.nuon` (`10.0.2.2:5000`, the host as a podman dev node sees it). `render.nu` resolves it once and hands it to the hand-written
+charts in the environment, where their Dhall reads it (`env:POLAR_NODE_REGISTRY as Text`); the render cache's key includes the value of every
+environment variable a Dhall file imports. It is not the registry as this machine reaches it (`POLAR_REGISTRY`, `localhost:5000`: where
+images are pushed and digests asked), and it is not the host's address for the deployment git server (`flux.nu --host`, else
+`POLAR_DEPLOY_HOST`, else the registry's host when that is an address).
+
+**Cluster inputs.** What belongs to one cluster and exists only after it does is not committed. Today that is the git server's
+administrators: the first admin's identity is made by the admin flow on the live cluster, and the git server must know it. `up.nu`'s seed
+step writes `targets/<target>/cluster-inputs.nuon` (gitignored; `infra/cluster-inputs.nu`), in the shape of `config.nuon`'s
+`workloads.<name>.env`, tied to the cluster by the sha256 of its CA, and renders and publishes again. The render lets those entries replace a
+same-named one in the target's config; a file made for another cluster is discarded before the render, so a reset starts clean. The second
+signed commit's `provenance.json` names the file, its digest, the cluster and the values (`cluster_inputs`), so the provenance trail shows
+who was made administrator, and the tree stays clean.
+
+**Pull policy.** An image named by a tag that moves (`latest`, or no tag) is pulled `Always`: a node that keeps the first copy it pulled
+(`IfNotPresent`) never sees a rebuild, and the pod runs old code that looks like a bug in the new. The catalog sets it in `kinds.nuon`, the
+custom charts in their `values.dhall`, and `rules.nu` (`pull_policy_problems`) fails a render that leaves a moving tag on anything else; a
+digest pin or a version tag may stay `IfNotPresent`. The cost is a request to the registry for every container that starts, which the
+kubelet limits (5 a second, a burst of 10): 24 pods at once took 18 s against 1.3 s. The `u7s` node lifts the limit
+(`registryPullQPS: 0`, nix-usernetes); on another cluster set the kubelet's `registryPullQPS`, or accept the retries. After the core
+services are up, `up.nu` also says, by pod, when a running container's image is not the one the registry serves.
 
 **The image lock.** A manifest that names an image by tag alone does not say which bytes run: a rebuilt image under the
 same tag is a different image behind the same name, and a GitOps tool cannot see the change. A target with
@@ -420,9 +493,9 @@ builds and pushes every image once, writes the committed `infra/images.lock.nuon
 `release.nu secrets accept ID... --reason` (or `--placeholder-like`) records one you have looked at, with the reason.
 
 A target can also group its files into **layers** (`apply_layers`; `local-minimal` has six: platform,
-cert-issuer, data, cassini, identity, agents). A layer is a set of files applied together after the layers it
+cert-issuer, data, cassini, identity, agents; `sandbox-local` adds `flux`). A layer is a set of files applied together after the layers it
 `depends_on` are healthy, with the workloads to wait for in `wait_for` (the same pod selectors and
-StatefulSets `up.nu` waits for). Where a target declares layers, its `apply_order` is derived from them, so
+StatefulSets `up.nu` waits for, except one that cannot be Ready until a later layer is up: Neo4j needs the credentials agent, so `sandbox-local`'s data layer waits for nothing). Where a target declares layers, its `apply_order` is derived from them, so
 `up.nu` applies exactly what it did, and `render.nu` fails when a rendered file is in no layer or in two.
 `nu infra/layers.nu split <target> <dest>` copies a render into `<dest>/<layer>/` with a `layers.json`:
 the shape a GitOps tool reconciles one layer at a time (see the Flux plan in `remaining-work.md`).
@@ -436,7 +509,7 @@ image references, pull secrets, storage classes, hostnames, URLs.
 
 ```nuon
 {
-  cluster: { registry: "registry.example.com" }     # any field of cluster.nuon
+  cluster: { registry: "registry.example.com" }     # any field of cluster.nuon (POLAR_NODE_REGISTRY overrides the registry)
   workloads: {
     "jira-observer": { backoff_limit: 5 }           # any field of a workload entry
     "oci-registry-resolver": { enabled: false }     # leave a catalog workload out of this target
@@ -467,15 +540,26 @@ ignored without a word.)
 
 ## The render cache
 
-A re-run of `up.nu` renders the whole catalog again, and nearly all of that time is Dhall evaluating two templates per
-workload (the pod, and the objects beside it). A rendered manifest is a pure function of its inputs, so one rendered
-before from the same inputs is read back instead of rendered again. A resume that changed nothing takes a fraction of
-the time; a change to one workload re-renders that workload and nothing else.
+A re-run of `up.nu` renders the whole target again, and nearly all of that time is Dhall evaluating, and agents being asked
+what they take. A rendered manifest is a pure function of its inputs, so one rendered before from the same inputs is read
+back instead of rendered again. A resume that changed nothing takes a fraction of the time; a change to one workload
+re-renders that workload and nothing else.
 
 ### What is cached, and under what key
 
-`render-catalog.nu` keeps the output of each `dhall-to-yaml` call (two per workload) in `cache.nu`'s store, under
-`~/.cache/polar/render/` (`POLAR_CACHE_DIR` moves it; `XDG_CACHE_HOME` is honoured). The key is a hash of:
+Three things, all in `cache.nu`'s store under `~/.cache/polar/` (`POLAR_CACHE_DIR` moves it; `XDG_CACHE_HOME` is honoured):
+
+- **the catalog's manifests** (`render/`): `render-catalog.nu` keeps the output of each `dhall-to-yaml` call (two per
+  workload);
+- **the hand-written charts' manifests** (`chart/`): `dhall-render.nu` keeps the output of each of their 19 `dhall-to-yaml`
+  calls. The key is the text rendered, a digest of every Dhall file under `infra/` (charts import each other, the schema
+  and the target's overrides by path, so none of them is in the text), the value of every environment variable a Dhall file
+  imports (`POLAR_NODE_REGISTRY`, which `render.nu` hands them), the tool's version and the flags;
+- **an agent's scaffold** (`scaffold/`): what its image prints for `--scaffold`, under the image's reference and the digest the
+  registry serves for it (`digest.nu`, a manifest HEAD request, about ten milliseconds). A rebuilt image is another key; with no
+  digest to key on nothing is kept. Before this, every resolve of a workload started its container.
+
+The catalog's key is a hash of:
 
 - the **typed spec**: the workload's resolved record as `json-to-dhall` turns it into Dhall, with the template it is
   applied to. A different value anywhere in the workload (an environment variable, a pull policy, a shutdown budget) is
@@ -491,8 +575,10 @@ together into one.
 ### Why it cannot serve a stale manifest
 
 The cache stores only successes; a failed render reaches the caller and nothing is written. A file is written under a
-name of its own and moved into place, so a reader never sees half of one. What was checked on the 16 workloads of
-`local-minimal`:
+name of its own and moved into place, so a reader never sees half of one. `infra/tests/render-determinism.nu --with-cache` renders a
+target with the cache off, cold and warm and fails unless the output is byte-identical, and it covers all three caches (checked
+2026-10-19, on `local-minimal`). The chart cache was also checked against the commit before it: the same render, in a throwaway
+worktree, byte for byte. What was checked on the 16 workloads of `local-minimal` for the catalog's cache, on 2026-10-14:
 
 - rendered with the cache off, cold (empty) and warm, the 32 output files are **byte-identical**;
 - with one workload's pull policy changed, **one** new cache entry was made and **one** output file differed; the
@@ -507,8 +593,8 @@ mid-write.
 
 ### What it saves
 
-Measured with `infra/measure-render-cache.nu` on 2026-10-14, on a machine with 32 logical CPUs, with the cluster
-running and the machine otherwise idle. "Cold" is a fresh, empty cache directory for every run; "off" is
+**Before the chart and scaffold caches.** Measured with `infra/measure-render-cache.nu` on 2026-10-14, on a machine with 32 logical CPUs,
+with the cluster running and the machine otherwise idle. "Cold" is a fresh, empty cache directory for every run; "off" is
 `POLAR_CACHE=off`. Dhall's own import cache (`~/.cache/dhall`) was left as it was in every case, so it is not part
 of these numbers.
 
@@ -529,18 +615,19 @@ Per workload that is about 3.4 s uncached, about 0.5 s cached, and about 3.0 s m
 changed. The saving is the same in absolute terms at each level, about 47 s, because it is the same work being
 skipped; it is a smaller share of the larger totals.
 
-### Where a warm resume still spends its time
+**Since.** Not measured with the harness (so no minimum and maximum), on the same machine, rendering `sandbox-local`, whose catalog has 15
+workloads. A warm render took 59 to 62 s with only the catalog cached. The scaffold cache took a catalog file from about 2.1 s to 0.35 s. The
+chart cache then brought a warm render to **12 s**, and one with the chart cache cold to 23 s. A render with no cache at all is still over
+a minute, because every Dhall render has to run once; a tester's first render is that one.
 
-By subtraction, not measured separately: of the 28.0 s,
+### Where a warm resume still spent its time, and what was done
 
-- about **8.2 s** is the catalog render that is left (resolving each workload twice, about a quarter of a second
-  each, and reading the cache);
-- about **12.6 s** is the eight custom charts, which are not cached;
-- about **7.2 s** is everything else `up.nu` does (the applies and their comparisons with the cluster, the checks,
-  the waits).
-
-So the next saving is in the charts and in resolving, about 21 s between them, and neither is cached yet. A cache
-of the per-image scaffold would address a slice of the resolving only; measure before building it.
+The 2026-10-14 breakdown of a 28.0 s resume was about 8.2 s of catalog (resolving each workload twice, and reading the cache), about 12.6 s of
+the eight custom charts, which were not cached, and about 7.2 s of everything else `up.nu` does. It pointed at the charts and at resolving, and
+a note here said to measure before building a cache of the scaffold. Measured, a resolve that had to ask the image for its scaffold took
+2.45 s against 0.63 s from the cache, and a render did it a few dozen times. The charts and the scaffolds are now cached; resolving itself is not. What is left of the render includes
+`resolve.nu` run twice per workload in separate processes (0.69 s a call, of which 0.22 s is loading the script), `json-to-dhall` (about
+0.3 s a file), and pinning the images against the registry; how much each of those costs now has not been measured.
 
 ### Using it
 
@@ -560,7 +647,14 @@ Leave the machine alone while the measurement runs, or the timings move.
 
 Secrets are encrypted per target and are not rendered by the chart pipeline.
 
-- `targets/<t>/secrets.sops.yaml` holds the values, encrypted with sops (age). Add your key to the target's `.sops.yaml` and run `sops updatekeys` to give someone access.
+- `targets/<t>/secrets.sops.yaml` holds the values, encrypted with sops (age, with SSH keys as the identity). It is encrypted to every key
+  listed in the target's `.sops.yaml`. To give someone access, add their public key to that file's `age:` value and run
+  `sops --config targets/<t>/.sops.yaml updatekeys targets/<t>/secrets.sops.yaml`, then commit the re-encrypted file. Two things about
+  `.sops.yaml` are easy to get wrong: the keys must be **comma-separated** (`key1,` newline `key2,`, since sops reads a space-separated list
+  as one recipient and silently encrypts to the first key only), and it is gitignored and only needed to *encrypt*: a file knows its own
+  recipients, so decrypting needs only your private key (`SOPS_AGE_SSH_PRIVATE_KEY_FILE`). A fresh checkout can decrypt a file it was added to.
+  Someone with no access can write a file of their own for a local target: `neo4j_auth` (`neo4j/<password>`) and `graph_password` (the same
+  password) are the two the cluster cannot run without (the README's "Secrets setup").
 - `targets/<t>/secrets.nu` decrypts them and creates the Secrets and ConfigMaps in the cluster. It creates what is missing and skips what already exists, so re-running is safe. `up.nu` runs it in the "secrets and infrastructure" step.
 - Manifests only *reference* secrets by name (`secretKeyRef`); they never contain secret values. A catalog workload's env entry does the same: `{ name: "JIRA_TOKEN", secret: "jira-secret", key: "token" }`.
 - Never `git add` certificates or keys.
@@ -634,7 +728,7 @@ permission, a credential.
    cannot be resolved. You cannot forget a case.
 
 Name it for what the code *requires*, and add the same name to the Rust
-`Capability` enum in `polar-agent-builder` (`src/capability.rs`). A unit test
+`Capability` enum in `polar-agent-builder` (`src/agents/polar-agent-builder/src/capability.rs`). A unit test
 (`names_match_the_deployment_catalog`) compares the two name sets in both
 directions, so a rename on one side fails the other side's tests.
 
@@ -900,15 +994,20 @@ beside one that may still be alive), but it is an outage until someone acts.
 - **Access to the outside is checked once, at the end of `up.nu`, and only reported.** A pod runs `git ls-remote` against one public repository (`POLAR_EGRESS_PROBE_URL` changes it) and `up.nu` says whether the name resolved and the host answered. It is a note because a cluster used offline works. The probe runs in the `polar-scheduler-observer` pod, the one image with a git CLI, so if that pod is not running the check says it was skipped. On a cluster whose CoreDNS forwards to a resolver that pods cannot reach, pods resolve nothing outside the cluster, and this check says so.
 - **Service-account token ordering.** On a fresh cluster, a `kubernetes.io/service-account-token` Secret is populated by the token controller only after its ServiceAccount exists, so the first apply may need repeating. `serviceaccounts.yaml` precedes `kube-observer-resources.yaml` in `apply_order`, which should avoid it, but this has only been exercised on an existing cluster.
 - **The catalog has two kinds, `agent` and `service`.** All the agents are in it; the custom charts are ace, cert-issuer, jaeger, keycloak, neo4j and postgres.
-- **`apply_order` (and the layers it comes from) is hand-maintained** in each `target.nu`; only `local-minimal` has layers so far. It should be derived from the catalog (resources before the Job).
+- **`apply_order` (and the layers it comes from) is hand-maintained** in each `target.nu`; `local-minimal` and `sandbox-local` have layers, `local` does not. It should be derived from the catalog (resources before the Job).
 - **`render.nu` passes cluster facts to custom charts through a `match` on the chart name,** and `target.nu` carries values (`cert_issuer_url`, `polar_init_image`, ...) that the catalog derives elsewhere. That is data written as control flow, and a duplicated fact.
 - **Only the kube agents declare capabilities in Rust.** Other agents still hard-code health arguments and Cassini/Neo4j endpoints; they move to the builder one pair at a time.
 - **`POLAR_CAPABILITIES` unset is a warning, not an error,** so an agent run outside the cluster still starts. A deployment that forgets to set it is therefore not caught by the builder; the catalog sets it for every workload it renders.
 - **The cluster domain drives catalog addresses,** but custom charts still hard-code `svc.cluster.local`, and `polar-init --cluster-domain` is not passed.
 - **`src/deploy/`** is the old system. Confirm it is dead and remove it, or mark it.
-- **Only the catalog's manifests are cached.** The custom charts (cert-issuer, Neo4j, ACE, ...) are rendered in full
-  on every run; see "The render cache" for what that costs.
-- **Resolving the workloads is not cached.** A warm render still runs `resolve` for each workload twice (its
-  pod and its resources, each about a quarter of a second), which is most of what remains of a warm render.
+- **Resolving the workloads is not cached.** A render runs `resolve` twice per workload in separate processes (0.69 s a call, 0.22 s
+  of it loading the script). Only the scaffold inside it, the hand-written charts and the catalog's Dhall are cached; see "The render cache".
+- **A first render is slow.** With nothing cached every Dhall render has to run (over a minute for `sandbox-local`); only repeats are fast.
+- **Pulling `Always` is throttled by the kubelet** (5 requests a second, burst 10) on a cluster that has not lifted `registryPullQPS`: a
+  burst of pods is retried with a backoff, which slows a bring-up but does not break it. The `u7s` node lifts it.
+- **Third-party images under a version tag (Jaeger, Keycloak, Postgres, the Flux controllers, local-path-provisioner) are still
+  `IfNotPresent`,** and `just cluster-load` (an image loaded into a node and not in the registry) does not work with `Always` for ours.
+- **The gitops target has run on one cluster** (the podman dev node). Other runtimes are untried; `flux.nu --host` is how the nodes reach the
+  host, and the deployment git server does not yet reject an unsigned push (`flux.nu install` checks the signature; the server does not).
 
 Open items are tracked in `remaining-work.md`.

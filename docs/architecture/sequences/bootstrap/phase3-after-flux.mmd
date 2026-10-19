@@ -20,8 +20,9 @@
 %% DM26-0670
 
 %% Phase 3 of the sandbox-local bootstrap: what up.nu does once the workloads run.
-%% These steps exist today (infra/up.nu step_forwards, step_admin, step_seed, step_browser,
-%% report_egress) and run unchanged after Flux. Each checks whether it is already done.
+%% These steps are the code in infra/up.nu (step_forwards, step_admin, step_seed, step_browser,
+%% report_egress) and run after Flux (or after the apply loop, for a target up.nu applies itself).
+%% Each checks whether it is already done. Run end to end on a gitops target on 2026-10-19.
 %% The bootstrap-admin hop between polar-admin-grant and the credentials agent is drawn in
 %% general/admin_bootstrap_identity.mmd.
 sequenceDiagram
@@ -61,18 +62,16 @@ sequenceDiagram
 
     Note over Up,GS: 4 seed the schedules repository with the first signed policy
     Up->>K: wait_pods: polar-git-server, polar-scheduler-observer, polar-scheduler, credentials-agent
-    Up->>Up: openssl x509 -ext subjectAltName on U.crt:<br/>the seed documents must name agents that exist
-    Up->>Git: git clone polar-schedules over mTLS with U's certificate<br/>(through the 8443 forward, 6 tries 5 seconds apart)
-    Git->>GS: clone
-    alt the server refuses (403): it does not know U's identity as an administrator
-        GS-->>Up: refused
-        Up-->>Op: stop and say what to do (seed refused_hint)
-        Op->>Op: set POLAR_GIT_SERVER_ADMINS in config.nuon to<br/>U's first DNS name (once per fresh cluster)
-        Op->>Up: run the same command again
-        Note over Up,GS: the second run renders, splits and publishes again, Flux applies the changed<br/>layer, the git server restarts, and this step starts over at its first wait
-    else the server accepts
-        GS-->>Git: the repository
+    Up->>Up: openssl x509 -ext subjectAltName on U.crt: the first DNS name is U's identity,<br/>and the seed documents must name agents that exist
+    alt this cluster's inputs do not yet name U as an administrator of the git server
+        Up->>Up: write targets/T/cluster-inputs.nuon (gitignored, tied to this cluster by the sha256 of its CA)
+        Up->>Up: render again, so the git server's configuration names U
+        Up->>Up: publish a second signed commit (deploy-repo.nu publish), its provenance.json names the<br/>inputs file, its digest, the cluster and the values (flux.nu wait for Flux, or the apply loop)
+        Note over Up,GS: Flux recreates the polar-git-server Job: the fingerprint of its ConfigMap, in the pod template,<br/>changed. The step waits for the pods again before it goes on.
     end
+    Up->>Git: git clone polar-schedules over mTLS with U's certificate<br/>(through the 8443 forward, 6 tries 5 seconds apart: the forward may be reconnecting to a pod that was just replaced)
+    Git->>GS: clone
+    GS-->>Git: the repository (a 403 here means the git server does not know U: seed refused_hint says where to look)
     loop each seed document not yet in the repository
         Up->>Sign: polar-sign runtime --agent A --section S --version N --body-file - --user U<br/>(the body on standard input from seed.nu)
         Sign-->>Up: a signed document, written to permanent/A/S.dhall in the clone

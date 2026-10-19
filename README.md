@@ -517,12 +517,19 @@ repo root with `KUBECONFIG` pointing at the cluster:
 nu infra/up.nu local-minimal --dev --user <name> --email <email>
 ```
 
-`infra/render.nu` only renders (it never touches a cluster); `infra/up.nu`
+`infra/render.nu` only renders (it applies nothing; it needs each agent's
+scaffold, which `up.nu` asks of the agents' images on your cluster, and
+which `nu infra/resolve.nu collect-scaffolds` does by hand); `infra/up.nu`
 renders and then applies. It is driven by the target's own config, so it runs
 only the steps that target needs and prints the plan first, with the reason for
 every skipped step. For `local-minimal` that is: images (`--dev`), namespaces,
 the cluster CA, secrets and manifests in the target's apply order, a wait for
-the core pods, the port-forwards, the admin flow and the browser certificate.
+the core pods, the port-forwards, the admin flow, the seed of the schedules
+repository and the browser certificate. A target that deploys with Flux
+(`sandbox-local`) does not apply its manifests: it publishes them, signed, to a
+deployment git server of its own that runs on your host, installs Flux and
+lets it apply them layer by layer (`infra/INFRA.md`, "How a target works", and
+`docs/architecture/cluster-bootstrap.md`).
 It stops only where a person is needed (closing the browser, the Neo4j
 password), and every step checks whether it is already done, so after a
 failure you re-run the same command to resume.

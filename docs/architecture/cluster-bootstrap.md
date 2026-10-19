@@ -35,21 +35,23 @@ order, and every artifact it makes. The diagrams are in `sequences/bootstrap/`:
 
 The sources are the `.mmd` files beside them (regenerate as in `sequences/assets/asset_regeneration.md`).
 
-## What exists and what is proposed
+## What exists
 
-**Everything not marked (new) runs today.** It was traced from the code: `infra/up.nu`, `plan.nu`, `images.nu`,
-`render.nu`, `render-catalog.nu`, `resolve.nu`, `layers.nu`, `secrets.nu` of the target, `tools.nu`, `forwards.nu`, the
-Justfile recipes (`registry-up`, `port-forwards-up`, `admin-bootstrap`, `admin-provision`, `admin-claim`,
-`user-cert-install`), and `polar-admin-grant` and `polar-sign`. **(new)** marks the proposed Flux deployment, none of
-which is built except the deployment host (`deploy-repo.nu ensure`): `deploy-repo.nu publish`, `flux.nu`, and Flux itself. Today `up.nu` applies the
-manifests itself, in `apply_order`, with one gate (Cassini); the Flux target replaces that loop and nothing else.
+**Everything described here runs.** It was traced from the code (`infra/up.nu`, `plan.nu`, `images.nu`, `render.nu`,
+`render-catalog.nu`, `resolve.nu`, `layers.nu`, `registry.nu`, `deploy-repo.nu`, `deploy-objects.nu`, `flux.nu`,
+`cluster-inputs.nu`, `secrets.nu` of the target, `tools.nu`, `forwards.nu`, the Justfile recipes `registry-up`, `port-forwards-up`,
+`admin-bootstrap`, `admin-provision`, `admin-claim` and `user-cert-install`, and `polar-admin-grant` and `polar-sign`), and a clean
+`sandbox-local` bring-up was run end to end on 2026-10-19 on the podman dev node (all six layers Ready, the seed applied). Other
+runtimes (minikube, kind, a managed cluster) have not run the gitops target; `local-minimal` does not use Flux and `up.nu` applies it
+itself, in `apply_order`, with one gate (Cassini). A target opts in with `gitops: true` (`plan.nu` swaps the apply loop for steps 8 to 11
+below).
 
 ## Why three phases
 
 | Phase | Who | What it is | Why it is there |
 |---|---|---|---|
-| 1 before Flux | `up.nu` | build, render, publish, namespaces, the cluster CA, the secrets, install Flux | needs a human's machine (the SOPS key, the kubeconfig), or has to exist before any workload can start |
-| 2 Flux | Flux | apply the six layers in order, each after the one before is healthy | the part that is GitOps: declared in a repository, repeatable, reverted with `git revert` |
+| 1 before Flux | `up.nu` | build, render, namespaces, the cluster CA, the secrets, the deployment git server, publish, install Flux | needs a human's machine (the SOPS key, the kubeconfig), or has to exist before any workload can start |
+| 2 Flux | Flux | apply the layers in order, each after the one before is healthy | the part that is GitOps: declared in a repository, repeatable, reverted with `git revert` |
 | 3 after Flux | `up.nu` | port-forwards, the admin flow, the seed, the browser, the report | needs running workloads (the credentials agent, the git server, Neo4j), and a person |
 
 ## The steps, with the script and what each makes
@@ -60,27 +62,27 @@ manifests itself, in `apply_order`, with one gate (Cassini); the Flux target rep
 |---|---|---|---|
 | 1 | preflight | `up.nu` | nothing. Checks the cluster answers and namespaces can be made, a container runtime exists when a step starts a container here (`--dev`, the deployment host), the SOPS files decrypt; deletes scratch namespaces an interrupted run left behind |
 | 2 | agent images (`--dev`) | `just registry-up`, `resolve.nu document-images`, `images.nu sync`, `nix build`, `skopeo` | the registry container; `result/IMAGE` archives; images in the registry |
-| 3 | render | `resolve.nu collect-scaffolds` (`agent-pods.nu`), `render.nu`, each chart's `main.nu`, `render-catalog.nu`, `resolve.nu`, `dhall` | the agents' scaffolds, asked of their images as pods in a scratch namespace (deleted afterwards); `manifests/` (51 files), render cache |
+| 3 | render | `resolve.nu collect-scaffolds` (`agent-pods.nu`), `render.nu`, each chart's `main.nu`, `render-catalog.nu`, `resolve.nu`, `dhall` | the agents' scaffolds, asked of their images as pods in a scratch namespace (deleted afterwards); `manifests/` (52 files), the render caches |
 | 4 | images (`--dev`) | `images.nu` | the images the manifests name |
-| 5 | split (new) | `layers.nu split` | one directory per layer and `layers.json` |
-| 5 | deployment host | `deploy-repo.nu ensure` | the deployment PKI; the deployment git server container. Built 2026-10-19 (`nu infra/deploy-repo.nu ensure <target>`, idempotent; the container is `polar-deploy-<target>` on host port 9443, its repositories in the volume `polar-deploy-<target>-repos`) |
-| 5 | publish | `deploy-repo.nu publish` | a signed commit in `deploy-T`: `layers/<layer>/` (every layer but the bootstrap `flux` one), `flux/` (the GitRepository and a Kustomization per layer with `dependsOn`, `force` where the layer has Jobs, and health checks made from the layer's `wait_for`; a Job is waited for through the Endpoints of the Service that selects its pods, see "What looks odd"; a Job with no such Service is not waited for), `provenance.json` (source commit, the digest of every file, the image lock, the CAs) and a README. Built 2026-10-19. Signed with git's x509 support (`gpgsm`) using the `pipeline` certificate in a GnuPG home beside the PKI; the trust is the deployment CA only, and nothing in it comes from the cluster. Refuses an unrendered target, an image not pinned by digest, and a dirty tree (`--allow-dirty` records it). Running it again on an unchanged render commits nothing |
-| 6 | namespaces | `up.nu` (`kubectl apply`) | the namespaces |
-| 7 | cluster CA | `polar-admin-grant bootstrap-ca` | Secret `cert-issuer-ca`, ConfigMap `polar-ca`; straight to the API with your kubeconfig, created once and never overwritten (a second run fails with 409) |
-| 8 | secrets | `targets/T/secrets.nu`, `sops`, `rage` | the Secrets listed below |
-| 9 | install Flux | `flux.nu install` | Built and run 2026-10-19 (a clean `sandbox-local` bring-up). First it clones the deployment repository as `flux` and checks that its head is signed by the pipeline's certificate (`git verify-commit` in the PKI's GnuPG home); an unsigned or unpublished head stops it before the cluster is touched. Then it applies the rendered controllers and waits for their CRDs and Deployments; a Service `polar-deploy-git` (the name on the server's certificate) with an EndpointSlice to the host (`--host`, `10.0.2.2` on the podman node); Secret `deploy-repo-auth` (the `flux` certificate, key and the deployment CA, never printed); and the GitRepository and Kustomizations from the verified clone |
+| 5 | namespaces | `up.nu` (`kubectl apply`) | the namespaces |
+| 6 | cluster CA | `polar-admin-grant bootstrap-ca` | Secret `cert-issuer-ca`, ConfigMap `polar-ca`; straight to the API with your kubeconfig, created once and never overwritten (a second run fails with 409) |
+| 7 | secrets | `targets/T/secrets.nu`, `sops`, `rage` | the Secrets listed below; the same script `up.nu` runs for a target it applies itself |
+| 8 | deployment git server | `deploy-repo.nu ensure` | the deployment PKI under `~/.config/polar-deploy/T/` (its own CA, a server certificate, and client certificates for `pipeline`, which writes, and `flux`, which reads; not Polar's CA, which does not exist before the cluster does) and the server: a container on the host and outside the cluster, `polar-deploy-T` on port 9443, its repositories in the volume `polar-deploy-T-repos`. Idempotent: it makes what is missing and replaces the container only when what it should be has changed. The container needs `--restart=always`, `--tmpfs /tmp` and `POLAR_HEALTH_CERTS` pointed at its own certificate (what a pod gets from its Job) |
+| 9 | publish | `deploy-repo.nu publish` | one signed commit in `deploy-T`: `layers/<layer>/` (every layer but the bootstrap `flux` one, with a `polar.dev/config-hash` fingerprint of the ConfigMaps a workload reads in its pod template), `flux/` (a GitRepository and a Kustomization per layer: `dependsOn`, `force` where the layer has Jobs, and health checks made from the layer's `wait_for`, see "What looks odd"), `provenance.json` (the source commit, the digest of every file as rendered and as published, the image lock, the CAs, and `cluster_inputs`) and a README. Signed with git's x509 support (`gpgsm`) using the `pipeline` certificate in a GnuPG home beside the PKI; the trust is the deployment CA only, and nothing in it comes from the cluster. Refuses a target that is not rendered, an image not pinned by digest, and a dirty tree (`--allow-dirty` records it); on an unchanged render it commits nothing |
+| 10 | install Flux | `flux.nu install` | First it clones the deployment repository as `flux` and checks that its head is signed by the pipeline's certificate (`git verify-commit` in the PKI's GnuPG home): an unsigned or unpublished head stops it before the cluster is touched. Then it applies the rendered controllers and waits for their CRDs and Deployments; a Service `polar-deploy-git` (the name on the server's certificate) with an EndpointSlice to the host (`--host`, else `POLAR_DEPLOY_HOST`, else the node registry's host when that is an address); Secret `deploy-repo-auth` (the `flux` certificate, key and the deployment CA, never printed); the GitRepository, waiting until Flux has fetched the repository; and the Kustomizations, from the verified clone |
+| 11 | wait for Flux | `flux.nu wait` | nothing; it follows the layers (phase 2) until every Kustomization is Ready at the published commit |
 
 ### Phase 2 (Flux)
 
 `platform` → `cert-issuer` → `data` → `cassini` → `identity` → `agents`, each a Kustomization that `dependsOn` the one before
-and is healthy before the next starts (what it waits for is in `layers.json`, copied from what `up.nu` waits for today).
+and is healthy before the next starts. What it waits for is each layer's `wait_for` in the target, turned into health checks (a StatefulSet or Deployment as itself, an agent's Job through the Endpoints of its Service); the `data` layer waits for nothing, because Neo4j cannot be Ready until the credentials agent of a later layer is up.
 `cassini` is a layer of its own because a client that starts before its broker attaches to a broker that is about to go away.
-`flux.nu wait <target>` polls until every Kustomization is Ready *and* was applied from the commit that was published (a layer that is Ready at an older commit does not count), printing a layer's state when it changes, and on timeout names the layers that are not.
+`flux.nu wait <target>` polls until every Kustomization is Ready *and* was applied from the commit that was published (a layer that is Ready at an older commit does not count), printing a layer's state when it changes, and on timeout names the layers that are not. A layer waiting on a health check begun under an older spec or revision is ended by restarting the kustomize-controller (see "What looks odd").
 
 ### Phase 3 (`up.nu` again)
 
 wait for the core services → port-forwards (`just port-forwards-up`) → admin flow (`just admin-bootstrap`,
-`admin-provision`, `admin-claim`, all `polar-admin-grant`) → seed (`git`, `polar-sign runtime`, `git push`) →
+`admin-provision`, `admin-claim`, all `polar-admin-grant`) → seed (records the first admin's identity in `cluster-inputs.nuon`, renders and publishes again, waits for Flux to restart the git server, then `git`, `polar-sign runtime`, `git push`) →
 browser (`just user-cert-install`, the Neo4j password check, both with a person) → report (`kubectl get pods`, the egress
 probe). The bootstrap-admin exchange itself is drawn in `sequences/general/admin_bootstrap_identity.mmd`.
 
@@ -88,18 +90,17 @@ probe). The bootstrap-admin exchange itself is drawn in `sequences/general/admin
 
 | Artifact | Made by | Read by | Where | Notes |
 |---|---|---|---|---|
-| images | `images.nu` (nix build, skopeo copy, mirror) | the nodes, the render (to ask an agent for its scaffold), the deployment git server | registry container on `:5000` | ours are `:latest` today; Flux cannot see one change |
+| images | `images.nu` (nix build, skopeo copy, mirror, import) | the nodes, the render (to ask an agent for its scaffold) | registry container on `:5000` | a gitops target names them by digest from the image lock, so Flux sees a change; the others use `:latest`, pulled `Always` |
 | `result/IMAGE` | `nix build` | `images.nu` | repo root, ignored by git | docker archives |
-| `manifests/*.yaml` | `render.nu` | `up.nu` (today), `layers.nu` | repo root, ignored by git | 51 files, identical on every render (`infra/tests/render-determinism.nu`); no Secret documents |
-| render cache | `render-catalog.nu` | later renders | `~/.cache/polar` | keyed on a hash of every input; never changes the output |
-| layer tree, `layers.json` (new) | `layers.nu split` | `deploy-repo.nu` | a temp directory | the order, the dependencies and the waits |
-| `deploy-T` repository (new) | `deploy-repo.nu publish` | Flux's source-controller; the verify step | on the deployment git server | `layers/`, `flux/`, `provenance.json`, a README that says it is generated; commits signed with the pipeline's certificate |
-| deployment PKI (new) | `deploy-repo.nu ensure` | the git server, the pipeline, Flux | `~/.config/polar-deploy/T/` | its own CA, a server certificate, and client certificates for `pipeline` (writes) and `flux` (reads); not Polar's CA |
-| `push-log.jsonl` (new) | the deployment git server | whoever audits | beside its repositories | who pushed what, when |
+| `manifests/*.yaml` | `render.nu` | `up.nu` (a target it applies itself), `deploy-repo.nu publish` | repo root, ignored by git | 51 files (52 for `sandbox-local`), identical on every render (`infra/tests/render-determinism.nu`); no Secret documents |
+| render cache | `render-catalog.nu`, `dhall-render.nu`, `resolve.nu` | later renders | `~/.cache/polar` | the catalog's manifests, the hand-written charts' manifests and the agents' scaffolds, each keyed on a hash of every input; never changes the output |
+| `deploy-T` repository | `deploy-repo.nu publish` | Flux's source-controller; the verify step | on the deployment git server | `layers/`, `flux/`, `provenance.json`, a README that says it is generated; commits signed with the pipeline's certificate |
+| deployment PKI | `deploy-repo.nu ensure` | the git server, the pipeline, Flux | `~/.config/polar-deploy/T/` | its own CA, a server certificate, and client certificates for `pipeline` (writes) and `flux` (reads); not Polar's CA |
+| `push-log.jsonl` | the deployment git server | whoever audits | beside its repositories | who pushed what, when |
 | Secret `cert-issuer-ca`, ConfigMap `polar-ca` | `polar-admin-grant bootstrap-ca` | cert-issuer; everyone trusting the CA | the cluster | the CA's key lives only in the cluster |
 | Secrets `neo4j-secret`, `polar-graph-pw`, `cassini-shutdown-token`, `jira-secret`, `oci-registry-auth`, `keycloak-admin-secret`, `keycloak-db-secret` | `secrets.nu` | the workloads | the cluster | from `secrets.sops.yaml` and `user.sops.yaml`; never in the render or the deployment repo |
-| Secret `flux-system/deploy-repo-auth` (new) | `up.nu` | source-controller | the cluster | `tls.crt`, `tls.key`, `ca.crt` of the `flux` identity |
-| Flux controllers, GitRepository, Kustomizations (new) | `flux.nu install`, then Flux | Flux | the cluster | the Kustomizations are also in the repository, under `flux/` |
+| Secret `flux-system/deploy-repo-auth` | `flux.nu install` | source-controller | the cluster | `tls.crt`, `tls.key`, `ca.crt` of the `flux` identity |
+| Flux controllers, GitRepository, Kustomizations | `flux.nu install`, then Flux | Flux | the cluster | the Kustomizations are also in the repository, under `flux/` |
 | `~/.config/polar-admin/` | `just admin-*`, `polar-admin-grant` | `polar-sign`, `git`, the browser step | the home directory | `ca.pem`, `bootstrap-admin.*`, `U.crt`, `U.key`, `U.chain.pem`; moved aside to `polar-admin.old-TIMESTAMP` when its CA is another cluster's, never deleted |
 | signed documents in `polar-schedules` | `polar-sign runtime` | the scheduler observer, then the agents | the in-cluster git server | `permanent/AGENT/SECTION.dhall`: runtime configuration, a separate repository from `deploy-T` and a separate trust path |
 | certificate store entries | `just user-cert-install` | the browser | the Librewolf profile | the CA and U's PKCS12 |
@@ -137,10 +138,10 @@ probe). The bootstrap-admin exchange itself is drawn in `sequences/general/admin
 
 ## What was not checked
 
-This document was written before the first full run. On 2026-10-19 a clean `sandbox-local` bring-up ran end to end (all six layers
-Ready, the seed applied), and the "(new)" marks above are out of date for what it covered. Still not exercised: the server rejecting
-an unsigned push (open item 4), `local` and `local-minimal` as gitops targets, and a runtime other than the podman node
-(`--host` for the Service's address is untested elsewhere). In the steps that existed before, I did not confirm which of the `data`
-workloads get their certificate from `cert-issuer` directly and which from the credentials agent (the diagram says only that their
-init containers run `polar-init`), nor where the port-forward logs are written. The node's image cache is dropped by
-`podman exec u7s ctr images rm` on the host, only when `POLAR_CLUSTER_RUNTIME` is `u7s`.
+A clean `sandbox-local` bring-up ran end to end on 2026-10-19 (all six layers Ready, the seed applied), on the podman dev node. Not
+exercised: the server rejecting an unsigned push (open item 4), `local` and `local-minimal` as gitops targets, and a runtime other than the
+podman node (`--host` for the Service's address is untested elsewhere). For the steps that existed before Flux, I did not confirm which of the
+`data` workloads get their certificate from `cert-issuer` directly and which from the credentials agent (the diagram says only that their init
+containers run `polar-init`), nor where the port-forward logs are written. The node's image cache is dropped by
+`podman exec u7s ctr images rm` on the host, only when `POLAR_CLUSTER_RUNTIME` is `u7s`; images that move are pulled `Always`, so another
+cluster needs no such step.

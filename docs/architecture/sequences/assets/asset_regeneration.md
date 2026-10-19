@@ -24,7 +24,7 @@
 # Regenerating Diagram Assets
 
 All sequence diagram sources live under `docs/architecture/sequences/`,
-organized by subsystem (`broker/`, `general/`). Each `.mmd` file has a
+organized by subsystem (`broker/`, `general/`, `bootstrap/`). Each `.mmd` file has a
 matching `.png` rendered with Mermaid CLI (`mmdc`).
 
 Shared rendering assets (CSS, Mermaid config) live in
@@ -39,7 +39,7 @@ To regenerate every diagram:
 
 ```bash
 cd docs/architecture/sequences
-for f in broker/*.mmd general/*.mmd; do
+for f in broker/*.mmd general/*.mmd bootstrap/*.mmd; do
   name="${f%.mmd}"
   mmdc \
     -i "$f" \

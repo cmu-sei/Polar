@@ -20,82 +20,83 @@
 %% DM26-0670
 
 %% Phase 1 of the sandbox-local bootstrap: everything up.nu does before Flux takes over.
-%% (new) marks the proposed Flux deployment. Every other step is the code in infra/ today.
+%% This is the code in infra/ (up.nu, plan.nu, render.nu, deploy-repo.nu, flux.nu), run end to end on 2026-10-19.
+%% A target that does not set gitops: true skips steps 8 to 11 and applies its layers itself.
 sequenceDiagram
     autonumber
     actor Op as Operator
     participant Up as infra/up.nu
     participant Img as infra/images.nu
-    participant Nix as nix build
     participant Reg as registry :5000<br/>(container polar-registry)
     participant Ren as infra/render.nu
-    participant Cat as render-catalog.nu<br/>resolve.nu, dhall
-    participant Lay as layers.nu (new)
-    participant Dep as deploy-repo.nu (new)
-    participant DGit as deployment git server (new)<br/>polar-git-server container
+    participant Pods as agent-pods.nu<br/>(scratch namespace)
+    participant Cat as the renderers<br/>(render cache)
     participant Adm as polar-admin-grant<br/>(infra/tools.nu)
     participant Sec as targets/T/secrets.nu
-    participant Fx as flux.nu (new)
+    participant Dep as deploy-repo.nu
+    participant DGit as deployment git server<br/>(container on the host)
+    participant Fx as flux.nu
     participant K as Kubernetes API
 
     Op->>Up: nu infra/up.nu sandbox-local --user U --email E
-    Up->>Up: read targets/T/target.nu (one nuon record: charts, layers, waits)<br/>build_plan (plan.nu) prints the steps and why any is skipped
+    Up->>Up: read targets/T/target.nu (charts, layers, waits, gitops: true)<br/>build_plan (plan.nu) prints the steps and why any is skipped
 
     Note over Up,K: 1 preflight
-    Up->>K: kubectl get nodes (KUBECONFIG is set, cluster reachable)
-    Up->>Up: a container runtime exists (infra/runtime.nu: podman or docker)<br/>the SOPS files decrypt (secrets-lib.nu)
+    Up->>K: kubectl get nodes, a container runtime exists when a step needs one
+    Up->>Up: the SOPS files decrypt (or the secrets already exist)
 
     Note over Up,Reg: 2 agent images (only with --dev, else the registry must already hold them)
-    Up->>Reg: just registry-up: run registry:2 as polar-registry on :5000
-    Up->>Cat: resolve.nu document-images: which agents describe themselves
     Up->>Img: images sync (the agents the render will ask)
-    Img->>Nix: nix build the flake attribute of IMAGE for ARCH, linked at result/IMAGE
-    Nix-->>Img: result/IMAGE (docker archive)
-    Img->>Reg: skopeo copy docker-archive to docker://localhost:5000/IMAGE:TAG<br/>mirror third-party images, push the Neo4j archive
-    Note over Img,Reg: u7s only: podman exec u7s ctr images rm drops the node's cached copy of a rebuilt image
+    Img->>Reg: nix build, skopeo copy to the registry (nu infra/images.nu import fills it from a published account instead)
 
     Note over Up,K: 3 render
-    Up->>Ren: POLAR_AGENT_SOURCE=images nu infra/render.nu T
-    Ren->>Ren: load target.nu, empty manifests/
-    Ren->>Cat: each chart's main.nu: namespaces, storage, cert-issuer,<br/>jaeger, ace, neo4j, postgres, keycloak (dhall to YAML)
-    Ren->>Cat: render-catalog.nu: per catalog workload, resolve.nu json<br/>(runs IMAGE --scaffold with no network) then json-to-dhall, dhall-to-yaml<br/>(render cache in ~/.cache/polar)
+    Up->>K: discard cluster-inputs.nuon if it was made for another cluster (CA fingerprint)
+    Up->>Pods: resolve.nu collect-scaffolds: for each agent image whose scaffold is not cached<br/>under its digest, run IMAGE --scaffold as a pod (pulled Always), then delete the namespace
+    Pods-->>Up: one scaffold per agent, in a temporary directory (POLAR_SCAFFOLD_DIR)
+    Up->>Ren: nu infra/render.nu T
+    Ren->>Ren: resolve the registry once (registry.nu: POLAR_NODE_REGISTRY, the target, cluster.nuon)<br/>and export it, the charts' Dhall reads it
+    Ren->>Cat: each chart's main.nu (dhall-render.nu: dhall-to-yaml through the chart cache),<br/>then render-catalog.nu and resolve.nu per workload (through the catalog cache)
     Cat-->>Ren: manifests/NAME.yaml and NAME-resources.yaml
-    Ren->>Ren: checks: apply order, service accounts (writes serviceaccounts.yaml),<br/>Job replacement, cert-issuer identity, CA provisioning, layers
-    Ren-->>Up: manifests/ (51 files for local-minimal), identical on every run
+    Ren->>Ren: pin every image by digest from the image lock (a pinning target)<br/>checks: apply order, service accounts, Job replacement, image pull policies,<br/>cert-issuer identity, CA provisioning, layers
+    Ren-->>Up: manifests/ (52 files for sandbox-local), identical on every run
 
     Note over Up,Reg: 4 images (only with --dev): what the rendered manifests reference
     Up->>Img: images needed (reads image: from manifests/), then sync as in step 2
 
-    Note over Up,DGit: 5 split, deployment host, publish (new)
-    Up->>Lay: layers.nu split T WORK (platform, cert-issuer, data, cassini, identity, agents)
-    Lay-->>Up: WORK/LAYER/FILE.yaml and WORK/layers.json
-    Up->>Dep: deploy-repo.nu ensure T
-    Dep->>Dep: first time only: ~/.config/polar-deploy/T/ gets a CA, a server certificate,<br/>and client certificates for "pipeline" (writes) and "flux" (reads), made with openssl
-    Dep->>DGit: start the container from registry polar-git-server with POLAR_GIT_SERVER_*<br/>repos: deploy-T, writers [pipeline], readers [flux] (no Cassini, no cluster)
-    Up->>Dep: deploy-repo.nu publish T WORK
-    Dep->>Dep: assemble the tree: layers/, flux/ (GitRepository and one Kustomization per layer,<br/>generated from layers.json), provenance.json (polar commit, image digests,<br/>tree hash), a README saying the tree is generated
-    Dep->>DGit: git commit signed with the pipeline certificate (x509), push over mTLS as "pipeline"
-    DGit->>DGit: ACL check by certificate identity, append push-log.jsonl
-    Dep->>DGit: verify: fresh clone as "flux", check the signature against the CA,<br/>the tree hash equals the one recorded
-    Dep-->>Up: deployment repo at COMMIT
-
-    Note over Up,K: 6 namespaces (before any secret can be made)
+    Note over Up,K: 5 namespaces (before any secret can be made)
     Up->>K: kubectl apply manifests/namespaces.yaml
 
-    Note over Up,K: 7 cluster CA
-    Up->>K: kubectl get secret cert-issuer-ca (done already? skip)
-    Up->>Adm: polar-admin-grant bootstrap-ca
-    Adm->>K: straight to the API with your kubeconfig, not through Cassini (there is no broker yet):<br/>Secret cert-issuer-ca (the CA key and certificate), ConfigMap polar-ca (the certificate)<br/>created once and never overwritten: a second run fails with 409
+    Note over Up,K: 6 cluster CA
+    Up->>Adm: polar-admin-grant bootstrap-ca (skipped if Secret cert-issuer-ca exists)
+    Adm->>K: straight to the API with your kubeconfig, there is no broker yet:<br/>Secret cert-issuer-ca (key and certificate), ConfigMap polar-ca (certificate)<br/>created once and never overwritten
 
-    Note over Up,K: 8 secrets (then, today, every manifest in apply order)
+    Note over Up,K: 7 secrets (which Flux does not own and never prunes)
     Up->>Sec: secrets.nu TARGET_DIR REPO_ROOT
-    Sec->>Sec: sops decrypt secrets.sops.yaml and user.sops.yaml (rage with your SSH key)
+    Sec->>Sec: sops decrypt secrets.sops.yaml and user.sops.yaml (rage, your SSH key)
     Sec->>K: upsert neo4j-secret, polar-graph-pw, cassini-shutdown-token, jira-secret,<br/>oci-registry-auth, keycloak-admin-secret, keycloak-db-secret
-    Note over Up,K: In gitops mode the apply loop that follows today is replaced by Flux
 
-    Note over Up,K: 9 install Flux (new)
-    Up->>K: Secret flux-system/deploy-repo-auth (tls.crt, tls.key, ca.crt for the "flux" identity)
+    Note over Up,DGit: 8 the deployment git server
+    Up->>Dep: deploy-repo.nu ensure T
+    Dep->>Dep: first time only: ~/.config/polar-deploy/T/ gets a CA, a server certificate<br/>(the cluster-local name Flux will use, and localhost), and client certificates for<br/>"pipeline" (writes) and "flux" (reads), made with openssl. Not Polar's CA.
+    Dep->>DGit: run the polar-git-server image by digest with --restart=always, --tmpfs /tmp,<br/>repository deploy-T, writers [pipeline], readers [flux]
+    Dep->>DGit: check it answers over mTLS as "pipeline"
+
+    Note over Up,DGit: 9 publish
+    Up->>Dep: deploy-repo.nu publish T
+    Dep->>Dep: refuse a target that is not rendered, an image not pinned by digest,<br/>a dirty tree (unless --allow-dirty)
+    Dep->>Dep: build the tree: layers/ (every layer but flux, with a config-hash fingerprint<br/>in the pod template of each workload that reads a ConfigMap), flux/ (GitRepository and<br/>a Kustomization per layer), provenance.json, a README
+    Dep->>Dep: sign with git x509 (gpgsm, a GnuPG home beside the PKI, no prompt), verify the commit
+    Dep->>DGit: push over mTLS as "pipeline", ACL by certificate identity, push-log.jsonl
+    Dep-->>Up: the deployment repo at COMMIT (nothing committed if the render is unchanged)
+
+    Note over Up,K: 10 install Flux
     Up->>Fx: flux.nu install T
-    Fx->>K: apply the Flux controllers (images from the registry), wait for the CRDs
-    Fx->>K: apply GitRepository (the deployment repo) and the layer Kustomizations,<br/>read from the commit just published
-    Fx-->>Up: Flux is running and has the repo's address
+    Fx->>DGit: clone as "flux" and git verify-commit against the deployment CA,<br/>a head that is not signed stops everything here, before the cluster is touched
+    Fx->>K: apply the Flux controllers, wait for the CRDs and Deployments
+    Fx->>K: Service polar-deploy-git and an EndpointSlice to the host,<br/>Secret deploy-repo-auth (the "flux" certificate, key and the deployment CA)
+    Fx->>K: apply the GitRepository and wait until it has fetched the repository
+    Fx->>K: apply the Kustomizations (from the verified clone)
+    Fx-->>Up: Flux is running and has the repository
+
+    Note over Up,K: 11 wait for Flux: phase2-flux.png
+    Up->>Fx: flux.nu wait T

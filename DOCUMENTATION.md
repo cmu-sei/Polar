@@ -127,13 +127,13 @@ Git pre-commit hooks for static analysis.
 
 ### `infra/` - Deployment Pipeline
 
-Layered Dhall charts rendered to Kubernetes manifests and applied in dependency order by `nu infra/render.nu <target> --apply`.
+Layered Dhall charts and a configuration catalog, rendered to Kubernetes manifests by `nu infra/render.nu <target>` and applied by `nu infra/up.nu <target>` (or, for a target that deploys with Flux, committed signed to a deployment git server and reconciled by Flux).
 
 - `layers/` - Charts grouped by layer (for example `2-services/` holds cert-issuer, cassini, neo4j and the agents)
 - `targets/<name>/` - Deployment profiles (`local-minimal`, ...): `target.nu` lists what a target deploys, `overrides.dhall` holds per-deployment values, `secrets.sops.yaml` holds encrypted cluster secrets
 - `schema/` - Shared Dhall types and constants (namespaces, hostnames, certificate paths)
 
-See `README.md` for the full deployment walkthrough.
+See `README.md` for the full deployment walkthrough, `infra/INFRA.md` for how the pipeline works and how to add to it, and `docs/architecture/cluster-bootstrap.md` for the Flux bootstrap.
 
 ### `docs/` - Documentation
 
@@ -142,23 +142,27 @@ Comprehensive documentation including architecture and operational guides.
 #### `docs/architecture/` - Architecture Documentation
 
 - `Polar.md` - Main architecture documentation
-- `attestation_and_issuance.md` - Secure attestation protocol
 - `cassini_testing.md` - Testing documentation for Cassini
+- `cluster-bootstrap.md` - How a cluster goes from nothing to running with Flux: every script, every artifact, what was found by running it
+- `config-catalog-design.md` - The configuration catalog (how an agent is a short entry of data)
+- `credentials-policy.md` - The credentials agent's policy, and seeding a cluster with it
+- `git-server.md` - The git server for signed configuration, and the deployment git server's role
+- `signed-configuration.md` - Signed runtime configuration
 - `git/` - Git-specific architecture docs
 - `identity-and-bootstrap-update.md` - Workload identity, cert-issuer, accounts, claims and admin bootstrap
 - `kubernetes/` - Kubernetes architecture docs
 - `polar-logical-architecture.md` - Logical architecture model
-- `secrets-management.md` - Secrets management documentation
-- `sequences/` - Sequence diagrams
+- `sequences/` - Sequence diagrams (`bootstrap/` draws the cluster bootstrap; `assets/asset_regeneration.md` says how to redraw them)
 
-#### `docs/devops.md` - DevOps Guide
+#### `docs/operations/` - Operations Guides
 
-Documentation for the CI/CD pipeline using Nix and GitLab CI.
+- `git-private-repository.md` - Bring a cluster up and have it observe a private repository, step by step
+- `gitea-add-user.md` - Add a user to the Gitea that hosts the repository
 
 ### `scripts/` - Utility Scripts
 
-- `dev_stack.sh` - Starts local development stack
-- `render-manifests.sh` - Renders Kubernetes manifests from Dhall
+- `pipeline/` - The static analysis, SBOM and provenance pipeline
+- `polar-init.nu` - The init script behind the `polar-init` image
 - `setup-neo4j.sh` - Neo4j setup script
 - `loaders/` - Data loader scripts
 
@@ -314,19 +318,21 @@ In a cluster, the `TLS_*` variables point at files that `polar-init` writes from
 Layered Dhall charts rendered to Kubernetes manifests by `nu infra/render.nu <target>` and brought up, in dependency order and with the CA, secrets and admin flow, by `nu infra/up.nu <target>`.
 
 ```bash
-kubectl apply -f manifests/namespaces.yaml
-(cd src/agents && cargo run -p polar-admin-grant -- bootstrap-ca)
-nu infra/render.nu local-minimal --apply
+nu infra/up.nu local-minimal --dev --user <name> --email <email>
 ```
 
-`bootstrap-ca` creates the cluster's CA once and needs a Kubernetes admin credential. After the pods are running, `just port-forwards-up` exposes the services locally, and the admin flow (`just admin-bootstrap`, `admin-provision`, `admin-claim`, `user-cert-install`) issues a personal certificate for Neo4j Browser and the admin tools. `README.md` has the full walkthrough.
+`up.nu` renders the target and then does everything in order: the namespaces, the cluster CA (`polar-admin-grant bootstrap-ca`, once, which needs a Kubernetes admin credential), the secrets, the manifests, the wait for the core pods, the port-forwards and the admin flow. It is resumable: run the same command again after a failure. When the pods are running, `just port-forwards-up` exposes the services locally, and the admin flow (`just admin-bootstrap`, `admin-provision`, `admin-claim`, `user-cert-install`) issues a personal certificate for Neo4j Browser and the admin tools. `README.md` has the full walkthrough.
 
 ### GitOps Workflow
 
-- Manifests are version-controlled and immutable
-- Flux watches the Git repository for changes
-- Automated continuous deployment
-- Rollback capability to previous known-good versions
+For a target that deploys with Flux (`sandbox-local`):
+
+- The rendered manifests are committed, signed with the pipeline's certificate, to a git server of the deployment's own. It runs on the host, outside the cluster, with a PKI of its own, so what a cluster is made from can be reasoned about from before the cluster exists. `provenance.json` in each commit records where it came from (the source commit, the digest of every file, the image lock, and what the cluster supplied).
+- Images are named by digest, so Flux sees a rebuilt one. `flux.nu install` refuses a head that is not signed.
+- Flux watches that repository and applies it layer by layer, each after the one before is healthy; `up.nu` does what has to exist before Flux (the CA, the secrets) and what needs running workloads after it (the admin flow, the seed).
+- Rolling back is a `git revert` of the deployment repository. It rolls back manifests only, not data, secrets or certificates.
+
+The design, every script and every artifact are in `docs/architecture/cluster-bootstrap.md`.
 
 ### Agent Deployment Requirements
 
