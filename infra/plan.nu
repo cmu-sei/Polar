@@ -51,7 +51,7 @@ export def build_plan [config: record, dev: bool] {
 
     [
         { id: "preflight", title: "preflight", on: true, why: "" }
-        { id: "agent-images", title: "agent images", on: $dev, why: "pass --dev to build the agents' images; without it the render asks the ones already in the local registry" }
+        { id: "agent-images", title: "agent images", on: $dev, why: "pass --dev to build the agents' images; without it the render asks the ones already in the registry, on the cluster" }
         { id: "render", title: "render", on: true, why: "" }
         { id: "images", title: "images", on: $dev, why: "pass --dev to build and load images into the local registry" }
         { id: "namespaces", title: "namespaces", on: ("namespaces.yaml" in $order), why: "target has no namespaces.yaml in its apply order" }
@@ -83,6 +83,16 @@ export def build_plan [config: record, dev: bool] {
             why: (if not $has_neo4j { "target does not deploy neo4j" } else { "no credentials-agent, so no user certificate to import" })
         }
     ]
+}
+
+# The steps that start a container on this machine: building the images (`--dev`) starts the registry with `just
+# registry-up`, and a gitops target's deployment git server runs here. No other step needs a container runtime: the agents
+# are asked about themselves on the cluster.
+export const RUNTIME_STEPS = ["agent-images" "images" "deploy-host"]
+
+# Whether the enabled steps of `plan` need a container runtime on this machine.
+export def needs_runtime [plan: list] {
+    $plan | where on | any {|s| $s.id in $RUNTIME_STEPS }
 }
 
 # Port-forwards needed by the admin and browser steps, and only those.

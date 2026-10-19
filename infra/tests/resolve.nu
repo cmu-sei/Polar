@@ -105,6 +105,17 @@ def init_env_value [r: record, name: string] {
 }
 
 def main [] {
+    # The agents' scaffolds, asked of their images on the cluster once for the whole run (it needs KUBECONFIG and the images in
+    # the registry): every resolve below reads them. `local` runs the whole catalog, so its workloads cover every target's.
+    let scaffolds = (mktemp --directory)
+    let collected = (do { ^nu $RESOLVER collect-scaffolds $scaffolds --target local } | complete)
+    if $collected.exit_code != 0 {
+        rm -rf $scaffolds
+        print -e $"cannot run: the agents could not be asked for their scaffolds \(this needs a cluster, KUBECONFIG, and their images in the registry\):\n($collected.stderr | lines | last 8 | str join "\n")"
+        exit 1
+    }
+    $env.POLAR_SCAFFOLD_DIR = $scaffolds
+
     let tests = {
         "every workload's budget is in what the agent is given, as the code declared": {
             for w in ($BUDGETS | transpose name secs) {
@@ -297,22 +308,6 @@ def main [] {
         "the consumer is told where cert-issuer is, from the catalog's facts": {
             let r = (resolve "credentials-agent")
             assert equal (env_value $r "CREDENTIALS_AGENT_CERT_ISSUER_URL") $r.cert_issuer_url
-        }
-
-        "what the built image says about itself is what the source tree says": {
-            # The scaffold taken from the image in the local registry, the artifact that deploys,
-            # must give the record the source tree gives. Skipped, and said so, where there is no
-            # podman or the image has not been pushed.
-            let have = ((which podman | is-not-empty) or (which docker | is-not-empty)) and (try { (^curl -sf $"(($env.POLAR_REGISTRY? | default 'localhost:5000'))/v2/kube-consumer/tags/list" | from json | get tags | is-not-empty) } catch { false })
-            if not $have {
-                print "        (skipped: no podman or docker, or kube-consumer is not in the local registry)"
-            } else {
-                for n in ["kube-consumer" "credentials-agent"] {
-                    let from_source = (^nu $RESOLVER json $n | from json)
-                    let from_image = (with-env { POLAR_AGENT_SOURCE: "images" } { ^nu $RESOLVER json $n | from json })
-                    assert equal $from_image $from_source $n
-                }
-            }
         }
 
         "the broker is a service, not a client: it needs nothing and is not given a Cassini client": {
@@ -592,6 +587,7 @@ def main [] {
             { name: $t.name, error: $e.msg }
         }
     })
+    rm -rf $scaffolds
 
     for r in $results {
         if $r.error == null {

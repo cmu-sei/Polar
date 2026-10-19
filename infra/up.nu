@@ -38,10 +38,12 @@
 # human is required (closing the browser, the Neo4j password).
 #
 # Steps (each enabled only when the target needs it):
-#   preflight   cluster reachable, a container runtime (podman or docker) is installed, run from the repo root   always
+#   preflight   cluster reachable, namespaces can be made, run from the repo root; a container runtime   always
+#               (podman or docker) only when a step below starts a container here (--dev, or a gitops target)
 #   agent-images build and push the images of the agents that describe          --dev
 #               themselves, before the render asks them (--scaffold, --check)
-#   render      nu infra/render.nu <target>                               always
+#   render      ask the agents' images for their scaffolds on the cluster,    always
+#               then nu infra/render.nu <target>
 #   images      build and push only what the rendered manifests reference --dev
 #   namespaces  kubectl apply namespaces.yaml                             namespaces.yaml in apply_order
 #   ca          polar-admin-grant bootstrap-ca                            cert-issuer deployed and cert_issuer_ca_configmap set
@@ -66,7 +68,8 @@ use seed.nu
 use cluster-inputs.nu
 use tools.nu
 use runtime.nu [container_runtime]
-use plan.nu [build_forwards, build_plan, deployed_charts]
+use plan.nu [build_forwards, build_plan, deployed_charts, needs_runtime]
+use agent-pods.nu [delete_stale_namespaces]
 use apply.nu [any_pod_ready, changed_configmaps, config_users, gate_after, job_verdict, jobs_in, stale_images, workload_needs_restart]
 
 def note [msg: string] { print $"  -- ($msg)" }
@@ -282,7 +285,7 @@ def build_waits [config: record] {
     $w
 }
 
-def step_preflight [config: record] {
+def step_preflight [config: record, runtime_needed: bool] {
     if not ("infra/render.nu" | path exists) {
         fail "run this from the repo root (infra/render.nu not found)"
     }
@@ -294,8 +297,19 @@ def step_preflight [config: record] {
         fail $"cluster not reachable: ($nodes.stderr | str trim)"
     }
     ok $"cluster reachable, ($nodes.stdout | lines | length) node\(s\)"
-    let rt = (try { container_runtime } catch {|e| fail $e.msg })
-    ok $"container runtime: ($rt)"
+    if $runtime_needed {
+        let rt = (try { container_runtime } catch {|e| fail $e.msg })
+        ok $"container runtime: ($rt)"
+    } else {
+        ok "no container runtime needed: the agents are asked about themselves on the cluster"
+    }
+    # The render asks each agent's image for its scaffold in a scratch namespace of its own, deleted afterwards.
+    let can = (do { ^kubectl auth can-i create namespaces } | complete)
+    if ($can.stdout | str trim) != "yes" {
+        fail "this account cannot create namespaces, which the render needs: it asks the agents for their scaffolds in a scratch namespace, deleted afterwards"
+    }
+    let stale = (delete_stale_namespaces)
+    if ($stale | is-not-empty) { note $"deleted scratch namespace\(s\) an interrupted run left behind: ($stale | str join ', ')" }
 
     # The secrets step needs the SOPS files to decrypt unless the secrets are already there. Found out here, in
     # seconds, and not after the images are built: a shell without the dev shell's SOPS variables was told so
@@ -341,12 +355,22 @@ def discard_other_clusters_inputs [target: string] {
     }
 }
 
+# The render reads the agents' scaffolds from a directory, asked of their images on the cluster just before (the ones cached
+# under their image's digest are not asked again), so render.nu itself never touches a cluster.
 def step_render [target: string] {
     discard_other_clusters_inputs $target
-    with-env { POLAR_AGENT_SOURCE: "images" } {
+    let scaffolds = (mktemp --directory)
+    ^$nu.current-exe infra/resolve.nu collect-scaffolds $scaffolds --target $target
+    if $env.LAST_EXIT_CODE != 0 {
+        rm -rf $scaffolds
+        fail "the agents could not be asked for their scaffolds (above)"
+    }
+    with-env { POLAR_SCAFFOLD_DIR: $scaffolds } {
         ^$nu.current-exe infra/render.nu $target
     }
-    if $env.LAST_EXIT_CODE != 0 { fail "render failed" }
+    let code = $env.LAST_EXIT_CODE
+    rm -rf $scaffolds
+    if $code != 0 { fail "render failed" }
 }
 
 def step_images [config: record] {
@@ -672,7 +696,7 @@ def main [
         print ""
         print $"[($it.index + 1)/($total)] ($s.title)"
         match $s.id {
-            "preflight" => { step_preflight $config }
+            "preflight" => { step_preflight $config (needs_runtime $plan) }
             "agent-images" => { step_agent_images $target }
             "render" => { step_render $target }
             "images" => { step_images $config }

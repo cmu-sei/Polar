@@ -45,13 +45,11 @@
 
 use rules.nu *
 use document.nu *
-use runtime.nu [container_runtime, entrypoint_for, insecure_pull_flags]
 
 const INFRA = (path self | path dirname)
 
 use cluster-inputs.nu [env_for, env_merged, path_of, read_inputs]
-use cache.nu [cached_text, content_key]
-use digest.nu [registry_digest]
+use agent-pods.nu [collect_scaffolds, run_checks]
 const CONFIG = ($INFRA | path join "config")
 
 const DEFAULT_TARGET = "local-minimal"
@@ -161,122 +159,55 @@ const DOCUMENT_DIR = "/etc/polar"
 const DOCUMENT_FILE = "config.json"
 const DOCUMENT_VOLUME = "polar-config"
 
-# Where the resolver gets an agent's own answers (`--scaffold`, `--check`):
-#   cargo   `cargo run -p <package>`: the source tree, for work on a developer's machine
-#   images  the built image in the registry this machine pushes to (POLAR_REGISTRY, default
-#           localhost:5000): the exact artifact that deploys. `up.nu` uses this.
-def agent_source [] { $env.POLAR_AGENT_SOURCE? | default "cargo" }
-
-def push_registry [] { $env.POLAR_REGISTRY? | default "localhost:5000" }
-
-# A local registry speaks plain HTTP.
-def registry_flags [] {
-    let r = (push_registry)
-    if ($r | str starts-with "localhost") or ($r | str starts-with "127.") { ["--tls-verify=false"] } else { [] }
-}
-
-# The image as this machine pulls it from the registry it pushed to (the cluster's name for it is
-# different: see `image_ref`).
-def pushed_image_ref [images: list, name: string, who: string] {
-    let hit = ($images | where image == $name)
-    if ($hit | is-empty) {
-        error make { msg: $"($who): image '($name)' has no row in infra/images.nuon" }
-    }
-    let i = ($hit | first)
-    $"(push_registry)/($i.image):($i.tag)"
-}
-
-# Runs the agent in its image, with no network, asking it `args`. `extra` is more `podman run`
-# options (a mounted file, environment). Returns the completed process.
-def run_in_image [ref: string, args: list<string>, extra: list<string> = []] {
-    # A pull of a tag that has moved leaves the image it replaced behind, untagged, and every
-    # `up.nu --dev` moves them all. Remember which it was, and remove it once the new one is here.
-    let rt = (container_runtime)
-    let before = (^$rt image inspect --format '{{.Id}}' $ref | complete | get stdout | str trim)
-    let pulled = (^$rt pull -q ...(insecure_pull_flags $rt (registry_flags)) $ref | complete)
-    if $pulled.exit_code != 0 {
-        error make { msg: $"cannot pull ($ref): ($pulled.stderr | str trim). Build and push it first: nu infra/images.nu push <image>" }
-    }
-    let after = (^$rt image inspect --format '{{.Id}}' $ref | str trim)
-    if ($before | is-not-empty) and $before != $after {
-        # Fails, harmlessly, if something still uses it.
-        ^$rt rmi $before | complete | ignore
-    }
-    let config = (^$rt image inspect --format '{{json .Config}}' $ref | from json)
-    let e = (entrypoint_for $rt (image_command $config))
-    ^$rt run --rm --network none --entrypoint $e.entrypoint ...$extra $ref ...$e.leading ...$args | complete
-}
-
-# The scaffold the agent prints about itself (`<agent> --scaffold`): from the binary, never from a
-# copy. `POLAR_SCAFFOLD_DIR` names a directory of `<workload>.json` files to read instead, for a
-# check that must not build anything.
+# The scaffold the agent prints about itself (`<agent> --scaffold`): from the binary, never from a copy. The resolver
+# reads it from `POLAR_SCAFFOLD_DIR`, a directory of `<workload>.json` files, and asks nothing itself, so it stays a pure
+# function. The directory is filled by asking each agent's image on the cluster (`collect-scaffolds`, which up.nu runs
+# before it renders; infra/agent-pods.nu), or holds stubs, for a test that must not ask the agents.
 def scaffold_of [name: string, spec: record] {
     let dir = ($env.POLAR_SCAFFOLD_DIR? | default "")
-    if ($dir | is-not-empty) {
-        let file = ($dir | path join $"($name).json")
-        if not ($file | path exists) {
-            error make { msg: $"($name): no scaffold at ($file)" }
-        }
-        return (open $file)
+    if ($dir | is-empty) {
+        error make { msg: $"($name): POLAR_SCAFFOLD_DIR is not set. The agents' scaffolds come from their images on the cluster: nu infra/resolve.nu collect-scaffolds <dir> --target <target>, then set POLAR_SCAFFOLD_DIR=<dir>" }
     }
-    if (agent_source) == "images" {
-        let ref = (pushed_image_ref (open ($INFRA | path join "images.nuon")) $spec.image $name)
-        # Starting the agent's container to read its scaffold takes about 0.4 s, and a render asks for it a few dozen times. What an
-        # image prints for --scaffold is a function of the image, so it is kept under the digest the registry serves for it: a
-        # rebuilt image is another key. With no digest to key on (no registry answer) nothing is kept.
-        let digest = (registry_digest $ref)
-        let compute = {||
-            let ran = (try { run_in_image $ref ["--scaffold"] } catch {|e| error make { msg: $"($name): ($e.msg)" } })
-            if $ran.exit_code != 0 {
-                error make { msg: $"($name): `($ref) --scaffold` failed: ($ran.stderr | lines | last 5 | str join ' | ')" }
-            }
-            $ran.stdout
-        }
-        let text = if $digest == null { do $compute } else { cached_text "scaffold" (content_key ["scaffold" $ref $digest]) $compute }
-        return ($text | from json)
+    let file = ($dir | path join $"($name).json")
+    if not ($file | path exists) {
+        error make { msg: $"($name): no scaffold at ($file)" }
     }
-    let package = ($spec.scaffold_package? | default $spec.image)
-    let ran = (do { cd ($INFRA | path join "../src/agents"); ^cargo run -q -p $package -- --scaffold } | complete)
-    if $ran.exit_code != 0 {
-        error make { msg: $"($name): `cargo run -p ($package) -- --scaffold` failed: ($ran.stderr | lines | last 5 | str join ' | ')" }
-    }
-    $ran.stdout | from json
+    open $file
 }
 
-# The agent's own judgement of the document it will be given: `<agent> --check --config FILE`, the
-# function it runs when it starts. Skipped when scaffolds come from a directory, since then there is
-# no binary to ask. The secrets the document refers to are given dummy values: only that they are
-# set matters here.
+# The scaffold directory a command reads, collecting one for `target` when none is set. Returns { dir, made }, where
+# `made` says the caller should remove it when done.
+def scaffold_dir_for [target: string] {
+    let set = ($env.POLAR_SCAFFOLD_DIR? | default "")
+    if ($set | is-not-empty) { return { dir: $set, made: false } }
+    let dir = (mktemp --directory)
+    collect_into $dir $target
+    { dir: $dir, made: true }
+}
+
+# Asks the image of every catalog workload of `target` for its scaffold, on the cluster, and writes `<workload>.json` to `dir`.
+def collect_into [dir: string, target: string] {
+    let workloads = (all_workloads $target | where {|w| ($w.config? | default "env") == "document" } | select name image)
+    collect_scaffolds $workloads $dir (load_cluster $target).registry (open ($INFRA | path join "images.nuon"))
+}
+
 # What the agent check needs to name: the image it pulls (a row of images.nuon) and the crate it builds with
 # cargo (`-p`). They are one name unless the crate is not named for its image (`scaffold_package`).
 def check_names [spec: record] {
     { image: $spec.image, package: ($spec.scaffold_package? | default $spec.image) }
 }
 
-def agent_check [name: string, r: record] {
-    let dir = ($env.POLAR_SCAFFOLD_DIR? | default "")
-    if ($dir | is-not-empty) { return [] }
-    let file = (mktemp --suffix ".json")
-    $r.config_map.content | save --force $file
-    let secrets = ($r.env | where secret != null | get name | reduce --fold {} {|n, acc| $acc | insert $n "x" })
-    let ran = if (agent_source) == "images" {
-        chmod 644 $file
-        let ref = (pushed_image_ref (open ($INFRA | path join "images.nuon")) $r.check_names.image $name)
-        let env_flags = ($secrets | columns | each {|n| ["-e" $"($n)=x"] } | flatten)
-        try {
-            run_in_image $ref ["--check" "--config" "/polar-config.json"] (["-v" $"($file):/polar-config.json:ro,Z"] ++ $env_flags)
-        } catch {|e| { exit_code: 1, stderr: $"ERROR: ($e.msg)" } }
-    } else {
-        let package = $r.check_names.package
-        do {
-            cd ($INFRA | path join "../src/agents")
-            with-env $secrets { ^cargo run -q -p $package -- --check --config $file }
-        } | complete
-    }
-    rm -f $file
-    if $ran.exit_code == 0 { [] } else {
-        $ran.stderr | lines | where {|l| $l | str starts-with "ERROR:" } | each {|l| $"($name): ($l | str replace 'ERROR: ' '')" }
-    }
+# The agents' own judgement of the documents they will be given: `<agent> --check --config FILE`, the function each runs
+# when it starts, asked of each workload's image on the cluster, all in one scratch namespace. The secrets a document refers
+# to are given dummy values: only that they are set matters here. Takes the resolved records; returns the problems.
+def agent_checks [target: string, resolved: list] {
+    let checks = ($resolved | each {|x| {
+        workload: $x.name
+        image: $x.r.check_names.image
+        document: $x.r.config_map.content
+        secrets: ($x.r.env | where secret != null | get name)
+    } })
+    run_checks $checks (load_cluster $target).registry (open ($INFRA | path join "images.nuon"))
 }
 
 # ── Resolution ───────────────────────────────────────────────────────────────
@@ -596,7 +527,8 @@ def check_capabilities [] {
     } | flatten
 }
 
-# Everything that can be wrong with the configuration, found without a cluster.
+# Everything that can be wrong with the configuration. The agents judge their own documents on the cluster (`agent_checks`);
+# everything else is found without one.
 def check_all [target: string] {
     let names = (all_workloads $target | get name)
     mut problems: list<any> = []
@@ -617,16 +549,20 @@ def check_all [target: string] {
                 bootstrap: $r.bootstrap
                 identity: $"($r.service_account).($r.namespace)"
                 # The agent's configuration is judged by filling its own scaffold and then by the agent
-                # itself; its pod environment is a pointer, not the variables.
-                rules: ($r.config_problems ++ (agent_check $n $r) ++ (shutdown_problems $n $r._settings.shutdown))
+                # itself (below, all at once); its pod environment is a pointer, not the variables.
+                rules: ($r.config_problems ++ (shutdown_problems $n $r._settings.shutdown))
                 error: null
+                resolved: $r
             }
         } catch {|e|
-            { who: $n, issuer: null, bootstrap: null, identity: null, rules: [], error: $e.msg }
+            { who: $n, issuer: null, bootstrap: null, identity: null, rules: [], error: $e.msg, resolved: null }
         }
     })
     for r in ($results | where error != null) { $problems = ($problems | append $r.error) }
     for r in $results { for p in $r.rules { $problems = ($problems | append $p) } }
+    let judged = ($results | where error == null | each {|x| { name: $x.who, r: $x.resolved } })
+    let verdicts = (try { agent_checks $target $judged } catch {|e| [$"the agents could not judge their documents: ($e.msg)"] })
+    for p in $verdicts { $problems = ($problems | append $p) }
     let sas = ($results | where error == null)
 
     # A workload's ServiceAccount becomes the SAN of its certificate, so two
@@ -792,18 +728,28 @@ def "main names" [--target: string = $DEFAULT_TARGET] {
 # Writes the scaffold of every agent in the catalog to `dir`, one `<agent>.json` each: what `polar-sign template`
 # and `polar-sign sign` read to know what each agent takes (its runtime sections, the settings a signed document
 # may change, their defaults and which fields are secret). An author keeps them in `scaffolds/` next to their
-# certificate (`~/.config/polar-admin/scaffolds`). The scaffold comes from the agent itself (the source with
-# cargo, the built image with POLAR_AGENT_SOURCE=images), never from a copy.
+# certificate (`~/.config/polar-admin/scaffolds`). The scaffold comes from the agent itself, its image asked on the
+# cluster (or POLAR_SCAFFOLD_DIR when it is set), never from a copy.
 def "main scaffolds" [dir: string, --target: string = $DEFAULT_TARGET] {
+    let from = (scaffold_dir_for $target)
     mkdir $dir
     let agents = (all_workloads $target | where kind == "agent")
     for w in $agents {
-        let scaffold = (scaffold_of $w.name $w)
+        let scaffold = (with-env { POLAR_SCAFFOLD_DIR: $from.dir } { scaffold_of $w.name $w })
         let name = ($scaffold | get agent.name)
         $scaffold | to json | save --force ($dir | path join $"($name).json")
         print $"  ($name)"
     }
+    if $from.made { rm -rf $from.dir }
     print $"wrote (($agents | length)) scaffold\(s\) to ($dir)"
+}
+
+# Asks the image of every catalog workload of `target` for its scaffold, on the cluster (KUBECONFIG), and writes
+# `<workload>.json` to `dir`: what the resolver reads with POLAR_SCAFFOLD_DIR=<dir>. Each image is run once, all together,
+# in a scratch namespace that is deleted afterwards; one whose scaffold is cached under its digest is not run.
+def "main collect-scaffolds" [dir: string, --target: string = $DEFAULT_TARGET] {
+    let ran = (collect_into $dir $target)
+    print $"collected the scaffolds of ((all_workloads $target | where {|w| ($w.config? | default 'env') == 'document' } | length)) workload\(s\) in ($dir) \(($ran) image\(s\) asked on the cluster, the rest cached\)"
 }
 
 # Show what a workload resolves to and where each value came from.
@@ -909,7 +855,9 @@ def "main resources" [
 
 # Validate every workload in the catalog.
 def "main check" [--target: string = $DEFAULT_TARGET] {
-    let found = (check_all $target)
+    let from = (scaffold_dir_for $target)
+    let found = (with-env { POLAR_SCAFFOLD_DIR: $from.dir } { check_all $target })
+    if $from.made { rm -rf $from.dir }
     let problems = $found.problems
     if ($found.pending | is-not-empty) {
         print $"pending: ($found.pending | length) workload\(s\) still ask cert-issuer directly and are not bootstrap identities; the floor cannot be enforced until they move"

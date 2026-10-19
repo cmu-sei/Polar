@@ -35,16 +35,17 @@
 # question (it must not change what is rendered); `POLAR_CACHE_DIR=... nu infra/tests/render-determinism.nu --with-cache`
 # also renders with a cold and then a warm cache and compares those.
 #
-# It runs the real render, so it needs what `up.nu` needs to render: the agents' images in the registry
-# (POLAR_AGENT_SOURCE=images, the default here) or a Rust toolchain (POLAR_AGENT_SOURCE=cargo), and a container
-# runtime. It takes a few minutes. It replaces the target's output directory (`manifests/`), as any render does.
+# It runs the real render, so it needs what `up.nu` needs to render: the agents' images in the registry and a cluster
+# to ask them on (KUBECONFIG). Their scaffolds are collected once, before the first render, and every render reads that
+# directory, so the render without KUBECONFIG reads the same answers. It takes a few minutes. It replaces the target's
+# output directory (`manifests/`), as any render does.
 #
 #   nu infra/tests/render-determinism.nu [target] [--with-cache]
 
 use ../layers.nu [split_into]
 
 def render [target: string, name: string, env_vars: record, hide: list<string>, work: string, cache: bool] {
-    let base = { POLAR_AGENT_SOURCE: ($env.POLAR_AGENT_SOURCE? | default "images") }
+    let base = { POLAR_SCAFFOLD_DIR: ($work | path join "scaffolds") }
     let vars = (if $cache { $base } else { $base | merge { POLAR_CACHE: "off" } })
     let ran = (with-env ($vars | merge $env_vars) {
         for v in $hide { hide-env --ignore-errors $v }
@@ -72,6 +73,11 @@ def main [
     cd $root
     let work = (^mktemp -d | str trim)
     mut problems = []
+
+    let collected = (do { ^nu infra/resolve.nu collect-scaffolds ($work | path join "scaffolds") --target $target } | complete)
+    if $collected.exit_code != 0 {
+        error make --unspanned { msg: $"the agents could not be asked for their scaffolds \(this needs a cluster, KUBECONFIG, and their images in the registry\):\n($collected.stderr | lines | last 8 | str join "\n")" }
+    }
 
     let first = (render $target "first" {} [] $work false)
     let again = (render $target "again" {} [] $work false)

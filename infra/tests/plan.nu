@@ -28,7 +28,7 @@
 #   nu infra/tests/up.nu
 
 use std/assert
-use ../plan.nu [build_forwards, build_plan, deployed_charts]
+use ../plan.nu [build_forwards, build_plan, deployed_charts, needs_runtime]
 
 def config [charts: list, order: list] {
     { charts: ($charts | each {|c| $"/layers/x/($c)/main.nu" }), apply_order: $order, cert_issuer_ca_configmap: "polar-ca" }
@@ -48,6 +48,15 @@ def main [] {
                 assert ("credentials-agent" in $d)
                 assert ("polar-git-server" in $d)
                 assert ("cert-issuer" in $d)
+            }
+        }
+        {
+            name: "a container runtime is needed here only to build images (--dev) or to run a gitops target's deployment git server"
+            body: {
+                let c = (config ["cert-issuer" "neo4j"] ["namespaces.yaml" "credentials-agent.yaml" "polar-git-server.yaml"])
+                assert (not (needs_runtime (build_plan $c false))) "applying prebuilt images asks the agents on the cluster"
+                assert (needs_runtime (build_plan $c true)) "--dev starts the registry"
+                assert (needs_runtime (build_plan ($c | insert gitops true) false)) "the deployment git server runs here"
             }
         }
         {
