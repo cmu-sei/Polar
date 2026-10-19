@@ -27,15 +27,24 @@
 # container on the host, outside the cluster, with a PKI of its own (not Polar's CA), so that what a cluster is
 # made from can be reasoned about from before the cluster exists. Design: docs/architecture/cluster-bootstrap.md.
 #
-#   nu infra/deploy-repo.nu ensure <target> [--port N] [--image REF]
+#   nu infra/deploy-repo.nu ensure  <target> [--port N] [--image REF]
+#   nu infra/deploy-repo.nu publish <target> [--port N] [--allow-dirty]
 #
 # `ensure` makes the PKI under ~/.config/polar-deploy/<target>/ if it is not there, and starts the server. It can be
 # run again: nothing is made twice, and the container is replaced only when what it should be has changed.
+#
+# `publish` commits the target's rendered layers, the Flux objects that reconcile them (infra/deploy-objects.nu) and a
+# provenance record to the deployment repository, signed with the pipeline's certificate. Nothing in it needs a
+# cluster: it runs before one exists, and the signature chains to the deployment CA, never to Polar's. The signing
+# uses git's x509 support (gpgsm) in a GnuPG home of its own beside the PKI, and never touches the user's ~/.gnupg or
+# asks for a passphrase.
 #
 # Identities (the DNS name in a client certificate): `pipeline` writes the repository, `flux` reads it.
 
 use runtime.nu [container_runtime, insecure_pull_flags]
 use retry.nu [with_retries]
+use layers.nu [layer_problems]
+use deploy-objects.nu [BOOTSTRAP_LAYERS, documents, git_repository, has_job, kustomization, provenance, published_layers, readme, unpinned_images, yaml_docs]
 
 export const DEFAULT_PORT = 9443
 # The name Flux is given. It is a Service in the cluster whose Endpoints are the host, so it needs no host resolution.
@@ -209,6 +218,200 @@ def "main ensure" [
     print $"  ok: ($name) answers at https://localhost:($port)/ as ($WRITER)"
 }
 
+# ---- publish ---------------------------------------------------------------------------------------------------
+
+export def gnupg_dir [pki: string] { $pki | path join "gnupg" }
+
+# The program git runs in place of gpgsm: the same, but it reads the passphrase from a file instead of asking for it.
+# (The key is protected by the 700 directory it lives in; gpgsm insists on a passphrase all the same.)
+export def wrapper_text [pass_file: string] {
+    $"#!/usr/bin/env bash\nexec 3<'($pass_file)'\nexec gpgsm --pinentry-mode loopback --passphrase-fd 3 \"$@\"\n"
+}
+
+# The `git -c ...` arguments that sign a commit with the pipeline's certificate.
+export def signing_config [wrapper: string, fingerprint: string, target: string] {
+    [
+        "-c" "gpg.format=x509"
+        "-c" $"gpg.x509.program=($wrapper)"
+        "-c" $"user.signingkey=($fingerprint)"
+        "-c" $"user.name=($WRITER)"
+        "-c" $"user.email=($WRITER)@polar-deploy-($target)"
+    ]
+}
+
+# `git -c ...` arguments that present a deployment identity's certificate to the server, for one command.
+export def tls_config [pki: string, identity: string] {
+    [
+        "-c" $"http.sslCAInfo=($pki | path join 'ca.pem')"
+        "-c" $"http.sslCert=($pki | path join $"($identity).pem")"
+        "-c" $"http.sslKey=($pki | path join $"($identity).key")"
+    ]
+}
+
+# The SHA-1 fingerprint gpgsm names a certificate by.
+def fingerprint_of [pem: string] {
+    run_ok "reading a fingerprint" { ^openssl x509 -in $pem -noout -fingerprint -sha1 } | str trim | split row "=" | last | str replace --all ":" ""
+}
+
+def sha256_of [pem: string] {
+    run_ok "reading a fingerprint" { ^openssl x509 -in $pem -noout -fingerprint -sha256 } | str trim | split row "=" | last | str replace --all ":" "" | str downcase
+}
+
+# Makes the GnuPG home that signs: the pipeline's key and certificate, the deployment CA as the only trust. Returns
+# the signing key's fingerprint and the program for git.
+export def ensure_signing [pki: string] {
+    if (which gpgsm | is-empty) {
+        error make --unspanned { msg: "publish signs commits with the pipeline's certificate and needs gpgsm (GnuPG) on the PATH" }
+    }
+    let home = (gnupg_dir $pki)
+    mkdir $home
+    chmod 700 $home
+    "allow-loopback-pinentry\n" | save --force ($home | path join "gpg-agent.conf")
+    let pass = ($pki | path join "signing.pass")
+    if not ($pass | path exists) {
+        run_ok "making a passphrase" { ^openssl rand -hex 16 } | str trim | save --force $pass
+        chmod 600 $pass
+    }
+    let wrapper = ($pki | path join "gpgsm-loopback")
+    wrapper_text $pass | save --force $wrapper
+    chmod 700 $wrapper
+    let fp = (fingerprint_of ($pki | path join $"($WRITER).pem"))
+    with-env { GNUPGHOME: $home } {
+        # gpgsm exits 0 when nothing matches, so the answer is whether it listed anything.
+        let have = (do { ^gpgsm --batch --with-colons --list-secret-keys $fp } | complete)
+        if ($have.stdout | str trim | is-empty) {
+            let p12 = ($pki | path join "signing.p12")
+            run_ok "packaging the signing key" { ^openssl pkcs12 -export -inkey ($pki | path join $"($WRITER).key") -in ($pki | path join $"($WRITER).pem") -certfile ($pki | path join "ca.pem") -out $p12 -passout $"file:($pass)" }
+            let imported = (open --raw $pass | do { ^gpgsm --batch --pinentry-mode loopback --passphrase-fd 0 --import $p12 } | complete)
+            rm -f $p12
+            if $imported.exit_code != 0 { error make --unspanned { msg: $"importing the signing key failed: ($imported.stderr | str trim)" } }
+            let ca_fp = (fingerprint_of ($pki | path join "ca.pem"))
+            $"($ca_fp) S relax\n" | save --append ($home | path join "trustlist.txt")
+            run_ok "importing the CA" { ^gpgsm --batch --import ($pki | path join "ca.pem") } | ignore
+        }
+    }
+    { fingerprint: $fp, wrapper: $wrapper, home: $home }
+}
+
+def digest_of [file: string] { open --raw $file | hash sha256 }
+
+# Everything the published tree is made of, as files: path -> text. Pure given the facts.
+export def tree_files [target: string, layers: list, texts: record, port: int, facts: record] {
+    let published = (published_layers $layers)
+    let layer_files = ($published | each {|l|
+        $l.files | where {|f| $f in ($texts | columns) } | each {|f| { path: $"layers/($l.name)/($f)", text: ($texts | get $f) } }
+    } | flatten)
+    let flux = ($published | each {|l|
+        let docs = ($l.files | each {|f| if $f in ($texts | columns) { documents ($texts | get $f) } else { [] } } | flatten)
+        let forced = ($l.files | any {|f| ($f in ($texts | columns)) and (has_job ($texts | get $f)) })
+        kustomization $l $docs $forced
+    })
+    let source = (git_repository $target $CLUSTER_NAME $port)
+    let recorded = ($facts | insert layers ($published | each {|l|
+        { name: $l.name, depends_on: $l.depends_on, files: ($l.files | where {|f| $f in ($texts | columns) } | each {|f| { path: $f, sha256: ($texts | get $f | hash sha256) } }) }
+    }))
+    $layer_files ++ [
+        { path: "flux/gitrepository.yaml", text: (yaml_docs [$source]) }
+        { path: "flux/kustomizations.yaml", text: (yaml_docs $flux) }
+        { path: "provenance.json", text: ((provenance $recorded) + "\n") }
+        { path: "README.md", text: (readme $target) }
+    ]
+}
+
+def load_config [target: string] {
+    let file = ($env.PWD | path join $"infra/targets/($target)/target.nu")
+    if not ($file | path exists) { error make --unspanned { msg: $"no such target: ($target)" } }
+    ^$nu.current-exe $file | from nuon
+}
+
+def git_out [args: list<string>] {
+    run_ok $"git ($args | first)" { ^git ...$args } | str trim
+}
+
+def "main publish" [
+    target: string
+    --port: int = 9443          # the port the deployment git server listens on
+    --allow-dirty               # publish from a working tree with uncommitted changes (the provenance says so)
+] {
+    let config = (load_config $target)
+    if ($config.apply_layers? | default [] | is-empty) { error make --unspanned { msg: $"the target '($target)' declares no apply_layers" } }
+    let rendered = (glob ($config.output_dir | path join "*.yaml") | each {|f| $f | path basename } | sort)
+    let problems = (layer_problems $config.apply_layers $rendered)
+    if ($problems | is-not-empty) {
+        error make --unspanned { msg: $"the render does not match the target's layers (run: nu infra/render.nu ($target)): ($problems | first)" }
+    }
+
+    let published = (published_layers $config.apply_layers)
+    let texts = ($published | get files | flatten | uniq | reduce --fold {} {|f, acc| $acc | insert $f (open --raw ($config.output_dir | path join $f)) })
+
+    if ($config.pin_images? | default false) {
+        let loose = ($texts | items {|f, t| unpinned_images $t | each {|i| $"($f): ($i)" } } | flatten)
+        if ($loose | is-not-empty) {
+            error make --unspanned { msg: $"the render has images not pinned by digest, and this target pins them: ($loose | first 5 | str join '; ')" }
+        }
+    }
+
+    let dirty = (git_out [status --porcelain] | is-not-empty)
+    if $dirty and not $allow_dirty {
+        error make --unspanned { msg: "the working tree has uncommitted changes, so the commit it would be published from does not say what was rendered; commit them, or pass --allow-dirty (the provenance records it)" }
+    }
+    let pki = (pki_dir $env.HOME $target)
+    if not ($pki | path join "ca.pem" | path exists) { error make --unspanned { msg: $"no deployment PKI at ($pki): run: nu infra/deploy-repo.nu ensure ($target)" } }
+    let signing = (ensure_signing $pki)
+
+    let lock = ($config.repo_root | path join "infra" "images.lock.nuon")
+    let controllers = ($config.output_dir | path join "flux-controllers.yaml")
+    let facts = {
+        schema: 1
+        target: $target
+        source: { commit: (git_out [rev-parse HEAD]), describe: (git_out [describe --tags --always]), uncommitted_changes: $dirty }
+        published_by: "infra/deploy-repo.nu publish"
+        image_lock: (if ($lock | path exists) { { file: "infra/images.lock.nuon", sha256: (digest_of $lock) } } else { null })
+        flux_controllers: (if ($controllers | path exists) { { sha256: (digest_of $controllers), bootstrap_layers: $BOOTSTRAP_LAYERS } } else { null })
+        deployment_ca_sha256: (sha256_of ($pki | path join "ca.pem"))
+        signer: { identity: $WRITER, certificate_sha256: (sha256_of ($pki | path join $"($WRITER).pem")) }
+    }
+    let files = (tree_files $target $config.apply_layers $texts $port $facts)
+
+    let url = $"https://localhost:($port)/(repo_name $target).git"
+    let work = (mktemp -d)
+    let copy = ($work | path join "repo")
+    let outcome = (try {
+        with-env { GNUPGHOME: $signing.home } {
+            let tls = (tls_config $pki $WRITER)
+            run_ok "cloning the deployment repository (is it running? nu infra/deploy-repo.nu ensure)" { ^env -u GIT_SSL_CAINFO -u SSL_CERT_FILE git ...$tls clone -q $url $copy }
+            ls -a $copy | get name | where {|n| ($n | path basename) not-in [".git" "." ".."] } | each {|n| rm -rf $n } | ignore
+            for f in $files {
+                let dest = ($copy | path join $f.path)
+                mkdir ($dest | path dirname)
+                $f.text | save --force $dest
+            }
+            ^git -C $copy add -A
+            if (git_out [-C $copy status --porcelain] | is-empty) {
+                { changed: false, commit: (try { git_out [-C $copy rev-parse HEAD] } catch { "" }) }
+            } else {
+                let short = ($facts.source.commit | str substring 0..6)
+                let note = if $dirty { ", with uncommitted changes" } else { "" }
+                let msg = $"chore\(deploy\): ($target) from ($short)\n\nRendered from ($facts.source.describe) \(commit ($facts.source.commit)\)($note).\nLayers: ($published | get name | str join ', ')."
+                let sign = (signing_config $signing.wrapper $signing.fingerprint $target)
+                run_ok "committing" { ^git -C $copy ...$sign commit -q -S -m $msg }
+                run_ok "verifying the signature" { ^git -C $copy ...$sign verify-commit HEAD }
+                run_ok "pushing" { ^env -u GIT_SSL_CAINFO -u SSL_CERT_FILE git -C $copy ...$tls push -q origin HEAD:refs/heads/main }
+                { changed: true, commit: (git_out [-C $copy rev-parse HEAD]) }
+            }
+        }
+    } catch {|e| { error: $e.msg } })
+    with-env { GNUPGHOME: $signing.home } { do { ^gpgconf --kill gpg-agent } | complete | ignore }
+    rm -rf $work
+    if ($outcome | get -o error) != null { error make --unspanned { msg: ($outcome | get error) } }
+
+    if $outcome.changed {
+        print $"  published ($files | length) files to deploy-($target) as ($outcome.commit | str substring 0..11), signed by ($WRITER) \(($signing.fingerprint | str substring 0..7)\)"
+    } else {
+        print $"  ok: deploy-($target) already holds this render \(($outcome.commit | str substring 0..11)\)"
+    }
+}
+
 def main [] {
-    print "usage: nu infra/deploy-repo.nu ensure <target> [--port N] [--image REF]"
+    print "usage: nu infra/deploy-repo.nu ensure <target> [--port N] [--image REF] | publish <target> [--port N] [--allow-dirty]"
 }

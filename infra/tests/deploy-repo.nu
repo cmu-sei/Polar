@@ -24,7 +24,7 @@
 # The deployment git server's pure decisions: its PKI, its repository, its container arguments.
 
 use std/assert
-use ../deploy-repo.nu [cert_plan, container_name, ext_text, labelled, pki_dir, repo_name, repos_json, run_args, serve_dir, server_env, spec_of, CLUSTER_NAME, READER, WRITER]
+use ../deploy-repo.nu [cert_plan, container_name, ext_text, labelled, pki_dir, repo_name, repos_json, run_args, serve_dir, server_env, signing_config, spec_of, tls_config, tree_files, wrapper_text, CLUSTER_NAME, READER, WRITER]
 
 def main [] {
     let tests = [
@@ -98,6 +98,51 @@ def main [] {
                 assert equal ($l | last) "img@sha256:1"
                 assert equal ($l | get (($l | length) - 3)) "--label"
                 assert equal ($l | get (($l | length) - 2)) "polar.deploy.spec=fp"
+            }
+        }
+        {
+            name: "commits are signed as the pipeline with the deployment certificate's fingerprint, through a program that does not ask for a passphrase"
+            body: {
+                let c = (signing_config "/p/wrap" "ABCD" "t" | str join " ")
+                assert ($c | str contains "gpg.format=x509")
+                assert ($c | str contains "gpg.x509.program=/p/wrap")
+                assert ($c | str contains "user.signingkey=ABCD")
+                assert ($c | str contains $"user.name=($WRITER)")
+                let w = (wrapper_text "/p/signing.pass")
+                assert ($w | str contains "--pinentry-mode loopback")
+                assert ($w | str contains "/p/signing.pass")
+                assert ($w | str starts-with "#!")
+            }
+        }
+        {
+            name: "the server is addressed with the identity's own certificate and the deployment CA, never the user's configuration"
+            body: {
+                let a = (tls_config "/pki" "flux" | str join " ")
+                assert ($a | str contains "http.sslCert=/pki/flux.pem")
+                assert ($a | str contains "http.sslKey=/pki/flux.key")
+                assert ($a | str contains "http.sslCAInfo=/pki/ca.pem")
+            }
+        }
+        {
+            name: "the published tree has each layer's files under it, the Flux objects, the provenance and the README, and not the bootstrap layer"
+            body: {
+                let layers = [
+                    { name: "platform", depends_on: [], wait_for: [], files: ["ns.yaml"] }
+                    { name: "flux", depends_on: ["platform"], wait_for: [], files: ["flux.yaml"] }
+                    { name: "agents", depends_on: ["flux"], wait_for: [], files: ["job.yaml"] }
+                ]
+                let texts = { "ns.yaml": "kind: Namespace\nmetadata:\n  name: polar\n", "job.yaml": "kind: Job\nmetadata:\n  name: a\n", "flux.yaml": "kind: Deployment\n" }
+                let files = (tree_files "t" $layers $texts 9443 { schema: 1, target: "t" })
+                let paths = ($files | get path)
+                assert ("layers/platform/ns.yaml" in $paths)
+                assert ("layers/agents/job.yaml" in $paths)
+                assert (not ("layers/flux/flux.yaml" in $paths))
+                for need in ["flux/gitrepository.yaml" "flux/kustomizations.yaml" "provenance.json" "README.md"] { assert ($need in $paths) }
+                let prov = ($files | where path == "provenance.json" | first | get text | from json)
+                assert equal ($prov.layers | get name) ["platform" "agents"]
+                assert equal ($prov.layers | first | get files | first | get sha256) ("kind: Namespace\nmetadata:\n  name: polar\n" | hash sha256)
+                let k = ($files | where path == "flux/kustomizations.yaml" | first | get text)
+                assert ($k | str contains "force: true")
             }
         }
     ]
