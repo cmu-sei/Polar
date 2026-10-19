@@ -57,7 +57,11 @@ const POD_UID = 65532
 def pod_timeout [] { $env.POLAR_AGENT_POD_TIMEOUT? | default "5min" | into duration }
 
 # Waiting reasons that will not resolve by waiting.
-const STUCK_REASONS = ["ErrImagePull" "ImagePullBackOff" "InvalidImageName" "CreateContainerConfigError" "CreateContainerError" "RunContainerError"]
+const STUCK_REASONS = ["ErrImagePull" "InvalidImageName" "CreateContainerConfigError" "CreateContainerError" "RunContainerError"]
+
+# A back-off is the kubelet waiting to pull again, and does not say why: after a throttled pull it resolves by itself, after a
+# refused one it does not. It counts as stuck once it has lasted this long.
+export const PULL_BACKOFF_LIMIT = 90sec
 
 # ── What is applied (pure) ───────────────────────────────────────────────────
 
@@ -125,7 +129,8 @@ export def command_of_config [config: record] {
 
 # ── What comes back (pure) ───────────────────────────────────────────────────
 
-# Where a pod is, from its status: { state: "running" | "done" | "stuck", exit, reason }. `exit` is the container's exit code
+# Where a pod is, from its status: { state: "running" | "backoff" | "done" | "stuck", exit, reason } ("backoff": a pull the kubelet will
+# try again; the caller decides when that has gone on too long). `exit` is the container's exit code
 # once it has one; a pod that failed without one (it ran out of time) is done with a null exit.
 export def pod_outcome [pod: record] {
     let status = ($pod.status? | default {})
@@ -139,6 +144,9 @@ export def pod_outcome [pod: record] {
     # The kubelet limits how fast it asks a registry (5 a second, a burst of 10), and a pull policy of Always asks for every container: a
     # burst of pods is told "pull QPS exceeded" and the kubelet tries again by itself. That resolves by waiting.
     let throttled = (($waiting.message? | default "") | str contains "pull QPS exceeded")
+    if $waiting != null and ($waiting.reason? | default "") == "ImagePullBackOff" {
+        return { state: "backoff", exit: null, reason: $"ImagePullBackOff: ($waiting.message? | default '')" }
+    }
     if $waiting != null and ($waiting.reason? | default "") in $STUCK_REASONS and not $throttled {
         return { state: "stuck", exit: null, reason: $"($waiting.reason): ($waiting.message? | default '')" }
     }
@@ -249,11 +257,18 @@ export def run_pods [ns: string, objects: list] {
     apply $objects
     let deadline = ((date now) + (pod_timeout))
     mut finished = []
+    # When each pod's current pull back-off began.
+    mut backoff_since = {}
     loop {
         let listed = (^kubectl get pods -n $ns -o json | complete)
         if $listed.exit_code != 0 { error make --unspanned { msg: $"cannot read the agent pods in ($ns): ($listed.stderr | str trim)" } }
         let seen = ($listed.stdout | from json | get items | each {|p| { name: $p.metadata.name, out: (pod_outcome $p) } } | where name in $names)
-        let stuck = ($seen | where out.state == "stuck")
+        let now = (date now)
+        let before = $backoff_since
+        $backoff_since = ($seen | where out.state == "backoff" | reduce --fold {} {|p, acc| $acc | insert $p.name ($before | get -o $p.name | default $now) })
+        let began = $backoff_since
+        let too_long = ($seen | where out.state == "backoff" | where {|p| ($now - ($began | get $p.name)) > $PULL_BACKOFF_LIMIT } | each {|p| $p | update out.state "stuck" })
+        let stuck = (($seen | where out.state == "stuck") ++ $too_long)
         if ($stuck | is-not-empty) {
             error make --unspanned { msg: $"agent pod\(s\) cannot start: ($stuck | each {|s| $'($s.name) — ($s.out.reason)' } | str join '; ')" }
         }

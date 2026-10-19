@@ -102,7 +102,8 @@ def main [] {
                 assert equal (pod_outcome (terminated 0)).state "done"
                 assert equal (pod_outcome (terminated 0)).exit 0
                 assert equal (pod_outcome (terminated 1)).exit 1
-                assert equal (pod_outcome (waiting "ImagePullBackOff")).state "stuck"
+                assert equal (pod_outcome (waiting "ImagePullBackOff")).state "backoff" "the kubelet pulls again by itself; run_pods times the back-off"
+                assert equal (pod_outcome (waiting "ErrImagePull")).state "stuck" "a refused pull, not a throttled one"
                 assert ((pod_outcome (waiting "ErrImagePull")).reason | str starts-with "ErrImagePull")
                 assert equal (pod_outcome (waiting "ContainerCreating")).state "running"
                 # a throttled pull is the kubelet's rate limit, which it retries by itself: not stuck
