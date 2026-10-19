@@ -50,6 +50,8 @@ use runtime.nu [container_runtime, entrypoint_for, insecure_pull_flags]
 const INFRA = (path self | path dirname)
 
 use cluster-inputs.nu [env_for, env_merged, path_of, read_inputs]
+use cache.nu [cached_text, content_key]
+use digest.nu [registry_digest]
 const CONFIG = ($INFRA | path join "config")
 
 const DEFAULT_TARGET = "local-minimal"
@@ -219,11 +221,19 @@ def scaffold_of [name: string, spec: record] {
     }
     if (agent_source) == "images" {
         let ref = (pushed_image_ref (open ($INFRA | path join "images.nuon")) $spec.image $name)
-        let ran = (try { run_in_image $ref ["--scaffold"] } catch {|e| error make { msg: $"($name): ($e.msg)" } })
-        if $ran.exit_code != 0 {
-            error make { msg: $"($name): `($ref) --scaffold` failed: ($ran.stderr | lines | last 5 | str join ' | ')" }
+        # Starting the agent's container to read its scaffold takes about 0.4 s, and a render asks for it a few dozen times. What an
+        # image prints for --scaffold is a function of the image, so it is kept under the digest the registry serves for it: a
+        # rebuilt image is another key. With no digest to key on (no registry answer) nothing is kept.
+        let digest = (registry_digest $ref)
+        let compute = {||
+            let ran = (try { run_in_image $ref ["--scaffold"] } catch {|e| error make { msg: $"($name): ($e.msg)" } })
+            if $ran.exit_code != 0 {
+                error make { msg: $"($name): `($ref) --scaffold` failed: ($ran.stderr | lines | last 5 | str join ' | ')" }
+            }
+            $ran.stdout
         }
-        return ($ran.stdout | from json)
+        let text = if $digest == null { do $compute } else { cached_text "scaffold" (content_key ["scaffold" $ref $digest]) $compute }
+        return ($text | from json)
     }
     let package = ($spec.scaffold_package? | default $spec.image)
     let ran = (do { cd ($INFRA | path join "../src/agents"); ^cargo run -q -p $package -- --scaffold } | complete)
