@@ -71,7 +71,10 @@ def main [] {
         {
             name: "data"
             depends_on: ["cert-issuer"]
-            wait_for: [ { kind: "statefulset", ns: "polar-graph", ref: "statefulset/polar-neo4j", label: "neo4j" } ]
+            # No wait_for: Neo4j (and Keycloak) cannot be Ready until the credentials agent issues their certificates,
+            # and the credentials agent is a later layer that depends on this one. Waiting here would never end under Flux.
+            # up.nu applied these without waiting too, and waits for Neo4j in its core-services step, after every layer.
+            wait_for: []
             files: [
                 "neo4j-configmap.yaml"
                 "neo4j-init-script-configmap.yaml"
