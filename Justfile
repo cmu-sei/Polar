@@ -822,6 +822,10 @@ cluster-status:
 #
 # The observer is on local 8081, not 8080: keycloak already owns 8080, and
 # a forward that loses that race silently talks to the wrong service.
+#
+# `registry` (a target whose registry is in the cluster, infra/cluster-registry.nu)
+# starts only when named, since it takes local 5000, where the host registry
+# listens: POLAR_REGISTRY_FORWARD_PORT picks another port.
 port-forwards-up *only:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -842,6 +846,9 @@ port-forwards-up *only:
     start_pf jaeger   polar       jaeger-svc                   "4318:4318 16686:16686" /tmp/pf-jaeger.log
     start_pf observer polar       credentials-agent-observer   "8081:8080"             /tmp/pf-credentials-observer.log
     start_pf git      polar       polar-git-server             "8443:8443"             /tmp/pf-polar-git-server.log
+    if [[ "$ONLY" == *" registry "* ]]; then
+        start_pf registry polar-registry registry "${POLAR_REGISTRY_FORWARD_PORT:-5000}:5000" /tmp/pf-registry.log
+    fi
     echo "Logs: /tmp/pf-*.log"
 
 # The polar-git-server, as the git CLI reaches it from this machine: the cluster's own name for it,
@@ -913,6 +920,7 @@ port-forwards-down:
     pkill -f "port-forward -n polar svc/jaeger-svc" 2>/dev/null || true
     pkill -f "port-forward -n polar svc/credentials-agent-observer" 2>/dev/null || true
     pkill -f "port-forward -n polar svc/polar-git-server" 2>/dev/null || true
+    pkill -f "port-forward -n polar-registry svc/registry" 2>/dev/null || true
     echo "Port-forwards stopped."
 
 # Idempotent Keycloak bootstrap: realm, public client (PKCE, Authorization

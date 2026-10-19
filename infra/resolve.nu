@@ -49,7 +49,7 @@ use document.nu *
 const INFRA = (path self | path dirname)
 
 use cluster-inputs.nu [env_for, env_merged, path_of, read_inputs]
-use registry.nu [node_registry]
+use registry.nu [node_registry, push_registry]
 use agent-pods.nu [collect_scaffolds, run_checks]
 const CONFIG = ($INFRA | path join "config")
 
@@ -89,11 +89,12 @@ def all_workloads [target: string] {
     catalog_workloads | where {|w| not ($w.name in $off) }
 }
 
-# <service> -> { dns, port, addr }, from services.nuon and the cluster domain.
+# <service> -> { dns, port, addr }, from services.nuon and the cluster domain; and `_registry`, the registry the nodes pull from
+# (infra/registry.nu), for {registry}.
 def service_vars [services: record, cluster: record] {
     $services
     | transpose name s
-    | reduce --fold {} {|it, acc|
+    | reduce --fold { _registry: $cluster.registry } {|it, acc|
         let ns = ($cluster.namespaces | get $it.s.namespace)
         let dns = $"($it.s.dns_name).($ns).svc.($cluster.domain)"
         let addr = $"($dns):($it.s.port)"
@@ -103,13 +104,15 @@ def service_vars [services: record, cluster: record] {
     }
 }
 
-# Replaces {workload} (the workload's own name) and {<service>.dns|port|addr}. A placeholder left over is an error:
-# it means a capability names a service that services.nuon does not have.
+# Replaces {workload} (the workload's own name), {registry} (the registry the nodes pull from) and {<service>.dns|port|addr}.
+# A placeholder left over is an error: it means a capability names a service that services.nuon does not have.
 def subst [text: string, vars: record, who: string] {
+    let start = ($text | str replace --all "{workload}" $who | str replace --all "{registry}" ($vars._registry? | default "{registry}"))
     let out = (
         $vars
+        | reject -o _registry
         | transpose name v
-        | reduce --fold ($text | str replace --all "{workload}" $who) {|it, acc|
+        | reduce --fold $start {|it, acc|
             $acc
             | str replace --all $"{($it.name).name}" $it.v.name
             | str replace --all $"{($it.name).dns}" $it.v.dns
@@ -190,7 +193,9 @@ def scaffold_dir_for [target: string] {
 # Asks the image of every catalog workload of `target` for its scaffold, on the cluster, and writes `<workload>.json` to `dir`.
 def collect_into [dir: string, target: string] {
     let workloads = (all_workloads $target | where {|w| ($w.config? | default "env") == "document" } | select name image)
-    collect_scaffolds $workloads $dir (load_cluster $target).registry (open ($INFRA | path join "images.nuon"))
+    with-env { POLAR_REGISTRY: (push_registry $target) } {
+        collect_scaffolds $workloads $dir (load_cluster $target).registry (open ($INFRA | path join "images.nuon"))
+    }
 }
 
 # What the agent check needs to name: the image it pulls (a row of images.nuon) and the crate it builds with
@@ -209,7 +214,9 @@ def agent_checks [target: string, resolved: list] {
         document: $x.r.config_map.content
         secrets: ($x.r.env | where secret != null | get name)
     } })
-    run_checks $checks (load_cluster $target).registry (open ($INFRA | path join "images.nuon"))
+    with-env { POLAR_REGISTRY: (push_registry $target) } {
+        run_checks $checks (load_cluster $target).registry (open ($INFRA | path join "images.nuon"))
+    }
 }
 
 # ── Resolution ───────────────────────────────────────────────────────────────

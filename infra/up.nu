@@ -39,7 +39,9 @@
 #
 # Steps (each enabled only when the target needs it):
 #   preflight   cluster reachable, namespaces can be made, run from the repo root; a container runtime   always
-#               (podman or docker) only when a step below starts a container here (--dev, or a gitops target)
+#               (podman or docker) only when a step below starts a container here (the host registry for --dev, or a gitops target)
+#   registry    apply the registry in the cluster (and the storage it needs), forward to it    cluster.registry_in_cluster
+#   import      nu infra/images.nu import --from <registry>/<account>      --import-from
 #   agent-images build and push the images of the agents that describe          --dev
 #               themselves, before the render asks them (--scaffold, --check)
 #   render      ask the agents' images for their scaffolds on the cluster,    always
@@ -70,6 +72,7 @@ use tools.nu
 use runtime.nu [container_runtime]
 use plan.nu [build_forwards, build_plan, deployed_charts, needs_runtime]
 use agent-pods.nu [delete_stale_namespaces]
+use cluster-registry.nu
 use apply.nu [any_pod_ready, changed_configmaps, config_users, gate_after, job_verdict, jobs_in, stale_images, stale_pod_images, stale_pod_report, workload_needs_restart]
 
 def note [msg: string] { print $"  -- ($msg)" }
@@ -352,8 +355,8 @@ def step_preflight [config: record, runtime_needed: bool] {
 # will be given, when the catalog is rendered. They are asked in their built image, the artifact
 # that deploys, so those images exist before the render. (The images step later builds the rest
 # and finds these already built.)
-def step_agent_images [target: string] {
-    ^just registry-up
+def step_agent_images [target: string, in_cluster: bool] {
+    if not $in_cluster { ^just registry-up }
     let names = (^$nu.current-exe infra/resolve.nu document-images --target $target | from json)
     print $"  ($names | length) agent image\(s\) the render asks: ($names | str join ', ')"
     try { images sync (images named $names) } catch {|e| fail $e.msg }
@@ -397,11 +400,18 @@ def step_render [target: string] {
     if $code != 0 { fail "render failed" }
 }
 
-def step_images [config: record] {
+# The published images (infra/images.nu publish), copied into the registry this run pushes to, for this machine's architecture.
+def step_import [from: string] {
+    ^$nu.current-exe infra/images.nu import --from $from
+    if $env.LAST_EXIT_CODE != 0 { fail $"importing the images from ($from) failed \(above\)" }
+    ok $"images imported from ($from)"
+}
+
+def step_images [config: record, in_cluster: bool] {
     let files = ($config.apply_order
         | each {|f| $config.output_dir | path join $f }
         | where {|f| $f | path exists })
-    ^just registry-up
+    if not $in_cluster { ^just registry-up }
     let rows = try { images needed $files } catch {|e| fail $e.msg }
     print $"  ($rows | length) image\(s\) needed by this target"
     try { images sync $rows } catch {|e| fail $e.msg }
@@ -693,6 +703,7 @@ def main [
     --user: string          # Username for the first admin account
     --email: string         # Email for the first admin account
     --allow-dirty           # Publish a gitops target from a working tree with uncommitted changes (the provenance records it)
+    --import-from: string = ""  # Copy the published images into the registry first, e.g. docker.io/<account> (infra/images.nu import)
 ] {
     if not ("infra/render.nu" | path exists) {
         fail "run this from the repo root (infra/render.nu not found)"
@@ -703,7 +714,13 @@ def main [
     }
     let config = (^$nu.current-exe $target_file | from nuon)
 
-    let plan = (build_plan $config $dev)
+    # A target whose registry is in its cluster: everything this run pushes, and asks digests of, goes through the forward the
+    # registry step starts (infra/cluster-registry.nu).
+    let in_cluster_registry = (cluster-registry settings_of (cluster-registry cluster_of $target))
+    let in_cluster = ($in_cluster_registry != null)
+    if $in_cluster { $env.POLAR_REGISTRY = $"localhost:($in_cluster_registry.local_port)" }
+
+    let plan = (build_plan $config $dev { in_cluster: $in_cluster, import_from: $import_from })
     let enabled = ($plan | where on)
     let waits = (build_waits $config)
     let forwards = (build_forwards $config)
@@ -721,9 +738,11 @@ def main [
         print $"[($it.index + 1)/($total)] ($s.title)"
         match $s.id {
             "preflight" => { step_preflight $config (needs_runtime $plan) }
-            "agent-images" => { step_agent_images $target }
+            "registry" => { cluster-registry ensure $target | ignore }
+            "import" => { step_import $import_from }
+            "agent-images" => { step_agent_images $target $in_cluster }
             "render" => { step_render $target }
-            "images" => { step_images $config }
+            "images" => { step_images $config $in_cluster }
             "namespaces" => { apply_file $config.output_dir "namespaces.yaml" }
             "ca" => { step_ca }
             "infra" => { step_infra $config }

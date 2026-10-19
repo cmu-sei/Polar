@@ -27,7 +27,11 @@
 {
   # cert-issuer signs only the bootstrap identities on a token alone; everything else is vouched for by the
   # credentials agent (docs/architecture/cert-issuer-isolation.md). On once no workload asked it directly.
-  cluster: { issuance: { floor_enforced: true } }
+  #
+  # The registry is in the cluster (infra/cluster-registry.nu): the nodes pull from localhost:30500, and nothing on this machine
+  # runs one. This machine pushes through a port-forward on local 5001, since the host registry (`just registry-up`, which the
+  # other targets use) listens on 5000.
+  cluster: { issuance: { floor_enforced: true }, registry_in_cluster: { node_port: 30500, local_port: 5001 } }
   workloads: {
     # The git server's administrators are this cluster's first account, an identity that only exists once the admin flow has run on the
     # live cluster. `up.nu` records it in infra/targets/<target>/cluster-inputs.nuon (gitignored), renders and publishes again, and the

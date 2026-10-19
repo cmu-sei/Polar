@@ -39,7 +39,7 @@
     # The cluster pulls from the development registry over plain http, and so must the resolver.
     oci-registry-resolver: {
       env: [
-        { name: "OCI_INSECURE_REGISTRIES", value: "10.0.2.2:5000" }
+        { name: "OCI_INSECURE_REGISTRIES", value: "{registry}" }
       ]
     }
     jira-observer: {

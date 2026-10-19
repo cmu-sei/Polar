@@ -60,6 +60,22 @@ def main [] {
             }
         }
         {
+            name: "a registry in the cluster comes before the import and the render, and building images then needs no runtime here"
+            body: {
+                let c = (config ["cert-issuer" "neo4j"] ["namespaces.yaml" "credentials-agent.yaml" "polar-git-server.yaml"])
+                let ids = (build_plan $c true { in_cluster: true, import_from: "docker.io/acme" } | where on | get id)
+                let at = {|id| $ids | enumerate | where item == $id | first | get index }
+                assert ((do $at "registry") < (do $at "import"))
+                assert ((do $at "import") < (do $at "render"))
+                assert ((do $at "registry") < (do $at "agent-images"))
+                assert (not (needs_runtime (build_plan $c true { in_cluster: true }))) "--dev pushes to the registry in the cluster"
+                assert (needs_runtime (build_plan ($c | insert gitops true) false { in_cluster: true })) "the deployment git server still runs here"
+                let plain = (build_plan $c false | where on | get id)
+                assert ("registry" not-in $plain)
+                assert ("import" not-in $plain) "nothing is imported unless asked"
+            }
+        }
+        {
             name: "the admin flow runs when the credentials agent is deployed through the catalog"
             body: {
                 let plan = (build_plan (config ["neo4j"] ["namespaces.yaml" "credentials-agent.yaml"]) false)

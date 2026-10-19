@@ -41,7 +41,8 @@
 #   <output_dir>/local-path-provisioner.yaml
 
 use ../../../../dhall-render.nu [dhall_yaml]
-use ../../../../registry.nu [node_registry]
+use ../../../../registry.nu [node_registry, target_cluster]
+use ../../../../cluster-registry.nu [storage_images]
 
 def main [context_nuon: string] {
     let context = ($context_nuon | from nuon)
@@ -60,8 +61,10 @@ def main [context_nuon: string] {
     let provisioner_src = ($chart_dir | path join "local-path-provisioner.yaml")
     let provisioner_out = ($output_dir | path join "local-path-provisioner.yaml")
     # The manifest names its images with the placeholder node-registry.invalid; the registry the nodes use is put in as it is copied.
-    print $"  copying local-path-provisioner.yaml, images from the node registry"
-    open --raw $provisioner_src | str replace --all "node-registry.invalid/" $"(node_registry)/" | save --force $provisioner_out
+    # A target whose registry is in the cluster takes them from upstream instead: the registry's own volume comes from this provisioner.
+    let in_cluster = ((target_cluster ($context.target_dir | path basename)).registry_in_cluster? | default null) != null
+    print $"  copying local-path-provisioner.yaml, images from (if $in_cluster { 'upstream, by digest' } else { 'the node registry' })"
+    storage_images (open --raw $provisioner_src) (node_registry) $in_cluster | save --force $provisioner_out
 
     print $"  storage: done"
 }

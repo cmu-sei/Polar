@@ -24,7 +24,7 @@
 # Which registry the nodes are told to pull from: the environment first, then the target, then the default.
 
 use std/assert
-use ../registry.nu [host_of, node_registry, pick_registry]
+use ../registry.nu [host_of, node_registry, pick_registry, target_push_registry, target_registry]
 
 def main [] {
     let tests = [
@@ -35,6 +35,24 @@ def main [] {
                 assert equal (pick_registry "" "target:5000" "default:5000") "target:5000"
                 assert equal (pick_registry "" null "default:5000") "default:5000"
                 assert equal (pick_registry "  " "" "default:5000") "default:5000"
+            }
+        }
+        {
+            name: "a target that keeps its registry in the cluster names it on the nodes' localhost, at its NodePort"
+            body: {
+                assert equal (target_registry { registry_in_cluster: { node_port: 30500 } }) "localhost:30500"
+                assert equal (target_registry { registry: "registry.example.org:5000" }) "registry.example.org:5000"
+                assert equal (target_registry {}) null
+                let both = (try { target_registry { registry: "x:5000", registry_in_cluster: { node_port: 30500 } }; "accepted" } catch {|e| $e.msg })
+                assert ($both | str contains "keep one") $both
+            }
+        }
+        {
+            name: "this machine pushes to a registry in the cluster through its forward, and to the default otherwise"
+            body: {
+                assert equal (target_push_registry { registry_in_cluster: { node_port: 30500 } }) "localhost:5000"
+                assert equal (target_push_registry { registry_in_cluster: { node_port: 30500, local_port: 5001 } }) "localhost:5001"
+                assert equal (target_push_registry { registry: "registry.example.org:5000" }) null
             }
         }
         {

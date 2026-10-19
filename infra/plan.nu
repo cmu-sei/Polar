@@ -35,7 +35,11 @@ export def deployed_charts [config: record] {
 }
 
 # The plan: one record per step, with whether it runs and why not.
-export def build_plan [config: record, dev: bool] {
+# `options`: `in_cluster`, the target keeps its registry in its cluster (infra/cluster-registry.nu); `import_from`, where the
+# published images are copied from (`--import-from`), or "". A step's `runtime` says it starts a container on this machine.
+export def build_plan [config: record, dev: bool, options: record = {}] {
+    let in_cluster = ($options.in_cluster? | default false)
+    let import_from = ($options.import_from? | default "")
     let d = (deployed_charts $config)
     let order = $config.apply_order
     let ca_cm = ($config.cert_issuer_ca_configmap? | default "")
@@ -51,9 +55,13 @@ export def build_plan [config: record, dev: bool] {
 
     [
         { id: "preflight", title: "preflight", on: true, why: "" }
-        { id: "agent-images", title: "agent images", on: $dev, why: "pass --dev to build the agents' images; without it the render asks the ones already in the registry, on the cluster" }
+        # Before anything that pulls a Polar image: the render's scaffold pods, and Flux's own controllers.
+        { id: "registry", title: "registry in the cluster", on: $in_cluster, why: "the target's registry is not in its cluster (cluster.registry_in_cluster)" }
+        { id: "import", title: "import the published images", on: ($import_from | is-not-empty), why: "pass --import-from <registry>/<account> to copy the published images into the registry" }
+        # Without a registry in the cluster, the image steps start the host's (`just registry-up`).
+        { id: "agent-images", title: "agent images", on: $dev, runtime: (not $in_cluster), why: "pass --dev to build the agents' images; without it the render asks the ones already in the registry, on the cluster" }
         { id: "render", title: "render", on: true, why: "" }
-        { id: "images", title: "images", on: $dev, why: "pass --dev to build and load images into the local registry" }
+        { id: "images", title: "images", on: $dev, runtime: (not $in_cluster), why: "pass --dev to build and load images into the local registry" }
         { id: "namespaces", title: "namespaces", on: ("namespaces.yaml" in $order), why: "target has no namespaces.yaml in its apply order" }
         {
             id: "ca"
@@ -63,7 +71,7 @@ export def build_plan [config: record, dev: bool] {
         }
         { id: "infra", title: "secrets and infrastructure", on: (not $gitops), why: "the layers are applied by Flux (gitops target)" }
         { id: "secrets", title: "secrets", on: $gitops, why: "up.nu creates the secrets in the infrastructure step" }
-        { id: "deploy-host", title: "deployment git server", on: $gitops, why: "target is not applied by Flux" }
+        { id: "deploy-host", title: "deployment git server", on: $gitops, runtime: true, why: "target is not applied by Flux" }
         { id: "publish", title: "publish the layers", on: $gitops, why: "target is not applied by Flux" }
         { id: "flux", title: "install Flux", on: $gitops, why: "target is not applied by Flux" }
         { id: "flux-wait", title: "wait for Flux to reconcile", on: $gitops, why: "target is not applied by Flux" }
@@ -85,14 +93,11 @@ export def build_plan [config: record, dev: bool] {
     ]
 }
 
-# The steps that start a container on this machine: building the images (`--dev`) starts the registry with `just
-# registry-up`, and a gitops target's deployment git server runs here. No other step needs a container runtime: the agents
-# are asked about themselves on the cluster.
-export const RUNTIME_STEPS = ["agent-images" "images" "deploy-host"]
-
-# Whether the enabled steps of `plan` need a container runtime on this machine.
+# Whether the enabled steps of `plan` need a container runtime on this machine: building the images (`--dev`) starts the host's
+# registry unless the target's registry is in its cluster, and a gitops target's deployment git server runs here. No other step
+# needs one: the agents are asked about themselves on the cluster.
 export def needs_runtime [plan: list] {
-    $plan | where on | any {|s| $s.id in $RUNTIME_STEPS }
+    $plan | where on | any {|s| $s.runtime? | default false }
 }
 
 # Port-forwards needed by the admin and browser steps, and only those.

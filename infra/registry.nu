@@ -42,12 +42,41 @@ export def pick_registry [from_env: string, from_target: any, default: string] {
     $chosen | str trim | str trim --right --char "/"
 }
 
+# What a target's own cluster settings say about the registry, or null. A target that keeps its registry in the cluster
+# (infra/cluster-registry.nu) says `registry_in_cluster: { node_port: N }`, and its nodes then name it `localhost:N`: a NodePort
+# answers on every node's localhost, and a node's container runtime pulls from a localhost registry over plain HTTP with no
+# configuration. Saying that and an address as well is an error, since the two would disagree. Pure.
+export def target_registry [cluster: record] {
+    let in_cluster = ($cluster.registry_in_cluster? | default null)
+    if $in_cluster == null { return ($cluster.registry? | default null) }
+    if ($cluster.registry? | default "" | is-not-empty) {
+        error make --unspanned { msg: $"the target's cluster settings give both `registry` \(($cluster.registry)\) and `registry_in_cluster`: keep one" }
+    }
+    $"localhost:($in_cluster.node_port)"
+}
+
+# Where this machine pushes to, and asks digests of, the registry of a target with these cluster settings: for a registry in the
+# cluster, the local end of its port-forward (`registry_in_cluster.local_port`, default 5000); otherwise null, which leaves
+# POLAR_REGISTRY's default. Pure.
+export def target_push_registry [cluster: record] {
+    let in_cluster = ($cluster.registry_in_cluster? | default null)
+    if $in_cluster == null { null } else { $"localhost:($in_cluster.local_port? | default 5000)" }
+}
+
+# The registry this machine pushes to for `target`: POLAR_REGISTRY, then the target's (a registry in its cluster), then localhost:5000.
+export def push_registry [target: string] {
+    pick_registry ($env.POLAR_REGISTRY? | default "") (target_push_registry (target_cluster $target)) "localhost:5000"
+}
+
+# The cluster settings in `targets/<target>/config.nuon`, or an empty record.
+export def target_cluster [target: string] {
+    let p = ($INFRA | path join "targets" $target "config.nuon")
+    if ($p | path exists) { open $p | get -o cluster | default {} } else { {} }
+}
+
 # The registry the nodes of `target` name ("" for no particular target: the environment, then the default).
 export def node_registry [target: string = ""] {
-    let cfg = if $target == "" { null } else {
-        let p = ($INFRA | path join "targets" $target "config.nuon")
-        if ($p | path exists) { open $p | get -o cluster.registry } else { null }
-    }
+    let cfg = if $target == "" { null } else { target_registry (target_cluster $target) }
     pick_registry ($env.POLAR_NODE_REGISTRY? | default "") $cfg (open ($INFRA | path join "config" "cluster.nuon") | get registry)
 }
 
