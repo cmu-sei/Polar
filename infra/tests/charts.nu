@@ -31,6 +31,7 @@
 #   nu infra/tests/charts.nu
 
 use std/assert
+use ../registry.nu [node_registry]
 
 const INFRA = (path self | path dirname | path dirname)
 const OBSERVER = "http://credentials-agent-observer.polar.svc.cluster.local:8080"
@@ -72,6 +73,8 @@ def init_env [file: string] {
 def value_of [vars: list, name: string] { $vars | where name == $name | get -o 0.value }
 
 def main [] {
+    # The charts' Dhall reads the node registry from the environment, which render.nu sets; these render a chart without it.
+    $env.POLAR_NODE_REGISTRY = (node_registry local-minimal)
     let tests = {
         "Neo4j's server certificate is requested from the credentials agent": {
             let out = (render neo4j {})
