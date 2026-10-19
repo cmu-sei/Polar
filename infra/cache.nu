@@ -55,17 +55,32 @@ export def dir_digest [dir: string, pattern: string] {
 # `compute` returns when it fails is not stored: the error reaches the caller. Written to a file of its own name
 # and moved into place, so a reader never sees half of one.
 export def cached_text [kind: string, key: string, compute: closure] {
-    if ($env.POLAR_CACHE? | default "" | str downcase) == "off" { return (do $compute) }
-    let dir = ((cache_dir) | path join $kind)
-    let file = ($dir | path join $"($key).txt")
-    if ($file | path exists) {
-        let hit = (try { open --raw $file } catch { null })
-        if $hit != null { return $hit }
-    }
+    let hit = (cache_peek $kind $key)
+    if $hit != null { return $hit }
     let value = (do $compute)
-    mkdir $dir
+    cache_put $kind $key $value
+    $value
+}
+
+def cache_off [] { ($env.POLAR_CACHE? | default "" | str lowercase) == "off" }
+
+def cache_file [kind: string, key: string] { (cache_dir) | path join $kind $"($key).txt" }
+
+# The text stored for `key` under `kind`, or null. For a caller that computes the misses together (agent-pods.nu runs one pod per
+# missing scaffold, all at once) and stores each with `cache_put`.
+export def cache_peek [kind: string, key: string] {
+    if (cache_off) { return null }
+    let file = (cache_file $kind $key)
+    if not ($file | path exists) { return null }
+    try { open --raw $file } catch { null }
+}
+
+# Stores `value` for `key` under `kind`, written to a file of its own name and moved into place.
+export def cache_put [kind: string, key: string, value: string] {
+    if (cache_off) { return }
+    let file = (cache_file $kind $key)
+    mkdir ($file | path dirname)
     let part = $"($file).part-(random chars --length 8)"
     $value | save --force $part
     mv --force $part $file
-    $value
 }
