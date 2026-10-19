@@ -718,20 +718,31 @@ If your SSH private key isn't at the default path the devShell
 assumes, set `SOPS_AGE_SSH_PRIVATE_KEY_FILE` in your own `my.env` to
 point at it (see `example.env`'s own comment on this).
 
-Once you're a listed recipient, you can decrypt and edit
+Once you're a listed recipient, and you have pulled the commit that
+re-encrypted the file with your key, you can decrypt and edit
 `secrets.sops.yaml` directly:
 
 ```sh
 # Decrypt for inspection:
-SOPS_AGE_KEY_FILE=~/.ssh/id_github sops --decrypt secrets.sops.yaml
+SOPS_AGE_SSH_PRIVATE_KEY_FILE=~/.ssh/id_github sops --decrypt secrets.sops.yaml
 
 # Edit in place (opens your $EDITOR on the decrypted content, re-encrypts on save):
-SOPS_AGE_KEY_FILE=~/.ssh/id_github sops secrets.sops.yaml
+SOPS_AGE_SSH_PRIVATE_KEY_FILE=~/.ssh/id_github sops secrets.sops.yaml
 ```
 
-`SOPS_AGE_KEY_FILE` here is what tells `sops`/`rage` which private key
-to use for decryption — point it at whichever SSH key you had added
-as a recipient in step 2.
+`SOPS_AGE_SSH_PRIVATE_KEY_FILE` is what tells `sops` which SSH private
+key to decrypt with — point it at whichever SSH key you had added as a
+recipient in step 2. Without it, `sops` tries `~/.ssh/id_ed25519` and
+then `~/.ssh/id_rsa`. Do not use `SOPS_AGE_KEY_FILE` for this: it takes
+native age keys (`AGE-SECRET-KEY-1...`) only, and given an SSH key it
+reports `unknown identity type`.
+
+If decryption fails with `no identity matched any of the recipients`,
+look at the recipients `sops` lists. One entry holding several
+space-separated keys means your copy was encrypted to the first key
+only: pull, and if it persists, ask for step 2 again. If they are
+listed one per entry, compare yours with `ssh-keygen -y -f <your key>`:
+the private key you point at is not the one you sent.
 
 #### 3. Set up your own `user.sops.yaml`
 
@@ -765,10 +776,10 @@ access to it.
    Fill in your own values (your GitLab token, your Jira token, etc.).
 
 3. **Encrypt it**, pointing `sops` at your own config via
-   `SOPS_CONFIG` rather than `SOPS_AGE_KEY_FILE` — this is the one
-   genuinely different mechanism between the two files, and the part
-   most likely to trip you up if you're used to step 2's own
-   commands:
+   `SOPS_CONFIG` — this is the one genuinely different mechanism
+   between the two files, and the part most likely to trip you up if
+   you're used to step 2's own commands (the key is still found the
+   same way, through `SOPS_AGE_SSH_PRIVATE_KEY_FILE`):
 
    ```sh
    SOPS_CONFIG=.user.sops.yaml sops --encrypt --in-place user.sops.yaml
@@ -795,7 +806,7 @@ access to it.
 
 | File | Config used | Env var |
 |---|---|---|
-| `secrets.sops.yaml` (shared) | `.sops.yaml` (gitignored, multi-recipient; only needed to encrypt, not to decrypt) | `SOPS_AGE_KEY_FILE=<path to your key>` |
+| `secrets.sops.yaml` (shared) | `.sops.yaml` (gitignored, multi-recipient; only needed to encrypt, not to decrypt) | `SOPS_AGE_SSH_PRIVATE_KEY_FILE=<path to your key>` |
 | `user.sops.yaml` (personal) | `.user.sops.yaml` (gitignored, your own single-recipient config, which you create) | `SOPS_CONFIG=.user.sops.yaml` |
 
 ### Just the container
