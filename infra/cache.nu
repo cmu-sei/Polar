@@ -26,7 +26,7 @@
 # A cache for what is a pure function of its inputs and slow to compute: render-catalog.nu keeps the manifest Dhall
 # renders from a workload's inputs (about 3.5 seconds each, a minute for the catalog), so a resume that changed
 # nothing reads them back. Keyed on a hash of every input, so a change to any one of them is a different key and
-# nothing stale can be served. Also kept here: an agent image's scaffold, under the digest the registry serves for the image. Set POLAR_CACHE=off to compute everything and store nothing.
+# nothing stale can be served. Also kept here: an agent image's scaffold, under the digest the registry serves for the image, and the hand-written charts' Dhall renders (infra/dhall-render.nu). Set POLAR_CACHE=off to compute everything and store nothing.
 
 # Where the cache lives: POLAR_CACHE_DIR, else under XDG_CACHE_HOME, else under HOME.
 export def cache_dir [] {

@@ -23,6 +23,8 @@
 
 # infra/layers/2-services/keycloak/main.nu
 
+use ../../../dhall-render.nu [dhall_yaml]
+
 def main [context_nuon: string] {
     let context    = ($context_nuon | from nuon)
     let chart_dir  = $context.chart_dir
@@ -46,7 +48,7 @@ def main [context_nuon: string] {
     )
     $expr | save --force $tmp
     print $"  rendering service.dhall -> keycloak-service.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "keycloak-service.yaml")
+    dhall_yaml $tmp ["--documents"] | save --force ($output_dir | path join "keycloak-service.yaml")
     rm $tmp
 
     # -- Deployment --
@@ -68,7 +70,7 @@ def main [context_nuon: string] {
     )
     $expr | save --force $tmp
     print $"  rendering deployment.dhall -> keycloak-deployment.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "keycloak-deployment.yaml")
+    dhall_yaml $tmp ["--documents"] | save --force ($output_dir | path join "keycloak-deployment.yaml")
     rm $tmp
 
     print $"  keycloak: done"

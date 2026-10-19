@@ -40,6 +40,8 @@
 #   <output_dir>/storage-class.yaml
 #   <output_dir>/local-path-provisioner.yaml
 
+use ../../../../dhall-render.nu [dhall_yaml]
+
 def main [context_nuon: string] {
     let context = ($context_nuon | from nuon)
     let chart_dir  = $context.chart_dir
@@ -51,7 +53,7 @@ def main [context_nuon: string] {
     let src = ($chart_dir | path join "storage-class.dhall")
     let out = ($output_dir | path join "storage-class.yaml")
     print $"  rendering storage-class.dhall -> storage-class.yaml"
-    dhall-to-yaml --documents --file $src | save --force $out
+    dhall_yaml $src ["--documents"] | save --force $out
 
     # Copy the local-path-provisioner manifest verbatim
     let provisioner_src = ($chart_dir | path join "local-path-provisioner.yaml")

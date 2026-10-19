@@ -23,6 +23,8 @@
 
 # infra/layers/2-services/cert-issuer/main.nu
 
+use ../../../dhall-render.nu [dhall_yaml]
+
 def main [context_nuon: string] {
     let context    = ($context_nuon | from nuon)
     let chart_dir  = $context.chart_dir
@@ -55,7 +57,7 @@ def main [context_nuon: string] {
     let expr = "let v = " + $merged + " in " + $chart_dir + "/pvc.dhall { name = v.name, caVolumeName = v.caVolumeName, caStorageClass = v.caStorageClass, caStorageSize = v.caStorageSize }"
     $expr | save --force $tmp
     print $"  rendering pvc.dhall -> cert-issuer-pvc.yaml"
-    dhall-to-yaml --file $tmp | save --force ($output_dir | path join "cert-issuer-pvc.yaml")
+    dhall_yaml $tmp | save --force ($output_dir | path join "cert-issuer-pvc.yaml")
     rm $tmp
 
     # ConfigMap — config JSON rendered from target OIDC values
@@ -66,7 +68,7 @@ def main [context_nuon: string] {
     let expr = "let v = " + $merged + " in " + $chart_dir + "/configmap.dhall { name = v.name, port = v.port, caCertPath = v.caCertPath, caKeyPath = v.caKeyPath, issuers = v.issuers, defaultLifetimeSecs = v.defaultLifetimeSecs, serverLifetimeSecs = v.serverLifetimeSecs, userLifetimeSecs = v.userLifetimeSecs, mtlsServerIdentity = v.mtlsServerIdentity, mtlsInternalCallers = v.mtlsInternalCallers, mtlsBootstrap = v.mtlsBootstrap, mtlsEnforceBootstrap = v.mtlsEnforceBootstrap, caProvisioning = v.caProvisioning, identityLifetimeOverrides = [ " + $identity_overrides_dhall + " ] }"
     $expr | save --force $tmp
     print $"  rendering configmap.dhall -> cert-issuer-configmap.yaml"
-    dhall-to-yaml --file $tmp | save --force ($output_dir | path join "cert-issuer-configmap.yaml")
+    dhall_yaml $tmp | save --force ($output_dir | path join "cert-issuer-configmap.yaml")
     rm $tmp
 
     # Service
@@ -74,7 +76,7 @@ def main [context_nuon: string] {
     let expr = "let v = " + $merged + " in " + $chart_dir + "/service.dhall { name = v.name, port = v.port }"
     $expr | save --force $tmp
     print $"  rendering service.dhall -> cert-issuer-service.yaml"
-    dhall-to-yaml --file $tmp | save --force ($output_dir | path join "cert-issuer-service.yaml")
+    dhall_yaml $tmp | save --force ($output_dir | path join "cert-issuer-service.yaml")
     rm $tmp
 
     # Deployment
@@ -82,7 +84,7 @@ def main [context_nuon: string] {
     let expr = "let v = " + $merged + " in " + $chart_dir + "/deployment.dhall { name = v.name, image = v.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, port = v.port, caVolumeName = v.caVolumeName, caCertPath = v.caCertPath, caKeyPath = v.caKeyPath, caProvisioning = v.caProvisioning }"
     $expr | save --force $tmp
     print $"  rendering deployment.dhall -> cert-issuer-deployment.yaml"
-    dhall-to-yaml --file $tmp | save --force ($output_dir | path join "cert-issuer-deployment.yaml")
+    dhall_yaml $tmp | save --force ($output_dir | path join "cert-issuer-deployment.yaml")
     rm $tmp
 
     print $"  cert-issuer: done"

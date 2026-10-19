@@ -23,6 +23,8 @@
 
 # infra/layers/2-services/ace/main.nu
 
+use ../../../dhall-render.nu [dhall_yaml]
+
 def main [context_nuon: string] {
     let context           = ($context_nuon | from nuon)
     let chart_dir         = $context.chart_dir
@@ -43,7 +45,7 @@ def main [context_nuon: string] {
     let expr = $base + $chart_dir + "/rbac.dhall { serviceAccountName = v.serviceAccountName }"
     $expr | save --force $tmp
     print $"  rendering rbac.dhall -> ace-rbac.yaml"
-    dhall-to-yaml --documents --quoted --file $tmp | save --force ($output_dir | path join "ace-rbac.yaml")
+    dhall_yaml $tmp ["--documents" "--quoted"] | save --force ($output_dir | path join "ace-rbac.yaml")
     rm $tmp
 
     # ── Job + Service ────────────────────────────────────────────────────────
@@ -61,7 +63,7 @@ def main [context_nuon: string] {
     )
     $expr | save --force $tmp
     print $"  rendering job.dhall -> ace.yaml"
-    dhall-to-yaml --documents --quoted --file $tmp | save --force ($output_dir | path join "ace.yaml")
+    dhall_yaml $tmp ["--documents" "--quoted"] | save --force ($output_dir | path join "ace.yaml")
     rm $tmp
 
     print $"  ace: done"

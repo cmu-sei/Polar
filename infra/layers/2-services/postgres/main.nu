@@ -23,6 +23,8 @@
 
 # infra/layers/2-services/postgres/main.nu
 
+use ../../../dhall-render.nu [dhall_yaml]
+
 def main [context_nuon: string] {
     let context    = ($context_nuon | from nuon)
     let chart_dir  = $context.chart_dir
@@ -47,7 +49,7 @@ def main [context_nuon: string] {
     )
     $expr | save --force $tmp
     print $"  rendering pvc.dhall -> postgres-pvc.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "postgres-pvc.yaml")
+    dhall_yaml $tmp ["--documents"] | save --force ($output_dir | path join "postgres-pvc.yaml")
     rm $tmp
 
     # -- Service --
@@ -61,7 +63,7 @@ def main [context_nuon: string] {
     )
     $expr | save --force $tmp
     print $"  rendering service.dhall -> postgres-service.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "postgres-service.yaml")
+    dhall_yaml $tmp ["--documents"] | save --force ($output_dir | path join "postgres-service.yaml")
     rm $tmp
 
     # -- StatefulSet --
@@ -80,7 +82,7 @@ def main [context_nuon: string] {
     )
     $expr | save --force $tmp
     print $"  rendering statefulset.dhall -> postgres-statefulset.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "postgres-statefulset.yaml")
+    dhall_yaml $tmp ["--documents"] | save --force ($output_dir | path join "postgres-statefulset.yaml")
     rm $tmp
 
     print $"  postgres: done"

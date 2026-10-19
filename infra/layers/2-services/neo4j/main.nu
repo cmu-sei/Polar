@@ -23,6 +23,8 @@
 
 # infra/layers/2-services/neo4j/main.nu
 
+use ../../../dhall-render.nu [dhall_yaml]
+
 def main [context_nuon: string] {
     let context    = ($context_nuon | from nuon)
     let chart_dir  = $context.chart_dir
@@ -55,12 +57,12 @@ def main [context_nuon: string] {
     )
     $expr | save --force $tmp
     print $"  rendering configmap.dhall -> neo4j-configmap.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "neo4j-configmap.yaml")
+    dhall_yaml $tmp ["--documents"] | save --force ($output_dir | path join "neo4j-configmap.yaml")
     rm $tmp
 
     # ── ConfigMap: init script ────────────────────────────────────────────────
     print $"  rendering script-configmap.dhall -> neo4j-init-script-configmap.yaml"
-    dhall-to-yaml --documents --file ($chart_dir | path join "script-configmap.dhall")
+    dhall_yaml ($chart_dir | path join "script-configmap.dhall") ["--documents"]
     | save --force ($output_dir | path join "neo4j-init-script-configmap.yaml")
 
     # ── PVCs ──────────────────────────────────────────────────────────────────
@@ -74,7 +76,7 @@ def main [context_nuon: string] {
     )
     $expr | save --force $tmp
     print $"  rendering pvcs.dhall -> neo4j-pvcs.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "neo4j-pvcs.yaml")
+    dhall_yaml $tmp ["--documents"] | save --force ($output_dir | path join "neo4j-pvcs.yaml")
     rm $tmp
 
     # ── Service ───────────────────────────────────────────────────────────────
@@ -87,7 +89,7 @@ def main [context_nuon: string] {
     )
     $expr | save --force $tmp
     print $"  rendering service.dhall -> neo4j-service.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "neo4j-service.yaml")
+    dhall_yaml $tmp ["--documents"] | save --force ($output_dir | path join "neo4j-service.yaml")
     rm $tmp
 
     # ── StatefulSet ───────────────────────────────────────────────────────────
@@ -113,7 +115,7 @@ def main [context_nuon: string] {
     )
     $expr | save --force $tmp
     print $"  rendering statefulset.dhall -> neo4j-statefulset.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "neo4j-statefulset.yaml")
+    dhall_yaml $tmp ["--documents"] | save --force ($output_dir | path join "neo4j-statefulset.yaml")
     rm $tmp
 
     print $"  neo4j: done"

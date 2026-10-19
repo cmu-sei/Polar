@@ -37,6 +37,8 @@
 # Writes:
 #   <output_dir>/namespaces.yaml
 
+use ../../../../dhall-render.nu [dhall_yaml]
+
 def main [context_nuon: string] {
     let context   = ($context_nuon | from nuon)
     let chart_dir  = $context.chart_dir
@@ -47,7 +49,7 @@ def main [context_nuon: string] {
     let src = ($chart_dir | path join "namespaces.dhall")
     let out = ($output_dir | path join "namespaces.yaml")
     print $"  rendering namespaces.dhall -> namespaces.yaml"
-    dhall-to-yaml --documents --file $src | save --force $out
+    dhall_yaml $src ["--documents"] | save --force $out
 
     print $"  namespaces: done"
 }

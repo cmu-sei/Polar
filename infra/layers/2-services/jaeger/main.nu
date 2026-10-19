@@ -23,6 +23,8 @@
 
 # infra/layers/2-services/jaeger/main.nu
 
+use ../../../dhall-render.nu [dhall_yaml]
+
 def main [context_nuon: string] {
     let context    = ($context_nuon | from nuon)
     let chart_dir  = $context.chart_dir
@@ -39,7 +41,7 @@ def main [context_nuon: string] {
     $expr | save --force $tmp
 
     print $"  rendering jaeger deployment + service -> jaeger.yaml"
-    dhall-to-yaml --documents --file $tmp | save --force ($output_dir | path join "jaeger.yaml")
+    dhall_yaml $tmp ["--documents"] | save --force ($output_dir | path join "jaeger.yaml")
     rm $tmp
 
     print $"  jaeger: done"
