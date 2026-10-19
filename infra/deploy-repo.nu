@@ -44,7 +44,7 @@
 use runtime.nu [container_runtime, insecure_pull_flags]
 use retry.nu [with_retries]
 use layers.nu [layer_problems]
-use deploy-objects.nu [BOOTSTRAP_LAYERS, documents, git_repository, has_job, kustomization, provenance, published_layers, readme, unpinned_images, yaml_docs]
+use deploy-objects.nu [BOOTSTRAP_LAYERS, annotate_config_hashes, documents, git_repository, has_job, kustomization, provenance, published_layers, readme, unpinned_images, yaml_docs]
 
 export const DEFAULT_PORT = 9443
 # The name Flux is given. It is a Service in the cluster whose Endpoints are the host, so it needs no host resolution.
@@ -298,6 +298,8 @@ def digest_of [file: string] { open --raw $file | hash sha256 }
 # Everything the published tree is made of, as files: path -> text. Pure given the facts.
 export def tree_files [target: string, layers: list, texts: record, port: int, facts: record] {
     let published = (published_layers $layers)
+    let rendered = $texts
+    let texts = (annotate_config_hashes $rendered)
     let layer_files = ($published | each {|l|
         $l.files | where {|f| $f in ($texts | columns) } | each {|f| { path: $"layers/($l.name)/($f)", text: ($texts | get $f) } }
     } | flatten)
@@ -308,7 +310,7 @@ export def tree_files [target: string, layers: list, texts: record, port: int, f
     })
     let source = (git_repository $target $CLUSTER_NAME $port)
     let recorded = ($facts | insert layers ($published | each {|l|
-        { name: $l.name, depends_on: $l.depends_on, files: ($l.files | where {|f| $f in ($texts | columns) } | each {|f| { path: $f, sha256: ($texts | get $f | hash sha256) } }) }
+        { name: $l.name, depends_on: $l.depends_on, files: ($l.files | where {|f| $f in ($texts | columns) } | each {|f| { path: $f, sha256: ($texts | get $f | hash sha256), rendered_sha256: ($rendered | get $f | hash sha256) } }) }
     }))
     $layer_files ++ [
         { path: "flux/gitrepository.yaml", text: (yaml_docs [$source]) }

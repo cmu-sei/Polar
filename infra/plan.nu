@@ -44,6 +44,10 @@ export def build_plan [config: record, dev: bool] {
     let has_neo4j = ("neo4j" in $d)
     let has_seed = ($has_ca_agent and ("polar-git-server" in $d) and ("polar-scheduler-observer" in $d))
     let has_core = ($has_ci or ("cassini" in $d) or $has_ca_agent or $has_neo4j)
+    # A gitops target is not applied by up.nu: its layers are committed, signed, to a deployment git server outside
+    # the cluster, and Flux applies them. up.nu still does what has to exist before Flux (namespaces, the CA, the
+    # secrets) and what needs running workloads after it (the admin flow, the seed, the browser).
+    let gitops = ($config.gitops? | default false)
 
     [
         { id: "preflight", title: "preflight", on: true, why: "" }
@@ -57,7 +61,12 @@ export def build_plan [config: record, dev: bool] {
             on: ($has_ci and ($ca_cm | is-not-empty))
             why: (if not $has_ci { "target does not deploy cert-issuer" } else { "target does not use a provisioned CA (cert_issuer_ca_configmap is empty)" })
         }
-        { id: "infra", title: "secrets and infrastructure", on: true, why: "" }
+        { id: "infra", title: "secrets and infrastructure", on: (not $gitops), why: "the layers are applied by Flux (gitops target)" }
+        { id: "secrets", title: "secrets", on: $gitops, why: "up.nu creates the secrets in the infrastructure step" }
+        { id: "deploy-host", title: "deployment git server", on: $gitops, why: "target is not applied by Flux" }
+        { id: "publish", title: "publish the layers", on: $gitops, why: "target is not applied by Flux" }
+        { id: "flux", title: "install Flux", on: $gitops, why: "target is not applied by Flux" }
+        { id: "flux-wait", title: "wait for Flux to reconcile", on: $gitops, why: "target is not applied by Flux" }
         { id: "pods", title: "waiting for core services", on: $has_core, why: "target deploys none of cert-issuer, cassini, credentials-agent, neo4j" }
         { id: "forwards", title: "port-forwards", on: ($has_ca_agent or $has_neo4j), why: "target deploys neither credentials-agent nor neo4j" }
         { id: "admin", title: "admin flow", on: $has_ca_agent, why: "target does not deploy credentials-agent" }

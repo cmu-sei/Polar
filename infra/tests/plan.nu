@@ -88,6 +88,28 @@ def main [] {
                 assert ("git" not-in (build_forwards (config [] ["credentials-agent.yaml"]) | get name))
             }
         }
+        {
+            name: "a target that is not gitops applies its layers itself, and has no deployment host, publish or Flux steps"
+            body: {
+                let plan = (build_plan (config ["neo4j"] ["namespaces.yaml" "credentials-agent.yaml"]) false)
+                assert (on $plan "infra")
+                for id in ["secrets" "deploy-host" "publish" "flux" "flux-wait"] { assert (not (on $plan $id)) }
+            }
+        }
+        {
+            name: "a gitops target creates its secrets, publishes and waits for Flux in place of applying, and still runs the steps that need workloads"
+            body: {
+                let c = ((config ["neo4j"] ["namespaces.yaml" "credentials-agent.yaml" "polar-git-server.yaml" "polar-scheduler-observer.yaml"]) | insert gitops true)
+                let plan = (build_plan $c false)
+                assert (not (on $plan "infra"))
+                for id in ["secrets" "deploy-host" "publish" "flux" "flux-wait" "admin" "seed" "browser"] { assert (on $plan $id) }
+                # Flux comes after the CA and the secrets it does not own, and the workload steps after Flux
+                let order = ($plan | get id)
+                assert (($order | enumerate | where item == "ca" | first | get index) < ($order | enumerate | where item == "secrets" | first | get index))
+                assert (($order | enumerate | where item == "secrets" | first | get index) < ($order | enumerate | where item == "publish" | first | get index))
+                assert (($order | enumerate | where item == "flux-wait" | first | get index) < ($order | enumerate | where item == "admin" | first | get index))
+            }
+        }
     ]
 
     let results = ($tests | each {|t|

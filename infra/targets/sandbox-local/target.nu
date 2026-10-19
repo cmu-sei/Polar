@@ -159,6 +159,10 @@ def main [] {
         # Every image of the node registry is named by digest in the render (infra/lock.nu).
         pin_images : true
 
+        # Flux applies the layers, from a signed commit on a deployment git server outside the cluster (infra/deploy-repo.nu,
+        # infra/flux.nu). up.nu does what has to exist before Flux and what needs running workloads after it.
+        gitops : true
+
         overrides : ($target_dir | path join "overrides.dhall")
 
         charts : [

@@ -25,7 +25,7 @@
 # wait for each, and the checks that keep an unpinned image out.
 
 use std/assert
-use ../deploy-objects.nu [documents, git_repository, has_job, health_check, kustomization, published_layers, unpinned_images, yaml_docs]
+use ../deploy-objects.nu [annotate_config_hashes, CONFIG_HASH_ANNOTATION, documents, git_repository, has_job, health_check, kustomization, published_layers, unpinned_images, yaml_docs]
 
 def fails_with [needle: string, body: closure] {
     let r = (try { do $body; "no error" } catch {|e| $e.msg })
@@ -127,6 +127,32 @@ def main [] {
                 let text = (yaml_docs $docs)
                 assert equal (documents $text) $docs
                 assert ($text | str ends-with "\n")
+            }
+        }
+        {
+            name: "a workload that reads a ConfigMap carries a fingerprint of it, which changes when the ConfigMap does, so Flux restarts it"
+            body: {
+                let cm = {|v| $"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  namespace: polar\ndata:\n  ADMINS: ($v)\n" }
+                let job = "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: j\n  namespace: polar\nspec:\n  template:\n    metadata:\n      labels:\n        app: j\n    spec:\n      containers:\n      - name: c\n        image: x@sha256:1\n        envFrom:\n        - configMapRef:\n            name: cfg\n"
+                let before = (annotate_config_hashes { "j.yaml": $job, "cm.yaml": (do $cm "a") })
+                let after = (annotate_config_hashes { "j.yaml": $job, "cm.yaml": (do $cm "b") })
+                let h = {|o| documents ($o | get "j.yaml") | first | get spec.template.metadata.annotations | get $CONFIG_HASH_ANNOTATION }
+                assert ((do $h $before) != (do $h $after))
+                assert equal (do $h $before) (do $h (annotate_config_hashes { "j.yaml": $job, "cm.yaml": (do $cm "a") }))
+                # the labels stay, and the ConfigMap's own file is as it was rendered
+                assert equal (documents ($before | get "j.yaml") | first | get spec.template.metadata.labels.app) "j"
+                assert equal ($before | get "cm.yaml") (do $cm "a")
+            }
+        }
+        {
+            name: "a workload with no ConfigMap of the render, or in another namespace, is left exactly as rendered"
+            body: {
+                let plain = "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: p\n  namespace: polar\nspec:\n  template:\n    spec:\n      containers:\n      - name: c\n        image: x@sha256:1\n"
+                let other = "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: o\n  namespace: elsewhere\nspec:\n  template:\n    spec:\n      containers:\n      - name: c\n        image: x@sha256:1\n        envFrom:\n        - configMapRef:\n            name: cfg\n"
+                let cm = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  namespace: polar\ndata:\n  A: b\n"
+                let out = (annotate_config_hashes { "p.yaml": $plain, "o.yaml": $other, "cm.yaml": $cm })
+                assert equal ($out | get "p.yaml") $plain
+                assert equal ($out | get "o.yaml") $other
             }
         }
     ]

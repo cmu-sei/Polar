@@ -371,8 +371,14 @@ facts still passed to the custom charts (`neo4j_bolt_addr`, `cert_issuer_url`,
 can have completely different orderings.
 
 `sandbox-local` is the target for a Flux-based deployment: `local-minimal` plus a `flux` layer holding the controllers
-(`nu infra/flux.nu export` regenerates them; see `docs/architecture/cluster-bootstrap.md`). Until its gitops mode exists, `up.nu`
-applies it like any other target.
+(`nu infra/flux.nu export` regenerates them; see `docs/architecture/cluster-bootstrap.md`). It declares `gitops: true`, so `up.nu`
+does not apply its layers. It creates the namespaces, the cluster CA and the secrets (which Flux does not own), starts the
+deployment git server (`deploy-repo.nu ensure`), commits the layers there signed with the pipeline's certificate
+(`publish`; it refuses a dirty tree unless `up.nu` is given `--allow-dirty`), installs Flux (`flux.nu install`, which
+refuses a head that is not signed) and waits for every layer to be Ready at that commit (`flux.nu wait`). Then it runs the
+steps that need workloads: the admin flow, the seed, the browser. A workload that reads a ConfigMap carries a fingerprint
+of it in its pod template (added when publishing, `polar.dev/config-hash`), so a changed ConfigMap restarts it. Written
+2026-10-19; not yet run on a cluster.
 
 **The image lock.** A manifest that names an image by tag alone does not say which bytes run: a rebuilt image under the
 same tag is a different image behind the same name, and a GitOps tool cannot see the change. A target with

@@ -131,7 +131,7 @@ def main [] {
                     { name: "flux", depends_on: ["platform"], wait_for: [], files: ["flux.yaml"] }
                     { name: "agents", depends_on: ["flux"], wait_for: [], files: ["job.yaml"] }
                 ]
-                let texts = { "ns.yaml": "kind: Namespace\nmetadata:\n  name: polar\n", "job.yaml": "kind: Job\nmetadata:\n  name: a\n", "flux.yaml": "kind: Deployment\n" }
+                let texts = { "ns.yaml": "kind: Namespace\nmetadata:\n  name: polar\n", "job.yaml": "kind: Job\nmetadata:\n  name: a\n", "flux.yaml": "kind: Deployment\nmetadata:\n  name: f\n" }
                 let files = (tree_files "t" $layers $texts 9443 { schema: 1, target: "t" })
                 let paths = ($files | get path)
                 assert ("layers/platform/ns.yaml" in $paths)

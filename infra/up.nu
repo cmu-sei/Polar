@@ -351,14 +351,39 @@ def step_ca [] {
     }
 }
 
-def step_infra [config: record] {
-    let output_dir = $config.output_dir
+def run_secrets [config: record] {
     let secrets_script = ($config.target_dir | path join "secrets.nu")
     if ($secrets_script | path exists) {
         print "  creating secrets..."
         ^$nu.current-exe $secrets_script $config.target_dir $config.repo_root
         if $env.LAST_EXIT_CODE != 0 { fail "secrets.nu failed" }
     }
+}
+
+# A gitops target's secrets are made here and never committed: Flux does not own them and never prunes them.
+def step_secrets [config: record] {
+    run_secrets $config
+    ok "secrets created"
+}
+
+# The scripts a gitops target runs in place of the apply loop. Each stops the run on failure with its own message.
+def run_script [args: list<string>] {
+    ^$nu.current-exe ...$args
+    if $env.LAST_EXIT_CODE != 0 { fail $"($args | skip 1 | first 2 | str join ' ') failed" }
+}
+
+def step_deploy_host [target: string] { run_script [infra/deploy-repo.nu ensure $target] }
+
+def step_publish [target: string, allow_dirty: bool] {
+    run_script ([infra/deploy-repo.nu publish $target] ++ (if $allow_dirty { ["--allow-dirty"] } else { [] }))
+}
+
+def step_flux [target: string] { run_script [infra/flux.nu install $target] }
+def step_flux_wait [target: string] { run_script [infra/flux.nu wait $target] }
+
+def step_infra [config: record] {
+    let output_dir = $config.output_dir
+    run_secrets $config
     mut changed: list<string> = []
     for filename in ($config.apply_order | skip 1) {
         let applied = (apply_file $output_dir $filename $changed)
@@ -513,7 +538,14 @@ def step_seed [target: string, config: record, username: string, mail: string] {
             $edit.text | save --force $file
             note $"added this cluster's administrator ($identity) to infra/targets/($target)/config.nuon; applying it to the git server"
             step_render $target
-            step_infra $config
+            if ($config.gitops? | default false) {
+                # The tree is dirty by exactly this edit, which the provenance will say. Flux restarts the git server's
+                # Job because its ConfigMap's fingerprint, in the Job's pod template, changed.
+                step_publish $target true
+                step_flux_wait $target
+            } else {
+                step_infra $config
+            }
             wait_pods (seed_waits) 10min
         }
     }
@@ -589,6 +621,7 @@ def main [
     --dev                   # Also build and load images (local development cluster)
     --user: string          # Username for the first admin account
     --email: string         # Email for the first admin account
+    --allow-dirty           # Publish a gitops target from a working tree with uncommitted changes (the provenance records it)
 ] {
     if not ("infra/render.nu" | path exists) {
         fail "run this from the repo root (infra/render.nu not found)"
@@ -623,6 +656,11 @@ def main [
             "namespaces" => { apply_file $config.output_dir "namespaces.yaml" }
             "ca" => { step_ca }
             "infra" => { step_infra $config }
+            "secrets" => { step_secrets $config }
+            "deploy-host" => { step_deploy_host $target }
+            "publish" => { step_publish $target $allow_dirty }
+            "flux" => { step_flux $target }
+            "flux-wait" => { step_flux_wait $target }
             "pods" => { wait_pods $waits 10min }
             "forwards" => { step_forwards $forwards }
             "admin" => { step_admin $username $mail }

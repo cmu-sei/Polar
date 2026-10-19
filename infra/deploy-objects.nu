@@ -31,6 +31,8 @@
 # provenance.json, README.md. The layers a cluster's installer applies itself (BOOTSTRAP_LAYERS: Flux's own
 # controllers) are not in it: Flux cannot reconcile itself into existence.
 
+use apply.nu [config_users]
+
 # Layers the installer applies before Flux exists.
 export const BOOTSTRAP_LAYERS = ["flux"]
 export const SOURCE_NAME = "polar-deploy"
@@ -155,6 +157,40 @@ export def git_repository [target: string, host: string, port: int] {
 # YAML documents joined into one file.
 export def yaml_docs [docs: list] {
     $docs | each {|d| $d | to yaml | str trim --right } | str join "\n---\n" | $in + "\n"
+}
+
+export const CONFIG_HASH_ANNOTATION = "polar.dev/config-hash"
+
+# A fingerprint of a ConfigMap's content.
+def configmap_hash [doc: record] {
+    { data: ($doc | get -o data | default {}), binaryData: ($doc | get -o binaryData | default {}) } | to json --raw | hash sha256
+}
+
+# The rendered files with, in every Job, Deployment and StatefulSet that uses a ConfigMap, an annotation in its pod
+# template that is a fingerprint of those ConfigMaps. Flux recreates a Job only when its spec changes, and a changed
+# ConfigMap does not change it: with the fingerprint, it does, and the workload restarts to read the new content
+# (`apply.nu` does the same for the imperative path). A file with no such workload is returned as it was rendered.
+export def annotate_config_hashes [texts: record] {
+    let maps = ($texts | items {|f, t| documents $t | where {|d| ($d.kind? | default "") == "ConfigMap" } }
+        | flatten
+        | reduce --fold {} {|d, acc| $acc | upsert $"($d.metadata.namespace? | default 'polar')/($d.metadata.name)" (configmap_hash $d) })
+    $texts | items {|f, text|
+        let users = (config_users $text | each {|u|
+            let known = ($u.configmaps | where {|c| $"($u.ns)/($c)" in ($maps | columns) })
+            if ($known | is-empty) { null } else {
+                { kind: $u.kind, name: $u.name, hash: ($known | sort | each {|c| $"($c)=($maps | get $"($u.ns)/($c)")" } | str join "\n" | hash sha256) }
+            }
+        } | compact)
+        if ($users | is-empty) { return { f: $f, text: $text } }
+        let docs = (documents $text | each {|d|
+            let hit = ($users | where kind == ($d.kind? | default "") and name == ($d.metadata?.name? | default ""))
+            if ($hit | is-empty) { $d } else {
+                let annotations = ($d | get -o spec.template.metadata.annotations | default {} | upsert $CONFIG_HASH_ANNOTATION ($hit | first | get hash))
+                $d | upsert spec.template.metadata.annotations $annotations
+            }
+        })
+        { f: $f, text: (yaml_docs $docs) }
+    } | reduce --fold {} {|r, acc| $acc | insert $r.f $r.text }
 }
 
 # What the published tree records about where it came from. Only facts that exist before the cluster does: nothing
