@@ -70,9 +70,11 @@ def load_table [] { open $TABLE }
 
 # "10.0.2.2:5000/kube-observer:latest" -> {ref, name, tag}
 # A leading path segment that looks like a host (has a "." or ":") is the
-# registry and is dropped; the table holds bare names.
-def split_ref [ref: string] {
-    let parts = ($ref | split row "/")
+# registry and is dropped; the table holds bare names. A reference pinned by
+# digest (`name:tag@sha256:...`, a target that pins its images) is the same
+# image: the digest is not part of the name or the tag.
+export def split_ref [ref: string] {
+    let parts = ($ref | split row "@" | first | split row "/")
     let path = if ($parts | length) > 1 and (($parts | first) =~ '[.:]') {
         $parts | skip 1 | str join "/"
     } else {
@@ -93,7 +95,14 @@ def referenced [files: list<string>] {
     }
     | flatten
     | uniq
+    | ours (node_registry)
     | each {|r| split_ref $r }
+}
+
+# The image references under the registry the nodes pull from: the ones this repository builds or mirrors. Another registry's
+# (an image a chart takes from upstream by digest, as the storage chart does for a registry in the cluster) is not ours to push.
+export def ours [registry: string] {
+    $in | where {|r| $r | str starts-with $"($registry)/" }
 }
 
 # The table rows a set of manifests needs. Fails, listing every problem at

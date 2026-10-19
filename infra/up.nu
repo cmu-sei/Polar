@@ -73,6 +73,7 @@ use runtime.nu [container_runtime]
 use plan.nu [build_forwards, build_plan, deployed_charts, needs_runtime]
 use agent-pods.nu [delete_stale_namespaces]
 use cluster-registry.nu
+use registry.nu [node_registry]
 use apply.nu [any_pod_ready, changed_configmaps, config_users, gate_after, job_verdict, jobs_in, stale_images, stale_pod_images, stale_pod_report, workload_needs_restart]
 
 def note [msg: string] { print $"  -- ($msg)" }
@@ -719,6 +720,8 @@ def main [
     let in_cluster_registry = (cluster-registry settings_of (cluster-registry cluster_of $target))
     let in_cluster = ($in_cluster_registry != null)
     if $in_cluster { $env.POLAR_REGISTRY = $"localhost:($in_cluster_registry.local_port)" }
+    # The registry as this target's nodes name it, for every script this run starts (images.nu evicts a node's cached copy by it).
+    $env.POLAR_NODE_REGISTRY = (node_registry $target)
 
     let plan = (build_plan $config $dev { in_cluster: $in_cluster, import_from: $import_from })
     let enabled = ($plan | where on)

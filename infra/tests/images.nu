@@ -24,7 +24,7 @@
 # How images are named when they are published and imported, and which ones.
 
 use std/assert
-use ../images.nu [arch_of, import_rows, published_ref, published_rows, system_of]
+use ../images.nu [arch_of, import_rows, ours, published_ref, published_rows, split_ref, system_of]
 
 def sample [] {
     [
@@ -71,6 +71,22 @@ def main [] {
                 assert equal (published_rows (sample) ["postgres"] | get image) ["postgres"]
                 assert equal (published_rows (sample) ["postgres" "cassini"] | get image) ["postgres" "cassini"]
                 assert ((try { published_rows (sample) ["neo4j"]; "accepted" } catch {|e| $e.msg }) | str contains "not an image this repository builds")
+            }
+        }
+        {
+            name: "a reference is its image's name and tag, whether or not it is pinned by digest"
+            body: {
+                assert equal (split_ref "localhost:30500/cassini:latest") { ref: "localhost:30500/cassini:latest", name: "cassini", tag: "latest" }
+                let pinned = "localhost:30500/neo4j:5.26.2@sha256:30e755f597ff0810f7e4359b4d5ceb49872906a759d6c4ccf35ed50b14a59d7f"
+                assert equal (split_ref $pinned) { ref: $pinned, name: "neo4j", tag: "5.26.2" }
+                assert equal (split_ref "10.0.2.2:5000/kube-observer") { ref: "10.0.2.2:5000/kube-observer", name: "kube-observer", tag: "latest" }
+            }
+        }
+        {
+            name: "only the images under the node registry are the ones to build and push; one from upstream is not"
+            body: {
+                let refs = ["localhost:30500/cassini:latest" "docker.io/rancher/local-path-provisioner:v0.0.35@sha256:abc" "localhost:30500/neo4j:5.26.2" "localhost:305000/x:y"]
+                assert equal ($refs | ours "localhost:30500") ["localhost:30500/cassini:latest" "localhost:30500/neo4j:5.26.2"]
             }
         }
         {
