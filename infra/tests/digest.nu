@@ -24,7 +24,7 @@
 # Reading an image reference and the digest header a registry answers with.
 
 use std/assert
-use ../digest.nu [digest_from_headers, parse_image_ref]
+use ../digest.nu [digest_from_headers, manifest_urls, parse_image_ref]
 
 def main [] {
     let tests = [
@@ -41,6 +41,15 @@ def main [] {
                 assert equal (parse_image_ref "localhost:5000/cassini@sha256:abc") null
                 assert equal (parse_image_ref "localhost:5000/cassini") null
                 assert equal (parse_image_ref "cassini:latest") null
+            }
+        }
+        {
+            name: "a manifest is asked for over HTTPS first, then over plain HTTP, which only the local registry speaks"
+            body: {
+                assert equal (manifest_urls { host: "registry.example.org", name: "team/polar-cassini", tag: "v1" }) [
+                    "https://registry.example.org/v2/team/polar-cassini/manifests/v1"
+                    "http://registry.example.org/v2/team/polar-cassini/manifests/v1"
+                ]
             }
         }
         {

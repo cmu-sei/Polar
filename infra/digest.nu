@@ -44,13 +44,22 @@ export def digest_from_headers [headers: string] {
 
 const ACCEPT = "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json"
 
+# The URLs a manifest is asked at, in order: HTTPS, which a registry anyone else runs speaks, then plain HTTP, which the local
+# development registry (`just registry-up`) speaks.
+export def manifest_urls [parts: record] {
+    ["https" "http"] | each {|scheme| $"($scheme)://($parts.host)/v2/($parts.name)/manifests/($parts.tag)" }
+}
+
 # The digest the registry serves for `ref`, or null when it cannot say (the registry does not answer, or the image is not there).
-# A plain-HTTP registry is how the node registry is reached.
 export def registry_digest [ref: string] {
     let parts = (parse_image_ref $ref)
     if $parts == null { return null }
-    let url = $"http://($parts.host)/v2/($parts.name)/manifests/($parts.tag)"
-    let r = (do { ^curl -sI -m 5 -H $"Accept: ($ACCEPT)" $url } | complete)
-    if $r.exit_code != 0 { return null }
-    digest_from_headers $r.stdout
+    for url in (manifest_urls $parts) {
+        let r = (do { ^curl -sI -m 5 -H $"Accept: ($ACCEPT)" $url } | complete)
+        if $r.exit_code == 0 {
+            let digest = (digest_from_headers $r.stdout)
+            if $digest != null { return $digest }
+        }
+    }
+    null
 }
