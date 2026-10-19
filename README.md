@@ -705,9 +705,14 @@ already decrypt the target's secrets has to add you.
 Send them your SSH *public* key (`cat ~/.ssh/id_ed25519.pub`, or
 whichever key you use) and ask them to:
 
-1. Add it to `infra/targets/<target>/.sops.yaml`'s `age:` block.
-2. Run `sops updatekeys infra/targets/<target>/secrets.sops.yaml` to
-   re-encrypt the existing file with your key now included.
+1. Add it to `infra/targets/<target>/.sops.yaml`'s `age:` block. That file
+   is local (gitignored), and the keys in it must be **comma-separated**
+   (`key1,` newline `key2,` ...): sops reads a space-separated list as
+   one recipient and silently encrypts to the first key only.
+2. Run `sops --config infra/targets/<target>/.sops.yaml updatekeys infra/targets/<target>/secrets.sops.yaml`
+   to re-encrypt the existing file with your key now included, then
+   commit the file (the recipients live inside it, so you decrypt after
+   you pull).
 
 If your SSH private key isn't at the default path the devShell
 assumes, set `SOPS_AGE_SSH_PRIVATE_KEY_FILE` in your own `my.env` to
@@ -790,7 +795,7 @@ access to it.
 
 | File | Config used | Env var |
 |---|---|---|
-| `secrets.sops.yaml` (shared) | `.sops.yaml` (repo-tracked, multi-recipient) | `SOPS_AGE_KEY_FILE=<path to your key>` |
+| `secrets.sops.yaml` (shared) | `.sops.yaml` (gitignored, multi-recipient; only needed to encrypt, not to decrypt) | `SOPS_AGE_KEY_FILE=<path to your key>` |
 | `user.sops.yaml` (personal) | `.user.sops.yaml` (gitignored, your own single-recipient config, which you create) | `SOPS_CONFIG=.user.sops.yaml` |
 
 ### Just the container

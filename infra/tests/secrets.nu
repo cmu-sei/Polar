@@ -52,6 +52,23 @@ def broken_target [] {
 def main [] {
     let tests = [
         {
+            name: "a file is decrypted with no .sops.yaml beside it, because it knows its own recipients"
+            body: {
+                let dir = (mktemp -d)
+                let key = ($dir | path join "k")
+                ^ssh-keygen -q -t ed25519 -N "" -f $key
+                let pub = (open --raw $"($key).pub" | split row " " | first 2 | str join " ")
+                $"creation_rules:\n  - path_regex: secrets\\.sops\\.yaml$\n    age: ($pub)\n" | save ($dir | path join ".sops.yaml")
+                "neo4j_auth: neo4j/x\n" | save ($dir | path join "secrets.sops.yaml")
+                with-env { SOPS_CONFIG: ($dir | path join ".sops.yaml") } { ^sops --encrypt --in-place ($dir | path join "secrets.sops.yaml") }
+                rm ($dir | path join ".sops.yaml")
+                let got = (with-env { SOPS_AGE_SSH_PRIVATE_KEY_FILE: $key } { decrypt_sops $dir "secrets.sops.yaml" })
+                rm -rf $dir
+                assert equal $got.failure null
+                assert equal $got.data.neo4j_auth "neo4j/x"
+            }
+        }
+        {
             name: "a generated token is long, made of letters and digits, and different each time"
             body: {
                 let a = (random_token)

@@ -119,17 +119,19 @@ export def decrypt_sops [target_dir: string, file: string] {
     } else {
         ($target_dir | path join ".sops.yaml")
     }
-    if not ($sops_config | path exists) {
-        return { data: {}, failure: { file: $file, reason: $"no SOPS config at ($sops_config)" } }
-    }
 
-    let result = (
+    # The config holds the rules for *encrypting* (who the recipients are). A file already knows its own recipients,
+    # so decrypting needs none, and it is gitignored: a fresh checkout has none, and must still be able to read a
+    # file its key was added to.
+    let result = if ($sops_config | path exists) {
         do {
             with-env { SOPS_CONFIG: $sops_config } {
                 run-external "sops" "--decrypt" "--output-type" "json" $path
             }
         } | complete
-    )
+    } else {
+        do { run-external "sops" "--decrypt" "--output-type" "json" $path } | complete
+    }
     if $result.exit_code != 0 {
         return { data: {}, failure: { file: $file, reason: (first_line $result.stderr) } }
     }
