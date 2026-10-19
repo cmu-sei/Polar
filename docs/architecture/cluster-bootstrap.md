@@ -107,12 +107,12 @@ probe). The bootstrap-admin exchange itself is drawn in `sequences/general/admin
 
 ## What looks odd, and why
 
-- **The git server's administrator is a per-cluster value set by hand, after the first run.** The identity that may seed
-  `polar-schedules` is U's certificate, which exists only after the admin flow in phase 3, but the git server's configuration
-  needs it in phase 1. So the first run reaches the seed, is refused (403), and stops with the instruction to put U's first
-  DNS name in `config.nuon`. The second run renders again, and under Flux that is a new commit that Flux applies before the seed
-  resumes (the alternative branch in the phase 3 diagram). This is the README's step 6. Whether that value belongs in a
-  committed file is open.
+- **The git server's administrator is a per-cluster value, and `up.nu` writes it.** The identity that may seed
+  `polar-schedules` is U's certificate, which exists only after the admin flow, but the git server's configuration
+  needs it. The seed step reads the first DNS name of U's certificate, adds it to `POLAR_GIT_SERVER_ADMINS` in
+  `targets/T/config.nuon` (`seed.nu` `with_admin`), and renders and applies again if that changed anything; under Flux
+  that is a new commit that Flux applies before the seed resumes. The value in a committed `config.nuon` is whatever the
+  last cluster left, and is not meant to be edited.
 - **Namespaces are applied by `up.nu` and again by Flux.** The CA and the secrets need the namespaces before Flux runs, and the
   `platform` layer also declares them. Flux adopts what `up.nu` applied; the content is the same.
 - **`up.nu` creates secrets that Flux does not own.** They are not in the repository, so Flux never prunes them, and they
@@ -128,7 +128,7 @@ probe). The bootstrap-admin exchange itself is drawn in `sequences/general/admin
 4. Verifying a signature on push (the server rejects an unsigned or invalidly signed commit to `deploy-T`): not built.
 5. ~~Pinning images.~~ Built for `sandbox-local`: `infra/lock.nu`, `infra/images.lock.nuon` and `images.dev.lock.nuon`, `images.nu lock refresh|show|promote`, and the render's `pin_images` pass. All 44 image lines of its render carry a digest, and a node pulled one by digest from the plain-HTTP registry. The committed lock does not exist yet: a release writes it from one coherent build (the dev registry holds agents built at different commits).
 6. Restarting a Job on a rebuilt image or a changed ConfigMap, which `apply.nu` does today and Flux does not.
-7. Whether `POLAR_GIT_SERVER_ADMINS` is committed.
+7. ~~Whether `POLAR_GIT_SERVER_ADMINS` is committed.~~ `up.nu` writes it (see above); what is committed is only the last cluster's value.
 
 ## What was not checked
 

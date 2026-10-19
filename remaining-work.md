@@ -74,8 +74,10 @@ Last updated: 2026-10-10.
   `sandbox-local` (empty). `scripts/pipeline` (the static analysis, SBOM and provenance pipeline) was removed by
   mistake and restored. `event-logger` stays.
 - **Open: Flux target.** `sandbox-local` is to become a Flux-based deployment fed by `up.nu`: git is the source of
-  truth and the registry the transport (rendered manifests committed to a deployment repo, pushed as an OCI artifact
-  with `oras`). Stages: a deterministic render (two renders, no diff), per-layer output for Kustomizations with
+  truth, so the system's provenance can be reasoned about from its earliest setup: the rendered manifests are committed
+  and signed to a repository on a deployment git server of our own that runs as a container on the host, outside the
+  cluster, with its own PKI (design: `docs/architecture/cluster-bootstrap.md`). The registry carries images only; an OCI
+  artifact pushed with `oras` was an earlier idea and is not the plan. Stages: a deterministic render (two renders, no diff), per-layer output for Kustomizations with
   `dependsOn`, the Flux layer and mirrored controller images, a gitops mode in `up.nu`, SOPS-encrypted secrets.
   Jobs need `force: true`; the CA, the admin flow and the schedules seed stay imperative. `git revert` rolls back
   manifests only, not data, secrets or certificates.
