@@ -68,14 +68,14 @@ manifests itself, in `apply_order`, with one gate (Cassini); the Flux target rep
 | 6 | namespaces | `up.nu` (`kubectl apply`) | the namespaces |
 | 7 | cluster CA | `polar-admin-grant bootstrap-ca` | Secret `cert-issuer-ca`, ConfigMap `polar-ca`; straight to the API with your kubeconfig, created once and never overwritten (a second run fails with 409) |
 | 8 | secrets | `targets/T/secrets.nu`, `sops`, `rage` | the Secrets listed below |
-| 9 | install Flux (new) | `flux.nu install` | Secret `deploy-repo-auth`; the Flux controllers, the GitRepository, the Kustomizations |
+| 9 | install Flux | `flux.nu install` | Built 2026-10-19; the git half is checked, the cluster half is not yet run. First it clones the deployment repository as `flux` and checks that its head is signed by the pipeline's certificate (`git verify-commit` in the PKI's GnuPG home); an unsigned or unpublished head stops it before the cluster is touched. Then it applies the rendered controllers and waits for their CRDs and Deployments; a Service `polar-deploy-git` (the name on the server's certificate) with an EndpointSlice to the host (`--host`, `10.0.2.2` on the podman node); Secret `deploy-repo-auth` (the `flux` certificate, key and the deployment CA, never printed); and the GitRepository and Kustomizations from the verified clone |
 
 ### Phase 2 (Flux)
 
 `platform` → `cert-issuer` → `data` → `cassini` → `identity` → `agents`, each a Kustomization that `dependsOn` the one before
 and is healthy before the next starts (what it waits for is in `layers.json`, copied from what `up.nu` waits for today).
 `cassini` is a layer of its own because a client that starts before its broker attaches to a broker that is about to go away.
-`flux.nu wait` polls until all six are Ready at the published commit.
+`flux.nu wait <target>` polls until every Kustomization is Ready *and* was applied from the commit that was published (a layer that is Ready at an older commit does not count), printing a layer's state when it changes, and on timeout names the layers that are not.
 
 ### Phase 3 (`up.nu` again)
 

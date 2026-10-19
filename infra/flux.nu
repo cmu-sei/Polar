@@ -27,11 +27,18 @@
 # else, so they are reviewed, signed and rolled back the same way:
 #
 #   nu infra/flux.nu export    regenerate the controllers' YAML from the pinned fluxcd
+#   nu infra/flux.nu install <target> [--port N] [--host IP]
+#                              put Flux on the cluster and point it at the target's deployment repository
+#   nu infra/flux.nu wait <target> [--port N] [--timeout 20min]
+#                              wait until every layer is Ready at the commit that was published
 #
 # The version is whatever `fluxcd` the repository's pinned nixpkgs provides: bump nixpkgs and run `export`,
 # then mirror the new controller images (infra/images.nuon) and read the diff. Only the two controllers a
 # git-sourced deployment needs are installed: source-controller and kustomize-controller. The file is
 # generated and committed; `render` copies it, pointing the images at the registry the nodes pull from.
+
+use deploy-repo.nu [CLUSTER_NAME, DEFAULT_PORT, READER, ensure_signing, pki_dir, repo_name, tls_config]
+use deploy-objects.nu [AUTH_SECRET, FLUX_NS, SOURCE_NAME]
 
 const CHART = (path self | path dirname | path join "layers" "1-platform" "services" "flux")
 const SELF = (path self)
@@ -66,6 +73,202 @@ def "main export" [] {
     for i in $images { print $"  ($i)" }
 }
 
+# ---- install and wait --------------------------------------------------------------------------------------------
+
+# Where the nodes reach the host: the address of the host as the node sees it (`10.0.2.2` on the podman node, the same
+# one the registry is reached at). Other setups name theirs with --host.
+export const DEFAULT_HOST = "10.0.2.2"
+
+# The name the deployment git server's certificate carries is a Service in the cluster, so Flux needs no host resolution.
+export def service_name [] { $CLUSTER_NAME | split row "." | first }
+
+export def is_ipv4 [text: string] {
+    let parts = ($text | split row ".")
+    (($parts | length) == 4) and ($parts | all {|p| ($p =~ '^\d{1,3}$') and (($p | into int) <= 255) })
+}
+
+# A Service with no selector, and the one address it leads to: the host's port where the deployment git server listens.
+export def host_documents [ip: string, port: int] {
+    let name = (service_name)
+    [
+        {
+            apiVersion: "v1"
+            kind: "Service"
+            metadata: { name: $name, namespace: $FLUX_NS }
+            spec: { ports: [{ name: "https", port: $port, targetPort: $port, protocol: "TCP" }] }
+        }
+        {
+            apiVersion: "discovery.k8s.io/v1"
+            kind: "EndpointSlice"
+            metadata: { name: $"($name)-host", namespace: $FLUX_NS, labels: { "kubernetes.io/service-name": $name } }
+            addressType: "IPv4"
+            ports: [{ name: "https", port: $port, protocol: "TCP" }]
+            endpoints: [{ addresses: [$ip] }]
+        }
+    ]
+}
+
+# "main@sha1:abc..." -> "abc..."
+export def commit_of_revision [revision: string] {
+    $revision | split row ":" | last
+}
+
+# Where each Kustomization stands, given what `kubectl get kustomizations -o json` listed and the commit that was published.
+export def layer_states [items: list, commit: string] {
+    $items | each {|k|
+        let ready = ($k.status?.conditions? | default [] | where type == "Ready" | default [{}] | first)
+        let applied = ($k.status?.lastAppliedRevision? | default "")
+        {
+            name: $k.metadata.name
+            ready: (($ready | get -o status | default "") == "True")
+            reason: ($ready | get -o reason | default "")
+            message: ($ready | get -o message | default "")
+            applied: $applied
+            current: (($applied | is-not-empty) and ($applied | str ends-with $commit))
+        }
+    }
+}
+
+# Every layer is Ready and applied from the published commit (and there is at least one).
+export def settled [states: list] {
+    ($states | is-not-empty) and ($states | all {|s| $s.ready and $s.current })
+}
+
+export def describe_state [s: record] {
+    let state = if $s.ready and $s.current { "ready" } else if $s.ready { $"ready, but at ($s.applied)" } else { $s.reason }
+    let note = ($s.message | lines | first | default "" | str substring 0..160)
+    if ($note | is-empty) { $"($s.name): ($state)" } else { $"($s.name): ($state) -- ($note)" }
+}
+
+def run_ok [what: string, cmd: closure] {
+    let r = (do $cmd | complete)
+    if $r.exit_code != 0 { error make --unspanned { msg: $"($what) failed: ($r.stderr | str trim)" } }
+    $r.stdout
+}
+
+def load_config [target: string] {
+    let file = ($env.PWD | path join $"infra/targets/($target)/target.nu")
+    if not ($file | path exists) { error make --unspanned { msg: $"no such target: ($target)" } }
+    ^$nu.current-exe $file | from nuon
+}
+
+def server_url [target: string, port: int] { $"https://localhost:($port)/(repo_name $target).git" }
+
+def git_as_reader [pki: string, args: list<string>] {
+    let tls = (tls_config $pki $READER)
+    ^env -u GIT_SSL_CAINFO -u SSL_CERT_FILE git ...$tls ...$args
+}
+
+# The commit the deployment repository's main branch is at, or null when nothing is published.
+def published_commit [pki: string, target: string, port: int] {
+    let r = (do { git_as_reader $pki [ls-remote (server_url $target $port) refs/heads/main] } | complete)
+    if $r.exit_code != 0 { error make --unspanned { msg: $"cannot read the deployment repository (is it running? nu infra/deploy-repo.nu ensure ($target)): ($r.stderr | str trim)" } }
+    let line = ($r.stdout | lines | where {|l| $l | str contains "refs/heads/main" })
+    if ($line | is-empty) { null } else { $line | first | split row "\t" | first | str trim }
+}
+
+# Clones the deployment repository as the reader and checks that its head is signed by the pipeline's certificate, which
+# chains to the deployment CA. Nothing is applied from a tree that does not pass.
+def fetch_verified [pki: string, target: string, port: int, into: string] {
+    let commit = (published_commit $pki $target $port)
+    if $commit == null { error make --unspanned { msg: $"nothing is published to deploy-($target): run nu infra/deploy-repo.nu publish ($target)" } }
+    let signing = (ensure_signing $pki)
+    run_ok "cloning the deployment repository" { git_as_reader $pki [clone -q (server_url $target $port) $into] }
+    let verified = (with-env { GNUPGHOME: $signing.home } {
+        let r = (do { ^git -C $into -c gpg.format=x509 -c gpg.x509.program=gpgsm verify-commit HEAD } | complete)
+        do { ^gpgconf --kill gpg-agent } | complete | ignore
+        $r
+    })
+    if $verified.exit_code != 0 {
+        error make --unspanned { msg: $"the head of deploy-($target) is not signed by the pipeline's certificate, so nothing from it is applied: ($verified.stderr | str trim | if ($in | is-empty) { 'the commit carries no signature' } else { $in })" }
+    }
+    $commit
+}
+
+def apply_yaml [docs: list] {
+    let text = ($docs | each {|d| $d | to yaml | str trim --right } | str join "\n---\n")
+    let r = ($text | do { ^kubectl apply -f - } | complete)
+    if $r.exit_code != 0 { error make --unspanned { msg: $"kubectl apply failed: ($r.stderr | str trim)" } }
+    print ($r.stdout | str trim)
+}
+
+def "main install" [
+    target: string
+    --port: int = 9443          # the port the deployment git server listens on (host and Service)
+    --host: string = "10.0.2.2" # the host's address as the nodes reach it
+] {
+    if not (is_ipv4 $host) { error make --unspanned { msg: $"--host must be an IPv4 address, got '($host)'" } }
+    let config = (load_config $target)
+    let pki = (pki_dir $env.HOME $target)
+    if not ($pki | path join "ca.pem" | path exists) { error make --unspanned { msg: $"no deployment PKI at ($pki): run: nu infra/deploy-repo.nu ensure ($target)" } }
+    let controllers = ($config.output_dir | path join "flux-controllers.yaml")
+    if not ($controllers | path exists) { error make --unspanned { msg: $"no rendered ($controllers): run: nu infra/render.nu ($target)" } }
+
+    # Before anything touches the cluster: the published tree is the one the pipeline signed.
+    let work = (mktemp -d)
+    let copy = ($work | path join "repo")
+    let commit = (try { fetch_verified $pki $target $port $copy } catch {|e| rm -rf $work; error make --unspanned { msg: $e.msg } })
+    print $"  ok: deploy-($target) at ($commit | str substring 0..11) is signed by the pipeline's certificate"
+    let objects = ["gitrepository.yaml" "kustomizations.yaml"] | each {|f| $copy | path join "flux" $f }
+    for f in $objects { if not ($f | path exists) { rm -rf $work; error make --unspanned { msg: $"the published tree has no ($f | path relative-to $copy)" } } }
+
+    print "  applying Flux's controllers..."
+    run_ok "applying the controllers" { ^kubectl apply -f $controllers } | print
+    run_ok "waiting for Flux's CRDs" { ^kubectl wait --for=condition=Established --timeout=120s crd/gitrepositories.source.toolkit.fluxcd.io crd/kustomizations.kustomize.toolkit.fluxcd.io } | ignore
+    run_ok "waiting for Flux's controllers" { ^kubectl -n $FLUX_NS rollout status deploy/source-controller deploy/kustomize-controller --timeout=300s } | ignore
+    print "  ok: source-controller and kustomize-controller are running"
+
+    print $"  pointing ($CLUSTER_NAME) at ($host):($port)..."
+    apply_yaml (host_documents $host $port)
+
+    # The `flux` identity's certificate and key, and the deployment CA, are what Flux presents and trusts. They go
+    # from the files into the Secret without being printed or written anywhere else.
+    let secret = (run_ok "building the credentials Secret" {
+        ^kubectl -n $FLUX_NS create secret generic $AUTH_SECRET $"--from-file=tls.crt=($pki | path join $'($READER).pem')" $"--from-file=tls.key=($pki | path join $'($READER).key')" $"--from-file=ca.crt=($pki | path join 'ca.pem')" --dry-run=client -o yaml
+    })
+    let applied = ($secret | do { ^kubectl apply -f - } | complete)
+    if $applied.exit_code != 0 { rm -rf $work; error make --unspanned { msg: "applying the credentials Secret failed" } }
+    print $"  ok: secret/($AUTH_SECRET) holds the ($READER) identity"
+
+    for f in $objects { run_ok $"applying ($f | path basename)" { ^kubectl apply -f $f } | print }
+    rm -rf $work
+    print $"  ok: Flux reconciles the layers of deploy-($target) from ($commit | str substring 0..11); next: nu infra/flux.nu wait ($target)"
+}
+
+def "main wait" [
+    target: string
+    --port: int = 9443
+    --timeout: duration = 20min
+] {
+    let pki = (pki_dir $env.HOME $target)
+    let commit = (published_commit $pki $target $port)
+    if $commit == null { error make --unspanned { msg: $"nothing is published to deploy-($target)" } }
+    print $"  waiting for every layer to be Ready at ($commit | str substring 0..11)..."
+    let deadline = ((date now) + $timeout)
+    mut seen = ""
+    mut states = []
+    loop {
+        let got = (do { ^kubectl -n $FLUX_NS get kustomizations.kustomize.toolkit.fluxcd.io -o json } | complete)
+        if $got.exit_code == 0 {
+            $states = (layer_states ($got.stdout | from json | get items) $commit)
+            let lines = ($states | each {|s| describe_state $s })
+            let shown = ($lines | str join "\n")
+            if $shown != $seen {
+                for l in $lines { print $"    ($l)" }
+                print ""
+                $seen = $shown
+            }
+            if (settled $states) { break }
+        }
+        if (date now) > $deadline {
+            let stuck = ($states | where {|s| not ($s.ready and $s.current) } | each {|s| describe_state $s })
+            error make --unspanned { msg: $"not every layer was Ready at ($commit | str substring 0..11) after ($timeout): ($stuck | str join '; '). See: kubectl -n ($FLUX_NS) get kustomizations" }
+        }
+        sleep 5sec
+    }
+    print $"  ok: all ($states | length) layers are Ready at ($commit | str substring 0..11)"
+}
+
 def main [] {
-    print "usage: nu infra/flux.nu export"
+    print "usage: nu infra/flux.nu export | install <target> [--port N] [--host IP] | wait <target> [--port N] [--timeout 20min]"
 }

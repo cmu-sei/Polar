@@ -254,7 +254,7 @@ def fingerprint_of [pem: string] {
 }
 
 def sha256_of [pem: string] {
-    run_ok "reading a fingerprint" { ^openssl x509 -in $pem -noout -fingerprint -sha256 } | str trim | split row "=" | last | str replace --all ":" "" | str downcase
+    run_ok "reading a fingerprint" { ^openssl x509 -in $pem -noout -fingerprint -sha256 } | str trim | split row "=" | last | str replace --all ":" "" | str lowercase
 }
 
 # Makes the GnuPG home that signs: the pipeline's key and certificate, the deployment CA as the only trust. Returns
