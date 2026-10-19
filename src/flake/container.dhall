@@ -48,6 +48,8 @@ let polarExtras =
     , Lib.nixpkgs "cosign"
     , Lib.nixpkgs "skopeo"
     , Lib.nixpkgs "kubectl"
+    -- The Justfile's recipes are bash scripts (#!/usr/bin/env bash): port-forwards-up, user-cert-install and others.
+    , Lib.nixpkgs "bash"
     , Lib.flakePackage "polar-tools" "default"
     , Lib.nixpkgs "git"
     , Lib.nixpkgs "curl"

@@ -18,7 +18,6 @@
 # This Software includes and/or makes use of Third-Party Software each subject to its own license.
 #
 # DM26-0670
-
 {
   ai = null;
   entrypoint = null;
@@ -77,6 +76,7 @@
           { attrPath = "cosign"; flakeInput = null; }
           { attrPath = "skopeo"; flakeInput = null; }
           { attrPath = "kubectl"; flakeInput = null; }
+          { attrPath = "bash"; flakeInput = null; }
           { attrPath = "default"; flakeInput = "polar-tools"; }
           { attrPath = "git"; flakeInput = null; }
           { attrPath = "curl"; flakeInput = null; }
