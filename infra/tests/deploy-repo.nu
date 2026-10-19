@@ -24,7 +24,7 @@
 # The deployment git server's pure decisions: its PKI, its repository, its container arguments.
 
 use std/assert
-use ../deploy-repo.nu [cert_plan, container_name, ext_text, labelled, pki_dir, repo_name, repos_json, run_args, serve_dir, server_env, signing_config, spec_of, tls_config, tree_files, wrapper_text, CLUSTER_NAME, READER, WRITER]
+use ../deploy-repo.nu [cluster_inputs_fact, cert_plan, container_name, ext_text, labelled, pki_dir, repo_name, repos_json, run_args, serve_dir, server_env, signing_config, spec_of, tls_config, tree_files, wrapper_text, CLUSTER_NAME, READER, WRITER]
 
 def main [] {
     let tests = [
@@ -145,6 +145,23 @@ def main [] {
                 assert equal ($prov.layers | first | get files | first | get sha256) ("kind: Namespace\nmetadata:\n  name: polar\n" | hash sha256)
                 let k = ($files | where path == "flux/kustomizations.yaml" | first | get text)
                 assert ($k | str contains "force: true")
+            }
+        }
+        {
+            name: "the provenance names the cluster's inputs file, its digest, the cluster and the values; with no file it says none"
+            body: {
+                let dir = (mktemp -d)
+                mkdir ($dir | path join "targets" "t")
+                let file = ($dir | path join "targets" "t" "cluster-inputs.nuon")
+                { cluster: "ca-A", workloads: { "polar-git-server": { env: [{ name: "POLAR_GIT_SERVER_ADMINS", value: "id-1" }] } } } | to nuon | save $file
+                let fact = (cluster_inputs_fact { infra_root: $dir } "t")
+                assert equal $fact.file "infra/targets/t/cluster-inputs.nuon"
+                assert equal $fact.cluster_ca_sha256 "ca-A"
+                assert equal $fact.sha256 (open --raw $file | hash sha256)
+                assert equal ($fact.values | get "polar-git-server" | get env | first | get value) "id-1"
+                rm $file
+                assert equal (cluster_inputs_fact { infra_root: $dir } "t") null
+                rm -rf $dir
             }
         }
     ]

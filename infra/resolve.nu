@@ -48,6 +48,8 @@ use document.nu *
 use runtime.nu [container_runtime, entrypoint_for, insecure_pull_flags]
 
 const INFRA = (path self | path dirname)
+
+use cluster-inputs.nu [env_for, env_merged, path_of, read_inputs]
 const CONFIG = ($INFRA | path join "config")
 
 const DEFAULT_TARGET = "local-minimal"
@@ -407,7 +409,10 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         }
     }
 
-    for e in (($entry.env? | default []) ++ ($ov.env? | default [])) {
+    # What the cluster supplies (its administrators, once the admin flow has made them) replaces a same-named entry of the
+    # target's config; infra/cluster-inputs.nu.
+    let supplied = (env_for (read_inputs (path_of $INFRA $target)) $name)
+    for e in (($entry.env? | default []) ++ (env_merged ($ov.env? | default []) $supplied)) {
         $env_list = ($env_list | append (env_entry $e $vars "entry" $name))
     }
 

@@ -29,16 +29,12 @@
   # credentials agent (docs/architecture/cert-issuer-isolation.md). On once no workload asked it directly.
   cluster: { issuance: { floor_enforced: true } }
   workloads: {
-    # Who administers the git server in development: the DNS names in the certificates of the
-    # accounts `just admin-claim` made on this cluster (alice, operator, seeder). They belong to this
-    # cluster's ledger and change when it is reset: read them with
-    #   openssl x509 -in ~/.config/polar-admin/<user>.crt -noout -ext subjectAltName
+    # The git server's administrators are this cluster's first account, an identity that only exists once the admin flow has run on the
+    # live cluster. `up.nu` records it in infra/targets/<target>/cluster-inputs.nuon (gitignored), renders and publishes again, and the
+    # signed provenance names that file. Nothing about it belongs here.
     polar-git-server: {
       # Group 4: its client certificate and its server certificate, one of each, come from the credentials agent.
       issuer: "credentials-agent"
-      env: [
-        { name: "POLAR_GIT_SERVER_ADMINS", value: "e4e478c6-519d-4894-841a-dc11a1c1f734" }
-      ]
     }
     # The OCI registry resolver is not part of this cluster (2026-10-14). It is in the catalog, and the
     # `local` target still runs it.

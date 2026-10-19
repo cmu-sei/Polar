@@ -321,19 +321,14 @@ bring a cluster up from images you were given, or to finish a run that
 stopped at a person's step. It skips the build stages and leaves the
 running pods alone.
 
-**6. If it stops at the policy step, set the git server's administrator.**
-The Polar git server takes its administrators by identity, and an identity
-belongs to one cluster, so a new cluster needs its own. The step says:
-"the Polar git server does not know `<id>` as an administrator". Read the
-first DNS name in your new certificate:
-
-```bash
-openssl x509 -in ~/.config/polar-admin/<name>.crt -noout -ext subjectAltName
-```
-
-put it as the value of `POLAR_GIT_SERVER_ADMINS` for `polar-git-server` in
-`infra/targets/local-minimal/config.nuon`, and run the `up.nu` command
-again. (You do this once per fresh cluster, since a reset gives new ids.)
+**6. The git server's administrator is recorded for you.** The Polar git
+server takes its administrators by identity, and an identity belongs to one
+cluster. After the admin flow, `up.nu` reads the first DNS name of your new
+certificate, writes it to `infra/targets/<target>/cluster-inputs.nuon` (not
+committed; a reset discards it), renders the layers again, and the git
+server restarts with it before the seed. Nothing to edit by hand. If the
+seed still says the git server does not know your identity, look at that
+file and at whether the git server's pod restarted.
 
 **7. Import your certificate into the browser.** When `up.nu` pauses at
 "Close Librewolf", close it and press on: it imports the cluster's CA

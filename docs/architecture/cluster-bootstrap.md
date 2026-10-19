@@ -103,18 +103,39 @@ probe). The bootstrap-admin exchange itself is drawn in `sequences/general/admin
 | `~/.config/polar-admin/` | `just admin-*`, `polar-admin-grant` | `polar-sign`, `git`, the browser step | the home directory | `ca.pem`, `bootstrap-admin.*`, `U.crt`, `U.key`, `U.chain.pem`; moved aside to `polar-admin.old-TIMESTAMP` when its CA is another cluster's, never deleted |
 | signed documents in `polar-schedules` | `polar-sign runtime` | the scheduler observer, then the agents | the in-cluster git server | `permanent/AGENT/SECTION.dhall`: runtime configuration, a separate repository from `deploy-T` and a separate trust path |
 | certificate store entries | `just user-cert-install` | the browser | the Librewolf profile | the CA and U's PKCS12 |
-| `POLAR_GIT_SERVER_ADMINS` in `targets/T/config.nuon` | the operator | `render.nu` | the source repository | a value that belongs to one cluster; see below |
+| `cluster-inputs.nuon` (`POLAR_GIT_SERVER_ADMINS`) | `up.nu`, at the seed step | `render.nu`, then recorded in `provenance.json` | `targets/T/`, gitignored | what belongs to one cluster and exists only after it does; see below |
 
 ## What looks odd, and why
 
-- **The git server's administrator is a per-cluster value, and `up.nu` writes it.** The identity that may seed
-  `polar-schedules` is U's certificate, which exists only after the admin flow, but the git server's configuration
-  needs it. The seed step reads the first DNS name of U's certificate, adds it to `POLAR_GIT_SERVER_ADMINS` in
-  `targets/T/config.nuon` (`seed.nu` `with_admin`), and renders and applies again if that changed anything; under Flux
-  that is a new commit that Flux applies before the seed resumes. The value in a committed `config.nuon` is whatever the
-  last cluster left, and is not meant to be edited.
+- **The git server's administrator is a per-cluster input, rendered twice on purpose.** The identity that may seed `polar-schedules` is
+  U's certificate, which exists only after the admin flow, but the git server's configuration needs it. It is an input like any other, and
+  the provenance trail has to show it, so the seed step writes it to `targets/T/cluster-inputs.nuon` (`infra/cluster-inputs.nu`: gitignored,
+  tied to the cluster by the sha256 of its CA, discarded when that differs), renders again and publishes a second signed commit. That commit's
+  `provenance.json` names the file, its digest, the cluster and the values (`cluster_inputs`), and the tree is not dirty. Flux restarts the git
+  server because the fingerprint of its ConfigMap, in its pod template, changed. The inputs replace an entry of the same name in the target's
+  `config.nuon`, so a stale committed value cannot survive.
 - **Namespaces are applied by `up.nu` and again by Flux.** The CA and the secrets need the namespaces before Flux runs, and the
   `platform` layer also declares them. Flux adopts what `up.nu` applied; the content is the same.
 - **`up.nu` creates secrets that Flux does not own.** They are not in the repository, so Flux never prunes them, and they
   have to exist before the workloads that use them start. That is intended.
 - **A Job never completes, and Flux cannot be told a running Job is healthy.** Every agent is a Job that runs until it is replaced (about hourly, before its certificate expires), so `wait: true` cannot be used on the `agents` layer. A health check on the Job itself does not work either: Flux's kustomize-controller registers its own Job status reader ahead of any `healthCheckExprs`, and it counts a Job as Current only when it has completed (found 2026-10-19: `polar-cassini` stayed "Running health checks" for ten minutes with a Ready pod, and a CEL expression on the Job was never consulted; `fluxcd/pkg` `runtime/statusreaders/job.go`). What says an agent is up is the Service that selects its pods: its `Endpoints` has a deterministic name and no `subsets` until a pod is ready. `publish` gives a layer a health check on that Endpoints with `subsets.exists(s, has(s.addresses) && size(s.addresses) > 0)` (`has()` takes only a field selection, so the missing field is left to make Flux wait). `cassini` and `identity` are gated this way (the broker and the credentials observer). The credentials agent Job has no Service, so nothing waits for it separately; its observer depends on it. A layer's `wait_for` of a Job with no Service is dropped.
+
+## Not settled, to decide before building
+
+1. ~~Where the Flux controllers come from.~~ Decided: rendered into the repository. `nu infra/flux.nu export` generates `flux-controllers.yaml` from the pinned `fluxcd` (2.9.6, controllers v1.9.6), the `flux` chart copies it with the images pointed at the node registry, and two mirror rows in `images.nuon` bring the images in. It is a layer of `sandbox-local`, applied for now by `up.nu` like every other layer.
+2. ~~How the nodes reach the deployment git server on the host.~~ Checked 2026-10-19 on u7s: the node (`podman exec u7s curl`) reached a host container's published port at `10.0.2.2:PORT` and the server answered `200` to the `flux` client certificate (the registry is reached the same way, `10.0.2.2:5000`). The server certificate's name must be the name Flux is given; inside the cluster that is a Service with a manual Endpoints to the host address, so the name is cluster-local and no host resolution is needed. Other runtimes: not checked.
+3. ~~The git server running as a container outside a cluster.~~ Checked 2026-10-19: the `polar-git-server` image from the registry, run by podman on the host with a throwaway PKI, served a clone and a push for a writer, refused a push from a reader (`403`), dropped a client without a certificate in the handshake, and wrote `push-log.jsonl`. Three things it needs that a pod gets from its Job: `POLAR_HEALTH_CERTS` pointed at the real server certificate (the image's default path does not exist, and the server exits 1 after 30 s without it); a writable `/tmp` (`--tmpfs /tmp`: the health actor writes its state there, and after three failed writes, about 90 s, the server shuts itself down. The first check of this missed it by watching for less than 90 s); and a restart policy (`--restart=always`), because an agent exits by design when its certificate nears expiry.
+4. Verifying a signature on push (the server rejects an unsigned or invalidly signed commit to `deploy-T`): not built. Flux's own `GitRepository.spec.verify` checks OpenPGP signatures only, not x509, so neither Flux nor the server verifies the pipeline's commits today; `git verify-commit` with the PKI's GnuPG home does.
+5. ~~Pinning images.~~ Built for `sandbox-local`: `infra/lock.nu`, `infra/images.lock.nuon` and `images.dev.lock.nuon`, `images.nu lock refresh|show|promote`, and the render's `pin_images` pass. All 44 image lines of its render carry a digest, and a node pulled one by digest from the plain-HTTP registry. The committed lock does not exist yet: a release writes it from one coherent build (the dev registry holds agents built at different commits).
+6. ~~Restarting a Job on a rebuilt image or a changed ConfigMap.~~ A rebuilt image changes the digest in the pod template, so Flux sees it. A changed ConfigMap: `publish` adds `polar.dev/config-hash`, a fingerprint of the ConfigMaps a Job, Deployment or StatefulSet reads, to its pod template (18 of `sandbox-local`'s 52 files), so the spec changes and `force: true` recreates the Job. Checked on a cluster (2026-10-19): after the seed added the administrator, Flux replaced the git server's pod and it read the new value.
+7. ~~Whether `POLAR_GIT_SERVER_ADMINS` is committed.~~ No: it is a gitignored cluster input (`targets/T/cluster-inputs.nuon`), rendered in and recorded in the provenance (see "What looks odd").
+
+## What was not checked
+
+This document was written before the first full run. On 2026-10-19 a clean `sandbox-local` bring-up ran end to end (all six layers
+Ready, the seed applied), and the "(new)" marks above are out of date for what it covered. Still not exercised: the server rejecting
+an unsigned push (open item 4), `local` and `local-minimal` as gitops targets, and a runtime other than the podman node
+(`--host` for the Service's address is untested elsewhere). In the steps that existed before, I did not confirm which of the `data`
+workloads get their certificate from `cert-issuer` directly and which from the credentials agent (the diagram says only that their
+init containers run `polar-init`), nor where the port-forward logs are written. The node's image cache is dropped by
+`podman exec u7s ctr images rm` on the host, only when `POLAR_CLUSTER_RUNTIME` is `u7s`.

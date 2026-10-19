@@ -61,6 +61,8 @@ ai_models/
 pi/
 src/deploy/local/values-active.dhall
 .sops.yaml
+# what belongs to one cluster and exists only after it does (infra/cluster-inputs.nu)
+infra/targets/*/cluster-inputs.nuon
 .user.sops.yaml
 user.sops.yaml
 

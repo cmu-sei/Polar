@@ -63,6 +63,7 @@ use browser.nu [browser_expected, browser_found, browser_problems, neo4j_answer,
 use forwards.nu [ensure_observer_forward]
 use egress.nu [egress_report, kube_probe, probe_url]
 use seed.nu
+use cluster-inputs.nu
 use tools.nu
 use runtime.nu [container_runtime]
 use plan.nu [build_forwards, build_plan, deployed_charts]
@@ -321,7 +322,27 @@ def step_agent_images [target: string] {
     ok "agent images built and pushed"
 }
 
+# Identifies the cluster this machine is pointed at, by its CA (the ConfigMap `bootstrap-ca` makes), or null when it has none yet.
+def cluster_fingerprint [] {
+    let r = (do { ^kubectl -n $POLAR get configmap polar-ca -o 'jsonpath={.data.ca\.pem}' } | complete)
+    if $r.exit_code != 0 or ($r.stdout | str trim | is-empty) { null } else { $r.stdout | hash sha256 }
+}
+
+def cluster_inputs_path [target: string] { cluster-inputs path_of ($env.PWD | path join "infra") $target }
+
+# What this machine kept of another cluster's inputs (its administrators) is not this cluster's: discard it before it is rendered.
+def discard_other_clusters_inputs [target: string] {
+    let path = (cluster_inputs_path $target)
+    if not ($path | path exists) { return }
+    let held = (cluster-inputs read_inputs $path)
+    if (cluster-inputs reconcile $held (cluster_fingerprint)) != $held {
+        rm $path
+        note $"discarded ($path | path relative-to $env.PWD): it was made for another cluster"
+    }
+}
+
 def step_render [target: string] {
+    discard_other_clusters_inputs $target
     with-env { POLAR_AGENT_SOURCE: "images" } {
         ^$nu.current-exe infra/render.nu $target
     }
@@ -515,7 +536,7 @@ def seed_git [username: string, args: list<string>] {
     ^env -u GIT_SSL_CAINFO -u SSL_CERT_FILE git ...$config ...$args
 }
 
-def step_seed [target: string, config: record, username: string, mail: string] {
+def step_seed [target: string, config: record, username: string, mail: string, allow_dirty: bool] {
     wait_pods (seed_waits) 10min
     let dir = (admin_dir)
     let root = $env.PWD
@@ -526,27 +547,29 @@ def step_seed [target: string, config: record, username: string, mail: string] {
     let missing = (seed lacks $san (seed documents))
     if ($missing | is-not-empty) { fail (seed lacks_hint $username $missing) }
 
-    # The git server learns its administrators from the target's config, and this cluster's identity did not exist
-    # when that was rendered (the account was made after). Put it there, and apply again if that changed anything.
+    # The git server's administrator is this cluster's first account, which did not exist when the layers were rendered. It is an
+    # input like any other: written to the cluster's inputs, rendered, published signed, and recorded in the provenance, which
+    # names the file and its digest. Flux restarts the git server's Job because its ConfigMap's fingerprint changes.
     let identity = (seed first_dns_name $san)
     if $identity != null {
-        let file = ($config.target_dir | path join "config.nuon")
-        let edit = (seed with_admin (open --raw $file) $identity)
-        if not $edit.found {
-            note $"($file) has no POLAR_GIT_SERVER_ADMINS for polar-git-server; not writing ($identity) anywhere"
-        } else if $edit.changed {
-            $edit.text | save --force $file
-            note $"added this cluster's administrator ($identity) to infra/targets/($target)/config.nuon; applying it to the git server"
-            step_render $target
-            if ($config.gitops? | default false) {
-                # The tree is dirty by exactly this edit, which the provenance will say. Flux restarts the git server's
-                # Job because its ConfigMap's fingerprint, in the Job's pod template, changed.
-                step_publish $target true
-                step_flux_wait $target
-            } else {
-                step_infra $config
+        let cluster = (cluster_fingerprint)
+        if $cluster == null {
+            note $"this cluster has no CA to tie the administrator ($identity) to; not recording it"
+        } else {
+            let path = (cluster_inputs_path $target)
+            let recorded = (cluster-inputs with_admin (cluster-inputs read_inputs $path) $identity $cluster)
+            if $recorded.changed {
+                $recorded.inputs | to nuon --indent 2 | save --force $path
+                note $"recorded this cluster's administrator ($identity) in ($path | path relative-to $env.PWD); applying it to the git server"
+                step_render $target
+                if ($config.gitops? | default false) {
+                    step_publish $target $allow_dirty
+                    step_flux_wait $target
+                } else {
+                    step_infra $config
+                }
+                wait_pods (seed_waits) 10min
             }
-            wait_pods (seed_waits) 10min
         }
     }
 
@@ -665,7 +688,7 @@ def main [
             "forwards" => { step_forwards $forwards }
             "admin" => { step_admin $username $mail }
             "browser" => { step_browser $username }
-            "seed" => { step_seed $target $config $username $mail }
+            "seed" => { step_seed $target $config $username $mail $allow_dirty }
         }
     }
 

@@ -44,6 +44,7 @@
 use runtime.nu [container_runtime, insecure_pull_flags]
 use retry.nu [with_retries]
 use layers.nu [layer_problems]
+use cluster-inputs.nu
 use deploy-objects.nu [BOOTSTRAP_LAYERS, annotate_config_hashes, documents, git_repository, has_job, kustomization, provenance, published_layers, readme, unpinned_images, yaml_docs]
 
 export const DEFAULT_PORT = 9443
@@ -323,6 +324,20 @@ export def tree_files [target: string, layers: list, texts: record, port: int, f
     ]
 }
 
+# What the cluster supplied to this render (its git server administrators): the file, its digest, the cluster it is tied to, and the
+# values, so the signed record says exactly which identities were rendered in. Null when there were none.
+export def cluster_inputs_fact [config: record, target: string] {
+    let path = (cluster-inputs path_of $config.infra_root $target)
+    if not ($path | path exists) { return null }
+    let held = (cluster-inputs read_inputs $path)
+    {
+        file: $"infra/targets/($target)/cluster-inputs.nuon"
+        sha256: (open --raw $path | hash sha256)
+        cluster_ca_sha256: ($held | get -o cluster)
+        values: ($held | get -o workloads | default {})
+    }
+}
+
 def load_config [target: string] {
     let file = ($env.PWD | path join $"infra/targets/($target)/target.nu")
     if not ($file | path exists) { error make --unspanned { msg: $"no such target: ($target)" } }
@@ -371,6 +386,7 @@ def "main publish" [
         target: $target
         source: { commit: (git_out [rev-parse HEAD]), describe: (git_out [describe --tags --always]), uncommitted_changes: $dirty }
         published_by: "infra/deploy-repo.nu publish"
+        cluster_inputs: (cluster_inputs_fact $config $target)
         image_lock: (if ($lock | path exists) { { file: "infra/images.lock.nuon", sha256: (digest_of $lock) } } else { null })
         flux_controllers: (if ($controllers | path exists) { { sha256: (digest_of $controllers), bootstrap_layers: $BOOTSTRAP_LAYERS } } else { null })
         deployment_ca_sha256: (sha256_of ($pki | path join "ca.pem"))

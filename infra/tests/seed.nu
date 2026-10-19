@@ -123,14 +123,11 @@ def main [] {
             body: { assert equal (repo_url) "https://polar-git-server.polar.svc.cluster.local:8443/polar-schedules.git" }
         }
         {
-            name: "a refusal names the identity and the file to change"
+            name: "a refusal names the identity and the file the cluster's administrators are kept in"
             body: {
                 let hint = (refused_hint "66b3f4c8-f024" "local-minimal")
                 assert ($hint | str contains "66b3f4c8-f024")
-                assert ($hint | str contains "POLAR_GIT_SERVER_ADMINS")
-                assert ($hint | str contains "infra/targets/local-minimal/config.nuon")
-                # what to do about the old value, and what running it again does
-                assert ($hint | str contains "this cluster")
+                assert ($hint | str contains "infra/targets/local-minimal/cluster-inputs.nuon")
                 assert ($hint | str contains "restarts the git server")
             }
         }
@@ -141,22 +138,6 @@ def main [] {
                 assert equal (first_dns_name $san) "66b3f4c8-f024-4207-b70b-9fadf7badc92"
                 assert equal (first_dns_name "X509v3 Subject Alternative Name:\n    email:a@b.c") null
                 assert equal (first_dns_name "") null
-            }
-        }
-        {
-            name: "the administrator is written into the config, once, keeping the comments and the other administrators"
-            body: {
-                let text = "# who administers\n  env: [\n    { name: \"POLAR_GIT_SERVER_ADMINS\", value: \"old-1\" }\n  ]\n"
-                let first = (with_admin $text "new-2")
-                assert $first.changed
-                assert ($first.text | str contains 'value: "old-1,new-2" }')
-                assert ($first.text | str starts-with "# who administers")
-                let again = (with_admin $first.text "new-2")
-                assert (not $again.changed)
-                assert equal $again.text $first.text
-                let empty = (with_admin "{ name: \"POLAR_GIT_SERVER_ADMINS\", value: \"\" }" "x")
-                assert ($empty.text | str contains 'value: "x"')
-                assert (not (with_admin "nothing here" "x").found)
             }
         }
         {
