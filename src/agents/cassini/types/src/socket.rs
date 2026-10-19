@@ -36,6 +36,10 @@
 //!
 //! Both ends of every Cassini connection set them, so a dead peer is found within about a minute
 //! and the read or write fails like any other connection error, which the code already handles.
+//!
+//! `TCP_USER_TIMEOUT` is a Linux option (socket2 offers it on Linux, Android, Fuchsia and
+//! Cygwin). Elsewhere, such as a macOS host building and running the code for development, only
+//! keepalive is set. The images run on Linux, so a deployment gets both.
 
 use socket2::{SockRef, TcpKeepalive};
 use std::os::fd::AsFd;
@@ -53,7 +57,7 @@ pub const KEEPALIVE_PROBES: u32 = 3;
 pub const USER_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Makes the kernel find a dead peer on `stream`, in about a minute, whether the connection is
-/// idle or has data in flight.
+/// idle or has data in flight (on an idle one only, where `TCP_USER_TIMEOUT` does not exist).
 pub fn enable_dead_peer_detection(stream: &impl AsFd) -> std::io::Result<()> {
     let socket = SockRef::from(stream);
     socket.set_tcp_keepalive(
@@ -62,7 +66,14 @@ pub fn enable_dead_peer_detection(stream: &impl AsFd) -> std::io::Result<()> {
             .with_interval(KEEPALIVE_INTERVAL)
             .with_retries(KEEPALIVE_PROBES),
     )?;
-    socket.set_tcp_user_timeout(Some(USER_TIMEOUT))
+    #[cfg(any(
+        target_os = "android",
+        target_os = "fuchsia",
+        target_os = "linux",
+        target_os = "cygwin"
+    ))]
+    socket.set_tcp_user_timeout(Some(USER_TIMEOUT))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -89,6 +100,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(
+        target_os = "android",
+        target_os = "fuchsia",
+        target_os = "linux",
+        target_os = "cygwin"
+    ))]
     fn sent_data_that_is_never_acknowledged_closes_the_connection() {
         let (client, _server) = connected();
         enable_dead_peer_detection(&client).unwrap();
