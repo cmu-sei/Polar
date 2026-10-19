@@ -142,7 +142,7 @@ probe). The bootstrap-admin exchange itself is drawn in `sequences/general/admin
 
 A clean `sandbox-local` bring-up ran end to end on 2026-10-19 (all six layers Ready, the seed applied), on the podman dev node. Not
 exercised: the server rejecting an unsigned push (open item 4), `local` and `local-minimal` as gitops targets, and a runtime other than the
-podman node. Not yet run: the deployment git server in the cluster (2026-10-19), which replaced the host container and its `--host`. For the steps that existed before Flux, I did not confirm which of the
+podman node. The deployment git server in the cluster, which replaced the host container and its `--host`, ran on a fresh cluster on 2026-10-19 with the registry in the cluster too: all six layers Ready at both of the bring-up's commits. For the steps that existed before Flux, I did not confirm which of the
 `data` workloads get their certificate from `cert-issuer` directly and which from the credentials agent (the diagram says only that their init
 containers run `polar-init`), nor where the port-forward logs are written. The node's image cache is dropped by
 `podman exec u7s ctr images rm` on the host, only when `POLAR_CLUSTER_RUNTIME` is `u7s`; images that move are pulled `Always`, so another

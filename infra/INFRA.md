@@ -1009,7 +1009,8 @@ beside one that may still be alive), but it is an outage until someone acts.
   burst of pods is retried with a backoff, which slows a bring-up but does not break it. The `u7s` node lifts it.
 - **Third-party images under a version tag (Jaeger, Keycloak, Postgres, the Flux controllers, local-path-provisioner) are still
   `IfNotPresent`,** and `just cluster-load` (an image loaded into a node and not in the registry) does not work with `Always` for ours.
-- **The gitops target has run on one cluster** (the podman dev node), and with the deployment git server in the cluster not yet at all.
-  The server does not yet reject an unsigned push (`flux.nu install` checks the signature; the server does not).
+- **The gitops target has run on one kind of cluster** (the podman dev node), most recently (2026-10-19) on a fresh one with the registry
+  and the deployment git server both in the cluster. The server does not yet reject an unsigned push (`flux.nu install` checks the
+  signature; the server does not).
 
 Open items are tracked in `remaining-work.md`.
