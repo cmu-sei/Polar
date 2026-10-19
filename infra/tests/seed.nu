@@ -144,6 +144,22 @@ def main [] {
             }
         }
         {
+            name: "the administrator is written into the config, once, keeping the comments and the other administrators"
+            body: {
+                let text = "# who administers\n  env: [\n    { name: \"POLAR_GIT_SERVER_ADMINS\", value: \"old-1\" }\n  ]\n"
+                let first = (with_admin $text "new-2")
+                assert $first.changed
+                assert ($first.text | str contains 'value: "old-1,new-2" }')
+                assert ($first.text | str starts-with "# who administers")
+                let again = (with_admin $first.text "new-2")
+                assert (not $again.changed)
+                assert equal $again.text $first.text
+                let empty = (with_admin "{ name: \"POLAR_GIT_SERVER_ADMINS\", value: \"\" }" "x")
+                assert ($empty.text | str contains 'value: "x"')
+                assert (not (with_admin "nothing here" "x").found)
+            }
+        }
+        {
             name: "a seed document is signed for the capability its section needs, and every one of them has one"
             body: {
                 for d in (documents) { assert ($d.capability | str starts-with "c:") }

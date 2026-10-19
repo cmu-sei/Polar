@@ -30,9 +30,9 @@
   cluster: { issuance: { floor_enforced: true } }
   workloads: {
     # Who administers the git server in development: the DNS names in the certificates of the
-    # accounts `just admin-claim` made on this cluster (alice, operator, seeder). They belong to this
-    # cluster's ledger and change when it is reset: read them with
-    #   openssl x509 -in ~/.config/polar-admin/<user>.crt -noout -ext subjectAltName
+    # accounts made on this cluster. They belong to this cluster's ledger and change when it is reset,
+    # so `up.nu` adds the first admin's to this list itself, at the seed step, and applies it. The value
+    # below is whatever the last cluster brought up from this checkout left; it is not meant to be edited.
     polar-git-server: {
       # Group 4: its client certificate and its server certificate, one of each, come from the credentials agent.
       issuer: "credentials-agent"

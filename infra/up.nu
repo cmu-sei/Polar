@@ -490,7 +490,7 @@ def seed_git [username: string, args: list<string>] {
     ^env -u GIT_SSL_CAINFO -u SSL_CERT_FILE git ...$config ...$args
 }
 
-def step_seed [target: string, username: string, mail: string] {
+def step_seed [target: string, config: record, username: string, mail: string] {
     wait_pods (seed_waits) 10min
     let dir = (admin_dir)
     let root = $env.PWD
@@ -500,6 +500,23 @@ def step_seed [target: string, username: string, mail: string] {
     let san = (^openssl x509 -in ($dir | path join $"($username).crt") -noout -ext subjectAltName)
     let missing = (seed lacks $san (seed documents))
     if ($missing | is-not-empty) { fail (seed lacks_hint $username $missing) }
+
+    # The git server learns its administrators from the target's config, and this cluster's identity did not exist
+    # when that was rendered (the account was made after). Put it there, and apply again if that changed anything.
+    let identity = (seed first_dns_name $san)
+    if $identity != null {
+        let file = ($config.target_dir | path join "config.nuon")
+        let edit = (seed with_admin (open --raw $file) $identity)
+        if not $edit.found {
+            note $"($file) has no POLAR_GIT_SERVER_ADMINS for polar-git-server; not writing ($identity) anywhere"
+        } else if $edit.changed {
+            $edit.text | save --force $file
+            note $"added this cluster's administrator ($identity) to infra/targets/($target)/config.nuon; applying it to the git server"
+            step_render $target
+            step_infra $config
+            wait_pods (seed_waits) 10min
+        }
+    }
 
     # Through a port-forward that may be reconnecting to a pod that was just replaced (every pod restarts
     # hourly, before its certificate expires), so a transport failure is tried again for a while; a refusal is not.
@@ -610,7 +627,7 @@ def main [
             "forwards" => { step_forwards $forwards }
             "admin" => { step_admin $username $mail }
             "browser" => { step_browser $username }
-            "seed" => { step_seed $target $username $mail }
+            "seed" => { step_seed $target $config $username $mail }
         }
     }
 

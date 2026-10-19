@@ -91,6 +91,24 @@ export def clone_outcome [exit_code: int, stderr: string] {
     }
 }
 
+# The target's config.nuon text with `identity` among the git server's administrators. The text is edited,
+# not parsed and written back, so the file's comments stay. Other identities are kept (a cluster may have
+# several administrators; one a reset has made dead is harmless). `found` is false when the file has no
+# POLAR_GIT_SERVER_ADMINS to edit; `changed` is false when the identity was already listed.
+export def with_admin [text: string, identity: string] {
+    let pattern = '(name:\s*"POLAR_GIT_SERVER_ADMINS",\s*value:\s*")(?<value>[^"]*)(")'
+    let hit = ($text | parse --regex $pattern)
+    if ($hit | is-empty) { return { text: $text, found: false, changed: false } }
+    let held = ($hit | first | get value | split row "," | each {|i| $i | str trim } | where {|i| $i != "" })
+    if $identity in $held { return { text: $text, found: true, changed: false } }
+    let value = ($held | append $identity | str join ",")
+    {
+        text: ($text | str replace --regex $pattern $'${1}($value)${3}')
+        found: true
+        changed: true
+    }
+}
+
 export def refused_hint [identity: string, target: string] {
     $"the Polar git server does not know ($identity) as an administrator, so it will not take the seed. That identity belongs to this cluster, and a reset gives new ones: set POLAR_GIT_SERVER_ADMINS for polar-git-server in infra/targets/($target)/config.nuon to include it \(comma-separated; drop the previous cluster's\), then run this again. Running it again restarts the git server by itself, because its ConfigMap changes."
 }
