@@ -27,8 +27,9 @@
 # else, so they are reviewed, signed and rolled back the same way:
 #
 #   nu infra/flux.nu export    regenerate the controllers' YAML from the pinned fluxcd
-#   nu infra/flux.nu install <target> [--port N] [--host IP]
-#                              put Flux on the cluster and point it at the target's deployment repository
+#   nu infra/flux.nu install <target> [--port N]
+#                              put Flux on the cluster and point it at the target's deployment repository, which runs in the
+#                              cluster (infra/deploy-repo.nu ensure): Flux reaches it by its Service
 #   nu infra/flux.nu wait <target> [--port N] [--timeout 20min]
 #                              wait until every layer is Ready at the commit that was published
 #
@@ -37,9 +38,8 @@
 # git-sourced deployment needs are installed: source-controller and kustomize-controller. The file is
 # generated and committed; `render` copies it, pointing the images at the registry the nodes pull from.
 
-use deploy-repo.nu [CLUSTER_NAME, DEFAULT_PORT, READER, ensure_signing, pki_dir, repo_name, tls_config]
+use deploy-repo.nu [DEFAULT_PORT, READER, ensure_signing, pki_dir, repo_name, tls_config]
 use deploy-objects.nu [AUTH_SECRET, FLUX_NS, SOURCE_NAME]
-use registry.nu [host_of, node_registry]
 
 const CHART = (path self | path dirname | path join "layers" "1-platform" "services" "flux")
 const SELF = (path self)
@@ -75,47 +75,6 @@ def "main export" [] {
 }
 
 # ---- install and wait --------------------------------------------------------------------------------------------
-
-# Where the nodes reach the host: the address of the host as the node sees it. In order: `--host`, `POLAR_DEPLOY_HOST`, and the host the node
-# registry is reached at when that is an address (`10.0.2.2` on the podman node: the registry and the deployment git server are both
-# containers on the host). A registry named by a hostname says nothing about an address (an EndpointSlice needs one), so then it must be given.
-export def deploy_host [flag: string, from_env: string, registry: string] {
-    let chosen = [$flag $from_env (host_of $registry)] | where {|h| ($h | str trim) != "" } | each {|h| $h | str trim }
-    let first = ($chosen | first)
-    if not (is_ipv4 $first) {
-        error make --unspanned { msg: $"the nodes' address for the host is '($first)', which is not an IPv4 address: say it with --host <ip> or POLAR_DEPLOY_HOST \(on minikube: `minikube ssh -- getent hosts host.minikube.internal`\)" }
-    }
-    $first
-}
-
-# The name the deployment git server's certificate carries is a Service in the cluster, so Flux needs no host resolution.
-export def service_name [] { $CLUSTER_NAME | split row "." | first }
-
-export def is_ipv4 [text: string] {
-    let parts = ($text | split row ".")
-    (($parts | length) == 4) and ($parts | all {|p| ($p =~ '^\d{1,3}$') and (($p | into int) <= 255) })
-}
-
-# A Service with no selector, and the one address it leads to: the host's port where the deployment git server listens.
-export def host_documents [ip: string, port: int] {
-    let name = (service_name)
-    [
-        {
-            apiVersion: "v1"
-            kind: "Service"
-            metadata: { name: $name, namespace: $FLUX_NS }
-            spec: { ports: [{ name: "https", port: $port, targetPort: $port, protocol: "TCP" }] }
-        }
-        {
-            apiVersion: "discovery.k8s.io/v1"
-            kind: "EndpointSlice"
-            metadata: { name: $"($name)-host", namespace: $FLUX_NS, labels: { "kubernetes.io/service-name": $name } }
-            addressType: "IPv4"
-            ports: [{ name: "https", port: $port, protocol: "TCP" }]
-            endpoints: [{ addresses: [$ip] }]
-        }
-    ]
-}
 
 # "main@sha1:abc..." -> "abc..."
 export def commit_of_revision [revision: string] {
@@ -232,19 +191,10 @@ def fetch_verified [pki: string, target: string, port: int, into: string] {
     $commit
 }
 
-def apply_yaml [docs: list] {
-    let text = ($docs | each {|d| $d | to yaml | str trim --right } | str join "\n---\n")
-    let r = ($text | do { ^kubectl apply -f - } | complete)
-    if $r.exit_code != 0 { error make --unspanned { msg: $"kubectl apply failed: ($r.stderr | str trim)" } }
-    print ($r.stdout | str trim)
-}
-
 def "main install" [
     target: string
-    --port: int = 9443          # the port the deployment git server listens on (host and Service)
-    --host: string = ""         # the host's address as the nodes reach it (default: POLAR_DEPLOY_HOST, else the node registry's host)
+    --port: int = 9443          # this machine's end of the forward to the deployment git server
 ] {
-    let host = (deploy_host $host ($env.POLAR_DEPLOY_HOST? | default "") (node_registry $target))
     let config = (load_config $target)
     let pki = (pki_dir $env.HOME $target)
     if not ($pki | path join "ca.pem" | path exists) { error make --unspanned { msg: $"no deployment PKI at ($pki): run: nu infra/deploy-repo.nu ensure ($target)" } }
@@ -264,9 +214,6 @@ def "main install" [
     run_ok "waiting for Flux's CRDs" { ^kubectl wait --for=condition=Established --timeout=120s crd/gitrepositories.source.toolkit.fluxcd.io crd/kustomizations.kustomize.toolkit.fluxcd.io } | ignore
     run_ok "waiting for Flux's controllers" { ^kubectl -n $FLUX_NS rollout status deploy/source-controller deploy/kustomize-controller --timeout=300s } | ignore
     print "  ok: source-controller and kustomize-controller are running"
-
-    print $"  pointing ($CLUSTER_NAME) at ($host):($port)..."
-    apply_yaml (host_documents $host $port)
 
     # The `flux` identity's certificate and key, and the deployment CA, are what Flux presents and trusts. They go
     # from the files into the Secret without being printed or written anywhere else.
@@ -336,5 +283,5 @@ def "main wait" [
 }
 
 def main [] {
-    print "usage: nu infra/flux.nu export | install <target> [--port N] [--host IP] | wait <target> [--port N] [--timeout 20min]"
+    print "usage: nu infra/flux.nu export | install <target> [--port N] | wait <target> [--port N] [--timeout 20min]"
 }

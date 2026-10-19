@@ -825,7 +825,9 @@ cluster-status:
 #
 # `registry` (a target whose registry is in the cluster, infra/cluster-registry.nu)
 # starts only when named, since it takes local 5000, where the host registry
-# listens: POLAR_REGISTRY_FORWARD_PORT picks another port.
+# listens: POLAR_REGISTRY_FORWARD_PORT picks another port. `deploy` (a gitops
+# target's deployment git server, infra/deploy-repo.nu) starts only when named
+# too, on local 9443 or POLAR_DEPLOY_FORWARD_PORT.
 port-forwards-up *only:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -848,6 +850,9 @@ port-forwards-up *only:
     start_pf git      polar       polar-git-server             "8443:8443"             /tmp/pf-polar-git-server.log
     if [[ "$ONLY" == *" registry "* ]]; then
         start_pf registry polar-registry registry "${POLAR_REGISTRY_FORWARD_PORT:-5000}:5000" /tmp/pf-registry.log
+    fi
+    if [[ "$ONLY" == *" deploy "* ]]; then
+        start_pf deploy polar-deploy polar-deploy-git "${POLAR_DEPLOY_FORWARD_PORT:-9443}:9443" /tmp/pf-deploy.log
     fi
     echo "Logs: /tmp/pf-*.log"
 
@@ -921,6 +926,7 @@ port-forwards-down:
     pkill -f "port-forward -n polar svc/credentials-agent-observer" 2>/dev/null || true
     pkill -f "port-forward -n polar svc/polar-git-server" 2>/dev/null || true
     pkill -f "port-forward -n polar-registry svc/registry" 2>/dev/null || true
+    pkill -f "port-forward -n polar-deploy svc/polar-deploy-git" 2>/dev/null || true
     echo "Port-forwards stopped."
 
 # Idempotent Keycloak bootstrap: realm, public client (PKCE, Authorization

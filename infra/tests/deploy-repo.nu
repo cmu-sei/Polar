@@ -24,7 +24,7 @@
 # The deployment git server's pure decisions: its PKI, its repository, its container arguments.
 
 use std/assert
-use ../deploy-repo.nu [cluster_inputs_fact, cert_plan, container_name, ext_text, labelled, pki_dir, repo_name, repos_json, run_args, serve_dir, server_env, signing_config, spec_of, tls_config, tree_files, wrapper_text, CLUSTER_NAME, READER, WRITER]
+use ../deploy-repo.nu [cluster_inputs_fact, cert_plan, ext_text, mirror_dir, needs_reissue, pki_dir, repo_name, repos_json, sans_in, serve_dir, server_env, server_manifests, server_name, signing_config, tls_config, tree_files, wrapper_text, DEFAULT_PORT, NAMESPACE, READER, SERVICE, WRITER]
 
 def main [] {
     let tests = [
@@ -36,11 +36,11 @@ def main [] {
             }
         }
         {
-            name: "the server answers to the cluster's name and to localhost; the pipeline writes and Flux reads, each by its own name"
+            name: "the server answers to its Service's name and to localhost; the pipeline writes and Flux reads, each by its own name"
             body: {
-                let plan = (cert_plan)
+                let plan = (cert_plan (server_name "cluster.local"))
                 let server = ($plan | where name == "server" | first)
-                assert equal $server.dns [$CLUSTER_NAME "localhost"]
+                assert equal $server.dns ["polar-deploy-git.polar-deploy.svc.cluster.local" "localhost"]
                 assert equal $server.usage "serverAuth"
                 assert equal ($plan | where name == $WRITER | first | get dns) [$WRITER]
                 assert equal ($plan | where name == $READER | first | get usage) "clientAuth"
@@ -75,31 +75,53 @@ def main [] {
             }
         }
         {
-            name: "the container restarts itself, mounts only the serve directory read-only, and runs the image it was given last"
+            name: "the server's name is its Service, in the cluster's own DNS domain"
             body: {
-                let args = (run_args "t" 9443 "reg/polar-git-server@sha256:abc" "/p/serve" ["--tls-verify=false"])
-                assert ("--restart=always" in $args)
-                assert ("/p/serve:/pki:ro" in $args)
-                assert ("9443:8443" in $args)
-                # the health file is written under /tmp, which must be writable or the server exits after about 90 seconds
-                assert ("/tmp:rw,mode=1777" in $args)
-                assert equal ($args | last) "reg/polar-git-server@sha256:abc"
-                assert equal (container_name "t") "polar-deploy-t"
-                assert (not ($args | any {|a| $a | str contains "ca.key" }))
+                assert equal (server_name "cluster.local") $"($SERVICE).($NAMESPACE).svc.cluster.local"
+                assert equal (server_name "k8s.example.org") "polar-deploy-git.polar-deploy.svc.k8s.example.org"
             }
         }
         {
-            name: "the fingerprint changes with the image, the port and the target, and the label goes before the image"
+            name: "the server runs in its own namespace, on a claim, restarted when it exits, from the image it was given, and reached by its Service"
             body: {
-                let a = (run_args "t" 9443 "img@sha256:1" "/p" [])
-                assert equal (spec_of $a) (spec_of (run_args "t" 9443 "img@sha256:1" "/p" []))
-                assert ((spec_of $a) != (spec_of (run_args "t" 9443 "img@sha256:2" "/p" [])))
-                assert ((spec_of $a) != (spec_of (run_args "t" 9444 "img@sha256:1" "/p" [])))
-                assert ((spec_of $a) != (spec_of (run_args "u" 9443 "img@sha256:1" "/p" [])))
-                let l = (labelled $a "fp")
-                assert equal ($l | last) "img@sha256:1"
-                assert equal ($l | get (($l | length) - 3)) "--label"
-                assert equal ($l | get (($l | length) - 2)) "polar.deploy.spec=fp"
+                let m = (server_manifests "t" "reg/polar-git-server@sha256:abc" { class: "managed-csi", size: "1Gi" } "fp")
+                assert equal ($m | each {|o| $o.metadata.namespace? | default $o.metadata.name } | uniq) [$NAMESPACE]
+                let d = ($m | where kind == "Deployment" | first)
+                let pod = $d.spec.template.spec
+                let c = ($pod.containers | first)
+                assert equal $c.image "reg/polar-git-server@sha256:abc"
+                assert equal $d.spec.strategy.type "Recreate" "the repositories' claim is ReadWriteOnce"
+                assert equal $pod.automountServiceAccountToken false
+                assert equal ($c.volumeMounts | where mountPath == "/pki" | first | get readOnly) true
+                assert ($c.volumeMounts | any {|v| $v.mountPath == "/tmp" }) "the health file is written under /tmp, or the server exits after about 90 seconds"
+                let given = ($c.env | reduce --fold {} {|e, acc| $acc | insert $e.name $e.value })
+                assert equal $given (server_env "t")
+                assert equal ($d.spec.template.metadata.annotations | get "polar.dev/pki-sha256") "fp" "a re-issued certificate restarts the pod"
+                let svc = ($m | where kind == "Service" | first)
+                assert equal $svc.metadata.name $SERVICE
+                assert equal $svc.spec.selector $d.spec.selector.matchLabels
+                assert equal ($svc.spec.ports | first | get port) $DEFAULT_PORT
+                assert equal ($svc.spec.ports | first | get targetPort) 8443
+                let pvc = ($m | where kind == "PersistentVolumeClaim" | first)
+                assert equal $pvc.spec.storageClassName "managed-csi"
+                assert equal ($pod.volumes | where name == "repos" | first | get persistentVolumeClaim.claimName) $pvc.metadata.name
+                assert (not ($m | to json | str contains "ca.key")) "the CA key never goes to the cluster"
+                assert (not ($m | any {|o| $o.kind == "Secret" })) "the Secret is made from the files, never written here"
+            }
+        }
+        {
+            name: "a certificate is made again only when the names it carries are not the ones it should, whatever their order"
+            body: {
+                assert equal (sans_in "X509v3 Subject Alternative Name: \n    DNS:polar-deploy-git.polar-deploy.svc.cluster.local, DNS:localhost\n") ["polar-deploy-git.polar-deploy.svc.cluster.local" "localhost"]
+                assert equal (needs_reissue ["a" "localhost"] ["localhost" "a"]) false
+                assert equal (needs_reissue ["polar-deploy-git.flux-system.svc.cluster.local" "localhost"] ["polar-deploy-git.polar-deploy.svc.cluster.local" "localhost"]) true
+                assert equal (needs_reissue [] ["pipeline"]) true
+            }
+        }
+        {
+            name: "the mirror of the signed history is kept beside the PKI, off the cluster"
+            body: {
+                assert equal (mirror_dir "/h/.config/polar-deploy/t") "/h/.config/polar-deploy/t/mirror.git"
             }
         }
         {
@@ -134,7 +156,7 @@ def main [] {
                     { name: "agents", depends_on: ["flux"], wait_for: [], files: ["job.yaml"] }
                 ]
                 let texts = { "ns.yaml": "kind: Namespace\nmetadata:\n  name: polar\n", "job.yaml": "kind: Job\nmetadata:\n  name: a\n", "flux.yaml": "kind: Deployment\nmetadata:\n  name: f\n" }
-                let files = (tree_files "t" $layers $texts 9443 { schema: 1, target: "t" })
+                let files = (tree_files "t" $layers $texts (server_name "cluster.local") { schema: 1, target: "t" })
                 let paths = ($files | get path)
                 assert ("layers/platform/ns.yaml" in $paths)
                 assert ("layers/agents/job.yaml" in $paths)
@@ -143,6 +165,8 @@ def main [] {
                 let prov = ($files | where path == "provenance.json" | first | get text | from json)
                 assert equal ($prov.layers | get name) ["platform" "agents"]
                 assert equal ($prov.layers | first | get files | first | get sha256) ("kind: Namespace\nmetadata:\n  name: polar\n" | hash sha256)
+                let source = ($files | where path == "flux/gitrepository.yaml" | first | get text | from yaml)
+                assert equal $source.spec.url "https://polar-deploy-git.polar-deploy.svc.cluster.local:9443/deploy-t.git" "Flux reaches the server by its Service"
                 let k = ($files | where path == "flux/kustomizations.yaml" | first | get text)
                 assert ($k | str contains "force: true")
             }

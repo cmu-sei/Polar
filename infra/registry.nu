@@ -31,8 +31,7 @@
 #   targets/<target>/config.nuon  cluster.registry   the target's own
 #   config/cluster.nuon  registry            the default
 #
-# Not this machine's way to the same registry (POLAR_REGISTRY, `localhost:5000`: where images are pushed and digests asked), and not the host's
-# address for the deployment git server (`POLAR_DEPLOY_HOST`, flux.nu).
+# Not this machine's way to the same registry (POLAR_REGISTRY, `localhost:5000`: where images are pushed and digests asked; `push_registry`).
 
 const INFRA = (path self | path dirname)
 
@@ -78,9 +77,4 @@ export def target_cluster [target: string] {
 export def node_registry [target: string = ""] {
     let cfg = if $target == "" { null } else { target_registry (target_cluster $target) }
     pick_registry ($env.POLAR_NODE_REGISTRY? | default "") $cfg (open ($INFRA | path join "config" "cluster.nuon") | get registry)
-}
-
-# The host part of a registry address ("10.0.2.2:5000" -> "10.0.2.2").
-export def host_of [registry: string] {
-    $registry | split row "/" | first | split row ":" | first
 }

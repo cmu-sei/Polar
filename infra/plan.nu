@@ -48,8 +48,8 @@ export def build_plan [config: record, dev: bool, options: record = {}] {
     let has_neo4j = ("neo4j" in $d)
     let has_seed = ($has_ca_agent and ("polar-git-server" in $d) and ("polar-scheduler-observer" in $d))
     let has_core = ($has_ci or ("cassini" in $d) or $has_ca_agent or $has_neo4j)
-    # A gitops target is not applied by up.nu: its layers are committed, signed, to a deployment git server outside
-    # the cluster, and Flux applies them. up.nu still does what has to exist before Flux (namespaces, the CA, the
+    # A gitops target is not applied by up.nu: its layers are committed, signed, to a deployment git server in
+    # the cluster (in no layer), and Flux applies them. up.nu still does what has to exist before Flux (namespaces, the CA, the
     # secrets) and what needs running workloads after it (the admin flow, the seed, the browser).
     let gitops = ($config.gitops? | default false)
 
@@ -71,7 +71,7 @@ export def build_plan [config: record, dev: bool, options: record = {}] {
         }
         { id: "infra", title: "secrets and infrastructure", on: (not $gitops), why: "the layers are applied by Flux (gitops target)" }
         { id: "secrets", title: "secrets", on: $gitops, why: "up.nu creates the secrets in the infrastructure step" }
-        { id: "deploy-host", title: "deployment git server", on: $gitops, runtime: true, why: "target is not applied by Flux" }
+        { id: "deploy-host", title: "deployment git server", on: $gitops, why: "target is not applied by Flux" }
         { id: "publish", title: "publish the layers", on: $gitops, why: "target is not applied by Flux" }
         { id: "flux", title: "install Flux", on: $gitops, why: "target is not applied by Flux" }
         { id: "flux-wait", title: "wait for Flux to reconcile", on: $gitops, why: "target is not applied by Flux" }
@@ -93,9 +93,9 @@ export def build_plan [config: record, dev: bool, options: record = {}] {
     ]
 }
 
-# Whether the enabled steps of `plan` need a container runtime on this machine: building the images (`--dev`) starts the host's
-# registry unless the target's registry is in its cluster, and a gitops target's deployment git server runs here. No other step
-# needs one: the agents are asked about themselves on the cluster.
+# Whether the enabled steps of `plan` need a container runtime on this machine: only building the images (`--dev`), which starts
+# the host's registry unless the target's registry is in its cluster. No other step needs one: the agents are asked about
+# themselves on the cluster, and a gitops target's deployment git server runs there too.
 export def needs_runtime [plan: list] {
     $plan | where on | any {|s| $s.runtime? | default false }
 }

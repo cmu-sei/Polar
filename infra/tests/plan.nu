@@ -51,12 +51,12 @@ def main [] {
             }
         }
         {
-            name: "a container runtime is needed here only to build images (--dev) or to run a gitops target's deployment git server"
+            name: "a container runtime is needed here only to build images (--dev) with the registry on this machine"
             body: {
                 let c = (config ["cert-issuer" "neo4j"] ["namespaces.yaml" "credentials-agent.yaml" "polar-git-server.yaml"])
                 assert (not (needs_runtime (build_plan $c false))) "applying prebuilt images asks the agents on the cluster"
                 assert (needs_runtime (build_plan $c true)) "--dev starts the registry"
-                assert (needs_runtime (build_plan ($c | insert gitops true) false)) "the deployment git server runs here"
+                assert (not (needs_runtime (build_plan ($c | insert gitops true) false))) "the deployment git server runs in the cluster"
             }
         }
         {
@@ -69,7 +69,7 @@ def main [] {
                 assert ((do $at "import") < (do $at "render"))
                 assert ((do $at "registry") < (do $at "agent-images"))
                 assert (not (needs_runtime (build_plan $c true { in_cluster: true }))) "--dev pushes to the registry in the cluster"
-                assert (needs_runtime (build_plan ($c | insert gitops true) false { in_cluster: true })) "the deployment git server still runs here"
+                assert (not (needs_runtime (build_plan ($c | insert gitops true) false { in_cluster: true }))) "a gitops target with its registry in the cluster needs nothing here"
                 let plain = (build_plan $c false | where on | get id)
                 assert ("registry" not-in $plain)
                 assert ("import" not-in $plain) "nothing is imported unless asked"

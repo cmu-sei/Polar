@@ -24,7 +24,7 @@
 # Which registry the nodes are told to pull from: the environment first, then the target, then the default.
 
 use std/assert
-use ../registry.nu [host_of, node_registry, pick_registry, target_push_registry, target_registry]
+use ../registry.nu [node_registry, pick_registry, target_push_registry, target_registry]
 
 def main [] {
     let tests = [
@@ -68,14 +68,6 @@ def main [] {
                 let base = (with-env { POLAR_NODE_REGISTRY: "" } { node_registry })
                 assert equal $base (open ($env.PWD | path join "infra" "config" "cluster.nuon") | get registry)
                 assert equal (with-env { POLAR_NODE_REGISTRY: "polar-registry:5000" } { node_registry "local-minimal" }) "polar-registry:5000"
-            }
-        }
-        {
-            name: "the host of a registry address is what is before the port"
-            body: {
-                assert equal (host_of "10.0.2.2:5000") "10.0.2.2"
-                assert equal (host_of "polar-registry:5000") "polar-registry"
-                assert equal (host_of "registry.example.org") "registry.example.org"
             }
         }
     ]

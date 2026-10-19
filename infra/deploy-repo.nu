@@ -23,15 +23,20 @@
 
 # infra/deploy-repo.nu
 #
-# The deployment git server: where the rendered manifests are committed, signed, for Flux to read. It runs as a
-# container on the host, outside the cluster, with a PKI of its own (not Polar's CA), so that what a cluster is
-# made from can be reasoned about from before the cluster exists. Design: docs/architecture/cluster-bootstrap.md.
+# The deployment git server: where the rendered manifests are committed, signed, for Flux to read. It runs in the
+# target's cluster, in a namespace of its own (`polar-deploy`) that no layer holds, so Flux neither applies nor prunes it,
+# with a PKI of its own (not Polar's CA), so that what Polar is made from can be reasoned about from before Polar exists.
+# The PKI's CA key never leaves this machine: the cluster holds only the server's certificate and key and the CA
+# certificate. Design: docs/architecture/cluster-bootstrap.md.
 #
 #   nu infra/deploy-repo.nu ensure  <target> [--port N] [--image REF]
 #   nu infra/deploy-repo.nu publish <target> [--port N] [--allow-dirty]
 #
-# `ensure` makes the PKI under ~/.config/polar-deploy/<target>/ if it is not there, and starts the server. It can be
-# run again: nothing is made twice, and the container is replaced only when what it should be has changed.
+# `ensure` makes the PKI under ~/.config/polar-deploy/<target>/ if it is not there, applies the server, and starts the
+# port-forward this machine reaches it through (`just port-forwards-up deploy`, to localhost:<port>). Flux reaches it by
+# its Service. It can be run again: nothing is made twice. A server whose repository is empty (a new cluster) is given
+# the history of the mirror `publish` keeps beside the PKI, so a cluster that is gone does not take the signed record
+# with it.
 #
 # `publish` commits the target's rendered layers, the Flux objects that reconcile them (infra/deploy-objects.nu) and a
 # provenance record to the deployment repository, signed with the pipeline's certificate. Nothing in it needs a
@@ -41,33 +46,41 @@
 #
 # Identities (the DNS name in a client certificate): `pipeline` writes the repository, `flux` reads it.
 
-use runtime.nu [container_runtime, insecure_pull_flags]
 use retry.nu [with_retries]
+use registry.nu [node_registry, push_registry]
+use digest.nu [registry_digest]
+use cluster-registry.nu [cluster_of]
 use layers.nu [layer_problems]
 use cluster-inputs.nu
 use deploy-objects.nu [BOOTSTRAP_LAYERS, annotate_config_hashes, documents, git_repository, has_job, kustomization, provenance, published_layers, readme, unpinned_images, yaml_docs]
 
+# The port of the server's Service, and of this machine's end of the forward to it unless --port says otherwise.
 export const DEFAULT_PORT = 9443
-# The name Flux is given. It is a Service in the cluster whose Endpoints are the host, so it needs no host resolution.
-export const CLUSTER_NAME = "polar-deploy-git.flux-system.svc.cluster.local"
+export const NAMESPACE = "polar-deploy"
+export const SERVICE = "polar-deploy-git"
 export const WRITER = "pipeline"
 export const READER = "flux"
 
-export def container_name [target: string] { $"polar-deploy-($target)" }
+# The name Flux is given, and the server's certificate carries: its Service, in the cluster's DNS domain.
+export def server_name [domain: string] { $"($SERVICE).($NAMESPACE).svc.($domain)" }
+
 export def repo_name [target: string] { $"deploy-($target)" }
-export def volume_name [target: string] { $"polar-deploy-($target)-repos" }
 
 export def pki_dir [home: string, target: string] {
     $home | path join ".config" "polar-deploy" $target
 }
 
-# What the server mounts: the CA certificate, its own certificate and its key. The CA's key is never in it.
+# What the server is given: the CA certificate, its own certificate and its key. The CA's key is never in it.
 export def serve_dir [pki: string] { $pki | path join "serve" }
 
-# The certificates the PKI holds. The server answers to the cluster's name and to localhost (the host's own git).
-export def cert_plan [] {
+# The bare repository `publish` keeps beside the PKI: the signed history, off the cluster.
+export def mirror_dir [pki: string] { $pki | path join "mirror.git" }
+
+# The certificates the PKI holds. The server answers to its name in the cluster (Flux) and to localhost (this machine, through
+# the forward).
+export def cert_plan [server: string] {
     [
-        { name: "server", dns: [$CLUSTER_NAME "localhost"], usage: "serverAuth" }
+        { name: "server", dns: [$server "localhost"], usage: "serverAuth" }
         { name: $WRITER, dns: [$WRITER], usage: "clientAuth" }
         { name: $READER, dns: [$READER], usage: "clientAuth" }
     ]
@@ -79,8 +92,8 @@ export def repos_json [target: string] {
     | to json --raw
 }
 
-# The server's environment inside the container. The health certificate is the server's own: the image's default
-# path does not exist on a host, and without it the server judges itself unhealthy and exits after 30 seconds.
+# The server's environment. The health certificate is the server's own: without it the server judges itself unhealthy and
+# exits after 30 seconds.
 export def server_env [target: string] {
     {
         POLAR_GIT_SERVER_CERT: "/pki/server.pem"
@@ -93,33 +106,70 @@ export def server_env [target: string] {
     }
 }
 
-# The arguments of `<runtime> run` for the server. `image` should be a digest reference, so what runs is what was
-# looked at. `--restart=always` because the server exits, by design, when its certificate is near expiry.
-export def run_args [target: string, port: int, image: string, serve: string, pull_flags: list<string>] {
-    let env_flags = (server_env $target | items {|k, v| ["-e" $"($k)=($v)"] } | flatten)
+# The server, for the pod to run: its namespace, the claim its repositories live on, the Deployment and the Service Flux reaches it
+# by. `image` is a digest reference, so what runs is what was looked up; `pki_sha256` is a digest of what the PKI Secret holds, in
+# the pod template, so a re-issued certificate restarts the pod. The Secret itself is made from the files (`ensure`), never here.
+# Restarted when it exits, as it does, by design, when its certificate is near expiry.
+export def server_manifests [target: string, image: string, storage: record, pki_sha256: string] {
+    let labels = { app: $SERVICE }
     [
-        "run" "-d" "--name" (container_name $target) "--replace" "--restart=always"
-        "-p" $"($port):8443"
-        # The health actor writes its state under /tmp, which the image's user cannot write on a host (a pod's Job mounts
-        # one). Without it the server judges itself unhealthy after three failed writes, about 90 seconds, and exits.
-        "--tmpfs" "/tmp:rw,mode=1777"
-        "-v" $"($serve):/pki:ro"
-        "-v" $"(volume_name $target):/repos"
-        "--label" $"polar.deploy.target=($target)"
-        ...$env_flags
-        ...$pull_flags
-        $image
+        { apiVersion: "v1", kind: "Namespace", metadata: { name: $NAMESPACE } }
+        {
+            apiVersion: "v1", kind: "PersistentVolumeClaim"
+            metadata: { name: $"($SERVICE)-repos", namespace: $NAMESPACE }
+            spec: { accessModes: ["ReadWriteOnce"], storageClassName: $storage.class, resources: { requests: { storage: $storage.size } } }
+        }
+        {
+            apiVersion: "apps/v1", kind: "Deployment"
+            metadata: { name: $SERVICE, namespace: $NAMESPACE, labels: $labels }
+            spec: {
+                replicas: 1
+                strategy: { type: "Recreate" }
+                selector: { matchLabels: $labels }
+                template: {
+                    metadata: { labels: $labels, annotations: { "polar.dev/pki-sha256": $pki_sha256 } }
+                    spec: {
+                        automountServiceAccountToken: false
+                        securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, seccompProfile: { type: "RuntimeDefault" } }
+                        containers: [{
+                            name: "server"
+                            image: $image
+                            ports: [{ containerPort: 8443 }]
+                            env: (server_env $target | items {|k, v| { name: $k, value: $v } })
+                            readinessProbe: { tcpSocket: { port: 8443 }, periodSeconds: 5 }
+                            securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
+                            # The health actor writes its state under /tmp; without it the server judges itself unhealthy and exits.
+                            volumeMounts: [
+                                { name: "pki", mountPath: "/pki", readOnly: true }
+                                { name: "repos", mountPath: "/repos" }
+                                { name: "tmp", mountPath: "/tmp" }
+                            ]
+                        }]
+                        volumes: [
+                            { name: "pki", secret: { secretName: $"($SERVICE)-tls" } }
+                            { name: "repos", persistentVolumeClaim: { claimName: $"($SERVICE)-repos" } }
+                            { name: "tmp", emptyDir: {} }
+                        ]
+                    }
+                }
+            }
+        }
+        {
+            apiVersion: "v1", kind: "Service"
+            metadata: { name: $SERVICE, namespace: $NAMESPACE }
+            spec: { selector: $labels, ports: [{ name: "https", port: $DEFAULT_PORT, targetPort: 8443, protocol: "TCP" }] }
+        }
     ]
 }
 
-# A fingerprint of what the container should be, kept on it as a label, so `ensure` can tell it is already right.
-export def spec_of [args: list<string>] {
-    $args | to json --raw | hash sha256
+# The DNS names a certificate carries, as `openssl x509 -ext subjectAltName` prints them ("DNS:a, DNS:b"). Pure.
+export def sans_in [text: string] {
+    $text | parse --regex 'DNS:(?<name>[^,\s]+)' | get name
 }
 
-# `args` with the fingerprint as a label, put before the image (the last argument).
-export def labelled [args: list<string>, spec: string] {
-    ($args | drop 1) ++ ["--label" $"polar.deploy.spec=($spec)"] ++ [($args | last)]
+# Whether a certificate that carries `have` must be made again to carry `want`: the same names in any order are the same.
+export def needs_reissue [have: list<string>, want: list<string>] {
+    ($have | sort | uniq) != ($want | sort | uniq)
 }
 
 # The openssl extension text for one certificate.
@@ -134,8 +184,9 @@ def run_ok [what: string, cmd: closure] {
     $r.stdout
 }
 
-# Makes the CA and the certificates that are not there yet. The CA key stays in `pki`; only `serve/` is mounted.
-export def ensure_pki [pki: string, target: string] {
+# Makes the CA and the certificates that are not there yet, and makes again one whose names are not the ones it should carry (the
+# server's, when the cluster's domain changes). The CA key stays in `pki`; only `serve/` goes to the cluster.
+export def ensure_pki [pki: string, target: string, server: string] {
     mkdir $pki
     chmod 700 $pki
     let serve = (serve_dir $pki)
@@ -148,10 +199,14 @@ export def ensure_pki [pki: string, target: string] {
         chmod 600 $ca_key
         $made = ($made | append "ca")
     }
-    for c in (cert_plan) {
+    for c in (cert_plan $server) {
         let pem = ($pki | path join $"($c.name).pem")
         let key = ($pki | path join $"($c.name).key")
-        if ($pem | path exists) and ($key | path exists) { continue }
+        if ($pem | path exists) and ($key | path exists) {
+            let have = (sans_in (run_ok $"reading ($c.name)'s names" { ^openssl x509 -in $pem -noout -ext subjectAltName }))
+            if not (needs_reissue $have $c.dns) { continue }
+            rm -f $pem $key
+        }
         let csr = ($pki | path join $"($c.name).csr")
         let ext = ($pki | path join $"($c.name).ext")
         ext_text $c | save --force $ext
@@ -161,65 +216,90 @@ export def ensure_pki [pki: string, target: string] {
         chmod 600 $key
         $made = ($made | append $c.name)
     }
-    # The container runs as another user than the one who made these, so what it reads is readable to it. The directory
-    # above is 700, so nobody else on this machine can get to them.
     cp $ca_pem ($serve | path join "ca.pem")
     cp ($pki | path join "server.pem") ($serve | path join "server.pem")
     cp ($pki | path join "server.key") ($serve | path join "server.key")
-    chmod 644 ($serve | path join "server.key")
-    chmod 755 $serve
+    chmod 600 ($serve | path join "server.key")
     $made
 }
 
-# The digest the registry serves for the server's image, as a reference to run.
-def image_by_digest [ref: string] {
-    let digest = (run_ok $"looking up ($ref)" { ^skopeo inspect --tls-verify=false --format "{{.Digest}}" $"docker://($ref)" } | str trim)
-    let repo = ($ref | split row ":" | drop 1 | str join ":")
-    $"($repo)@($digest)"
+def kubectl_apply [objects: list] {
+    let r = ({ apiVersion: "v1", kind: "List", items: $objects } | to json | ^kubectl apply -f - | complete)
+    if $r.exit_code != 0 { error make --unspanned { msg: $"the cluster refused the deployment git server's objects: ($r.stderr | str trim)" } }
 }
 
-def container_spec [runtime: string, name: string] {
-    let r = (do { ^$runtime inspect $name --format '{{ index .Config.Labels "polar.deploy.spec" }} {{.State.Running}}' } | complete)
-    if $r.exit_code != 0 { return null }
-    let parts = ($r.stdout | str trim | split row " ")
-    { spec: ($parts | first), running: (($parts | last) == "true") }
+def forward_running [] {
+    (do { ^pgrep -f $"port-forward -n ($NAMESPACE) svc/($SERVICE)" } | complete).exit_code == 0
+}
+
+# The commit the server's main branch is at, or "" when it has none.
+def server_head [pki: string, target: string, port: int] {
+    let r = (do { ^env -u GIT_SSL_CAINFO -u SSL_CERT_FILE git ...(tls_config $pki $WRITER) ls-remote $"https://localhost:($port)/(repo_name $target).git" refs/heads/main } | complete)
+    if $r.exit_code != 0 { error make --unspanned { msg: $"cannot read the deployment repository: ($r.stderr | str trim)" } }
+    $r.stdout | lines | where {|l| $l | str contains "refs/heads/main" } | each {|l| $l | split row "\t" | first } | get -o 0 | default ""
 }
 
 def "main ensure" [
     target: string
-    --port: int = 9443          # the host port the server listens on
-    --image: string = ""        # the server's image (default: polar-git-server:latest in the node registry)
+    --port: int = 9443          # this machine's end of the forward to the server
+    --image: string = ""        # the server's image as this machine pushed it (default: polar-git-server:latest in the push registry)
 ] {
-    let runtime = (container_runtime)
+    let cluster = (cluster_of $target)
+    let server = (server_name $cluster.domain)
     let pki = (pki_dir $env.HOME $target)
-    let made = (ensure_pki $pki $target)
+    let made = (ensure_pki $pki $target $server)
     if ($made | is-empty) { print $"  ok: the deployment PKI is in ($pki)" } else { print $"  made in ($pki): ($made | str join ', ')" }
 
-    let registry = ($env.POLAR_REGISTRY? | default "localhost:5000")
-    let ref = if ($image | is-empty) { $"($registry)/polar-git-server:latest" } else { $image }
-    let pinned = (image_by_digest $ref)
-    let pull = (insecure_pull_flags $runtime ["--tls-verify=false"])
-    let args = (run_args $target $port $pinned (serve_dir $pki) $pull)
-    let spec = (spec_of $args)
-    let name = (container_name $target)
+    # The image by the digest the registry serves, under the name the nodes pull it by.
+    let pushed = if ($image | is-empty) { $"(push_registry $target)/polar-git-server:latest" } else { $image }
+    let digest = (registry_digest $pushed)
+    if $digest == null { error make --unspanned { msg: $"($pushed) is not in the registry, or the registry does not answer: load or push it first" } }
+    let node_ref = $"(node_registry $target)/polar-git-server@($digest)"
 
-    let have = (container_spec $runtime $name)
-    if $have != null and $have.running and $have.spec == $spec {
-        print $"  ok: ($name) is running ($pinned)"
-    } else {
-        let with_label = (labelled $args $spec)
-        run_ok $"starting ($name)" { ^$runtime ...$with_label }
-        print $"  started ($name) from ($pinned) on port ($port)"
+    let serve = (serve_dir $pki)
+    let files = ["server.pem" "server.key" "ca.pem"]
+    let pki_sha256 = ($files | each {|f| open --raw ($serve | path join $f) | hash sha256 } | str join "" | hash sha256)
+    kubectl_apply (server_manifests $target $node_ref $cluster.storage $pki_sha256 | first 1)
+    # The certificate and key go from the files into the Secret without being printed or written anywhere else.
+    let secret = (run_ok "building the server's Secret" {
+        ^kubectl -n $NAMESPACE create secret generic $"($SERVICE)-tls" ...($files | each {|f| $"--from-file=($f)=($serve | path join $f)" }) --dry-run=client -o yaml
+    })
+    let applied = ($secret | do { ^kubectl apply -f - } | complete)
+    if $applied.exit_code != 0 { error make --unspanned { msg: "applying the server's Secret failed" } }
+    kubectl_apply (server_manifests $target $node_ref $cluster.storage $pki_sha256 | skip 1)
+    run_ok "waiting for the deployment git server" { ^kubectl -n $NAMESPACE rollout status $"deployment/($SERVICE)" --timeout=5m } | ignore
+    print $"  ok: the deployment git server runs in the cluster as ($server):($DEFAULT_PORT) \(($node_ref | split row '@' | last | str substring 0..18)\)"
+
+    if not (forward_running) {
+        # Something else on the port (the host container this server replaced, `polar-deploy-<target>`) would answer in its place,
+        # with a certificate from the same PKI, and be published to.
+        # Anything that accepts a connection counts, a server that then refuses the TLS handshake for want of a client certificate
+        # too. Asked of 127.0.0.1: `localhost` can resolve to ::1 first, where nothing answers and a connect waits out its timeout.
+        let busy = (do { ^timeout 3 bash -c $"exec 3<>/dev/tcp/127.0.0.1/($port)" } | complete)
+        if $busy.exit_code == 0 {
+            error make --unspanned { msg: $"something already answers at localhost:($port), and it is not the forward to the server in the cluster: stop it \(the old host container: podman rm -f polar-deploy-($target)\), or pass --port" }
+        }
+        let started = (with-env { POLAR_DEPLOY_FORWARD_PORT: ($port | into string) } { do { ^just port-forwards-up deploy } | complete })
+        if $started.exit_code != 0 { error make --unspanned { msg: $"starting the deployment git server's port-forward failed: ($started.stderr | str trim)" } }
     }
-
     # Up means it answers the pipeline's certificate over TLS with its own name checked.
     let url = $"https://localhost:($port)/(repo_name $target).git/info/refs?service=git-upload-pack"
-    let up = (with_retries 15 2sec {|n|
+    let up = (with_retries 20 2sec {|n|
         let r = (do { ^curl -s -m 5 --cacert ($pki | path join "ca.pem") --cert ($pki | path join $"($WRITER).pem") --key ($pki | path join $"($WRITER).key") -o /dev/null -w "%{http_code}" $url } | complete)
         { ok: ($r.stdout == "200"), final: false, detail: $"answered ($r.stdout) ($r.stderr | str trim)" }
     })
-    if not $up.ok { error make --unspanned { msg: $"($name) did not answer after ($up.tries) tries: ($up.detail). See: ($runtime) logs ($name)" } }
-    print $"  ok: ($name) answers at https://localhost:($port)/ as ($WRITER)"
+    if not $up.ok { error make --unspanned { msg: $"the deployment git server did not answer at localhost:($port) after ($up.tries) tries: ($up.detail). See: kubectl -n ($NAMESPACE) logs deployment/($SERVICE), /tmp/pf-deploy.log" } }
+    print $"  ok: it answers at https://localhost:($port)/ as ($WRITER)"
+
+    # A new server (a new cluster) has no history: it is given the mirror's, so Flux finds the record as it was signed.
+    let mirror = (mirror_dir $pki)
+    if (server_head $pki $target $port | is-empty) and ($mirror | path exists) {
+        let held = (do { ^git -C $mirror rev-parse --verify -q refs/heads/main } | complete)
+        if $held.exit_code == 0 {
+            run_ok "giving the server the mirror's history" { ^env -u GIT_SSL_CAINFO -u SSL_CERT_FILE git -C $mirror ...(tls_config $pki $WRITER) push -q $"https://localhost:($port)/(repo_name $target).git" refs/heads/main:refs/heads/main }
+            print $"  ok: the server was empty and now holds the mirror's history, at ($held.stdout | str trim | str substring 0..11)"
+        }
+    }
 }
 
 # ---- publish ---------------------------------------------------------------------------------------------------
@@ -300,7 +380,7 @@ export def ensure_signing [pki: string] {
 def digest_of [file: string] { open --raw $file | hash sha256 }
 
 # Everything the published tree is made of, as files: path -> text. Pure given the facts.
-export def tree_files [target: string, layers: list, texts: record, port: int, facts: record] {
+export def tree_files [target: string, layers: list, texts: record, server: string, facts: record] {
     let published = (published_layers $layers)
     let rendered = $texts
     let texts = (annotate_config_hashes $rendered)
@@ -312,7 +392,7 @@ export def tree_files [target: string, layers: list, texts: record, port: int, f
         let forced = ($l.files | any {|f| ($f in ($texts | columns)) and (has_job ($texts | get $f)) })
         kustomization $l $docs $forced
     })
-    let source = (git_repository $target $CLUSTER_NAME $port)
+    let source = (git_repository $target $server $DEFAULT_PORT)
     let recorded = ($facts | insert layers ($published | each {|l|
         { name: $l.name, depends_on: $l.depends_on, files: ($l.files | where {|f| $f in ($texts | columns) } | each {|f| { path: $f, sha256: ($texts | get $f | hash sha256), rendered_sha256: ($rendered | get $f | hash sha256) } }) }
     }))
@@ -350,7 +430,7 @@ def git_out [args: list<string>] {
 
 def "main publish" [
     target: string
-    --port: int = 9443          # the port the deployment git server listens on
+    --port: int = 9443          # this machine's end of the forward to the deployment git server
     --allow-dirty               # publish from a working tree with uncommitted changes (the provenance says so)
 ] {
     let config = (load_config $target)
@@ -392,13 +472,13 @@ def "main publish" [
         deployment_ca_sha256: (sha256_of ($pki | path join "ca.pem"))
         signer: { identity: $WRITER, certificate_sha256: (sha256_of ($pki | path join $"($WRITER).pem")) }
     }
-    let files = (tree_files $target $config.apply_layers $texts $port $facts)
+    let files = (tree_files $target $config.apply_layers $texts (server_name (cluster_of $target).domain) $facts)
 
     let url = $"https://localhost:($port)/(repo_name $target).git"
     let work = (mktemp -d)
     let copy = ($work | path join "repo")
     let outcome = (try {
-        with-env { GNUPGHOME: $signing.home } {
+        let result = (with-env { GNUPGHOME: $signing.home } {
             let tls = (tls_config $pki $WRITER)
             run_ok "cloning the deployment repository (is it running? nu infra/deploy-repo.nu ensure)" { ^env -u GIT_SSL_CAINFO -u SSL_CERT_FILE git ...$tls clone -q $url $copy }
             ls -a $copy | get name | where {|n| ($n | path basename) not-in [".git" "." ".."] } | each {|n| rm -rf $n } | ignore
@@ -420,7 +500,14 @@ def "main publish" [
                 run_ok "pushing" { ^env -u GIT_SSL_CAINFO -u SSL_CERT_FILE git -C $copy ...$tls push -q origin HEAD:refs/heads/main }
                 { changed: true, commit: (git_out [-C $copy rev-parse HEAD]) }
             }
+        })
+        # The signed history, kept off the cluster as well: `ensure` gives a new server this mirror's.
+        if ($result.commit | is-not-empty) {
+            let mirror = (mirror_dir $pki)
+            if not ($mirror | path exists) { run_ok "making the mirror" { ^git init -q --bare $mirror } | ignore }
+            run_ok "updating the mirror" { ^git -C $copy push -q --force $mirror HEAD:refs/heads/main } | ignore
         }
+        $result
     } catch {|e| { error: $e.msg } })
     with-env { GNUPGHOME: $signing.home } { do { ^gpgconf --kill gpg-agent } | complete | ignore }
     rm -rf $work

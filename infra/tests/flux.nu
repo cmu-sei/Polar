@@ -25,7 +25,7 @@
 # counts as done.
 
 use std/assert
-use ../flux.nu [commit_of_revision, deploy_host, due_stale, revision_waited_on, stale_waits, track_stale, describe_state, host_documents, is_ipv4, layer_states, service_name, settled]
+use ../flux.nu [commit_of_revision, due_stale, revision_waited_on, stale_waits, track_stale, describe_state, layer_states, settled]
 
 def kustomization [name: string, ready: string, revision: string, reason: string = "ReconciliationSucceeded", message: string = ""] {
     {
@@ -50,32 +50,6 @@ const WAITING = "Running health checks for revision main@sha1:abc with a timeout
 
 def main [] {
     let tests = [
-        {
-            name: "only an IPv4 address is taken as the host, since an EndpointSlice cannot hold a name"
-            body: {
-                assert (is_ipv4 "10.0.2.2")
-                assert (not (is_ipv4 "10.0.2"))
-                assert (not (is_ipv4 "10.0.2.256"))
-                assert (not (is_ipv4 "host.example"))
-                assert (not (is_ipv4 "10.0.2.2.5"))
-            }
-        }
-        {
-            name: "the Service has the first label of the certificate's name, and the EndpointSlice leads it to the host"
-            body: {
-                assert equal (service_name) "polar-deploy-git"
-                let docs = (host_documents "10.0.2.2" 9443)
-                let svc = ($docs | where kind == "Service" | first)
-                let slice = ($docs | where kind == "EndpointSlice" | first)
-                assert equal $svc.metadata.name "polar-deploy-git"
-                assert equal $svc.metadata.namespace "flux-system"
-                assert (($svc.spec | get -o selector) == null)
-                assert equal $svc.spec.ports.0.port 9443
-                assert equal ($slice.metadata.labels | get "kubernetes.io/service-name") "polar-deploy-git"
-                assert equal $slice.endpoints.0.addresses ["10.0.2.2"]
-                assert equal $slice.ports.0.port 9443
-            }
-        }
         {
             name: "a revision is reduced to its commit"
             body: { assert equal (commit_of_revision "main@sha1:abc123") "abc123" }
@@ -162,18 +136,6 @@ def main [] {
                 assert equal (due_stale $again ($t0 + 16sec) 15sec) ["a"]
                 # no longer stale: forgotten, so a later stale spell starts its own clock
                 assert equal (track_stale $again [] ($t0 + 20sec)) {}
-            }
-        }
-        {
-            name: "the host the nodes reach is the flag, then the environment, then the registry's host when that is an address; a name is not enough"
-            body: {
-                assert equal (deploy_host "192.168.49.1" "10.1.1.1" "10.0.2.2:5000") "192.168.49.1"
-                assert equal (deploy_host "" "10.1.1.1" "10.0.2.2:5000") "10.1.1.1"
-                assert equal (deploy_host "" "" "10.0.2.2:5000") "10.0.2.2"
-                let named = (try { deploy_host "" "" "polar-registry:5000"; "accepted" } catch {|e| $e.msg })
-                assert ($named | str contains "not an IPv4 address")
-                assert ($named | str contains "--host")
-                assert equal (deploy_host "192.168.49.1" "" "polar-registry:5000") "192.168.49.1"
             }
         }
     ]
