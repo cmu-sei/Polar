@@ -68,11 +68,13 @@ deployed to Kubernetes.
   assume a specific one; see **Using your own target**, below)
 - A Neo4j instance populated with work-item data (see **Data source**,
   below)
-- [Nix](https://nixos.org) with flakes enabled, a container runtime (`podman` or
-  `docker`: Polar does not provide one, so install whichever you use), `direnv`,
+- [Nix](https://nixos.org) with flakes enabled, `direnv`,
   [`just`](https://github.com/casey/just), `nushell` and `kubectl` — or
   use the provided dev container (see below), which already has the
-  build tools. The full list is in **Bring a cluster up**, below.
+  build tools. A container runtime (`podman` or `docker`: Polar does not
+  provide one) is needed only to run the dev container, or a registry on
+  your machine (`just registry-up`); with the registry in your cluster, as
+  the shipped targets keep it, nothing else needs one. The full list is in **Bring a cluster up**, below.
   **If you are given prebuilt images** (see **Loading prebuilt images**,
   under **Images**) you do not build them and do not need Nix for that.
   You also do not compile anything to install: the command-line tools
@@ -80,10 +82,10 @@ deployed to Kubernetes.
   static binaries in the `polar-tools` image (see **Installing the Polar
   tools**). What `up.nu` still needs on your `PATH`: `nushell`, `dhall`,
   `kubectl`, `skopeo`, `sops`/`rage` and `git`. It asks the agents about
-  themselves on your cluster, so it needs a container runtime only to start
-  the local registry (`just registry-up`), to build images (`--dev`) or for a
-  gitops target's deployment git server. The dev container has all of them
-  (below), so use it unless you already have those installed
+  themselves on your cluster, and a target's registry and deployment git
+  server can run there too, so it needs a container runtime only to start a
+  registry on your machine (`just registry-up`). The dev container has all of
+  them (below), so use it unless you already have those installed
 
 ### Dev container
 
@@ -133,10 +135,11 @@ What each mount is for:
 
 The dev container has no container runtime. `up.nu` does not need one to
 read the agents' scaffolds, which it asks of their images on your cluster, so
-with prebuilt images in a registry it runs entirely in the container. What does
-need one runs on the host: starting the local registry (`just registry-up`), and
-a gitops target's deployment git server. Importing the certificate into a
-browser (step 7) is a host step in any case.
+with a target whose registry is in the cluster (the shipped ones) it runs
+entirely in the container, `--dev` builds included: they push through a
+port-forward. What needs one runs on the host: a registry on your machine
+(`just registry-up`), for a target that uses one. Importing the certificate
+into a browser (step 7) is a host step in any case.
 
 **On an ARM Mac:** you need a dev container image to get started.
 Reach out to the developers if you do not have one.
@@ -309,7 +312,7 @@ export POLAR_CLUSTER_RUNTIME=none                     # unless the cluster is a 
 The scripts use `podman` or `docker`, whichever is installed (`podman` first).
 To choose, set `POLAR_CONTAINER_RUNTIME=docker` (or `podman`); `up.nu` says
 which it found in its first step, and stops with a clear message if a step needs
-one (`--dev` with the registry on this machine, or a gitops target) and neither is installed.
+one (`--dev` with the registry on this machine) and neither is installed.
 
 **2b. Get the Polar images into that registry, one of two ways.**
 
