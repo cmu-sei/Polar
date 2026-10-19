@@ -23,6 +23,8 @@
 
 # infra/targets/local-minimal/target.nu
 
+use ../../registry.nu [node_registry]
+
 def main [] {
     let repo_root  = (git rev-parse --show-toplevel | str trim)
     let infra_root = ($repo_root | path join "infra")
@@ -169,7 +171,7 @@ def main [] {
         # and render.nu then requires cert-issuer's ca.provisioning to be
         # "provisioned" (check_ca_provisioning).
         cert_issuer_ca_configmap : "polar-ca"
-        polar_init_image      : "10.0.2.2:5000/polar-init:latest"
+        polar_init_image      : $"(node_registry local-minimal)/polar-init:latest"
         identity_lifetime_overrides : [
             { identity: "graph.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }
             { identity: "ace.polar.serviceaccount.cluster.local", lifetimeSecs: 31536000 }

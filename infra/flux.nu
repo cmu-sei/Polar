@@ -39,6 +39,7 @@
 
 use deploy-repo.nu [CLUSTER_NAME, DEFAULT_PORT, READER, ensure_signing, pki_dir, repo_name, tls_config]
 use deploy-objects.nu [AUTH_SECRET, FLUX_NS, SOURCE_NAME]
+use registry.nu [host_of, node_registry]
 
 const CHART = (path self | path dirname | path join "layers" "1-platform" "services" "flux")
 const SELF = (path self)
@@ -75,9 +76,17 @@ def "main export" [] {
 
 # ---- install and wait --------------------------------------------------------------------------------------------
 
-# Where the nodes reach the host: the address of the host as the node sees it (`10.0.2.2` on the podman node, the same
-# one the registry is reached at). Other setups name theirs with --host.
-export const DEFAULT_HOST = "10.0.2.2"
+# Where the nodes reach the host: the address of the host as the node sees it. In order: `--host`, `POLAR_DEPLOY_HOST`, and the host the node
+# registry is reached at when that is an address (`10.0.2.2` on the podman node: the registry and the deployment git server are both
+# containers on the host). A registry named by a hostname says nothing about an address (an EndpointSlice needs one), so then it must be given.
+export def deploy_host [flag: string, from_env: string, registry: string] {
+    let chosen = [$flag $from_env (host_of $registry)] | where {|h| ($h | str trim) != "" } | each {|h| $h | str trim }
+    let first = ($chosen | first)
+    if not (is_ipv4 $first) {
+        error make --unspanned { msg: $"the nodes' address for the host is '($first)', which is not an IPv4 address: say it with --host <ip> or POLAR_DEPLOY_HOST \(on minikube: `minikube ssh -- getent hosts host.minikube.internal`\)" }
+    }
+    $first
+}
 
 # The name the deployment git server's certificate carries is a Service in the cluster, so Flux needs no host resolution.
 export def service_name [] { $CLUSTER_NAME | split row "." | first }
@@ -233,9 +242,9 @@ def apply_yaml [docs: list] {
 def "main install" [
     target: string
     --port: int = 9443          # the port the deployment git server listens on (host and Service)
-    --host: string = "10.0.2.2" # the host's address as the nodes reach it
+    --host: string = ""         # the host's address as the nodes reach it (default: POLAR_DEPLOY_HOST, else the node registry's host)
 ] {
-    if not (is_ipv4 $host) { error make --unspanned { msg: $"--host must be an IPv4 address, got '($host)'" } }
+    let host = (deploy_host $host ($env.POLAR_DEPLOY_HOST? | default "") (node_registry $target))
     let config = (load_config $target)
     let pki = (pki_dir $env.HOME $target)
     if not ($pki | path join "ca.pem" | path exists) { error make --unspanned { msg: $"no deployment PKI at ($pki): run: nu infra/deploy-repo.nu ensure ($target)" } }

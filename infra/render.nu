@@ -38,6 +38,7 @@
 use validate.nu *
 use rules.nu [job_replacement_problems, apply_order_problems, pull_policy_problems]
 use layers.nu [layer_problems]
+use registry.nu [node_registry]
 use lock.nu [effective, lock_problems, pin_text]
 
 def main [
@@ -54,6 +55,10 @@ def main [
 
     print $"=== Polar Render Pipeline ==="
     print $"  target: ($target)"
+    # The registry as the nodes name it, resolved once (infra/registry.nu) and handed to everything that renders: the charts' Dhall reads it
+    # from the environment, and so do the processes that run them.
+    $env.POLAR_NODE_REGISTRY = (node_registry $target)
+    print $"  registry: ($env.POLAR_NODE_REGISTRY)"
     print ""
 
     # ── Load target configuration ─────────────────────────────────────────────
@@ -178,7 +183,7 @@ def main [
         mut pinned = 0
         for f in (glob ($output_dir | path join "*.yaml")) {
             let text = (open --raw $f)
-            let r = (pin_text $text $rows $cluster.registry $cluster.arch)
+            let r = (pin_text $text $rows $env.POLAR_NODE_REGISTRY $cluster.arch)
             if $r.text != $text { $r.text | save --force $f }
             $missing = ($missing | append $r.missing)
             $pinned = $pinned + $r.pinned

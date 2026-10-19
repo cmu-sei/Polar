@@ -104,7 +104,7 @@ def cmd_ok [] {
     $r.exit_code == 0
 }
 
-# The registry as this machine reaches it. The cluster names it differently (10.0.2.2:5000, the host as the
+# The registry as this machine reaches it. The cluster names it differently (POLAR_NODE_REGISTRY, infra/registry.nu; 10.0.2.2:5000 by default, the host as the
 # node sees it), so an image reference is looked up here by its path and tag.
 def registry_host [] { $env.POLAR_REGISTRY? | default "localhost:5000" }
 

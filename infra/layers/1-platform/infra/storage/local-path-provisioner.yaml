@@ -109,7 +109,7 @@ spec:
       serviceAccountName: local-path-provisioner-service-account
       containers:
         - name: local-path-provisioner
-          image: 10.0.2.2:5000/local-path-provisioner:v0.0.35
+          image: node-registry.invalid/local-path-provisioner:v0.0.35
           imagePullPolicy: IfNotPresent
           command:
             - local-path-provisioner
@@ -178,5 +178,5 @@ data:
           effect: NoSchedule
       containers:
       - name: helper-pod
-        image: 10.0.2.2:5000/busybox:latest
+        image: node-registry.invalid/busybox:latest
         imagePullPolicy: IfNotPresent

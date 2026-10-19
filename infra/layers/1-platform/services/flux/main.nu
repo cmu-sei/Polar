@@ -30,9 +30,11 @@
 # Renders:
 #   <output_dir>/flux-controllers.yaml
 
+use ../../../../registry.nu [node_registry]
+
 def main [context_nuon: string] {
     let context = ($context_nuon | from nuon)
-    let registry = (open ($context.repo_root | path join "infra" "config" "cluster.nuon") | get registry)
+    let registry = (node_registry)
 
     mkdir $context.output_dir
     let src = ($context.chart_dir | path join "flux-controllers.yaml")

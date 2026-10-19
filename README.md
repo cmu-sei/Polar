@@ -259,11 +259,24 @@ just registry-up        # a registry container on localhost:5000
 just registry-status    # prints "registry reachable" when it is up
 ```
 
-For any other registry, set `POLAR_REGISTRY` to the address this machine
-pushes to (default `localhost:5000`) and `registry` in
-`infra/config/cluster.nuon` to the address the cluster's nodes pull from.
-Also set `POLAR_CLUSTER_RUNTIME=none` unless your cluster is a rootless
-podman dev node (see **Images**).
+For any other registry there are two addresses, because the same registry has
+two names: the one this machine pushes to, and the one your cluster's nodes
+pull from. Say both, in your environment (nothing in the repository to edit):
+
+```bash
+export POLAR_REGISTRY=localhost:5000                  # as this machine reaches it (default)
+export POLAR_NODE_REGISTRY=polar-registry:5000        # as your cluster's nodes reach it
+export POLAR_CLUSTER_RUNTIME=none                     # unless the cluster is a rootless podman dev node (see Images)
+```
+
+`POLAR_NODE_REGISTRY` is the prefix of every image in the manifests (default
+`10.0.2.2:5000`, the host as a podman dev node sees it; a target can also set
+`cluster.registry` in its `config.nuon`). A deployment through Flux also needs
+the host's address as the nodes see it, for the deployment git server:
+`--host <ip>` on `flux.nu install`, or `POLAR_DEPLOY_HOST`. It defaults to the
+node registry's host when that is an address (it is not, if you named the
+registry with a hostname). On minikube the host is
+`minikube ssh -- getent hosts host.minikube.internal`.
 
 The scripts use `podman` or `docker`, whichever is installed (`podman` first).
 To choose, set `POLAR_CONTAINER_RUNTIME=docker` (or `podman`); `up.nu` says

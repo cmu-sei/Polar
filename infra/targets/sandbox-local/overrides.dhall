@@ -25,15 +25,17 @@
 -- Covers: neo4j, cassini, cert-issuer, jaeger.
 -- Each chart's main.nu merges: values.dhall // overrides.<chart>
 --
--- Image references are prefixed with the local registry address
--- (10.0.2.2:5000 -- u7s's slirp4netns gateway to the host, where
--- `just registry-up` runs a registry container on port 5000). See
+-- Image references are prefixed with the registry as the nodes name it, which
+-- render.nu resolves once (infra/registry.nu: POLAR_NODE_REGISTRY, then the
+-- target's cluster.registry, then config/cluster.nuon; 10.0.2.2:5000 by default,
+-- u7s's slirp4netns gateway to the host, where `just registry-up` runs a
+-- registry container on port 5000) and hands to the charts in the environment. See
 -- `just cluster-load-all`/`cluster-load-minimal`, which push built
 -- images there via skopeo rather than importing directly into a
 -- specific cluster's containerd -- this works with any Kubernetes
 -- distribution whose nodes can reach the registry, not just u7s.
 
-let registry = "10.0.2.2:5000/"
+let registry = (env:POLAR_NODE_REGISTRY as Text) ++ "/"
 
 let IdentityStrategy = ../../schema/identity-strategy.dhall
 

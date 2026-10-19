@@ -25,7 +25,7 @@
 # counts as done.
 
 use std/assert
-use ../flux.nu [commit_of_revision, due_stale, revision_waited_on, stale_waits, track_stale, describe_state, host_documents, is_ipv4, layer_states, service_name, settled]
+use ../flux.nu [commit_of_revision, deploy_host, due_stale, revision_waited_on, stale_waits, track_stale, describe_state, host_documents, is_ipv4, layer_states, service_name, settled]
 
 def kustomization [name: string, ready: string, revision: string, reason: string = "ReconciliationSucceeded", message: string = ""] {
     {
@@ -162,6 +162,18 @@ def main [] {
                 assert equal (due_stale $again ($t0 + 16sec) 15sec) ["a"]
                 # no longer stale: forgotten, so a later stale spell starts its own clock
                 assert equal (track_stale $again [] ($t0 + 20sec)) {}
+            }
+        }
+        {
+            name: "the host the nodes reach is the flag, then the environment, then the registry's host when that is an address; a name is not enough"
+            body: {
+                assert equal (deploy_host "192.168.49.1" "10.1.1.1" "10.0.2.2:5000") "192.168.49.1"
+                assert equal (deploy_host "" "10.1.1.1" "10.0.2.2:5000") "10.1.1.1"
+                assert equal (deploy_host "" "" "10.0.2.2:5000") "10.0.2.2"
+                let named = (try { deploy_host "" "" "polar-registry:5000"; "accepted" } catch {|e| $e.msg })
+                assert ($named | str contains "not an IPv4 address")
+                assert ($named | str contains "--host")
+                assert equal (deploy_host "192.168.49.1" "" "polar-registry:5000") "192.168.49.1"
             }
         }
     ]

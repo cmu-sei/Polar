@@ -56,16 +56,15 @@
 #   POLAR_NEO4J_IMAGE      path to the Neo4j docker-archive (overrides the table)
 
 use lock.nu
+use registry.nu [node_registry]
 
 const TABLE = (path self | path dirname | path join "images.nuon")
-const CLUSTER = (path self | path dirname | path join "config" "cluster.nuon")
 
 def registry [] { $env.POLAR_REGISTRY? | default "localhost:5000" }
 def runtime [] { $env.POLAR_CLUSTER_RUNTIME? | default "u7s" }
 
 # The registry address as the cluster nodes see it, which is not the address this
 # machine pushes to. A node's cached image is named with this one.
-def node_registry [] { open $CLUSTER | get registry }
 
 def load_table [] { open $TABLE }
 

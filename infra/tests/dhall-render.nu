@@ -24,7 +24,7 @@
 # The cache key of a hand-written chart's Dhall render, and that a render read back from the cache is the render.
 
 use std/assert
-use ../dhall-render.nu [dhall_yaml, key_parts]
+use ../dhall-render.nu [dhall_yaml, env_names_in, key_parts]
 use ../cache.nu [content_key]
 
 def main [] {
@@ -61,6 +61,29 @@ def main [] {
                     "{ a = " | save --force $file
                     let failed = (try { dhall_yaml $file; "no error" } catch {|e| $e.msg })
                     assert ($failed | str contains "dhall-to-yaml failed")
+                }
+                rm -rf $dir
+            }
+        }
+        {
+            name: "the environment variables a Dhall file imports are found, once each; a file that imports none adds none"
+            body: {
+                assert equal (env_names_in ["let r = (env:POLAR_NODE_REGISTRY as Text) ++ \"/\"" "env:B as Text ? env:A as Text" "{ a = 1 }"]) ["A" "B" "POLAR_NODE_REGISTRY"]
+                assert equal (env_names_in ["{ a = 1 }"]) []
+            }
+        }
+        {
+            name: "a render from the cache is not served when the environment a file imports has changed"
+            body: {
+                let dir = (mktemp -d)
+                let file = ($dir | path join "r.dhall")
+                with-env { POLAR_CACHE_DIR: ($dir | path join "cache") } {
+                    # the key looks at the repository's own Dhall files, so this checks the render itself: same file, different value, different text
+                    "{ registry = env:POLAR_NODE_REGISTRY as Text }" | save $file
+                    let a = (with-env { POLAR_NODE_REGISTRY: "10.0.2.2:5000" } { dhall_yaml $file })
+                    let b = (with-env { POLAR_NODE_REGISTRY: "polar-registry:5000" } { dhall_yaml $file })
+                    assert ($a | str contains "10.0.2.2:5000")
+                    assert ($b | str contains "polar-registry:5000")
                 }
                 rm -rf $dir
             }

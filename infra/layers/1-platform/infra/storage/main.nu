@@ -41,6 +41,7 @@
 #   <output_dir>/local-path-provisioner.yaml
 
 use ../../../../dhall-render.nu [dhall_yaml]
+use ../../../../registry.nu [node_registry]
 
 def main [context_nuon: string] {
     let context = ($context_nuon | from nuon)
@@ -58,8 +59,9 @@ def main [context_nuon: string] {
     # Copy the local-path-provisioner manifest verbatim
     let provisioner_src = ($chart_dir | path join "local-path-provisioner.yaml")
     let provisioner_out = ($output_dir | path join "local-path-provisioner.yaml")
-    print $"  copying local-path-provisioner.yaml"
-    cp $provisioner_src $provisioner_out
+    # The manifest names its images with the placeholder node-registry.invalid; the registry the nodes use is put in as it is copied.
+    print $"  copying local-path-provisioner.yaml, images from the node registry"
+    open --raw $provisioner_src | str replace --all "node-registry.invalid/" $"(node_registry)/" | save --force $provisioner_out
 
     print $"  storage: done"
 }

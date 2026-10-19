@@ -39,9 +39,23 @@ export def key_parts [text: string, sources: string, version: string, flags: lis
     ["chart" $text $sources $version ($flags | str join " ")]
 }
 
+# The names of the environment variables the Dhall texts import (`env:NAME`), sorted and once each. A render depends on their values.
+export def env_names_in [texts: list<string>] {
+    $texts | each {|t| $t | parse --regex 'env:(?<name>[A-Za-z_][A-Za-z0-9_]*)' | get name } | flatten | uniq | sort
+}
+
+# The sources part of the key: every local Dhall file, and the value of every environment variable one of them imports (the registry, for
+# one: render.nu hands it to the charts that way), so a changed value is another key.
+def sources_key [] {
+    let files = (glob ($INFRA | path join "**" "*.dhall") | sort)
+    let names = (env_names_in ($files | each {|f| open --raw $f }))
+    let values = ($names | each {|n| $"($n)=($env | get -o $n | default '')" } | str join "\n")
+    $"(dir_digest $INFRA '**/*.dhall')|($values)"
+}
+
 # `dhall-to-yaml <flags> --file <file>`, as text; the same call again with nothing changed reads it back.
 export def dhall_yaml [file: string, flags: list<string> = []] {
-    let parts = (key_parts (open --raw $file) (dir_digest $INFRA "**/*.dhall") (^dhall-to-yaml --version | str trim) $flags)
+    let parts = (key_parts (open --raw $file) (sources_key) (^dhall-to-yaml --version | str trim) $flags)
     cached_text "chart" (content_key $parts) {||
         let r = (^dhall-to-yaml ...$flags --file $file | complete)
         if $r.exit_code != 0 { error make { msg: $"dhall-to-yaml failed on ($file): ($r.stderr | str trim)" } }

@@ -49,6 +49,7 @@ use document.nu *
 const INFRA = (path self | path dirname)
 
 use cluster-inputs.nu [env_for, env_merged, path_of, read_inputs]
+use registry.nu [node_registry]
 use agent-pods.nu [collect_scaffolds, run_checks]
 const CONFIG = ($INFRA | path join "config")
 
@@ -63,7 +64,8 @@ def target_config [target: string] {
 
 def load_cluster [target: string] {
     let overrides = (target_config $target | get -o cluster | default {})
-    open ($CONFIG | path join "cluster.nuon") | merge deep $overrides
+    # The registry is resolved in one place (infra/registry.nu): the environment, then the target, then the default.
+    open ($CONFIG | path join "cluster.nuon") | merge deep $overrides | upsert registry (node_registry $target)
 }
 
 # Every workload the catalog defines, whatever a target says.
