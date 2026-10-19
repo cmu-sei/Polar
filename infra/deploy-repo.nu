@@ -99,6 +99,9 @@ export def run_args [target: string, port: int, image: string, serve: string, pu
     [
         "run" "-d" "--name" (container_name $target) "--replace" "--restart=always"
         "-p" $"($port):8443"
+        # The health actor writes its state under /tmp, which the image's user cannot write on a host (a pod's Job mounts
+        # one). Without it the server judges itself unhealthy after three failed writes, about 90 seconds, and exits.
+        "--tmpfs" "/tmp:rw,mode=1777"
         "-v" $"($serve):/pki:ro"
         "-v" $"(volume_name $target):/repos"
         "--label" $"polar.deploy.target=($target)"

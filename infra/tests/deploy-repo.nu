@@ -81,6 +81,8 @@ def main [] {
                 assert ("--restart=always" in $args)
                 assert ("/p/serve:/pki:ro" in $args)
                 assert ("9443:8443" in $args)
+                # the health file is written under /tmp, which must be writable or the server exits after about 90 seconds
+                assert ("/tmp:rw,mode=1777" in $args)
                 assert equal ($args | last) "reg/polar-git-server@sha256:abc"
                 assert equal (container_name "t") "polar-deploy-t"
                 assert (not ($args | any {|a| $a | str contains "ca.key" }))
