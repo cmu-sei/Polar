@@ -114,6 +114,11 @@ probe). The bootstrap-admin exchange itself is drawn in `sequences/general/admin
   `provenance.json` names the file, its digest, the cluster and the values (`cluster_inputs`), and the tree is not dirty. Flux restarts the git
   server because the fingerprint of its ConfigMap, in its pod template, changed. The inputs replace an entry of the same name in the target's
   `config.nuon`, so a stale committed value cannot survive.
+- **A reconcile finishes under the spec it began with, so a changed spec or a new revision waits behind a health check.** A Kustomization
+  that is in "Running health checks" does not read a newer spec (or the next published commit) until the wait ends, up to its 10 minute
+  timeout, and the condition records the generation and the revision it began under. `flux.nu wait` compares them with the current ones, and a
+  wait that has been behind for 15 seconds is ended by restarting the kustomize-controller (state is in the objects, so nothing is lost; at most three
+  restarts per `wait`). Reproduced and fixed on a cluster 2026-10-19: a layer given an unsatisfiable check and then corrected recovered in 57 s.
 - **Namespaces are applied by `up.nu` and again by Flux.** The CA and the secrets need the namespaces before Flux runs, and the
   `platform` layer also declares them. Flux adopts what `up.nu` applied; the content is the same.
 - **`up.nu` creates secrets that Flux does not own.** They are not in the repository, so Flux never prunes them, and they

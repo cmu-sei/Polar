@@ -91,10 +91,10 @@ Last updated: 2026-10-10.
   `flux.nu install` before anything is applied), `flux.nu install|wait`, six Kustomizations Ready at the published commit, the seed applied through a
   republish. What running it found and fixed: the `data` layer waited for Neo4j, which needs the credentials agent in a later layer (deadlock); Flux's own
   Job status reader runs before any CEL expression and counts only a completed Job healthy, so a running agent is waited for through its Service's
-  Endpoints; a spec change is not seen by a reconcile already waiting on a health check (the controller was restarted by hand; `install` could do it);
+  Endpoints; a spec change is not seen by a reconcile already waiting on a health check (`flux.nu wait` now notices a wait begun under an older spec or revision, and after 15 s restarts the kustomize-controller, at most three times);
   the deployment server container needs `--tmpfs /tmp`; and a host search domain whose resolver never answers (`wifi.local.cmu.edu` behind a VPN)
   made every 4-dot service name wait CoreDNS's 5 s upstream timeout, past the Cassini client's 5 s attempt budget (fixed in nix-usernetes with
-  `--dns-search=.`, uncommitted there). Open: the republish while a layer waits on a health check needs the controller bounce; the server rejecting unsigned
+  `--dns-search=.`, uncommitted there). Open: the server rejecting unsigned
   pushes; `local` and `local-minimal` as gitops targets; SOPS-encrypted secrets in the repository; the agents' `ndots` (Polar-side hardening against search
   domains); failed Jira-observer pods accumulate with no Jira to reach (as before). Render time (2026-10-19): a warm `sandbox-local` render took about 60 s; an agent's scaffold is now cached by image digest and the 19 hand-written chart renders go through the same cache (`infra/dhall-render.nu`), so a warm render is about 12 s and one with a cold chart cache about 23 s (a render with no cache at all is still over a minute). Not done: resolving all workloads in one process (the catalog section is a few seconds).
   **Stage 3d done, 2026-10-16: `release.nu`.** `plan`, `gates`, `secrets` (and `secrets accept`), `run` (see INFRA.md, "The release").

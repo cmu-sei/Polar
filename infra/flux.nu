@@ -140,6 +140,44 @@ export def describe_state [s: record] {
     if ($note | is-empty) { $"($s.name): ($state)" } else { $"($s.name): ($state) -- ($note)" }
 }
 
+# How long a reconcile may sit in a health-check wait begun under a spec or revision that has since been replaced before `wait` restarts the
+# controller. A hand-over between two reconciles takes seconds; this is long enough not to mistake one for the other.
+export const STALE_AFTER = 15sec
+export const MAX_RESTARTS = 3
+
+# "Running health checks for revision main@sha1:abc with a timeout of 10m0s" -> "main@sha1:abc", or null.
+export def revision_waited_on [message: string] {
+    let found = ($message | parse --regex 'for revision (?<rev>\S+)')
+    if ($found | is-empty) { null } else { $found | first | get rev }
+}
+
+# The Kustomizations whose reconcile is waiting on a health check that was begun under an older spec (the condition records the generation it
+# started under) or an older revision than the current ones. Flux finishes a reconcile under the spec it began with, so the wait runs out its
+# whole timeout (ten minutes) before the new spec or revision is read; a restart of the controller ends it.
+export def stale_waits [items: list, commit: string] {
+    $items | where {|k|
+        let reconciling = ($k.status?.conditions? | default [] | where type == "Reconciling" and status == "True")
+        if ($reconciling | is-empty) { return false }
+        let c = ($reconciling | first)
+        let message = ($c | get -o message | default "")
+        if not ($message | str contains "Running health checks") { return false }
+        let spec_moved = (($c | get -o observedGeneration | default 0) < ($k.metadata.generation? | default 0))
+        let rev = (revision_waited_on $message)
+        let revision_moved = ($rev != null and not ($rev | str ends-with $commit))
+        $spec_moved or $revision_moved
+    } | each {|k| $k.metadata.name }
+}
+
+# When each currently stale Kustomization was first seen stale: kept from `since` for the ones that still are, `now` for new ones.
+export def track_stale [since: record, stale: list<string>, now: datetime] {
+    $stale | reduce --fold {} {|n, acc| $acc | insert $n ($since | get -o $n | default $now) }
+}
+
+# The ones that have been stale for `after` or longer.
+export def due_stale [since: record, now: datetime, after: duration] {
+    $since | transpose name at | where {|r| ($now - $r.at) >= $after } | get name
+}
+
 def run_ok [what: string, cmd: closure] {
     let r = (do $cmd | complete)
     if $r.exit_code != 0 { error make --unspanned { msg: $"($what) failed: ($r.stderr | str trim)" } }
@@ -253,10 +291,13 @@ def "main wait" [
     let deadline = ((date now) + $timeout)
     mut seen = ""
     mut states = []
+    mut stale_since = {}
+    mut restarts = 0
     loop {
         let got = (do { ^kubectl -n $FLUX_NS get kustomizations.kustomize.toolkit.fluxcd.io -o json } | complete)
         if $got.exit_code == 0 {
-            $states = (layer_states ($got.stdout | from json | get items) $commit)
+            let items = ($got.stdout | from json | get items)
+            $states = (layer_states $items $commit)
             let lines = ($states | each {|s| describe_state $s })
             let shown = ($lines | str join "\n")
             if $shown != $seen {
@@ -265,6 +306,16 @@ def "main wait" [
                 $seen = $shown
             }
             if (settled $states) { break }
+
+            $stale_since = (track_stale $stale_since (stale_waits $items $commit) (date now))
+            let due = (due_stale $stale_since (date now) $STALE_AFTER)
+            if ($due | is-not-empty) and $restarts < $MAX_RESTARTS {
+                print $"  -- ($due | str join ', ') has been waiting on a health check begun under an older spec or revision; restarting kustomize-controller so it reads the current one"
+                run_ok "restarting kustomize-controller" { ^kubectl -n $FLUX_NS rollout restart deploy/kustomize-controller } | ignore
+                run_ok "waiting for kustomize-controller" { ^kubectl -n $FLUX_NS rollout status deploy/kustomize-controller --timeout=120s } | ignore
+                $restarts = $restarts + 1
+                $stale_since = {}
+            }
         }
         if (date now) > $deadline {
             let stuck = ($states | where {|s| not ($s.ready and $s.current) } | each {|s| describe_state $s })

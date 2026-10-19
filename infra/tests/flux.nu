@@ -25,7 +25,7 @@
 # counts as done.
 
 use std/assert
-use ../flux.nu [commit_of_revision, describe_state, host_documents, is_ipv4, layer_states, service_name, settled]
+use ../flux.nu [commit_of_revision, due_stale, revision_waited_on, stale_waits, track_stale, describe_state, host_documents, is_ipv4, layer_states, service_name, settled]
 
 def kustomization [name: string, ready: string, revision: string, reason: string = "ReconciliationSucceeded", message: string = ""] {
     {
@@ -36,6 +36,17 @@ def kustomization [name: string, ready: string, revision: string, reason: string
         }
     }
 }
+
+
+# A Kustomization in the middle of a reconcile: generation of the spec, and the Reconciling condition it began under.
+def reconciling [name: string, generation: int, began_under: int, message: string] {
+    {
+        metadata: { name: $name, generation: $generation }
+        status: { conditions: [{ type: "Reconciling", status: "True", reason: "Progressing", message: $message, observedGeneration: $began_under }] }
+    }
+}
+
+const WAITING = "Running health checks for revision main@sha1:abc with a timeout of 10m0s"
 
 def main [] {
     let tests = [
@@ -104,6 +115,53 @@ def main [] {
                 assert ((describe_state ($old | first)) | str contains "ready, but at main@sha1:old")
                 let done = (layer_states [(kustomization "polar-data" "True" "main@sha1:abc")] "abc")
                 assert equal (describe_state ($done | first)) "polar-data: ready"
+            }
+        }
+        {
+            name: "the revision a health-check wait was begun for is read from its message"
+            body: {
+                assert equal (revision_waited_on $WAITING) "main@sha1:abc"
+                assert equal (revision_waited_on "Reconciliation in progress") null
+            }
+        }
+        {
+            name: "a wait begun under an older spec or revision is stale; one begun under the current ones is not"
+            body: {
+                # spec changed since the wait began (generation 2, began under 1)
+                assert equal (stale_waits [(reconciling "polar-identity" 2 1 $WAITING)] "abc") ["polar-identity"]
+                # the published commit moved on
+                assert equal (stale_waits [(reconciling "polar-identity" 1 1 $WAITING)] "def") ["polar-identity"]
+                # current spec, current revision: an ordinary wait
+                assert equal (stale_waits [(reconciling "polar-identity" 1 1 $WAITING)] "abc") []
+            }
+        }
+        {
+            name: "only a health-check wait can be stale; waiting on a dependency, or being Ready, cannot"
+            body: {
+                let dependency = (reconciling "polar-agents" 3 1 "dependency 'flux-system/polar-identity' is not ready")
+                let ready = { metadata: { name: "polar-platform", generation: 2 }, status: { conditions: [{ type: "Ready", status: "True", message: "Applied revision: main@sha1:abc", observedGeneration: 1 }] } }
+                let none = { metadata: { name: "polar-new", generation: 1 } }
+                assert equal (stale_waits [$dependency $ready $none] "abc") []
+                # several at once: only the stale one
+                let mixed = (stale_waits [(reconciling "a" 2 1 $WAITING) (reconciling "b" 1 1 $WAITING) $ready] "abc")
+                assert equal $mixed ["a"]
+            }
+        }
+        {
+            name: "a Kustomization is acted on only after it has been stale for the grace period, and forgotten once it is not"
+            body: {
+                let t0 = ("2026-10-19T12:00:00Z" | into datetime)
+                let seen = (track_stale {} ["a"] $t0)
+                assert equal ($seen | columns) ["a"]
+                # still stale later: the first sighting is kept
+                let later = ($t0 + 10sec)
+                let again = (track_stale $seen ["a" "b"] $later)
+                assert equal ($again | get a) $t0
+                assert equal ($again | get b) $later
+                assert equal (due_stale $again $later 15sec) []
+                assert equal (due_stale $again ($t0 + 16sec) 15sec) ["a"]
+                # no longer stale: forgotten, so a later stale spell starts its own clock
+                assert equal (track_stale $again [] ($t0 + 20sec)) {}
             }
         }
     ]
