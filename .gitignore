@@ -89,3 +89,6 @@ env.sh
 
 # The image digests this machine last pushed (infra/lock.nu); lies over the committed infra/images.lock.nuon
 infra/images.dev.lock.nuon
+
+# bin/polar-dev renders a user's kustomization here for a moment
+infra/.dev-pod-*/

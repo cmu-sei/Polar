@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# ACE Tool
+#
+# Copyright 2026 Carnegie Mellon University.
+#
+# NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+# FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+# EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+# PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+# MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+# TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+#
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+# for full terms.
+#
+# [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+# distribution.  Please see Copyright notice for non-US Government use and distribution.
+#
+# This Software includes and/or makes use of Third-Party Software each subject to its own license.
+#
+# DM26-0670
+
+# bin/polar-dev: your dev container, as a pod in whatever cluster kubectl points at, local or not. Your machine needs kubectl,
+# ssh and git; everything else (Nix, the tools, the builds, up.nu) runs in the pod. You reach it over SSH with your agent
+# forwarded, so git there uses your own key and none is kept in the cluster.
+#
+#   bin/polar-dev up        make or update the pod, clone the sources into it if they are not there, and log in
+#   bin/polar-dev attach    log in again
+#   bin/polar-dev cert [u]  copy your Polar certificate out and import it into Librewolf here (infra/user-cert-install.sh)
+#   bin/polar-dev forward   the port-forwards a browser here needs: Neo4j (7473, 7687) and ACE (8050)
+#   bin/polar-dev sync      copy ~/.config/polar-deploy (the deployment PKI and its signed history) and polar-admin back here
+#   bin/polar-dev down      sync, then stop the pod (its volumes stay); --purge removes the namespace and the volumes too
+#
+# Settings (environment): POLAR_DEV_IMAGE, POLAR_DEV_STORAGE_CLASS (default: the cluster's), POLAR_DEV_SSH_KEY (the public key
+# to log in with; default: the first your agent holds), POLAR_DEV_SOPS_KEY (the private key sops decrypts with; default:
+# SOPS_AGE_SSH_PRIVATE_KEY_FILE, else ~/.ssh/id_ed25519), POLAR_DEV_REPO and POLAR_DEV_BRANCH (what is cloned),
+# POLAR_DEV_PORT (local end of the SSH forward, 2222).
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+U=$(id -un | tr '[:upper:]_.' '[:lower:]--')
+NS=polar-dev-$U
+DEPLOY=polar-dev-$U
+ARCH=$(case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; *) uname -m;; esac)
+IMAGE=${POLAR_DEV_IMAGE:-docker.io/daveman1010220/polar-dev:latest-$ARCH}
+REPO=${POLAR_DEV_REPO:-git@52.235.181.217:SEI/ACE.git}
+BRANCH=${POLAR_DEV_BRANCH:-feat/ace-integration}
+PORT=${POLAR_DEV_PORT:-2222}
+SOPS_KEY=${POLAR_DEV_SOPS_KEY:-${SOPS_AGE_SSH_PRIVATE_KEY_FILE:-$HOME/.ssh/id_ed25519}}
+REMOTE_HOME=/home/$(id -un)
+SSH_OPTS=(-A -p "$PORT" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$HOME/.ssh/polar-dev_known_hosts")
+
+die() { echo "polar-dev: $*" >&2; exit 1; }
+k() { kubectl -n "$NS" "$@"; }
+pod() { k get pod -l app=polar-dev -o jsonpath='{.items[0].metadata.name}'; }
+
+pubkey() {
+    if [ -n "${POLAR_DEV_SSH_KEY:-}" ]; then cat "$POLAR_DEV_SSH_KEY"; return; fi
+    # All of the listing first, then its first line: `| head -1` would close the pipe on ssh-add, which pipefail counts as a failure.
+    local keys; keys=$(ssh-add -L 2>/dev/null) || true
+    [ -n "$keys" ] && [[ "$keys" != "The agent has no identities."* ]] || die "no key in your ssh agent (ssh-add one, or set POLAR_DEV_SSH_KEY to a public key file)"
+    printf '%s\n' "${keys%%$'\n'*}"
+}
+
+# The kustomization this user's pod is made from: the base in infra/dev-pod, and what is theirs.
+render() {
+    [ -r "$SOPS_KEY" ] || die "no key for sops at $SOPS_KEY (set POLAR_DEV_SOPS_KEY)"
+    # Beside the base, since kustomize takes a base only by a relative path; removed when done.
+    local d="$HERE/infra/.dev-pod-$U"; rm -rf "$d"; mkdir -p "$d"; trap 'rm -rf "$d"' RETURN
+    local uid gid key; uid=$(id -u); gid=$(id -g)
+    key=$(pubkey) || exit 1
+    printf 'apiVersion: v1\nkind: Namespace\nmetadata: { name: %s }\n' "$NS" > "$d/namespace.yaml"
+    cat > "$d/kustomization.yaml" <<K
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: $NS
+nameSuffix: -$U
+resources: [namespace.yaml, ../dev-pod]
+images: [{ name: polar-dev, newName: ${IMAGE%:*}, newTag: ${IMAGE##*:} }]
+secretGenerator:
+  - { name: polar-dev-ssh, literals: ["authorized_keys_b64=$(printf '%s\n' "$key" | base64 | tr -d '\n')"] }
+  - { name: polar-dev-sops, files: ["key=$SOPS_KEY"] }
+patches:
+  - target: { kind: ClusterRoleBinding }
+    patch: '[{"op": "replace", "path": "/subjects/0", "value": {"kind": "ServiceAccount", "name": "polar-dev-$U", "namespace": "$NS"}}]'
+  - target: { kind: PersistentVolumeClaim }
+    patch: '[{"op": "add", "path": "/spec/storageClassName", "value": "${POLAR_DEV_STORAGE_CLASS:-}"}]'
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: polar-dev }
+      spec:
+        template:
+          spec:
+            securityContext: { fsGroup: $gid }
+            initContainers:
+              - name: seed
+                env: [{ name: CREATE_UID, value: "$uid" }, { name: CREATE_GID, value: "$gid" }]
+            containers:
+              - name: dev
+                env: [{ name: CREATE_USER, value: "$(id -un)" }, { name: CREATE_UID, value: "$uid" }, { name: CREATE_GID, value: "$gid" }]
+                volumeMounts:
+                  - { name: state, mountPath: $REMOTE_HOME/.local/share/atuin, subPath: atuin }
+                  - { name: state, mountPath: $REMOTE_HOME/.config/polar-admin, subPath: polar-admin }
+                  - { name: state, mountPath: $REMOTE_HOME/.config/polar-deploy, subPath: polar-deploy }
+                  - { name: state, mountPath: $REMOTE_HOME/.cache, subPath: cache }
+                  # The pod's SSH host keys live here, so they are the same after a restart and ssh keeps trusting them.
+                  - { name: state, mountPath: $REMOTE_HOME/.ssh, subPath: ssh }
+K
+    [ -n "${POLAR_DEV_STORAGE_CLASS:-}" ] || sed -i.bak '/PersistentVolumeClaim/,+1d' "$d/kustomization.yaml"
+    kubectl kustomize --load-restrictor LoadRestrictionsNone "$d"
+}
+
+ssh_answers() { ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$(id -un)@127.0.0.1" true 2>/dev/null; }
+
+# Starts the forward to the pod's SSH and waits until a login works. A forward left from before that does not reach the pod
+# (it was made for a pod that has since been replaced) is replaced.
+forward_ssh() {
+    ssh_answers && return
+    pkill -f "port-forward deploy/$DEPLOY $PORT:2223" 2>/dev/null || true
+    k port-forward "deploy/$DEPLOY" "$PORT:2223" >/tmp/polar-dev-$U-ssh.log 2>&1 &
+    for _ in $(seq 1 60); do ssh_answers && return; sleep 2; done
+    die "the pod's SSH does not answer at 127.0.0.1:$PORT (kubectl -n $NS logs deploy/$DEPLOY; /tmp/polar-dev-$U-ssh.log)"
+}
+
+login() { forward_ssh; exec ssh "${SSH_OPTS[@]}" -t "$(id -un)@127.0.0.1" "$@"; }
+
+# tar over kubectl exec, so a directory keeps its modes; owned by the user in the pod.
+copy_in() { [ -d "$HOME/.config/$1" ] || return 0; tar -C "$HOME/.config" -cf - "$1" | k exec -i "deploy/$DEPLOY" -c dev -- tar -C "$REMOTE_HOME/.config" --no-same-owner -xf -; k exec "deploy/$DEPLOY" -c dev -- chown -R "$(id -u):$(id -g)" "$REMOTE_HOME/.config/$1"; }
+copy_out() { mkdir -p "$HOME/.config"; k exec "deploy/$DEPLOY" -c dev -- tar -C "$REMOTE_HOME/.config" -cf - "$1" | tar -C "$HOME/.config" -xf -; }
+
+case "${1:-}" in
+    up)
+        manifests=$(render) || exit 1
+        printf '%s\n' "$manifests" | kubectl apply -f - >/dev/null
+        echo "polar-dev: waiting for $NS/$DEPLOY (the first start copies the image's Nix store to its volume, which takes a while)"
+        k rollout status "deploy/$DEPLOY" --timeout=30m
+        # The state that lives on this machine goes in, unless the pod has its own already (it keeps what it made).
+        for d in polar-deploy polar-admin; do
+            [ -n "$(k exec "deploy/$DEPLOY" -c dev -- ls -A "$REMOTE_HOME/.config/$d" 2>/dev/null)" ] || copy_in "$d"
+        done
+        forward_ssh
+        ssh "${SSH_OPTS[@]}" "$(id -un)@127.0.0.1" "test -d /workspace/.git || GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' git clone -b '$BRANCH' '$REPO' /workspace"
+        login ;;
+    attach) login ;;
+    cert)
+        u=${2:-$(id -un)}
+        copy_out polar-admin
+        script=$(mktemp); k exec "deploy/$DEPLOY" -c dev -- cat /workspace/infra/user-cert-install.sh > "$script"
+        bash "$script" "$u"; rm -f "$script" ;;
+    forward)
+        kubectl -n polar-graph port-forward svc/polar-db-svc 7473:7473 7687:7687 >/tmp/polar-dev-$U-neo4j.log 2>&1 &
+        kubectl -n polar port-forward svc/ace-svc 8050:8050 >/tmp/polar-dev-$U-ace.log 2>&1 &
+        echo "polar-dev: Neo4j at https://localhost:7473, ACE at http://localhost:8050 (logs in /tmp/polar-dev-$U-*.log)" ;;
+    sync) copy_out polar-deploy; copy_out polar-admin; echo "polar-dev: copied polar-deploy and polar-admin to ~/.config" ;;
+    down)
+        "$0" sync
+        if [ "${2:-}" = "--purge" ]; then kubectl delete namespace "$NS"; kubectl delete clusterrolebinding "polar-dev-$U" --ignore-not-found
+        else k scale "deploy/$DEPLOY" --replicas=0; fi ;;
+    *) sed -n '/^# bin\/polar-dev/,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 1 ;;
+esac

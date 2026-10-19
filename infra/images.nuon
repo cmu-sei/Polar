@@ -75,6 +75,11 @@
   {image: "oci-resolver",        tag: "latest", kind: "nix", attr: "polarPkgs.ociResolver.resolverImage"}
   {image: "build-processor",     tag: "latest", kind: "nix", attr: "buildProcessorImage"}
 
+  # ── Developer (not deployed by any target) ───────────────────────────────
+  # The dev container, which bin/polar-dev runs in the cluster: published, so a cluster can pull it before Polar exists
+  # (`nu infra/images.nu publish dev --to docker.io/<account>` makes polar-dev:latest-<arch>).
+  {image: "dev", tag: "latest", kind: "nix", attr: "devContainer"}
+
   # ── Cassini test harness (not deployed by any target; `just image <name>`) ──
   {image: "harness-producer", tag: "latest", kind: "nix", attr: "polarPkgs.cassini.producerImage"}
   {image: "harness-sink",     tag: "latest", kind: "nix", attr: "polarPkgs.cassini.sinkImage"}

@@ -528,19 +528,26 @@ def step_admin [username: string, mail: string] {
 def step_browser [username: string] {
     let dir = (admin_dir)
 
-    let db = (nss_db)
-    let browser_problems = if $db == null {
-        ["no Librewolf profile with a certificate database was found under ~/.librewolf or ~/.config/librewolf (set POLAR_NSS_DB to its directory)"]
+    # In the in-cluster dev container (bin/polar-dev) there is no browser here: the certificate is imported on the user's
+    # machine, by the same script `just user-cert-install` runs.
+    if ($env.POLAR_DEV_POD? | default "") == "1" {
+        note "this is the in-cluster dev container: the browser is on your own machine"
+        pause $"On your machine, close Librewolf and run: bin/polar-dev cert ($username)   \(it copies the certificate out and imports it\)"
     } else {
-        browser_problems (browser_found $db $username) (browser_expected $dir $username) $username
-    }
-    if ($browser_problems | is-empty) {
-        ok $"the browser trusts this cluster's CA and holds ($username)'s current certificate"
-    } else {
-        for p in $browser_problems { note $p }
-        pause "Close Librewolf so its certificate store is not locked."
-        ^just user-cert-install $username
-        if $env.LAST_EXIT_CODE != 0 { fail "just user-cert-install failed" }
+        let db = (nss_db)
+        let browser_problems = if $db == null {
+            ["no Librewolf profile with a certificate database was found under ~/.librewolf or ~/.config/librewolf (set POLAR_NSS_DB to its directory)"]
+        } else {
+            browser_problems (browser_found $db $username) (browser_expected $dir $username) $username
+        }
+        if ($browser_problems | is-empty) {
+            ok $"the browser trusts this cluster's CA and holds ($username)'s current certificate"
+        } else {
+            for p in $browser_problems { note $p }
+            pause "Close Librewolf so its certificate store is not locked."
+            ^just user-cert-install $username
+            if $env.LAST_EXIT_CODE != 0 { fail "just user-cert-install failed" }
+        }
     }
 
     # The password the agents use is the Secret's; whether Neo4j has it tells whether the first login happened.
