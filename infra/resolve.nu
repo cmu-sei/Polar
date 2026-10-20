@@ -221,14 +221,9 @@ def agent_checks [target: string, resolved: list] {
 
 # ── Resolution ───────────────────────────────────────────────────────────────
 
-export def resolve [name: string, target: string = $DEFAULT_TARGET] {
-    let cluster = (load_cluster $target)
-    let services = (open ($CONFIG | path join "services.nuon"))
-    let caps = (open ($CONFIG | path join "capabilities.nuon"))
-    let kinds = (open ($CONFIG | path join "kinds.nuon"))
-    let images = (open ($INFRA | path join "images.nuon"))
-    let vars = (service_vars $services $cluster)
-
+# A workload's entry, the target's overrides of it, its kind, and the spec they make together (scalars and nested records:
+# kind < entry < target; resolve adds the lists). Nothing here reads the agent's scaffold.
+def spec_of [name: string, target: string, kinds: record] {
     let found = (catalog_workloads | where name == $name)
     if ($found | is-empty) {
         error make { msg: $"no workload named '($name)'. Known: (catalog_workloads | get name | str join ', ')" }
@@ -243,13 +238,35 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         error make { msg: $"($name): unknown kind '($entry.kind)'" }
     }
     let kind = (kind_of $kinds $entry.kind)
-
-    # Scalars and nested records: kind < entry < target. Lists below.
     let spec = (
         $kind
         | merge deep ($entry | reject -o needs env)
         | merge deep ($ov | reject -o needs env)
     )
+    { entry: $entry, ov: $ov, kind: $kind, spec: $spec }
+}
+
+# The images a workload's pod runs, as the resolved spec names them: its own, and its init container's.
+def images_of [images: list, cluster: record, spec: record, name: string] {
+    {
+        image: (image_ref $images $cluster $spec.image $name)
+        polar_init_image: (image_ref $images $cluster "polar-init" $name)
+    }
+}
+
+export def resolve [name: string, target: string = $DEFAULT_TARGET] {
+    let cluster = (load_cluster $target)
+    let services = (open ($CONFIG | path join "services.nuon"))
+    let caps = (open ($CONFIG | path join "capabilities.nuon"))
+    let kinds = (open ($CONFIG | path join "kinds.nuon"))
+    let images = (open ($INFRA | path join "images.nuon"))
+    let vars = (service_vars $services $cluster)
+
+    let merged = (spec_of $name $target $kinds)
+    let entry = $merged.entry
+    let ov = $merged.ov
+    let kind = $merged.kind
+    let spec = $merged.spec
     let origin = (
         $spec | columns | reduce --fold {} {|k, acc|
             let o = if ($ov | get -o $k) != null { "target" } else if ($entry | get -o $k) != null { "entry" } else { $"kind:($entry.kind)" }
@@ -450,10 +467,9 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         name: $name
         kind: $entry.kind
         namespace: $spec.namespace
-        image: (image_ref $images $cluster $spec.image $name)
+        ...(images_of $images $cluster $spec $name)
         pull_policy: $spec.pull_policy
         pull_secrets: $spec.pull_secrets
-        polar_init_image: (image_ref $images $cluster "polar-init" $name)
         issuer: $issuer
         bootstrap: $spec.bootstrap
         cert_issuer_url: (if $issuer == "credentials-agent" { "" } else { $"($scheme)://($ci.addr)" })
@@ -727,6 +743,17 @@ def "main list" [--target: string = $DEFAULT_TARGET] {
 # be built first: `up.nu` builds exactly these before it renders.
 def "main document-images" [--target: string = $DEFAULT_TARGET] {
     print (all_workloads $target | where {|w| ($w.config? | default "env") == "document" } | get image | uniq | to json --raw)
+}
+
+# Every image the target's catalog workloads run, as a JSON array of references (images_of: the same that resolve gives the
+# render). It reads no scaffold, so the images can be built before the render that asks them for theirs.
+def "main images" [--target: string = $DEFAULT_TARGET] {
+    let cluster = (load_cluster $target)
+    let kinds = (open ($CONFIG | path join "kinds.nuon"))
+    let images = (open ($INFRA | path join "images.nuon"))
+    all_workloads $target
+    | each {|w| images_of $images $cluster (spec_of $w.name $target $kinds).spec $w.name | values }
+    | flatten | uniq | sort | to json --raw | print
 }
 
 # The workload names, as a JSON array (for scripts that render each one).
