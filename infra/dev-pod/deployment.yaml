@@ -96,9 +96,10 @@ spec:
             # skopeo, and others, stage large files in /var/tmp, which the user cannot write here; /tmp is open to all
             # (start.nu makes it 1777), and TMPDIR is what they take instead. Every SSH session gets it too.
             - { name: TMPDIR, value: /tmp }
+          # What the scheduler sets aside for it; no limits, so it can use all of a node's CPUs and memory, as a machine of
+          # your own would (a nix build wants both). On a cluster shared with others, add limits here.
           resources:
             requests: { cpu: "2", memory: 8Gi }
-            limits: { memory: 24Gi }
           volumeMounts:
             - { name: nix, mountPath: /nix }
             - { name: workspace, mountPath: /workspace }

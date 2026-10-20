@@ -336,7 +336,7 @@ It copies your `~/.config/polar-deploy` and `polar-admin` in, unless the pod has
 `127.0.0.1:2222` (`POLAR_DEV_PORT`) to the pod's SSH, clones `POLAR_DEV_REPO` (`POLAR_DEV_BRANCH`) into `/workspace` if it is
 empty, and logs you in. The keys ssh trusts for the pod are kept per namespace
 (`~/.ssh/polar-dev_known_hosts.<id>`), so a new cluster's pod is not mistaken for a changed host. Every setting is at the
-top of `bin/polar-dev`; the pod's resources (2 CPUs and 8Gi requested, 24Gi of memory at most) and volumes (20Gi for
+top of `bin/polar-dev`; the pod's resources (2 CPUs and 8Gi of memory requested, with no limits, so it can use the whole node) and volumes (20Gi for
 `/workspace`, 80Gi for the Nix store, 2Gi for your state) are in `infra/dev-pod/`.
 
 ```bash
