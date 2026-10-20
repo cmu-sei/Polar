@@ -284,11 +284,10 @@ Things that look wrong and are not:
   and then `just port-forwards-up` (in the dev container), or `bin/polar-dev forward` again (on your machine).
 - **A Job that is slow to replace a pod you deleted by hand.** The Job controller waits longer after each failure, up to
   about six minutes.
-- **`clone attempt 1 failed ... unexpected eof` while seeding the schedules repository.** The git server had just
-  restarted (it does when its settings change). The step retries and goes on.
-- **`[polar] TLS certs missing -> building .#tlsCerts ... ERROR`** printed by a recipe that starts a nested `nix-shell`.
-  Your dev shell was entered before the flake last changed and still carries an old startup hook. It is harmless; leave the
-  dev shell and enter it again (or `direnv reload`) to make it stop.
+- **`the git server does not answer yet ... trying again` while seeding the schedules repository.** The git server had
+  just restarted (it does when its settings change). The step retries and goes on.
+- **`[polar] TLS certs missing -> building .#tlsCerts ... ERROR`** from a dev shell entered before the dev shell's TLS
+  hook was retired (there is no dev PKI of its own any more). Leave the dev shell and enter it again, or `direnv reload`.
 
 ### 7. Day to day
 

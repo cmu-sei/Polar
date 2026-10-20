@@ -162,11 +162,6 @@
           inherit pkgs crane;
         };
 
-        # ── TLS certificates ───────────────────────────────────────────────────
-        # The dev shell's local certificates (TLS_CA_CERT and the rest, for the agents' dev_stack.sh): its TLS hook builds
-        # .#tlsCerts into result-tlsCerts when they are missing.
-        tlsCerts = pkgs.callPackage ./src/flake/gen-certs.nix { inherit pkgs; };
-
         pkgsCuda = import nixpkgs {
           inherit system;
           config = {
@@ -187,7 +182,7 @@
           default     = polarPkgs.workspacePackages;
           inherit polarPkgs;
 
-          inherit dhallCache tlsCerts;
+          inherit dhallCache;
 
           # ── Dev / CI / Agent containers ──────────────────────────────────────
           devContainer         = container.image;

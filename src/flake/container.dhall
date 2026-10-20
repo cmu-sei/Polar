@@ -96,10 +96,8 @@ in defaults.devContainer //
       , polarExtras
       ]
 
-  , tls = Some
-      ( defaults.defaultTLS //
-        { generateCerts = True }
-      )
+  -- No dev PKI of its own: certificates come from the cluster's CA (cert-issuer), as in a deployment.
+  , tls = None Lib.TLSConfig
 
   , ssh = Some
       ( defaults.defaultSSH //

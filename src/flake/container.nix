@@ -101,7 +101,7 @@
   ssh = { enable = true; port = 2223; };
   staticGid = null;
   staticUid = null;
-  tls = { certsPath = null; enable = true; generateCerts = true; };
+  tls = null;
   user = {
     createUser = true;
     defaultShell = "/bin/fish";
