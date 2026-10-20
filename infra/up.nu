@@ -121,7 +121,7 @@ def served_digest [image: string] {
     let url = $"http://(registry_host)/v2/($parsed.0.name)/manifests/($parsed.0.tag)"
     let r = (do { ^curl -sI -m 5 -H "Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json" $url } | complete)
     if $r.exit_code != 0 { return null }
-    let line = ($r.stdout | lines | where {|l| ($l | str downcase | str starts-with "docker-content-digest:") })
+    let line = ($r.stdout | lines | where {|l| ($l | str lowercase | str starts-with "docker-content-digest:") })
     if ($line | is-empty) { null } else { $line | first | str replace --regex '(?i)^docker-content-digest:\s*' '' | str trim }
 }
 
@@ -200,7 +200,7 @@ def apply_file [output_dir: string, filename: string, changed: list<string> = []
     let rollers = ($users | where kind in ["Deployment" "StatefulSet"])
     # Each in a record: `each` drops a null (a Deployment that does not exist yet has no generation), which would
     # shift every later one out of its place.
-    let before = ($rollers | each {|u| { generation: (generation_of $u.ns ($u.kind | str downcase) $u.name) } })
+    let before = ($rollers | each {|u| { generation: (generation_of $u.ns ($u.kind | str lowercase) $u.name) } })
     let applied = (do { ^kubectl apply -f $manifest } | complete)
     print ($applied.stdout | str trim)
     if $applied.exit_code != 0 {
@@ -213,7 +213,7 @@ def apply_file [output_dir: string, filename: string, changed: list<string> = []
     # generation, not what kubectl printed, since `configured` is printed for more than a changed spec.
     for it in ($rollers | enumerate) {
         let u = $it.item
-        let kind = ($u.kind | str downcase)
+        let kind = ($u.kind | str lowercase)
         let hit = ($u.configmaps | where {|c| $c in ($changed ++ $now_changed) })
         let after = (generation_of $u.ns $kind $u.name)
         if (workload_needs_restart ($before | get $it.index | get generation) $after $hit) {
