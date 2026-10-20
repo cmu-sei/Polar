@@ -593,11 +593,11 @@ history), load it into the running deployment with:
 just neo4j-load-dump ~/path/to/your.neo4j.dump
 ```
 
-This scales Neo4j down, restores the dump via a temporary loader pod,
-fixes file ownership, scales Neo4j back up, and resets the `neo4j`
-user's password to match the cluster's own secret — the whole sequence
-is scripted and safe to run against a live deployment, but Neo4j will
-be briefly unavailable while it does.
+It runs `infra/neo4j-load.nu`, which prints each `kubectl` call. It scales Neo4j down (on a Flux target, it suspends the
+Kustomization that applies Neo4j first, so Flux does not scale it back up halfway), loads the dump into the `neo4j` database
+in a temporary pod with Neo4j's own image and user, then scales Neo4j up again and resumes the Kustomization, even when the
+load fails. The users and the password are left as they were: they are in the `system` database, which a dump of `neo4j`
+does not touch. Neo4j is unavailable while it runs.
 
 ### Accessing the deployment
 

@@ -513,50 +513,12 @@ admin-claim username email:
         --cert-out {{_admin_dir}}/{{username}}.crt \
         --key-out  {{_admin_dir}}/{{username}}.key
 
-# Load a neo4j dump file into the cluster database.
-# Scales down neo4j, runs a loader pod as root, chowns the data, scales back up,
-# and resets the neo4j password to match the cluster secret.
-# Usage: just neo4j-load-dump ~/Documents/projects/jira.5.26.26.neo4j.dump
+# Stops Neo4j (suspending the Flux Kustomization that applies it, on a gitops target), loads the dump with Neo4j's own image
+# and user, and starts it again; the users and the password are kept (infra/neo4j-load.nu says how).
+#   just neo4j-load-dump ~/Documents/projects/jira.5.26.26.neo4j.dump
+# Replace the cluster graph's neo4j database with a dump
 neo4j-load-dump dump_path:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ ! -f "{{dump_path}}" ]; then
-        echo "ERROR: dump file not found: {{dump_path}}"
-        exit 1
-    fi
-    NEO4J_PASSWORD=$(kubectl get secret -n polar-graph neo4j-secret -o jsonpath='{.data.secret}' | base64 -d | cut -d'/' -f2)
-    echo "Scaling neo4j down..."
-    kubectl scale statefulset -n polar-graph polar-neo4j --replicas=0
-    kubectl wait --for=delete pod/polar-neo4j-0 -n polar-graph --timeout=120s 2>/dev/null || true
-    echo "Launching loader pod..."
-    kubectl run -n polar-graph neo4j-loader \
-        --image=neo4j:5.26.2 \
-        --restart=Never \
-        --overrides='{"spec":{"securityContext":{"runAsUser":0,"runAsGroup":0},"volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"polar-db-data"}},{"name":"logs","persistentVolumeClaim":{"claimName":"polar-db-logs"}}],"containers":[{"name":"neo4j-loader","image":"neo4j:5.26.2","command":["/bin/sh","-c","sleep 3600"],"volumeMounts":[{"name":"data","mountPath":"/var/lib/neo4j/data"},{"name":"logs","mountPath":"/var/lib/neo4j/logs"}]}]}}'
-    kubectl wait --for=condition=Ready pod/neo4j-loader -n polar-graph --timeout=60s
-    echo "Copying dump file..."
-    cat "{{dump_path}}" | kubectl exec -i -n polar-graph neo4j-loader -- /bin/sh -c 'cat > /var/lib/neo4j/data/neo4j.dump'
-    echo "Loading dump..."
-    kubectl exec -n polar-graph neo4j-loader -- /bin/sh -c \
-        'mkdir -p /var/lib/neo4j/tmp && NEO4J_HOME=/var/lib/neo4j NEO4J_CONF=/var/lib/neo4j/conf JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=/var/lib/neo4j/tmp" /nix/store/qbds1qr8sf5qkzz8cady90bwhcnw05xf-neo4j-community-src-2025.8.0/opt/neo4j/bin/neo4j-admin database load neo4j --from-path=/var/lib/neo4j/data --overwrite-destination=true'
-    echo "Fixing ownership..."
-    kubectl exec -n polar-graph neo4j-loader -- /bin/sh -c 'chown -R 7474:7474 /var/lib/neo4j/data && rm /var/lib/neo4j/data/neo4j.dump'
-    echo "Cleaning up loader pod..."
-    kubectl delete pod -n polar-graph neo4j-loader
-    echo "Scaling neo4j back up..."
-    kubectl scale statefulset -n polar-graph polar-neo4j --replicas=1
-    echo "Waiting for neo4j to be ready..."
-    kubectl wait --for=condition=Ready pod/polar-neo4j-0 -n polar-graph --timeout=180s
-    echo "Waiting for neo4j to finish initializing..."
-    sleep 15
-    echo "Resetting neo4j password..."
-    kubectl exec -n polar-graph polar-neo4j-0 -- /nix/store/qbds1qr8sf5qkzz8cady90bwhcnw05xf-neo4j-community-src-2025.8.0/opt/neo4j/bin/cypher-shell \
-        -u neo4j -p neo4j \
-        "ALTER USER neo4j SET PASSWORD '$NEO4J_PASSWORD' CHANGE NOT REQUIRED" || \
-    kubectl exec -n polar-graph polar-neo4j-0 -- /nix/store/qbds1qr8sf5qkzz8cady90bwhcnw05xf-neo4j-community-src-2025.8.0/opt/neo4j/bin/cypher-shell \
-        -u neo4j -p "$NEO4J_PASSWORD" \
-        "ALTER USER neo4j SET PASSWORD '$NEO4J_PASSWORD' CHANGE NOT REQUIRED"
-    echo "Done. If you changed users, re-run: just user-cert-install"
+    nu infra/neo4j-load.nu {{dump_path}}
 
 # The image recipes are infra/images.nu (its header says what each stage needs), and print the command they run. Those that
 # push use the target's registry (`target`, above): the one in its cluster, through a forward they start.
