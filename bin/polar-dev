@@ -162,7 +162,8 @@ login() { forward_ssh; exec ssh "${SSH_OPTS[@]}" -t "$(id -un)@127.0.0.1" "$@"; 
 
 # tar over kubectl exec, so a directory keeps its modes; owned by the user in the pod.
 copy_in() { [ -d "$HOME/.config/$1" ] || return 0; tar -C "$HOME/.config" -cf - "$1" | k exec -i "deploy/$DEPLOY" -c dev -- tar -C "$REMOTE_HOME/.config" --no-same-owner -xf -; k exec "deploy/$DEPLOY" -c dev -- chown -R "$(id -u):$(id -g)" "$REMOTE_HOME/.config/$1"; }
-copy_out() { mkdir -p "$HOME/.config"; k exec "deploy/$DEPLOY" -c dev -- tar -C "$REMOTE_HOME/.config" -cf - "$1" | tar -C "$HOME/.config" -xf -; }
+# A socket there (gpg-agent's, in a deployment PKI's GnuPG home) cannot be copied; tar leaves it out, and is told not to say so.
+copy_out() { mkdir -p "$HOME/.config"; k exec "deploy/$DEPLOY" -c dev -- tar --warning=no-file-ignored -C "$REMOTE_HOME/.config" -cf - "$1" | tar -C "$HOME/.config" -xf -; }
 
 # Every command but the help talks to the cluster: say so plainly when kubectl cannot reach it, before anything is half done.
 case "${1:-}" in
