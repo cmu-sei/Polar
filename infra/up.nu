@@ -765,7 +765,7 @@ def main [
 
     let total = ($enabled | length)
     # The images the images step prepared, which the render's manifests must keep to (null when it did not run).
-    mut prepared = null
+    mut prepared: any = null
     for it in ($enabled | enumerate) {
         let s = $it.item
         print ""
