@@ -68,6 +68,13 @@ def runtime [] { $env.POLAR_CLUSTER_RUNTIME? | default "u7s" }
 
 def load_table [] { open $TABLE }
 
+# skopeo stages a large image in a temporary file, in /var/tmp unless told otherwise: it does not read TMPDIR. Where TMPDIR is set
+# (the dev shell, the dev container in the cluster, whose user cannot write /var/tmp), it is passed on.
+def tmpdir_flags [] {
+    let t = ($env.TMPDIR? | default "")
+    if ($t | is-empty) { [] } else { ["--tmpdir" $t] }
+}
+
 # "10.0.2.2:5000/kube-observer:latest" -> {ref, name, tag}
 # A leading path segment that looks like a host (has a "." or ":") is the
 # registry and is dropped; the table holds bare names. A reference pinned by
@@ -244,7 +251,7 @@ def record_digest [row: record] {
 # The format is named, not left to skopeo's default: the digest of the manifest depends on it.
 def push_archive [row: record, a: string] {
     try {
-        ^skopeo copy --format v2s2 $"docker-archive:($a)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
+        ^skopeo ...(tmpdir_flags) copy --format v2s2 $"docker-archive:($a)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
     } catch {
         error make --unspanned { msg: $"skopeo could not push the archive to (registry)" }
     }
@@ -258,7 +265,7 @@ def mirror_row [row: record] {
         record_digest $row
     } else {
         try {
-            ^skopeo copy --retry-times 3 --override-os linux --override-arch (arch) $"docker://($row.upstream)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
+            ^skopeo ...(tmpdir_flags) copy --retry-times 3 --override-os linux --override-arch (arch) $"docker://($row.upstream)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
         } catch {
             error make --unspanned { msg: $"skopeo could not copy ($row.upstream) into (registry)" }
         }
@@ -487,7 +494,7 @@ def "main import" [
         let row = $it.item
         let ref = (published_ref $from $row $want)
         print $"  [($it.index + 1)/($rows | length)] ($ref)"
-        let r = (do { ^skopeo copy --retry-times 3 --format v2s2 ...$auth --dest-tls-verify=false $"docker://($ref)" $"docker://(registry)/(dest $row)" } | complete)
+        let r = (do { ^skopeo ...(tmpdir_flags) copy --retry-times 3 --format v2s2 ...$auth --dest-tls-verify=false $"docker://($ref)" $"docker://(registry)/(dest $row)" } | complete)
         if $r.exit_code != 0 {
             let why = ($r.stderr | lines | last 1 | str join "")
             print $"      FAILED: ($why)"
@@ -537,7 +544,7 @@ def "main publish" [
             # What this repository builds goes up from the archive it built; a mirror goes up as its upstream's image for the architecture.
             let source = if $row.kind == "mirror" { $"docker://($row.upstream)" } else { $"docker-archive:(archive $row $system)" }
             let platform = if $row.kind == "mirror" { ["--override-os" "linux" "--override-arch" $want] } else { [] }
-            let r = (do { ^skopeo copy --retry-times 3 --format v2s2 ...$platform ...$auth $source $"docker://($ref)" } | complete)
+            let r = (do { ^skopeo ...(tmpdir_flags) copy --retry-times 3 --format v2s2 ...$platform ...$auth $source $"docker://($ref)" } | complete)
             if $r.exit_code != 0 { error make --unspanned { msg: ($r.stderr | lines | last 1 | str join "") } }
             null
         } catch {|e| $e.msg })

@@ -74,7 +74,9 @@ def "main install" [
     let files = ($work | path join "files")
     mkdir $files
 
-    let copied = (do { ^skopeo copy ...$flags $source $"dir:($image)" } | complete)
+    # skopeo stages in /var/tmp unless told: it does not read TMPDIR.
+    let tmp = (if ($env.TMPDIR? | default "" | is-empty) { [] } else { ["--tmpdir" $env.TMPDIR] })
+    let copied = (do { ^skopeo ...$tmp copy ...$flags $source $"dir:($image)" } | complete)
     if $copied.exit_code != 0 {
         rm -rf $work
         error make --unspanned { msg: $"skopeo could not read ($source): ($copied.stderr | str trim)" }
