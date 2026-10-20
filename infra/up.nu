@@ -644,7 +644,8 @@ def step_seed [target: string, config: record, username: string, mail: string, a
     let cloned = (with_retries 6 5sec {|n|
         let r = (do { seed_git $username [clone (seed repo_url) $repo] } | complete)
         if $r.exit_code != 0 {
-            note $"clone attempt ($n) failed: ($r.stderr | lines | last | default '' | str trim)"
+            # Its error, when every try fails or the server refuses, is in the failure below.
+            if not ($r.stderr | str contains "403") { note "the git server does not answer yet (its pod, or the port-forward to it, was just replaced): trying again" }
             rm -rf $repo
         }
         seed clone_outcome $r.exit_code $r.stderr
