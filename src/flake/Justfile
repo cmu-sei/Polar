@@ -45,22 +45,29 @@
 # Render the dev container config
 render-dev:
     @echo "Rendering container.dhall → container.nix..."
-    dhall-to-nix < container.dhall > container.nix
+    just _render container.dhall container.nix
     @echo "Done. Commit container.nix alongside container.dhall."
 
 # Render the agent container config
 render-agent:
     @echo "Rendering agent-container.dhall → agent-container.nix..."
-    dhall-to-nix < agent-container.dhall > agent-container.nix
+    just _render agent-container.dhall agent-container.nix
     @echo "Done. Commit agent-container.nix alongside agent-container.dhall."
 
 # Render the CI container config
 render-ci:
     @echo "Rendering ci-container.dhall → ci-container.nix..."
-    dhall-to-nix < ci-container.dhall > ci-container.nix
+    just _render ci-container.dhall ci-container.nix
     @echo "Done. Commit ci-container.nix alongside ci-container.dhall."
 
 # Render all three container configs
+# The rendered file opens with the license banner of the .dhall it comes from (its leading `--` comment, as `#` lines), so a
+# render cannot drop it.
+_render src out:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    { sed -n '/^--/!q; s/^--/#/p' {{src}}; dhall-to-nix < {{src}}; } > {{out}}
+
 render-all: render-dev render-agent render-ci
     @echo "All container configs rendered."
 
