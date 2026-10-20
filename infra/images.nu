@@ -49,14 +49,17 @@
 # ends with a summary and a non-zero exit when anything failed.
 #
 # Environment (all optional):
-#   POLAR_REGISTRY         where this machine pushes     (default localhost:5000)
+#   POLAR_REGISTRY         where this machine pushes     (default localhost:5000;
+#                          --target <target> sets it to that target's, and starts
+#                          the forward to a registry in its cluster)
 #   POLAR_CLUSTER_RUNTIME  "u7s" drops the node's cached copy of a rebuilt
 #                          image so the next pull is fresh (default u7s;
 #                          anything else skips that)
 #   POLAR_NEO4J_IMAGE      path to the Neo4j docker-archive (overrides the table)
 
 use lock.nu
-use registry.nu [node_registry]
+use registry.nu [node_registry, push_registry]
+use cluster-registry.nu
 
 const TABLE = (path self | path dirname | path join "images.nuon")
 
@@ -310,7 +313,7 @@ def node_present [] {
 def require_registry [] {
     let r = (try { do { ^curl -sf --max-time 3 $"http://(registry)/v2/" } | complete } catch { { exit_code: 1 } })
     if $r.exit_code != 0 {
-        error make --unspanned { msg: $"the registry at (registry) is not reachable. Start it with `just registry-up`, or set POLAR_REGISTRY." }
+        error make --unspanned { msg: $"the registry at (registry) is not reachable. Start it with `just registry-up`, set POLAR_REGISTRY, or pass --target <target> for a target whose registry is in its cluster." }
     }
 }
 
@@ -381,6 +384,17 @@ export def sync [rows: list] {
 
 def main [] { help main }
 
+# With --target, the registry that target uses: where this machine pushes (for a registry in its cluster, the forward to it,
+# started if it is not running) and the name its nodes pull by, as up.nu sets them. An address already in the environment wins.
+def --env use_target [target: string] {
+    if ($target | is-empty) { return }
+    if ($env.POLAR_REGISTRY? | default "" | is-empty) {
+        let in_cluster = (cluster-registry settings_of (cluster-registry cluster_of $target))
+        $env.POLAR_REGISTRY = if $in_cluster != null { cluster-registry ensure $target } else { push_registry $target }
+    }
+    if ($env.POLAR_NODE_REGISTRY? | default "" | is-empty) { $env.POLAR_NODE_REGISTRY = (node_registry $target) }
+}
+
 def rows_for [names: list<string>, all: bool] {
     if $all {
         load_table | insert ref ""
@@ -412,7 +426,9 @@ def "main build" [
 def "main push" [
     ...names: string
     --all
+    --target: string = ""   # use this target's registry (infra/targets/<target>), as up.nu does
 ] {
+    use_target $target
     let n = (run_stage "push" (rows_for $names $all))
     print $"pushed ($n) image\(s\) to (registry)"
 }
@@ -421,7 +437,9 @@ def "main push" [
 def "main mirror" [
     ...names: string
     --all
+    --target: string = ""   # use this target's registry (infra/targets/<target>), as up.nu does
 ] {
+    use_target $target
     let n = (run_stage "mirror" (rows_for $names $all))
     print $"mirrored ($n) image\(s\) into (registry)"
 }
@@ -430,7 +448,9 @@ def "main mirror" [
 def "main sync" [
     ...names: string
     --all
+    --target: string = ""   # use this target's registry (infra/targets/<target>), as up.nu does
 ] {
+    use_target $target
     let n = (run_stage "sync" (rows_for $names $all))
     print $"synced ($n) image\(s\) to (registry)"
 }
@@ -440,7 +460,9 @@ def "main sync" [
 # the lock a render would use.
 def "main lock refresh" [
     ...names: string        # only these images (default: every row)
+    --target: string = ""   # use this target's registry (infra/targets/<target>), as up.nu does
 ] {
+    use_target $target
     require_registry
     let rows = (if ($names | is-empty) { load_table } else { named $names })
     mut recorded = 0
@@ -481,7 +503,9 @@ def "main import" [
     --src-authfile: string = ""  # credentials for a private source
     --src-insecure               # the source serves plain HTTP or a certificate that is not trusted
     --skip-mirrors
+    --target: string = ""   # use this target's registry (infra/targets/<target>), as up.nu does
 ] {
+    use_target $target
     if ($from | is-empty) { error make --unspanned { msg: "say where the images are published: --from docker.io/<account>" } }
     require_registry
     let want = if ($arch | is-empty) { arch } else { arch_of $arch }
