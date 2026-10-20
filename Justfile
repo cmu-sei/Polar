@@ -93,38 +93,15 @@ agent-container gpu='rocm':
     nix build {{_nix_flags}} ".#packages.{{platform}}.$target" -o result-agent-container
     just _load result-agent-container
 
-# Build every package — binaries, all containers, TLS certs.
-# Use this to verify the full build after disruptive changes.
-build-all:
-    nix build {{_nix_flags}} ".#packages.{{platform}}.default"               -o result-binaries
-    nix build {{_nix_flags}} ".#packages.{{platform}}.devContainer"          -o result-dev-container
-    nix build {{_nix_flags}} ".#packages.{{platform}}.ciContainer"           -o result-ci-container
-    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainer"        -o result-agent-container
-    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainerRocm"    -o result-agent-container-rocm
-    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainerVulkan"  -o result-agent-container-vulkan
-    nix build {{_nix_flags}} ".#packages.{{platform}}.cassiniImage"          -o result-cassini
-    nix build {{_nix_flags}} ".#packages.{{platform}}.cassiniProducerImage"  -o result-harness-producer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.cassiniSinkImage"      -o result-harness-sink
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitlabObserverImage"   -o result-gitlab-observer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitlabConsumerImage"   -o result-gitlab-consumer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.kubeObserverImage"     -o result-kube-observer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.kubeConsumerImage"     -o result-kube-consumer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.openApiObserverImage"  -o result-openapi-observer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.openApiProcessorImage" -o result-openapi-processor
-    nix build {{_nix_flags}} ".#packages.{{platform}}.polarPkgs.ociResolver.resolverImage" -o result-resolver
-    nix build {{_nix_flags}} ".#packages.{{platform}}.schedulerProcessorImage" -o result-scheduler-processor
-    nix build {{_nix_flags}} ".#packages.{{platform}}.schedulerObserverImage"  -o result-scheduler-observer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.jiraObserverImage"     -o result-jira-observer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.jiraProcessorImage"    -o result-jira-processor
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitObserverImage"      -o result-git-observer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitProcessorImage"     -o result-git-processor
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitControllerImage"    -o result-git-controller
-    nix build {{_nix_flags}} ".#packages.{{platform}}.credentialsAgentConsumerImage" -o result-credentials-agent-consumer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.credentialsAgentObserverImage" -o result-credentials-agent-observer
-    nix build {{_nix_flags}} ".#packages.{{platform}}.buildProcessorImage"   -o result-build-processor
-    nix build {{_nix_flags}} ".#packages.{{platform}}.nuInitImage"           -o result-nu-init
-    nix build {{_nix_flags}} ".#packages.{{platform}}.polarInitImage"        -o result-polar-init
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage"        -o result-git-server
+# Use this to verify the full build after disruptive changes. The table's images are built by infra/images.nu (the
+# images-build recipe, first); the rest are what the table does not hold: the workspace binaries and the CI and agent containers.
+# Build every image in infra/images.nuon, then the binaries and the containers it does not list
+build-all: images-build
+    nix build {{_nix_flags}} ".#packages.{{platform}}.default"              -o result-binaries
+    nix build {{_nix_flags}} ".#packages.{{platform}}.ciContainer"          -o result-ci-container
+    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainer"       -o result-agent-container
+    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainerRocm"   -o result-agent-container-rocm
+    nix build {{_nix_flags}} ".#packages.{{platform}}.agentContainerVulkan" -o result-agent-container-vulkan
 
 # ── Dev container ─────────────────────────────────────────────────────────────
 
