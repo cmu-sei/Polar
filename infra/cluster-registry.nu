@@ -40,6 +40,7 @@
 
 use registry.nu [target_cluster]
 use retry.nu [with_retries]
+use dhall-cache.nu
 
 export const NAMESPACE = "polar-registry"
 export const NAME = "registry"
@@ -147,6 +148,8 @@ def ensure_storage [target: string, storage_class: string] {
         print $"  -- storage class ($storage_class) is already there: leaving it as it is"
         return
     }
+    # Rendered before render.nu runs, so Dhall's cache is filled here first.
+    dhall-cache seed | ignore
     let out = (mktemp --directory)
     let context = { chart_dir: ($chart | first | path dirname), output_dir: $out, overrides: $config.overrides, repo_root: $config.repo_root, target_dir: $config.target_dir, enable_tls: $config.enable_tls }
     let r = (do { ^nu ($chart | first) ($context | to nuon) } | complete)

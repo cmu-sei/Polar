@@ -79,6 +79,7 @@
           { attrPath = "bash"; flakeInput = null; }
           { attrPath = "diffutils"; flakeInput = null; }
           { attrPath = "default"; flakeInput = "polar-tools"; }
+          { attrPath = "default"; flakeInput = "polar-dhall-cache"; }
           { attrPath = "git"; flakeInput = null; }
           { attrPath = "curl"; flakeInput = null; }
           { attrPath = "dhall"; flakeInput = null; }

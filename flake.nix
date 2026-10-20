@@ -87,6 +87,10 @@
         };
         inherit (pkgs) lib;
 
+        # ── Dhall cache ────────────────────────────────────────────────────────
+        # The pinned remote imports of the repository's Dhall, so a render fetches nothing (src/flake/dhall-cache.nix).
+        dhallCache = import ./src/flake/dhall-cache.nix { inherit pkgs lib; roots = [ ./infra ./src ]; };
+
         # ── Container lib helper ───────────────────────────────────────────────
         mkPolarContainer = configNixPath: nix-container-lib.lib.${system}.mkContainer {
           inherit system pkgs;
@@ -103,6 +107,9 @@
             };
             ace-python-env = {
               packages.${system}.default = acePkgs.venvNoCheck;
+            };
+            polar-dhall-cache = {
+              packages.${system}.default = dhallCache;
             };
           };
           inherit configNixPath;
@@ -174,6 +181,8 @@
           # ── Workspace binaries ───────────────────────────────────────────────
           default     = polarPkgs.workspacePackages;
           inherit polarPkgs;
+
+          inherit dhallCache;
 
           # ── Dev / CI / Agent containers ──────────────────────────────────────
           devContainer         = container.image;
@@ -266,6 +275,7 @@
             echo "  # applies the target, waits, starts forwards, runs the admin flow, and pauses for"
             echo "  # the browser import and the Neo4j password; re-run the same command to resume"
             echo ""
+            export POLAR_DHALL_CACHE="${dhallCache}/lib/polar/dhall-cache"
             export SOPS_AGE_BINARY=$(which rage)
             export SOPS_AGE_SSH_PRIVATE_KEY_FILE=~/.ssh/id_github
           '';

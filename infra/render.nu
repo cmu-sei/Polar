@@ -40,6 +40,7 @@ use rules.nu [job_replacement_problems, apply_order_problems, pull_policy_proble
 use layers.nu [layer_problems]
 use registry.nu [node_registry]
 use lock.nu [effective, lock_problems, pin_text]
+use dhall-cache.nu
 
 def main [
     target: string        # Target name: local, local-minimal, sandbox-local
@@ -59,6 +60,8 @@ def main [
     # from the environment, and so do the processes that run them.
     $env.POLAR_NODE_REGISTRY = (node_registry $target)
     print $"  registry: ($env.POLAR_NODE_REGISTRY)"
+    let seeded = (dhall-cache seed)
+    if $seeded > 0 { print $"  dhall: ($seeded) pinned import\(s\) copied into its cache, so nothing is fetched" }
     print ""
 
     # ── Load target configuration ─────────────────────────────────────────────
