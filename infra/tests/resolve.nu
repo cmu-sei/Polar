@@ -30,6 +30,8 @@
 #   nu infra/tests/resolve.nu
 
 use std/assert
+use ../cluster-registry.nu
+use ../registry.nu [node_registry]
 
 const RESOLVER = (path self | path dirname | path dirname | path join "resolve.nu")
 
@@ -107,6 +109,14 @@ def init_env_value [r: record, name: string] {
 def main [] {
     # The agents' scaffolds, asked of their images on the cluster once for the whole run (it needs KUBECONFIG and the images in
     # the registry): every resolve below reads them. `local` runs the whole catalog, so its workloads cover every target's.
+    # The images are asked of a registry the cluster has: the one in the cluster of POLAR_TEST_REGISTRY_TARGET (default
+    # local-minimal), through its forward, as up.nu does; `local` names a registry on the host. An address already in the
+    # environment wins.
+    let registry_target = ($env.POLAR_TEST_REGISTRY_TARGET? | default "local-minimal")
+    if (cluster-registry settings_of (cluster-registry cluster_of $registry_target)) != null {
+        if ($env.POLAR_REGISTRY? | default "" | is-empty) { $env.POLAR_REGISTRY = (cluster-registry ensure $registry_target) }
+        if ($env.POLAR_NODE_REGISTRY? | default "" | is-empty) { $env.POLAR_NODE_REGISTRY = (node_registry $registry_target) }
+    }
     let scaffolds = (mktemp --directory)
     let collected = (do { ^nu $RESOLVER collect-scaffolds $scaffolds --target local } | complete)
     if $collected.exit_code != 0 {
@@ -396,8 +406,7 @@ def main [] {
 
         "the resolver speaks http to the cluster's own development registry, which the target names": {
             let r = (resolve_for "local" "oci-registry-resolver")
-            let cluster = (open ($RESOLVER | path dirname | path join "config/cluster.nuon"))
-            assert ((env_value $r "OCI_INSECURE_REGISTRIES" "local") | str contains $cluster.registry)
+            assert ((env_value $r "OCI_INSECURE_REGISTRIES" "local") | str contains (node_registry "local"))
         }
 
         "the git observer is a plain agent: Cassini only, its cache in the pod, and no graph": {
