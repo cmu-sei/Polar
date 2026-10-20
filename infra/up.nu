@@ -414,7 +414,7 @@ def step_images [config: record, in_cluster: bool] {
         | where {|f| $f | path exists })
     if not $in_cluster { ^just registry-up }
     let rows = try { images needed $files } catch {|e| fail $e.msg }
-    print $"  ($rows | length) image\(s\) needed by this target"
+    print $"  ($rows | length) image\(s\) needed by this target: the rest are built now; the agents' images, built before the render, are found built and already pushed"
     try { images sync $rows } catch {|e| fail $e.msg }
     ok "images built and pushed"
 }

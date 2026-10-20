@@ -348,10 +348,9 @@ def run_stage [stage: string, rows: list] {
         print $"  not part of the '($stage)' stage: ($names)"
     }
 
+    # The pods pull this repository's images Always (render.nu checks it), so a node's cached copy is never what runs; dropping
+    # it from a u7s node, when there is one, only frees its disk. Nothing to say when there is none.
     let evict = ($stage == "sync") and ((runtime) == "u7s") and (node_present)
-    if $stage == "sync" and (runtime) == "u7s" and not $evict {
-        print "  no u7s node found; leaving node image caches alone"
-    }
 
     let total = ($todo | length)
     mut failures: list<any> = []
