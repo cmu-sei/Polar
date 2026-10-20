@@ -798,5 +798,9 @@ def main [
     print $"=== Target ($target) is up ==="
     ^kubectl -n $POLAR get pods
     report_egress
-    note "other services (keycloak, ace, jaeger) are not forwarded here; run: just port-forwards-up"
+    if ($env.POLAR_DEV_POD? | default "") == "1" {
+        note "for a browser on your own machine: bin/polar-dev forward there (Neo4j and ACE); just port-forwards-up there has every service"
+    } else {
+        note "other services (keycloak, ace, jaeger) are not forwarded here; run: just port-forwards-up"
+    }
 }

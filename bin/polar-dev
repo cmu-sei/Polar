@@ -164,6 +164,12 @@ login() { forward_ssh; exec ssh "${SSH_OPTS[@]}" -t "$(id -un)@127.0.0.1" "$@"; 
 copy_in() { [ -d "$HOME/.config/$1" ] || return 0; tar -C "$HOME/.config" -cf - "$1" | k exec -i "deploy/$DEPLOY" -c dev -- tar -C "$REMOTE_HOME/.config" --no-same-owner -xf -; k exec "deploy/$DEPLOY" -c dev -- chown -R "$(id -u):$(id -g)" "$REMOTE_HOME/.config/$1"; }
 copy_out() { mkdir -p "$HOME/.config"; k exec "deploy/$DEPLOY" -c dev -- tar -C "$REMOTE_HOME/.config" -cf - "$1" | tar -C "$HOME/.config" -xf -; }
 
+# Every command but the help talks to the cluster: say so plainly when kubectl cannot reach it, before anything is half done.
+case "${1:-}" in
+    up|attach|cert|forward|sync|down)
+        kubectl version --request-timeout=5s >/dev/null 2>&1 || die "the cluster does not answer (KUBECONFIG is ${KUBECONFIG:-not set}): point kubectl at it, then run this again" ;;
+esac
+
 case "${1:-}" in
     up)
         say "applying $NS (image $IMAGE)"
@@ -194,7 +200,7 @@ case "${1:-}" in
         u=${2:-$(id -un)}
         copy_out polar-admin
         script=$(mktemp); k exec "deploy/$DEPLOY" -c dev -- cat /workspace/infra/user-cert-install.sh > "$script"
-        bash "$script" "$u"; rm -f "$script" ;;
+        POLAR_CERT_NEXT="bin/polar-dev forward" bash "$script" "$u"; rm -f "$script" ;;
     forward)
         kubectl -n polar-graph port-forward svc/polar-db-svc 7473:7473 7687:7687 >/tmp/polar-dev-$U-neo4j.log 2>&1 &
         kubectl -n polar port-forward svc/ace-svc 8050:8050 >/tmp/polar-dev-$U-ace.log 2>&1 &

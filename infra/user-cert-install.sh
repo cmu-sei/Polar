@@ -129,4 +129,5 @@ if command -v certutil >/dev/null && command -v pk12util >/dev/null; then
 else
     nix-shell -p nssTools openssl --run "bash $WORK/install.sh"
 fi
-echo "Done. just port-forwards-up, then browse to https://localhost:7473"
+# What starts the forward the browser needs: the caller says (bin/polar-dev, for a cluster the dev pod is in), else the Justfile's.
+echo "Done. ${POLAR_CERT_NEXT:-just port-forwards-up}, then browse to https://localhost:7473"
