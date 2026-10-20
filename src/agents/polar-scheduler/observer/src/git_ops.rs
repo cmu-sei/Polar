@@ -87,6 +87,12 @@ pub fn ensure_repo(local_path: &Path, remote_url: &str, tls: &GitTls) -> Result<
     run(cmd, "clone").map(|_| ())
 }
 
+/// Whether a failed clone is the server refusing this identity, which trying again cannot change,
+/// rather than a server that does not answer yet (it is starting, or its pod was just replaced).
+pub fn clone_refused(error: &str) -> bool {
+    error.contains("403") || error.contains("401")
+}
+
 /// Brings the checkout up to its remote when that is a fast-forward. A history that has diverged
 /// is an error and is left alone.
 pub fn pull_repo(local_path: &Path, tls: &GitTls) -> Result<(), anyhow::Error> {
@@ -107,6 +113,20 @@ pub fn repo_name(remote_url: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_is_final_and_a_server_that_does_not_answer_is_tried_again() {
+        assert!(clone_refused(
+            "git clone failed: fatal: unable to access '...': The requested URL returned error: 403"
+        ));
+        assert!(clone_refused("The requested URL returned error: 401"));
+        assert!(!clone_refused(
+            "fatal: unable to access '...': TLS connect error: error:0A000126:SSL routines::unexpected eof while reading"
+        ));
+        assert!(!clone_refused(
+            "Failed to connect to polar-git-server.polar.svc.cluster.local port 8443: Connection refused"
+        ));
+    }
 
     #[test]
     fn the_repository_is_the_last_path_segment() {

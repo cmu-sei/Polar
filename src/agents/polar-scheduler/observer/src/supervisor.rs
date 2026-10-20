@@ -40,7 +40,7 @@
 //! 4. The infrastructure supervisor's termination makes this supervisor exit non-zero, so the
 //!    workload is restarted with fresh certificates.
 
-use crate::git_ops::{GitTls, ensure_repo, repo_name};
+use crate::git_ops::{GitTls, clone_refused, ensure_repo, repo_name};
 use crate::settings::ObserverSettings;
 use crate::sync_actor::{GitSyncActor, GitSyncArgs, SyncMessage};
 use crate::watcher::{GitWatcherActor, GitWatcherMsg};
@@ -61,6 +61,10 @@ pub const SERVICE_NAME: &str = "polar-scheduler-observer";
 
 /// Stopping two small actors is all there is to drain; the rest is margin.
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
+
+/// How long the first clone of the schedules repository is tried for while the git server does not answer: under the
+/// liveness probe's initial delay (infra/config/kinds.nuon, 150 s), so the probe does not end the pod first.
+const FIRST_CLONE_PATIENCE: Duration = Duration::from_secs(120);
 
 pub enum SchedulerObserverMessage {
     ClientEvent {
@@ -165,16 +169,34 @@ impl Actor for SchedulerObserverSupervisor {
         let mut sync = None;
         let mut watched_repo = None;
         if let Some(remote_url) = &settings.remote_url {
-            // The first clone is blocking and the observer has nothing to watch without it.
-            let (path, url, clone_tls) = (
-                PathBuf::from(&settings.local_path),
-                remote_url.clone(),
-                tls.clone(),
-            );
-            tokio::task::spawn_blocking(move || ensure_repo(&path, &url, &clone_tls))
-                .await
-                .map_err(|e| format!("cloning the schedules repository panicked: {e}"))?
-                .map_err(|e| format!("cannot get the schedules repository: {e:#}"))?;
+            // The first clone is blocking and the observer has nothing to watch without it. The git
+            // server may not answer yet: it starts in the same layer as this observer, and replaces its
+            // own pod every hour. So a transport failure is tried again, with a growing wait, for less
+            // than the liveness probe's initial delay; a refusal ends the observer at once.
+            let deadline = std::time::Instant::now() + FIRST_CLONE_PATIENCE;
+            let mut wait = Duration::from_secs(2);
+            loop {
+                let (path, url, clone_tls) = (
+                    PathBuf::from(&settings.local_path),
+                    remote_url.clone(),
+                    tls.clone(),
+                );
+                let cloned =
+                    tokio::task::spawn_blocking(move || ensure_repo(&path, &url, &clone_tls))
+                        .await
+                        .map_err(|e| format!("cloning the schedules repository panicked: {e}"))?;
+                let Err(e) = cloned else { break };
+                let why = format!("{e:#}");
+                if clone_refused(&why) || std::time::Instant::now() + wait > deadline {
+                    return Err(format!("cannot get the schedules repository: {why}").into());
+                }
+                warn!(
+                    "the schedules repository does not answer yet ({why}); trying again in {}s",
+                    wait.as_secs()
+                );
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(Duration::from_secs(30));
+            }
 
             watched_repo = repo_name(remote_url).map(str::to_string);
             let interval = settings
