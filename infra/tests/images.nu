@@ -24,7 +24,7 @@
 # How images are named when they are published and imported, and which ones.
 
 use std/assert
-use ../images.nu [arch_of, external_source, import_rows, ours, published_ref, published_rows, split_ref, system_of]
+use ../images.nu [arch_of, external_source, import_rows, unprepared, ours, published_ref, published_rows, split_ref, system_of]
 
 def sample [] {
     [
@@ -37,6 +37,13 @@ def sample [] {
 
 def main [] {
     let tests = [
+        {
+            name: "a render may name only the images prepared before it"
+            body: {
+                assert equal (unprepared ["cassini" "neo4j"] ["cassini" "neo4j" "postgres"]) []
+                assert equal (unprepared ["cassini" "ace-viz"] ["cassini"]) ["ace-viz"]
+            }
+        }
         {
             name: "an image built elsewhere comes from its archive, else is left when the registry has it, else is copied from where it is published"
             body: {

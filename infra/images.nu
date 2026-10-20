@@ -94,8 +94,9 @@ export def split_ref [ref: string] {
     { ref: $ref, name: $m.name, tag: (if ($m.tag | is-empty) { "latest" } else { $m.tag }) }
 }
 
-# Every image referenced by the given manifest files.
-def referenced [files: list<string>] {
+# Every image referenced by the given manifest files, and the `extra` references given as they are (the catalog's, before the
+# render that writes them into manifests).
+def referenced [files: list<string>, extra: list<string> = []] {
     $files
     | where {|f| $f | path exists }
     | each {|f|
@@ -104,6 +105,7 @@ def referenced [files: list<string>] {
         | each {|r| $r.ref }
     }
     | flatten
+    | append $extra
     | uniq
     | ours (node_registry)
     | each {|r| split_ref $r }
@@ -118,11 +120,11 @@ export def ours [registry: string] {
 # The table rows a set of manifests needs. Fails, listing every problem at
 # once, when a manifest references an image the table does not know or knows
 # under a different tag.
-export def needed [files: list<string>] {
+export def needed [files: list<string>, extra: list<string> = []] {
     let rows = (load_table)
     mut found = []
     mut problems = []
-    for r in (referenced $files) {
+    for r in (referenced $files $extra) {
         let hit = ($rows | where image == $r.name)
         if ($hit | is-empty) {
             $problems = ($problems | append $"($r.ref): no row for '($r.name)' in infra/images.nuon")
@@ -137,6 +139,12 @@ export def needed [files: list<string>] {
         error make --unspanned { msg: $"image table and manifests disagree:\n  ($listing)" }
     }
     $found | uniq-by image
+}
+
+# The images a render names that were not prepared before it (up.nu's images step): they are not in the registry for this run.
+# Pure.
+export def unprepared [needed: list<string>, prepared: list<string>] {
+    $needed | where {|i| $i not-in $prepared }
 }
 
 # Table rows by name (for building by hand). ref is empty; a node's cached copy is
@@ -224,10 +232,11 @@ def archive [row: record, system: string = ""] {
             let dir = if ($system | is-empty) { "result" } else { $"result/($system)" }
             mkdir $dir
             let out = $"($dir)/($row.image)"
-            try {
-                ^nix build -L $".#packages.($platform).($row.attr)" -o $out
-            } catch {
-                error make --unspanned { msg: $"nix build failed \(attr ($row.attr)\)" }
+            # Its log is kept back, and shown only when the build fails.
+            let r = (do { ^nix build -L $".#packages.($platform).($row.attr)" -o $out } | complete)
+            if $r.exit_code != 0 {
+                print -e ($r.stderr | lines | last 60 | str join "\n")
+                error make --unspanned { msg: $"nix build failed \(attr ($row.attr)\): its log ends above" }
             }
             $out
         }
@@ -268,10 +277,9 @@ def record_digest [row: record] {
 
 # The format is named, not left to skopeo's default: the digest of the manifest depends on it.
 def push_archive [row: record, a: string] {
-    try {
-        ^skopeo ...(tmpdir_flags) copy --format v2s2 $"docker-archive:($a)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
-    } catch {
-        error make --unspanned { msg: $"skopeo could not push the archive to (registry)" }
+    let r = (do { ^skopeo ...(tmpdir_flags) copy --format v2s2 $"docker-archive:($a)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false } | complete)
+    if $r.exit_code != 0 {
+        error make --unspanned { msg: $"skopeo could not push the archive to (registry): ($r.stderr | lines | last 1 | str join '')" }
     }
     record_digest $row
 }
@@ -282,10 +290,9 @@ def mirror_row [row: record] {
         print "      already in the registry"
         record_digest $row
     } else {
-        try {
-            ^skopeo ...(tmpdir_flags) copy --retry-times 3 --override-os linux --override-arch (arch) $"docker://($row.upstream)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false
-        } catch {
-            error make --unspanned { msg: $"skopeo could not copy ($row.upstream) into (registry)" }
+        let r = (do { ^skopeo ...(tmpdir_flags) copy --retry-times 3 --override-os linux --override-arch (arch) $"docker://($row.upstream)" $"docker://(registry)/(dest $row)" --dest-tls-verify=false } | complete)
+        if $r.exit_code != 0 {
+            error make --unspanned { msg: $"skopeo could not copy ($row.upstream) into (registry): ($r.stderr | lines | last 1 | str join '')" }
         }
         record_digest $row
     }
@@ -368,6 +375,7 @@ def run_stage [stage: string, rows: list] {
     let evict = ($stage == "sync") and ((runtime) == "u7s") and (node_present)
 
     let total = ($todo | length)
+    if ($todo | any {|r| $r.kind == "nix" }) and $stage != "mirror" { print "  (a build's log is shown only if it fails; a first build of an image takes a while)" }
     mut failures: list<any> = []
     for it in ($todo | enumerate) {
         let row = $it.item
