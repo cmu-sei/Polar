@@ -201,10 +201,11 @@ whether it is already done, and picks up where it stopped.
 
 - **`--dev`** builds every image from this checkout and pushes it, through a port-forward, to the registry in the cluster.
   It is the way when you have changed code, and it restarts every Job to pick up the new images. The first build takes a
-  long while; the Nix store it fills is kept. Neo4j is built from the sibling repository **`nix-neo4j`**: check it out at
-  `~/Documents/projects/nix-neo4j` and build it there first (`nix build -L .#neo4j-image -o result-neo4j-image`), or set
-  `POLAR_NEO4J_IMAGE` to the archive. That image sets the `neo4j` user's password from `NEO4J_AUTH` on its first start, so
-  there is no password to change by hand.
+  long while; the Nix store it fills is kept. Neo4j is built in the sibling repository **`nix-neo4j`**, not here: unless
+  you built it, it is copied from where it is published (`docker.io/daveman1010220`, its row in `infra/images.nuon`). To
+  use your own build, check `nix-neo4j` out at `~/Documents/projects/nix-neo4j` and build it there (`nix build -L
+  .#neo4j-image -o result-neo4j-image`), or set `POLAR_NEO4J_IMAGE` to the archive. That image sets the `neo4j` user's
+  password from `NEO4J_AUTH` on its first start, so there is no password to change by hand.
 - **`--import-from docker.io/<account>`** copies the published images, Neo4j included, for this machine's architecture
   into the registry, as a step before the render: nothing is built (**Loading prebuilt images**).
 - **Neither:** the images are already in the registry. Use it to resume, or to finish a run that stopped at a person's
@@ -328,7 +329,8 @@ cluster.
   state under your home: atuin's history, `~/.config/polar-admin` and `polar-deploy`, `~/.cache`, and `~/.ssh` with the
   pod's SSH host keys;
 - your public key (the first in your agent, or `POLAR_DEV_SSH_KEY`) to log in with, and the key `sops` decrypts with
-  (`POLAR_DEV_SOPS_KEY`), as Secrets in your namespace: a dedicated key is better than your main one;
+  (`POLAR_DEV_SOPS_KEY`), as Secrets in your namespace. That one is a *private* key, kept wherever the cluster keeps its
+  Secrets (a cloud provider's, for a cluster in the cloud): use a key for SOPS alone, not your main one;
 - the pod, from `docker.io/daveman1010220/polar-dev:latest-<arch>` (amd64 and arm64; `POLAR_DEV_IMAGE` for another),
   headless, with SSH on 2223.
 
@@ -337,7 +339,10 @@ It copies your `~/.config/polar-deploy` and `polar-admin` in, unless the pod has
 empty, and logs you in. The keys ssh trusts for the pod are kept per namespace
 (`~/.ssh/polar-dev_known_hosts.<id>`), so a new cluster's pod is not mistaken for a changed host. Every setting is at the
 top of `bin/polar-dev`; the pod's resources (2 CPUs and 8Gi of memory requested, with no limits, so it can use the whole node) and volumes (20Gi for
-`/workspace`, 80Gi for the Nix store, 2Gi for your state) are in `infra/dev-pod/`.
+`/workspace`, 80Gi for the Nix store, 2Gi for your state) are in `infra/dev-pod/`. Nothing on your machine is mounted: the
+volumes are the cluster's, from its default storage class (`POLAR_DEV_STORAGE_CLASS` for another), so on a cluster in the
+cloud they are its disks. The image carries the Dhall the charts import (`src/flake/dhall-cache.nix`), so a render in the
+pod fetches nothing; the dev shell on your machine has the same cache (`POLAR_DHALL_CACHE`).
 
 ```bash
 bin/polar-dev attach        # log in again
@@ -464,8 +469,8 @@ published images first (`nu infra/images.nu import --from docker.io/<account>`) 
 comes from: built from the flake with Nix, mirrored from a third-party
 registry, or an archive built elsewhere (Neo4j). `up.nu --dev` builds
 and pushes the ones the target needs. To work on them yourself, with the
-registry running (**Registries**; for the one in the cluster, `nu infra/cluster-registry.nu up <target>` starts its
-forward and prints the `POLAR_REGISTRY` to use):
+registry running (**Registries**; for the one in the cluster, give the commands that push `--target <target>`, which
+starts its forward and pushes through it, as `up.nu` does):
 
 ```bash
 nu infra/images.nu list            # every image, its tag and its source
