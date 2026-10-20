@@ -59,42 +59,300 @@ direct container usage.
 
 ## Installation
 
-ACE ships as a container image, built reproducibly with Nix and
-deployed to Kubernetes.
+ACE runs on Polar, which you deploy to a Kubernetes cluster you bring: one on your own machine or one somewhere else. This
+section is the whole path, in the order you do it, from a cluster to a running deployment you can use and develop. Each
+step says what it does, what you should see, and where you have a choice. The commands are the ones for the setup the
+maintainers use (a local single-node cluster, the dev container in the cluster, building from source); the variations
+follow each step, and the reference sections after the steps go into detail.
 
-### Prerequisites
-
-- A Kubernetes cluster (any distribution — this pipeline doesn't
-  assume a specific one; see **Using your own target**, below)
-- A Neo4j instance populated with work-item data (see **Data source**,
-  below)
-- [Nix](https://nixos.org) with flakes enabled, `direnv`,
-  [`just`](https://github.com/casey/just), `nushell` and `kubectl` — or
-  use the provided dev container (see below), which already has the
-  build tools. A container runtime (`podman` or `docker`: Polar does not
-  provide one) is needed only to run the dev container, or a registry on
-  your machine (`just registry-up`); with the registry in your cluster, as
-  the shipped targets keep it, nothing else needs one. The full list is in **Bring a cluster up**, below.
-  **If you are given prebuilt images** (see **Loading prebuilt images**,
-  under **Images**) you do not build them and do not need Nix for that.
-  You also do not compile anything to install: the command-line tools
-  `up.nu` runs (`polar-admin-grant`, `polar-sign`, `cassini-c2`) come as
-  static binaries in the `polar-tools` image (see **Installing the Polar
-  tools**). What `up.nu` still needs on your `PATH`: `nushell`, `dhall`,
-  `kubectl`, `skopeo`, `sops`/`rage` and `git`. It asks the agents about
-  themselves on your cluster, and a target's registry and deployment git
-  server can run there too, so it needs a container runtime only to start a
-  registry on your machine (`just registry-up`). The dev container has all of
-  them (below), so use it unless you already have those installed
-
-### Dev container
-
-If you don't already have Nix/`just`/`skopeo` set up, `just
-dev-container` builds a ready-to-use development environment with
-everything the build pipeline needs:
+### At a glance
 
 ```bash
-just dev-container
+# On your machine: kubectl, ssh (with your key in its agent), git, a browser.
+export KUBECONFIG=<your cluster's kubeconfig>
+kubectl get storageclass                          # step 1: a cluster with storage
+bin/polar-dev up                                  # step 3: your dev container, in the cluster; you land in it
+
+# In the dev container, from /workspace:
+nu infra/up.nu local-minimal --dev --user <you> --email <your email>      # step 4: Polar
+# when it pauses at the browser step, on your machine:
+bin/polar-dev cert <you>                          # step 5: your certificate into the browser
+bin/polar-dev forward                             # step 6: then https://localhost:7473 and http://localhost:8050
+```
+
+### Decide first
+
+| Decision | Choices | The examples use |
+|---|---|---|
+| Your cluster | A local dev node ([nix-usernetes](https://github.com/daveman1010220/nix-usernetes)), or any cluster you can reach with `kubectl` and have admin rights in | a local nix-usernetes node |
+| Where you work | **The dev container in the cluster** (`bin/polar-dev`: your machine needs only `kubectl`, `ssh`, `git` and a browser), the dev container on your machine (needs `podman` or `docker`), or the tools installed on your machine. See **Working environments** | in the cluster |
+| Images | **Built from source** (`up.nu --dev`; the way when you change code), or **published** ones copied in (`up.nu --import-from docker.io/<account>`; nothing is built) | built from source |
+| Target | **`local-minimal`**, applied by `up.nu` directly, or **`sandbox-local`**, published signed to a deployment git server in the cluster and applied by Flux; or a target of your own (**Using your own target**) | `local-minimal` |
+| Registry | **In the cluster** (the shipped targets keep it there; nothing to run anywhere), or one you bring. See **Registries** | in the cluster |
+
+You also need data for ACE to show: a Neo4j populated with work items (**Data source**, below).
+
+### 1. A cluster, with storage
+
+Point `kubectl` at your cluster and check it answers:
+
+```bash
+export KUBECONFIG=<path to your kubeconfig>
+kubectl get nodes                  # at least one node, Ready
+kubectl get storageclass           # at least one
+```
+
+*On a local nix-usernetes node*, a fresh cluster is:
+
+```bash
+cd ~/Documents/projects/nix-usernetes
+just reset && just up && just init && just kubeconfig      # its banner's cert-manager line is out of date: skip it
+export KUBECONFIG=$PWD/kubeconfig
+```
+
+*A cluster with no storage class* (a bare node, like the one above) needs a provisioner before anything else, since the dev
+container's volumes come first. Polar's own storage chart is upstream's local-path provisioner, so start with upstream's:
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.35/deploy/local-path-storage.yaml
+kubectl get storageclass           # local-path
+```
+
+*A cluster rebuilt at the same address as before* (the local node is always `127.0.0.1:6443`): clear kubectl's cache of the
+old one's resource types, or `kubectl get all` asks for types it no longer has (Flux's, after a Flux target):
+
+```bash
+rm -rf ~/.kube/cache/discovery/127.0.0.1_6443
+```
+
+What Polar asks of the cluster:
+
+- **A storage class** for persistent volumes. The `local-minimal` and `sandbox-local` targets install a local-path
+  provisioner and a class named `managed-csi` (`storage.class` in `infra/config/cluster.nuon`) unless the cluster already
+  has a class of that name; on a cluster with a class of its own, set `storage.class` to it.
+- **A kube-proxy that answers NodePorts on `localhost`** (the iptables mode does; IPVS and some kube-proxy replacements do
+  not), for the registry in the cluster (**Registries**), or a registry you bring.
+- **The cluster's DNS domain** in `domain` in the same file, if it is not `cluster.local`.
+- **The `pkcs8_key_parser` kernel module** loaded on the nodes (`sudo modprobe pkcs8_key_parser`): the agents' key custody
+  needs it.
+- **Pods that can resolve names and reach the internet**, if you want to observe repositories on GitHub or GitLab. `up.nu`
+  checks this at the end and says what it found. A DNS search domain on the node that makes every lookup slow (some
+  university and corporate networks, and a VPN) is a common cause of slow or timed-out pods: a lookup of a name inside the
+  cluster tries the node's search domains before the right name, and if your resolver never answers them, an agent gives up
+  (its connect attempt is 5 seconds) before the answer comes. Remove the search domain from the node's resolver.
+- **A kubelet that does not throttle registry requests, or one you can live with.** Polar pulls an image named by a tag
+  that moves (`latest`) with `imagePullPolicy: Always`, which asks your registry for every container that starts. The
+  kubelet limits that to 5 a second with a burst of 10 (`registryPullQPS`), so a burst of pods (a bring-up) sees
+  `ErrImagePull: pull QPS exceeded`, backs off and retries: slower, not broken. If you can, raise it on the nodes
+  (minikube: `minikube start --extra-config=kubelet.registry-pull-qps=0`).
+
+### 2. Access to the target's secrets
+
+The target's secrets (the Neo4j password, tokens for the systems Polar observes) are in a SOPS file encrypted to the SSH
+keys of the people who may deploy it. Yours has to be one of them: send your SSH *public* key to someone who can already
+decrypt the file, and once they have added it, pull. Then check, with the private key you were added with, here if you
+have `sops`, or in the dev container after step 3 (where the key is already set, so `sops --decrypt` alone):
+
+```bash
+SOPS_AGE_SSH_PRIVATE_KEY_FILE=~/.ssh/<your key> sops --decrypt infra/targets/local-minimal/secrets.sops.yaml >/dev/null && echo ok
+```
+
+The details, what to do when nobody can add you, and your own `user.sops.yaml` for your personal tokens are in **Secrets
+setup**, below. The dev container is given this key as `POLAR_DEV_SOPS_KEY` (step 3).
+
+### 3. Your working environment
+
+From the repository on your machine (a clone is all it needs to be), make your dev container in the cluster and log in to
+it:
+
+```bash
+export POLAR_DEV_SOPS_KEY=~/.ssh/<your key>          # the key of step 2 (default: ~/.ssh/id_ed25519)
+export POLAR_DEV_STORAGE_CLASS=local-path            # only on a cluster with no default storage class
+bin/polar-dev up
+```
+
+The first time takes several minutes: it pulls the dev container image (about 2.7 GB) and copies its Nix store to a volume
+(about 9.7 GB). It says what it is doing as it goes, then clones the sources into `/workspace` with your forwarded SSH
+agent (`POLAR_DEV_REPO`, `POLAR_DEV_BRANCH`) and logs you in: the dev container's banner, a fish shell, `/workspace`. Inside
+it, `kubectl` reaches the cluster as the pod's own account and `sops` decrypts with your key. Later logins are
+`bin/polar-dev attach`. What it makes and every setting are in **Working environments**.
+
+*Variations:* the dev container on your own machine, with `podman` (**Dev container on your machine**), or the tools on
+your own machine (**Tools on your machine**). Steps 4 to 7 are the same from there, but for step 5, which on your own
+machine happens by itself.
+
+### 4. Bring Polar up
+
+In the dev container, from `/workspace`:
+
+```bash
+nu infra/up.nu local-minimal --dev --user <name> --email <email>
+```
+
+`up.nu` prints its plan first, every step with the reason any is skipped, and then runs it: the registry in the cluster
+(and the storage it needs, on a cluster that has no class yet), the images, the agents' own answers about themselves
+(asked of their images as pods in a scratch namespace that is deleted afterwards), the render, the namespaces, the cluster
+CA, the secrets, every manifest in the target's order, a wait for the core services, the port-forwards it needs, the admin
+flow (your first account), the seed of the schedules repository (its first signed policy) and your browser certificate. It
+stops for a person only where one is needed. After a failure or a pause, **run the same command again**: every step checks
+whether it is already done, and picks up where it stopped.
+
+*Images, the choice:*
+
+- **`--dev`** builds every image from this checkout and pushes it, through a port-forward, to the registry in the cluster.
+  It is the way when you have changed code, and it restarts every Job to pick up the new images. The first build takes a
+  long while; the Nix store it fills is kept. Neo4j is built from the sibling repository **`nix-neo4j`**: check it out at
+  `~/Documents/projects/nix-neo4j` and build it there first (`nix build -L .#neo4j-image -o result-neo4j-image`), or set
+  `POLAR_NEO4J_IMAGE` to the archive. That image sets the `neo4j` user's password from `NEO4J_AUTH` on its first start, so
+  there is no password to change by hand.
+- **`--import-from docker.io/<account>`** copies the published images, Neo4j included, for this machine's architecture
+  into the registry, as a step before the render: nothing is built (**Loading prebuilt images**).
+- **Neither:** the images are already in the registry. Use it to resume, or to finish a run that stopped at a person's
+  step; it leaves the running pods alone.
+
+*Target, the choice:* `sandbox-local` deploys with Flux instead:
+
+```bash
+nu infra/up.nu sandbox-local --dev --user <name> --email <email>
+```
+
+It does not apply its manifests: it publishes them, signed, to a deployment git server that runs in the cluster in a
+namespace of its own (`polar-deploy`, held by no layer, so Flux neither applies nor prunes it), installs Flux and waits
+while Flux applies them layer by layer. Signing needs `gpgsm` (in the dev container). The deployment PKI is in
+`~/.config/polar-deploy/<target>/` (its CA key never goes to the cluster) with a mirror of the signed history,
+`mirror.git`, which a new cluster's server is given. Add `--allow-dirty` if the checkout has uncommitted changes (the
+signed record says so). `infra/INFRA.md` ("How a target works") explains what it does. The two targets use the same
+namespaces, so they do not share a cluster: rebuild the cluster between them (step 7).
+
+What `local-minimal` deploys: Neo4j, Cassini, `cert-issuer`, the credentials agent and its observer, ACE, the ingestion
+agents, a git server for the schedules repository, and Keycloak with its own Postgres (an optional identity-provider route
+for certificates for people). ACE runs as a Kubernetes Job: it asks for its mTLS client certificate in an init container
+each time a pod starts, which is how it recovers when a certificate or its environment changes, and it holds no other
+cluster permissions.
+
+The cluster CA is made once, by `polar-admin-grant bootstrap-ca` (the `cert-issuer-ca` Secret and the `polar-ca`
+ConfigMap), and refuses to be made again; replacing it means rebuilding the cluster. Everything else gets its certificates
+from it. The git server takes its administrators by identity, and an identity belongs to one cluster, so after the admin
+flow `up.nu` records yours in `infra/targets/<target>/cluster-inputs.nuon` (not committed; a new cluster discards it),
+renders again, and the git server restarts with it before the seed. Nothing to edit by hand. To render without applying:
+`nu infra/resolve.nu collect-scaffolds <dir> --target <target>`, then `POLAR_SCAFFOLD_DIR=<dir> nu infra/render.nu
+<target>`; the manifests are in `manifests/`.
+
+### 5. Your certificate in the browser
+
+Neo4j's browser, and the other services for people, accept you by your Polar certificate. When `up.nu` reaches the
+browser step it pauses. On **your machine**, close Librewolf, then:
+
+```bash
+bin/polar-dev cert <name>
+```
+
+and press Enter in the dev container. It copies your certificate out of the dev container and imports it, with the
+cluster's CA, into Librewolf's certificate store, replacing any Polar certificate from before (it needs NSS's `certutil`
+and `pk12util`: from Nix, or your package manager). `up.nu` then checks the Neo4j password and goes on. For another
+browser, import `~/.config/polar-admin/<name>.crt`, its key and `ca.pem` yourself.
+
+*On your own machine* (the variations of step 3), `up.nu` does this itself when it pauses at "Close Librewolf"
+(`just user-cert-install <name>` does the same by hand).
+
+### 6. Check that it works
+
+`up.nu` ends with `=== Target local-minimal is up ===` and the pods it runs. For a browser on your machine:
+
+```bash
+bin/polar-dev forward              # Neo4j at https://localhost:7473, ACE at http://localhost:8050
+```
+
+In the dev container, `just cluster-status` shows the nodes and every pod, and `kubectl -n polar get pods` Polar's own.
+**Accessing the deployment**, below, has every service.
+
+Things that look wrong and are not:
+
+- **Pods in `Error` next to a running replacement.** The agents are Kubernetes Jobs and exit on purpose, about once an
+  hour, when their certificates are renewed; the Job starts a fresh pod. Look at the newest pod. On a bring-up, a
+  scheduler observer can also fail once if Polar's git server is still starting, and its next pod runs.
+- **`jira-observer` failing** when no Jira is set up for the target: its credentials come from the target's secrets (see
+  **Secrets setup**). A pile of its failed pods grows: `just cluster-prune-failed` deletes failed pods and leaves running
+  ones.
+- **`ErrImagePull: pull QPS exceeded` or `ImagePullBackOff`, briefly, when many pods start at once.** The kubelet's limit
+  on registry requests (step 1). It retries by itself and the pods start.
+- **A port-forward that stops answering** after a pod was replaced: forwards follow one pod. Run `just port-forwards-down`
+  and then `just port-forwards-up` (in the dev container), or `bin/polar-dev forward` again (on your machine).
+- **A Job that is slow to replace a pod you deleted by hand.** The Job controller waits longer after each failure, up to
+  about six minutes.
+- **`clone attempt 1 failed ... unexpected eof` while seeding the schedules repository.** The git server had just
+  restarted (it does when its settings change). The step retries and goes on.
+- **`[polar] TLS certs missing -> building .#tlsCerts ... ERROR`** printed by a recipe that starts a nested `nix-shell`.
+  Your dev shell was entered before the flake last changed and still carries an old startup hook. It is harmless; leave the
+  dev shell and enter it again (or `direnv reload`) to make it stop.
+
+### 7. Day to day
+
+```bash
+bin/polar-dev attach               # log in to the dev container again
+git -C /workspace pull             # (in the dev container) new code; then up.nu --dev to rebuild and roll it out
+bin/polar-dev sync                 # copy ~/.config/polar-deploy and polar-admin back to your machine
+bin/polar-dev down                 # sync, then stop the dev container; its volumes stay. --purge removes them too
+```
+
+- **The dev container keeps** `/workspace`, its Nix store (so builds are not redone), your shell history and
+  `~/.config/polar-*` across restarts; `bin/polar-dev up` again after `down` brings the same one back.
+- **To start over on a fresh cluster:** `bin/polar-dev sync` first (it keeps the deployment PKI and its signed history on
+  your machine), rebuild the cluster (step 1, with the discovery-cache line), and `bin/polar-dev up` again: a new cluster is
+  a new dev container, with your state copied in again, and step 4 from the top. `up.nu` notices when
+  `~/.config/polar-admin` holds the previous cluster's CA and moves those files aside (it tells you where).
+- **To switch targets** (`local-minimal` and `sandbox-local` share namespaces), start over on a fresh cluster with the
+  other one.
+
+**What to do next:** tell Polar what to observe. Repositories, credentials and the rules for accepting repositories other
+agents propose are signed documents pushed to the cluster's git server with `polar-sign`; the walk-through, with every
+command, is [docs/operations/git-private-repository.md](docs/operations/git-private-repository.md), and the design is in
+[docs/architecture/signed-configuration.md](docs/architecture/signed-configuration.md). `infra/INFRA.md` explains the
+catalog, targets and images behind `up.nu`.
+
+### Working environments
+
+#### Dev container in the cluster (`bin/polar-dev`)
+
+The same dev container as on a machine, as a pod in your cluster, so that your own machine needs only `kubectl`, `ssh`,
+`git` and a browser, for a local cluster or one in the cloud alike: the builds, the tools and `up.nu` all run in the
+cluster. You log in over SSH with your agent forwarded, so `git` in it uses your own key and no git key is kept in the
+cluster.
+
+`up` makes, in a namespace of your own (`polar-dev-<you>`):
+
+- a ServiceAccount bound to `cluster-admin` (`up.nu` applies everything, CRDs and namespaces included; anyone who can exec
+  into that namespace, or read its Secrets, can do what it can), and a kubeconfig for it, so `kubectl` and `up.nu` work
+  inside as on a machine;
+- volumes for the checkout (`/workspace`), the Nix store (seeded from the image, again whenever the image changes) and your
+  state under your home: atuin's history, `~/.config/polar-admin` and `polar-deploy`, `~/.cache`, and `~/.ssh` with the
+  pod's SSH host keys;
+- your public key (the first in your agent, or `POLAR_DEV_SSH_KEY`) to log in with, and the key `sops` decrypts with
+  (`POLAR_DEV_SOPS_KEY`), as Secrets in your namespace: a dedicated key is better than your main one;
+- the pod, from `docker.io/daveman1010220/polar-dev:latest-<arch>` (amd64 and arm64; `POLAR_DEV_IMAGE` for another),
+  headless, with SSH on 2223.
+
+It copies your `~/.config/polar-deploy` and `polar-admin` in, unless the pod has its own already, forwards
+`127.0.0.1:2222` (`POLAR_DEV_PORT`) to the pod's SSH, clones `POLAR_DEV_REPO` (`POLAR_DEV_BRANCH`) into `/workspace` if it is
+empty, and logs you in. The keys ssh trusts for the pod are kept per namespace
+(`~/.ssh/polar-dev_known_hosts.<id>`), so a new cluster's pod is not mistaken for a changed host. Every setting is at the
+top of `bin/polar-dev`; the pod's resources (2 CPUs and 8Gi requested, 24Gi of memory at most) and volumes (20Gi for
+`/workspace`, 80Gi for the Nix store, 2Gi for your state) are in `infra/dev-pod/`.
+
+```bash
+bin/polar-dev attach        # log in again
+bin/polar-dev cert [name]   # copy your certificate out and import it into Librewolf here
+bin/polar-dev forward       # Neo4j (https://localhost:7473) and ACE (http://localhost:8050) for a browser here
+bin/polar-dev sync          # copy ~/.config/polar-deploy and polar-admin back here
+bin/polar-dev down          # sync, then stop the pod; --purge removes the namespace and its volumes too
+```
+
+#### Dev container on your machine
+
+With `podman` (or `docker`) on your machine, the same dev container runs there:
+
+```bash
+just dev-container                 # builds it (or: podman pull docker.io/daveman1010220/polar-dev:latest-<arch>)
 
 # state that has to outlive the container; create it first, so it is yours and not root's
 mkdir -p ~/.config/polar-admin ~/.cache/polar-sign
@@ -112,394 +370,93 @@ podman run --rm -it --name polar-dev \
   localhost/polar-dev:latest
 ```
 
-With `docker`, run the same command as `docker run` and leave out
-`--userns=keep-id`, which is a podman option (docker, running as root, keeps
-the host's user ids on bind mounts as they are).
+With `docker`, run the same command as `docker run` and leave out `--userns=keep-id`, which is a podman option (docker,
+running as root, keeps the host's user ids on bind mounts as they are).
 
 What each mount is for:
 
-- `--network=host`: the container reaches the cluster's API, the local
-  registry on `localhost:5000` and the port-forwards `up.nu` starts exactly
-  as the host does.
-- `/kube/config`: your kubeconfig, so `kubectl` and the tools reach your
-  cluster. The cluster address in it must be reachable from the container
-  (with `--network=host`, `127.0.0.1` is the host's).
-- `~/.config/polar-admin`: your certificate, key and the cluster CA. They
-  belong on the host, so they survive the container and your browser can use
-  them.
+- `--network=host`: the container reaches the cluster's API, a registry on `localhost:5000` and the port-forwards `up.nu`
+  starts exactly as the host does. On a Mac, "host" is the Linux VM that runs the containers, not the Mac, so a browser on
+  the Mac does not see the port-forwards; the dev container in the cluster avoids this.
+- `/kube/config`: your kubeconfig, so `kubectl` and the tools reach your cluster. The cluster address in it must be
+  reachable from the container (with `--network=host`, `127.0.0.1` is the host's).
+- `~/.config/polar-admin`: your certificate, key and the cluster CA. They belong on the host, so they survive the container
+  and your browser can use them.
 - `~/.cache/polar-sign`: the tool's clone of the schedules repository.
-- the SSH key, read-only: the private key you were added to the secrets file
-  with, for `sops` (see **Secrets setup**). It is mounted outside your home on
-  purpose: the container's entrypoint takes ownership of everything under
-  `/home/$USER`, which a read-only mount refuses.
+- the SSH key, read-only: the private key you were added to the secrets file with, for `sops` (see **Secrets setup**). It
+  is mounted outside your home on purpose: the container's entrypoint takes ownership of everything under `/home/$USER`,
+  which a read-only mount refuses.
 
-The dev container has no container runtime. `up.nu` does not need one to
-read the agents' scaffolds, which it asks of their images on your cluster, so
-with a target whose registry is in the cluster (the shipped ones) it runs
-entirely in the container, `--dev` builds included: they push through a
-port-forward. What needs one runs on the host: a registry on your machine
-(`just registry-up`), for a target that uses one. Importing the certificate
-into a browser (step 7) is a host step in any case.
+The container has the Polar tools (`polar-sign`, `polar-admin-grant`, `cassini-c2`, `cassini-client`, `user-cert-fetcher`,
+`cert-client`, `cert-issuer-setup`) on its `PATH`, built as static binaries, together with `nu`, `just`, `bash`,
+`kubectl`, `skopeo`, `dhall`, `sops`, `rage`, `git` and a Rust toolchain. It runs no containers itself, and needs none: with
+the registry in the cluster, `up.nu` (`--dev` builds included) runs entirely in it. Importing the certificate into a
+browser (step 5) is a host step.
 
-**On an ARM Mac:** you need a dev container image to get started.
-Reach out to the developers if you do not have one.
+Inside the container, at `/workspace`, `direnv allow` enters the dev shell; the first time it builds the full workspace
+(every Rust agent, and ACE's Python environment), which takes a while. Keep the container (`podman stop`/`podman start`
+rather than `--rm`) so later shells skip the rebuild.
 
-The container has the Polar tools (`polar-sign`, `polar-admin-grant`,
-`cassini-c2`, `cassini-client`, `user-cert-fetcher`, `cert-client`,
-`cert-issuer-setup`) on its `PATH`, built as static binaries, together with
-`nu`, `just`, `kubectl`, `skopeo`, `dhall`, `sops`, `rage`, `git` and a Rust
-toolchain. It does not run containers itself; see **Bring a cluster up** for
-which steps need it.
+**If your registry is on the host rather than in your cluster, and your cluster tooling lives on the host too**, get the
+built images out of the container before they can be pushed: `just images-build` leaves Nix store symlinks in `result/`,
+which only resolve inside the container. Copy them dereferenced (`cp -rL result/ /path/the/host/can/see/`), then push each
+on the host (`skopeo copy docker-archive:<folder>/<image> docker://localhost:5000/<image>:<tag> --dest-tls-verify=false`;
+`nu infra/images.nu list` prints every image name and tag). With the registry in the cluster none of this applies.
 
-Inside the container, at `/workspace`:
+The step that drops a node's cached copy of a rebuilt image is written for one kind of dev node (a rootless `podman`
+container running `containerd`, the default `POLAR_CLUSTER_RUNTIME=u7s`). On any other cluster (Docker Desktop's
+Kubernetes, kind, k3d, Colima, minikube, a managed cluster) set `POLAR_CLUSTER_RUNTIME=none`. You do not need to clear the
+node yourself: every image of Polar's that is named by a tag that moves (`latest`) is pulled with `imagePullPolicy:
+Always`, so a pod that starts gets what your registry serves now. `up.nu` also warns, by name, when a running pod's image
+is not the one the registry serves; if you see that on a cluster that has run Polar before, the node kept an old copy
+(`minikube image rm <image>`, or recreate the cluster).
 
-```bash
-direnv allow
-```
+#### Tools on your machine
 
-The first `direnv allow` builds the full workspace (every Rust agent,
-plus ACE's Python environment) — this takes a while the first time.
-Once built, keep the container running (`podman stop`/`podman start`
-rather than `--rm`-ing it) so subsequent shells skip the rebuild
-entirely.
+Without a dev container: [Nix](https://nixos.org) with flakes and `direnv` (the dev shell, `direnv allow` at the repository
+root, provides the rest), or, with published images and nothing to build, `nushell`, `dhall`, `kubectl`, `skopeo`,
+`sops`/`rage`, `git`, `gpgsm` (for a Flux target) and NSS's `certutil`/`pk12util` (for the browser) on your `PATH`, and
+the Polar tools: `nu infra/tools.nu install ~/.local/bin` (**Installing the Polar tools**). Without them `up.nu` compiles
+`polar-admin-grant` and `polar-sign` from this checkout, which needs a Rust toolchain. The tools are Linux binaries: on a
+Mac, use a dev container. A container runtime is needed only for a registry on your machine (**Registries**). Outside the
+dev shell, `sops` needs `SOPS_AGE_SSH_PRIVATE_KEY_FILE=~/.ssh/<your key>` (and `SOPS_AGE_BINARY=$(which rage)`).
 
-**If your registry is on the host rather than in your cluster, and
-your cluster tooling (`podman`, `skopeo`, and your Kubernetes distribution
-itself) lives on the host too** — common on a Mac, where the dev container only
-provides the Linux build environment — you need to get the built images out of
-the container before they can be pushed. (With the registry in your cluster, as
-the shipped targets keep it, none of this applies: `up.nu --dev` in the dev
-container pushes through a port-forward itself.) `just images-build` leaves
-Nix store symlinks in `result/`; they only resolve inside the
-container's own filesystem. Copying them with a plain `cp` copies the
-symlink itself, not the image data — `ls` will still show the file on
-the host side, but any tool that opens it will report it as not found.
-Dereference on copy instead:
+### Registries
 
-```bash
-cp -rL result/ /path/to/a/folder/the/host/can/see/
-```
+The cluster's nodes pull every Polar image from one registry, which the manifests name as the prefix of each image. There
+are two ways to have it.
 
-Then, on the host, push each archive to the registry yourself:
-
-```bash
-skopeo copy docker-archive:<folder>/<image> \
-  docker://localhost:5000/<image>:<tag> --dest-tls-verify=false
-```
-
-(`nu infra/images.nu list` prints every image name and tag.)
-
-The step that drops a node's cached copy of a rebuilt image is written
-for one kind of dev node (a rootless `podman` container running
-`containerd`, the default `POLAR_CLUSTER_RUNTIME=u7s`). On any other
-cluster (Docker Desktop's Kubernetes, kind, k3d, Colima, minikube, a
-managed cluster) set `POLAR_CLUSTER_RUNTIME=none`, e.g.
-`POLAR_CLUSTER_RUNTIME=none just image <name>`. You do not need to clear
-the node yourself: every image of Polar's that is named by a tag that
-moves (`latest`) is pulled with `imagePullPolicy: Always`, so a pod that
-starts gets what your registry serves now. `up.nu` also warns, by name,
-when a running pod's image is not the one the registry serves; if you see
-that on a cluster that has run Polar before, the node predates this and
-kept an old copy (`minikube image rm <image>`, or recreate the cluster).
-
-### Dev container in the cluster (`bin/polar-dev`)
-
-The same dev container can run as a pod in your cluster, local or in the cloud, so that your own machine needs only
-`kubectl`, `ssh`, `git` and a browser: the builds, the tools and `up.nu` all run in the cluster. You log in to it over SSH
-with your agent forwarded, so `git` in it uses your own key and no git key is kept in the cluster.
-
-```bash
-export KUBECONFIG=<your cluster>          # any cluster; the dev pod is the first thing in it
-bin/polar-dev up                          # make the pod, clone the sources into it, and log in
-```
-
-`up` makes, in a namespace of your own (`polar-dev-<you>`), a ServiceAccount with `cluster-admin` (up.nu applies
-everything, so anyone who can exec into that namespace can do what it can), volumes for the checkout (`/workspace`), the
-Nix store (seeded from the image, so builds are kept across restarts) and your state (atuin's history, `~/.config/polar-admin`
-and `polar-deploy`, `~/.cache`), and the pod, from `docker.io/daveman1010220/polar-dev:latest-<arch>`. It copies your
-`~/.config/polar-deploy` (the deployment PKI and its signed history) and `polar-admin` in, unless the pod has its own
-already, clones `POLAR_DEV_REPO` (`POLAR_DEV_BRANCH`) into `/workspace` if it is empty, and logs you in. In the pod,
-`kubectl` reaches the cluster as the pod's account, and `sops` decrypts with the key you gave it (`POLAR_DEV_SOPS_KEY`,
-kept as a Secret in your namespace: a dedicated key is better than your main one). From there it is the usual sequence,
-from `/workspace`: `nu infra/up.nu <target> --dev ...` or `--import-from docker.io/<account> ...`.
-
-The rest of `bin/polar-dev`:
-
-```bash
-bin/polar-dev attach        # log in again
-bin/polar-dev cert          # copy your certificate out and import it into Librewolf here (up.nu's browser step asks for this)
-bin/polar-dev forward       # Neo4j (https://localhost:7473) and ACE (http://localhost:8050) for a browser here
-bin/polar-dev sync          # copy ~/.config/polar-deploy and polar-admin back here
-bin/polar-dev down          # sync, then stop the pod; --purge removes the namespace and its volumes too
-```
-
-Settings are environment variables, listed at the top of `bin/polar-dev`; on a cluster with no default storage class set
-`POLAR_DEV_STORAGE_CLASS`. The pod's resources (2 CPUs and 8Gi requested, 24Gi of memory at most) and volumes (20Gi, 80Gi
-for the Nix store, 2Gi) are in `infra/dev-pod/`.
-
-### Bring a cluster up: the whole sequence
-
-This is the path from a Kubernetes cluster to a running Polar cluster.
-Polar does not care which Kubernetes distribution you use: anything that
-meets the list in step 1 will do, and setting one up is outside this
-document. Each step says what it does and what to expect; the sections
-after it go into detail. Every command is run from the repository root
-unless it says otherwise.
-
-**What you need before you start** (the dev shell from `direnv allow`
-provides most of the tools):
-
-- `just`, `nushell`, `kubectl`, `skopeo`, `dhall`, `sops` and `rage`, and a
-  container runtime, `podman` or `docker`, if you run the local registry of step 2
-  yourself (`up.nu` asks each agent for its scaffold as a pod on your cluster, in a
-  namespace of its own that it deletes afterwards, so your account must be able to
-  create namespaces).
-- **Images, one of two ways** (step 2b): published ones you copy into your
-  registry (no build), or ones you build from this checkout, which needs Nix
-  with flakes.
-- A Kubernetes cluster, and admin access to it (step 1).
-- To build from source (`--dev`), a checkout of the sibling repository
-  **`nix-neo4j`** at `~/Documents/projects/nix-neo4j`, which builds the Neo4j
-  image Polar deploys. With published images you do not need it: Neo4j is
-  published (`polar-neo4j`) and imported with the rest.
-- Your SSH key listed as an age recipient of the target's secrets file, so
-  `sops` can decrypt it, or a secrets file of your own if nobody can add you
-  (both in **Secrets setup**).
-
-**1. Have a cluster, and point `kubectl` at it.**
-
-```bash
-export KUBECONFIG=<path to your kubeconfig>
-kubectl get nodes      # at least one node, Ready
-```
-
-What Polar asks of the cluster:
-
-- **A registry its nodes can pull from** (step 2). The shipped targets run one
-  in the cluster itself, so this asks nothing more of it than a storage class.
-  A registry of your own also works, with the address the *nodes* use for it,
-  which you give as `POLAR_NODE_REGISTRY` (step 2); that is often not the one
-  your machine pushes to.
-- **A storage class** for persistent volumes. The `local-minimal` target
-  installs a local-path provisioner and a class named `managed-csi`
-  (`storage.class` in the same file). On a cluster that has its own class,
-  set `storage.class` to it.
-- **The cluster's DNS domain** in `domain` in the same file, if it is not
-  `cluster.local`.
-- **The `pkcs8_key_parser` kernel module** loaded on the nodes
-  (`sudo modprobe pkcs8_key_parser`): the agents' key custody needs it.
-- **Pods that can resolve names and reach the internet**, if you want to
-  observe repositories on GitHub or GitLab. `up.nu` checks this at the end
-  and says what it found. A DNS search domain on the node that makes every
-  lookup slow (some university and corporate networks, and a VPN) is a common
-  cause of slow or timed-out pods: a lookup of a name inside the cluster tries
-  the node's search domains before the right name, and if your resolver never
-  answers them, an agent gives up (its connect attempt is 5 seconds) before the
-  answer comes. Remove the search domain from the node's resolver.
-- **A kubelet that does not throttle registry requests, or one you can live
-  with.** Polar pulls an image named by a tag that moves (`latest`) with
-  `imagePullPolicy: Always`, which asks your registry for every container that
-  starts. The kubelet limits that to 5 a second with a burst of 10
-  (`registryPullQPS`), so a burst of pods (a bring-up) sees `ErrImagePull: pull
-  QPS exceeded`, backs off and retries: slower, not broken. If you can, raise
-  it on the nodes (minikube: `minikube start --extra-config=kubelet.registry-pull-qps=0`).
-
-**2. Have a registry** the cluster pulls images from, and say where it is.
-For the shipped targets (`local-minimal`, `sandbox-local`) there is nothing to do:
-their registry is in the cluster, and `up.nu` makes it.
-
-*In the cluster itself* (nothing to run on this machine, no container runtime):
-say so in the target's `config.nuon`, as `local-minimal` and `sandbox-local` do:
+**In the cluster** (the shipped targets): nothing to run anywhere, and no container runtime. A target says so in its
+`config.nuon`:
 
 ```nuon
 cluster: { registry_in_cluster: { node_port: 30500 } }   # local_port (default 5000) and size (default 20Gi) are optional
 ```
 
-`up.nu` then applies it first (namespace `polar-registry`, a Deployment, a claim
-on the target's storage class, a NodePort Service), before anything that pulls an
-image, and starts a port-forward this machine pushes through
-(`localhost:<local_port>`, set as `POLAR_REGISTRY` for the run). The nodes pull
-from `localhost:<node_port>`, which a NodePort answers on every node, over plain
-HTTP: a node's container runtime allows that for `localhost` with no
-configuration. The registry image and, when the target deploys the storage
-chart, the local-path provisioner come from Docker Hub, pinned by digest, since
-the registry cannot hold its own images before it exists. To use it outside
-`up.nu`: `nu infra/cluster-registry.nu up <target>`. **It has no
-authentication yet:** anyone who can reach a node at the NodePort can push and
-pull. It needs a kube-proxy that answers NodePorts on `localhost` (the iptables
-mode does; IPVS and some kube-proxy replacements do not).
+`up.nu` applies it first (namespace `polar-registry`, a Deployment, a claim on the target's storage class, a NodePort
+Service), before anything that pulls an image, and starts a port-forward this machine (or the dev container) pushes
+through (`localhost:<local_port>`, set as `POLAR_REGISTRY` for the run). The nodes pull from `localhost:<node_port>`, which a
+NodePort answers on every node, over plain HTTP: a node's container runtime allows that for `localhost` with no
+configuration. The registry image and, when the target deploys the storage chart, the local-path provisioner come from
+Docker Hub, pinned by digest, since the registry cannot hold its own images before it exists. By hand: `nu
+infra/cluster-registry.nu up <target>`. **It has no authentication yet:** anyone who can reach a node at the NodePort can
+push and pull.
 
-*On this machine*, for a target that names a registry instead (and leaves out
-`registry_in_cluster`): for a local cluster, `just registry-up` starts one on `localhost:5000`:
-
-```bash
-just registry-up        # a registry container on localhost:5000
-just registry-status    # prints "registry reachable" when it is up
-```
-
-For any other registry there are two addresses, because the same registry has
-two names: the one this machine pushes to, and the one your cluster's nodes
-pull from. Say both, in your environment (nothing in the repository to edit):
+**One you bring**, for a target that names a registry instead (and leaves out `registry_in_cluster`). On your machine,
+`just registry-up` starts one on `localhost:5000` (`just registry-status` says when it is up); that needs a container
+runtime, which the scripts take as `podman` or `docker`, whichever is installed (`POLAR_CONTAINER_RUNTIME` to choose). For
+any other registry there are two addresses, because the same registry has two names: the one this machine pushes to, and
+the one your cluster's nodes pull from. Say both, in your environment (nothing in the repository to edit):
 
 ```bash
 export POLAR_REGISTRY=localhost:5000                  # as this machine reaches it (default)
 export POLAR_NODE_REGISTRY=polar-registry:5000        # as your cluster's nodes reach it
-export POLAR_CLUSTER_RUNTIME=none                     # unless the cluster is a rootless podman dev node (see Images)
+export POLAR_CLUSTER_RUNTIME=none                     # unless the cluster is a rootless podman dev node
 ```
 
-`POLAR_NODE_REGISTRY` is the prefix of every image in the manifests (default
-`10.0.2.2:5000`, the host as a podman dev node sees it; a target can also set
-`cluster.registry` in its `config.nuon`).
-
-The scripts use `podman` or `docker`, whichever is installed (`podman` first).
-To choose, set `POLAR_CONTAINER_RUNTIME=docker` (or `podman`); `up.nu` says
-which it found in its first step, and stops with a clear message if a step needs
-one (`--dev` with the registry on this machine) and neither is installed.
-
-**2b. Get the Polar images into that registry, one of two ways.** Either way
-there is nothing to run now: `up.nu` does it in step 5.
-
-- *Published images (no build):* `up.nu <target> --import-from docker.io/<account>`
-  copies the images for this machine's architecture into the registry, as a step
-  after the registry is made and before the render. See **Loading prebuilt
-  images**, under **Images**. For a registry of your own you can also import
-  first (`nu infra/images.nu import --from docker.io/<account>`) and then run
-  `up.nu` with neither flag.
-- *Build from source:* `up.nu <target> --dev` (step 5) builds and pushes them.
-  This is the way when you have changed code.
-
-**3. Building from source: build the Neo4j image.** Skip this with published
-images, which include Neo4j. In the `nix-neo4j` checkout:
-
-```bash
-nix build -L .#neo4j-image -o result-neo4j-image
-```
-
-`infra/images.nuon` expects the archive at
-`~/Documents/projects/nix-neo4j/result-neo4j-image`; set
-`POLAR_NEO4J_IMAGE` to its path if you keep it elsewhere. This image sets
-the `neo4j` user's password from `NEO4J_AUTH` on its first start, so there
-is no password to change by hand later.
-
-**4. Make sure `sops` can find your key.** (Not a recipient yet and nobody to
-add you? See "If nobody can add you" under **Secrets setup**.) Inside the dev shell
-`SOPS_AGE_BINARY` is already set; set `SOPS_AGE_SSH_PRIVATE_KEY_FILE` to
-the private key you were added with (put it in your `my.env`, see
-`example.env`). Outside the dev shell, export both:
-
-```bash
-export SOPS_AGE_BINARY=$(which rage)
-export SOPS_AGE_SSH_PRIVATE_KEY_FILE=$HOME/.ssh/<your key>
-```
-
-**5. Bring Polar up.**
-
-First put the tools on your `PATH` (**Installing the Polar tools**,
-below): `nu infra/tools.nu install ~/.local/bin`. Without them `up.nu`
-falls back to compiling `polar-admin-grant` and `polar-sign` from this
-checkout, which needs a Rust toolchain and takes a few minutes. The tools
-are Linux binaries: on a Mac, run `up.nu` in the dev container, which has
-them, rather than installing them on the Mac.
-
-```bash
-# Building from source (builds every image; the first cold build takes a long while):
-nu infra/up.nu local-minimal --dev --user <name> --email <email>
-
-# Published images (given to you; see "Loading prebuilt images"). Nothing is built:
-nu infra/up.nu local-minimal --import-from docker.io/<account> --user <name> --email <email>
-```
-
-With `--dev` it prints its plan first, then builds and pushes the images the target
-needs (`--dev`; the first cold build takes a long while), creates the
-namespaces and the cluster CA, applies the target, waits for the core
-pods, starts the port-forwards, runs the admin flow and signs and pushes
-the cluster's first policy. It stops for a person only where one is
-needed. After any failure or pause, **run the same command again**: every
-step checks whether it is already done.
-
-To deploy with Flux instead, bring up the `sandbox-local` target:
-`nu infra/up.nu sandbox-local --user <name> --email <email>`. It publishes the
-rendered layers, signed, to a deployment git server that runs in the cluster, in
-a namespace of its own (`polar-deploy`), installs Flux and lets it apply them. It
-needs `gpgsm` from GnuPG here, to sign; no container runtime. A copy of the signed
-history is kept in `~/.config/polar-deploy/<target>/mirror.git`, and a new
-cluster's server is given it. Add `--allow-dirty` if your working tree has
-uncommitted changes (the signed record says so). `infra/INFRA.md` ("How a target
-works") explains what it does; it has been run on one cluster, a podman dev node.
-
-Use `--dev` when you have changed code and want the images rebuilt (and
-every Job restarted to pick them up). Once the images are in the registry
-you do not need it: run the same command without `--dev` to resume, to
-bring a cluster up from images you were given, or to finish a run that
-stopped at a person's step. It skips the build stages and leaves the
-running pods alone.
-
-**6. The git server's administrator is recorded for you.** The Polar git
-server takes its administrators by identity, and an identity belongs to one
-cluster. After the admin flow, `up.nu` reads the first DNS name of your new
-certificate, writes it to `infra/targets/<target>/cluster-inputs.nuon` (not
-committed; a reset discards it), renders the layers again, and the git
-server restarts with it before the seed. Nothing to edit by hand. If the
-seed still says the git server does not know your identity, look at that
-file and at whether the git server's pod restarted.
-
-**7. Import your certificate into the browser.** When `up.nu` pauses at
-"Close Librewolf", close it and press on: it imports the cluster's CA
-and your user certificate (`just user-cert-install <name>` does the same
-by hand). For another browser, import the same files from
-`~/.config/polar-admin/` yourself. Nothing else is needed for Neo4j.
-
-**8. Check that it works.**
-
-```bash
-just cluster-status                 # nodes and every pod
-kubectl -n polar get pods
-just port-forwards-up               # then browse https://localhost:7473
-```
-
-Things that look wrong and are not:
-
-- **Pods in `Error` next to a running replacement.** The agents are
-  Kubernetes Jobs and exit on purpose, about once an hour, when their
-  certificates are renewed; the Job starts a fresh pod. Look at the
-  newest pod.
-- **`jira-observer` failing** when no Jira is set up for the target: its
-  credentials come from the target's secrets (see **Secrets setup**).
-- **`ErrImagePull: pull QPS exceeded` or `ImagePullBackOff`, briefly, when
-  many pods start at once.** The kubelet's limit on registry requests (step 1).
-  It retries by itself and the pods start.
-- **A growing pile of failed `jira-observer` pods** when there is no Jira to
-  reach: `just cluster-prune-failed` deletes the failed pods and leaves the
-  running ones.
-- **A port-forward that stops answering** after a pod was replaced:
-  forwards follow one pod. Run `just port-forwards-down` and then
-  `just port-forwards-up`.
-- **A Job that is slow to replace a pod you deleted by hand.** The Job
-  controller waits longer after each failure, up to about six minutes.
-- **`clone attempt 1 failed ... unexpected eof` while seeding the
-  schedules repository.** The git server had just restarted (it does when
-  its settings change). The step retries and goes on.
-- **`[polar] TLS certs missing -> building .#tlsCerts ... ERROR`** printed
-  by `just user-cert-install` or another recipe that starts a nested
-  `nix-shell`. Your dev shell was entered before the flake last changed and
-  still carries an old startup hook. It is harmless: what you asked for
-  still happens. Leave the dev shell and enter it again (or `direnv
-  reload`) to make it stop; do this after pulling changes to `flake.nix`.
-
-**To start over:** wipe the cluster the way your distribution does,
-then repeat steps 1, 5 and 7 (6 happens by itself). `up.nu` notices when
-`~/.config/polar-admin` holds the previous cluster's CA and moves those
-files aside (it tells you where).
-
-**What to do next:** tell Polar what to observe. Repositories,
-credentials and the rules for accepting repositories other agents propose
-are signed documents pushed to the cluster's git server with
-`polar-sign`; the walk-through, with every command, is
-[docs/operations/git-private-repository.md](docs/operations/git-private-repository.md),
-and the design is in
-[docs/architecture/signed-configuration.md](docs/architecture/signed-configuration.md).
-`infra/INFRA.md` explains the catalog, targets and images behind
-`up.nu`.
+`POLAR_NODE_REGISTRY` is the prefix of every image in the manifests (default `10.0.2.2:5000`, the host as a podman dev node
+sees it; a target can also set `cluster.registry` in its `config.nuon`). With a registry you bring, you can import the
+published images first (`nu infra/images.nu import --from docker.io/<account>`) and run `up.nu` with neither flag.
 
 ### Images
 
@@ -507,7 +464,8 @@ and the design is in
 comes from: built from the flake with Nix, mirrored from a third-party
 registry, or an archive built elsewhere (Neo4j). `up.nu --dev` builds
 and pushes the ones the target needs. To work on them yourself, with the
-registry from step 2 running:
+registry running (**Registries**; for the one in the cluster, `nu infra/cluster-registry.nu up <target>` starts its
+forward and prints the `POLAR_REGISTRY` to use):
 
 ```bash
 nu infra/images.nu list            # every image, its tag and its source
@@ -525,7 +483,7 @@ attempted and the stage ends with a summary.
 To push to a different registry (a real cluster, or a customer
 environment), set `POLAR_REGISTRY` to the address this machine pushes to
 (default `localhost:5000`) and `POLAR_NODE_REGISTRY` to the address your
-cluster's nodes pull from (step 2). Nothing in a target needs editing.
+cluster's nodes pull from (**Registries**). Nothing in a target needs editing.
 
 ### Loading prebuilt images
 
@@ -612,62 +570,8 @@ A "target" is a named deployment profile under `infra/targets/`.
 storage classes and other per-deployment values for the hand-written charts.
 The registry is not one of them: a target keeps it in its cluster
 (`cluster.registry_in_cluster` in its `config.nuon`) or names it
-(`cluster.registry`, or `POLAR_NODE_REGISTRY`, step 2), and every chart reads
+(`cluster.registry`, or `POLAR_NODE_REGISTRY`; **Registries**), and every chart reads
 the one value that comes out of that.
-
-### Deploy
-
-Render the target and bring the cluster up with the orchestrator, from the
-repo root with `KUBECONFIG` pointing at the cluster:
-
-```bash
-nu infra/up.nu local-minimal --dev --user <name> --email <email>
-```
-
-`infra/render.nu` only renders (it applies nothing; it needs each agent's
-scaffold, which `up.nu` asks of the agents' images on your cluster, and
-which `nu infra/resolve.nu collect-scaffolds` does by hand); `infra/up.nu`
-renders and then applies. It is driven by the target's own config, so it runs
-only the steps that target needs and prints the plan first, with the reason for
-every skipped step. For `local-minimal` that is: the registry in the cluster
-(and the storage it needs, when the cluster has no storage class yet), the
-import of the published images (`--import-from`), the images (`--dev`), namespaces,
-the cluster CA, secrets and manifests in the target's apply order, a wait for
-the core pods, the port-forwards, the admin flow, the seed of the schedules
-repository and the browser certificate. A target that deploys with Flux
-(`sandbox-local`) does not apply its manifests: it publishes them, signed, to a
-deployment git server of its own that runs in the cluster (in a namespace of its
-own, outside every layer), installs Flux and lets it apply them layer by layer (`infra/INFRA.md`, "How a target works", and
-`docs/architecture/cluster-bootstrap.md`).
-It stops only where a person is needed (closing the browser, the Neo4j
-password), and every step checks whether it is already done, so after a
-failure you re-run the same command to resume.
-
-The CA step runs `polar-admin-grant bootstrap-ca`, which needs a Kubernetes
-admin credential. It creates the cluster's own CA once (the `cert-issuer-ca`
-Secret and the `polar-ca` ConfigMap) and refuses to run again if they already
-exist, so replacing a CA means rebuilding the cluster. Everything else in the
-deployment gets its certificates from that CA.
-
-Swap `local-minimal` for whichever target you've set up. To only render, run
-`nu infra/render.nu <target>`; it writes every chart to `manifests/`.
-
-For `local-minimal` specifically, this deploys the full stack: Neo4j,
-Cassini, `cert-issuer`, the credentials-agent and its observer, ACE,
-the ingestion agents, and Keycloak with its own Postgres backing store
-(an optional identity-provider route for human-facing certificate
-issuance).
-
-ACE runs as a Kubernetes `Job` (not a `Deployment`): it requests a
-long-lived mTLS client certificate from the cluster's certificate
-infrastructure via an init container on every pod creation, which is
-what lets it recover automatically if its certificate or environment
-ever needs to be refreshed. It authenticates to Neo4j over mutual TLS
-and holds no other cluster permissions.
-
-Wait for the pods to come up (`kubectl -n polar get pods -w`) before
-continuing with **Accessing the deployment** and **Admin access and
-your user certificate**, below.
 
 ### Loading data into Neo4j
 
@@ -688,9 +592,11 @@ be briefly unavailable while it does.
 ### Accessing the deployment
 
 None of the in-cluster services are exposed outside the cluster by
-default. A single recipe brings up detached, auto-restarting
-port-forwards for everything you'd normally want reachable from your
-own machine:
+default. With the dev container in the cluster, `bin/polar-dev forward` on your machine
+forwards the two a browser needs (Neo4j and ACE); everything else is reached from inside
+the dev container, where `up.nu` has already started what it uses. On your own machine
+(or in a dev container there), a single recipe brings up detached, auto-restarting
+port-forwards for everything you'd normally want reachable:
 
 ```bash
 just port-forwards-up       # neo4j (7473/7687), keycloak (8080), ace (8050),
@@ -782,18 +688,18 @@ The sequence above assumes no particular Kubernetes distribution. To
 deploy to an environment of your own (a shared cluster, a customer's),
 make a target for it:
 
-1. Do steps 1 and 2 of the sequence: a kubeconfig, and a registry the
-   nodes can pull from (a real cluster generally can't import a local
-   image tarball directly the way `kind load` or `k3d image import` can).
+1. Do steps 1 to 3 of **Installation**: a cluster with storage, the secrets, and your dev container. The registry can be
+   in your cluster, as the shipped targets keep it, or one you bring (**Registries**; a real cluster generally can't
+   import a local image tarball directly the way `kind load` or `k3d image import` can).
 2. Copy `infra/targets/local-minimal/` to a new target directory
-   (the registry needs no edit: set `POLAR_NODE_REGISTRY`, step 2), and
+   (the registry needs no edit: it stays in the cluster, or you set `POLAR_NODE_REGISTRY`; **Registries**), and
    adjust any hostnames/URLs specific to your environment. In particular, `cert-issuer`'s `issuers` list is where
    trust in Kubernetes and/or an external IdP (Keycloak, Okta, etc.)
    is configured — see the inline comments there for what each field
    means, especially `identityStrategy`'s `clusterDomain` (only needed
    if your cluster's kubelet runs with a non-default
    `--cluster-domain`).
-3. Bring it up (see **Deploy**, above): `nu infra/up.nu <your-target>`. It
+3. Bring it up (step 4 of **Installation**): `nu infra/up.nu <your-target>`. It
    creates the namespaces and the CA, applies the target, and runs the admin
    flow, skipping whatever your target doesn't deploy.
 4. Reach your cluster's credentials-agent observer however suits your

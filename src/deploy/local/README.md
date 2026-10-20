@@ -33,7 +33,7 @@ inspectable.
 - [Nix](https://nixos.org) with flakes enabled
 - [podman](https://podman.io)
 - [just](https://just.systems)
-- A Kubernetes cluster and `kubectl` access to it (see the repository `README.md`, "Bring a cluster up")
+- A Kubernetes cluster and `kubectl` access to it (see the repository `README.md`, "Installation")
 - The [nix-neo4j](https://github.com/cmu-sei/nix-neo4j) repo checked out at
   `~/Documents/projects/nix-neo4j`
 
@@ -94,13 +94,13 @@ nix build .#neo4j-image -o result-neo4j-image
 
 ## Cluster Startup Sequence
 
-See "Bring a cluster up: the whole sequence" in the repository `README.md`. It
-is the current path, and it works with any Kubernetes distribution.
+See "Installation" in the repository `README.md`, steps 1 to 7. It is the
+current path, and it works with any Kubernetes distribution.
 
 ## Other local clusters (Minikube, kind, k3d, Docker Desktop, ...)
 
 Any of them works, because Polar asks only the things listed in step 1 of
-"Bring a cluster up" in the repository `README.md`. What differs between them
+"Installation" in the repository `README.md`. What differs between them
 is how images get to the nodes, which is the one thing to settle before running
 `nu infra/up.nu`:
 
