@@ -33,6 +33,10 @@ use ../apply.nu *
 
 def main [] {
     let tests = {
+        "what kubectl apply left unchanged is not shown; what it created or configured is": {
+            assert equal (changed_lines "configmap/a unchanged\ndeployment.apps/b configured\n\nservice/c created\nsecret/d unchanged") ["deployment.apps/b configured" "service/c created"]
+            assert equal (changed_lines "configmap/a unchanged\n") []
+        }
         "a job whose manifest is unchanged and whose pods are ready is left alone": {
             let v = (job_verdict 0 [{ name: "cassini", ready: true, done: false }])
             assert (not $v.restart)

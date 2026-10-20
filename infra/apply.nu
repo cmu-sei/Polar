@@ -90,6 +90,11 @@ export def job_verdict [diff_exit: int, jobs: list, stale: list<string> = [], ch
     }
 }
 
+# What kubectl apply printed, less the objects it left unchanged, which say nothing. Pure.
+export def changed_lines [apply_output: string] {
+    $apply_output | lines | where {|l| ($l | str trim | is-not-empty) and not ($l | str trim | str ends-with " unchanged") }
+}
+
 # The ConfigMaps `kubectl apply` reported as changed (it says `configured`; `created` has no running
 # user yet, and `unchanged` changed nothing).
 export def changed_configmaps [apply_output: string] {

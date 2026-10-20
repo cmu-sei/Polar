@@ -75,7 +75,7 @@ use plan.nu [build_forwards, build_plan, deployed_charts, needs_runtime]
 use agent-pods.nu [delete_stale_namespaces]
 use cluster-registry.nu
 use registry.nu [node_registry]
-use apply.nu [any_pod_ready, changed_configmaps, config_users, gate_after, job_verdict, jobs_in, stale_images, stale_pod_images, stale_pod_report, workload_needs_restart]
+use apply.nu [any_pod_ready, changed_configmaps, changed_lines, config_users, gate_after, job_verdict, jobs_in, stale_images, stale_pod_images, stale_pod_report, workload_needs_restart]
 
 def note [msg: string] { print $"  -- ($msg)" }
 def ok [msg: string] { print $"  ok: ($msg)" }
@@ -165,7 +165,8 @@ def stale_for [jobs: list] {
 # own image changed has anything to restart for), or when a ConfigMap it uses was just changed (it reads it at
 # start). A Deployment or StatefulSet that uses a ConfigMap that just changed is rolled the same way.
 # `changed` is the ConfigMaps changed by the manifests applied before this one; returns the ones this one changed.
-def apply_file [output_dir: string, filename: string, changed: list<string> = []] {
+# `quiet` (the seed's re-apply) says nothing of a manifest that changed nothing.
+def apply_file [output_dir: string, filename: string, changed: list<string> = [], --quiet] {
     let manifest = ($output_dir | path join $filename)
     if not ($manifest | path exists) {
         note $"skipping ($filename), not found"
@@ -188,12 +189,12 @@ def apply_file [output_dir: string, filename: string, changed: list<string> = []
         let changed_config = ($users | where kind == "Job" | get configmaps | flatten | where {|c| $c in $changed } | uniq)
         let verdict = (job_verdict $diff.exit_code $jobs $stale $changed_config)
         if not $verdict.restart {
-            ok $"($filename): left running, ($verdict.reason)"
+            if not $quiet { ok $"($filename): left running, ($verdict.reason)" }
             return { changed: [] }
         }
         note $"($filename): restarting its Jobs, ($verdict.reason)"
     }
-    print $"  applying ($filename)..."
+    if not $quiet or $has_job { print $"  applying ($filename)..." }
     if $has_job {
         ^kubectl delete --ignore-not-found -f $manifest
     }
@@ -202,7 +203,13 @@ def apply_file [output_dir: string, filename: string, changed: list<string> = []
     # shift every later one out of its place.
     let before = ($rollers | each {|u| { generation: (generation_of $u.ns ($u.kind | str lowercase) $u.name) } })
     let applied = (do { ^kubectl apply -f $manifest } | complete)
-    print ($applied.stdout | str trim)
+    let shown = (changed_lines $applied.stdout)
+    if ($shown | is-not-empty) {
+        if $quiet and not $has_job { print $"  applying ($filename)..." }
+        print ($shown | str join "\n")
+    } else if not $quiet {
+        print "  unchanged"
+    }
     if $applied.exit_code != 0 {
         print -e ($applied.stderr | str trim)
         fail $"kubectl apply failed for ($filename)"
@@ -381,18 +388,24 @@ def discard_other_clusters_inputs [target: string] {
 
 # The render reads the agents' scaffolds from a directory, asked of their images on the cluster just before (the ones cached
 # under their image's digest are not asked again), so render.nu itself never touches a cluster.
-def step_render [target: string, prepared: any = null, config: any = null] {
+# `quiet` (the seed's render, after the first) keeps the render's output back, unless it fails.
+def step_render [target: string, prepared: any = null, config: any = null, --quiet] {
     discard_other_clusters_inputs $target
     let scaffolds = (mktemp --directory)
-    ^$nu.current-exe infra/resolve.nu collect-scaffolds $scaffolds --target $target
-    if $env.LAST_EXIT_CODE != 0 {
+    let collected = (do { ^$nu.current-exe infra/resolve.nu collect-scaffolds $scaffolds --target $target } | complete)
+    if not $quiet or $collected.exit_code != 0 { print -n $collected.stdout; print -e -n $collected.stderr }
+    if $collected.exit_code != 0 {
         rm -rf $scaffolds
         fail "the agents could not be asked for their scaffolds (above)"
     }
-    with-env { POLAR_SCAFFOLD_DIR: $scaffolds } {
-        ^$nu.current-exe infra/render.nu $target
+    let code = if $quiet {
+        let r = (with-env { POLAR_SCAFFOLD_DIR: $scaffolds } { do { ^$nu.current-exe infra/render.nu $target } | complete })
+        if $r.exit_code != 0 { print -e $r.stdout $r.stderr } else { ok "rendered again (its output is shown only if it fails)" }
+        $r.exit_code
+    } else {
+        with-env { POLAR_SCAFFOLD_DIR: $scaffolds } { ^$nu.current-exe infra/render.nu $target }
+        $env.LAST_EXIT_CODE
     }
-    let code = $env.LAST_EXIT_CODE
     rm -rf $scaffolds
     if $code != 0 { fail "render failed" }
     if $prepared != null and $config != null {
@@ -457,12 +470,18 @@ def step_ca [] {
     }
 }
 
-def run_secrets [config: record] {
+# `quiet` keeps what secrets.nu prints back, unless it fails.
+def run_secrets [config: record, --quiet] {
     let secrets_script = ($config.target_dir | path join "secrets.nu")
     if ($secrets_script | path exists) {
-        print "  creating secrets..."
-        ^$nu.current-exe $secrets_script $config.target_dir $config.repo_root
-        if $env.LAST_EXIT_CODE != 0 { fail "secrets.nu failed" }
+        if $quiet {
+            let r = (do { ^$nu.current-exe $secrets_script $config.target_dir $config.repo_root } | complete)
+            if $r.exit_code != 0 { print -e $r.stdout $r.stderr; fail "secrets.nu failed" }
+        } else {
+            print "  creating secrets..."
+            ^$nu.current-exe $secrets_script $config.target_dir $config.repo_root
+            if $env.LAST_EXIT_CODE != 0 { fail "secrets.nu failed" }
+        }
     }
 }
 
@@ -487,18 +506,19 @@ def step_publish [target: string, allow_dirty: bool] {
 def step_flux [target: string] { run_script [infra/flux.nu install $target] }
 def step_flux_wait [target: string] { run_script [infra/flux.nu wait $target] }
 
-def step_infra [config: record] {
+# `quiet` (the seed's re-apply, after the first) prints only what changed and what restarts.
+def step_infra [config: record, --quiet] {
     let output_dir = $config.output_dir
-    run_secrets $config
+    run_secrets $config --quiet=$quiet
     mut changed: list<string> = []
     for filename in ($config.apply_order | skip 1) {
-        let applied = (apply_file $output_dir $filename $changed)
+        let applied = (apply_file $output_dir $filename $changed --quiet=$quiet)
         $changed = ($changed ++ $applied.changed | uniq)
         # What the next manifests connect to must be up before they start: a client that comes
         # up first attaches to a broker that is about to go away, and loses it.
         let gate = (gate_after $filename)
         if $gate != null and ($output_dir | path join $filename | path exists) {
-            print $"  waiting for ($gate.label) before applying what follows..."
+            if not $quiet { print $"  waiting for ($gate.label) before applying what follows..." }
             wait_pods [{ kind: "pods", ns: $gate.ns, ref: $gate.ref, label: $gate.label }] 5min
         }
     }
@@ -653,12 +673,12 @@ def step_seed [target: string, config: record, username: string, mail: string, a
             if $recorded.changed {
                 $recorded.inputs | to nuon --indent 2 | save --force $path
                 note $"recorded this cluster's administrator ($identity) in ($path | path relative-to $env.PWD); applying it to the git server"
-                step_render $target
+                step_render $target --quiet
                 if ($config.gitops? | default false) {
                     step_publish $target $allow_dirty
                     step_flux_wait $target
                 } else {
-                    step_infra $config
+                    step_infra $config --quiet
                 }
                 wait_pods (seed_waits) 10min
             }
