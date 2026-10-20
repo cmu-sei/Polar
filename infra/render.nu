@@ -44,6 +44,8 @@ use dhall-cache.nu
 
 def main [
     target: string        # Target name: local, local-minimal, sandbox-local
+    --charts-into: string = ""  # render only the charts, into this directory, and stop: what their manifests name (the images to
+                                # build before the render) needs no agent's scaffold. The target's output is left alone.
 ] {
     let infra_root  = ($env.PWD | path join "infra")
     let target_file = ($infra_root | path join $"targets/($target)/target.nu")
@@ -67,7 +69,7 @@ def main [
     # ── Load target configuration ─────────────────────────────────────────────
     print "Loading target configuration..."
     let config = (nu $target_file | from nuon)
-    let output_dir = $config.output_dir
+    let output_dir = if ($charts_into | is-empty) { $config.output_dir } else { $charts_into }
 
     # ── Validate environment ───────────────────────────────────────────────────
     print "Validating environment..."
@@ -120,8 +122,9 @@ def main [
                 "cert-issuer" => {
                     identityLifetimeOverrides: $identity_lifetime_overrides
                     # The floor is written from the catalog, so what a workload is issued and what cert-issuer
-                    # allows it cannot differ.
-                    floor: (^nu ($infra_root | path join "resolve.nu") floor --target $target | from json)
+                    # allows it cannot differ. The catalog has it from the agents' scaffolds, which a charts-only render
+                    # (for the images its manifests name) does not have: it gives none, since the floor names no image.
+                    floor: (if ($charts_into | is-not-empty) { [] } else { ^nu ($infra_root | path join "resolve.nu") floor --target $target | from json })
                     floorEnforced: (^nu ($infra_root | path join "resolve.nu") floor-enforced --target $target | str trim | into bool)
                 }
                 "neo4j" => { polarInitImage: $polar_init_image, credentialsObserverUrl: $credentials_observer_url }
@@ -136,6 +139,10 @@ def main [
 
         nu $chart_path ($chart_context | to nuon)
         print ""
+    }
+    if ($charts_into | is-not-empty) {
+        print $"=== Charts rendered into ($charts_into) ==="
+        return
     }
 
     print "Rendering catalog workloads..."
