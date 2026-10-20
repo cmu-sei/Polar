@@ -91,6 +91,7 @@ spec:
             # of this pod's own account, and the key sops decrypts the targets' secrets with.
             - { name: POLAR_DEV_POD, value: "1" }
             - { name: KUBECONFIG, value: /etc/polar-dev/kubeconfig }
+            - { name: DIRENV_CONFIG, value: /etc/polar-dev }
             - { name: SOPS_AGE_SSH_PRIVATE_KEY_FILE, value: /run/sops-key/key }
             - { name: ATUIN_SESSION_NAME, value: polar-dev }
             # skopeo, and others, stage large files in /var/tmp, which the user cannot write here; /tmp is open to all
@@ -113,6 +114,6 @@ spec:
         - name: state
           persistentVolumeClaim: { claimName: polar-dev-state }
         - name: kubeconfig
-          configMap: { name: polar-dev-kubeconfig, items: [{ key: kubeconfig, path: kubeconfig }] }
+          configMap: { name: polar-dev-kubeconfig, items: [{ key: kubeconfig, path: kubeconfig }, { key: direnv.toml, path: direnv.toml }] }
         - name: sops-key
           secret: { secretName: polar-dev-sops, defaultMode: 0440 }
