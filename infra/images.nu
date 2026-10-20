@@ -335,7 +335,7 @@ def node_present [] {
 def require_registry [] {
     let r = (try { do { ^curl -sf --max-time 3 $"http://(registry)/v2/" } | complete } catch { { exit_code: 1 } })
     if $r.exit_code != 0 {
-        error make --unspanned { msg: $"the registry at (registry) is not reachable. Start it with `just registry-up`, set POLAR_REGISTRY, or pass --target <target> for a target whose registry is in its cluster." }
+        error make --unspanned { msg: $"the registry at (registry) is not reachable. Pass --target <target> for a target whose registry is in its cluster, or set POLAR_REGISTRY, or start one on this machine with `just registry-host-up`." }
     }
 }
 

@@ -39,7 +39,7 @@ The sources are the `.mmd` files beside them (regenerate as in `sequences/assets
 
 **Everything described here runs.** It was traced from the code (`infra/up.nu`, `plan.nu`, `images.nu`, `render.nu`,
 `render-catalog.nu`, `resolve.nu`, `layers.nu`, `registry.nu`, `deploy-repo.nu`, `deploy-objects.nu`, `flux.nu`,
-`cluster-inputs.nu`, `secrets.nu` of the target, `tools.nu`, `forwards.nu`, the Justfile recipes `registry-up`, `port-forwards-up`,
+`cluster-inputs.nu`, `secrets.nu` of the target, `tools.nu`, `forwards.nu`, the Justfile recipes `registry-host-up`, `port-forwards-up`,
 `admin-bootstrap`, `admin-provision`, `admin-claim` and `user-cert-install`, and `polar-admin-grant` and `polar-sign`), and a clean
 `sandbox-local` bring-up was run end to end on 2026-10-19 on the podman dev node (all six layers Ready, the seed applied). Other
 runtimes (minikube, kind, a managed cluster) have not run the gitops target; `local-minimal` does not use Flux and `up.nu` applies it
@@ -63,7 +63,7 @@ below).
 | 1 | preflight | `up.nu` | nothing. Checks the cluster answers and namespaces can be made, a container runtime exists when a step starts a container here (`--dev`, the deployment host), the SOPS files decrypt; deletes scratch namespaces an interrupted run left behind |
 | 1b | registry (`cluster.registry_in_cluster`) | `cluster-registry.nu ensure` | for a target whose registry is in its cluster: the storage chart (provisioner from upstream), namespace `polar-registry` with the registry (upstream image by digest, a claim on the target's class, a NodePort the nodes pull from at `localhost:<port>`), and the port-forward this machine pushes through. Applied by `up.nu`, never by Flux: everything Flux runs, its controllers included, is pulled from it |
 | 1c | import (`--import-from`) | `images.nu import` | the published images, Neo4j included, copied into the registry |
-| 2 | agent images (`--dev`) | `just registry-up`, `resolve.nu document-images`, `images.nu sync`, `nix build`, `skopeo` | the registry container; `result/IMAGE` archives; images in the registry |
+| 2 | agent images (`--dev`) | `just registry-host-up`, `resolve.nu document-images`, `images.nu sync`, `nix build`, `skopeo` | the registry container; `result/IMAGE` archives; images in the registry |
 | 3 | render | `resolve.nu collect-scaffolds` (`agent-pods.nu`), `render.nu`, each chart's `main.nu`, `render-catalog.nu`, `resolve.nu`, `dhall` | the agents' scaffolds, asked of their images as pods in a scratch namespace (deleted afterwards); `manifests/` (52 files), the render caches |
 | 4 | images (`--dev`) | `images.nu` | the images the manifests name |
 | 5 | namespaces | `up.nu` (`kubectl apply`) | the namespaces |

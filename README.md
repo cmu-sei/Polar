@@ -450,7 +450,7 @@ infra/cluster-registry.nu up <target>`. **It has no authentication yet:** anyone
 push and pull.
 
 **One you bring**, for a target that names a registry instead (and leaves out `registry_in_cluster`). On your machine,
-`just registry-up` starts one on `localhost:5000` (`just registry-status` says when it is up); that needs a container
+`just registry-host-up` starts one on `localhost:5000` (`just registry-host-status` says when it is up); that needs a container
 runtime, which the scripts take as `podman` or `docker`, whichever is installed (`POLAR_CONTAINER_RUNTIME` to choose). For
 any other registry there are two addresses, because the same registry has two names: the one this machine pushes to, and
 the one your cluster's nodes pull from. Say both, in your environment (nothing in the repository to edit):
@@ -471,15 +471,18 @@ published images first (`nu infra/images.nu import --from docker.io/<account>`) 
 comes from: built from the flake with Nix, mirrored from a third-party
 registry, or an archive built elsewhere (Neo4j). `up.nu --dev` builds
 and pushes the ones the target needs. To work on them yourself, with the
-registry running (**Registries**; for the one in the cluster, give the commands that push `--target <target>`, which
-starts its forward and pushes through it, as `up.nu` does):
+target's registry (**Registries**). Each recipe prints the `infra/images.nu` command it runs. Those that push use the
+registry in the target's cluster, through a forward they start, as `up.nu` does; the target is `POLAR_TARGET`, else
+`local-minimal` (`just target=sandbox-local image cassini` for another), and `just target= …` pushes to `POLAR_REGISTRY`
+instead:
 
 ```bash
 nu infra/images.nu list            # every image, its tag and its source
 just images-build <name>…          # build only (needs Nix; no registry, no cluster)
-just images-push <name>…           # build and push to the registry
-just images-mirror                 # copy the third-party images into the registry
-just image <name>                  # every stage, then drop the node's cached copy
+just images-push <name>…           # build and push to the target's registry
+just images-mirror                 # copy the third-party images into it
+just image <name>                  # every stage (alias: cluster-load)
+just registry-up                   # the target's registry in its cluster, and the forward to it
 just images-all                    # all of it, for every image
 ```
 
@@ -509,7 +512,7 @@ For a registry of your own, or by hand (`nu infra/cluster-registry.nu up <target
 first, and prints the `POLAR_REGISTRY` to use):
 
 ```bash
-just registry-up                                       # a registry on this machine, if you have not started it yet
+just registry-host-up                                  # a registry on this machine, if you have not started it yet
 nu infra/images.nu import --from docker.io/<account>   # amd64 or arm64, from `uname -m`; --arch to choose
 ```
 
@@ -904,7 +907,7 @@ agent, rebuild its image, push it and bounce its pod; Jobs create a
 fresh pod, and `polar-init` fetches a new certificate on startup:
 
 ```bash
-just image <image-name>      # build, push, drop the node's cached copy
+just image <image-name>      # build it and push it to the cluster's registry
 kubectl -n polar delete pod -l job-name=<job-name>
 ```
 

@@ -152,10 +152,12 @@ nu infra/resolve.nu check
 # Images
 nu infra/images.nu list                     # every image the repo knows how to produce
 just images-build kube-observer             # stage 1: build only (needs nix; no registry, no cluster)
-just images-push kube-observer              # stage 2: build and push to the registry (no cluster)
-just images-mirror                          # stage 3: copy third-party images into the registry
-just image kube-observer                    # every stage, then drop the node's stale cached copy
+just images-push kube-observer              # stage 2: build and push to the target's registry
+just images-mirror                          # stage 3: copy third-party images into the target's registry
+just image kube-observer                    # every stage (alias: cluster-load)
 just images-all                             # every stage for everything in the table
+# Each prints the images.nu command it runs. The target is POLAR_TARGET, else local-minimal (just target=<t> ...); its
+# registry is the one in its cluster, through a forward the recipe starts. `just target= ...` uses POLAR_REGISTRY instead.
 nu infra/images.nu import --from docker.io/<account>    # copy published images into your registry (this machine's architecture)
 nu infra/images.nu publish --to docker.io/<account> --arch arm64    # publish them (a mirror only when named)
 
@@ -1008,7 +1010,8 @@ beside one that may still be alive), but it is an outage until someone acts.
 - **Pulling `Always` is throttled by the kubelet** (5 requests a second, burst 10) on a cluster that has not lifted `registryPullQPS`: a
   burst of pods is retried with a backoff, which slows a bring-up but does not break it. The `u7s` node lifts it.
 - **Third-party images under a version tag (Jaeger, Keycloak, Postgres, the Flux controllers, local-path-provisioner) are still
-  `IfNotPresent`,** and `just cluster-load` (an image loaded into a node and not in the registry) does not work with `Always` for ours.
+  `IfNotPresent`. An image loaded into a node by hand, and not in the registry, does not work with `Always` for ours: push it
+  (`just image <name>`; `just cluster-load` is now its alias).
 - **The gitops target has run on one kind of cluster** (the podman dev node), most recently (2026-10-19) on a fresh one with the registry
   and the deployment git server both in the cluster. The server does not yet reject an unsigned push (`flux.nu install` checks the
   signature; the server does not).

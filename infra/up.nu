@@ -438,7 +438,7 @@ def step_images [target: string, in_cluster: bool, dev: bool, import_from: strin
         }
     }
     if $dev {
-        if not $in_cluster { ^just registry-up }
+        if not $in_cluster { ^just registry-host-up }
         try { images sync $rows } catch {|e| fail $e.msg }
     }
     ok (if $dev { "images built and pushed" } else { $"images copied from ($import_from)" })

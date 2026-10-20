@@ -45,7 +45,7 @@ export def digest_from_headers [headers: string] {
 const ACCEPT = "application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json"
 
 # The URLs a manifest is asked at, in order: HTTPS, which a registry anyone else runs speaks, then plain HTTP, which the local
-# development registry (`just registry-up`) speaks.
+# development registry (`just registry-host-up`, or the one in the cluster) speaks.
 export def manifest_urls [parts: record] {
     ["https" "http"] | each {|scheme| $"($scheme)://($parts.host)/v2/($parts.name)/manifests/($parts.tag)" }
 }

@@ -188,7 +188,7 @@ export def ensure [target: string] {
     }
     if not (forward_running) {
         if (answers $s.local_port) {
-            error make --unspanned { msg: $"something else already answers as a registry at localhost:($s.local_port) \(the host registry? just registry-down\), or set cluster.registry_in_cluster.local_port" }
+            error make --unspanned { msg: $"something else already answers as a registry at localhost:($s.local_port) \(the host registry? just registry-host-down\), or set cluster.registry_in_cluster.local_port" }
         }
         let started = (with-env { POLAR_REGISTRY_FORWARD_PORT: ($s.local_port | into string) } { do { ^just port-forwards-up registry } | complete })
         if $started.exit_code != 0 { error make --unspanned { msg: $"starting the registry's port-forward failed: ($started.stderr | str trim)" } }

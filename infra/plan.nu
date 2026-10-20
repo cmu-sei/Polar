@@ -60,7 +60,7 @@ export def build_plan [config: record, dev: bool, options: record = {}] {
         # Every image the target runs, before the render: the render asks the agents' images for their scaffolds, and a target that
         # pins its images by digest names the ones just pushed. Copied from where they are published (--import-from), built from
         # this checkout (--dev), or both, in that order; with neither, they are in the registry already. Without a registry in the
-        # cluster, building starts the host's (`just registry-up`).
+        # cluster, building starts the host's (`just registry-host-up`).
         { id: "images", title: "images", on: ($dev or ($import_from | is-not-empty)), runtime: ($dev and (not $in_cluster)), why: "pass --dev to build them, or --import-from <registry>/<account> to copy the published ones; without either, the render asks the ones already in the registry" }
         { id: "render", title: "render", on: true, why: "" }
         { id: "namespaces", title: "namespaces", on: ("namespaces.yaml" in $order), why: "target has no namespaces.yaml in its apply order" }

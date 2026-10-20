@@ -39,6 +39,12 @@ _nix_flags := if verbose == "true" { "-L" } else { "--log-format bar-with-logs" 
 
 _taskfile := "/workspace/agent-task.json"
 
+# The target whose registry the image and registry recipes use: its own, in the cluster, through a forward they start
+# (infra/cluster-registry.nu). POLAR_TARGET, else local-minimal; `just target=sandbox-local image cassini` for another.
+# `just target= images-push ...` pushes to POLAR_REGISTRY instead (default localhost:5000, such as `just registry-host-up`'s).
+target := env_var_or_default('POLAR_TARGET', 'local-minimal')
+_target_flag := if target == "" { "" } else { "--target " + target }
+
 # ── Help ──────────────────────────────────────────────────────────────────────
 
 # List all available recipes
@@ -49,8 +55,8 @@ default:
 
 # Load a docker-archive build result into the host podman.
 # No-ops when podman is unavailable (e.g. inside the dev container, where
-# podman-in-podman is explicitly not wanted and images reach the cluster via
-# `just cluster-load-*` instead), or when POLAR_SKIP_LOAD is set. This lets the
+# podman-in-podman is explicitly not wanted and images reach the cluster through
+# its registry instead: `just image <name>`), or when POLAR_SKIP_LOAD is set. This lets the
 # per-service build recipes run unchanged in both the dev container and on the
 # host — in the container they build only; on the host they also load.
 _load result:
@@ -128,134 +134,33 @@ dev-container:
     nix build {{_nix_flags}} ".#packages.{{platform}}.devContainer" -o result-dev-container
     just _load result-dev-container
 
-# ── Local dev PKI / cert-issuer stack ─────────────────────────────────────────
-#
-# One-time bootstrap sequence (run once per CA rotation):
-#
-#   just setup-cert-issuer                    # generates CA, OIDC keypair, JWKS, tokens, config
-#
-# Then, in separate terminals (or tmux panes):
-#
-#   just run-jwks                     # Terminal A: JWKS HTTP server (port 8081)
-#   just run-cert-issuer                   # Terminal B: cert-issuer gRPC server (port 8443)
-#
-# Then issue all three certs and copy Neo4j layout:
-#
-#   just issue-certs                    # issues cassini, neo4j, and agent certs
-#
-# Print env vars for a given workload:
-#
-#   just dev-env cassini
-#   just dev-env agent
-#   just dev-env neo4j
-#
-# Tokens expire after 1h. Refresh without rotating the CA:
-#
-#   just                     # safe to re-run; preserves dev/tmp/
-#
-# Rotate the CA root (invalidates all outstanding certs):
-#
-#   just dev-clean ca && just dev-setup
-
-# Run the one-shot dev environment setup (CA, OIDC keypair, JWKS, tokens, config).
-# Safe to re-run — preserves dev/tmp/. Delete dev/tmp/ explicitly to rotate the CA.
-setup-cert-issuer:
-    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-issuer-setup
-
-# Start the JWKS HTTP server on port 8081.
-# Run in a dedicated terminal — this is a foreground process.
-# Must be running before dev-issuer starts.
-run-jwks:
-    python3 -m http.server 8081 --directory dev
-
-# Start the cert-issuer on port 8443.
-# Run in a dedicated terminal — this is a foreground process.
-# Requires dev-jwks to be running (issuer fetches JWKS on startup).
-run-cert-issuer:
-    export CERT_ISSUER_CONFIG=dev/config.json
-    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-issuer
-
-# Issue all three dev certs (cassini server, neo4j server, agent client).
-# Requires both dev-jwks and dev-issuer to be running in separate terminals.
-# Tokens expire after 1h; re-run dev-setup first if they've expired.
-issue-dev-certs:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    # TODO: add healthcheck
-    # Fail fast if the issuer is not reachable rather than producing a confusing TLS error.
-    # if ! curl -sf --max-time 2 http://127.0.0.1:8443 > /dev/null 2>&1; then
-    #     echo "ERROR: cert-issuer not responding on :8443 — run 'just dev-issuer' in another terminal first."
-    #     exit 1
-    # fi
-
-    echo "--- Issuing Cassini server cert ---"
-    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-client -- \
-        --cert-issuer-url http://127.0.0.1:8443 \
-        --token-path dev/token-cassini \
-        --cert-dir dev/certs/server \
-        --cert-type server \
-        --key-algorithm ecdsa-p256
-
-    echo "--- Issuing Neo4j server cert ---"
-    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-client -- \
-        --cert-issuer-url http://127.0.0.1:8443 \
-        --token-path dev/token-neo4j \
-        --cert-dir dev/certs/neo4j-server \
-        --cert-type server \
-        --key-algorithm ecdsa-p256 \
-        --extra-san neo4j.polar.svc.cluster.local \
-        --extra-san polar-db-svc.polar.svc.cluster.local
-
-    for p in https bolt; do
-        mkdir -p "dev/certs/neo4j/$p/trusted"
-        cp dev/certs/neo4j-server/cert.pem "dev/certs/neo4j/$p/public.crt"
-        cp dev/certs/neo4j-server/key.pem  "dev/certs/neo4j/$p/private.key"
-        cp dev/certs/neo4j-server/ca.pem   "dev/certs/neo4j/$p/trusted/ca.pem"
-        echo "  populated dev/certs/neo4j/$p/"
-    done
-
-    echo "--- Issuing agent client cert ---"
-    cargo run --manifest-path ./src/agents/Cargo.toml --bin cert-client -- \
-        --cert-issuer-url http://127.0.0.1:8443 \
-        --token-path dev/token-agent \
-        --cert-dir dev/certs/client \
-        --key-algorithm ecdsa-p256
-
-    echo "--- Verifying EKUs ---"
-    for cert in dev/certs/server/cert.pem dev/certs/neo4j-server/cert.pem dev/certs/client/cert.pem; do
-        echo "  $cert:"
-        openssl x509 -in "$cert" -noout -text | grep -A5 'Extended Key Usage' | sed 's/^/    /'
-    done
-
-    echo "Done."
-
 # ── Workspace binaries ────────────────────────────────────────────────────────
 
 # Build all workspace binaries
 agents:
     nix build {{_nix_flags}} ".#packages.{{platform}}.default" -o polar
 
-git-server:
-    nix build {{_nix_flags}} ".#packages.{{platform}}.gitServerImage" -o result-git-server-image
-    just _load result-git-server-image
-
-# Update the nix-container-lib pin in container-lib.dhall and re-render all container.nix files.
+# Pin the Dhall side of nix-container-lib (src/containers/container-lib.dhall) to the commit flake.lock names for its Nix side,
+# with the hash Dhall computes for it, then re-render every container config that imports it. Each rendered .nix opens with the
+# license banner of the .dhall it comes from, as src/flake/Justfile's renders do. Review with git diff.
+# Pin container-lib.dhall to flake.lock's nix-container-lib and re-render the container configs
 update-dhall-pins:
     #!/usr/bin/env bash
     set -euo pipefail
     COMMIT=$(nix flake metadata --json | jq -r '.locks.nodes["nix-container-lib"].locked.rev')
-    DHALL_HASH=$(dhall hash <<< "https://raw.githubusercontent.com/daveman1010221/nix-container-lib/${COMMIT}/dhall/prelude.dhall")
-    echo "nix-container-lib commit: $COMMIT"
-    echo "Dhall prelude hash:       $DHALL_HASH"
-    echo "Updating src/containers/container-lib.dhall..."
-    echo "Re-rendering container.nix files..."
-    for f in $(grep -rl "container-lib.dhall" src/ --include="*.dhall" | grep -v 'container-lib.dhall'); do
-        DIR="$(dirname $f)"
-        BASE="$(basename $f .dhall)"
-        pushd "$DIR" > /dev/null
-        dhall-to-nix < "$BASE.dhall" > "$BASE.nix" && echo "  rendered: $DIR/$BASE.nix" || echo "  skipped:  $f"
-        popd > /dev/null
+    URL="https://raw.githubusercontent.com/daveman1010221/nix-container-lib/${COMMIT}/dhall/prelude.dhall"
+    echo "+ dhall hash <<< $URL"
+    HASH=$(dhall hash <<< "$URL")
+    echo "  nix-container-lib $COMMIT, Dhall prelude $HASH"
+    LIB=src/containers/container-lib.dhall
+    echo "+ pinning $LIB"
+    sed -i -E "s|https://raw\.githubusercontent\.com/daveman1010221/nix-container-lib/[0-9a-f]{40}/dhall/prelude\.dhall|$URL|; s|^([[:space:]]*)sha256:[0-9a-f]{64}$|\1$HASH|" "$LIB"
+    for f in $(grep -rl "container-lib.dhall" src/ --include="*.dhall" | grep -v '^src/containers/container-lib.dhall$'); do
+        DIR="$(dirname "$f")"; BASE="$(basename "$f" .dhall)"
+        echo "+ (cd $DIR && dhall-to-nix < $BASE.dhall > $BASE.nix)"
+        # Rendered aside and then written into the existing file, which keeps its mode; a failed render leaves it as it was.
+        ( cd "$DIR" && { sed -n '/^--/!q; s/^--/#/p' "$BASE.dhall"; dhall-to-nix < "$BASE.dhall"; } > "$BASE.nix.new" && cat "$BASE.nix.new" > "$BASE.nix" && rm "$BASE.nix.new" ) \
+            || { rm -f "$DIR/$BASE.nix.new"; echo "  FAILED: $f" >&2; exit 1; }
     done
     echo "Done. Review with: git diff"
 
@@ -653,27 +558,33 @@ neo4j-load-dump dump_path:
         "ALTER USER neo4j SET PASSWORD '$NEO4J_PASSWORD' CHANGE NOT REQUIRED"
     echo "Done. If you changed users, re-run: just user-cert-install"
 
+# The image recipes are infra/images.nu (its header says what each stage needs), and print the command they run. Those that
+# push use the target's registry (`target`, above): the one in its cluster, through a forward they start.
+
 # Build the nix images (archives under result/). Needs only nix: no registry, no cluster.
 # With no names, builds every image.  just images-build kube-observer
 images-build *names:
     nu infra/images.nu build {{ if names == "" { "--all" } else { names } }}
 
-# Build and push to the local registry. Needs the registry, not the cluster.
-images-push *names: registry-up
-    nu infra/images.nu push {{ if names == "" { "--all" } else { names } }}
+# Build and push to the target's registry. With no names, every image.
+images-push *names:
+    nu infra/images.nu push {{ if names == "" { "--all" } else { names } }} {{_target_flag}}
 
-# Copy third-party images from upstream into the local registry.
-images-mirror *names: registry-up
-    nu infra/images.nu mirror {{ if names == "" { "--all" } else { names } }}
+# Copy third-party images from upstream into the target's registry. With no names, every one.
+images-mirror *names:
+    nu infra/images.nu mirror {{ if names == "" { "--all" } else { names } }} {{_target_flag}}
 
-# Every stage for the named images, then drop the cluster node's stale copies.
+# Every stage for the named images: build, push, mirror.
 #   just image kube-observer jira-observer
-image +names: registry-up
-    nu infra/images.nu sync {{names}}
+image +names:
+    nu infra/images.nu sync {{names}} {{_target_flag}}
+
+# What `cluster-load` did (import an image into the node), for any cluster: build it and push it to the cluster's registry.
+alias cluster-load := image
 
 # Every stage for every image in infra/images.nuon.
-images-all: registry-up
-    nu infra/images.nu sync --all
+images-all:
+    nu infra/images.nu sync --all {{_target_flag}}
 
 # ── nix-usernetes (local cluster) ────────────────────────────────────────────
 #
@@ -960,33 +871,28 @@ licenses-check:
 cluster-ctx:
     @echo "Run: export KUBECONFIG={{_u7s_kubeconf}}"
 
-# Load a nix result or podman image into the cluster containerd
-# Usage: just cluster-load ./result-cassini-image
-#        just cluster-load cassini:latest
-cluster-load image:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ -e "{{image}}" ]; then
-        podman exec -i u7s ctr -n k8s.io images import - < "{{image}}"
-    else
-        podman save "{{image}}" | podman exec -i u7s ctr -n k8s.io images import -
-    fi
-
 _registry_host := "localhost"
 _registry_port := "5000"
 
-# Start a local OCI registry for image distribution. Works with any
-# Kubernetes cluster (u7s, kind, k3d, a real cluster) -- push here from
-# the host, and configure your cluster's node(s) to pull from wherever
-# this registry is reachable on their end.
+# Applied with the storage it needs, and forwarded to this machine, which pushes through the forward; up.nu's registry step.
+# Start the target's registry in its cluster (infra/cluster-registry.nu)
 registry-up:
+    nu infra/cluster-registry.nu up {{target}}
+
+# Whether the target's registry in the cluster runs, and its forward answers.
+registry-status:
+    nu infra/cluster-registry.nu status {{target}}
+
+# For a target that names a registry you bring (no `registry_in_cluster`): a container on localhost:5000, with podman or
+# docker. Push to it with `just target= images-push ...`; your nodes must be able to reach it.
+# Start a registry on this machine
+registry-host-up:
     {{_runtime}} run -d --name polar-registry -p {{_registry_port}}:{{_registry_port}} docker.io/library/registry:2 2>/dev/null || echo "Container 'polar-registry' already running."
 
-registry-down:
+# Stop the registry on this machine
+registry-host-down:
     {{_runtime}} rm -f polar-registry
 
-registry-status:
+# Whether the registry on this machine answers
+registry-host-status:
     curl -sf http://{{_registry_host}}:{{_registry_port}}/v2/ && echo "registry reachable"
-
-# Pull and push the local-path provisioner image to the local registry.
-
