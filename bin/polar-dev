@@ -48,7 +48,12 @@ BRANCH=${POLAR_DEV_BRANCH:-feat/ace-integration}
 PORT=${POLAR_DEV_PORT:-2222}
 SOPS_KEY=${POLAR_DEV_SOPS_KEY:-${SOPS_AGE_SSH_PRIVATE_KEY_FILE:-$HOME/.ssh/id_ed25519}}
 REMOTE_HOME=/home/$(id -un)
-SSH_OPTS=(-A -p "$PORT" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$HOME/.ssh/polar-dev_known_hosts")
+# The pod's host keys are kept on its state volume, so they stay the same while the namespace does; a new namespace (a new
+# cluster, or after down --purge) is a new pod with new keys. So the keys ssh trusts are kept per namespace, by its uid.
+ssh_opts() {
+    local uid; uid=$(kubectl get namespace "$NS" -o jsonpath='{.metadata.uid}' 2>/dev/null) || true
+    SSH_OPTS=(-A -p "$PORT" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$HOME/.ssh/polar-dev_known_hosts.${uid:0:8}")
+}
 
 die() { echo "polar-dev: $*" >&2; exit 1; }
 k() { kubectl -n "$NS" "$@"; }
@@ -111,7 +116,7 @@ K
     kubectl kustomize --load-restrictor LoadRestrictionsNone "$d"
 }
 
-ssh_answers() { ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$(id -un)@127.0.0.1" true 2>/dev/null; }
+ssh_answers() { ssh_opts; ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$(id -un)@127.0.0.1" true 2>/dev/null; }
 
 # Starts the forward to the pod's SSH and waits until a login works. A forward left from before that does not reach the pod
 # (it was made for a pod that has since been replaced) is replaced.
