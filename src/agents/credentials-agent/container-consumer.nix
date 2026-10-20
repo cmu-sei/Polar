@@ -9,8 +9,8 @@
 # MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
 # TRADEMARK, OR COPYRIGHT INFRINGEMENT.
 #
-# Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
-# for full terms.
+# Licensed under a MIT (SEI)-style license, please see license.txt or contact
+# permission@sei.cmu.edu for full terms.
 #
 # [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
 # distribution.  Please see Copyright notice for non-US Government use and distribution.
@@ -18,7 +18,6 @@
 # This Software includes and/or makes use of Third-Party Software each subject to its own license.
 #
 # DM26-0670
-
 {
   ai = null;
   entrypoint = "credentials-agent-consumer";
