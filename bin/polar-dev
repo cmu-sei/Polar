@@ -57,7 +57,37 @@ ssh_opts() {
 
 die() { echo "polar-dev: $*" >&2; exit 1; }
 k() { kubectl -n "$NS" "$@"; }
-pod() { k get pod -l app=polar-dev -o jsonpath='{.items[0].metadata.name}'; }
+say() { echo "polar-dev: $*"; }
+
+# The newest of the dev pods (one being replaced may still be there).
+pod() { k get pod -l app=polar-dev --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null; }
+
+# Waits for the rollout, saying what the pod is doing as it happens: its status, each event (scheduled, pulling the image,
+# pulled, started), and while the init container copies the image's Nix store to its volume, how much is copied.
+wait_ready() {
+    local p="" seen_status="" seen_events="" last_copy=0
+    for _ in $(seq 1 720); do
+        if k rollout status "deploy/$DEPLOY" --timeout=1s >/dev/null 2>&1; then say "the pod is ready"; return; fi
+        p=$(pod)
+        if [ -n "$p" ]; then
+            local status; status=$(k get pod "$p" --no-headers 2>/dev/null | awk '{print $3}')
+            [ "$status" != "$seen_status" ] && { say "pod $p: $status"; seen_status=$status; }
+            local events; events=$(k get events --field-selector "involvedObject.name=$p" --sort-by=.lastTimestamp -o custom-columns=R:.reason,M:.message --no-headers 2>/dev/null)
+            if [ "$events" != "$seen_events" ]; then
+                comm -13 <(printf '%s\n' "$seen_events" | sort) <(printf '%s\n' "$events" | sort) | sed 's/^/  /'
+                seen_events=$events
+            fi
+            if [ "$status" = "Init:0/1" ] && [ $((SECONDS - last_copy)) -ge 30 ]; then
+                local copied; copied=$(k exec "$p" -c seed -- nu -c 'if ("/seed/store" | path exists) { du /seed | get 0.physical | into string } else { "nothing yet" }' 2>/dev/null) || true
+                [ -n "$copied" ] && say "  seeding the Nix store from the image: $copied copied so far"
+                last_copy=$SECONDS
+            fi
+        fi
+        sleep 5
+    done
+    die "the pod did not become ready in an hour (kubectl -n $NS describe pod $p)"
+}
+
 
 pubkey() {
     if [ -n "${POLAR_DEV_SSH_KEY:-}" ]; then cat "$POLAR_DEV_SSH_KEY"; return; fi
@@ -136,16 +166,28 @@ copy_out() { mkdir -p "$HOME/.config"; k exec "deploy/$DEPLOY" -c dev -- tar -C 
 
 case "${1:-}" in
     up)
+        say "applying $NS (image $IMAGE)"
         manifests=$(render) || exit 1
-        printf '%s\n' "$manifests" | kubectl apply -f - >/dev/null
-        echo "polar-dev: waiting for $NS/$DEPLOY (the first start copies the image's Nix store to its volume, which takes a while)"
-        k rollout status "deploy/$DEPLOY" --timeout=30m
+        printf '%s\n' "$manifests" | kubectl apply -f - | sed 's/^/  /'
+        say "waiting for the pod (a first start pulls the image and copies its Nix store to a volume: several minutes)"
+        wait_ready
         # The state that lives on this machine goes in, unless the pod has its own already (it keeps what it made).
         for d in polar-deploy polar-admin; do
-            [ -n "$(k exec "deploy/$DEPLOY" -c dev -- ls -A "$REMOTE_HOME/.config/$d" 2>/dev/null)" ] || copy_in "$d"
+            if [ -n "$(k exec "deploy/$DEPLOY" -c dev -- ls -A "$REMOTE_HOME/.config/$d" 2>/dev/null)" ]; then
+                say "~/.config/$d: the pod has its own, left as it is"
+            elif [ -d "$HOME/.config/$d" ]; then
+                say "copying ~/.config/$d into the pod"; copy_in "$d"
+            fi
         done
+        say "forwarding 127.0.0.1:$PORT to the pod's SSH"
         forward_ssh
-        ssh "${SSH_OPTS[@]}" "$(id -un)@127.0.0.1" "test -d /workspace/.git || GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' git clone -b '$BRANCH' '$REPO' /workspace"
+        if ssh "${SSH_OPTS[@]}" "$(id -un)@127.0.0.1" "test -d /workspace/.git"; then
+            say "/workspace already has a checkout"
+        else
+            say "cloning $REPO ($BRANCH) into /workspace, with your forwarded agent"
+            ssh "${SSH_OPTS[@]}" "$(id -un)@127.0.0.1" "GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' git clone -b '$BRANCH' '$REPO' /workspace"
+        fi
+        say "logging in (bin/polar-dev attach to come back)"
         login ;;
     attach) login ;;
     cert)
