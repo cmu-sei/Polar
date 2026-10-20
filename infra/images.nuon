@@ -34,10 +34,12 @@
 # kind: mirror    third-party image copied into the local registry
 #                 columns: upstream
 # kind: external  built outside this repo; an existing docker-archive
-#                 columns: path (~ allowed), env (variable that overrides path)
+#                 columns: path (~ allowed), env (variable that overrides path),
+#                 published (where it is published, as <registry>/<account>: copied from
+#                 there, as polar-<image>:<tag>-<arch>, when there is no archive)
 [
   # ── Infrastructure ──────────────────────────────────────────────────────
-  {image: "neo4j",    tag: "5.26.2", kind: "external", path: "~/Documents/projects/nix-neo4j/result-neo4j-image", env: "POLAR_NEO4J_IMAGE"}
+  {image: "neo4j",    tag: "5.26.2", kind: "external", path: "~/Documents/projects/nix-neo4j/result-neo4j-image", env: "POLAR_NEO4J_IMAGE", published: "docker.io/daveman1010220"}
   {image: "jaeger",   tag: "2.13.0", kind: "mirror", upstream: "cr.jaegertracing.io/jaegertracing/jaeger:2.13.0"}
   {image: "flux-source-controller",    tag: "v1.9.6", kind: "mirror", upstream: "ghcr.io/fluxcd/source-controller:v1.9.6"}
   {image: "flux-kustomize-controller", tag: "v1.9.6", kind: "mirror", upstream: "ghcr.io/fluxcd/kustomize-controller:v1.9.6"}

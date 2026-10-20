@@ -24,7 +24,7 @@
 # How images are named when they are published and imported, and which ones.
 
 use std/assert
-use ../images.nu [arch_of, import_rows, ours, published_ref, published_rows, split_ref, system_of]
+use ../images.nu [arch_of, external_source, import_rows, ours, published_ref, published_rows, split_ref, system_of]
 
 def sample [] {
     [
@@ -37,6 +37,16 @@ def sample [] {
 
 def main [] {
     let tests = [
+        {
+            name: "an image built elsewhere comes from its archive, else is left when the registry has it, else is copied from where it is published"
+            body: {
+                assert equal (external_source true false "docker.io/acct") "archive"
+                assert equal (external_source true true "") "archive"
+                assert equal (external_source false true "docker.io/acct") "registry"
+                assert equal (external_source false false "docker.io/acct") "published"
+                assert equal (external_source false false "") "missing"
+            }
+        }
         {
             name: "machine types become the architecture names images are tagged with"
             body: {

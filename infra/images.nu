@@ -208,6 +208,13 @@ export def published_rows [table: list, names: list<string>] {
 
 def arch [] { arch_of (^uname -m | str trim) }
 
+# Where an external row's image comes from: its archive when there is one ("archive"), else nothing to do when the registry has it
+# ("registry"), else the copy published where the row says ("published"), else nowhere ("missing"). Building it from source is asked
+# for by pointing the row's variable at the archive. Pure.
+export def external_source [archive_exists: bool, in_registry: bool, published: string] {
+    if $archive_exists { "archive" } else if $in_registry { "registry" } else if ($published | is-not-empty) { "published" } else { "missing" }
+}
+
 # The docker-archive for a row, building it first when it is a nix row.
 # Returns null for rows with nothing to push.
 def archive [row: record, system: string = ""] {
@@ -226,13 +233,21 @@ def archive [row: record, system: string = ""] {
         }
         "external" => {
             let p = ($env | get -o $row.env | default $row.path | path expand)
-            if ($p | path exists) {
-                $p
-            } else if (in_registry $row) {
-                print $"      archive not found at ($p), but the registry already has it; skipping"
-                null
-            } else {
-                error make --unspanned { msg: $"archive not found at ($p). Build it, or set ($row.env) to its path." }
+            let published = ($row.published? | default "")
+            match (external_source ($p | path exists) (in_registry $row) $published) {
+                "archive" => $p
+                "registry" => {
+                    print $"      archive not found at ($p), but the registry already has it; skipping"
+                    null
+                }
+                "published" => {
+                    let ref = (published_ref $published $row (arch))
+                    print $"      no archive at ($p): copying the published ($ref) \(to use one built from source, set ($row.env) to its archive\)"
+                    let r = (do { ^skopeo ...(tmpdir_flags) copy --retry-times 3 --format v2s2 --dest-tls-verify=false $"docker://($ref)" $"docker://(registry)/(dest $row)" } | complete)
+                    if $r.exit_code != 0 { error make --unspanned { msg: $"skopeo could not copy ($ref) into (registry): ($r.stderr | lines | last 1 | str join '')" } }
+                    null
+                }
+                _ => { error make --unspanned { msg: $"archive not found at ($p). Build it, or set ($row.env) to its path." } }
             }
         }
         _ => null
