@@ -532,7 +532,7 @@ def step_browser [username: string] {
     # machine, by the same script `just user-cert-install` runs.
     if ($env.POLAR_DEV_POD? | default "") == "1" {
         note "this is the in-cluster dev container: the browser is on your own machine"
-        pause $"On your machine, close Librewolf and run: bin/polar-dev cert ($username)   \(it copies the certificate out and imports it\)"
+        pause $"On your machine, close Librewolf and run: bin/polar-dev cert ($username)   \(it copies the certificate out and imports it\), then bin/polar-dev forward   \(Neo4j and ACE for the browser there\)"
     } else {
         let db = (nss_db)
         let browser_problems = if $db == null {
