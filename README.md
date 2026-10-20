@@ -206,8 +206,11 @@ whether it is already done, and picks up where it stopped.
   use your own build, check `nix-neo4j` out at `~/Documents/projects/nix-neo4j` and build it there (`nix build -L
   .#neo4j-image -o result-neo4j-image`), or set `POLAR_NEO4J_IMAGE` to the archive. That image sets the `neo4j` user's
   password from `NEO4J_AUTH` on its first start, so there is no password to change by hand.
-- **`--import-from docker.io/<account>`** copies the published images, Neo4j included, for this machine's architecture
-  into the registry, as a step before the render: nothing is built (**Loading prebuilt images**).
+- **`--import-from docker.io/<account>`** copies the published images the target runs, Neo4j included, for this
+  machine's architecture into the registry: nothing is built (**Loading prebuilt images**).
+
+Either way it is one step, before the render: `up.nu` works out every image the target runs (its charts, rendered alone,
+and its catalog name them), then builds or copies each once. A build's log is shown only if it fails.
 - **Neither:** the images are already in the registry. Use it to resume, or to finish a run that stopped at a person's
   step; it leaves the running pods alone.
 
