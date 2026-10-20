@@ -336,6 +336,8 @@ def step_preflight [config: record, runtime_needed: bool] {
     if ($can.stdout | str trim) != "yes" {
         fail "this account cannot create namespaces, which the render needs: it asks the agents for their scaffolds in a scratch namespace, deleted afterwards"
     }
+    # kubectl diff runs `diff`. Without it no manifest can be compared with the cluster, so every Job is restarted when applied.
+    if (which diff | is-empty) { note "no `diff` on PATH: kubectl diff cannot compare manifests with the cluster, so every Job applied is restarted (install diffutils)" }
     let stale = (delete_stale_namespaces)
     if ($stale | is-not-empty) { note $"deleted scratch namespace\(s\) an interrupted run left behind: ($stale | str join ', ')" }
 

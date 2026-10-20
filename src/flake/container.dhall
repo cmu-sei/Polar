@@ -50,6 +50,8 @@ let polarExtras =
     , Lib.nixpkgs "kubectl"
     -- The Justfile's recipes are bash scripts (#!/usr/bin/env bash): port-forwards-up, user-cert-install and others.
     , Lib.nixpkgs "bash"
+    -- kubectl diff runs `diff`; without it nothing can be compared with the cluster, and up.nu restarts every Job it applies.
+    , Lib.nixpkgs "diffutils"
     , Lib.flakePackage "polar-tools" "default"
     , Lib.nixpkgs "git"
     , Lib.nixpkgs "curl"

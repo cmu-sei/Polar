@@ -77,6 +77,7 @@
           { attrPath = "skopeo"; flakeInput = null; }
           { attrPath = "kubectl"; flakeInput = null; }
           { attrPath = "bash"; flakeInput = null; }
+          { attrPath = "diffutils"; flakeInput = null; }
           { attrPath = "default"; flakeInput = "polar-tools"; }
           { attrPath = "git"; flakeInput = null; }
           { attrPath = "curl"; flakeInput = null; }
