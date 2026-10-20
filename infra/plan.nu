@@ -57,11 +57,12 @@ export def build_plan [config: record, dev: bool, options: record = {}] {
         { id: "preflight", title: "preflight", on: true, why: "" }
         # Before anything that pulls a Polar image: the render's scaffold pods, and Flux's own controllers.
         { id: "registry", title: "registry in the cluster", on: $in_cluster, why: "the target's registry is not in its cluster (cluster.registry_in_cluster)" }
-        { id: "import", title: "import the published images", on: ($import_from | is-not-empty), why: "pass --import-from <registry>/<account> to copy the published images into the registry" }
-        # Without a registry in the cluster, the image steps start the host's (`just registry-up`).
-        { id: "agent-images", title: "agent images", on: $dev, runtime: (not $in_cluster), why: "pass --dev to build the agents' images; without it the render asks the ones already in the registry, on the cluster" }
+        # Every image the target runs, before the render: the render asks the agents' images for their scaffolds, and a target that
+        # pins its images by digest names the ones just pushed. Copied from where they are published (--import-from), built from
+        # this checkout (--dev), or both, in that order; with neither, they are in the registry already. Without a registry in the
+        # cluster, building starts the host's (`just registry-up`).
+        { id: "images", title: "images", on: ($dev or ($import_from | is-not-empty)), runtime: ($dev and (not $in_cluster)), why: "pass --dev to build them, or --import-from <registry>/<account> to copy the published ones; without either, the render asks the ones already in the registry" }
         { id: "render", title: "render", on: true, why: "" }
-        { id: "images", title: "images", on: $dev, runtime: (not $in_cluster), why: "pass --dev to build and load images into the local registry" }
         { id: "namespaces", title: "namespaces", on: ("namespaces.yaml" in $order), why: "target has no namespaces.yaml in its apply order" }
         {
             id: "ca"

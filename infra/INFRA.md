@@ -172,7 +172,7 @@ with a summary and a non-zero exit. The node cache step of `image` and
 `images-all` is skipped unless `POLAR_CLUSTER_RUNTIME` is `u7s` (the default) and that dev node exists.
 
 `up.nu` prints its plan first and skips what the target does not need. Its steps:
-preflight, agent images and images (`--dev`), render, namespaces, cluster CA, secrets and
+preflight, images (`--dev` or `--import-from`: every image the target runs, before the render), render, namespaces, cluster CA, secrets and
 infrastructure, waiting for core services, port-forwards, admin flow, the seed of the schedules repository,
 browser certificate and Neo4j password. A gitops target (`gitops: true`) replaces "secrets and infrastructure" with
 secrets, the deployment git server, publish, install Flux and wait for Flux, and then runs the same steps from "waiting for

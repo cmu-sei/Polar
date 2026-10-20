@@ -41,12 +41,13 @@
 #   preflight   cluster reachable, namespaces can be made, run from the repo root; a container runtime   always
 #               (podman or docker) only when a step below starts a container here (the host registry for --dev, or a gitops target)
 #   registry    apply the registry in the cluster (and the storage it needs), forward to it    cluster.registry_in_cluster
-#   import      nu infra/images.nu import --from <registry>/<account>      --import-from
-#   agent-images build and push the images of the agents that describe          --dev
-#               themselves, before the render asks them (--scaffold, --check)
+#   images      every image the target runs (its charts, rendered alone, and   --dev or --import-from
+#               its catalog name them): copied from --import-from, built and
+#               pushed with --dev; before the render, which asks the agents'
+#               images (--scaffold, --check) and may pin them by digest
 #   render      ask the agents' images for their scaffolds on the cluster,    always
-#               then nu infra/render.nu <target>
-#   images      build and push only what the rendered manifests reference --dev
+#               then nu infra/render.nu <target>, and check it names only
+#               the images prepared
 #   namespaces  kubectl apply namespaces.yaml                             namespaces.yaml in apply_order
 #   ca          polar-admin-grant bootstrap-ca                            cert-issuer deployed and cert_issuer_ca_configmap set
 #   infra       target secrets.nu, then every manifest in apply order     always
@@ -354,18 +355,6 @@ def step_preflight [config: record, runtime_needed: bool] {
     }
 }
 
-# The agents that describe themselves are asked for their scaffold, and to check the document they
-# will be given, when the catalog is rendered. They are asked in their built image, the artifact
-# that deploys, so those images exist before the render. (The images step later builds the rest
-# and finds these already built.)
-def step_agent_images [target: string, in_cluster: bool] {
-    if not $in_cluster { ^just registry-up }
-    let names = (^$nu.current-exe infra/resolve.nu document-images --target $target | from json)
-    print $"  ($names | length) agent image\(s\) the render asks: ($names | str join ', ')"
-    try { images sync (images named $names) } catch {|e| fail $e.msg }
-    ok "agent images built and pushed"
-}
-
 # Identifies the cluster this machine is pointed at, by its CA (the ConfigMap `bootstrap-ca` makes), or null when it has none yet.
 def cluster_fingerprint [] {
     let r = (do { ^kubectl -n $POLAR get configmap polar-ca -o 'jsonpath={.data.ca\.pem}' } | complete)
@@ -387,7 +376,7 @@ def discard_other_clusters_inputs [target: string] {
 
 # The render reads the agents' scaffolds from a directory, asked of their images on the cluster just before (the ones cached
 # under their image's digest are not asked again), so render.nu itself never touches a cluster.
-def step_render [target: string] {
+def step_render [target: string, prepared: any = null, config: any = null] {
     discard_other_clusters_inputs $target
     let scaffolds = (mktemp --directory)
     ^$nu.current-exe infra/resolve.nu collect-scaffolds $scaffolds --target $target
@@ -401,24 +390,54 @@ def step_render [target: string] {
     let code = $env.LAST_EXIT_CODE
     rm -rf $scaffolds
     if $code != 0 { fail "render failed" }
+    if $prepared != null and $config != null {
+        let files = ($config.apply_order | each {|f| $config.output_dir | path join $f } | where {|f| $f | path exists })
+        let needed = (try { images needed $files | get image } catch {|e| fail $e.msg })
+        let missing = (images unprepared $needed $prepared)
+        if ($missing | is-not-empty) {
+            fail $"the render names images the images step did not prepare: ($missing | str join ', '). Its list \(render.nu --charts-into, resolve.nu images\) and the render disagree"
+        }
+    }
 }
 
-# The published images (infra/images.nu publish), copied into the registry this run pushes to, for this machine's architecture.
-def step_import [from: string] {
-    ^$nu.current-exe infra/images.nu import --from $from
-    if $env.LAST_EXIT_CODE != 0 { fail $"importing the images from ($from) failed \(above\)" }
-    ok $"images imported from ($from)"
+# The images the target runs, worked out before the render, from what the render is given: the charts' manifests, rendered
+# alone into a scratch directory (no chart needs an agent's scaffold for its images), and the catalog's workloads, as their
+# resolved specs name them (resolve.nu images). Their rows of infra/images.nuon.
+def target_images [target: string] {
+    let charts = (mktemp --directory)
+    let r = (do { ^$nu.current-exe infra/render.nu $target --charts-into $charts } | complete)
+    if $r.exit_code != 0 {
+        rm -rf $charts
+        print -e $r.stdout $r.stderr
+        fail "rendering the charts, for the images they name, failed (above)"
+    }
+    let catalog = (^$nu.current-exe infra/resolve.nu images --target $target | from json)
+    let rows = (try { images needed (glob ($charts | path join "*.yaml")) $catalog } catch {|e| rm -rf $charts; fail $e.msg })
+    rm -rf $charts
+    $rows
 }
 
-def step_images [config: record, in_cluster: bool] {
-    let files = ($config.apply_order
-        | each {|f| $config.output_dir | path join $f }
-        | where {|f| $f | path exists })
-    if not $in_cluster { ^just registry-up }
-    let rows = try { images needed $files } catch {|e| fail $e.msg }
-    print $"  ($rows | length) image\(s\) needed by this target: the rest are built now; the agents' images, built before the render, are found built and already pushed"
-    try { images sync $rows } catch {|e| fail $e.msg }
-    ok "images built and pushed"
+# Every image the target runs, in the registry before the render, each handled once: copied from where they are published
+# (--import-from; a third-party image from its own registry), then built from this checkout and pushed (--dev). The render asks
+# the agents' images for their scaffolds, and a target that pins its images by digest names the ones just pushed. Returns the
+# images it prepared, which the render is checked against.
+def step_images [target: string, in_cluster: bool, dev: bool, import_from: string] {
+    let rows = (target_images $target)
+    print $"  ($rows | length) image\(s\) this target runs"
+    if ($import_from | is-not-empty) {
+        let published = ($rows | where kind != "mirror" | get image)
+        ^$nu.current-exe infra/images.nu import ...$published --from $import_from --skip-mirrors
+        if $env.LAST_EXIT_CODE != 0 { fail $"importing the images from ($import_from) failed \(above\)" }
+        if not $dev {
+            try { images sync ($rows | where kind == "mirror") } catch {|e| fail $e.msg }
+        }
+    }
+    if $dev {
+        if not $in_cluster { ^just registry-up }
+        try { images sync $rows } catch {|e| fail $e.msg }
+    }
+    ok (if $dev { "images built and pushed" } else { $"images copied from ($import_from)" })
+    $rows | get image
 }
 
 def step_ca [] {
@@ -745,6 +764,8 @@ def main [
     let mail = if not $needs_admin { "" } else if $email == null { input "  email for the first admin: " } else { $email }
 
     let total = ($enabled | length)
+    # The images the images step prepared, which the render's manifests must keep to (null when it did not run).
+    mut prepared = null
     for it in ($enabled | enumerate) {
         let s = $it.item
         print ""
@@ -752,10 +773,8 @@ def main [
         match $s.id {
             "preflight" => { step_preflight $config (needs_runtime $plan) }
             "registry" => { cluster-registry ensure $target | ignore }
-            "import" => { step_import $import_from }
-            "agent-images" => { step_agent_images $target $in_cluster }
-            "render" => { step_render $target }
-            "images" => { step_images $config $in_cluster }
+            "images" => { $prepared = (step_images $target $in_cluster $dev $import_from) }
+            "render" => { step_render $target $prepared $config }
             "namespaces" => { apply_file $config.output_dir "namespaces.yaml" }
             "ca" => { step_ca }
             "infra" => { step_infra $config }
