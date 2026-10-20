@@ -177,6 +177,12 @@ export def ensure [target: string] {
     let rolled = (do { ^kubectl -n $NAMESPACE rollout status $"deployment/($NAME)" --timeout=5m } | complete)
     if $rolled.exit_code != 0 { error make --unspanned { msg: $"the registry did not become ready: ($rolled.stderr | str trim) \(kubectl -n ($NAMESPACE) describe pod -l app=($NAME)\)" } }
     print $"  ok: the registry runs in the cluster; the nodes pull from localhost:($s.node_port)"
+    if (forward_running) and not (answers $s.local_port) {
+        # A forward left from before (to a cluster since rebuilt, or a pod since replaced) holds the port and answers nothing: replace it.
+        print "  -- the registry's port-forward does not answer: restarting it"
+        do { ^pkill -f $"port-forward -n ($NAMESPACE) svc/($NAME)" } | complete | ignore
+        sleep 1sec
+    }
     if not (forward_running) {
         if (answers $s.local_port) {
             error make --unspanned { msg: $"something else already answers as a registry at localhost:($s.local_port) \(the host registry? just registry-down\), or set cluster.registry_in_cluster.local_port" }
