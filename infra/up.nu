@@ -337,6 +337,11 @@ def step_preflight [config: record, runtime_needed: bool] {
     if ($can.stdout | str trim) != "yes" {
         fail "this account cannot create namespaces, which the render needs: it asks the agents for their scaffolds in a scratch namespace, deleted afterwards"
     }
+    # A gitops target's layers are published as commits signed with gpgsm; without it the run would stop at the publish, after the
+    # images and the render.
+    if ($config.gitops? | default false) and (which gpgsm | is-empty) {
+        fail "this target is published as signed commits, which needs gpgsm (GnuPG) on the PATH: it is in the dev container, or `nix shell nixpkgs#gnupg`"
+    }
     # kubectl diff runs `diff`. Without it no manifest can be compared with the cluster, so every Job is restarted when applied.
     if (which diff | is-empty) { note "no `diff` on PATH: kubectl diff cannot compare manifests with the cluster, so every Job applied is restarted (install diffutils)" }
     let stale = (delete_stale_namespaces)

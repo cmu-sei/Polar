@@ -42,6 +42,8 @@ let polarExtras =
     , Lib.flakePackage "dotacat"        "default"
     , Lib.flakePackage "myNeovimOverlay" "default"
     , Lib.nixpkgs "sops"
+    -- gpgsm signs a gitops target's commits to its deployment git server (infra/deploy-repo.nu publish).
+    , Lib.nixpkgs "gnupg"
     , Lib.nixpkgs "oras"
     , Lib.nixpkgs "zed-editor"
     , Lib.nixpkgs "rage"
