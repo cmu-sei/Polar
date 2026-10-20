@@ -271,9 +271,11 @@ cargo test --package polar -- --nocapture
 
 ### Development Setup
 
+The agents are developed against a cluster (README, **Installation**). To try a change to one:
+
 ```bash
-# Start local development stack
-./scripts/dev_stack.sh
+nu infra/images.nu sync <image> --target local-minimal   # build it and push it to the cluster's registry
+nu infra/up.nu local-minimal                             # restarts the Jobs whose image changed, and only those
 ```
 
 ### Development Container

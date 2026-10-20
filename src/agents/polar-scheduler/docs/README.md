@@ -58,93 +58,19 @@ It consists of a single **RootSupervisor** actor that spawns the **ScheduleInfoP
 
 # Integration Testing
 
-The scheduler includes a set of integration tests that verify end‑to‑end functionality. The tests
-use a real Neo4j database, Jaeger for tracing, and a local Git repository for schedule storage.
-Gitea is no longer used; instead, a local Git repository (with a `file://` remote) simulates the
-remote GitOps repo.
+The scheduler is tested in a cluster, with the rest of Polar. On `local-minimal`, `nu infra/up.nu local-minimal --dev`
+deploys the observer and the processor with the Polar git server they watch, and seeds the `polar-schedules` repository
+with its first signed policy (the seed step). To try a change to either agent:
 
-## Prerequisites
+```bash
+nu infra/images.nu sync scheduler-observer scheduler-processor --target local-minimal   # build both, push them to the cluster's registry
+nu infra/up.nu local-minimal                                                           # restarts the Jobs whose image changed, and only those
+kubectl -n polar logs -l job-name=polar-scheduler-observer -f
+```
 
-- Docker or Podman (for Neo4j and Jaeger containers)
-- A working Polar development environment (`nix develop` or `direnv`)
-- A local Git repository with test Dhall schedules (see below)
-
-## Step‑by‑Step Test Procedure
-
-1. **Create a test Git repository**  
-   ```bash
-   TEST_REPO=$(mktemp -d)
-   cd "$TEST_REPO"
-   git init
-   mkdir -p permanent
-   cat > permanent/test.dhall << 'EOF'
-   ... (sample schedule content) ...
-   EOF
-   git add permanent/test.dhall
-   git commit -m "feat(test): add test schedule"
-   git remote add origin "file://$TEST_REPO"
-   ```
-   Replace the sample schedule with the one from the project’s `schedules/permanent` directory.
-
-2. **Start the infrastructure stack**  
-   ```bash
-   cd src/agents/polar-scheduler
-   export POLAR_SCHEDULER_REMOTE_URL="file://$TEST_REPO"
-   ./scripts/dev_stack.sh up
-   ```
-   This launches Neo4j, Jaeger, and the Cassini broker.
-
-3. **Run the scheduler observer** (in a separate terminal)  
-   ```bash
-   cd src/agents/polar-scheduler/observer
-   export POLAR_SCHEDULER_LOCAL_PATH="/tmp/polar-schedules-test"
-   export POLAR_SCHEDULER_REMOTE_URL="file://$TEST_REPO"
-   export POLAR_SCHEDULER_SYNC_INTERVAL="30"
-   cargo run
-   ```
-   The observer clones the repo (if needed) and starts watching for changes.
-
-4. **Run the scheduler processor** (in another terminal)  
-   ```bash
-   cd src/agents/polar-scheduler/processor
-   cargo run
-   ```
-   The processor connects to Neo4j and subscribes to `scheduler.in`.
-
-5. **Run a mock agent** (optional, to receive schedule updates)  
-   ```bash
-   cd src/agents/polar-scheduler/tests/mock-agent
-   cargo run
-   ```
-   The mock agent subscribes to `agent.test-permanent.schedule` and logs any received schedule JSON.
-
-6. **Trigger a schedule change**  
-   Modify the Dhall file in the test repo, commit, and (if using a local repo) push is not needed; the observer’s filesystem watcher detects the change directly because it watches the local working copy.
-   ```bash
-   cd "$TEST_REPO"
-   # Edit permanent/test.dhall (e.g., bump version to 2)
-   sed -i 's/version = 1/version = 2/' permanent/test.dhall
-   git commit -am "feat(test): update schedule"
-   ```
-   The observer publishes a `GitScheduleChange::Update`, the processor updates the graph, and the mock agent (if running) logs the new schedule.
-
-7. **Verify in Neo4j**  
-   Open http://localhost:7474 (credentials `neo4j`/`somepassword`) and run:
-   ```cypher
-   MATCH (s:Schedule:Permanent {agent_id: 'test-permanent'}) RETURN s.schedule
-   ```
-   The returned JSON should reflect the latest version.
-
-8. **Clean up**  
-   Stop all running processes (Ctrl+C in each terminal). Then bring down the stack:
-   ```bash
-   cd src/agents/polar-scheduler
-   ./scripts/dev_stack.sh down
-   ```
-   Optionally remove the temporary test repo:
-   ```bash
-   rm -rf "$TEST_REPO"
-   ```
+The earlier local procedure (Neo4j, Jaeger and Cassini from `scripts/dev_stack.sh`, the agents with `cargo run`, a
+`file://` schedules repository) was retired on 2026-10-20 with the dev shell's static certificates it depended on; it is
+in the history before then.
 
 ## Environment Variables Summary
 

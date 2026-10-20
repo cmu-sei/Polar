@@ -46,8 +46,7 @@ securely. See your team about how to retrieve this information.
 1. Create an environments file named `conf/env_setup.sh` with the following template.
 ```sh
 
-# Generated Environment Configuration. If you edit this, do not re-run dev_stack.sh
-# script without backing up this file, first.
+# Environment configuration.
 # The service endpoint of the given neo4j instance.
 # For local development, this could be "neo4j://neo4j:7687"
 export GRAPH_ENDPOINT=""
