@@ -67,7 +67,8 @@ pub struct Principal {
     /// The `c:` capabilities in the presented certificate. A policy may read them; the certificate is
     /// the floor they come from.
     pub capabilities: Vec<Capability>,
-    /// The groups the identity is in, as the latest signed membership says.
+    /// The groups the identity is in: the latest signed membership's list for it when there is one, which may add to
+    /// or take from the certificate's; otherwise the groups its certificate carries (`g:`).
     pub groups: Vec<String>,
     /// How groups and roles are arranged, as the latest signed groups document says, and which arrangement it is
     /// (counted up with each), so the policy actor builds Cedar's hierarchy from it once and not for each request.
@@ -198,10 +199,23 @@ impl PermissionsActor {
                 .map_err(|e| PermissionsError::CertificateExtraction(e.to_string()))?,
             None => Vec::new(),
         };
+        // The certificate carries the catalog's membership (`g:`); the signed groups document, when it names the
+        // identity, decides it instead, adding and removing alike (docs/architecture/policy-enforcement.md).
+        let groups = match state.groups.get(identity) {
+            Some(listed) => listed.clone(),
+            None => match certificate_pem {
+                Some(pem) => cert_issuer_common::group::extract_groups(pem)
+                    .map_err(|e| PermissionsError::CertificateExtraction(e.to_string()))?
+                    .into_iter()
+                    .map(|g| g.0)
+                    .collect(),
+                None => Vec::new(),
+            },
+        };
         Ok(Principal {
             permissions: Self::resolve(state, identity, certificate_pem)?,
             capabilities,
-            groups: state.groups.get(identity).cloned().unwrap_or_default(),
+            groups,
             hierarchy: state.hierarchy.clone(),
             hierarchy_version: state.hierarchy_version,
         })
@@ -385,6 +399,71 @@ mod tests {
     }
 
     // -- the principal: permissions, capabilities, and the groups it is in -----------------------
+
+    async fn groups_of(
+        actor: &ActorRef<PermissionsMessage>,
+        who: &str,
+        certificate_pem: Option<String>,
+    ) -> Vec<String> {
+        ractor::call!(actor, |reply| PermissionsMessage::ResolvePrincipal {
+            identity: who.to_string(),
+            certificate_pem,
+            reply,
+        })
+        .unwrap()
+        .unwrap()
+        .groups
+    }
+
+    async fn listing(actor: &ActorRef<PermissionsMessage>, memberships: &[(&str, &[&str])]) {
+        ractor::call!(actor, |reply| PermissionsMessage::UpdateGroups {
+            memberships: memberships
+                .iter()
+                .map(|(who, groups)| (
+                    who.to_string(),
+                    groups.iter().map(|g| g.to_string()).collect()
+                ))
+                .collect(),
+            hierarchy: Default::default(),
+            reply,
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_certificate_s_groups_are_the_principal_s_until_the_groups_document_names_it() {
+        let (actor, _) = Actor::spawn(None, PermissionsActor, ()).await.unwrap();
+        let workload = "kube-consumer.polar.serviceaccount.cluster.local";
+        let certificate = build_test_certificate(vec![
+            workload.to_string(),
+            "g:cassini-client".to_string(),
+            "g:encryption".to_string(),
+        ]);
+        // With no document, or one that does not name it, the certificate's groups stand.
+        assert_eq!(
+            groups_of(&actor, workload, Some(certificate.clone())).await,
+            ["cassini-client", "encryption"]
+        );
+        listing(&actor, &[("someone-else", &["operators"])]).await;
+        assert_eq!(
+            groups_of(&actor, workload, Some(certificate.clone())).await,
+            ["cassini-client", "encryption"]
+        );
+        // A document that names it decides its membership, adding and removing alike.
+        listing(&actor, &[(workload, &["cassini-client", "auditors"])]).await;
+        assert_eq!(
+            groups_of(&actor, workload, Some(certificate.clone())).await,
+            ["cassini-client", "auditors"]
+        );
+        listing(&actor, &[(workload, &[])]).await;
+        assert!(
+            groups_of(&actor, workload, Some(certificate))
+                .await
+                .is_empty()
+        );
+        // Without the certificate, only the document speaks.
+        assert!(groups_of(&actor, workload, None).await.is_empty());
+    }
 
     #[tokio::test]
     async fn a_principal_is_its_permissions_its_capabilities_and_its_groups() {

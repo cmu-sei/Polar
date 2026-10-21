@@ -45,21 +45,42 @@ pub(crate) fn judge(service: &str, identity: &str) -> Result<(), String> {
     }
 }
 
-/// [`judge`] on the certificate at `path` (the agent's `TLS_CLIENT_CERT`): the identity it names, when the agent
-/// may run with it.
-pub(crate) fn check_certificate(service: &str, path: &str) -> Result<String, String> {
+/// The agent's own certificate, once judged: the identity it names, and its text (its `g:` groups count in the
+/// agent's own decisions).
+#[derive(Debug)]
+pub(crate) struct OwnCertificate {
+    pub(crate) identity: String,
+    pub(crate) pem: String,
+}
+
+/// [`judge`] on the certificate at `path` (the agent's `TLS_CLIENT_CERT`): the certificate, when the agent may run
+/// with it.
+pub(crate) fn check_certificate(service: &str, path: &str) -> Result<OwnCertificate, String> {
     let pem = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read this agent's certificate {path}: {e}"))?;
     let identity = extract_own_identity(&pem)
         .map_err(|e| format!("this agent's certificate {path} names no identity: {e}"))?;
     judge(service, &identity)?;
-    Ok(identity)
+    Ok(OwnCertificate { identity, pem })
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// A certificate's text naming `names`: the first is its identity (a DNS name), and `g:` and `p:` names are URI
+    /// names, as cert-issuer writes them.
+    pub(crate) fn certificate_with(names: &[&str]) -> String {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec![names[0].to_string()]).unwrap();
+        for name in &names[1..] {
+            params
+                .subject_alt_names
+                .push(rcgen::SanType::URI(name.to_string().try_into().unwrap()));
+        }
+        params.self_signed(&key).unwrap().pem()
+    }
 
     /// A certificate whose first DNS SAN is `identity`, written to a file the test keeps.
     pub(crate) fn certificate_for(identity: &str) -> tempfile::NamedTempFile {

@@ -432,13 +432,13 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
             .config
             .read(&cassini_client::environment::TLS_CLIENT_CERT)
             .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
-        let identity = own_name::check_certificate(&this.service_name, &certificate)
+        let own = own_name::check_certificate(&this.service_name, &certificate)
             .map_err(ActorProcessingErr::from)?;
         // Each publish and subscribe is checked before it leaves: the agent's policy, then its topics.
         let gate = this
             .topics
             .clone()
-            .map(|set| topic_gate::gate(&this.service_name, identity, set));
+            .map(|set| topic_gate::gate(&this.service_name, own.identity, Some(own.pem), set));
 
         let myself_cell = this.myself.get_cell();
 

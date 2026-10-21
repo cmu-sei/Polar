@@ -86,6 +86,7 @@ pub(crate) fn rule(
 pub(crate) async fn ask(
     lookup: &PolicyLookup,
     identity: &str,
+    certificate_pem: Option<String>,
     topic: &str,
     access: Access,
     facts: polar_policy::TopicFacts,
@@ -103,7 +104,7 @@ pub(crate) async fn ask(
     match lookup
         .decide(
             identity,
-            None,
+            certificate_pem,
             &action,
             &resource,
             polar_policy::Facts {
@@ -120,11 +121,19 @@ pub(crate) async fn ask(
 }
 
 /// The gate for an agent named `service`, whose certificate's identity is `identity` and whose topics are `set`.
-pub(crate) fn gate(service: &str, identity: String, set: Arc<TopicSet>) -> TopicGate {
+/// `certificate_pem` is its own certificate, read when it started, so the groups it carries count (its groups do not
+/// change when it is renewed: they are the catalog's).
+pub(crate) fn gate(
+    service: &str,
+    identity: String,
+    certificate_pem: Option<String>,
+    set: Arc<TopicSet>,
+) -> TopicGate {
     let lookup = PolicyLookup::for_service(service);
     Arc::new(move |use_, topic: String| {
         let lookup = lookup.clone();
         let identity = identity.clone();
+        let certificate_pem = certificate_pem.clone();
         let set = set.clone();
         Box::pin(async move {
             let access = match use_ {
@@ -134,6 +143,7 @@ pub(crate) fn gate(service: &str, identity: String, set: Arc<TopicSet>) -> Topic
             let said = ask(
                 &lookup,
                 &identity,
+                certificate_pem,
                 &topic,
                 access,
                 set.facts(&topic, access),
@@ -193,7 +203,7 @@ mod tests {
     }
 
     async fn uses(service: &str, use_: TopicUse, topic: &str) -> Result<(), String> {
-        gate(service, IDENTITY.to_string(), set())(use_, topic.to_string()).await
+        gate(service, IDENTITY.to_string(), None, set())(use_, topic.to_string()).await
     }
 
     #[tokio::test]
@@ -287,6 +297,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(said.contains("policy forbids"), "{said}");
+    }
+
+    #[tokio::test]
+    async fn the_groups_the_agent_s_certificate_carries_count_in_its_own_decisions() {
+        let service = format!("gate-groups-{}", rand::random::<u64>());
+        policy_for(
+            &service,
+            r#"forbid (principal, action == Action::"publish", resource) unless { principal in Group::"cassini-client" };"#,
+        )
+        .await;
+        let certificate = crate::own_name::tests::certificate_with(&[IDENTITY, "g:cassini-client"]);
+        let with = gate(&service, IDENTITY.to_string(), Some(certificate), set());
+        assert!(
+            with(TopicUse::Publish, "kubernetes.cluster.consumer.Pod".into())
+                .await
+                .is_ok()
+        );
+        let without = gate(&service, IDENTITY.to_string(), None, set());
+        assert!(
+            without(TopicUse::Publish, "kubernetes.cluster.consumer.Pod".into())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
