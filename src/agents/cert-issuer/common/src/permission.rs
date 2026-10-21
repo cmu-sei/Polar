@@ -79,6 +79,8 @@ pub enum PermissionParseError {
     UnknownScope(String),
     #[error("invalid FQDN target {0:?}: {1}")]
     InvalidTarget(String, String),
+    #[error("{0:?} is not a topic a certificate can carry")]
+    InvalidTopic(String),
 }
 
 impl PermissionScope {
@@ -148,6 +150,77 @@ impl Permission {
 
         Ok(Self { scope, target })
     }
+}
+
+/// Whether a certificate's holder may publish or subscribe to a topic.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, SerdeDeserialize, SerdeSerialize,
+)]
+pub enum TopicAccess {
+    Publish,
+    Subscribe,
+}
+
+/// A topic the catalog says a workload uses, carried in its certificate as `p:pub:<topic>` or `p:sub:<topic>`
+/// (docs/architecture/policy-enforcement.md, stage 3): the floor the broker decides on where no policy speaks. Only
+/// declared topics are written; the implied ones follow from the identity and its groups.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, SerdeDeserialize, SerdeSerialize)]
+pub struct TopicPermission {
+    pub access: TopicAccess,
+    pub topic: String,
+}
+
+/// Whether `topic` can be carried in a certificate: letters, digits, `.`, `_`, `:` and `-`, and not empty. That is
+/// every topic Polar uses, and it keeps the name a valid URI, which every TLS stack that reads a certificate's URI
+/// names (some strictly) accepts.
+pub fn is_carried_topic(topic: &str) -> bool {
+    !topic.is_empty()
+        && topic
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+}
+
+impl TopicPermission {
+    /// `p:pub:<topic>` or `p:sub:<topic>`.
+    pub fn to_san_string(&self) -> String {
+        let access = match self.access {
+            TopicAccess::Publish => "pub",
+            TopicAccess::Subscribe => "sub",
+        };
+        format!("p:{access}:{}", self.topic)
+    }
+
+    /// The inverse of [`to_san_string`](Self::to_san_string). A topic that cannot be carried is refused.
+    pub fn from_san_string(s: &str) -> Result<Self, PermissionParseError> {
+        let rest = s
+            .strip_prefix("p:")
+            .ok_or(PermissionParseError::MissingPrefix)?;
+        let (access, topic) = rest
+            .split_once(':')
+            .ok_or_else(|| PermissionParseError::UnknownScope(rest.to_string()))?;
+        let access = match access {
+            "pub" => TopicAccess::Publish,
+            "sub" => TopicAccess::Subscribe,
+            other => return Err(PermissionParseError::UnknownScope(other.to_string())),
+        };
+        if !is_carried_topic(topic) {
+            return Err(PermissionParseError::InvalidTopic(topic.to_string()));
+        }
+        Ok(Self {
+            access,
+            topic: topic.to_string(),
+        })
+    }
+}
+
+/// Every topic permission a certificate carries; anything else in its names is skipped.
+pub fn extract_topic_permissions(
+    certificate_pem: &str,
+) -> Result<Vec<TopicPermission>, PermissionExtractionError> {
+    Ok(san_strings(certificate_pem)?
+        .iter()
+        .filter_map(|s| TopicPermission::from_san_string(s).ok())
+        .collect())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -559,11 +632,134 @@ mod uri_san_tests {
         assert_eq!(capabilities, vec![Capability::ProvisionAccount]);
     }
 
+    /// A workload's certificate as stage 3 issues one: its identity, its declared topics and its groups.
+    fn issued_for_a_workload() -> String {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec![
+            "kube-consumer.polar.serviceaccount.cluster.local".to_string(),
+        ])
+        .unwrap();
+        for san in [
+            "p:sub:kubernetes.cluster.consumer.Pod",
+            "p:pub:polar.provenance.discovery",
+            "g:cassini-client",
+            "g:encryption",
+        ] {
+            params
+                .subject_alt_names
+                .push(rcgen::SanType::URI(san.to_string().try_into().unwrap()));
+        }
+        params.self_signed(&key).unwrap().pem()
+    }
+
+    #[test]
+    fn a_workload_s_topics_and_groups_are_read_from_uri_sans_and_nothing_else_is_taken_for_them() {
+        let pem = issued_for_a_workload();
+        let topics = extract_topic_permissions(&pem).unwrap();
+        assert_eq!(
+            topics,
+            vec![
+                TopicPermission::from_san_string("p:sub:kubernetes.cluster.consumer.Pod").unwrap(),
+                TopicPermission::from_san_string("p:pub:polar.provenance.discovery").unwrap(),
+            ]
+        );
+        let groups = crate::group::extract_groups(&pem).unwrap();
+        assert_eq!(
+            groups,
+            vec![
+                crate::group::Group("cassini-client".into()),
+                crate::group::Group("encryption".into())
+            ]
+        );
+        assert!(extract_permissions(&pem).unwrap().is_empty());
+        assert!(extract_capabilities(&pem).unwrap().is_empty());
+        assert_eq!(
+            extract_own_identity(&pem).unwrap(),
+            "kube-consumer.polar.serviceaccount.cluster.local"
+        );
+        // And the topics and groups are not in an account's certificate.
+        assert!(
+            extract_topic_permissions(&issued_like_cert_issuer())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn the_identity_is_still_the_dns_san() {
         assert_eq!(
             extract_own_identity(&issued_like_cert_issuer()).unwrap(),
             "acct-1"
         );
+    }
+
+    mod topics {
+        use super::super::*;
+        use proptest::prelude::*;
+
+        #[test]
+        fn a_topic_permission_is_written_in_the_documented_form() {
+            let publish = TopicPermission {
+                access: TopicAccess::Publish,
+                topic: "kubernetes.cluster.consumer.Pod".into(),
+            };
+            assert_eq!(
+                publish.to_san_string(),
+                "p:pub:kubernetes.cluster.consumer.Pod"
+            );
+            // A topic with colons in it keeps them.
+            let subscribe =
+                TopicPermission::from_san_string("p:sub:jira:consumer:projects").unwrap();
+            assert_eq!(subscribe.access, TopicAccess::Subscribe);
+            assert_eq!(subscribe.topic, "jira:consumer:projects");
+        }
+
+        #[test]
+        fn what_is_not_a_topic_permission_is_refused() {
+            for bad in [
+                "pub:x",
+                "p:pub",
+                "p:pub:",
+                "p:put:x",
+                "p:s2s",
+                "p:sub:two words",
+                "p:sub:{workload}",
+                "p:pub:caf\u{e9}",
+            ] {
+                assert!(TopicPermission::from_san_string(bad).is_err(), "{bad}");
+            }
+            // And a communication permission is not taken for one, nor the other way round.
+            assert!(TopicPermission::from_san_string("p:s2s:cassini.cluster.local").is_err());
+            assert!(Permission::from_san_string("p:pub:x").is_err());
+        }
+
+        fn topic() -> impl Strategy<Value = String> {
+            "[A-Za-z0-9._:-]{1,40}"
+        }
+
+        proptest! {
+            /// Every topic a certificate can carry reads back as written, either way.
+            #[test]
+            fn a_topic_permission_reads_back_as_written(topic in topic(), publish in any::<bool>()) {
+                let written = TopicPermission {
+                    access: if publish { TopicAccess::Publish } else { TopicAccess::Subscribe },
+                    topic,
+                };
+                prop_assert_eq!(TopicPermission::from_san_string(&written.to_san_string()).unwrap(), written);
+            }
+
+            /// A topic with any character outside the carried set is refused, wherever the character is.
+            #[test]
+            fn a_topic_with_a_character_it_cannot_carry_is_refused(
+                before in "[a-z.]{0,10}",
+                bad in "[^A-Za-z0-9._:-]",
+                after in "[a-z.]{0,10}",
+            ) {
+                let topic = format!("{before}{bad}{after}");
+                prop_assert!(!is_carried_topic(&topic));
+                let san = format!("p:pub:{topic}");
+                prop_assert!(TopicPermission::from_san_string(&san).is_err());
+            }
+        }
     }
 }
