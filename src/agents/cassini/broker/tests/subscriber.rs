@@ -44,6 +44,36 @@ impl Actor for MockActor {
     }
 }
 
+// A session manager that knows no sessions: it answers every GetSessionRef with None.
+struct SessionlessManager;
+
+#[ractor::async_trait]
+impl Actor for SessionlessManager {
+    type Msg = BrokerMessage;
+    type State = ();
+    type Arguments = ();
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        _args: (),
+    ) -> Result<(), ActorProcessingErr> {
+        Ok(())
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        message: Self::Msg,
+        _state: &mut (),
+    ) -> Result<(), ActorProcessingErr> {
+        if let BrokerMessage::GetSessionRef { reply_to, .. } = message {
+            let _ = reply_to.send(None);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +255,37 @@ mod tests {
         // This should not panic or error
         actor_ref.send_message(msg).unwrap();
 
+        Ok(())
+    }
+
+    /// A subscription that cannot be made, because its session has ended or its session cannot be looked up in time,
+    /// is refused to whoever asked, and the subscriber manager carries on. It used to fail, and a failed worker shuts
+    /// the broker down: under load a subscribe that raced a session's end took every client's broker away
+    /// (docs/architecture/policy-enforcement.md, stage 5a, 2026-10-21).
+    #[tokio::test]
+    async fn a_subscription_whose_session_is_gone_is_refused_and_the_manager_carries_on()
+    -> Result<(), ActorProcessingErr> {
+        let (sessionless, _) = Actor::spawn(None, SessionlessManager, ()).await?;
+        for session_mgr in [sessionless, create_mock_session_manager().await] {
+            let (manager, handle) = Actor::spawn(
+                None,
+                SubscriberManager,
+                SubscriberManagerArgs { session_mgr },
+            )
+            .await?;
+            for _ in 0..2 {
+                let answer = ractor::call!(manager, |reply| BrokerMessage::CreateSubscriber {
+                    topic: "t".to_string(),
+                    registration_id: "gone".to_string(),
+                    trace_ctx: None,
+                    reply,
+                })?;
+                assert!(answer.is_err(), "a subscriber for no session was made");
+            }
+            assert_eq!(manager.get_status(), ractor::ActorStatus::Running);
+            manager.stop(None);
+            handle.await.expect("the manager stops cleanly");
+        }
         Ok(())
     }
 

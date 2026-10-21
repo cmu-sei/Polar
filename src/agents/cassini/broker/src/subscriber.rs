@@ -423,15 +423,18 @@ impl SubscriberManager {
             .await
         {
             Ok(CallResult::Success(Some(ref_))) => ref_,
+            // A subscription that cannot be made is refused to whoever asked; it is not this manager failing. Failing
+            // here shut the broker down (a failed worker is fatal to it), and under load a subscribe that raced a
+            // session's end, or a session manager slower than the wait, took every client's broker away.
             Ok(CallResult::Success(None)) => {
-                let err_msg = "Session not found".to_string();
-                let _ = reply.send(Err(ActorProcessingErr::from(err_msg.clone())));
-                return Err(ActorProcessingErr::from(err_msg));
+                warn!(%registration_id, %topic, "no session to subscribe; refused");
+                let _ = reply.send(Err(ActorProcessingErr::from("Session not found")));
+                return Ok(());
             }
-            _ => {
-                let err_msg = "Failed to get session ref".to_string();
-                let _ = reply.send(Err(ActorProcessingErr::from(err_msg.clone())));
-                return Err(ActorProcessingErr::from(err_msg));
+            other => {
+                warn!(%registration_id, %topic, ?other, "the session could not be looked up; refused");
+                let _ = reply.send(Err(ActorProcessingErr::from("Failed to get session ref")));
+                return Ok(());
             }
         };
 
