@@ -45,6 +45,10 @@ impl PolarAgent for GitController {
         TopicDecl::subscribe(
             git_agent_common::proposal::PROPOSAL_OBSERVE_REPO_TOPIC,
             "a proposal that a repository be observed, with its evidence",
+        )
+        .waiting(
+            "no catalog agent proposes repositories yet: the gitlab and jira consumers are to \
+             (docs/architecture/git-controller.md); discover_repo, a test harness, does",
         ),
         TopicDecl::publish(
             git_agent_common::GIT_REPO_CONFIG_EVENTS,

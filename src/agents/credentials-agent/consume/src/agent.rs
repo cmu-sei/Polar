@@ -45,16 +45,19 @@ impl PolarAgent for CredentialsConsumer {
     const TOPICS: &'static [TopicDecl] = &[
         TopicDecl::subscribe(
             credentials_agent_common::CREDENTIALS_GRANTS_TOPIC,
-            "grants, which nothing publishes yet",
-        ),
+            "grants",
+        )
+        .waiting("nothing in the catalog publishes it yet"),
         TopicDecl::subscribe(
             credentials_agent_common::CREDENTIALS_REVOCATIONS_TOPIC,
-            "revocations, which nothing publishes yet",
-        ),
+            "revocations",
+        )
+        .waiting("nothing in the catalog publishes it yet"),
         TopicDecl::subscribe(
             credentials_agent_common::CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC,
-            "account provisioning, which nothing publishes yet",
-        ),
+            "account provisioning",
+        )
+        .waiting("nothing in the catalog publishes it yet"),
         TopicDecl::subscribe(
             credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC,
             "a signed administrator action, relayed by the observer",
@@ -77,8 +80,9 @@ impl PolarAgent for CredentialsConsumer {
         ),
         TopicDecl::subscribe(
             credentials_agent_common::CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC,
-            "a certificate lookup, which nothing publishes yet",
-        ),
+            "a certificate lookup",
+        )
+        .waiting("nothing in the catalog publishes it yet"),
         TopicDecl::subscribe(
             credentials_agent_common::CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
             "a secret to store, from its owner",
@@ -101,8 +105,9 @@ impl PolarAgent for CredentialsConsumer {
         ),
         TopicDecl::subscribe(
             credentials_agent_common::CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
-            "a decryption on behalf of an agent, which nothing publishes yet",
-        ),
+            "a decryption on behalf of an agent",
+        )
+        .waiting("nothing in the catalog publishes it yet"),
         TopicDecl::subscribe(
             credentials_agent_common::CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
             "a workload's certificate request, relayed by the observer",
@@ -134,7 +139,8 @@ impl PolarAgent for CredentialsConsumer {
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_CERTIFICATE_REPLIES_TOPIC,
             "the answer to a certificate lookup",
-        ),
+        )
+        .waiting("nothing in the catalog asks for a certificate lookup yet, so nothing reads the answer"),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_STORE_SECRET_REPLIES_TOPIC,
             "whether a secret was stored",
@@ -158,7 +164,8 @@ impl PolarAgent for CredentialsConsumer {
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_DECRYPT_ON_BEHALF_OF_REPLIES_TOPIC,
             "the answer to a decryption on behalf of an agent",
-        ),
+        )
+        .waiting("nothing in the catalog asks for a decryption on behalf of an agent yet, so nothing reads the answer"),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC,
             "a workload's certificate, or why not",
