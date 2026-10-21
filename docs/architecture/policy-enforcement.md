@@ -79,6 +79,12 @@ code today, and what stands between the two. The detail of each part is in the d
 - **Topics are exact names (2026-10-21).** No patterns. An agent that serves a family of topics (the scheduler, which
   publishes `agent.<workload>.configuration` for every workload) has its list generated from the catalog, one exact name
   per workload, so policy and the broker deal only in exact strings.
+- **The certificate carries the floor; runtime Cedar policy is the ceiling (2026-10-21, gap 3).** Each workload's
+  certificate carries its declared topics as `p:` names (a new form for topics, for example `p:pub:<topic>` and
+  `p:sub:<topic>`), written at issuance from the catalog's declarations, by the credentials agent and, for the bootstrap
+  services, by cert-issuer. The implied topics are derived from the identity, not written into each certificate. The
+  broker reads the certificate and needs no table of its own. A changed set reaches an agent with its next certificate
+  (within the hour, at rejuvenation).
 - **Open: an administrator's scheduled override or addition to an agent's set.** Considered, not decided: a signed,
   scheduled document that adds topics to (or overrides) what the scaffold declares and implies. If it comes, it is one
   more input every consumer reads the same way, and the builder's run-time check must honour it.
@@ -108,7 +114,7 @@ Numbered so a plan can refer to them. "Core" gaps block enforcement anywhere; th
    there is no source from which to derive a default policy, a certificate's permissions, or a seed.
 2. **Three names for one agent** (decided, above: the workload name; not built). Topics use the service name, documents are addressed to it, and the broker knows the
    identity, and for some agents they differ (`topics.md`). A rule needs one name, or a mapping it can trust.
-3. **Certificates say little about a workload.** Workload certificates carry their identity and no `p:` names (a grant
+3. **Certificates say little about a workload** (decided, above: they will carry the declared topics; not built). Workload certificates carry their identity and no `p:` names (a grant
    would add them, but grants are single-use and none are configured); `c:` capabilities are administrative and minted
    only for accounts (`cert-issuer-isolation.md`). The certificate fallback for a workload is therefore its identity alone,
    until certificates carry what the declarations say.
