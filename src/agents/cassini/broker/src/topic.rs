@@ -772,19 +772,30 @@ impl TopicAgent {
         let _g = span.enter();
         trace!("Topic agent received publish request for \"{topic}\"");
 
-        if !state.subscribers.is_empty() {
-            for subscriber in state.subscribers.values() {
-                if let Err(e) = subscriber.send_message(BrokerMessage::PublishResponse {
-                    topic: topic.clone(),
-                    payload: payload.clone(),
-                    result: Ok(()),
-                    trace_ctx: Some(span.context()),
-                    published_by: published_by.clone(),
-                }) {
-                    warn!("{PUBLISH_REQ_FAILED_TXT}: {e}")
-                }
+        // A subscriber that cannot take a message has ended (its session is gone): it is dropped here, once, instead of
+        // being sent every later message and logging each loss. What reached no subscriber is kept for the next one, as
+        // when there is none.
+        let mut delivered = 0usize;
+        let mut ended = Vec::new();
+        for (registration_id, subscriber) in &state.subscribers {
+            match subscriber.send_message(BrokerMessage::PublishResponse {
+                topic: topic.clone(),
+                payload: payload.clone(),
+                result: Ok(()),
+                trace_ctx: Some(span.context()),
+                published_by: published_by.clone(),
+            }) {
+                Ok(()) => delivered += 1,
+                Err(_) => ended.push(registration_id.clone()),
             }
-        } else {
+        }
+        if !ended.is_empty() {
+            for registration_id in &ended {
+                state.subscribers.remove(registration_id);
+            }
+            warn!(%topic, ended = ?ended, "{PUBLISH_REQ_FAILED_TXT}: these subscribers have ended and are dropped");
+        }
+        if delivered == 0 {
             state
                 .queue
                 .push_back((std::time::Instant::now(), payload.clone(), published_by));
