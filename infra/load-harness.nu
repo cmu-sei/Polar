@@ -40,6 +40,8 @@ const NAMESPACE = "polar"
 const RESULT_MARK = "HARNESS LOAD RESULT"
 const READY_MARK = "HARNESS LOAD READY"
 const RUN_LABEL = "polar.harness/run"
+# How many times a run's Job replaces a pod that failed.
+export const RETRIES = 2
 const ROOT = path self ..
 
 # A plan's defaults: what a run is when the plan does not say.
@@ -131,14 +133,14 @@ export def with_values [document: record, values: record]: nothing -> record {
 }
 
 # A run's Job for one producer or sink: the rendered Job renamed, reading `config_map` instead of its workload's
-# configuration, labelled with the run, never retried (a failed run is reported, not run again), and kept after it ends
-# until the script has read it and deletes it.
+# configuration, labelled with the run, a failed pod replaced at most twice (a pod whose init could not finish exits 1:
+# polar-init's escrow deadline), and kept after it ends until the script has read it and deletes it.
 export def job_for [job: record, name: string, config_map: string, run_id: string]: nothing -> record {
     let workload = $job.metadata.name
     let labelled = {|labels| ($labels | default {}) | upsert $RUN_LABEL $run_id }
     $job
     | update metadata {|j| $j.metadata | upsert name $name | upsert labels (do $labelled $j.metadata.labels?) }
-    | update spec {|j| $j.spec | upsert backoffLimit 0 | upsert ttlSecondsAfterFinished 3600 }
+    | update spec {|j| $j.spec | upsert backoffLimit $RETRIES | upsert ttlSecondsAfterFinished 3600 }
     | update spec.template.metadata {|j|
         $j.spec.template.metadata | upsert name $name | upsert labels (do $labelled $j.spec.template.metadata.labels?)
     }
@@ -193,6 +195,7 @@ export def summarise [records: list]: nothing -> list<record> {
             refused: (do $total $producers refused)
             reported: $"($r.results | length)/($r.run.producers + $r.run.sinks)"
             one_node: $r.one_node
+            error: ($r.error? | default "")
         }
     }
 }
@@ -227,13 +230,27 @@ def templates [target: string] {
     { producer: (do $of "harness-producer"), sink: (do $of "harness-sink") }
 }
 
+# Every pod's log of a Job (a failed pod is replaced, so there may be more than one).
 def logs_of [job: string, container: string] {
-    ^kubectl -n $NAMESPACE logs $"job/($job)" -c $container --tail=-1 | complete | get stdout
+    ^kubectl -n $NAMESPACE logs -l $"job-name=($job)" -c $container --tail=-1 --max-log-requests=10 | complete | get stdout
 }
 
+# Whether a Job is over: complete, or failed past its retries.
 def finished [job: string] {
-    let status = (kube get job $job -o json | from json | get status)
-    (($status.succeeded? | default 0) + ($status.failed? | default 0)) > 0
+    let conditions = (kube get job $job -o json | from json | get -o status.conditions | default [])
+    $conditions | any {|c| $c.type in [Complete Failed] and $c.status == "True" }
+}
+
+# What a run left, kept before its Jobs are deleted: each pod's state and every container's log.
+def keep_failed [run_id: string, parts: list, dir: string] {
+    mkdir $dir
+    kube get pods -l $"($RUN_LABEL)=($run_id)" -o wide | save --force ($dir | path join "pods.txt")
+    for p in $parts {
+        for c in ["polar-init" $"harness-($p.role)"] {
+            ^kubectl -n $NAMESPACE logs -l $"job-name=($p.name)" -c $c --tail=-1 --prefix | complete | get stdout
+            | save --force ($dir | path join $"($p.name)-($c).log")
+        }
+    }
 }
 
 def wait_for [what: string, timeout: duration, done: closure] {
@@ -259,7 +276,7 @@ def remove_run [run_id: string] {
 }
 
 # Runs one run: its sinks, then once they are ready its producers; collects every result line; deletes the Jobs.
-def run_one [run: record, templates: record] {
+def run_one [run: record, templates: record, kept: string] {
     let parts = (
         (0..<$run.sinks | each {|i| { role: "sink", index: $i } })
         | append (0..<$run.producers | each {|i| { role: "producer", index: $i } })
@@ -286,8 +303,11 @@ def run_one [run: record, templates: record] {
         remove_run $run.id
         { run: $run, results: $results, nodes: $nodes, one_node: (($nodes | length) == 1) }
     } catch {|e|
+        let dir = ($kept | path join $run.id)
+        try { keep_failed $run.id $parts $dir } catch {|k| print -e $"  could not keep the failed run's logs: ($k.msg)" }
         remove_run $run.id
-        error make { msg: $"run ($run.id): ($e.msg)" }
+        print -e $"  ($run.id) failed: ($e.msg); its pods' logs are in ($dir)"
+        { run: $run, results: [], nodes: [], one_node: true, error: $e.msg }
     }
 }
 
@@ -311,7 +331,7 @@ def "main run" [plan_file: string, --target: string = "local-minimal"] {
     mut records = []
     for run in $runs {
         print $"($run.id): ($run.producers)p ($run.sinks)s ($run.lanes)l, ($run.count) x ($run.size) bytes at ($run.rate)/s"
-        let record = ((run_one $run $templates) | insert context $context)
+        let record = ((run_one $run $templates ($out | str replace ".nuon" "-failed")) | insert context $context)
         $records = ($records | append $record)
         $records | save --force $out
         if not $record.one_node { print -e "  the pods were on more than one node: latencies compare two clocks" }

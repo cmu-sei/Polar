@@ -139,7 +139,7 @@ def main [] {
                 assert equal ($j.metadata.labels | get "polar.harness/run") "p-0"
                 assert equal ($j.spec.template.metadata.labels | get "polar.harness/run") "p-0"
                 assert equal $j.spec.template.metadata.labels.name "harness-sink"
-                assert equal $j.spec.backoffLimit 0
+                assert equal $j.spec.backoffLimit $RETRIES
                 assert equal $j.spec.ttlSecondsAfterFinished 3600
                 assert equal $j.spec.template.spec.volumes.0.configMap.name "harness-sink-p-0-1-config"
                 assert equal $j.spec.template.spec.volumes.1 { name: "polar-health", emptyDir: {} }
@@ -186,8 +186,9 @@ def main [] {
                 assert equal $s.lost 3
                 assert equal $s.refused 1
                 assert equal $s.reported "4/4"
-                let empty = (summarise [($record | update results [])] | first)
-                assert equal [$empty.p99_ms $empty.lost $empty.reported] [0 0 "0/4"]
+                assert equal $s.error ""
+                let failed = (summarise [($record | update results [] | insert error "timed out")] | first)
+                assert equal [$failed.p99_ms $failed.lost $failed.reported $failed.error] [0 0 "0/4" "timed out"]
             }
         }
     ]
