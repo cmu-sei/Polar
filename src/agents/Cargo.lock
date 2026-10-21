@@ -1449,6 +1449,7 @@ dependencies = [
  "polar-policy",
  "polar-router",
  "polar-signing",
+ "proptest",
  "ractor",
  "rand 0.10.3",
  "rcgen",

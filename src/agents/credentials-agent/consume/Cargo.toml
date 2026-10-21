@@ -53,6 +53,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
+proptest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 polar-signing.workspace = true
 polar-router.workspace = true

@@ -89,6 +89,14 @@ pub static INTROSPECTION_CLIENT_SECRET: Optional<String> = Optional::text(
 )
 .secret();
 
+pub static ISSUANCE_TOPICS: Defaulted<String> = Defaulted::text(
+    "CREDENTIALS_AGENT_ISSUANCE_TOPICS",
+    "the issuance floor: for each workload this agent issues (system:serviceaccount:<namespace>:<name>), the \
+     topics its certificates may carry, as a JSON list of {workload, publish, subscribe}. The render writes it \
+     from the catalog (docs/architecture/policy-enforcement.md, stage 2); read once, at start",
+    "[]",
+);
+
 static VARIABLES: &[&dyn Described] = &[
     &CERT_ISSUER_URL,
     &CA_CERT,
@@ -99,14 +107,29 @@ static VARIABLES: &[&dyn Described] = &[
     &INTROSPECTION_ENDPOINT,
     &INTROSPECTION_CLIENT_ID,
     &INTROSPECTION_CLIENT_SECRET,
+    &ISSUANCE_TOPICS,
 ];
 
 /// The section the credentials agent consumer registers.
 pub static SECTION: Section = Section {
     name: "credentials-agent",
     vars: VARIABLES,
-    relations: introspection_is_all_or_none,
+    relations,
 };
+
+/// What is wrong across the section's variables: introspection given in part, or an issuance floor that cannot be
+/// read.
+fn relations(env: &dyn Env) -> Vec<String> {
+    let mut problems = introspection_is_all_or_none(env);
+    let floor = env
+        .var(ISSUANCE_TOPICS.name())
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "[]".to_string());
+    if let Err(found) = crate::issuance_floor::IssuanceFloor::parse(&floor) {
+        problems.extend(found);
+    }
+    problems
+}
 
 /// Introspection is on when its three settings are all given and off when none is. One or two of
 /// them is a mistake that would otherwise switch the check off without a word, and a token the
@@ -151,6 +174,10 @@ pub struct ConsumerSettings {
     /// The agent's own mTLS identity, which it presents to cert-issuer as well as to Cassini.
     pub own_cert_path: String,
     pub own_key_path: String,
+    /// What each workload's certificates may carry, from the catalog. A floor that cannot be read stops the agent
+    /// when its configuration is checked, before this is read; were it read anyway it would be empty, so no
+    /// certificate would carry a topic it was not given.
+    pub issuance_floor: crate::issuance_floor::IssuanceFloor,
 }
 
 impl ConsumerSettings {
@@ -177,6 +204,10 @@ impl ConsumerSettings {
             introspection,
             own_cert_path: config.read(&TLS_CLIENT_CERT)?,
             own_key_path: config.read(&TLS_CLIENT_KEY)?,
+            issuance_floor: crate::issuance_floor::IssuanceFloor::parse(
+                &config.read(&ISSUANCE_TOPICS)?,
+            )
+            .unwrap_or_default(),
         })
     }
 }
@@ -213,6 +244,32 @@ mod tests {
     #[test]
     fn the_section_is_sound_and_its_defaults_parse() {
         assert_eq!(SECTION.defaults_problems(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_issuance_floor_is_read_from_its_variable_and_one_that_cannot_be_read_stops_the_agent() {
+        let floor = r#"[{"workload": "system:serviceaccount:polar:kube-observer", "publish": ["kubernetes.cluster.consumer.Pod"]}]"#;
+        let given = with(&[("CREDENTIALS_AGENT_ISSUANCE_TOPICS", floor)]);
+        assert!(config(&given).check().is_empty());
+        let settings = ConsumerSettings::read(&config(&given)).unwrap();
+        assert_eq!(settings.issuance_floor.len(), 1);
+        // None given is an empty floor.
+        assert!(
+            ConsumerSettings::read(&config(MINIMUM))
+                .unwrap()
+                .issuance_floor
+                .is_empty()
+        );
+        // One that cannot be read is a problem the agent stops on.
+        let wrong = with(&[(
+            "CREDENTIALS_AGENT_ISSUANCE_TOPICS",
+            r#"[{"workload": "w", "publish": ["two words"]}]"#,
+        )]);
+        let problems = config(&wrong).check();
+        assert!(
+            problems.iter().any(|p| p.contains("two words")),
+            "{problems:?}"
+        );
     }
 
     #[test]

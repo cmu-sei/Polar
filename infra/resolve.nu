@@ -247,6 +247,20 @@ def spec_of [name: string, target: string, kinds: record] {
     { entry: $entry, ov: $ov, kind: $kind, spec: $spec }
 }
 
+# What the credentials agent's issuance floor needs of a workload, from its spec and its scaffold alone (a full resolve
+# of every workload, from inside the credentials agent's, would resolve the credentials agent again).
+def issuance_record [w: record, target: string, kinds: record] {
+    let s = (spec_of $w.name $target $kinds).spec
+    {
+        who: $w.name
+        namespace: $s.namespace
+        service_account: ($s.service_account? | default $w.name)
+        issuer: $s.issuer
+        bootstrap: $s.bootstrap
+        topics: ((scaffold_of $w.name $w).topics? | default [])
+    }
+}
+
 # The images a workload's pod runs, as the resolved spec names them: its own, and its init container's.
 def images_of [images: list, cluster: record, spec: record, name: string] {
     {
@@ -442,6 +456,15 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     # same list (collect_scaffolds).
     if ($scaffold.topic_families? | default [] | is-not-empty) {
         $env_list = ($env_list | append (env_entry { name: "POLAR_SERVED_WORKLOADS", value: (served (all_workloads $target)) } $vars "catalog" $name))
+    }
+
+    # The credentials agent is given its issuance floor: for each workload it issues, the topics that workload's scaffold
+    # declares (rules.nu `issuance_topics`). Applying the catalog is the sign-off (policy-enforcement.md, stage 2). The
+    # value is JSON, written as it is: no placeholder in it is resolved.
+    let declared_vars = ($scaffold.sections | each {|s| $s.variables | get name } | flatten)
+    if "CREDENTIALS_AGENT_ISSUANCE_TOPICS" in $declared_vars {
+        let records = (all_workloads $target | each {|w| issuance_record $w $target $kinds })
+        $env_list = ($env_list | append { name: "CREDENTIALS_AGENT_ISSUANCE_TOPICS", value: (issuance_topics $records | to json --raw), secret: null, key: null, from: "catalog" })
     }
 
     # The agent reads one document, not an environment: the entries above are written into the

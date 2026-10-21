@@ -148,6 +148,27 @@ export def issuer_problems [records: list, enforced: bool]: nothing -> record {
     { errors: $errors, pending: $pending }
 }
 
+# A workload's own topics, as its scaffold prints them in `topics`: the declared and family ones, which its
+# certificates carry, and not the implied ones, which follow from its identity. Sorted, each once.
+def own_topics [r: record]: nothing -> record {
+    let own = ($r.topics? | default [] | where {|t| $t.from != "implied" })
+    {
+        publish: ($own | where access == "publish" | get name | uniq | sort)
+        subscribe: ($own | where access == "subscribe" | get name | uniq | sort)
+    }
+}
+
+# The credentials agent's issuance floor (CREDENTIALS_AGENT_ISSUANCE_TOPICS): for each workload it issues, the topics
+# its certificates may carry, by the workload as its token names it. A bootstrap service is issued by cert-issuer and is
+# in cert-issuer's floor instead; a workload still asking cert-issuer directly is in neither. `records` are as for
+# floor_entries. Applying the catalog is the sign-off of it (docs/architecture/policy-enforcement.md, stage 2).
+export def issuance_topics [records: list]: nothing -> list {
+    $records
+    | where {|r| $r.issuer == "credentials-agent" and (not $r.bootstrap) }
+    | each {|r| { workload: $"system:serviceaccount:($r.namespace):($r.service_account)" } | merge (own_topics $r) }
+    | sort-by workload
+}
+
 # The entries of cert-issuer's floor, from what the catalog says each workload is issued (the `--cert` specs
 # `kind:dir:algorithm:names`). A bootstrap identity gets an entry that lets its token alone be signed, for the one
 # type it is issued and the names it carries. A workload on the credentials agent that is issued a server
@@ -171,14 +192,14 @@ export def floor_entries [records: list]: nothing -> record {
             if ($kinds | length) != 1 {
                 $problems = ($problems | append $"($r.who): a bootstrap identity is written as one certificate type, and this one is issued ($kinds | str join ' and ')")
             } else {
-                let own = ($r.topics? | default [] | where {|t| $t.from != "implied" })
+                let own = (own_topics $r)
                 $entries = ($entries | append {
                     workload: $workload
                     certType: ($kinds | first | str uppercase)
                     names: ($parsed | get names | flatten | uniq)
                     vouchedOnly: false
-                    publish: ($own | where access == "publish" | get name | uniq | sort)
-                    subscribe: ($own | where access == "subscribe" | get name | uniq | sort)
+                    publish: $own.publish
+                    subscribe: $own.subscribe
                 })
             }
         } else if $r.issuer == "credentials-agent" {
