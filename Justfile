@@ -667,6 +667,18 @@ cassini-shutdown user=env_var('USER'):
 secret-harness-results:
     nu infra/harness.nu
 
+# Run a load-harness plan on the cluster (src/agents/cassini/test; docs/architecture/policy-enforcement.md, stage 5a):
+# each run's sinks, then its producers, as Jobs; the records go to ~/.cache/polar/harness. The target must enable
+# harness-producer and harness-sink (its config.nuon and target.nu say how).
+#        just load-harness-run infra/load-plans/baseline.nuon
+load-harness-run plan target='local-minimal':
+    nu infra/load-harness.nu run {{plan}} --target {{target}}
+
+# The runs in load-harness records, side by side.
+#        just load-harness-compare ~/.cache/polar/harness/baseline-*.nuon
+load-harness-compare +records:
+    nu infra/load-harness.nu compare {{records}}
+
 # Stop all detached port-forwards started by port-forwards-up.
 port-forwards-down:
     #!/usr/bin/env bash

@@ -180,6 +180,9 @@ def main [] {
 
         apply_layers : $apply_layers
         apply_order : ($apply_layers | each {|l| $l.files } | flatten)
+        # Rendered and never applied: the load harness's Jobs, which infra/load-harness.nu copies, one per producer and sink of a
+        # run, when the target enables the harness.
+        rendered_only : ["harness-producer.yaml" "harness-sink.yaml"]
 
         neo4j_bolt_addr       : "bolt+s://polar-db-svc.polar-graph.svc.cluster.local:7687"
         enable_tls            : true

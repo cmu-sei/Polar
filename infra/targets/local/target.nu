@@ -101,6 +101,10 @@ def main [] {
             "openapi-processor.yaml"
         ]
 
+        # Rendered and never applied: the load harness's Jobs, which infra/load-harness.nu copies, one per producer and sink of a
+        # run, when the target enables the harness.
+        rendered_only : ["harness-producer.yaml" "harness-sink.yaml"]
+
         neo4j_bolt_addr       : "bolt+s://polar-db-svc.polar-graph.svc.cluster.local:7687"
         identity_lifetime_overrides : [
             { identity: "graph.polar-graph.serviceaccount.cluster.local", lifetimeSecs: 31536000 }

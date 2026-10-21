@@ -418,9 +418,14 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
     them as it does any agent. Their catalog entries (`infra/config/workloads/cassini-harness.nuon`) are added to a
     target only when it is being measured;
   - a run is a set of Kubernetes Jobs made from the catalog's rendered pod spec: the identity, image, certificate and
-    topics are the catalog's, and only the run's parameters are given, as environment variables. The script starts the
-    sinks, waits until they are Ready (a sink is Ready once the broker has acknowledged its subscription), starts the
-    producers, collects the result lines and deletes the Jobs; an agent exits 0 when its run is done. (Chosen over
+    topics are the catalog's, and only the run's parameters are given. The script starts the sinks, waits until they
+    are ready (a sink is ready once the broker has acknowledged its subscription), starts the producers, collects the
+    result lines and deletes the Jobs; an agent exits 0 when its run is done.
+    *As built:* the parameters are values in a copy of each workload's configuration document (its `<name>-config`
+    ConfigMap, which a Job's `POLAR_CONFIG` names), not separate environment variables, which a document-configured
+    agent does not read; each must be a variable the agent declares, so a renamed one fails before a pod runs. A sink
+    says it is ready in its log (`HARNESS LOAD READY`), which the script waits for. The harness Jobs are rendered and
+    never applied: a target lists them as `rendered_only`, which the render's apply-order check accepts. (Chosen over
     long-running Deployments given each run as a signed configuration update, which would make every point of a grid a
     document to sign, and over patching the Deployments' environment, which drifts from the render and which Flux
     reverts.);

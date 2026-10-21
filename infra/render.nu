@@ -153,7 +153,9 @@ def main [
     let catalog_names = (^nu ($infra_root | path join "resolve.nu") names --target $target | from json)
     let catalog_files = ($catalog_names | each {|n| [$"($n).yaml" $"($n)-resources.yaml"] } | flatten
         | where {|f| ($output_dir | path join $f | path exists) })
-    let order_problems = (apply_order_problems $catalog_files $config.apply_order)
+    # What a target renders but never applies (the load harness's Jobs, which infra/load-harness.nu copies per run) is not missing
+    # from its order.
+    let order_problems = (apply_order_problems $catalog_files ($config.apply_order ++ ($config.rendered_only? | default [])))
     if ($order_problems | is-not-empty) {
         for p in $order_problems { print -e $"  ERROR: ($p)" }
         exit 1
