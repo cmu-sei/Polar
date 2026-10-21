@@ -220,7 +220,9 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   and the broker.
 - The credentials agent writes a workload's declared topics into each certificate it issues, from its floor; cert-issuer
   does the same for the bootstrap services.
-- Tests: issuance unit tests; a certificate's SANs for a catalog workload; the size of the largest set (open point C).
+- Tests: issuance unit tests; a certificate's SANs for a catalog workload; the size of the largest set (open point C); and
+  a certificate with a few hundred topic `p:` names presented to the broker (rustls) and to Neo4j (whose TLS stack, the
+  JDK's or OpenSSL's, sets the tightest limit), to confirm the handshake limits rather than trust the defaults.
 
 **Stage 4: Cedar knows topics** (gap 5)
 
