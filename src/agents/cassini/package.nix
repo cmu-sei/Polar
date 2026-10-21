@@ -71,13 +71,23 @@ let
   };
 
   producerContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = inputs // {
+      polar-healthcheck = {
+        packages.${system}.default = healthcheckDrv;
+      };
+    };
     configNixPath    = ./container-harness-producer.nix;
     extraDerivations = [ harnessProducer ];
   };
 
   sinkContainer = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs inputs;
+    inherit system pkgs;
+    inputs = inputs // {
+      polar-healthcheck = {
+        packages.${system}.default = healthcheckDrv;
+      };
+    };
     configNixPath    = ./container-harness-sink.nix;
     extraDerivations = [ harnessSink ];
   };

@@ -51,6 +51,11 @@
     # in target.nu (secret-harness-owner-resources.yaml, secret-harness-owner.yaml, and the same for the intruder).
     secret-harness-owner: { enabled: false, issuer: "credentials-agent" }
     secret-harness-intruder: { enabled: false, issuer: "credentials-agent" }
+    # The load harness is test code too (src/agents/cassini/test): enabled only while the broker is measured. To
+    # measure, set `enabled: true` on both and add harness-producer-resources.yaml and harness-sink-resources.yaml (not
+    # their Jobs: infra/load-harness.nu makes those per run) to the agents layer in target.nu.
+    harness-producer: { enabled: false, issuer: "credentials-agent" }
+    harness-sink: { enabled: false, issuer: "credentials-agent" }
     # Group 2: the workloads that ask for one client certificate. The ones that also open a Neo4j connection ask
     # for a second client certificate, which the credentials agent does not issue (one client and one server
     # certificate per pod instance). They moved in group 3, once the graph connection presented the pod's one

@@ -83,7 +83,7 @@
   # (`nu infra/images.nu publish dev --to docker.io/<account>` makes polar-dev:latest-<arch>).
   {image: "dev", tag: "latest", kind: "nix", attr: "devContainer"}
 
-  # ── Cassini test harness (not deployed by any target; `just image <name>`) ──
+  # ── Cassini load harness (run as Jobs by infra/load-harness.nu on a target that enables it) ──
   {image: "harness-producer", tag: "latest", kind: "nix", attr: "polarPkgs.cassini.producerImage"}
   {image: "harness-sink",     tag: "latest", kind: "nix", attr: "polarPkgs.cassini.sinkImage"}
 ]
