@@ -1,0 +1,111 @@
+<!--
+  ACE Tool
+
+  Copyright 2026 Carnegie Mellon University.
+
+  NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+  FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+  EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+  PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+  MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+  TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+  Licensed under a MIT (SEI)-style license, please see license.txt or contact permission@sei.cmu.edu
+  for full terms.
+
+  [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+  distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+  This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+  DM26-0670
+-->
+
+# Cassini topics, as built
+
+Read from the code on 2026-10-21. Every topic in use, who publishes and who subscribes. Topics are exact strings (the
+broker has no wildcards), and nothing declares them: they are constants and `format!` patterns in each crate. Paths
+below are relative to `src/agents/`. Who may use which topic is not decided anywhere yet (`policy-enforcement.md`).
+
+## Three names for one agent
+
+An agent's topics are named after the **service name** it passes to `AgentBuilder::new` (`polar-agent-builder/src/lib.rs:
+220-223, 433`), not after its `PolarAgent::NAME`, and the broker knows it by a third name, its **identity** (the
+certificate's first DNS SAN, from its ServiceAccount: `<workload>.<namespace>.serviceaccount.<domain>`,
+`cert-issuer/common/src/identity.rs:52-53, 125`). For most agents the service name is the workload name; for some it is not:
+
+| Workload | Service name (its topics) | Identity (what the broker sees) |
+|---|---|---|
+| kube-observer | `kubernetes.cluster_name.supervisor_name.client` (`kubernetes/observe/src/lib.rs:53`) | `kube-observer.polar.serviceaccount.cluster.local` |
+| kube-consumer | `kubernetes.cluster.cassini.client` (`kubernetes/consume/src/lib.rs:115`) | `kube-consumer.polar.serviceaccount.cluster.local` |
+| jira, oci-resolver | a client-name constant (not checked) | `<workload>.polar.serviceaccount.cluster.local` |
+| git, scheduler, credentials agents | the workload name | `<workload>.polar.serviceaccount.cluster.local` |
+
+A signed document must name the service name in `target.agent` (`signed.rs:312`, `configuration.rs:706`). A rule about
+who may use an agent's topics has to join the two.
+
+## Every builder agent
+
+| Topic | Publishes | Subscribes | Carries |
+|---|---|---|---|
+| `agent.<service>.configuration` | the scheduler processor; the scheduler observer on replay | the agent | `ConfigurationNotification { agent, document_json }`; the document inside is signed, the wrapper and its publisher are not checked |
+| `agent.<service>.command` | nobody yet (the scheduler cannot route commands) | the agent | `CommandNotification` |
+| `selftest.<service>` (`:` as `-`) | the agent's own instances | the same | instance id and counter |
+| `polar-configuration-replay` | every agent, at registration | the scheduler observer | `ConfigurationReplayRequest { agent }`: anyone may ask for any agent, and the answer goes to that agent's topic |
+| `polar-configuration-outcome` | every agent | the scheduler processor (records `published_by`) | `ConfigurationOutcome` |
+| `polar-command-outcome` | every agent | nobody | `CommandOutcome` |
+| `polar-authority-updates`, `polar-authority-snapshot-replies` | the credentials agent consumer | every agent (believed only from `POLAR_AUTHORITY_PUBLISHER`) | signed `Update`, `AuthoritySnapshot` |
+| `polar-authority-snapshot-requests` | every agent | the credentials agent consumer | `AuthoritySnapshotRequest` |
+
+## The credentials agent
+
+Request/reply is a payload convention (`cassini-request-reply-protocol.md`): `Envelope { correlation_id, payload }` on
+`<subject>-requests`, the answer on `<subject>-replies`. **Reply topics are shared:** every crypto actor subscribes to all
+six crypto replies and filters by correlation id, so a topic rule cannot make a reply private; the payloads are encrypted
+to the requester where it matters.
+
+| Subject | Requested by | Requester identity from |
+|---|---|---|
+| `credentials-retrieve-agent-escrow-keypair` | polar-init, a crypto actor | `published_by` |
+| `credentials-agent-escrow-issuance` | polar-init, a crypto actor | the ServiceAccount token in the request |
+| `credentials-escrow-key` | polar-init, a crypto actor | (the agent's public key, to anyone) |
+| `credentials-store-secret` | polar-init, a crypto actor | `published_by` (anonymous refused) |
+| `credentials-retrieve-secret` | a crypto actor (only secret-harness calls it today) | `published_by`, then Cedar |
+| `credentials-agent-escrow-key` | a crypto actor, the credentials agent observer | (another agent's public key) |
+| `credentials-workload-issuance` | the credentials agent observer, relaying polar-init's HTTP | the sealed ServiceAccount token |
+| `credentials-issuance`, `-identity-normalization`, `-account`, `-admin-action` | the observer (HTTP gateway) | the request's credential or signature |
+| `credentials-grants`, `-revocations`, `-account-provisioning`, `-certificate`, `-decrypt-on-behalf-of` | nobody publishes them today | |
+
+The consumer subscribes to all 16 request topics (`credentials-agent/consume/src/supervisor.rs:148-165`) and passes
+`published_by` through for store, retrieve, keypair retrieval and decrypt only (614-634).
+
+## The scheduler and the git server
+
+- The scheduler observer publishes `scheduler.in` (`GitScheduleChange`) and, on replay, `agent.<agent>.configuration`; it
+  subscribes `polar-git-repo-changed` and `polar-configuration-replay`.
+- The scheduler processor subscribes `scheduler.in`, `scheduler.adhoc` (nobody publishes) and
+  `polar-configuration-outcome`; publishes `agent.<agent>.configuration`, and `agent.<id>.schedule` /
+  `agent.type.<type>.schedule`, which nothing outside a test subscribes to. It forwards signed documents unverified (the
+  receiving agent verifies), and processes unsigned schedules with no check.
+- The Polar git server publishes `polar-git-repo-changed` (`RepoChanged`, with the pusher).
+
+## Domain topics
+
+| Topic | Publishes | Subscribes |
+|---|---|---|
+| `kubernetes.cluster.consumer.Pod` (every kind, despite the name) | kube-observer (`RawKubeEvent`, JSON) | kube-consumer (does not check `published_by`) |
+| `polar.kubernetes.cluster.resolution` | oci-resolver | kube-consumer |
+| `polar.provenance.discovery` | kube-consumer, the gitlab consumer | oci-resolver |
+| `polar.provenance.events` | oci-resolver | build-processor |
+| `polar.provenance.linker` | the gitlab consumer | build-processor |
+| `git.repo.config.events` | the git controller | the git observer |
+| `polar.git.repositories.events`, `polar.git.observation.status` | the git observer | the git processor |
+| `polar.git.proposals.decisions` | the git controller | the git processor |
+| `polar-proposal-observe-repo` | `discover_repo` | the git controller |
+| `gitlab.consumer.metadata`, `gitlab:consumer:{projects,groups,users,pipelines,repositories}` | the gitlab observer | the gitlab consumer (also `gitlab:consumer:runners`, which nobody publishes) |
+| `jira:consumer:{projects,groups,users,issues}` | the jira observer | the jira processor |
+| `polar.web.consumer` | the openapi observer | nobody: the openapi processor subscribes `polar.openapi.processor`, a mismatch |
+| `logging:consumer:logs` | nobody | the logger |
+
+Defined and unused: `kubernetes.cluster.observer.pods`, `polar.kubernetes.cluster.resources`, `git.repo.events`,
+`polar.git.processor`, `polar.git.repositories.discovery` (published by the gitlab consumer, never subscribed).
