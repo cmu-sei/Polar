@@ -80,6 +80,19 @@ pattern reaches the set, the certificates or policy (`policy-enforcement.md`, "T
 The scaffold shows the family unexpanded under `topic_families`, and, filled from a document (`--scaffold --config`), its
 topics expanded for the workloads that document names, each with `from: family` and its workload. Built 2026-10-21.
 
+## The cross-check
+
+Every declared or family topic has another side somewhere in the catalog (a subscriber, declared or implied, for a
+publish; a publisher for a subscribe), or its declaration says why it waits (`TopicDecl::waiting`, printed as `waits`).
+`infra/tests/catalog-topics.nu` builds every catalog agent from the workspace, asks each for its scaffold with the
+scheduler's family expanded for every agent the catalog serves, and fails on a one-sided topic with no reason; the logic
+is `infra/topics.nu` (tests `infra/tests/topics.nu`). A render warns about a topic one-sided in its target
+(`resolve.nu topics-check`), since it cannot see the workloads its target disables. Built 2026-10-21. Waiting today:
+seven of the credentials agent's request and reply topics (nothing calls them yet), the git controller's
+`polar-proposal-observe-repo` (no catalog agent proposes yet), and the resolver's `polar.provenance.events` (read by
+`build-processor`, a chart). `local-minimal` warns about kube-consumer's discovery and resolution topics, since it does
+not run the resolver.
+
 ## Every builder agent
 
 | Topic | Publishes | Subscribes | Carries |

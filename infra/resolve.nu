@@ -51,6 +51,7 @@ const INFRA = (path self | path dirname)
 use cluster-inputs.nu [env_for, env_merged, path_of, read_inputs]
 use registry.nu [node_registry, push_registry]
 use agent-pods.nu [collect_scaffolds, run_checks]
+use topics.nu [served, judge]
 const CONFIG = ($INFRA | path join "config")
 
 const DEFAULT_TARGET = "local-minimal"
@@ -194,7 +195,7 @@ def scaffold_dir_for [target: string] {
 def collect_into [dir: string, target: string] {
     let workloads = (all_workloads $target | where {|w| ($w.config? | default "env") == "document" } | select name image)
     with-env { POLAR_REGISTRY: (push_registry $target) } {
-        collect_scaffolds $workloads $dir (load_cluster $target).registry (open ($INFRA | path join "images.nuon"))
+        collect_scaffolds $workloads $dir (load_cluster $target).registry (open ($INFRA | path join "images.nuon")) (served (all_workloads $target))
     }
 }
 
@@ -435,12 +436,12 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         $env_list = ($env_list | append (env_entry $e $vars "kind" $name))
     }
 
-    # An agent with a topic family (the scheduler's agent.{workload}.configuration) is given the workloads this
-    # target runs, and its builder expands the family into one exact topic for each; nothing here recomputes it
-    # (docs/architecture/topics.md, "Families").
+    # An agent with a topic family (the scheduler's agent.{workload}.configuration) is given the agents this target
+    # runs that read a document (topics.nu `served`), and its builder expands the family into one exact topic for
+    # each; nothing here recomputes it (docs/architecture/topics.md, "Families"). Its scaffold was asked with the
+    # same list (collect_scaffolds).
     if ($scaffold.topic_families? | default [] | is-not-empty) {
-        let served = (all_workloads $target | where {|w| ($w.config? | default "env") == "document" } | get name | sort | str join ",")
-        $env_list = ($env_list | append (env_entry { name: "POLAR_SERVED_WORKLOADS", value: $served } $vars "catalog" $name))
+        $env_list = ($env_list | append (env_entry { name: "POLAR_SERVED_WORKLOADS", value: (served (all_workloads $target)) } $vars "catalog" $name))
     }
 
     # The agent reads one document, not an environment: the entries above are written into the
@@ -923,6 +924,27 @@ def "main floor" [--target: string = $DEFAULT_TARGET] {
         exit 1
     }
     print ($f.entries | to json --raw)
+}
+
+# The declared topics that nothing in this target is on the other side of, and that give no reason, as warnings: the
+# target-level part of the cross-check. The catalog-wide part, which fails, is infra/tests/catalog-topics.nu, since a
+# target's scaffolds do not show the topics of the workloads it disables (docs/architecture/policy-enforcement.md,
+# "Decisions"). Never fails.
+def "main topics-check" [--target: string = $DEFAULT_TARGET] {
+    let from = (scaffold_dir_for $target)
+    let sets = (all_workloads $target | where {|w| ($w.config? | default "env") == "document" } | each {|w|
+        let scaffold = (with-env { POLAR_SCAFFOLD_DIR: $from.dir } { scaffold_of $w.name $w })
+        { workload: $w.name, topics: ($scaffold.topics? | default []) }
+    })
+    if $from.made { rm -rf $from.dir }
+    let j = (judge $sets)
+    for f in $j.failures {
+        let verb = (if $f.access == "publish" { "publishes" } else { "subscribes to" })
+        print -e $"  WARNING: ($f.workload) ($verb) ($f.topic), and nothing in ($target) is on the other side"
+    }
+    if ($j.failures | is-empty) {
+        print $"ok: every declared topic in ($target) has another side, or says why it waits \(($j.waiting | length) wait\)"
+    }
 }
 
 # The URL of an in-cluster service, from services.nuon (render.nu hands it to the hand-written charts, so the

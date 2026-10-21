@@ -221,6 +221,13 @@ def main [
         print ""
     }
 
+    # The target-level part of the topic cross-check: a declared topic one-sided here is a warning (the catalog-wide
+    # check, which fails, is infra/tests/catalog-topics.nu).
+    if ($charts_into | is-empty) {
+        ^nu ($infra_root | path join "resolve.nu") topics-check --target $target
+        print ""
+    }
+
     print "=== Render complete ==="
     print $"  output: ($output_dir)"
     print ""

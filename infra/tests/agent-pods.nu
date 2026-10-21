@@ -25,13 +25,22 @@
 # side is exercised by every render and by tests/resolve.nu, which ask the agents through it.
 
 use std/assert
-use ../agent-pods.nu [agent_pod, check_problems, command_of_config, deny_all_policy, document_config_map, namespace_manifest, pod_outcome, scaffold_answer, stale_namespaces, DOCUMENT_PATH, SCRATCH_VALUE]
+use ../agent-pods.nu [agent_pod, check_problems, command_of_config, deny_all_policy, document_config_map, namespace_manifest, pod_outcome, scaffold_answer, stale_namespaces, DOCUMENT_PATH, SCRATCH_VALUE, scaffold_key]
 
 def terminated [code: int] { { status: { phase: (if $code == 0 { "Succeeded" } else { "Failed" }), containerStatuses: [{ state: { terminated: { exitCode: $code, reason: "Completed" } } }] } } }
 def waiting [reason: string] { { status: { phase: "Pending", containerStatuses: [{ state: { waiting: { reason: $reason, message: "back-off pulling image" } } }] } } }
 
 def main [] {
     let tests = [
+        {
+            name: "a scaffold is cached under its digest and the workloads its families are expanded for"
+            body: {
+                let k = (scaffold_key "reg/a:latest" "sha256:1" "a,b")
+                assert equal (scaffold_key "reg/a:latest" "sha256:1" "a,b") $k
+                assert not equal (scaffold_key "reg/a:latest" "sha256:1" "a,b,c") $k
+                assert not equal (scaffold_key "reg/a:latest" "sha256:2" "a,b") $k
+            }
+        }
         {
             name: "the pod runs the image's own command followed by the question, once, with nothing it does not need"
             body: {
