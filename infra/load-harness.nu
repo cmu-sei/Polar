@@ -219,7 +219,9 @@ def templates [target: string] {
         if not ($job | path exists) or not ($resources | path exists) {
             error make { msg: $"($workload) is not rendered for ($target): enable it in the target's config.nuon and render" }
         }
-        let config_map = (open $resources | where kind == "ConfigMap" | where metadata.name == $"($workload)-config" | first)
+        # A file of one document opens as a record, of several as a list.
+        let objects = (open $resources | if ($in | describe | str starts-with "record") { [$in] } else { $in })
+        let config_map = ($objects | where kind == "ConfigMap" | where metadata.name == $"($workload)-config" | first)
         { job: (open $job), config_map: $config_map, document: ($config_map.data."config.json" | from json) }
     }
     { producer: (do $of "harness-producer"), sink: (do $of "harness-sink") }
