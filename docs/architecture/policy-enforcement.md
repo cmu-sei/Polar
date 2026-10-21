@@ -149,6 +149,22 @@ code today, and what stands between the two. The detail of each part is in the d
   its implied topics; the agent computes its set with it and the broker its floor, so they cannot differ. (Chosen over
   the broker applying every rule to every identity, which would admit the self-test and credentials topics for
   agents that never use them, and over writing the implied topics themselves into each certificate.)
+- **Membership and capabilities are parents in Cedar's hierarchy, and groups nest (2026-10-21, for stage 4).** Cedar's `in`
+  is transitive: an entity's parents can have parents, and `principal in Group::"x"` follows the whole chain, the closure
+  computed when the entity store is built. So:
+  - a principal's parents are its groups, from its certificate's `g:` names and from the signed groups document
+    together, and its capabilities, as `Capability::"<name>"` entities (`c:` names), instead of an attribute set;
+  - the groups document gains nesting: a group may name parent groups, and a role is a group whose parents are
+    capabilities, so a rule can say `principal in Role::"policy-author"` and roles can contain roles;
+  - the policy actor builds the hierarchy (groups, roles, capabilities) once per groups update and keeps it, adding only
+    the principal and the resource for each decision, so the closure is not recomputed per request (today the whole
+    store is rebuilt for every decision, and no group entities are given at all, so nesting would not work);
+  - certificates carry direct membership only, never the closure. The floor is unchanged: authority admission still
+    reads the `c:` names from the certificate when policy is silent (an administrator can sign the first policy before
+    any hierarchy exists), and `implied_topics` reads direct groups. Nesting acts only at the ceiling.
+  A rule that read `principal.capabilities.contains("x")` is written `principal in Capability::"x"`; today only the
+  tests use the attribute. Datalog stays out unless rules must derive facts recursively beyond membership (delegation),
+  which Cedar deliberately cannot express.
 - **Open: an administrator's scheduled override or addition to an agent's set.** Considered, not decided: a signed,
   scheduled document that adds topics to (or overrides) what the scaffold declares and implies. If it comes, it is one
   more input every consumer reads the same way, and the builder's run-time check must honour it.
@@ -324,12 +340,18 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
 
 **Stage 4: Cedar knows topics** (gap 5)
 
-- A schema in `polar-policy`, in code: `Identity`, `Group`, `Topic`, and the actions in use (`publish`, `subscribe`,
-  `retrieve`, `store`, `decrypt`, `update-configuration`, `update-runtime`, `run-command`), with their attributes. A
-  policy is validated against it on arrival (it is refused whole, and the old one stays, if it does not validate) and by
-  `polar-sign` before signing.
+- A schema in `polar-policy`, in code: `Identity`, `Group`, `Role`, `Capability`, `Topic`, and the actions in use
+  (`publish`, `subscribe`, `retrieve`, `store`, `decrypt`, `update-configuration`, `update-runtime`, `run-command`), with
+  their attributes and their membership (`Identity in [Group, Role, Capability]`, `Group in [Group]`, `Role in [Role,
+  Capability]`). A policy is validated against it on arrival (it is refused whole, and the old one stays, if it does not
+  validate) and by `polar-sign` before signing.
 - Facts for a topic request: the workload the identity maps to, and whether the topic is in its declared or implied set.
-- Tests: the schema refuses a misspelt attribute; a permit and a forbid for a topic decide as stated.
+- The hierarchy ("Decisions", 2026-10-21): capabilities and groups as the principal's parents, the certificate's `g:`
+  groups merged with the groups document's, the groups document able to nest groups and define roles, and the
+  hierarchy built once per update and kept.
+- Tests: the schema refuses a misspelt attribute; a permit and a forbid for a topic decide as stated; membership through
+  a nested group and a role decides; certificate groups and document groups both count; the hierarchy is not rebuilt
+  per request.
 
 **Stage 5: the broker enforces** (gaps 7, 8, 11)
 
