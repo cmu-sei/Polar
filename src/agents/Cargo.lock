@@ -2919,6 +2919,8 @@ dependencies = [
  "anyhow",
  "cassini-types",
  "hex",
+ "polar-env",
+ "proptest",
  "ractor",
  "rkyv",
  "rustls",

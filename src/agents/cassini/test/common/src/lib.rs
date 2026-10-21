@@ -21,6 +21,21 @@
    DM26-0670
 */
 
+//! What the load harness's producer and sink share (docs/architecture/policy-enforcement.md, stage 5a): the topics
+//! they meet on, the message they exchange, the run they are given, how a run is paced and measured, and the line
+//! each reports at the end. Everything here is pure, so it is tested here; the agents only carry it out.
+
+#![deny(clippy::disallowed_methods)]
+
+pub mod envelope;
+pub mod lanes;
+pub mod report;
+pub mod schedule;
+pub mod settings;
+pub mod stats;
+
+// The controller's protocol, until the producer and the sink no longer use it.
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use sha2::{Digest, Sha256};
 

@@ -26,6 +26,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+polar-env.workspace = true
 anyhow.workspace = true
 cassini-types.workspace = true
 hex.workspace = true
@@ -38,3 +39,6 @@ sha2.workspace = true
 tokio-rustls.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
