@@ -55,6 +55,7 @@ name = "cassini-server"
 path = "src/main.rs"
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }
 cassini-client.workspace = true
 rcgen.workspace = true

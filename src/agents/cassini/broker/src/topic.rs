@@ -35,6 +35,9 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub const TOPIC_ADD_FAILED_TXT: &str = "Failed to add topic \"{topic}!\"";
 const QUEUE_TICK_SECS: u64 = 60;
+/// How long a subscription waits for the subscriber manager before the client is told it was not made. It is waited
+/// for in a task of its own, so this holds up nothing else.
+const SUBSCRIBE_WAIT: Duration = Duration::from_secs(10);
 const QUEUE_STALE_AFTER_SECS: u64 = QUEUE_TICK_SECS * 3; // ~3 minutes
 
 // ============================== Topic Supervisor definition ============================== //
@@ -112,11 +115,25 @@ impl TopicManager {
             .ensure_topic(topic.clone(), myself.clone(), state)
             .await?;
 
-        // Ask SubscriberManager to create the subscriber (delegation)
-        if let Some(sub_mgr) = &state.subscriber_mgr {
-            // BUGFIX: don't silently ignore call() failures (mailbox closed/actor dead/etc).
-            // Also: keep the trace context consistent through the whole subscribe flow.
-            let call_res = sub_mgr
+        // The subscriber manager is asked in a task of its own: this actor routes every publish, so it must not wait
+        // on a subscription (it used to, for up to 200 ms each, and a burst of subscriptions held up the broker's
+        // publishing). Whatever comes of it, the client is told: a subscription it is never told about is one it
+        // waits on for good.
+        let Some(sub_mgr) = state.subscriber_mgr.clone() else {
+            error!(%registration_id, %topic, "TopicManager: subscriber_mgr missing while subscribing");
+            acknowledge_subscribe(
+                &registration_id,
+                &topic,
+                Err("the broker cannot make subscriptions now".to_string()),
+                trace_ctx,
+            );
+            return Err(ActorProcessingErr::from(
+                "SubscriberManager not configured for TopicManager",
+            ));
+        };
+        let attach_to = topic_actor.clone();
+        tokio::spawn(async move {
+            let asked = sub_mgr
                 .call(
                     |reply| BrokerMessage::CreateSubscriber {
                         registration_id: registration_id.clone(),
@@ -124,102 +141,33 @@ impl TopicManager {
                         trace_ctx: trace_ctx.clone(),
                         reply,
                     },
-                    Some(Duration::from_millis(200)),
+                    Some(SUBSCRIBE_WAIT),
                 )
                 .await;
-
-            match call_res {
-                Ok(call_result) => match call_result {
-                    CallResult::Success(result) => match result {
-                        Ok(subscriber_ref) => {
-                            // Attach subscriber to topic
-                            let attached = topic_actor.cast(BrokerMessage::AddSubscriber {
-                                registration_id: registration_id.clone(),
-                                subscriber_ref,
-                                trace_ctx: trace_ctx.clone(),
-                            });
-                            if let Err(e) = &attached {
-                                warn!(
-                                    error = %e,
-                                    registration_id = %registration_id,
-                                    topic = %topic,
-                                    "failed to cast AddSubscriber to topic actor"
-                                );
-                            }
-                            // The client hears the outcome either way: a subscription it was not told about
-                            // is indistinguishable from one the broker refused.
-                            acknowledge_subscribe(
-                                &registration_id,
-                                &topic,
-                                attached.map_err(|_| {
-                                    "the topic could not take the subscriber".to_string()
-                                }),
-                                trace_ctx.clone(),
-                            );
-                        }
-                        Err(err) => {
-                            acknowledge_subscribe(
-                                &registration_id,
-                                &topic,
-                                Err("the subscriber could not be created".to_string()),
-                                trace_ctx.clone(),
-                            );
-                            // Don't leave a TODO landmine in the hot path; report and fail.
-                            error!(
-                                error = ?err,
-                                registration_id = %registration_id,
-                                topic = %topic,
-                                "subscriber_mgr returned subscription error"
-                            );
-                            return Err(ActorProcessingErr::from(
-                                "SubscriberManager returned subscription error",
-                            ));
-                        }
-                    },
-                    CallResult::SenderError => {
-                        error!(
-                            registration_id = %registration_id,
-                            topic = %topic,
-                            "SubscriberManager sender error while subscribing"
-                        );
-                        return Err(ActorProcessingErr::from(
-                            "SubscriberManager sender error while subscribing",
-                        ));
-                    }
-                    CallResult::Timeout => {
-                        error!(
-                            registration_id = %registration_id,
-                            topic = %topic,
-                            timeout_ms = 200u64,
-                            "SubscriberManager call timed out while subscribing"
-                        );
-                        return Err(ActorProcessingErr::from(
-                            "SubscriberManager call timed out while subscribing",
-                        ));
-                    }
-                },
-                Err(e) => {
-                    // ractor::rpc::CallError: actor stopped/mailbox closed/etc.
-                    error!(
-                        error = %e,
-                        registration_id = %registration_id,
-                        topic = %topic,
-                        "SubscriberManager call failed while subscribing"
-                    );
-                    return Err(ActorProcessingErr::from(
-                        "SubscriberManager call failed while subscribing",
-                    ));
+            let outcome = match asked {
+                Ok(CallResult::Success(Ok(subscriber_ref))) => attach_to
+                    .cast(BrokerMessage::AddSubscriber {
+                        registration_id: registration_id.clone(),
+                        subscriber_ref,
+                        trace_ctx: trace_ctx.clone(),
+                    })
+                    .map_err(|e| format!("the topic could not take the subscriber: {e}")),
+                Ok(CallResult::Success(Err(e))) => {
+                    Err(format!("the subscriber could not be created: {e}"))
                 }
+                Ok(CallResult::Timeout) => Err(format!(
+                    "the subscriber manager did not answer within {SUBSCRIBE_WAIT:?}"
+                )),
+                Ok(CallResult::SenderError) => {
+                    Err("the subscriber manager did not answer: it dropped the request".to_string())
+                }
+                Err(e) => Err(format!("the subscriber manager did not answer: {e}")),
+            };
+            if let Err(why) = &outcome {
+                warn!(%registration_id, %topic, "subscription refused: {why}");
             }
-        } else {
-            error!(
-                "TopicManager: subscriber_mgr missing while subscribing {} -> {}",
-                registration_id, topic
-            );
-            return Err(ActorProcessingErr::from(
-                "SubscriberManager not configured for TopicManager",
-            ));
-        }
+            acknowledge_subscribe(&registration_id, &topic, outcome, trace_ctx);
+        });
 
         Ok(topic_actor)
     }

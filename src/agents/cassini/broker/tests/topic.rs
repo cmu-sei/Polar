@@ -55,9 +55,213 @@ impl Actor for Collector {
     }
 }
 
+/// What a session is told about its subscriptions: (topic, result), in order.
+type Acks = Arc<std::sync::Mutex<Vec<(String, Result<(), String>)>>>;
+
+/// Stands in for a session: it is registered under its registration id, as a session is, and keeps every
+/// SubscribeAcknowledgment it is sent.
+struct AckRecorder;
+
+#[ractor::async_trait]
+impl Actor for AckRecorder {
+    type Msg = BrokerMessage;
+    type State = Acks;
+    type Arguments = Acks;
+
+    async fn pre_start(
+        &self,
+        _myself: ractor::ActorRef<Self::Msg>,
+        acks: Acks,
+    ) -> Result<Acks, ActorProcessingErr> {
+        Ok(acks)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ractor::ActorRef<Self::Msg>,
+        message: Self::Msg,
+        acks: &mut Acks,
+    ) -> Result<(), ActorProcessingErr> {
+        if let BrokerMessage::SubscribeAcknowledgment { topic, result, .. } = message {
+            acks.lock().unwrap().push((topic, result));
+        }
+        Ok(())
+    }
+}
+
+/// A subscriber manager that refuses every subscription (`refuse`), or never answers.
+struct StubSubscriberManager;
+
+#[ractor::async_trait]
+impl Actor for StubSubscriberManager {
+    type Msg = BrokerMessage;
+    type State = bool;
+    type Arguments = bool;
+
+    async fn pre_start(
+        &self,
+        _myself: ractor::ActorRef<Self::Msg>,
+        refuse: bool,
+    ) -> Result<bool, ActorProcessingErr> {
+        Ok(refuse)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ractor::ActorRef<Self::Msg>,
+        message: Self::Msg,
+        refuse: &mut bool,
+    ) -> Result<(), ActorProcessingErr> {
+        if let BrokerMessage::CreateSubscriber { reply, .. } = message {
+            if *refuse {
+                let _ = reply.send(Err(ActorProcessingErr::from("Session not found")));
+            } else {
+                // Never answers: the reply port is kept, so the caller waits, and is dropped only when this stops.
+                std::mem::forget(reply);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Subscribes `registration_id` to `topic` through a topic manager whose subscriber manager refuses (or never answers),
+/// and returns what the session was told, once it has been told something or `within` has passed.
+async fn subscribe_through(
+    refuse: bool,
+    registration_id: &str,
+    topic: &str,
+    within: std::time::Duration,
+) -> Vec<(String, Result<(), String>)> {
+    let acks: Acks = Default::default();
+    let (_session, _) = Actor::spawn(Some(registration_id.to_string()), AckRecorder, acks.clone())
+        .await
+        .unwrap();
+    let (subscriber_mgr, _) = Actor::spawn(None, StubSubscriberManager, refuse)
+        .await
+        .unwrap();
+    let (manager, _) = Actor::spawn(
+        None,
+        cassini_broker::topic::TopicManager,
+        cassini_broker::topic::TopicManagerArgs {
+            topics: None,
+            subscriber_mgr: Some(subscriber_mgr),
+        },
+    )
+    .await
+    .unwrap();
+    manager
+        .send_message(BrokerMessage::SubscribeRequest {
+            registration_id: registration_id.to_string(),
+            topic: topic.to_string(),
+            trace_ctx: None,
+        })
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + within;
+    while acks.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let told = acks.lock().unwrap().clone();
+    told
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A subscription the subscriber manager refuses is refused to the client, with the reason: a client never told is
+    /// left waiting for an acknowledgement (docs/architecture/policy-enforcement.md, stage 0).
+    #[tokio::test]
+    async fn a_refused_subscription_is_refused_to_the_client() {
+        let told = subscribe_through(
+            true,
+            "reg-refused",
+            "t-refused",
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].0, "t-refused");
+        let said = told[0].1.clone().unwrap_err();
+        assert!(said.contains("Session not found"), "{said}");
+    }
+
+    /// A subscriber manager that does not answer is waited for, and then the client is told: it used to be given up on
+    /// after 200 ms, inside the topic manager (holding up every publish meanwhile), and the client never heard
+    /// (stage 5a: a sink that started with three others had four of its six subscriptions go unanswered).
+    #[tokio::test(start_paused = true)]
+    async fn a_subscriber_manager_that_does_not_answer_is_given_up_on_and_the_client_is_told() {
+        let told = subscribe_through(
+            false,
+            "reg-silent",
+            "t-silent",
+            std::time::Duration::from_secs(120),
+        )
+        .await;
+        assert_eq!(told.len(), 1, "{told:?}");
+        let said = told[0].1.clone().unwrap_err();
+        assert!(said.contains("did not answer"), "{said}");
+    }
+
+    /// While a subscription waits on the subscriber manager, the topic manager goes on routing publishes.
+    #[tokio::test]
+    async fn a_waiting_subscription_does_not_hold_up_a_publish() {
+        let acks: Acks = Default::default();
+        let (_session, _) = Actor::spawn(Some("reg-wait".to_string()), AckRecorder, acks)
+            .await
+            .unwrap();
+        let (subscriber_mgr, _) = Actor::spawn(None, StubSubscriberManager, false)
+            .await
+            .unwrap();
+        let (manager, _) = Actor::spawn(
+            None,
+            cassini_broker::topic::TopicManager,
+            cassini_broker::topic::TopicManagerArgs {
+                topics: Some(vec!["t-busy".to_string()]),
+                subscriber_mgr: Some(subscriber_mgr),
+            },
+        )
+        .await
+        .unwrap();
+        let topic_actor: ractor::ActorRef<BrokerMessage> =
+            ractor::registry::where_is("t-busy".to_string())
+                .unwrap()
+                .into();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (live, _) = Actor::spawn(None, Collector, seen.clone()).await.unwrap();
+        topic_actor
+            .send_message(BrokerMessage::AddSubscriber {
+                registration_id: "live".to_string(),
+                subscriber_ref: live,
+                trace_ctx: None,
+            })
+            .unwrap();
+        // Several subscriptions the subscriber manager will never answer, then a publish.
+        for i in 0..5 {
+            manager
+                .send_message(BrokerMessage::SubscribeRequest {
+                    registration_id: "reg-wait".to_string(),
+                    topic: format!("t-other-{i}"),
+                    trace_ctx: None,
+                })
+                .unwrap();
+        }
+        manager
+            .send_message(BrokerMessage::PublishRequest {
+                registration_id: "producer".to_string(),
+                topic: "t-busy".to_string(),
+                payload: Arc::new(b"now".to_vec()),
+                reply_to: None,
+                trace_ctx: None,
+                published_by: None,
+            })
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![b"now".to_vec()],
+            "the publish waited on the subscriptions"
+        );
+    }
 
     /// A topic whose subscriber has ended drops it at the next message, and keeps what it could not deliver for the
     /// next subscriber, as it does with no subscriber at all. It used to keep the ended subscriber for good and send it
