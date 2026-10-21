@@ -122,7 +122,9 @@ opentelemetry-otlp = "0.32.0"
 opentelemetry_sdk = "0.32.1"
 parse_link_header = "0.4"
 proptest = "1.10.0"
-ractor = { version = "0.15.10", features = ["async-trait"] }
+# output-port-v2: the first OutputPort kept ten messages per subscriber and dropped a subscriber that fell further
+# behind, for good and silently (cassini/client/tests/output_port.rs); every client's events go through these ports.
+ractor = { version = "0.15.10", features = ["async-trait", "output-port-v2"] }
 rand = "0.10.0"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 rkyv = "0.8.15"

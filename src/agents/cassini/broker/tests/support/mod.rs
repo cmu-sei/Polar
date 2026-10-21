@@ -592,6 +592,16 @@ impl TestClient {
             .collect()
     }
 
+    /// How many publishes on `topic` the broker has acknowledged.
+    pub fn acknowledged(&self, topic: &str) -> usize {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, ClientEvent::PublishAcknowledged { topic: t } if t == topic))
+            .count()
+    }
+
     /// Whether the broker has acknowledged a subscription to `topic`.
     pub fn subscribed(&self, topic: &str) -> bool {
         self.events
