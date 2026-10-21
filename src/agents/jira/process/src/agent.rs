@@ -25,7 +25,7 @@
 //! `polar_agent_builder::PolarAgent`.
 
 use crate::supervisor::{ConsumerSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
+use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
 use ractor::Actor;
 use std::time::Duration;
 
@@ -39,6 +39,24 @@ impl PolarAgent for JiraProcessor {
         "Writes the Jira projects, groups, users and issues the observer publishes into the graph";
     const NEEDS: &'static [Capability] = &[Capability::GraphWrite];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::subscribe(
+            jira_common::JIRA_PROJECTS_CONSUMER_TOPIC,
+            "the observer's projects, written to the graph",
+        ),
+        TopicDecl::subscribe(
+            jira_common::JIRA_GROUPS_CONSUMER_TOPIC,
+            "the observer's groups, written to the graph",
+        ),
+        TopicDecl::subscribe(
+            jira_common::JIRA_USERS_CONSUMER_TOPIC,
+            "the observer's users, written to the graph",
+        ),
+        TopicDecl::subscribe(
+            jira_common::JIRA_ISSUES_CONSUMER_TOPIC,
+            "the observer's issues, written to the graph",
+        ),
+    ];
     const HELP: Option<&'static str> = Some(
         "jira-processor subscribes to the Jira observer's four topics on Cassini (projects, \
          groups, users, issues) and writes what it receives into the graph. It reads no \
@@ -72,4 +90,15 @@ mod tests {
     use super::*;
 
     polar_agent_builder::polar_agent_tests!(JiraProcessor);
+
+    #[test]
+    fn every_topic_it_subscribes_to_is_in_its_declared_set() {
+        let set = polar_agent_builder::agent::topic_set::<JiraProcessor>();
+        for topic in crate::supervisor::JIRA_TOPICS {
+            assert!(
+                set.allows(topic, polar_agent_builder::Access::Subscribe),
+                "{topic} is not declared"
+            );
+        }
+    }
 }

@@ -48,7 +48,7 @@ use tracing::{debug, error, info, warn};
 
 /// Every topic this agent consumes. One Subscription each; all of them
 /// deliver to the supervisor, which decodes and writes to the graph.
-const JIRA_TOPICS: [&str; 4] = [
+pub(crate) const JIRA_TOPICS: [&str; 4] = [
     JIRA_PROJECTS_CONSUMER_TOPIC,
     JIRA_GROUPS_CONSUMER_TOPIC,
     JIRA_USERS_CONSUMER_TOPIC,

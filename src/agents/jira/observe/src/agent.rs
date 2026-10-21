@@ -27,7 +27,7 @@
 use crate::settings::{self, JiraSettings};
 use crate::supervisor::{ObserverSupervisor, ObserverSupervisorArgs, SHUTDOWN_BUDGET};
 use crate::{JiraAuth, JiraDeployment};
-use polar_agent_builder::{Configured, PolarAgent, StartError};
+use polar_agent_builder::{Configured, PolarAgent, StartError, TopicDecl};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
@@ -45,6 +45,24 @@ impl PolarAgent for JiraObserver {
         "Polls a Jira site for projects, groups, users and issues and publishes them to Cassini";
     const NEEDS: &'static [polar_agent_builder::Capability] = &[];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::publish(
+            jira_common::JIRA_PROJECTS_CONSUMER_TOPIC,
+            "the projects it reads from Jira",
+        ),
+        TopicDecl::publish(
+            jira_common::JIRA_GROUPS_CONSUMER_TOPIC,
+            "the groups it reads from Jira",
+        ),
+        TopicDecl::publish(
+            jira_common::JIRA_USERS_CONSUMER_TOPIC,
+            "the users it reads from Jira",
+        ),
+        TopicDecl::publish(
+            jira_common::JIRA_ISSUES_CONSUMER_TOPIC,
+            "the issues it reads from Jira",
+        ),
+    ];
     const SECTIONS: &'static [&'static Section] = &[&settings::SECTION];
     const HELP: Option<&'static str> = Some(
         "jira-observer polls the Jira site at JIRA_URL every half hour and publishes its \
