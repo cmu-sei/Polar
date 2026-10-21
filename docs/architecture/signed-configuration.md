@@ -142,14 +142,14 @@ signature and the revocation list fail closed.*
 
 Three sequence diagrams, in `docs/architecture/sequences/general/` (rendered as `asset_regeneration.md` describes):
 
-- `signed_configuration_authoring.mmd` (and `.png`): the author's side. A typed template from the agent's
+- `signed_configuration_authoring.mmd` (and `.svg`): the author's side. A typed template from the agent's
   schema export, `check`, `sign`, the commit (signed through git's x509 support with the same key) and
   the push, ending with the git server announcing the change.
-- `signed_configuration_delivery.mmd` (and `.png`): the runtime side. The announcement, the observer's pull and
+- `signed_configuration_delivery.mmd` (and `.svg`): the runtime side. The announcement, the observer's pull and
   evaluation, the scheduler's storage and notification, and the ConfigurationActor in the target agent
   verifying the whole document for itself before it applies anything.
 
-- `signed_configuration_secrets.mmd` (and `.png`): a secret travelling in a document: the author's tool
+- `signed_configuration_secrets.mmd` (and `.svg`): a secret travelling in a document: the author's tool
   gets the target agent's public escrow key and encrypts to it, the target decrypts through its
   CryptoActor, closes the loop with the credentials agent, and retrieves the secret later.
 

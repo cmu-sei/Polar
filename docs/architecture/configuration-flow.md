@@ -42,7 +42,7 @@ Terms used throughout:
 
 ## 1. From a person to a Pod
 
-![authoring](sequences/general/configuration_authoring.png)
+![authoring](sequences/general/configuration_authoring.svg)
 
 A workload is a few lines of nuon in `infra/config/workloads/`: its name, its kind (`agent`), its
 image, what it `needs`, its shutdown budget, and any variables the catalog cannot derive. Facts about
@@ -63,7 +63,7 @@ clients).
 
 ## 2. From a Pod to a configured agent
 
-![startup](sequences/general/configuration_startup.png)
+![startup](sequences/general/configuration_startup.svg)
 
 The init container (`polar-init`) gets the agent's certificates and, for agents that encrypt,
 bootstraps the escrow key and leaves a handle to it for the workload. The agent's domain

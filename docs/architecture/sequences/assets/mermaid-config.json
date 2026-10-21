@@ -11,5 +11,9 @@
     "lineColor": "#7c6f64",
     "labelTextColor": "#3c3836",
     "edgeLabelBackground": "transparent"
-  }
+  },
+  "flowchart": {
+    "htmlLabels": false
+  },
+  "htmlLabels": false
 }

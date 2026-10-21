@@ -28,10 +28,10 @@ order, and every artifact it makes. The diagrams are in `sequences/bootstrap/`:
 
 | Diagram | Covers |
 |---|---|
-| [overview](sequences/bootstrap/overview.png) | the three phases on one page |
-| [phase 1: before Flux](sequences/bootstrap/phase1-before-flux.png) | `up.nu` up to installing Flux |
-| [phase 2: Flux](sequences/bootstrap/phase2-flux.png) | Flux reconciling the layers |
-| [phase 3: after Flux](sequences/bootstrap/phase3-after-flux.png) | the admin flow, the seed, the browser |
+| [overview](sequences/bootstrap/overview.svg) | the three phases on one page |
+| [phase 1: before Flux](sequences/bootstrap/phase1-before-flux.svg) | `up.nu` up to installing Flux |
+| [phase 2: Flux](sequences/bootstrap/phase2-flux.svg) | Flux reconciling the layers |
+| [phase 3: after Flux](sequences/bootstrap/phase3-after-flux.svg) | the admin flow, the seed, the browser |
 
 The sources are the `.mmd` files beside them (regenerate as in `sequences/assets/asset_regeneration.md`).
 

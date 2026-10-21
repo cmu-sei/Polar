@@ -60,7 +60,7 @@ path and the missing replay are bugs in their own right.
 
 Split what `TcpClientActor` does into a stable part and a disposable part.
 
-![components](sequences/general/cassini_client_components.png)
+![components](sequences/general/cassini_client_components.svg)
 
 - **Facade + Outbox** is what the rest of the agent holds, and it lives as long as the agent. It owns
   the agent-facing mailbox, the session identity (registration id), the remembered subscriptions and
@@ -77,7 +77,7 @@ Split what `TcpClientActor` does into a stable part and a disposable part.
 
 ### Publishing, online
 
-![publish](sequences/general/cassini_client_publish.png)
+![publish](sequences/general/cassini_client_publish.svg)
 
 A message gets its `(epoch, seq)` when it enters the outbox and leaves it only when the broker
 acknowledges that exact message. Acks are per message and may arrive in any order: the broker's
@@ -88,7 +88,7 @@ the socket proves nothing about the broker.
 
 ### Losing the connection, and coming back
 
-![recovery](sequences/general/cassini_client_recovery.png)
+![recovery](sequences/general/cassini_client_recovery.svg)
 
 At the first sign of trouble the facade writes the unacknowledged entries to the file and goes
 Offline. While offline every publish goes into the outbox and is appended to the file. When a
@@ -98,14 +98,14 @@ the file once the outbox is empty.
 
 ### Deliveries from the broker
 
-![inbound](sequences/general/cassini_client_inbound.png)
+![inbound](sequences/general/cassini_client_inbound.svg)
 
 The same problem in the other direction. The broker keeps a delivery until the client acknowledges it
 (`PublishResponseAck`, which exists in the protocol), and the facade drops a repeat by its origin.
 
 ### The facade's states
 
-![states](sequences/general/cassini_client_facade_states.png)
+![states](sequences/general/cassini_client_facade_states.svg)
 
 `Draining` starts at `ProceedWithShutdown`, not at `PrepareShutdown`: domain actors legitimately
 publish while they drain, so publishing stays open until they have finished. From then on new
