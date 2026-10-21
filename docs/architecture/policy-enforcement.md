@@ -85,6 +85,10 @@ code today, and what stands between the two. The detail of each part is in the d
   services, by cert-issuer. The implied topics are derived from the identity, not written into each certificate. The
   broker reads the certificate and needs no table of its own. A changed set reaches an agent with its next certificate
   (within the hour, at rejuvenation).
+  **Cedar overrides the certificate in both directions (settled; do not reopen):** a `permit` admits beyond what the
+  certificate carries, and a `forbid` refuses what it carries; where no policy speaks, the certificate decides. This is
+  the rule `authority-distribution.md` has held since 2026-10-12 ("Cedar overrides the certificate; the certificate is
+  the fallback"), now applied to topics. "Floor" and "ceiling" mean which comes first, not that policy may only narrow.
 - **Open: an administrator's scheduled override or addition to an agent's set.** Considered, not decided: a signed,
   scheduled document that adds topics to (or overrides) what the scaffold declares and implies. If it comes, it is one
   more input every consumer reads the same way, and the builder's run-time check must honour it.
