@@ -21,28 +21,11 @@
    DM26-0670
 */
 
-use harness_producer::actors::*;
-use ractor::Actor;
-use tracing::info;
+use harness_producer::agent::HarnessProducer;
+use std::process::ExitCode;
 
-#[tokio::main]
-async fn main() {
-    cassini_client::init_tracing("cassini-harness-producer");
-
-    info!("Producer Agent Starting up.");
-
-    let (_, handle) = Actor::spawn(
-        Some("cassini.harness.producer.supervisor".to_string()),
-        RootActor,
-        (),
-    )
-    .await
-    .expect("Expected harness supervisor to start.");
-
-    handle
-        .await
-        .expect("Expected producer to successfully execute.");
-
-    cassini_client::shutdown_tracing();
-    std::process::exit(0);
+/// The agent says what it is in `HarnessProducer`; `run` answers the command line (`--help`, `--scaffold`,
+/// `--check`), judges the configuration and starts it. It exits 0 only when its run is done.
+fn main() -> ExitCode {
+    polar_agent_builder::run::<HarnessProducer>()
 }

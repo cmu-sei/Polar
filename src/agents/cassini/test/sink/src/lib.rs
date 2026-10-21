@@ -21,4 +21,14 @@
    DM26-0670
 */
 
-pub mod sink;
+//! The load harness's sink (docs/architecture/policy-enforcement.md, stage 5a): a builder agent that subscribes to its
+//! lane, says when the broker has acknowledged the subscription, measures every message its lane's producers send
+//! (latency, loss, repeats, order), then reports in one line and ends. The script that runs the harness starts the
+//! sinks first, as Jobs, and starts the producers once every sink is ready.
+
+#![deny(clippy::disallowed_methods)]
+
+pub mod agent;
+pub mod measure;
+pub mod settings;
+pub mod supervisor;

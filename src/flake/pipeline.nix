@@ -119,11 +119,6 @@
         (u:
           u.Artifact {
             "content_type" = "elf-binary-set";
-            name = "harness-controller";
-          })
-        (u:
-          u.Artifact {
-            "content_type" = "elf-binary-set";
             name = "harness-producer";
           })
         (u:
@@ -266,11 +261,6 @@
           u.Artifact {
             "content_type" = "elf-binary-set";
             name = "gitlab-observer";
-          })
-        (u:
-          u.Artifact {
-            "content_type" = "elf-binary-set";
-            name = "harness-controller";
           })
         (u:
           u.Artifact {

@@ -21,13 +21,14 @@
    DM26-0670
 */
 
-pub mod actors;
+//! The load harness's producer (docs/architecture/policy-enforcement.md, stage 5a): a builder agent that, once
+//! registered, sends its run's messages on its lane at the rate it was given, never with more than its window
+//! unacknowledged, then reports what it did in one line and ends. The script that runs the harness starts it as a
+//! Job, after the sinks are ready.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+#![deny(clippy::disallowed_methods)]
 
-fn get_timestamp_in_milliseconds() -> Result<u128, std::time::SystemTimeError> {
-    let current_system_time = SystemTime::now();
-    let duration_since_epoch = current_system_time.duration_since(UNIX_EPOCH)?;
-    let milliseconds_timestamp = duration_since_epoch.as_millis();
-    Ok(milliseconds_timestamp)
-}
+pub mod agent;
+pub mod sending;
+pub mod settings;
+pub mod supervisor;

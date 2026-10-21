@@ -69,6 +69,14 @@ pub fn read(message: &[u8]) -> Result<Stamp, String> {
     })
 }
 
+/// Now, in nanoseconds since the Unix epoch: a message's send time, and its receipt.
+pub fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
 /// A payload of `size` bytes that does not compress, the same every run: made once per run, not per message.
 pub fn payload(size: usize) -> Vec<u8> {
     let mut state: u64 = 0x9E37_79B9_7F4A_7C15;

@@ -27,18 +27,8 @@ license.workspace = true
 
 [dependencies]
 polar-env.workspace = true
-anyhow.workspace = true
-cassini-types.workspace = true
-hex.workspace = true
-ractor.workspace = true
-rkyv.workspace = true
-rustls.workspace = true
-serde_json.workspace = true
 serde.workspace = true
-sha2.workspace = true
-tokio-rustls.workspace = true
-tokio.workspace = true
-tracing.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

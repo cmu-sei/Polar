@@ -27,24 +27,15 @@ license.workspace = true
 
 [dependencies]
 cassini-client.workspace = true
-cassini-tracing.workspace = true
 cassini-types.workspace = true
-fake.workspace = true
 harness-common.workspace = true
-opentelemetry-otlp.workspace = true
-opentelemetry_sdk.workspace = true
-opentelemetry.workspace = true
 polar.workspace = true
+polar-agent-builder.workspace = true
+polar-env.workspace = true
 ractor.workspace = true
-rand = { workspace = true }
-rkyv = { workspace = true }
-rustls.workspace = true
-serde_dhall.workspace = true
-serde_json.workspace = true
-serde = { workspace = true }
-tokio-rustls.workspace = true
-tokio-util.workspace = true
 tokio.workspace = true
-tracing-opentelemetry.workspace = true
-tracing-subscriber.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

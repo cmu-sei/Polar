@@ -2067,12 +2067,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deunicode"
-version = "1.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abd57806937c9cc163efc8ea3910e00a62e2aeb0b8119f1793a978088f8f6b04"
-
-[[package]]
 name = "dhall"
 version = "0.13.0"
 source = "git+https://github.com/daveman1010221/dhall-rust?branch=modernize-rkyv#776439e8acd9381f176fd70dc68976aaf367d551"
@@ -2349,17 +2343,6 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
-]
-
-[[package]]
-name = "fake"
-version = "4.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2b0902eb36fbab51c14eda1c186bda119fcff91e5e4e7fc2dd2077298197ce8"
-dependencies = [
- "deunicode",
- "either",
- "rand 0.9.5",
 ]
 
 [[package]]
@@ -2916,45 +2899,10 @@ dependencies = [
 name = "harness-common"
 version = "1.0.0"
 dependencies = [
- "anyhow",
- "cassini-types",
- "hex",
  "polar-env",
  "proptest",
- "ractor",
- "rkyv",
- "rustls",
  "serde",
  "serde_json",
- "sha2 0.10.9",
- "tokio",
- "tokio-rustls",
- "tracing",
-]
-
-[[package]]
-name = "harness-controller"
-version = "1.0.0"
-dependencies = [
- "cassini-client",
- "cassini-tracing",
- "cassini-types",
- "clap",
- "harness-common",
- "polar",
- "ractor",
- "rkyv",
- "rustls",
- "serde",
- "serde_dhall",
- "serde_json",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "tracing",
- "tracing-glog",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -2962,52 +2910,27 @@ name = "harness-producer"
 version = "1.0.0"
 dependencies = [
  "cassini-client",
- "cassini-tracing",
  "cassini-types",
- "fake",
  "harness-common",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
  "polar",
+ "polar-agent-builder",
+ "polar-env",
+ "proptest",
  "ractor",
- "rand 0.10.3",
- "rkyv",
- "rustls",
- "serde",
- "serde_dhall",
- "serde_json",
  "tokio",
- "tokio-rustls",
- "tokio-util",
  "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
 ]
 
 [[package]]
 name = "harness-sink"
 version = "1.0.0"
 dependencies = [
- "cassini-client",
- "cassini-tracing",
  "cassini-types",
  "harness-common",
- "opentelemetry",
- "opentelemetry_sdk",
- "polar",
+ "polar-agent-builder",
+ "polar-env",
  "ractor",
- "rkyv",
- "rustls",
- "serde",
- "serde_json",
- "tokio",
- "tokio-rustls",
- "tokio-util",
  "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

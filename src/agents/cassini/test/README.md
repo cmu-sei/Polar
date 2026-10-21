@@ -21,63 +21,39 @@
   DM26-0670
 -->
 
-# Cassini Test Harness
+# Cassini load harness
 
-A flexible test harness for exercising our message broker under a variety of workloads. The harness provides reusable actors that simulate producers and consumers, enabling us to test throughput, durability, and correctness at scale.
+Two builder agents that measure the broker from inside the cluster (`docs/architecture/policy-enforcement.md`, stage
+5a): `harness-producer` sends a run's messages, and `harness-sink` receives and measures them. Each is one binary per
+workload, with a catalog entry that is added to a target only when it is being measured. A run is a set of Kubernetes
+Jobs made from the catalog's rendered pod spec, given the run's parameters as environment variables;
+`infra/load-harness.nu` starts the sinks, waits until each says it is ready, starts the producers, and collects one
+result line from each.
 
-Unlike one-off integration tests, the harness is designed for **repeatable performance experiments** and **adversarial scenarios** that go beyond correctness checks.
+## The pieces
 
+- `common` (`harness-common`): what both share, all of it pure and tested there.
+  - `lanes`: the eight topics a run can use, `cassini.harness.lane.0` to `.7`. Producer `i` publishes on lane
+    `i mod HARNESS_LANES`, sink `j` subscribes to lane `j mod HARNESS_LANES`.
+  - `envelope`: a 20-byte header (producer, sequence number, send time in nanoseconds) in front of a payload made once
+    per run, so the sink reads what it measures without decoding the payload.
+  - `schedule`: message `i` is due `i / rate` seconds in; every due message is sent on each wake, and never more than
+    the window is unacknowledged.
+  - `stats`: nearest-rank percentiles over every latency, and a tally per producer of what arrived, lost, repeated and
+    out of order.
+  - `settings`: what both are told about the run: `HARNESS_RUN_ID`, `HARNESS_INDEX`, `HARNESS_PRODUCERS`,
+    `HARNESS_LANES`, `HARNESS_COUNT`.
+  - `report`: the `HARNESS LOAD RESULT` line (its mark, then one line of JSON with a `role`), and the sink's
+    `HARNESS LOAD READY` line.
+- `producer` (`harness-producer`): once registered, sends `HARNESS_COUNT` messages of `HARNESS_MESSAGE_SIZE` bytes at
+  `HARNESS_RATE` a second (0 is as fast as the window allows), with at most `HARNESS_WINDOW_BYTES` unacknowledged; gives
+  up on the rest when nothing is acknowledged for `HARNESS_STALL_SECS`. It reports what it sent, what was acknowledged,
+  refused or failed, and the rate it reached.
+- `sink` (`harness-sink`): subscribes to its lane, says it is ready once the broker acknowledges the subscription, and
+  measures every message from its lane's producers, the first `HARNESS_WARMUP` of each left out of the latencies. It
+  reports when it has them all, or when none has come for `HARNESS_IDLE_SECS` (`HARNESS_FIRST_WAIT_SECS` for the first).
 
----
+Each prints every variable it reads with `--scaffold`, and what it does with `--help`. Both exit 0 when their part of a
+run is done, and 1 for anything else.
 
-## Why?
-
-Static Integration tests only cover correctness of broker operations (topic creation, deletion, publish/subscribe semantics). The harness extends this by providing:
-
-* **Parameterized message generation** – Control message size, type, rate, and payload entropy.
-* **Supervised producer/consumer actors** – Each client runs under its own supervisor, enabling fault injection and lifecycle management.
-* **Metrics collection** – Measure throughput, latency, message loss, and errors.
-* **Scenario composition** – Run long-lived stress tests, spike workloads, or topic churn scenarios.
-* **Reusability** – Producers and consumers are just actors; they can be combined in different topologies without rewriting logic.
-
----
-
-## Concepts
-
-* **Harness Controller**
-  * Reads in initial Dhall test plan and distributes to local (or remote) instances of producer and consumer services.
-
-* **Producer Supervisor(Source)**
-
-  * Configurable rate (msgs/sec) and duration.
-  * Payloads may be fixed or random (text, numbers, enums).
-  * Logs metrics: sent count, errors, time elapsed.
-
-* **Consumer Supervisor (Sink)**
-
-  * Subscribes to a topic.
-  * Collects received messages and verifies integrity (sequence/checksum optional).
-  * Logs metrics: received count, loss rate, time elapsed.
-
-* **Metrics**
-
-  * Collected in-memory and queriable via messages.
-  * Useful for CI/CD pipelines, regression tests, and dashboards.
-
----
-
-## Usage
-
-The sink and producer services are two distinct components of the harness. Both are also configured to leverage mTLS and so must be configured with SSL certificates. See the example.env file at the root of this project for further details.
-
-
----
-
-## Scenarios
-
-The harness is intended to simulate a wide range of workloads, including:
-
-* **Throughput tests** – small messages at high rates.
-* **Batch tests** – fewer, larger payloads.
-* **Topic churn** – rapid create/delete of topics while publishing.
-* **Mixed workloads** – producers and consumers running simultaneously on multiple topics.
+Latency is the sink's clock less the producer's, so it is right only when both run on one node.
