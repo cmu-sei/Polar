@@ -67,6 +67,15 @@ code today, and what stands between the two. The detail of each part is in the d
   builder enforces it at start. An identity maps to its agent mechanically, `<workload>.<namespace>.serviceaccount.<domain>`
   to `<workload>`, so the broker, Cedar and the floor join a certificate to an agent's topics without a lookup table. The
   agents that pass another name today (kube-observer, kube-consumer, jira, oci-resolver; `topics.md`) change.
+- **An agent declares its topics, and some are implied (2026-10-21, gap 1).** A `TOPICS` constant on `PolarAgent`, beside
+  `NEEDS` and `SECTIONS`, lists each topic the agent uses, with its access (publish, subscribe) and a purpose. The topics
+  every agent uses because of the builder (its own configuration and command topics, self-test, the authority topics,
+  replay and outcome), and those a need brings (the credentials agent's request and reply topics, for `Encryption`), are
+  implied, not declared by each agent. The condition: how the implied topics are derived is documented, and **the agent,
+  the catalog and what reads it, and the scheduling scaffolds and what reads them, always arrive at the same set of
+  declared and implied topics for every agent.** The way to hold that: the set is computed once, in the agent (the
+  builder), and printed in full in its scaffold, each implied topic with the rule that implied it; nothing else
+  recomputes it, and the builder refuses at run time to publish or subscribe outside it.
 
 ## Where policy is enforced today
 
@@ -87,7 +96,8 @@ Numbered so a plan can refer to them. "Core" gaps block enforcement anywhere; th
 
 **Core**
 
-1. **No declaration of what an agent communicates.** A scaffold declares sections, commands, needs and the shutdown
+1. **No declaration of what an agent communicates** (decided, above: declared and implied topics in the scaffold; not
+   built). A scaffold declares sections, commands, needs and the shutdown
    budget, but no topics and no access (`polar-agent-builder/src/agent.rs:242-412`); the catalog declares none either. So
    there is no source from which to derive a default policy, a certificate's permissions, or a seed.
 2. **Three names for one agent** (decided, above: the workload name; not built). Topics use the service name, documents are addressed to it, and the broker knows the
