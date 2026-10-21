@@ -1247,6 +1247,13 @@ impl SessionAgent {
 
         if state.shutting_down {
             warn!("Rejecting subscribe during shutdown");
+            // Refused, and the client told so: a silent drop looks like a subscription that was taken.
+            crate::topic::acknowledge_subscribe(
+                &registration_id,
+                &topic,
+                Err("Broker is shutting down".to_string()),
+                Some(span.context()),
+            );
             return Ok(());
         }
 

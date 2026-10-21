@@ -572,6 +572,33 @@ impl TestClient {
             .collect()
     }
 
+    /// Whether the broker has acknowledged a subscription to `topic`.
+    pub fn subscribed(&self, topic: &str) -> bool {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, ClientEvent::ClientSubscribed { topic: t } if t == topic))
+    }
+
+    /// The reasons the broker gave for refusing a subscription to, or a publish on, `topic`.
+    pub fn refusals(&self, topic: &str) -> Vec<String> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                ClientEvent::SubscribeRefused { topic: t, reason }
+                | ClientEvent::PublishRefused { topic: t, reason }
+                    if t == topic =>
+                {
+                    Some(reason.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub async fn wait_for(&self, what: &str, within: Duration, ready: impl Fn(&Self) -> bool) {
         let deadline = tokio::time::Instant::now() + within;
         while tokio::time::Instant::now() < deadline {

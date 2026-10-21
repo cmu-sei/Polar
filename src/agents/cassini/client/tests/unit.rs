@@ -93,6 +93,10 @@ async fn test_client_event_forwarder_mailbox() -> Result<(), ActorProcessingErr>
                 payload: format!("error:{reason}"),
             }),
             CassiniClientEvent::ClientSubscribed { .. } => None,
+            CassiniClientEvent::SubscribeRefused { topic, reason }
+            | CassiniClientEvent::PublishRefused { topic, reason } => Some(MockMessage {
+                payload: format!("refused:{topic}:{reason}"),
+            }),
         });
 
     // Spawn the ClientEventForwarder with the mock actor as target
@@ -150,6 +154,10 @@ async fn test_client_event_forwarder_multiple_events() -> Result<(), ActorProces
                 payload: format!("err:{reason}"),
             }),
             CassiniClientEvent::ClientSubscribed { .. } => None,
+            CassiniClientEvent::SubscribeRefused { topic, reason }
+            | CassiniClientEvent::PublishRefused { topic, reason } => Some(MockMessage {
+                payload: format!("refused:{topic}:{reason}"),
+            }),
         });
 
     // Spawn the forwarder

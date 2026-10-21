@@ -133,11 +133,12 @@ impl TopicManager {
                     CallResult::Success(result) => match result {
                         Ok(subscriber_ref) => {
                             // Attach subscriber to topic
-                            if let Err(e) = topic_actor.cast(BrokerMessage::AddSubscriber {
+                            let attached = topic_actor.cast(BrokerMessage::AddSubscriber {
                                 registration_id: registration_id.clone(),
                                 subscriber_ref,
                                 trace_ctx: trace_ctx.clone(),
-                            }) {
+                            });
+                            if let Err(e) = &attached {
                                 warn!(
                                     error = %e,
                                     registration_id = %registration_id,
@@ -145,8 +146,24 @@ impl TopicManager {
                                     "failed to cast AddSubscriber to topic actor"
                                 );
                             }
+                            // The client hears the outcome either way: a subscription it was not told about
+                            // is indistinguishable from one the broker refused.
+                            acknowledge_subscribe(
+                                &registration_id,
+                                &topic,
+                                attached.map_err(|_| {
+                                    "the topic could not take the subscriber".to_string()
+                                }),
+                                trace_ctx.clone(),
+                            );
                         }
                         Err(err) => {
+                            acknowledge_subscribe(
+                                &registration_id,
+                                &topic,
+                                Err("the subscriber could not be created".to_string()),
+                                trace_ctx.clone(),
+                            );
                             // Don't leave a TODO landmine in the hot path; report and fail.
                             error!(
                                 error = ?err,
@@ -888,5 +905,23 @@ impl TopicAgent {
             );
         }
         Ok(())
+    }
+}
+
+/// Tells the client, through its session (registered under its registration id), whether its subscription to `topic`
+/// was taken. A session that has gone has no client to tell.
+pub(crate) fn acknowledge_subscribe(
+    registration_id: &str,
+    topic: &str,
+    result: Result<(), String>,
+    trace_ctx: Option<opentelemetry::Context>,
+) {
+    if let Some(session) = ractor::registry::where_is(registration_id.to_string()) {
+        let _ = session.send_message(BrokerMessage::SubscribeAcknowledgment {
+            registration_id: registration_id.to_string(),
+            topic: topic.to_string(),
+            result,
+            trace_ctx,
+        });
     }
 }

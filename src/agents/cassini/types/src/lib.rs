@@ -539,8 +539,21 @@ pub enum ClientEvent {
     PublishAcknowledged {
         topic: String,
     },
+    /// The broker took the subscription: messages published on `topic` from now on are delivered.
     ClientSubscribed {
         topic: String,
+    },
+    /// The broker refused the subscription (`reason` says why): nothing published on `topic` is delivered to this
+    /// client. An agent logs it; it is not retried until the client registers again.
+    SubscribeRefused {
+        topic: String,
+        reason: String,
+    },
+    /// The broker did not take a publish on `topic` (`reason` says why): it was not delivered to anyone, and no
+    /// `PublishAcknowledged` follows.
+    PublishRefused {
+        topic: String,
+        reason: String,
     },
 }
 /// External Messages for client comms

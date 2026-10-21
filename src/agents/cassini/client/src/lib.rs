@@ -697,8 +697,16 @@ impl TcpClientActor {
                     };
                     TcpClientActor::dispatch_event(delivery, event);
                     trace!("TCP client dispatched MessagePublished for topic {}", topic);
-                } else {
-                    warn!("Failed to publish message to topic: {topic}");
+                } else if let Err(reason) = result {
+                    // The broker did not take our publish: the agent hears it, not only the log.
+                    warn!("The broker refused a publish on {topic}: {reason}");
+                    TcpClientActor::dispatch_event(
+                        delivery,
+                        ClientEvent::PublishRefused {
+                            topic: topic.clone(),
+                            reason: reason.clone(),
+                        },
+                    );
                 }
             }
             ClientMessage::SubscribeAcknowledgment {
@@ -710,10 +718,26 @@ impl TcpClientActor {
                 try_set_parent_wire(&span, trace_ctx);
                 let _g = span.enter();
 
-                if result.is_ok() {
-                    info!("Successfully subscribed to topic: {topic}");
-                } else {
-                    warn!("Failed to subscribe to topic: {topic}, {result:?}");
+                match result {
+                    Ok(()) => {
+                        info!("Subscribed to topic: {topic}");
+                        TcpClientActor::dispatch_event(
+                            delivery,
+                            ClientEvent::ClientSubscribed {
+                                topic: topic.clone(),
+                            },
+                        );
+                    }
+                    Err(reason) => {
+                        warn!("The broker refused a subscription to {topic}: {reason}");
+                        TcpClientActor::dispatch_event(
+                            delivery,
+                            ClientEvent::SubscribeRefused {
+                                topic: topic.clone(),
+                                reason: reason.clone(),
+                            },
+                        );
+                    }
                 }
             }
 
@@ -1593,29 +1617,101 @@ mod process_client_message_tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_failed_publish_response_dispatches_nothing() {
+    /// The events the client dispatches for one message from the broker.
+    async fn dispatched_for(message: ClientMessage) -> Vec<ClientEvent> {
         let (myself, _received) = spawn_fake_tcp_client().await;
         let (delivery, captured) = broadcast_delivery().await;
-
-        TcpClientActor::process_client_message(
-            myself,
-            &delivery,
-            ClientMessage::PublishResponse {
-                topic: "a-real-topic".to_string(),
-                payload: b"real payload".to_vec().into(),
-                result: Err("broker rejected it".to_string()),
-                trace_ctx: None,
-                published_by: None,
-            },
-        );
-
+        TcpClientActor::process_client_message(myself, &delivery, message);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        captured.lock().unwrap().clone()
+    }
 
+    #[tokio::test]
+    async fn a_failed_publish_response_is_a_refusal_never_a_delivered_message() {
+        let events = dispatched_for(ClientMessage::PublishResponse {
+            topic: "a-real-topic".to_string(),
+            payload: b"real payload".to_vec().into(),
+            result: Err("broker rejected it".to_string()),
+            trace_ctx: None,
+            published_by: None,
+        })
+        .await;
         assert!(
-            captured.lock().unwrap().is_empty(),
-            "a failed publish must never dispatch a real MessagePublished event"
+            matches!(events.as_slice(), [ClientEvent::PublishRefused { topic, reason }]
+                if topic == "a-real-topic" && reason == "broker rejected it"),
+            "a failed publish is a PublishRefused, never a MessagePublished: {events:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_subscription_the_broker_took_is_acknowledged_to_the_agent() {
+        let events = dispatched_for(ClientMessage::SubscribeAcknowledgment {
+            topic: "news".to_string(),
+            result: Ok(()),
+            trace_ctx: None,
+        })
+        .await;
+        assert!(
+            matches!(events.as_slice(), [ClientEvent::ClientSubscribed { topic }] if topic == "news"),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subscription_the_broker_refused_is_a_refusal_the_agent_sees() {
+        let events = dispatched_for(ClientMessage::SubscribeAcknowledgment {
+            topic: "news".to_string(),
+            result: Err("refused: not declared".to_string()),
+            trace_ctx: None,
+        })
+        .await;
+        assert!(
+            matches!(events.as_slice(), [ClientEvent::SubscribeRefused { topic, reason }]
+                if topic == "news" && reason == "refused: not declared"),
+            "{events:?}"
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(24))]
+
+        /// For any topic and reason: a refusal reaches the agent as exactly one refusal event carrying both, and a
+        /// refusal is never mistaken for a delivery or a subscription taken.
+        #[test]
+        fn a_refusal_is_exactly_one_refusal_event_carrying_the_topic_and_reason(
+            topic in "[a-z][a-z0-9.:-]{0,40}",
+            reason in "[ -~]{0,80}",
+            subscribe in proptest::bool::ANY,
+        ) {
+            let message = if subscribe {
+                ClientMessage::SubscribeAcknowledgment {
+                    topic: topic.clone(),
+                    result: Err(reason.clone()),
+                    trace_ctx: None,
+                }
+            } else {
+                ClientMessage::PublishResponse {
+                    topic: topic.clone(),
+                    payload: Vec::new().into(),
+                    result: Err(reason.clone()),
+                    trace_ctx: None,
+                    published_by: None,
+                }
+            };
+            let events = tokio::runtime::Runtime::new().unwrap().block_on(dispatched_for(message));
+            proptest::prop_assert_eq!(events.len(), 1, "{:?}", events);
+            match &events[0] {
+                ClientEvent::SubscribeRefused { topic: t, reason: r } if subscribe => {
+                    proptest::prop_assert_eq!(t, &topic);
+                    proptest::prop_assert_eq!(r, &reason);
+                }
+                ClientEvent::PublishRefused { topic: t, reason: r } if !subscribe => {
+                    proptest::prop_assert_eq!(t, &topic);
+                    proptest::prop_assert_eq!(r, &reason);
+                }
+                other => proptest::prop_assert!(false, "not the refusal expected: {:?}", other),
+            }
+        }
     }
 
     #[tokio::test]

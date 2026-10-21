@@ -759,6 +759,13 @@ impl Actor for InfrastructureSupervisor {
                             test.connected = false;
                         }
                     }
+                    // A refusal is said in every agent's log, by the builder, whatever the agent does with it.
+                    ClientEvent::SubscribeRefused { topic, reason } => {
+                        tracing::warn!(%topic, %reason, "the broker refused a subscription");
+                    }
+                    ClientEvent::PublishRefused { topic, reason } => {
+                        tracing::warn!(%topic, %reason, "the broker refused a publish");
+                    }
                     _ => {}
                 }
                 if let Some(client) = &state.client {

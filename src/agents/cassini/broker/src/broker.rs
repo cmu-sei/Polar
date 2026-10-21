@@ -737,14 +737,13 @@ impl Broker {
         // Reject new subscriptions during shutdown
         if state.is_shutting_down {
             warn!("Rejecting subscribe request during shutdown");
-            if let Some(session_mgr) = &state.session_mgr {
-                session_mgr.send_message(BrokerMessage::SubscribeAcknowledgment {
-                    registration_id,
-                    topic,
-                    result: Err("Broker is shutting down".to_string()),
-                    trace_ctx: Some(span.context()),
-                })?;
-            }
+            // To the session, which forwards it to the client (the session manager had no use for it).
+            crate::topic::acknowledge_subscribe(
+                &registration_id,
+                &topic,
+                Err("Broker is shutting down".to_string()),
+                Some(span.context()),
+            );
             return Ok(());
         }
 
