@@ -25,7 +25,9 @@
 //! `polar_agent_builder::PolarAgent`.
 
 use crate::supervisor::{SERVICE_NAME, SHUTDOWN_BUDGET, SchedulerSupervisor};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
+use polar_agent_builder::{
+    Capability, Configured, PolarAgent, StartError, TopicDecl, topics::FamilyDecl,
+};
 use ractor::Actor;
 use std::time::Duration;
 
@@ -47,6 +49,10 @@ impl PolarAgent for SchedulerProcessor {
             "each agent's outcome for a configuration document, recorded in the graph",
         ),
     ];
+    const TOPIC_FAMILIES: &'static [FamilyDecl] = &[FamilyDecl::publish(
+        "agent.{workload}.configuration",
+        "a signed document for the workload, forwarded untouched for it to verify",
+    )];
     const HELP: Option<&'static str> = Some(
         "The processor subscribes to the changes the scheduler observer publishes from the \
          schedules repository (scheduler.in). It writes each signed document to the graph and, \
@@ -77,4 +83,17 @@ mod tests {
     use super::*;
 
     polar_agent_builder::polar_agent_tests!(SchedulerProcessor);
+
+    #[test]
+    fn its_family_is_the_topic_the_code_publishes_each_workloads_configuration_on() {
+        for workload in ["kube-observer", "credentials-agent", "polar-scheduler"] {
+            for family in SchedulerProcessor::TOPIC_FAMILIES {
+                assert_eq!(
+                    family.topic_for(workload),
+                    polar_scheduler_common::configuration_topic(workload)
+                );
+            }
+        }
+        assert_eq!(SchedulerProcessor::TOPIC_FAMILIES.len(), 1);
+    }
 }

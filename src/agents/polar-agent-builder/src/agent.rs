@@ -69,7 +69,7 @@ use crate::command::{CommandSpec, spec_problems};
 use crate::environment;
 use crate::runtime::RuntimeSection;
 use crate::startup::{self, Startup};
-use crate::topics::{Facts, TopicDecl, TopicEntry, TopicSet};
+use crate::topics::{Facts, FamilyDecl, TopicDecl, TopicEntry, TopicSet};
 use polar_env::{DocValue, Document, DocumentError, Env, FileEnv, ProcessEnv, Section, Source};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -131,6 +131,10 @@ pub trait PolarAgent: Sized + 'static {
     /// The topics every agent uses, and those a need brings, are implied and not listed here; the scaffold
     /// prints the whole set, and the agent's client refuses what is outside it unless policy permits it.
     const TOPICS: &'static [TopicDecl] = &[];
+    /// The topics the agent uses once for each workload it serves (the scheduler's `agent.{workload}.configuration`).
+    /// Each is expanded into exact names from `POLAR_SERVED_WORKLOADS`, which the render fills from the catalog;
+    /// an agent that declares one reads that variable.
+    const TOPIC_FAMILIES: &'static [FamilyDecl] = &[];
 
     /// The agent proper. It is given the configuration the infrastructure judged, and builds
     /// its infrastructure from it (see `AgentBuilder::into_configured`). It returns when the
@@ -150,6 +154,8 @@ pub struct Configured {
     pub(crate) commands: &'static [CommandSpec],
     /// The runtime sections the agent declared.
     pub(crate) runtime: &'static [&'static RuntimeSection],
+    /// Every topic the agent uses, its families expanded for the workloads it serves.
+    pub(crate) topics: Arc<TopicSet>,
     pub(crate) hooks: Hooks,
 }
 
@@ -180,6 +186,12 @@ impl Configured {
 
     pub fn shutdown_budget(&self) -> Duration {
         self.startup.shutdown_budget
+    }
+
+    /// Every topic the agent may use: declared, implied, and its families expanded for the workloads it
+    /// serves. The agent's client refuses anything else unless its policy permits it.
+    pub fn topics(&self) -> &Arc<TopicSet> {
+        &self.topics
     }
 
     /// Whether the agent is a Cassini client in this deployment: always for an agent, and for one
@@ -230,6 +242,7 @@ impl Configured {
             self_test: false,
             commands: &[],
             runtime: &[],
+            topics: Arc::new(TopicSet::default()),
             hooks: Hooks {
                 process_exit: Arc::new(move |code| exits.lock().unwrap().push(code)),
                 listen_for_signals: false,
@@ -261,14 +274,29 @@ pub struct AgentDocument {
     #[serde(default)]
     pub runtime: Vec<RuntimeDocument>,
     /// Every topic the agent uses, declared or implied, each with where it comes from: the one computed
-    /// set, which the catalog and the certificates take from here and never recompute.
+    /// set, which the catalog and the certificates take from here and never recompute. A family appears here
+    /// expanded for the workloads in the document the scaffold was filled from, and in `topic_families` as
+    /// declared.
     #[serde(default)]
     pub topics: Vec<TopicEntry>,
+    /// The agent's topic families, unexpanded: what `POLAR_SERVED_WORKLOADS` expands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topic_families: Vec<FamilyDocument>,
     #[serde(flatten)]
     pub document: Document,
     /// Every problem found, when the document was filled from a file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub problems: Vec<String>,
+}
+
+/// A topic family an agent declares, as the scaffold shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FamilyDocument {
+    pub pattern: String,
+    pub access: crate::topics::Access,
+    pub purpose: String,
+    /// The variable whose workloads it is expanded for.
+    pub over: String,
 }
 
 /// A runtime section an agent accepts, as the schema export shows it.
@@ -353,9 +381,35 @@ fn topic_facts<A: PolarAgent>() -> Facts<'static> {
     }
 }
 
-/// The whole set of topics `A` uses: what it declares and what is implied for it.
+/// The whole set of topics `A` uses: what it declares and what is implied for it. Its families serve no
+/// workload here; see [`topic_set_serving`].
 pub fn topic_set<A: PolarAgent>() -> TopicSet {
-    TopicSet::compute(&topic_facts::<A>(), A::TOPICS)
+    topic_set_serving::<A>(&[])
+}
+
+/// As [`topic_set`], with `A`'s families expanded for each of `workloads`.
+pub fn topic_set_serving<A: PolarAgent>(workloads: &[String]) -> TopicSet {
+    TopicSet::compute_with(&topic_facts::<A>(), A::TOPICS, A::TOPIC_FAMILIES, workloads)
+}
+
+/// The workloads `A` serves, from its configuration; none for an agent that declares no family.
+fn served_by<A: PolarAgent>(config: &polar_env::Config) -> Result<Vec<String>, String> {
+    if A::TOPIC_FAMILIES.is_empty() {
+        return Ok(Vec::new());
+    }
+    let text = config
+        .read(&crate::topics::SERVED_WORKLOADS)
+        .map_err(|e| e.to_string())?;
+    Ok(crate::topics::served_workloads(&text))
+}
+
+/// The variables `A` reads itself, and the builder's for its topic families when it declares any.
+fn own_sections<A: PolarAgent>() -> Vec<&'static Section> {
+    let mut sections: Vec<&'static Section> = A::SECTIONS.to_vec();
+    if !A::TOPIC_FAMILIES.is_empty() {
+        sections.push(&crate::topics::FAMILY_SECTION);
+    }
+    sections
 }
 
 /// The sections that apply to `A`, each with the capability that brings it in (none for the
@@ -381,7 +435,11 @@ fn sections_of<A: PolarAgent>() -> Vec<(Option<Capability>, &'static Section)> {
                 .map(|section| (Some(*capability), section)),
         );
     }
-    sections.extend(A::SECTIONS.iter().map(|section| (None, *section)));
+    sections.extend(
+        own_sections::<A>()
+            .into_iter()
+            .map(|section| (None, section)),
+    );
     sections
 }
 
@@ -433,6 +491,15 @@ pub fn scaffold_document<A: PolarAgent>() -> AgentDocument {
             })
             .collect(),
         topics: topic_set::<A>().entries(),
+        topic_families: A::TOPIC_FAMILIES
+            .iter()
+            .map(|f| FamilyDocument {
+                pattern: f.pattern.to_string(),
+                access: f.access,
+                purpose: f.purpose.to_string(),
+                over: crate::topics::SERVED_WORKLOADS.name().to_string(),
+            })
+            .collect(),
         document: Document::scaffold(&tagged),
         problems: Vec::new(),
     }
@@ -471,6 +538,7 @@ fn surface_problems<A: PolarAgent>() -> Vec<String> {
     }
     problems.extend(crate::runtime::check_declarations(A::RUNTIME));
     problems.extend(crate::topics::problems(&topic_facts::<A>(), A::TOPICS));
+    problems.extend(crate::topics::family_problems(A::TOPIC_FAMILIES));
     if !A::RUNTIME.is_empty() && !A::CASSINI_CLIENT {
         problems.push(format!(
             "{} declares runtime sections but is not a Cassini client, so no document can reach it",
@@ -508,7 +576,7 @@ fn problems_of<A: PolarAgent>(loaded: &Loaded) -> Vec<String> {
     if let Err(error) = startup::prepare_from(
         &loaded.env,
         Source::File,
-        A::SECTIONS,
+        &own_sections::<A>(),
         &effective_of::<A>(loaded.env.var(crate::capability::PROVIDED_ENV).as_deref()),
         Some(A::SHUTDOWN_BUDGET),
     ) {
@@ -532,7 +600,11 @@ pub fn scaffold_json<A: PolarAgent>(
         for (_, section) in sections_of::<A>() {
             builder = builder.register(section);
         }
-        let report = builder.build().report();
+        let filled = builder.build();
+        let report = filled.report();
+        if let Ok(served) = served_by::<A>(&filled) {
+            document.topics = topic_set_serving::<A>(&served).entries();
+        }
 
         let written: std::collections::HashMap<&str, &DocValue> = loaded
             .document
@@ -854,16 +926,21 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
     // What the agent uses here: what it needs, and the optional capabilities the deployment
     // provides. A deployment that does not say runs the agent on its own.
     let used = effective_of::<A>(env.var(crate::capability::PROVIDED_ENV).as_deref());
-    let startup =
-        match startup::prepare_from(&*env, source, A::SECTIONS, &used, Some(A::SHUTDOWN_BUDGET)) {
-            Ok(startup) => startup,
-            Err(error) => {
-                for problem in error.problems() {
-                    eprintln!("ERROR: {problem}");
-                }
-                return 1;
+    let startup = match startup::prepare_from(
+        &*env,
+        source,
+        &own_sections::<A>(),
+        &used,
+        Some(A::SHUTDOWN_BUDGET),
+    ) {
+        Ok(startup) => startup,
+        Err(error) => {
+            for problem in error.problems() {
+                eprintln!("ERROR: {problem}");
             }
-        };
+            return 1;
+        }
+    };
     let bad_commands = surface_problems::<A>();
     if !bad_commands.is_empty() {
         for problem in &bad_commands {
@@ -871,7 +948,15 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
         }
         return 1;
     }
+    let served = match served_by::<A>(&startup.config) {
+        Ok(served) => served,
+        Err(error) => {
+            eprintln!("ERROR: {error}");
+            return 1;
+        }
+    };
     let configured = Configured {
+        topics: Arc::new(topic_set_serving::<A>(&served)),
         startup,
         optional_off: A::OPTIONAL
             .iter()
@@ -1002,6 +1087,23 @@ mod tests {
         const NEEDS: &'static [Capability] = &[Capability::Cassini];
         const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
         const CASSINI_CLIENT: bool = false;
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
+    /// One that serves other workloads, as the scheduler does.
+    struct Scheduling;
+
+    impl PolarAgent for Scheduling {
+        const NAME: &'static str = "scheduling";
+        const PURPOSE: &'static str = "Publishes each workload's configuration";
+        const NEEDS: &'static [Capability] = &[];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+        const TOPIC_FAMILIES: &'static [FamilyDecl] = &[FamilyDecl::publish(
+            "agent.{workload}.configuration",
+            "each workload's documents",
+        )];
         async fn start(_: Configured) -> Result<(), StartError> {
             Ok(())
         }
@@ -1243,6 +1345,90 @@ mod tests {
         ));
         // It is the set the builder computes, whole.
         assert_eq!(doc.topics, topic_set::<Example>().entries());
+    }
+
+    #[test]
+    fn a_family_is_declared_in_the_scaffold_and_read_from_its_own_variable() {
+        let doc = scaffold_document::<Scheduling>();
+        assert_eq!(doc.topic_families.len(), 1);
+        assert_eq!(
+            doc.topic_families[0].pattern,
+            "agent.{workload}.configuration"
+        );
+        assert_eq!(doc.topic_families[0].over, "POLAR_SERVED_WORKLOADS");
+        // Filled from nothing, it serves no workload, so nothing is expanded.
+        assert!(
+            doc.topics
+                .iter()
+                .all(|t| t.access != crate::topics::Access::Publish
+                    || !t.name.ends_with(".configuration"))
+        );
+        let variables = |doc: &AgentDocument| -> Vec<String> {
+            doc.document
+                .sections
+                .iter()
+                .flat_map(|s| s.variables.iter().map(|v| v.name.clone()))
+                .collect()
+        };
+        assert!(variables(&doc).contains(&"POLAR_SERVED_WORKLOADS".to_string()));
+        // An agent with no family does not read it.
+        assert!(
+            !variables(&scaffold_document::<Example>())
+                .contains(&"POLAR_SERVED_WORKLOADS".to_string())
+        );
+        assert!(declaration_problems::<Scheduling>().is_empty());
+    }
+
+    #[test]
+    fn filled_from_a_document_the_scaffold_expands_a_family_for_each_workload_served() {
+        let mut doc = scaffold_document::<Scheduling>();
+        let values: HashMap<&str, &str> = CASSINI_ENV
+            .iter()
+            .copied()
+            .chain([("POLAR_SERVED_WORKLOADS", "kube-observer,jira-observer")])
+            .collect();
+        for variable in doc
+            .document
+            .sections
+            .iter_mut()
+            .flat_map(|s| s.variables.iter_mut())
+        {
+            if let Some(value) = values.get(variable.name.as_str()) {
+                variable.value = Some(DocValue::Literal(value.to_string()));
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("polar-agent-{}-families", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+        let filled: AgentDocument = serde_json::from_str(
+            &scaffold_json::<Scheduling>(Some(&path), |_: &str| None).unwrap(),
+        )
+        .unwrap();
+        let expanded: Vec<(String, String)> = filled
+            .topics
+            .iter()
+            .filter_map(|t| match &t.origin {
+                crate::topics::Origin::Family { workload, .. } => {
+                    Some((t.name.clone(), workload.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            expanded,
+            [
+                (
+                    "agent.jira-observer.configuration".to_string(),
+                    "jira-observer".to_string()
+                ),
+                (
+                    "agent.kube-observer.configuration".to_string(),
+                    "kube-observer".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]

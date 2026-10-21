@@ -27,6 +27,7 @@
 //! certificates take it from the scaffold, and the agent's client refuses anything outside it. Every topic
 //! is an exact name.
 
+use polar_env::{Defaulted, Described, Section};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -72,6 +73,73 @@ impl TopicDecl {
             purpose,
         }
     }
+}
+
+/// Where a family's workload goes in its pattern.
+pub const WORKLOAD_SLOT: &str = "{workload}";
+
+/// A topic an agent uses once for each workload it serves (the scheduler publishes each workload's configuration):
+/// `pattern` holds [`WORKLOAD_SLOT`] once, and the builder expands it into one exact name per workload in
+/// [`SERVED_WORKLOADS`], so no pattern reaches the set, the certificates or policy (docs/architecture/topics.md,
+/// "Families").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FamilyDecl {
+    pub pattern: &'static str,
+    pub access: Access,
+    pub purpose: &'static str,
+}
+
+impl FamilyDecl {
+    pub const fn publish(pattern: &'static str, purpose: &'static str) -> Self {
+        Self {
+            pattern,
+            access: Access::Publish,
+            purpose,
+        }
+    }
+
+    pub const fn subscribe(pattern: &'static str, purpose: &'static str) -> Self {
+        Self {
+            pattern,
+            access: Access::Subscribe,
+            purpose,
+        }
+    }
+
+    /// The family's topic for `workload`.
+    pub fn topic_for(&self, workload: &str) -> String {
+        self.pattern.replacen(WORKLOAD_SLOT, workload, 1)
+    }
+}
+
+/// The workloads an agent with a family serves, comma-separated: the render writes the catalog's workloads here.
+pub static SERVED_WORKLOADS: Defaulted<String> = Defaulted::text(
+    "POLAR_SERVED_WORKLOADS",
+    "the workloads this agent serves, comma-separated, from the catalog: each of its topic families is expanded \
+     into one exact topic per workload (docs/architecture/topics.md, \"Families\")",
+    "",
+);
+
+static FAMILY_VARIABLES: &[&dyn Described] = &[&SERVED_WORKLOADS];
+
+/// The builder's section for an agent that declares a topic family; an agent with none does not have it.
+pub static FAMILY_SECTION: Section = Section {
+    name: "topic-families",
+    vars: FAMILY_VARIABLES,
+    relations: |_| Vec::new(),
+};
+
+/// The workloads named in `text` ([`SERVED_WORKLOADS`]'s value): each once, in order, without blanks.
+pub fn served_workloads(text: &str) -> Vec<String> {
+    let mut workloads: Vec<String> = text
+        .split(',')
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect();
+    workloads.sort();
+    workloads.dedup();
+    workloads
 }
 
 /// Why a topic implied for an agent is in its set: each rule is a fact about the agent, and these are all
@@ -178,6 +246,12 @@ pub fn rules_for(facts: &Facts) -> Vec<Rule> {
 pub enum Origin {
     /// The agent declared it, for this purpose.
     Declared { purpose: String },
+    /// One of the agent's families, expanded for one workload it serves.
+    Family {
+        pattern: String,
+        workload: String,
+        purpose: String,
+    },
     /// A rule implied it.
     Implied { rule: Rule, why: String },
 }
@@ -201,6 +275,17 @@ impl TopicSet {
     /// The set for an agent with these facts that declares `declared`. A topic both declared and implied
     /// is implied (and its declaration a problem, see [`problems`]).
     pub fn compute(facts: &Facts, declared: &[TopicDecl]) -> Self {
+        Self::compute_with(facts, declared, &[], &[])
+    }
+
+    /// As [`compute`](Self::compute), with the agent's families expanded for each of `workloads`. A family
+    /// topic that is also declared is declared, and one that is implied is implied.
+    pub fn compute_with(
+        facts: &Facts,
+        declared: &[TopicDecl],
+        families: &[FamilyDecl],
+        workloads: &[String],
+    ) -> Self {
         let mut entries = BTreeMap::new();
         for decl in declared {
             entries
@@ -208,6 +293,17 @@ impl TopicSet {
                 .or_insert_with(|| Origin::Declared {
                     purpose: decl.purpose.to_string(),
                 });
+        }
+        for family in families {
+            for workload in workloads {
+                entries
+                    .entry((family.topic_for(workload), family.access))
+                    .or_insert_with(|| Origin::Family {
+                        pattern: family.pattern.to_string(),
+                        workload: workload.clone(),
+                        purpose: family.purpose.to_string(),
+                    });
+            }
         }
         for rule in rules_for(facts) {
             for key in implied_by(rule, facts.name) {
@@ -246,6 +342,35 @@ impl TopicSet {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+/// What is wrong with an agent's families: a pattern without exactly one workload slot, one with no purpose, or
+/// one declared twice the same way.
+pub fn family_problems(families: &[FamilyDecl]) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for family in families {
+        let what = format!(
+            "the topic family `{}` ({})",
+            family.pattern,
+            family.access.as_str()
+        );
+        if family.pattern.matches(WORKLOAD_SLOT).count() != 1 {
+            problems.push(format!("{what} must hold {WORKLOAD_SLOT} exactly once"));
+        }
+        if family.pattern.contains(char::is_whitespace) {
+            problems.push(format!("{what} is not a topic name"));
+        }
+        if family.purpose.trim().is_empty() {
+            problems.push(format!(
+                "{what} has no purpose: say what the agent uses it for"
+            ));
+        }
+        if !seen.insert((family.pattern, family.access)) {
+            problems.push(format!("{what} is declared twice"));
+        }
+    }
+    problems
 }
 
 /// What is wrong with an agent's declarations: an empty or padded name, a topic declared twice the same
@@ -397,6 +522,58 @@ mod tests {
         assert!(problems(&facts, DECLARED).is_empty());
     }
 
+    const FAMILY: FamilyDecl = FamilyDecl::publish(
+        "agent.{workload}.configuration",
+        "each workload's documents",
+    );
+
+    #[test]
+    fn a_family_is_one_exact_topic_for_each_workload_it_serves() {
+        let workloads = served_workloads("kube-observer, jira-observer,,kube-observer ");
+        assert_eq!(workloads, ["jira-observer", "kube-observer"]);
+        let set = TopicSet::compute_with(&agent("polar-scheduler"), &[], &[FAMILY], &workloads);
+        assert!(set.allows("agent.kube-observer.configuration", Access::Publish));
+        assert!(set.allows("agent.jira-observer.configuration", Access::Publish));
+        assert!(!set.allows("agent.git-repo-observer.configuration", Access::Publish));
+        // No pattern reaches the set.
+        assert!(
+            set.entries()
+                .iter()
+                .all(|e| !e.name.contains(WORKLOAD_SLOT))
+        );
+        // Serving no workload, the family adds nothing.
+        assert_eq!(
+            TopicSet::compute_with(&agent("polar-scheduler"), &[], &[FAMILY], &[]),
+            TopicSet::compute(&agent("polar-scheduler"), &[])
+        );
+    }
+
+    #[test]
+    fn a_family_that_is_wrong_is_a_problem() {
+        let said = family_problems(&[
+            FamilyDecl::publish("agent.configuration", "no slot"),
+            FamilyDecl::publish("{workload}.{workload}", "two slots"),
+            FamilyDecl::publish("agent.{workload}.x", ""),
+            FAMILY,
+            FAMILY,
+        ])
+        .join("\n");
+        assert!(
+            said.contains("`agent.configuration` (publish) must hold"),
+            "{said}"
+        );
+        assert!(
+            said.contains("`{workload}.{workload}` (publish) must hold"),
+            "{said}"
+        );
+        assert!(
+            said.contains("`agent.{workload}.x` (publish) has no purpose"),
+            "{said}"
+        );
+        assert!(said.contains("is declared twice"), "{said}");
+        assert!(family_problems(&[FAMILY]).is_empty());
+    }
+
     fn topic() -> impl Strategy<Value = String> {
         "[a-z][a-z0-9.:-]{0,24}"
     }
@@ -453,6 +630,32 @@ mod tests {
                 TopicSet::compute(&facts, &declared).entries(),
                 TopicSet::compute(&facts, &shuffled).entries()
             );
+        }
+
+        /// A family is expanded for every workload served and for nothing else, whatever order the workloads
+        /// are named in and however often.
+        #[test]
+        fn a_family_expands_for_exactly_the_workloads_served(
+            workloads in prop::collection::vec("[a-z][a-z0-9-]{0,12}", 0..8),
+            seed in any::<u64>(),
+        ) {
+            let facts = agent("polar-scheduler");
+            let text = workloads.join(",");
+            let mut shuffled = workloads.clone();
+            shuffled.reverse();
+            if seed % 2 == 0 { shuffled.extend(workloads.iter().cloned()); }
+            let a = TopicSet::compute_with(&facts, &[], &[FAMILY], &served_workloads(&text));
+            let b = TopicSet::compute_with(&facts, &[], &[FAMILY], &served_workloads(&shuffled.join(", ")));
+            prop_assert_eq!(a.entries(), b.entries());
+            let family: std::collections::BTreeSet<String> = a
+                .entries()
+                .into_iter()
+                .filter(|e| matches!(e.origin, Origin::Family { .. }))
+                .map(|e| e.name)
+                .collect();
+            let expected: std::collections::BTreeSet<String> =
+                workloads.iter().map(|w| FAMILY.topic_for(w)).collect();
+            prop_assert_eq!(family, expected);
         }
 
         /// The set is exactly the declared topics and those the agent's rules imply: nothing is lost and

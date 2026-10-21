@@ -67,6 +67,18 @@ A service that is not a Cassini client (the broker) has no topics. The set is or
 access; it does not depend on the order of the declarations, and it is exactly the declared and the implied topics
 (property tests in `topics.rs`).
 
+## Families
+
+An agent that uses a topic once for each workload it serves declares a family (`PolarAgent::TOPIC_FAMILIES`): a pattern
+with `{workload}` once, its access and its purpose. The scheduler pair declares the one family there is,
+`agent.{workload}.configuration` (the processor forwards each workload's documents on it, the observer replays them). The
+render gives such an agent the workloads its target runs, comma-separated, in `POLAR_SERVED_WORKLOADS`
+(`infra/resolve.nu`, the catalog's workloads with `config: "document"`, less those the target disables), and the
+builder expands the family into one exact topic per workload when it computes the set (`TopicSet::compute_with`). No
+pattern reaches the set, the certificates or policy (`policy-enforcement.md`, "Topics are exact names" and open point A).
+The scaffold shows the family unexpanded under `topic_families`, and, filled from a document (`--scaffold --config`), its
+topics expanded for the workloads that document names, each with `from: family` and its workload. Built 2026-10-21.
+
 ## Every builder agent
 
 | Topic | Publishes | Subscribes | Carries |

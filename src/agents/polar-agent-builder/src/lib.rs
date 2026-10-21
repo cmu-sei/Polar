@@ -984,6 +984,7 @@ mod tests {
             self_test: false,
             commands: &BOTH,
             runtime: &[],
+            topics: Default::default(),
             hooks: crate::agent::Hooks::real(),
         };
         let error = AgentBuilder::new(idle, "no-handlers")
@@ -1023,6 +1024,7 @@ mod tests {
             self_test: false,
             commands: &[],
             runtime: &[],
+            topics: Default::default(),
             hooks: crate::agent::Hooks::real(),
         };
         let error = AgentBuilder::new(idle, "kube-observer")
@@ -1052,6 +1054,7 @@ mod tests {
             self_test: false,
             commands: &[],
             runtime: &[],
+            topics: Default::default(),
             hooks: crate::agent::Hooks::real(),
         };
 

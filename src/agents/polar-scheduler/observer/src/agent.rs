@@ -22,7 +22,9 @@
 */
 
 use crate::supervisor::{SERVICE_NAME, SHUTDOWN_BUDGET, SchedulerObserverSupervisor};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
+use polar_agent_builder::{
+    Capability, Configured, PolarAgent, StartError, TopicDecl, topics::FamilyDecl,
+};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
@@ -48,6 +50,10 @@ impl PolarAgent for SchedulerObserver {
             "each schedule created, changed or deleted in the checkout",
         ),
     ];
+    const TOPIC_FAMILIES: &'static [FamilyDecl] = &[FamilyDecl::publish(
+        "agent.{workload}.configuration",
+        "the documents held for the workload, replayed when it asks",
+    )];
     const SECTIONS: &'static [&'static Section] = &[&crate::settings::SECTION];
     const HELP: Option<&'static str> = Some(
         "The observer clones the schedules repository from its remote, watches the checkout, \
@@ -79,4 +85,17 @@ mod tests {
     use super::*;
 
     polar_agent_builder::polar_agent_tests!(SchedulerObserver);
+
+    #[test]
+    fn its_family_is_the_topic_the_code_publishes_each_workloads_configuration_on() {
+        for workload in ["kube-observer", "credentials-agent", "polar-scheduler"] {
+            for family in SchedulerObserver::TOPIC_FAMILIES {
+                assert_eq!(
+                    family.topic_for(workload),
+                    polar_scheduler_common::configuration_topic(workload)
+                );
+            }
+        }
+        assert_eq!(SchedulerObserver::TOPIC_FAMILIES.len(), 1);
+    }
 }

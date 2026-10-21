@@ -435,6 +435,14 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         $env_list = ($env_list | append (env_entry $e $vars "kind" $name))
     }
 
+    # An agent with a topic family (the scheduler's agent.{workload}.configuration) is given the workloads this
+    # target runs, and its builder expands the family into one exact topic for each; nothing here recomputes it
+    # (docs/architecture/topics.md, "Families").
+    if ($scaffold.topic_families? | default [] | is-not-empty) {
+        let served = (all_workloads $target | where {|w| ($w.config? | default "env") == "document" } | get name | sort | str join ",")
+        $env_list = ($env_list | append (env_entry { name: "POLAR_SERVED_WORKLOADS", value: $served } $vars "catalog" $name))
+    }
+
     # The agent reads one document, not an environment: the entries above are written into the
     # variables they name, and the pod is given the document and the secrets it refers to.
     let entries = $env_list
