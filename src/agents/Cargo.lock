@@ -5864,6 +5864,7 @@ dependencies = [
  "clap",
  "polar-env",
  "polar-escrow",
+ "polar-policy",
  "polar-signing",
  "rand 0.10.3",
  "reqwest 0.12.28",

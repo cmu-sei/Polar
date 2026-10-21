@@ -76,6 +76,10 @@ pub enum Decision {
     NotDetermined,
 }
 
+/// The type a scaffold gives a field that holds Cedar policy (the credentials agent's `policy` section): `polar-sign`
+/// checks such a field with [`validate_source`] before it signs.
+pub const POLICY_TEXT: &str = "Cedar policy text";
+
 /// The most policy text the agents will take: more than any rule set should need, and a bound on what a
 /// signed document can ask every agent to parse.
 pub const MAX_POLICY_BYTES: usize = 256 * 1024;

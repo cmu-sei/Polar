@@ -162,6 +162,24 @@ pub fn runtime_payload(agent: &str, section: &str, version: u64, id: &str, body:
 
 /// A body as given on a command line or in a file: JSON, and an object, since a section's body is a set of
 /// named fields.
+/// The runtime section that carries Cedar policy (the credentials agent's), whose `source` is checked before it is
+/// signed, whether or not the agent's scaffold is at hand.
+pub const POLICY_SECTION: &str = "policy";
+
+/// What is wrong with the body of a runtime document for `section`, that would make every agent refuse it: for the
+/// policy section, a `source` that is not a policy Polar can load.
+pub fn runtime_problems(section: &str, body: &Value) -> Result<(), String> {
+    if section != POLICY_SECTION {
+        return Ok(());
+    }
+    let source = body
+        .get("source")
+        .and_then(Value::as_str)
+        .ok_or("the policy section's body must hold the policy text in `source`")?;
+    polar_policy::validate_source(source)
+        .map_err(|why| format!("`source` is not a policy Polar can load: {why}"))
+}
+
 pub fn parse_body(text: &str) -> Result<Value, String> {
     let value: Value =
         serde_json::from_str(text).map_err(|e| format!("the body is not JSON: {e}"))?;
@@ -427,6 +445,22 @@ mod tests {
             6,
             "no field the receiver does not know"
         );
+    }
+
+    #[test]
+    fn a_policy_is_checked_before_it_is_signed_and_other_sections_are_not() {
+        let seed = include_str!("../../../../infra/seeds/signed/policy.cedar");
+        assert!(runtime_problems("policy", &json!({ "source": seed })).is_ok());
+        let wrong =
+            json!({ "source": r#"permit (principal, action == Action::"reap", resource);"# });
+        assert!(
+            runtime_problems("policy", &wrong)
+                .unwrap_err()
+                .contains("schema")
+        );
+        assert!(runtime_problems("policy", &json!({ "rules": seed })).is_err());
+        // Another section's body is the agent's to judge.
+        assert!(runtime_problems("repositories", &wrong).is_ok());
     }
 
     #[test]

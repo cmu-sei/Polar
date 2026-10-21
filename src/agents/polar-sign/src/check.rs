@@ -88,6 +88,15 @@ fn check_object(fields: &[(String, Field)], value: &Value, path: &str, problems:
             } => {
                 if *secret && !value.is_string() {
                     problems.push(format!("`{at}` is a secret and must be text"));
+                } else if type_name == polar_policy::POLICY_TEXT {
+                    // Policy is checked as the agents will load it, so nothing is signed that every agent refuses.
+                    match value.as_str().map(polar_policy::validate_source) {
+                        None => problems.push(format!("`{at}` must be the policy text")),
+                        Some(Err(why)) => {
+                            problems.push(format!("`{at}` is not a policy Polar can load: {why}"))
+                        }
+                        Some(Ok(())) => {}
+                    }
                 } else if let Some(kind) = kind_of(type_name)
                     && !is_kind(kind, value)
                 {
@@ -243,9 +252,29 @@ mod tests {
 
     #[test]
     fn a_type_that_promises_no_kind_accepts_any_value() {
-        let d = json!({"source": {"type": "Cedar policy text", "required": true}});
+        let d = json!({"note": {"type": "free form", "required": true}});
         for value in [json!("x"), json!(1), json!({"a": 1})] {
-            assert!(check_body(&d, &json!({"source": value})).is_empty());
+            assert!(check_body(&d, &json!({"note": value})).is_empty());
+        }
+    }
+
+    #[test]
+    fn policy_text_is_checked_as_the_agents_will_load_it() {
+        let d = json!({"source": {"type": polar_policy::POLICY_TEXT, "required": true}});
+        let seed = include_str!("../../../../infra/seeds/signed/policy.cedar");
+        assert!(check_body(&d, &json!({"source": seed})).is_empty());
+        for (value, why) in [
+            (json!("this is not Cedar"), "not a policy Polar can load"),
+            (
+                json!(
+                    r#"permit (principal, action == Action::"retrieve", resource) when { resource.kind == "token" };"#
+                ),
+                "schema",
+            ),
+            (json!(7), "must be the policy text"),
+        ] {
+            let p = check_body(&d, &json!({"source": value})).join("; ");
+            assert!(p.contains(why), "{p}");
         }
     }
 

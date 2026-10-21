@@ -469,6 +469,8 @@ fn main() -> Result<()> {
                 _ => bail!("give the body with --body or --body-file"),
             };
             let body = parse_body(&text).map_err(anyhow::Error::msg)?;
+            // Nothing is signed that every agent would refuse.
+            polar_sign::runtime_problems(&section, &body).map_err(anyhow::Error::msg)?;
             let id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let payload = runtime_payload(&agent, &section, version, &id, body);
             let identity = load_identity(&default_dir(dir)?, &user).map_err(anyhow::Error::msg)?;

@@ -184,6 +184,12 @@ mod tests {
     }
 
     #[test]
+    fn the_policy_s_text_is_described_as_policy_text_so_polar_sign_checks_it() {
+        let description: serde_json::Value = serde_json::from_str(POLICY.body).unwrap();
+        assert_eq!(description["source"]["type"], polar_policy::POLICY_TEXT);
+    }
+
+    #[test]
     fn a_policy_body_has_one_field_and_it_is_text() {
         for body in [
             json!({}),
