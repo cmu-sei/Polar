@@ -34,7 +34,7 @@ const JIRA_PROCESSOR_SUPERVISOR: &str = "jira.supervisor.processor";
 pub struct JiraProcessor;
 
 impl PolarAgent for JiraProcessor {
-    const NAME: &'static str = "jira-processor";
+    const NAME: &'static str = crate::BROKER_CLIENT_NAME;
     const PURPOSE: &'static str =
         "Writes the Jira projects, groups, users and issues the observer publishes into the graph";
     const NEEDS: &'static [Capability] = &[Capability::GraphWrite];

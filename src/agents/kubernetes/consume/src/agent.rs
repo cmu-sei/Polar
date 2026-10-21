@@ -31,7 +31,7 @@ use std::time::Duration;
 pub struct KubeConsumer;
 
 impl PolarAgent for KubeConsumer {
-    const NAME: &'static str = "kube-consumer";
+    const NAME: &'static str = crate::BROKER_CLIENT_NAME;
     const PURPOSE: &'static str =
         "Projects the Kubernetes resources the observer publishes into the Polar knowledge graph";
     const NEEDS: &'static [Capability] = &[Capability::GraphWrite, Capability::Encryption];

@@ -30,13 +30,10 @@ use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
 use ractor::Actor;
 use std::time::Duration;
 
-/// What the agent calls itself: the name a configuration or a command is addressed to.
-pub const AGENT_NAME: &str = "git-repo-processor";
-
 pub struct GitProcessor;
 
 impl PolarAgent for GitProcessor {
-    const NAME: &'static str = AGENT_NAME;
+    const NAME: &'static str = SERVICE_NAME;
     const PURPOSE: &'static str =
         "Records the commits and ref updates the git observer publishes in the graph";
     const NEEDS: &'static [Capability] = &[Capability::GraphWrite];

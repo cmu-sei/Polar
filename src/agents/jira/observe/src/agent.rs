@@ -40,7 +40,7 @@ const BASE_INTERVAL_SECS: u64 = 1800;
 pub struct JiraObserver;
 
 impl PolarAgent for JiraObserver {
-    const NAME: &'static str = "jira-observer";
+    const NAME: &'static str = crate::BROKER_CLIENT_NAME;
     const PURPOSE: &'static str =
         "Polls a Jira site for projects, groups, users and issues and publishes them to Cassini";
     const NEEDS: &'static [polar_agent_builder::Capability] = &[];

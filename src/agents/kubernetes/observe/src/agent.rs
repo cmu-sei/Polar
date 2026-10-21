@@ -31,7 +31,7 @@ use std::time::Duration;
 pub struct KubeObserver;
 
 impl PolarAgent for KubeObserver {
-    const NAME: &'static str = "kube-observer";
+    const NAME: &'static str = crate::TCP_CLIENT_NAME;
     const PURPOSE: &'static str =
         "Watches the Kubernetes API and publishes what it sees to Cassini";
     const NEEDS: &'static [Capability] = &[Capability::KubeApiRead];

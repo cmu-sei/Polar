@@ -27,4 +27,5 @@ pub mod agent;
 pub mod ops;
 pub mod supervisor;
 
+/// What the agent calls itself: its workload name, the name a configuration or a command is addressed to.
 pub const SERVICE_NAME: &str = "git-repo-processor";

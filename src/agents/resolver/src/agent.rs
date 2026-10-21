@@ -35,7 +35,7 @@ use std::time::Duration;
 pub struct OciResolver;
 
 impl PolarAgent for OciResolver {
-    const NAME: &'static str = "oci-resolver";
+    const NAME: &'static str = crate::BROKER_CLIENT_NAME;
     const PURPOSE: &'static str = "Follows image references other agents discover to their registry and publishes the verified manifest";
     const NEEDS: &'static [Capability] = &[];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
