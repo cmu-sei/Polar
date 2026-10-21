@@ -66,7 +66,15 @@ code today, and what stands between the two. The detail of each part is in the d
   `AgentBuilder`, so its topics are `agent.<workload>.*` and its signed documents are addressed to `<workload>`; the
   builder enforces it at start. An identity maps to its agent mechanically, `<workload>.<namespace>.serviceaccount.<domain>`
   to `<workload>`, so the broker, Cedar and the floor join a certificate to an agent's topics without a lookup table. The
-  agents that pass another name today (kube-observer, kube-consumer, jira, oci-resolver; `topics.md`) change.
+  agents that pass another name today change (`topics.md`).
+  *Refined 2026-10-21:* the name is a constant in each agent's code, one binary per workload: every image runs as
+  exactly one workload, and its constant is that workload's name. The builder checks at start that the name is its own
+  certificate's identity (`<name>.<namespace>.serviceaccount.<domain>`) and refuses to start if not. The agents whose
+  constant differs are corrected: kube-observer, kube-consumer, jira-observer, jira-processor, oci-registry-resolver,
+  git-repo-processor, polar-scheduler, and the credentials agent (`credentials-agent-consumer` becomes
+  `credentials-agent`, and its signed documents are addressed to that). The secret harness, test code that ran one image
+  as two workloads, is built twice (`secret-harness-owner`, `secret-harness-intruder`), and is no longer deployed by the
+  shipped targets: it is added to a target when it is what is being tested.
 - **An agent declares its topics, and some are implied (2026-10-21, gap 1).** A `TOPICS` constant on `PolarAgent`, beside
   `NEEDS` and `SECTIONS`, lists each topic the agent uses, with its access (publish, subscribe) and a purpose. The topics
   every agent uses because of the builder (its own configuration and command topics, self-test, the authority topics,
