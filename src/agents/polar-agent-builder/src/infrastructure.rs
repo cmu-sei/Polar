@@ -1492,8 +1492,8 @@ mod tests {
                 facts: Default::default(),
                 requester_identity: "alice".to_string(),
                 requester_certificate_pem: None,
-                action: r#"Action::"anything""#.to_string(),
-                resource: r#"Thing::"x""#.to_string(),
+                action: r#"Action::"run-command""#.to_string(),
+                resource: r#"Command::"a/b""#.to_string(),
                 reply,
             }
         })

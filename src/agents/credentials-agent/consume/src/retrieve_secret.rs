@@ -104,6 +104,7 @@ impl RetrieveSecretHandler {
                 .as_ref()
                 .map(|s| s.labels.clone())
                 .unwrap_or_default(),
+            topic: None,
         };
 
         // No decision (the policy is not running yet, or failed) is never a grant.
@@ -720,7 +721,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_rule_on_a_stored_secrets_label_decides_whether_it_is_retrieved() {
-        let rule = r#"permit(principal, action == Action::"retrieve", resource) when { resource has kind && resource.kind == "token" };"#;
+        let rule = r#"permit(principal, action == Action::"retrieve", resource) when { resource.hasTag("kind") && resource.getTag("kind") == "token" };"#;
         let found = retrieving_under(rule, "someone-else/github", &[("kind", "token")]).await;
         assert!(
             matches!(found, RetrieveSecretReply::Found { .. }),

@@ -151,11 +151,11 @@ Written out in the conversation; the ones this design supports first:
 ```cedar
 // An agent may retrieve what it escrowed itself.
 permit (principal, action == Action::"retrieve", resource)
-when { resource.owner == principal };
+when { resource has owner && resource.owner == principal };
 
-// A group may retrieve one kind of secret.
+// A group may retrieve one kind of secret (a secret's labels are its tags).
 permit (principal in Group::"credential-managers", action == Action::"retrieve", resource)
-when { resource has kind && resource.kind == "git-token" };
+when { resource.hasTag("kind") && resource.getTag("kind") == "git-token" };
 
 // Incident freeze: overrides every permit.
 forbid (principal, action, resource)
@@ -166,7 +166,9 @@ permit (principal in Group::"contractors", action == Action::"retrieve", resourc
 when { context.now_secs < 1767225600 };
 ```
 
-Cedar denies by default, and any matching `forbid` beats any `permit`. A loaded policy with no matching `permit`
+These speak Polar's schema (`polar-policy/src/schema.rs`, `policy-enforcement.md`, "Decisions"), which a policy is
+checked against when it arrives and before it is signed: an optional attribute is read after `has`, and a label with
+`hasTag` and `getTag`. Cedar denies by default, and any matching `forbid` beats any `permit`. A loaded policy with no matching `permit`
 is a denial. **No policy loaded at all is a failure** (so a client knows to retry), and says nothing about
 which secrets exist.
 
@@ -180,7 +182,7 @@ With no policy, nothing is retrievable. The first document is therefore the smal
 repository next to the credentials agent's configuration item:
 
 ```cedar
-permit (principal, action == Action::"retrieve", resource) when { resource.owner == principal };
+permit (principal, action == Action::"retrieve", resource) when { resource has owner && resource.owner == principal };
 forbid (principal, action, resource) when { resource has frozen && resource.frozen };
 ```
 

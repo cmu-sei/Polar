@@ -88,6 +88,7 @@ pub(crate) async fn ask(
     identity: &str,
     topic: &str,
     access: Access,
+    facts: polar_policy::TopicFacts,
 ) -> PolicySaid {
     if lookup.actor().is_none() {
         return PolicySaid::NotRunning;
@@ -100,7 +101,16 @@ pub(crate) async fn ask(
         ));
     };
     match lookup
-        .decide(identity, None, &action, &resource, Default::default())
+        .decide(
+            identity,
+            None,
+            &action,
+            &resource,
+            polar_policy::Facts {
+                topic: Some(facts),
+                ..Default::default()
+            },
+        )
         .await
     {
         Ok(decision) => PolicySaid::Decided(decision),
@@ -121,7 +131,14 @@ pub(crate) fn gate(service: &str, identity: String, set: Arc<TopicSet>) -> Topic
                 TopicUse::Publish => Access::Publish,
                 TopicUse::Subscribe => Access::Subscribe,
             };
-            let said = ask(&lookup, &identity, &topic, access).await;
+            let said = ask(
+                &lookup,
+                &identity,
+                &topic,
+                access,
+                set.facts(&topic, access),
+            )
+            .await;
             rule(&said, set.allows(&topic, access), &topic, access)
         })
     })
@@ -246,6 +263,30 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn policy_is_told_whether_the_topic_is_the_agent_s_own() {
+        // A policy can keep every agent to what it declared, whatever else it permits.
+        let service = format!("gate-facts-{}", rand::random::<u64>());
+        policy_for(
+            &service,
+            r#"forbid (principal, action == Action::"publish", resource) unless { context.declared || context.implied };"#,
+        )
+        .await;
+        assert!(
+            uses(
+                &service,
+                TopicUse::Publish,
+                "kubernetes.cluster.consumer.Pod"
+            )
+            .await
+            .is_ok()
+        );
+        let said = uses(&service, TopicUse::Publish, "somebody.elses.topic")
+            .await
+            .unwrap_err();
+        assert!(said.contains("policy forbids"), "{said}");
     }
 
     #[tokio::test]

@@ -57,6 +57,8 @@
 use cedar_policy::{Authorizer, Context, Entities, EntityUid, PolicySet, Request};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, async_trait};
 
+pub mod schema;
+
 /// What the rules say about a request, which is one of three things, not two.
 ///
 /// Cedar denies by default, so "no rule mentions this" and "a rule forbids this" both come back as a denial
@@ -78,19 +80,29 @@ pub enum Decision {
 /// signed document can ask every agent to parse.
 pub const MAX_POLICY_BYTES: usize = 256 * 1024;
 
-/// Whether `source` is Cedar policy this crate would load, with the reason if not. Pure: an agent checks a
-/// policy document with it when it arrives, before it is signed and sent to every other agent.
+/// Whether `source` is Cedar policy this crate would load, with the reason if not: it parses, and it speaks the
+/// schema ([`schema`]), strictly. Pure: an agent checks a policy document with it when it arrives, and `polar-sign`
+/// before it is signed and sent to every other agent.
 pub fn validate_source(source: &str) -> Result<(), String> {
+    load_source(source).map(|_| ())
+}
+
+/// The policy in `source`, parsed and checked against the schema.
+fn load_source(source: &str) -> Result<PolicySet, String> {
     if source.len() > MAX_POLICY_BYTES {
         return Err(format!(
             "the policy is too large: {} bytes, and at most {MAX_POLICY_BYTES} are taken",
             source.len()
         ));
     }
-    source
-        .parse::<PolicySet>()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    let policies = source.parse::<PolicySet>().map_err(|e| e.to_string())?;
+    schema::validate(&policies).map_err(|problems| {
+        format!(
+            "the policy does not speak Polar's schema: {}",
+            problems.join("; ")
+        )
+    })?;
+    Ok(policies)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -147,14 +159,20 @@ pub struct Facts {
     /// asker computes it from the name; it is absent when the name has no namespace, and a rule on it then cannot
     /// be satisfied.
     pub namespace: Option<String>,
-    /// The resource's labels, each a string attribute under its own name (`resource.kind`). A label cannot take
-    /// the name of a fact above or of `frozen`; such a request is refused.
+    /// The resource's labels, as its tags (`resource.hasTag("kind") && resource.getTag("kind") == "token"`). Tags
+    /// are apart from attributes, so a label can never take the place of a fact above.
     pub labels: std::collections::BTreeMap<String, String>,
+    /// For a topic (`publish`, `subscribe`): whether it is in the requester's declared or implied set.
+    pub topic: Option<TopicFacts>,
 }
 
-/// Attributes of a resource that the evaluator gives it, or a policy document may add, and that a label
-/// therefore cannot take.
-const RESERVED_RESOURCE_ATTRIBUTES: [&str; 3] = ["owner", "namespace", "frozen"];
+/// Whether a topic is in the requester's own set, and how (docs/architecture/topics.md): `context.declared` (family
+/// topics included) and `context.implied`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TopicFacts {
+    pub declared: bool,
+    pub implied: bool,
+}
 
 pub struct PolicyActorArgs {
     pub permissions_actor: ActorRef<polar_permissions::PermissionsMessage>,
@@ -197,9 +215,10 @@ impl Actor for PolicyActor {
                 policy_source,
                 reply,
             } => {
-                let result = policy_source
-                    .parse::<PolicySet>()
-                    .map_err(|e| PolicyError::PolicyParse(e.to_string()))
+                // A policy that does not parse or does not speak the schema is refused whole, and the one in
+                // force stays.
+                let result = load_source(&policy_source)
+                    .map_err(PolicyError::PolicyParse)
                     .map(|parsed| {
                         state.policy_set = Some(parsed);
                     });
@@ -230,32 +249,6 @@ impl Actor for PolicyActor {
 }
 
 impl PolicyActor {
-    /// Converts a real, resolved `Permission` into its own, real
-    /// Cedar-compatible JSON value -- deliberately not via
-    /// `Permission`'s own, default Serde-derived shape, since that
-    /// would emit a bare JSON `null` for an absent `target`, which
-    /// Cedar's own entity-JSON parser genuinely, always rejects
-    /// (confirmed directly against cedar-policy-core's own, real
-    /// source: "JSON null, which is never valid"). `target` is
-    /// therefore omitted entirely when absent -- a real Cedar policy
-    /// can check for it with `has`, rather than ever receiving null.
-    fn permission_to_json(
-        permission: &cert_issuer_common::permission::Permission,
-    ) -> serde_json::Value {
-        let mut attrs = serde_json::Map::new();
-        attrs.insert(
-            "scope".to_string(),
-            serde_json::Value::String(format!("{:?}", permission.scope)),
-        );
-        if let Some(target) = &permission.target {
-            attrs.insert(
-                "target".to_string(),
-                serde_json::Value::String(target.clone()),
-            );
-        }
-        serde_json::Value::Object(attrs)
-    }
-
     /// The real, complete evaluation flow: resolve `requester_identity`'s
     /// own, real, authoritative permission set via this actor's own,
     /// required PermissionsActor, build that principal's own, real
@@ -301,32 +294,48 @@ impl PolicyActor {
             .map_err(|e| PolicyError::RequestConstruction(format!("resource: {e}")))?;
 
         // The principal is built from what PermissionsActor resolved and from nothing a caller said. Its
-        // groups are its parents, so a rule can say `principal in Group::"operators"`.
+        // groups and its capabilities are its parents, so a rule can say `principal in Group::"operators"` or
+        // `principal in Capability::"update-policy"`; its workload, when its identity is a workload's, is
+        // `principal.workload`.
+        let mut principal_attrs = serde_json::Map::new();
+        if let Some(workload) = cert_issuer_common::identity::workload_of(requester_identity) {
+            principal_attrs.insert(
+                "workload".to_string(),
+                serde_json::Value::String(workload.to_string()),
+            );
+        }
+        let parents: Vec<serde_json::Value> = principal
+            .groups
+            .iter()
+            .map(|g| serde_json::json!({ "type": "Group", "id": g }))
+            .chain(principal.capabilities.iter().map(|c| {
+                serde_json::json!({
+                    "type": "Capability",
+                    "id": c.to_san_string().trim_start_matches("c:"),
+                })
+            }))
+            .chain(principal.permissions.iter().map(|p| {
+                serde_json::json!({
+                    "type": "Permission",
+                    "id": p.to_san_string().trim_start_matches("p:"),
+                })
+            }))
+            .collect();
         let mut entities_json = vec![serde_json::json!({
             "uid": { "type": "Identity", "id": requester_identity },
-            "attrs": {
-                "permissions": principal.permissions.iter().map(Self::permission_to_json).collect::<Vec<_>>(),
-                "capabilities": principal.capabilities.iter()
-                    .map(|c| c.to_san_string().trim_start_matches("c:").to_string())
-                    .collect::<Vec<_>>(),
-            },
-            "parents": principal.groups.iter()
-                .map(|g| serde_json::json!({ "type": "Group", "id": g }))
-                .collect::<Vec<_>>()
+            "attrs": principal_attrs,
+            "parents": parents,
         })];
         // The resource, with the attributes its records give it. Built from the parsed id and not from the
         // text, like the principal. Only the attributes that exist are given, so a rule on one that does not
         // cannot be satisfied.
         if facts.owner.is_some() || facts.namespace.is_some() || !facts.labels.is_empty() {
             let mut attrs = serde_json::Map::new();
-            for (key, value) in &facts.labels {
-                if RESERVED_RESOURCE_ATTRIBUTES.contains(&key.as_str()) {
-                    return Err(PolicyError::RequestConstruction(format!(
-                        "a label cannot be named {key:?}: the evaluator gives the resource that attribute"
-                    )));
-                }
-                attrs.insert(key.clone(), serde_json::Value::String(value.clone()));
-            }
+            let tags: serde_json::Map<String, serde_json::Value> = facts
+                .labels
+                .iter()
+                .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+                .collect();
             if let Some(owner) = &facts.owner {
                 attrs.insert(
                     "owner".to_string(),
@@ -345,21 +354,35 @@ impl PolicyActor {
                     "id": resource_uid.id().unescaped(),
                 },
                 "attrs": attrs,
-                "parents": []
+                "parents": [],
+                "tags": tags,
             }));
         }
-        let entities = Entities::from_json_value(serde_json::Value::Array(entities_json), None)
-            .map_err(|e| PolicyError::RequestConstruction(format!("entities: {e}")))?;
+        let schema = schema::schema();
+        let entities =
+            Entities::from_json_value(serde_json::Value::Array(entities_json), Some(schema))
+                .map_err(|e| PolicyError::RequestConstruction(format!("entities: {e}")))?;
 
         // The time is this actor's own, never a caller's.
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let context = Context::from_json_value(serde_json::json!({ "now_secs": now_secs }), None)
+        let mut context = serde_json::json!({ "now_secs": now_secs });
+        if let Some(topic) = facts.topic {
+            context["declared"] = serde_json::Value::Bool(topic.declared);
+            context["implied"] = serde_json::Value::Bool(topic.implied);
+        }
+        let context = Context::from_json_value(context, Some((schema, &action_uid)))
             .map_err(|e| PolicyError::RequestConstruction(format!("context: {e}")))?;
-        let request = Request::new(principal_uid, action_uid, resource_uid, context, None)
-            .map_err(|e| PolicyError::RequestConstruction(e.to_string()))?;
+        let request = Request::new(
+            principal_uid,
+            action_uid,
+            resource_uid,
+            context,
+            Some(schema),
+        )
+        .map_err(|e| PolicyError::RequestConstruction(e.to_string()))?;
 
         let response = state
             .authorizer
@@ -398,7 +421,7 @@ mod tests {
     const REAL_POLICY: &str = r#"
         permit(
             principal == Identity::"kube-consumer",
-            action == Action::"decrypt",
+            action == Action::"retrieve",
             resource == Secret::"a-plaintext-env-var"
         );
     "#;
@@ -439,7 +462,7 @@ mod tests {
             facts: Default::default(),
             requester_identity: "kube-consumer".to_string(),
             requester_certificate_pem: None,
-            action: r#"Action::"decrypt""#.to_string(),
+            action: r#"Action::"retrieve""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
             reply,
         })
@@ -457,7 +480,7 @@ mod tests {
             facts: Default::default(),
             requester_identity: "some-other-agent".to_string(),
             requester_certificate_pem: None,
-            action: r#"Action::"decrypt""#.to_string(),
+            action: r#"Action::"retrieve""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
             reply,
         })
@@ -476,7 +499,7 @@ mod tests {
             facts: Default::default(),
             requester_identity: "kube-consumer".to_string(),
             requester_certificate_pem: None,
-            action: r#"Action::"decrypt""#.to_string(),
+            action: r#"Action::"retrieve""#.to_string(),
             resource: r#"Secret::"a-completely-different-secret""#.to_string(),
             reply,
         })
@@ -494,7 +517,7 @@ mod tests {
             facts: Default::default(),
             requester_identity: "kube-consumer".to_string(),
             requester_certificate_pem: None,
-            action: r#"Action::"decrypt""#.to_string(),
+            action: r#"Action::"retrieve""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
             reply,
         })
@@ -526,7 +549,7 @@ mod tests {
         let new_policy = r#"
             permit(
                 principal == Identity::"a-new-agent",
-                action == Action::"decrypt",
+                action == Action::"retrieve",
                 resource == Secret::"a-plaintext-env-var"
             );
         "#;
@@ -543,7 +566,7 @@ mod tests {
             facts: Default::default(),
             requester_identity: "kube-consumer".to_string(),
             requester_certificate_pem: None,
-            action: r#"Action::"decrypt""#.to_string(),
+            action: r#"Action::"retrieve""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
             reply,
         })
@@ -556,7 +579,7 @@ mod tests {
             facts: Default::default(),
             requester_identity: "a-new-agent".to_string(),
             requester_certificate_pem: None,
-            action: r#"Action::"decrypt""#.to_string(),
+            action: r#"Action::"retrieve""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
             reply,
         })
@@ -593,10 +616,10 @@ mod tests {
         let policy = r#"
             permit(
                 principal,
-                action == Action::"decrypt",
+                action == Action::"retrieve",
                 resource == Secret::"a-plaintext-env-var"
             ) when {
-                principal.permissions.contains({"scope": "ServiceToService"})
+                principal in Permission::"s2s"
             };
         "#;
         let result = ractor::call!(actor, |reply| PolicyMessage::UpdatePolicy {
@@ -610,7 +633,7 @@ mod tests {
             facts: Default::default(),
             requester_identity: "kube-consumer".to_string(),
             requester_certificate_pem: None,
-            action: r#"Action::"decrypt""#.to_string(),
+            action: r#"Action::"retrieve""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
             reply,
         })
@@ -625,7 +648,7 @@ mod tests {
             facts: Default::default(),
             requester_identity: "some-unrelated-agent".to_string(),
             requester_certificate_pem: None,
-            action: r#"Action::"decrypt""#.to_string(),
+            action: r#"Action::"retrieve""#.to_string(),
             resource: r#"Secret::"a-plaintext-env-var""#.to_string(),
             reply,
         })
@@ -702,11 +725,11 @@ mod tests {
     #[tokio::test]
     async fn a_rule_that_cannot_be_evaluated_denies_and_never_lets_a_request_through() {
         let actor = spawn_policy_actor().await;
-        // Reads an attribute the resource does not have: evaluating it is an error.
+        // Speaks the schema, so it loads, but overflows when it is evaluated: an error.
         load(
             &actor,
             r#"
-            permit(principal, action, resource) when { resource.owner == principal };
+            forbid(principal, action, resource) when { context.now_secs * 9223372036854775807 > 0 };
             permit(principal, action == Action::"retrieve", resource);
             "#,
         )
@@ -779,7 +802,7 @@ mod tests {
         load(
             &actor,
             r#"permit(principal, action == Action::"update-runtime", resource)
-               when { principal.capabilities.contains("update-runtime") };"#,
+               when { principal in Capability::"update-runtime" };"#,
         )
         .await;
         let holder = ask(
@@ -808,14 +831,103 @@ mod tests {
         // Permits the principal whose name is a"b, quote included.
         load(
             &actor,
-            r#"permit(principal == Identity::"a\"b", action == Action::"x", resource);"#,
+            r#"permit(principal == Identity::"a\"b", action == Action::"subscribe", resource);"#,
         )
         .await;
-        let quote = ask(&actor, "a\"b", None, r#"Action::"x""#, r#"Thing::"t""#).await;
+        let quote = ask_topic(&actor, "a\"b").await;
         // A different name, backslash then quote: formatted without escaping it parsed as the same entity.
-        let backslash_quote = ask(&actor, "a\\\"b", None, r#"Action::"x""#, r#"Thing::"t""#).await;
+        let backslash_quote = ask_topic(&actor, "a\\\"b").await;
         assert_eq!(quote, Decision::Allow);
         assert_eq!(backslash_quote, Decision::NotDetermined);
+    }
+
+    async fn ask_topic(actor: &ActorRef<PolicyMessage>, who: &str) -> Decision {
+        ask_with(
+            actor,
+            who,
+            r#"Action::"subscribe""#,
+            r#"Topic::"t""#,
+            Facts {
+                topic: Some(TopicFacts::default()),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_topic_request_says_whether_the_topic_is_the_requester_s_declared_or_implied() {
+        let actor = spawn_policy_actor().await;
+        load(
+            &actor,
+            r#"permit (principal, action == Action::"publish", resource) when { context.declared };
+               forbid (principal, action == Action::"publish", resource) when { context.implied };"#,
+        )
+        .await;
+        let publish = |declared, implied| {
+            let actor = actor.clone();
+            async move {
+                ask_with(
+                    &actor,
+                    "kube-observer.polar.serviceaccount.cluster.local",
+                    r#"Action::"publish""#,
+                    r#"Topic::"kubernetes.cluster.consumer.Pod""#,
+                    Facts {
+                        topic: Some(TopicFacts { declared, implied }),
+                        ..Default::default()
+                    },
+                )
+                .await
+            }
+        };
+        assert_eq!(publish(true, false).await, Decision::Allow);
+        assert_eq!(publish(false, false).await, Decision::NotDetermined);
+        assert_eq!(publish(false, true).await, Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn a_workload_s_identity_names_its_workload_and_a_person_s_names_none() {
+        let actor = spawn_policy_actor().await;
+        load(
+            &actor,
+            r#"permit (principal, action == Action::"subscribe", resource)
+               when { principal has workload && principal.workload == "kube-consumer" };"#,
+        )
+        .await;
+        assert_eq!(
+            ask_topic(&actor, "kube-consumer.polar.serviceaccount.cluster.local").await,
+            Decision::Allow
+        );
+        assert_eq!(
+            ask_topic(&actor, "kube-observer.polar.serviceaccount.cluster.local").await,
+            Decision::NotDetermined
+        );
+        // A username is not a workload's identity, and has no workload.
+        assert_eq!(ask_topic(&actor, "alice").await, Decision::NotDetermined);
+    }
+
+    #[tokio::test]
+    async fn a_policy_that_does_not_speak_the_schema_is_refused_whole_and_the_one_in_force_stays() {
+        let actor = spawn_policy_actor().await;
+        load(
+            &actor,
+            r#"permit (principal, action == Action::"subscribe", resource);"#,
+        )
+        .await;
+        let refused = ractor::call!(actor, |reply| PolicyMessage::UpdatePolicy {
+            // The first rule is sound; the second reads a label as an attribute.
+            policy_source: r#"forbid (principal, action == Action::"subscribe", resource);
+                permit (principal, action == Action::"retrieve", resource) when { resource.kind == "token" };"#
+                .to_string(),
+            reply,
+        })
+        .unwrap();
+        assert!(
+            matches!(&refused, Err(PolicyError::PolicyParse(why)) if why.contains("schema")),
+            "{refused:?}"
+        );
+        // The forbid did not come in with it: the old policy still decides.
+        assert_eq!(ask_topic(&actor, "anyone").await, Decision::Allow);
     }
 
     #[test]
@@ -876,7 +988,7 @@ mod tests {
         }
     }
 
-    const STORE_IN_OWN_NAMESPACE: &str = r#"permit (principal, action == Action::"store", resource) when { resource.namespace == principal };"#;
+    const STORE_IN_OWN_NAMESPACE: &str = r#"permit (principal, action == Action::"store", resource) when { resource has namespace && resource.namespace == principal };"#;
 
     #[tokio::test]
     async fn a_rule_on_the_namespace_lets_an_identity_store_in_its_own_and_not_another() {
@@ -920,7 +1032,8 @@ mod tests {
             Facts::default(),
         )
         .await;
-        assert_eq!(decision, Decision::Deny);
+        // The rule does not apply; the store's own floor then refuses a name outside the requester's namespace.
+        assert_eq!(decision, Decision::NotDetermined);
     }
 
     #[tokio::test]
@@ -957,7 +1070,7 @@ mod tests {
         let actor = spawn_policy_actor().await;
         load(
             &actor,
-            r#"permit (principal, action == Action::"retrieve", resource) when { resource has kind && resource.kind == "token" };"#,
+            r#"permit (principal, action == Action::"retrieve", resource) when { resource.hasTag("kind") && resource.getTag("kind") == "token" };"#,
         )
         .await;
         let secret = r#"Secret::"s""#;
@@ -1002,7 +1115,7 @@ mod tests {
         let actor = spawn_policy_actor().await;
         load(
             &actor,
-            r#"permit (principal, action == Action::"retrieve", resource) when { resource has kind && resource.kind == "a\"b" };"#,
+            r#"permit (principal, action == Action::"retrieve", resource) when { resource.hasTag("kind") && resource.getTag("kind") == "a\"b" };"#,
         )
         .await;
         assert_eq!(
@@ -1030,33 +1143,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_label_cannot_take_the_place_of_a_fact_the_ledger_or_the_name_gives() {
+    async fn a_label_never_takes_the_place_of_a_fact_the_ledger_or_the_name_gives() {
+        // Labels are tags and facts are attributes: a label named like a fact is a tag, and the fact is the
+        // ledger's. A requester that labels a secret `owner` with its own name does not become its owner.
         let actor = spawn_policy_actor().await;
         load(&actor, BASELINE).await;
         for key in ["owner", "namespace", "frozen"] {
             let facts = Facts {
                 owner: Some("the-real-owner".to_string()),
-                labels: [(key.to_string(), "x".to_string())].into_iter().collect(),
+                labels: [(key.to_string(), "someone".to_string())]
+                    .into_iter()
+                    .collect(),
                 ..Default::default()
             };
-            let answer = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
-                requester_identity: "someone".to_string(),
-                requester_certificate_pem: None,
-                action: r#"Action::"retrieve""#.to_string(),
-                resource: r#"Secret::"s""#.to_string(),
+            let answer = ask_with(
+                &actor,
+                "someone",
+                r#"Action::"retrieve""#,
+                r#"Secret::"s""#,
                 facts,
-                reply,
-            })
-            .unwrap();
-            assert!(
-                matches!(answer, Err(PolicyError::RequestConstruction(_))),
-                "a label named {key} was taken: {answer:?}"
+            )
+            .await;
+            assert_eq!(
+                answer,
+                Decision::NotDetermined,
+                "a label named {key} was taken"
             );
         }
     }
 
     const BASELINE: &str = r#"
-        permit (principal, action == Action::"retrieve", resource) when { resource.owner == principal };
+        permit (principal, action == Action::"retrieve", resource) when { resource has owner && resource.owner == principal };
         forbid (principal, action, resource) when { resource has frozen && resource.frozen };
     "#;
 
@@ -1094,7 +1211,7 @@ mod tests {
     async fn the_owner_is_the_ledgers_word_and_a_rule_cannot_be_satisfied_without_one() {
         let actor = spawn_policy_actor().await;
         load(&actor, BASELINE).await;
-        // No owner given: `resource.owner` cannot be evaluated, which is a denial and never an allow.
+        // No owner given: the rule does not apply, which a secret treats as a refusal, and never an allow.
         let decision = ask_with(
             &actor,
             "git-repo-observer",
@@ -1103,7 +1220,7 @@ mod tests {
             Facts::default(),
         )
         .await;
-        assert_eq!(decision, Decision::Deny);
+        assert_eq!(decision, Decision::NotDetermined);
     }
 
     #[tokio::test]

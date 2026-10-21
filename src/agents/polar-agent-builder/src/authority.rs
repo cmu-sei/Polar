@@ -1114,8 +1114,8 @@ mod actor_tests {
             .check(
                 "alice",
                 None,
-                r#"Action::"x""#,
-                r#"Thing::"t""#,
+                r#"Action::"run-command""#,
+                r#"Command::"a/b""#,
                 Default::default(),
             )
             .await;
@@ -1130,8 +1130,8 @@ mod actor_tests {
             .decide(
                 "alice",
                 None,
-                r#"Action::"x""#,
-                r#"Thing::"t""#,
+                r#"Action::"run-command""#,
+                r#"Command::"a/b""#,
                 Default::default(),
             )
             .await;
@@ -1147,8 +1147,8 @@ mod actor_tests {
             .decide(
                 "alice",
                 None,
-                r#"Action::"x""#,
-                r#"Thing::"t""#,
+                r#"Action::"run-command""#,
+                r#"Command::"a/b""#,
                 Default::default(),
             )
             .await;
@@ -1163,8 +1163,8 @@ mod actor_tests {
             .check(
                 "alice",
                 None,
-                r#"Action::"x""#,
-                r#"Thing::"t""#,
+                r#"Action::"run-command""#,
+                r#"Command::"a/b""#,
                 Default::default(),
             )
             .await;
@@ -1179,7 +1179,7 @@ mod actor_tests {
             snapshot(&[policy(
                 1,
                 1,
-                r#"permit(principal == Identity::"alice", action == Action::"x", resource);"#,
+                r#"permit(principal == Identity::"alice", action == Action::"run-command", resource);"#,
             )]),
             Some(CREDENTIALS.into()),
         );
@@ -1189,7 +1189,7 @@ mod actor_tests {
             .decide(
                 "alice",
                 None,
-                r#"Action::"x""#,
+                r#"Action::"run-command""#,
                 "this is not an entity",
                 Default::default(),
             )
@@ -1208,7 +1208,7 @@ mod actor_tests {
             snapshot(&[policy(
                 1,
                 1,
-                r#"permit(principal == Identity::"alice", action == Action::"x", resource);"#,
+                r#"permit(principal == Identity::"alice", action == Action::"run-command", resource);"#,
             )]),
             Some(CREDENTIALS.into()),
         );
@@ -1217,8 +1217,8 @@ mod actor_tests {
             .decide(
                 "alice",
                 None,
-                r#"Action::"x""#,
-                r#"Thing::"t""#,
+                r#"Action::"run-command""#,
+                r#"Command::"a/b""#,
                 Default::default(),
             )
             .await;
@@ -1233,7 +1233,7 @@ mod actor_tests {
             snapshot(&[policy(
                 1,
                 1,
-                r#"permit(principal == Identity::"alice", action == Action::"x", resource);"#,
+                r#"permit(principal == Identity::"alice", action == Action::"run-command", resource);"#,
             )]),
             Some(CREDENTIALS.into()),
         );
@@ -1245,8 +1245,8 @@ mod actor_tests {
                     .check(
                         who,
                         None,
-                        r#"Action::"x""#,
-                        r#"Thing::"t""#,
+                        r#"Action::"run-command""#,
+                        r#"Command::"a/b""#,
                         Default::default(),
                     )
                     .await

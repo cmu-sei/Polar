@@ -379,6 +379,26 @@ impl TopicSet {
         self.entries.contains_key(&(topic.to_string(), access))
     }
 
+    /// Where `topic`, used this way, comes from in the set; none when it is not in it.
+    pub fn origin(&self, topic: &str, access: Access) -> Option<&Origin> {
+        self.entries.get(&(topic.to_string(), access))
+    }
+
+    /// What policy is told about `topic`, used this way: whether it is declared (a family's included) or implied.
+    pub fn facts(&self, topic: &str, access: Access) -> polar_policy::TopicFacts {
+        match self.origin(topic, access) {
+            Some(Origin::Declared { .. } | Origin::Family { .. }) => polar_policy::TopicFacts {
+                declared: true,
+                implied: false,
+            },
+            Some(Origin::Implied { .. }) => polar_policy::TopicFacts {
+                declared: false,
+                implied: true,
+            },
+            None => polar_policy::TopicFacts::default(),
+        }
+    }
+
     pub fn entries(&self) -> Vec<TopicEntry> {
         self.entries
             .iter()
@@ -704,8 +724,14 @@ mod tests {
         "[a-z][a-z0-9.:-]{0,24}"
     }
 
+    /// Declarations without a topic declared twice the same way, which is a declaration problem (`problems`).
     fn decls() -> impl Strategy<Value = Vec<(String, bool, String)>> {
-        prop::collection::vec((topic(), any::<bool>(), "[a-z ]{1,12}"), 0..12)
+        prop::collection::vec((topic(), any::<bool>(), "[a-z ]{1,12}"), 0..12).prop_map(|raw| {
+            let mut seen = std::collections::BTreeSet::new();
+            raw.into_iter()
+                .filter(|(name, publish, _)| seen.insert((name.clone(), *publish)))
+                .collect()
+        })
     }
 
     fn facts_strategy() -> impl Strategy<Value = (String, bool, bool, bool)> {

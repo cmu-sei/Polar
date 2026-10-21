@@ -109,6 +109,7 @@ impl StoreSecretHandler {
             owner: existing.as_ref().map(|s| s.stored_by.clone()),
             namespace: namespace_of(&request.name).map(str::to_string),
             labels: request.labels.clone(),
+            topic: None,
         };
         let decision = self
             .policy
@@ -300,7 +301,7 @@ mod tests {
     async fn with_no_rule_about_it_the_floor_decides_and_refuses_what_is_not_the_identitys_own() {
         // A policy is loaded, and says nothing about stores.
         let w = world(
-            Policy::Rules(r#"permit (principal, action == Action::"retrieve", resource) when { resource.owner == principal };"#),
+            Policy::Rules(r#"permit (principal, action == Action::"retrieve", resource) when { resource has owner && resource.owner == principal };"#),
             &["alice"],
         )
         .await;
@@ -372,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn a_rule_can_speak_of_the_labels_a_secret_is_stored_with() {
         let w = world(
-            Policy::Rules(r#"forbid (principal, action == Action::"store", resource) when { resource has kind && resource.kind == "user-password" };"#),
+            Policy::Rules(r#"forbid (principal, action == Action::"store", resource) when { resource.hasTag("kind") && resource.getTag("kind") == "user-password" };"#),
             &["alice"],
         )
         .await;

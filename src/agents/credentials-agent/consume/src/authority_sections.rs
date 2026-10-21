@@ -169,6 +169,21 @@ mod tests {
     }
 
     #[test]
+    fn a_policy_that_does_not_speak_polar_s_schema_is_refused_on_arrival_with_the_reason() {
+        // A label read as an attribute, not a tag: it parses, and is still refused whole.
+        let wrong = json!({ "source": r#"permit (principal, action == Action::"retrieve", resource) when { resource.kind == "token" };"# });
+        let problems = validate_policy(&wrong).unwrap_err().join("; ");
+        assert!(
+            problems.contains("schema") && problems.contains("kind"),
+            "{problems}"
+        );
+        // The first policy a cluster is seeded with speaks it.
+        let seed =
+            json!({ "source": include_str!("../../../../../infra/seeds/signed/policy.cedar") });
+        assert!(validate_policy(&seed).is_ok());
+    }
+
+    #[test]
     fn a_policy_body_has_one_field_and_it_is_text() {
         for body in [
             json!({}),

@@ -264,7 +264,7 @@ mod tests {
     #[tokio::test]
     async fn a_rule_that_cannot_be_evaluated_refuses_whatever_the_certificate_says() {
         let actor = policy(Some(
-            r#"permit(principal, action, resource) when { resource.nope == principal };"#,
+            r#"forbid(principal, action, resource) when { context.now_secs * 9223372036854775807 > 0 };"#,
         ))
         .await;
         let req = request("alice", &[Capability::UpdateRuntime], &["a/b"]);
@@ -291,7 +291,7 @@ mod tests {
         load(
             &actor,
             r#"permit(principal in Group::"git-authors", action == Action::"update-runtime", resource)
-                 when { principal.capabilities.contains("update-runtime") };"#,
+                 when { principal in Capability::"update-runtime" };"#,
         )
         .await;
         // In the group and holding the capability: admitted by policy (the certificate floor refuses).
