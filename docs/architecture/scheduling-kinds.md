@@ -93,7 +93,7 @@ agent declares which commands it accepts, in the same schema export that lists i
    `ConfigurationNotification` on `agent.<name>.configuration`; every builder agent subscribes to its own
    topic and passes what arrives to the verifying `submit`. A document it cannot route is still written (as
    `unroutable`, with the reason) and goes nowhere. A version no newer than one already forwarded is written
-   and not forwarded again. The unsigned schedule shape still takes the old path, untouched. The observer
+   and not forwarded again. A file that is not a signed document is logged and ignored (since 2026-10-21). The observer
    still reads only the `permanent`, `adhoc` and `ephemeral` directories, so a configuration item lives in one
    of them until the repository layout changes. Not verified on a cluster.
 2. **Outcome events. Built.** The ConfigurationActor announces every document it handles on an output port; the
@@ -103,4 +103,6 @@ agent declares which commands it accepts, in the same schema export that lists i
    outcome names. A refusal is therefore visible, with its reason and signer. Outcomes for a proposal or a
    command will use the same path. Not verified on a cluster.
 3. **Proposal design and Command design. Written 2026-10-11, awaiting the decisions:** `proposals.md` (with `sequences/general/proposal_flow`) and `commands.md` (with `sequences/general/command_flow`). Then their code, each tests first.
-4. Retire the old `adhoc` and `ephemeral` handling and samples when 3 has replaced them.
+4. **Retired 2026-10-21**, before 3 was built: the unsigned path (`permanent`, `adhoc` and `ephemeral` schedules, the
+   `agent.<id>.schedule` and `agent.type.<type>.schedule` topics, `scheduler.adhoc`, the mocks and samples) is removed, so
+   the scheduler handles signed documents only (`policy-enforcement.md`, "Decisions").

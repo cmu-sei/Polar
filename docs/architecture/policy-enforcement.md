@@ -84,6 +84,14 @@ code today, and what stands between the two. The detail of each part is in the d
   declared and implied topics for every agent.** The way to hold that: the set is computed once, in the agent (the
   builder), and printed in full in its scaffold, each implied topic with the rule that implied it; nothing else
   recomputes it, and the builder refuses at run time to publish or subscribe outside it.
+- **The scheduler handles signed documents only (2026-10-21).** The unsigned schedule path is removed: the processor no
+  longer reads unsigned `permanent`, `adhoc` or `ephemeral` schedules, writes them to the graph, or publishes
+  `agent.<id>.schedule` and `agent.type.<type>.schedule` (whose names came from the schedule files, not the catalog, and
+  which only test mocks subscribed to); it no longer subscribes to `scheduler.adhoc`, and the mocks, the sample
+  schedules and their types go with it. A file that is not a signed document is logged and ignored. So the scheduler's
+  only family is `agent.<workload>.configuration`, expanded from the catalog (open point A), and nothing it handles is
+  unchecked. This is `scheduling-kinds.md`'s step 4, brought forward: what replaces ad hoc and ephemeral is the
+  proposal and the command.
 - **The agent's own client decides as the broker does: Cedar first, then the set (2026-10-21).** Before a publish or a
   subscribe leaves the agent, the builder's check asks the agent's PolicyActor; a `permit` admits a topic outside the
   computed set (an administrator's runtime addition, such as a workload the scheduler now serves, takes effect without a
@@ -133,7 +141,7 @@ code today, and what stands between the two. The detail of each part is in the d
 | Credentials agent: store | yes | its floor: the requester's own names | `credentials-policy.md` |
 | Credentials agent: admin actions, issuance | no | the certificate capability, or the credential | `identity-and-bootstrap-update.md`, `cert-issuer-isolation.md` |
 | Broker: subscribe, publish | no | nothing is decided: every client may use every topic | `cassini-broker.md` |
-| Scheduler | no | signed documents are forwarded unverified (the receiver verifies); unsigned schedules flow unchecked | `topics.md` |
+| Scheduler | no | signed documents are forwarded unverified (the receiver verifies); unsigned schedules flowed unchecked until 2026-10-21, when that path was removed | `topics.md` |
 | cert-issuer | no | a static floor | `cert-issuer-isolation.md` |
 | Polar git server | no | static lists of identities per repository | `git-server.md` |
 
@@ -181,7 +189,7 @@ Numbered so a plan can refer to them. "Core" gaps block enforcement anywhere; th
 
 **Other points**
 
-12. **The scheduler** forwards documents unverified, processes unsigned schedules, and answers replay requests from anyone.
+12. **The scheduler** forwards documents unverified and answers replay requests from anyone (it processed unsigned schedules too, until that path was removed on 2026-10-21).
 13. **The credentials agent** decides admin actions and issuance by capability or credential only; `DecryptOnBehalfOf`
     takes an unbound, caller-asserted resource.
 14. **cert-issuer and the git server** have static floors and no Cedar.
@@ -299,7 +307,7 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
 
 **Stage 8: the other enforcement points** (gaps 12, 13, 14)
 
-- The scheduler verifies a signed document before forwarding it, refuses unsigned schedules, and answers a replay only
+- The scheduler verifies a signed document before forwarding it (it already ignores anything unsigned), and answers a replay only
   for the requester's own workload.
 - The credentials agent asks Cedar for admin actions and issuance, with the capability as the fallback; `DecryptOnBehalfOf`
   binds its resource to the ciphertext.

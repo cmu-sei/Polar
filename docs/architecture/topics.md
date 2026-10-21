@@ -106,10 +106,10 @@ The consumer subscribes to all 16 request topics (`credentials-agent/consume/src
 
 - The scheduler observer publishes `scheduler.in` (`GitScheduleChange`) and, on replay, `agent.<agent>.configuration`; it
   subscribes `polar-git-repo-changed` and `polar-configuration-replay`.
-- The scheduler processor subscribes `scheduler.in`, `scheduler.adhoc` (nobody publishes) and
-  `polar-configuration-outcome`; publishes `agent.<agent>.configuration`, and `agent.<id>.schedule` /
-  `agent.type.<type>.schedule`, which nothing outside a test subscribes to. It forwards signed documents unverified (the
-  receiving agent verifies), and processes unsigned schedules with no check.
+- The scheduler processor subscribes `scheduler.in` and `polar-configuration-outcome`, and publishes
+  `agent.<agent>.configuration`. It forwards signed documents unverified (the receiving agent verifies), and ignores a
+  file that is not one: the unsigned schedule path (`scheduler.adhoc`, `agent.<id>.schedule`,
+  `agent.type.<type>.schedule`) was removed 2026-10-21.
 - The Polar git server publishes `polar-git-repo-changed` (`RepoChanged`, with the pusher).
 
 ## Domain topics
