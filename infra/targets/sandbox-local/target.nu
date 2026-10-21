@@ -144,10 +144,6 @@ def main [] {
                 "polar-scheduler-observer.yaml"
                 "polar-scheduler-resources.yaml"
                 "polar-scheduler.yaml"
-                "secret-harness-owner-resources.yaml"
-                "secret-harness-owner.yaml"
-                "secret-harness-intruder-resources.yaml"
-                "secret-harness-intruder.yaml"
             ]
         }
     ]

@@ -46,8 +46,11 @@
     # Rollout of cert-issuer isolation (docs/architecture/cert-issuer-isolation.md, phase 6), in groups. A
     # workload on the credentials agent gets its certificates through the observer, so the credentials agent
     # has a record of it. Group 1 is the secret harness, which is the check on the rest.
-    secret-harness-owner: { issuer: "credentials-agent" }
-    secret-harness-intruder: { issuer: "credentials-agent" }
+    # The secret harness is test code (src/agents/secret-harness): deployed only when it is what is being tested
+    # (2026-10-21). To run it, set `enabled: true` on both and add their four manifests back to the agents layer
+    # in target.nu (secret-harness-owner-resources.yaml, secret-harness-owner.yaml, and the same for the intruder).
+    secret-harness-owner: { enabled: false, issuer: "credentials-agent" }
+    secret-harness-intruder: { enabled: false, issuer: "credentials-agent" }
     # Group 2: the workloads that ask for one client certificate. The ones that also open a Neo4j connection ask
     # for a second client certificate, which the credentials agent does not issue (one client and one server
     # certificate per pod instance). They moved in group 3, once the graph connection presented the pod's one
