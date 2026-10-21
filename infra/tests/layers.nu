@@ -24,7 +24,7 @@
 # A target's layers: what they add up to, what is wrong with a set of them, and how a render is split.
 
 use std/assert
-use ../layers.nu [apply_order_of, layer_problems, layout, split_into]
+use ../layers.nu [apply_order_of, layer_problems, layout, split_into, to_apply]
 
 def layer [name: string, files: list<string>, depends_on: list<string> = [], wait_for: list = []] {
     { name: $name, files: $files, depends_on: $depends_on, wait_for: $wait_for }
@@ -36,6 +36,16 @@ def has [problems: list<string>, needle: string] {
 
 def main [] {
     let tests = [
+        {
+            name: "what a target renders and never applies is in no layer, and is not missing from one"
+            body: {
+                let layers = [(layer "a" ["1.yaml" "h-resources.yaml"])]
+                let rendered = ["1.yaml" "h-resources.yaml" "h.yaml"]
+                has (layer_problems $layers $rendered) "h.yaml is rendered but is in no layer"
+                assert equal (to_apply $rendered ["h.yaml" "never-rendered.yaml"]) ["1.yaml" "h-resources.yaml"]
+                assert equal (layer_problems $layers (to_apply $rendered ["h.yaml"])) []
+            }
+        }
         {
             name: "the flat order is the layers' files, layer by layer"
             body: {

@@ -125,14 +125,21 @@ def load_target [target: string] {
     $config
 }
 
-def rendered_in [dir: string] {
+# What of a render is applied: every rendered file but those the target renders and never applies (`rendered_only`: the
+# load harness's Jobs, which infra/load-harness.nu copies per run). Those belong to no layer.
+export def to_apply [rendered: list<string>, rendered_only: list<string>]: nothing -> list<string> {
+    $rendered | where {|f| $f not-in $rendered_only }
+}
+
+def rendered_in [config: record] {
+    let dir = $config.output_dir
     if not ($dir | path exists) { error make --unspanned { msg: $"nothing rendered at ($dir): run nu infra/render.nu first" } }
-    glob ($dir | path join "*.yaml") | each {|f| $f | path basename } | sort
+    to_apply (glob ($dir | path join "*.yaml") | each {|f| $f | path basename } | sort) ($config.rendered_only? | default [])
 }
 
 def "main check" [target: string] {
     let config = (load_target $target)
-    let problems = (layer_problems $config.apply_layers (rendered_in $config.output_dir))
+    let problems = (layer_problems $config.apply_layers (rendered_in $config))
     if ($problems | is-not-empty) {
         for p in $problems { print -e $"  ERROR: ($p)" }
         exit 1
@@ -142,7 +149,7 @@ def "main check" [target: string] {
 
 def "main split" [target: string, dest: string] {
     let config = (load_target $target)
-    let problems = (layer_problems $config.apply_layers (rendered_in $config.output_dir))
+    let problems = (layer_problems $config.apply_layers (rendered_in $config))
     if ($problems | is-not-empty) {
         for p in $problems { print -e $"  ERROR: ($p)" }
         exit 1

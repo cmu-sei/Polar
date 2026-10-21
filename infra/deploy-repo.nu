@@ -50,7 +50,7 @@ use retry.nu [with_retries]
 use registry.nu [node_registry, push_registry]
 use digest.nu [registry_digest]
 use cluster-registry.nu [cluster_of]
-use layers.nu [layer_problems]
+use layers.nu [layer_problems, to_apply]
 use cluster-inputs.nu
 use deploy-objects.nu [BOOTSTRAP_LAYERS, annotate_config_hashes, documents, git_repository, has_job, kustomization, provenance, published_layers, readme, unpinned_images, yaml_docs]
 
@@ -435,7 +435,8 @@ def "main publish" [
 ] {
     let config = (load_config $target)
     if ($config.apply_layers? | default [] | is-empty) { error make --unspanned { msg: $"the target '($target)' declares no apply_layers" } }
-    let rendered = (glob ($config.output_dir | path join "*.yaml") | each {|f| $f | path basename } | sort)
+    let rendered = (to_apply (glob ($config.output_dir | path join "*.yaml") | each {|f| $f | path basename } | sort)
+        ($config.rendered_only? | default []))
     let problems = (layer_problems $config.apply_layers $rendered)
     if ($problems | is-not-empty) {
         error make --unspanned { msg: $"the render does not match the target's layers (run: nu infra/render.nu ($target)): ($problems | first)" }
