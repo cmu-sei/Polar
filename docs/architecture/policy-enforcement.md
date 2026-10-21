@@ -62,6 +62,11 @@ code today, and what stands between the two. The detail of each part is in the d
   cached policy in the degraded window, then the bound and a restart into init. The credentials agent is exempt from
   aging: it is the authority. Every other agent is unhealthy until it has verified a snapshot. The bound is 90 minutes
   by default (`POLAR_AUTHORITY_MAX_AGE_SECS`), tunable.
+- **The workload name is an agent's one name (2026-10-21, gap 2).** Every agent passes its workload name to
+  `AgentBuilder`, so its topics are `agent.<workload>.*` and its signed documents are addressed to `<workload>`; the
+  builder enforces it at start. An identity maps to its agent mechanically, `<workload>.<namespace>.serviceaccount.<domain>`
+  to `<workload>`, so the broker, Cedar and the floor join a certificate to an agent's topics without a lookup table. The
+  agents that pass another name today (kube-observer, kube-consumer, jira, oci-resolver; `topics.md`) change.
 
 ## Where policy is enforced today
 
@@ -85,7 +90,7 @@ Numbered so a plan can refer to them. "Core" gaps block enforcement anywhere; th
 1. **No declaration of what an agent communicates.** A scaffold declares sections, commands, needs and the shutdown
    budget, but no topics and no access (`polar-agent-builder/src/agent.rs:242-412`); the catalog declares none either. So
    there is no source from which to derive a default policy, a certificate's permissions, or a seed.
-2. **Three names for one agent.** Topics use the service name, documents are addressed to it, and the broker knows the
+2. **Three names for one agent** (decided, above: the workload name; not built). Topics use the service name, documents are addressed to it, and the broker knows the
    identity, and for some agents they differ (`topics.md`). A rule needs one name, or a mapping it can trust.
 3. **Certificates say little about a workload.** Workload certificates carry their identity and no `p:` names (a grant
    would add them, but grants are single-use and none are configured); `c:` capabilities are administrative and minted
