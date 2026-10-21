@@ -55,6 +55,7 @@ export const DEFAULTS = {
     max_count: 100000
     max_bytes: 1073741824
     warmup: 100
+    window: 1000
     window_bytes: 67108864
     stall_secs: 30
     idle_secs: 30
@@ -101,6 +102,7 @@ export def values_for [run: record, role: string, index: int]: nothing -> record
         {
             HARNESS_MESSAGE_SIZE: $run.size
             HARNESS_RATE: $run.rate
+            HARNESS_WINDOW: $run.window
             HARNESS_WINDOW_BYTES: $run.window_bytes
             HARNESS_STALL_SECS: $run.stall_secs
         }
@@ -330,7 +332,8 @@ def "main run" [plan_file: string, --target: string = "local-minimal"] {
     }
     mut records = []
     for run in $runs {
-        print $"($run.id): ($run.producers)p ($run.sinks)s ($run.lanes)l, ($run.count) x ($run.size) bytes at ($run.rate)/s"
+        let pace = if $run.rate == 0 { "as fast as the window allows" } else { $"at ($run.rate)/s" }
+        print $"($run.id): ($run.producers)p ($run.sinks)s ($run.lanes)l, ($run.count) x ($run.size) bytes ($pace)"
         let record = ((run_one $run $templates ($out | str replace ".nuon" "-failed")) | insert context $context)
         $records = ($records | append $record)
         $records | save --force $out

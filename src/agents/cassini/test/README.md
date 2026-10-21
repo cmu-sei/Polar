@@ -46,7 +46,7 @@ result line from each.
   - `report`: the `HARNESS LOAD RESULT` line (its mark, then one line of JSON with a `role`), and the sink's
     `HARNESS LOAD READY` line.
 - `producer` (`harness-producer`): once registered, sends `HARNESS_COUNT` messages of `HARNESS_MESSAGE_SIZE` bytes at
-  `HARNESS_RATE` a second (0 is as fast as the window allows), with at most `HARNESS_WINDOW_BYTES` unacknowledged; gives
+  `HARNESS_RATE` a second (0 is as fast as the window allows), with at most `HARNESS_WINDOW` messages (and `HARNESS_WINDOW_BYTES`) unacknowledged; gives
   up on the rest when nothing is acknowledged for `HARNESS_STALL_SECS`. It reports what it sent, what was acknowledged,
   refused or failed, and the rate it reached.
 - `sink` (`harness-sink`): subscribes to its lane, says it is ready once the broker acknowledges the subscription, and

@@ -145,7 +145,11 @@ impl Actor for ProducerSupervisor {
                         Plan {
                             count: state.run.count,
                             rate: state.settings.rate,
-                            window: window(state.settings.window_bytes, state.settings.size),
+                            window: window(
+                                state.settings.window_messages,
+                                state.settings.window_bytes,
+                                state.settings.size,
+                            ),
                             stall: state.settings.stall,
                         },
                         state.settings.size,

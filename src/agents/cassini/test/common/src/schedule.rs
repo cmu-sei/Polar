@@ -50,9 +50,10 @@ pub fn due_by(elapsed: Duration, rate: u64, total: u64) -> u64 {
     due.min(total as u128) as u64
 }
 
-/// How many messages a window of `bytes` holds, of messages `size` bytes long: at least one.
-pub fn window(bytes: u64, size: u64) -> u64 {
-    (bytes / size.max(1)).max(1)
+/// The window: at most `messages`, and at most as many messages `size` bytes long as `bytes` holds; at least one. A
+/// window in bytes alone let 262,144 small messages be in flight, so a saturated run measured that queue, not the broker.
+pub fn window(messages: u64, bytes: u64, size: u64) -> u64 {
+    messages.min(bytes / size.max(1)).max(1)
 }
 
 #[cfg(test)]
@@ -67,8 +68,10 @@ mod tests {
         assert_eq!(due_by(Duration::from_micros(2500), 1000, 10), 3);
         assert_eq!(due_by(Duration::from_secs(60), 1000, 10), 10);
         assert_eq!(due_by(Duration::ZERO, 0, 10), 10);
-        assert_eq!(window(64 << 20, 1 << 20), 64);
-        assert_eq!(window(64 << 20, 1 << 30), 1);
+        assert_eq!(window(1000, 64 << 20, 1 << 20), 64);
+        assert_eq!(window(1000, 64 << 20, 1 << 30), 1);
+        assert_eq!(window(1000, 64 << 20, 256), 1000);
+        assert_eq!(window(0, 64 << 20, 256), 1);
     }
 
     proptest! {

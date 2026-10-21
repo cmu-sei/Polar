@@ -46,13 +46,26 @@ pub static WINDOW_BYTES: Defaulted<u64> = Defaulted::number(
     "67108864",
 );
 
+pub static WINDOW_MESSAGES: Defaulted<u64> = Defaulted::number(
+    "HARNESS_WINDOW",
+    "the most messages sent and not yet acknowledged by the broker (HARNESS_WINDOW_BYTES caps it too): small enough that \
+     a saturated run measures the broker, not a queue the producer built in front of it",
+    "1000",
+);
+
 pub static STALL_SECS: Defaulted<u64> = Defaulted::number(
     "HARNESS_STALL_SECS",
     "how long the producer waits for an acknowledgement before it gives up on the rest, and reports what it has",
     "30",
 );
 
-static VARIABLES: &[&dyn Described] = &[&MESSAGE_SIZE, &RATE, &WINDOW_BYTES, &STALL_SECS];
+static VARIABLES: &[&dyn Described] = &[
+    &MESSAGE_SIZE,
+    &RATE,
+    &WINDOW_MESSAGES,
+    &WINDOW_BYTES,
+    &STALL_SECS,
+];
 
 fn relations(env: &dyn Env) -> Vec<String> {
     match (INDEX.read(env), PRODUCERS.read(env)) {
@@ -72,6 +85,7 @@ pub static SECTION: Section = Section {
 pub struct ProducerSettings {
     pub size: u64,
     pub rate: u64,
+    pub window_messages: u64,
     pub window_bytes: u64,
     pub stall: Duration,
 }
@@ -81,6 +95,7 @@ impl ProducerSettings {
         Ok(Self {
             size: config.read(&MESSAGE_SIZE)?,
             rate: config.read(&RATE)?,
+            window_messages: config.read(&WINDOW_MESSAGES)?,
             window_bytes: config.read(&WINDOW_BYTES)?,
             stall: Duration::from_secs(config.read(&STALL_SECS)?),
         })
@@ -121,12 +136,16 @@ mod tests {
         let vars = env(&[
             ("HARNESS_MESSAGE_SIZE", "4096"),
             ("HARNESS_RATE", "0"),
+            ("HARNESS_WINDOW", "10"),
             ("HARNESS_WINDOW_BYTES", "1024"),
             ("HARNESS_STALL_SECS", "5"),
         ]);
         let config = Config::builder(&vars).register(&SECTION).build();
         let s = ProducerSettings::read(&config).unwrap();
-        assert_eq!((s.size, s.rate, s.window_bytes), (4096, 0, 1024));
+        assert_eq!(
+            (s.size, s.rate, s.window_messages, s.window_bytes),
+            (4096, 0, 10, 1024)
+        );
         assert_eq!(s.stall, Duration::from_secs(5));
     }
 }

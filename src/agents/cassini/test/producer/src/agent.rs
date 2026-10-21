@@ -55,7 +55,7 @@ impl PolarAgent for HarnessProducer {
     ];
     const HELP: Option<&'static str> = Some(
         "Once registered, it sends HARNESS_COUNT messages of HARNESS_MESSAGE_SIZE bytes on lane HARNESS_INDEX mod \
-         HARNESS_LANES, at HARNESS_RATE a second, never with more than HARNESS_WINDOW_BYTES unacknowledged. Each message \
+         HARNESS_LANES, at HARNESS_RATE a second, never with more than HARNESS_WINDOW messages (or HARNESS_WINDOW_BYTES) unacknowledged. Each message \
          carries its producer, its sequence number and its send time. When every message is acknowledged or refused, \
          or nothing has been for HARNESS_STALL_SECS, it logs one line beginning `HARNESS LOAD RESULT` and ends, exiting 0. \
          `infra/load-harness.nu` runs it.",
