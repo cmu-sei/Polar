@@ -89,6 +89,8 @@ let render =
                 , certType : Text
                 , names : List Text
                 , vouchedOnly : Bool
+                , publish : List Text
+                , subscribe : List Text
                 }
           , mtlsEnforceBootstrap : Bool
           -- Where cert-issuer's CA comes from. See ca-provisioning.dhall.
@@ -254,6 +256,8 @@ let render =
                                                     , certType : Text
                                                     , names : List Text
                                                     , vouchedOnly : Bool
+                                                    , publish : List Text
+                                                    , subscribe : List Text
                                                     }
                                                     JSON.Type
                                                     ( \ ( b
@@ -261,6 +265,8 @@ let render =
                                                           , certType : Text
                                                           , names : List Text
                                                           , vouchedOnly : Bool
+                                                          , publish : List Text
+                                                          , subscribe : List Text
                                                           }
                                                         ) ->
                                                         JSON.object
@@ -279,6 +285,22 @@ let render =
                                                                     )
                                                               , vouched_only =
                                                                   JSON.bool b.vouchedOnly
+                                                              , publish =
+                                                                  JSON.array
+                                                                    ( Prelude.List.map
+                                                                        Text
+                                                                        JSON.Type
+                                                                        JSON.string
+                                                                        b.publish
+                                                                    )
+                                                              , subscribe =
+                                                                  JSON.array
+                                                                    ( Prelude.List.map
+                                                                        Text
+                                                                        JSON.Type
+                                                                        JSON.string
+                                                                        b.subscribe
+                                                                    )
                                                               }
                                                           )
                                                     )

@@ -135,6 +135,8 @@ fn floor_with_this_workload() -> Option<Vec<BootstrapIdentity>> {
         cert_type: CertType::Client,
         names: vec![],
         vouched_only: false,
+        publish: vec![],
+        subscribe: vec![],
     }])
 }
 
@@ -145,6 +147,8 @@ fn floor_without_this_workload() -> Option<Vec<BootstrapIdentity>> {
         cert_type: CertType::Server,
         names: vec!["cassini-ip-svc.polar.svc.cluster.local".to_string()],
         vouched_only: false,
+        publish: vec![],
+        subscribe: vec![],
     }])
 }
 
@@ -257,6 +261,8 @@ fn floor_with_this_workload_vouched_only() -> Option<Vec<BootstrapIdentity>> {
         cert_type: CertType::Server,
         names: vec!["polar-git-server.polar.svc.cluster.local".to_string()],
         vouched_only: true,
+        publish: vec![],
+        subscribe: vec![],
     }])
 }
 

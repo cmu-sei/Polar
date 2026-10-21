@@ -82,6 +82,8 @@ in  { name             = "cert-issuer"
                , certType : Text
                , names : List Text
                , vouchedOnly : Bool
+               , publish : List Text
+               , subscribe : List Text
                }
     -- Whether cert-issuer enforces the floor. False is the old open
     -- behaviour (any token holder is signed what it asks for), and

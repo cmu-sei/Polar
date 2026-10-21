@@ -190,8 +190,8 @@ def main [] {
             let f = (floor_entries $r)
             assert equal $f.problems []
             assert equal $f.entries [
-                { workload: "system:serviceaccount:polar:cassini", certType: "SERVER", names: ["cassini-ip-svc.polar.svc.cluster.local"], vouchedOnly: false }
-                { workload: "system:serviceaccount:polar:credentials-agent", certType: "CLIENT", names: [], vouchedOnly: false }
+                { workload: "system:serviceaccount:polar:cassini", certType: "SERVER", names: ["cassini-ip-svc.polar.svc.cluster.local"], vouchedOnly: false, publish: [], subscribe: [] }
+                { workload: "system:serviceaccount:polar:credentials-agent", certType: "CLIENT", names: [], vouchedOnly: false, publish: [], subscribe: [] }
             ]
         }
 
@@ -205,8 +205,31 @@ def main [] {
             let f = (floor_entries $r)
             assert equal $f.problems []
             assert equal $f.entries [
-                { workload: "system:serviceaccount:polar:polar-git-server", certType: "SERVER", names: ["polar-git-server.polar.svc.cluster.local"], vouchedOnly: true }
+                { workload: "system:serviceaccount:polar:polar-git-server", certType: "SERVER", names: ["polar-git-server.polar.svc.cluster.local"], vouchedOnly: true, publish: [], subscribe: [] }
             ]
+        }
+
+        "a bootstrap service's entry carries its declared and family topics, and not the implied ones": {
+            let topic = {|name, access, from| { name: $name, access: $access, from: $from } }
+            let r = [
+                { who: "credentials-agent", namespace: "polar", service_account: "credentials-agent", issuer: "cert-issuer", bootstrap: true,
+                  certs: ["client:/etc/tls/certs:ecdsa-p256:"]
+                  topics: [
+                    (do $topic "polar-authority-updates" "publish" "declared")
+                    (do $topic "credentials-grants" "subscribe" "declared")
+                    (do $topic "agent.x.configuration" "publish" "family")
+                    (do $topic "polar-authority-snapshot-requests" "publish" "implied")
+                    (do $topic "agent.credentials-agent.configuration" "subscribe" "implied")
+                  ] }
+                # A workload on the credentials agent has its topics in the credentials agent's floor, not here.
+                { who: "polar-git-server", namespace: "polar", service_account: "polar-git-server", issuer: "credentials-agent", bootstrap: false,
+                  certs: ["server:/etc/tls/git-server:ecdsa-p256:polar-git-server.polar.svc.cluster.local"]
+                  topics: [(do $topic "polar-git-repo-changed" "publish" "declared")] }
+            ]
+            let f = (floor_entries $r)
+            assert equal $f.problems []
+            assert equal ($f.entries | first | select publish subscribe) { publish: ["agent.x.configuration" "polar-authority-updates"], subscribe: ["credentials-grants"] }
+            assert equal ($f.entries | last | select publish subscribe) { publish: [], subscribe: [] }
         }
 
         "a bootstrap identity that is issued two types cannot be written as one floor entry": {

@@ -56,6 +56,13 @@ pub struct BootstrapIdentity {
     /// certificate. False (the default) is a bootstrap identity.
     #[serde(default)]
     pub vouched_only: bool,
+    /// The topics a bootstrap service declares it publishes and subscribes to, written from the catalog
+    /// (docs/architecture/policy-enforcement.md, stage 2), for its certificates to carry as `p:pub:` and `p:sub:`
+    /// names (stage 3). Exact names; empty for anything that is not a bootstrap service.
+    #[serde(default)]
+    pub publish: Vec<String>,
+    #[serde(default)]
+    pub subscribe: Vec<String>,
 }
 
 /// Why a token-only request is not signed.
@@ -169,6 +176,14 @@ pub fn problems(floor: &[BootstrapIdentity]) -> Vec<String> {
                 problems.push(format!("`{}` lists the wildcard `{name}`", entry.workload));
             }
         }
+        for topic in entry.publish.iter().chain(&entry.subscribe) {
+            if topic.trim().is_empty() || topic.contains(char::is_whitespace) {
+                problems.push(format!(
+                    "`{}` lists `{topic}`, which is not a topic name",
+                    entry.workload
+                ));
+            }
+        }
     }
     problems
 }
@@ -184,12 +199,16 @@ mod tests {
                 cert_type: CertType::Client,
                 names: vec![],
                 vouched_only: false,
+                publish: vec![],
+                subscribe: vec![],
             },
             BootstrapIdentity {
                 workload: "system:serviceaccount:polar:cassini".to_string(),
                 cert_type: CertType::Server,
                 names: vec!["cassini-ip-svc.polar.svc.cluster.local".to_string()],
                 vouched_only: false,
+                publish: vec![],
+                subscribe: vec![],
             },
         ]
     }
@@ -338,6 +357,8 @@ mod tests {
             cert_type: CertType::Server,
             names: vec!["polar-db-svc.polar-graph.svc.cluster.local".to_string()],
             vouched_only: true,
+            publish: vec![],
+            subscribe: vec![],
         });
         f
     }
@@ -464,18 +485,24 @@ mod tests {
                 cert_type: CertType::Client,
                 names: vec![],
                 vouched_only: false,
+                publish: vec![],
+                subscribe: vec![],
             },
             BootstrapIdentity {
                 workload: "a".into(),
                 cert_type: CertType::Server,
                 names: names(&["p:s2s:x", "c:grant", "*.x", ""]),
                 vouched_only: false,
+                publish: vec![],
+                subscribe: vec![],
             },
             BootstrapIdentity {
                 workload: "a".into(),
                 cert_type: CertType::Client,
                 names: vec![],
                 vouched_only: false,
+                publish: vec![],
+                subscribe: vec![],
             },
         ];
         let p = problems(&bad);
@@ -503,5 +530,30 @@ mod tests {
             )
             .is_err()
         );
+        // A bootstrap service's declared topics, and none when they are not given.
+        let topics: BootstrapIdentity = serde_json::from_str(
+            r#"{"workload": "w", "cert_type": "CLIENT", "publish": ["polar-authority-updates"], "subscribe": ["credentials-grants"]}"#,
+        )
+        .unwrap();
+        assert_eq!(topics.publish, ["polar-authority-updates"]);
+        assert_eq!(topics.subscribe, ["credentials-grants"]);
+        assert!(no_names.publish.is_empty() && no_names.subscribe.is_empty());
+    }
+
+    #[test]
+    fn a_topic_that_is_not_a_name_is_a_floor_problem() {
+        let mut floor = floor();
+        floor[0].publish = vec!["polar-authority-updates".into(), "".into()];
+        floor[0].subscribe = vec!["two words".into()];
+        let said = problems(&floor).join("\n");
+        assert!(
+            said.contains("lists ``, which is not a topic name"),
+            "{said}"
+        );
+        assert!(
+            said.contains("lists `two words`, which is not a topic name"),
+            "{said}"
+        );
+        assert_eq!(problems(&floor).len(), 2);
     }
 }

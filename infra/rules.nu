@@ -152,7 +152,11 @@ export def issuer_problems [records: list, enforced: bool]: nothing -> record {
 # `kind:dir:algorithm:names`). A bootstrap identity gets an entry that lets its token alone be signed, for the one
 # type it is issued and the names it carries. A workload on the credentials agent that is issued a server
 # certificate gets a `vouchedOnly` entry, so cert-issuer checks the names the credentials agent states for it and
-# never signs it on its token alone. Anything else has no entry. Returns { entries, problems }.
+# never signs it on its token alone. Anything else has no entry. A bootstrap service's entry also carries the topics its
+# scaffold declares (and its families, expanded), for cert-issuer to write into its certificates; implied topics are not
+# written, since they follow from the identity (docs/architecture/policy-enforcement.md, stage 2). A workload on the
+# credentials agent has its topics in the credentials agent's floor instead. `records` may carry `topics`, as the
+# scaffold prints them. Returns { entries, problems }.
 export def floor_entries [records: list]: nothing -> record {
     mut entries: list<any> = []
     mut problems: list<string> = []
@@ -167,11 +171,14 @@ export def floor_entries [records: list]: nothing -> record {
             if ($kinds | length) != 1 {
                 $problems = ($problems | append $"($r.who): a bootstrap identity is written as one certificate type, and this one is issued ($kinds | str join ' and ')")
             } else {
+                let own = ($r.topics? | default [] | where {|t| $t.from != "implied" })
                 $entries = ($entries | append {
                     workload: $workload
                     certType: ($kinds | first | str uppercase)
                     names: ($parsed | get names | flatten | uniq)
                     vouchedOnly: false
+                    publish: ($own | where access == "publish" | get name | uniq | sort)
+                    subscribe: ($own | where access == "subscribe" | get name | uniq | sort)
                 })
             }
         } else if $r.issuer == "credentials-agent" {
@@ -182,6 +189,8 @@ export def floor_entries [records: list]: nothing -> record {
                     certType: "SERVER"
                     names: ($servers | get names | flatten | uniq)
                     vouchedOnly: true
+                    publish: []
+                    subscribe: []
                 })
             }
         }

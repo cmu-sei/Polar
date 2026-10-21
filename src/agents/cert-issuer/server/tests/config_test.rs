@@ -253,6 +253,8 @@ fn a_sound_floor_is_accepted_and_so_is_an_empty_one() {
         cert_type: CertType::Server,
         names: vec!["cassini-ip-svc.polar.svc.cluster.local".to_string()],
         vouched_only: false,
+        publish: vec![],
+        subscribe: vec![],
     }];
     assert!(config_with_floor(Some(floor)).validate().is_ok());
     // Present and empty is a closed floor: nobody is a bootstrap identity.
@@ -271,6 +273,8 @@ fn a_floor_that_lists_a_permission_or_a_wildcard_does_not_load() {
             cert_type: CertType::Server,
             names: vec![name.to_string()],
             vouched_only: false,
+            publish: vec![],
+            subscribe: vec![],
         }];
         let err = config_with_floor(Some(floor)).validate().unwrap_err();
         assert!(err.to_string().contains("mtls.bootstrap"), "{name}: {err}");

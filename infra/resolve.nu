@@ -642,9 +642,11 @@ def enabled_problems [target: string] {
 
 # The floor of cert-issuer for this target, written from the catalog: what each workload is issued, resolved.
 def floor_of [target: string] {
-    let records = (all_workloads $target | get name | each {|n|
-        let r = (resolve $n $target)
-        { who: $n, namespace: $r.namespace, service_account: $r.service_account, issuer: $r.issuer, bootstrap: $r.bootstrap, certs: $r.certs }
+    let records = (all_workloads $target | each {|w|
+        let r = (resolve $w.name $target)
+        # The topics its scaffold prints (declared, family and implied): floor_entries writes a bootstrap service's own.
+        let topics = ((scaffold_of $w.name $w).topics? | default [])
+        { who: $w.name, namespace: $r.namespace, service_account: $r.service_account, issuer: $r.issuer, bootstrap: $r.bootstrap, certs: $r.certs, topics: $topics }
     })
     floor_entries $records
 }

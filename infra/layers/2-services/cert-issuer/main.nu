@@ -36,17 +36,19 @@ def main [context_nuon: string] {
     let values_path = ($chart_dir | path join "values.dhall")
     # The floor's entries come from the catalog (infra/resolve.nu floor); the chart's own list holds what the
     # catalog does not describe (Neo4j), and goes after them.
-    let entry_type = "{ workload : Text, certType : Text, names : List Text, vouchedOnly : Bool }"
+    let entry_type = "{ workload : Text, certType : Text, names : List Text, vouchedOnly : Bool, publish : List Text, subscribe : List Text }"
     let entries = ($context.floor | each {|e|
         let names = ($e.names | each {|n| $"\"($n)\"" } | str join ", ")
         let vouched = (if $e.vouchedOnly { "True" } else { "False" })
-        $"{ workload = \"($e.workload)\", certType = \"($e.certType)\", names = [ ($names) ] : List Text, vouchedOnly = ($vouched) }"
+        let publish = ($e.publish? | default [] | each {|n| $"\"($n)\"" } | str join ", ")
+        let subscribe = ($e.subscribe? | default [] | each {|n| $"\"($n)\"" } | str join ", ")
+        $"{ workload = \"($e.workload)\", certType = \"($e.certType)\", names = [ ($names) ] : List Text, vouchedOnly = ($vouched), publish = [ ($publish) ] : List Text, subscribe = [ ($subscribe) ] : List Text }"
     } | str join ", ")
     # Neo4j is not a catalog workload: its entry is its chart's service account and namespace with the names
     # its init container asks for, which the target sets (`neo4jSans`). It goes through the credentials agent.
     let neo4j_values = ($chart_dir | path dirname | path join "neo4j/values.dhall")
     let neo4j = $"\(($neo4j_values)\) // \(($overrides)\).neo4j"
-    let neo4j_entry = $"{ workload = \"system:serviceaccount:\" ++ \(($neo4j)\).namespace ++ \":\" ++ \(($neo4j)\).serviceAccountName, certType = \"SERVER\", names = \(($neo4j)\).neo4jSans, vouchedOnly = True }"
+    let neo4j_entry = $"{ workload = \"system:serviceaccount:\" ++ \(($neo4j)\).namespace ++ \":\" ++ \(($neo4j)\).serviceAccountName, certType = \"SERVER\", names = \(($neo4j)\).neo4jSans, vouchedOnly = True, publish = [] : List Text, subscribe = [] : List Text }"
     let entries = (if ($entries | is-empty) { $neo4j_entry } else { $"($entries), ($neo4j_entry)" })
     let catalog_floor = $"[ ($entries) ] : List ($entry_type)"
     let enforce     = (if $context.floorEnforced { "True" } else { "False" })
