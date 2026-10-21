@@ -30,7 +30,7 @@ use polar::graph::{
 };
 use polar_scheduler::processor::ScheduleInfoProcessor;
 use polar_scheduler::types::ProcessorMsg;
-use polar_scheduler_common::{AdhocAgentAnnouncement, GitScheduleChange};
+use polar_scheduler_common::GitScheduleChange;
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use std::time::Duration;
 
@@ -65,8 +65,8 @@ impl Actor for MockGraphController {
 #[test]
 fn test_compile_upsert_node() {
     let op = GraphOp::UpsertNode {
-        key: ScheduleKey::Permanent {
-            agent_id: "agent-1".to_string(),
+        key: ScheduleKey::Configuration {
+            id: "agent-1".to_string(),
         }
         .into_key(),
         props: vec![Property(
@@ -80,42 +80,14 @@ fn test_compile_upsert_node() {
 }
 
 #[test]
-fn test_compile_upsert_node_adhoc() {
-    let op = GraphOp::UpsertNode {
-        key: ScheduleKey::Adhoc {
-            agent_type: "worker".to_string(),
-        }
-        .into_key(),
-        props: vec![],
-    };
-    let q = compile_graph_op(&op).unwrap();
-    assert!(q.query().contains("MERGE"));
-    assert!(q.query().contains("Adhoc"));
-}
-
-#[test]
-fn test_compile_upsert_node_ephemeral() {
-    let op = GraphOp::UpsertNode {
-        key: ScheduleKey::Ephemeral {
-            agent_type: "handler".to_string(),
-        }
-        .into_key(),
-        props: vec![],
-    };
-    let q = compile_graph_op(&op).unwrap();
-    assert!(q.query().contains("MERGE"));
-    assert!(q.query().contains("Ephemeral"));
-}
-
-#[test]
 fn test_compile_ensure_edge() {
     let op = GraphOp::EnsureEdge {
-        from: ScheduleKey::Permanent {
-            agent_id: "a".to_string(),
+        from: ScheduleKey::Configuration {
+            id: "a".to_string(),
         }
         .into_key(),
-        to: ScheduleKey::Adhoc {
-            agent_type: "b".to_string(),
+        to: ScheduleKey::ConfigurationOutcome {
+            key: "b".to_string(),
         }
         .into_key(),
         rel_type: "DESCRIBES".to_string(),
@@ -129,13 +101,13 @@ fn test_compile_ensure_edge() {
 #[test]
 fn test_compile_replace_edge() {
     let op = GraphOp::ReplaceEdge {
-        from: ScheduleKey::Permanent {
-            agent_id: "a".to_string(),
+        from: ScheduleKey::Configuration {
+            id: "a".to_string(),
         }
         .into_key(),
         rel_type: "HAS_STATE".to_string(),
-        to: ScheduleKey::Adhoc {
-            agent_type: "b".to_string(),
+        to: ScheduleKey::ConfigurationOutcome {
+            key: "b".to_string(),
         }
         .into_key(),
     };
@@ -146,8 +118,8 @@ fn test_compile_replace_edge() {
 #[test]
 fn test_compile_remove_edges() {
     let op = GraphOp::RemoveEdges {
-        from: ScheduleKey::Permanent {
-            agent_id: "a".to_string(),
+        from: ScheduleKey::Configuration {
+            id: "a".to_string(),
         }
         .into_key(),
         rel_type: "HAS_STATE".to_string(),
@@ -160,16 +132,16 @@ fn test_compile_remove_edges() {
 #[test]
 fn test_compile_update_state() {
     let op = GraphOp::UpdateState {
-        resource_key: ScheduleKey::Permanent {
-            agent_id: "a".to_string(),
+        resource_key: ScheduleKey::Configuration {
+            id: "a".to_string(),
         }
         .into_key(),
-        state_type_key: ScheduleKey::Adhoc {
-            agent_type: "state-type".to_string(),
+        state_type_key: ScheduleKey::ConfigurationOutcome {
+            key: "state-type".to_string(),
         }
         .into_key(),
-        state_instance_key: ScheduleKey::Ephemeral {
-            agent_type: "instance".to_string(),
+        state_instance_key: ScheduleKey::Configuration {
+            id: "instance".to_string(),
         }
         .into_key(),
         state_instance_props: vec![Property(
@@ -201,62 +173,6 @@ async fn test_processor_spawns() {
 }
 
 #[tokio::test]
-async fn test_processor_git_change_create() {
-    let (processor, handle) = spawn_processor().await;
-
-    let schedule_json = serde_json::json!({
-        "id": "test-schedule",
-        "kind": "Permanent",
-        "agent_id": "test-agent",
-        "agent_type": null,
-        "schedule": {"Periodic": {"interval": 10, "unit": "Minutes"}},
-        "config": {},
-        "metadata": {"description": null, "owner": null},
-        "version": 1
-    })
-    .to_string();
-
-    let change = GitScheduleChange::Create {
-        path: "permanent/test.dhall".to_string(),
-        json: schedule_json,
-    };
-    processor
-        .send_message(ProcessorMsg::GitChange(change))
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    processor.stop(None);
-    handle.await.unwrap();
-}
-
-#[tokio::test]
-async fn test_processor_git_change_update() {
-    let (processor, handle) = spawn_processor().await;
-
-    let schedule_json = serde_json::json!({
-        "id": "test-schedule",
-        "kind": "Adhoc",
-        "agent_id": null,
-        "agent_type": "worker",
-        "schedule": {"Periodic": {"interval": 5, "unit": "Minutes"}},
-        "config": {},
-        "metadata": {"description": null, "owner": null},
-        "version": 2
-    })
-    .to_string();
-
-    let change = GitScheduleChange::Update {
-        path: "adhoc/worker.dhall".to_string(),
-        json: schedule_json,
-    };
-    processor
-        .send_message(ProcessorMsg::GitChange(change))
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    processor.stop(None);
-    handle.await.unwrap();
-}
-
-#[tokio::test]
 async fn test_processor_git_change_delete() {
     let (processor, handle) = spawn_processor().await;
     let change = GitScheduleChange::Delete {
@@ -264,49 +180,6 @@ async fn test_processor_git_change_delete() {
     };
     processor
         .send_message(ProcessorMsg::GitChange(change))
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    processor.stop(None);
-    handle.await.unwrap();
-}
-
-#[tokio::test]
-async fn test_processor_announcement() {
-    let (processor, handle) = spawn_processor().await;
-
-    let default_schedule_json = serde_json::json!({
-        "id": "adhoc/worker",
-        "kind": "Adhoc",
-        "agent_id": null,
-        "agent_type": "worker",
-        "schedule": {"Periodic": {"interval": 60, "unit": "Minutes"}},
-        "config": {},
-        "metadata": {"description": null, "owner": null},
-        "version": 1
-    })
-    .to_string();
-
-    let ann = AdhocAgentAnnouncement {
-        agent_type: "worker".to_string(),
-        version: 1,
-        default_schedule_json,
-    };
-    processor
-        .send_message(ProcessorMsg::Announcement(ann))
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    processor.stop(None);
-    handle.await.unwrap();
-}
-
-#[tokio::test]
-async fn test_processor_event() {
-    let (processor, handle) = spawn_processor().await;
-    processor
-        .send_message(ProcessorMsg::Event {
-            topic: "events.user.updated".to_string(),
-            payload: vec![],
-        })
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     processor.stop(None);
@@ -344,17 +217,5 @@ fn test_git_schedule_change_delete_rkyv() {
     };
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
     let decoded = rkyv::from_bytes::<GitScheduleChange, rkyv::rancor::Error>(&bytes).unwrap();
-    assert_eq!(original, decoded);
-}
-
-#[test]
-fn test_adhoc_announcement_rkyv() {
-    let original = AdhocAgentAnnouncement {
-        agent_type: "worker".to_string(),
-        version: 1,
-        default_schedule_json: "{}".to_string(),
-    };
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original).unwrap();
-    let decoded = rkyv::from_bytes::<AdhocAgentAnnouncement, rkyv::rancor::Error>(&bytes).unwrap();
     assert_eq!(original, decoded);
 }

@@ -24,40 +24,15 @@
 // Graph node keys (processor‑specific)
 #[derive(Debug, Clone)]
 pub enum ScheduleKey {
-    Permanent {
-        agent_id: String,
-    },
-    Adhoc {
-        agent_type: String,
-    },
-    Ephemeral {
-        agent_type: String,
-    },
     /// A signed configuration item (see docs/architecture/scheduling-kinds.md), keyed by its id.
-    Configuration {
-        id: String,
-    },
+    Configuration { id: String },
     /// What an agent did with a configuration document: one node per outcome, kept as a trail.
-    ConfigurationOutcome {
-        key: String,
-    },
+    ConfigurationOutcome { key: String },
 }
 
 impl crate::graph::controller::GraphNodeKey for ScheduleKey {
     fn cypher_match(&self, prefix: &str) -> (String, Vec<(String, neo4rs::BoltType)>) {
         match self {
-            ScheduleKey::Permanent { agent_id } => (
-                format!("({prefix}:Schedule:Permanent {{ agent_id: ${prefix}_agent_id }})"),
-                vec![(format!("{prefix}_agent_id"), agent_id.clone().into())],
-            ),
-            ScheduleKey::Adhoc { agent_type } => (
-                format!("({prefix}:Schedule:Adhoc {{ agent_type: ${prefix}_agent_type }})"),
-                vec![(format!("{prefix}_agent_type"), agent_type.clone().into())],
-            ),
-            ScheduleKey::Ephemeral { agent_type } => (
-                format!("({prefix}:Schedule:Ephemeral {{ agent_type: ${prefix}_agent_type }})"),
-                vec![(format!("{prefix}_agent_type"), agent_type.clone().into())],
-            ),
             ScheduleKey::Configuration { id } => (
                 format!("({prefix}:Schedule:Configuration {{ id: ${prefix}_id }})"),
                 vec![(format!("{prefix}_id"), id.clone().into())],
@@ -77,15 +52,6 @@ mod tests {
 
     fn keys() -> Vec<ScheduleKey> {
         vec![
-            ScheduleKey::Permanent {
-                agent_id: "a".into(),
-            },
-            ScheduleKey::Adhoc {
-                agent_type: "t".into(),
-            },
-            ScheduleKey::Ephemeral {
-                agent_type: "t".into(),
-            },
             ScheduleKey::Configuration { id: "i".into() },
             ScheduleKey::ConfigurationOutcome { key: "k".into() },
         ]

@@ -345,25 +345,25 @@ async fn a_command_or_an_admission_is_written_to_the_graph_but_not_forwarded_yet
 }
 
 #[tokio::test]
-async fn an_unsigned_schedule_still_takes_the_old_path() {
+async fn a_file_that_is_not_a_signed_document_is_ignored() {
+    // The unsigned schedule shape, which the processor once wrote to the graph and published unchecked, and
+    // files that are no document at all: none is written or forwarded.
     let rig = Rig::new().await;
-    let node = json!({
+    let schedule = json!({
         "id": "permanent/x", "kind": "Permanent", "agent_id": "x", "agent_type": null,
         "schedule": {"Periodic": {"interval": 5, "unit": "Minutes"}},
         "config": {}, "metadata": {"description": null, "owner": null}, "version": 1
     });
-    rig.create("permanent/x.dhall", &node).await;
+    rig.create("permanent/x.dhall", &schedule).await;
+    rig.change(GitScheduleChange::Create {
+        path: "permanent/notes.txt".into(),
+        json: "not json at all".into(),
+    })
+    .await;
+    rig.create("permanent/list.dhall", &json!([1, 2, 3])).await;
 
-    let written = rig.graph();
-    assert_eq!(written.len(), 1);
-    assert!(
-        written[0].node.contains("Schedule:Permanent"),
-        "{}",
-        written[0].node
-    );
-    let published = rig.published();
-    assert_eq!(published.len(), 1);
-    assert_eq!(published[0].0, "agent.x.schedule");
+    assert!(rig.graph().is_empty(), "{:?}", rig.graph());
+    assert!(rig.published().is_empty(), "{:?}", rig.published());
 }
 
 fn outcome(status: &str, id: Option<&str>, sequence: u64) -> ConfigurationOutcome {

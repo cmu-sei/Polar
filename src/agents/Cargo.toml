@@ -79,8 +79,6 @@ members = [
     "polar-scheduler/common",
     "polar-scheduler/observer",
     "polar-scheduler/processor",
-    "polar-scheduler/tests/mock-agent",
-    "polar-scheduler/tests/mock-adhoc-agent",
     "build-processor",
     "cert-issuer/server","cert-issuer/client", "cert-issuer/common",
     "secret-harness",

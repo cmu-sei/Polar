@@ -4471,37 +4471,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mock-adhoc-agent"
-version = "1.0.0"
-dependencies = [
- "cassini-client",
- "cassini-types",
- "polar",
- "polar-scheduler-common",
- "ractor",
- "rkyv",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "mock-agent"
-version = "1.0.0"
-dependencies = [
- "cassini-client",
- "cassini-types",
- "neo4rs",
- "polar",
- "polar-scheduler-common",
- "ractor",
- "rkyv",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "moka"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"

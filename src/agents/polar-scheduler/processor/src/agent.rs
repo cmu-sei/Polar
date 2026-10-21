@@ -43,20 +43,16 @@ impl PolarAgent for SchedulerProcessor {
             "the observer's schedule changes",
         ),
         TopicDecl::subscribe(
-            polar_scheduler_common::SCHEDULER_ADHOC_TOPIC,
-            "an ad hoc agent announcing itself",
-        ),
-        TopicDecl::subscribe(
             polar_scheduler_common::CONFIGURATION_OUTCOME_TOPIC,
             "each agent's outcome for a configuration document, recorded in the graph",
         ),
     ];
     const HELP: Option<&'static str> = Some(
-        "The processor subscribes to the schedule changes the scheduler observer publishes \
-         (scheduler.in) and to the announcements of ad-hoc agents (scheduler.adhoc). It stores \
-         each schedule in the graph and, when a schedule's version has changed, publishes a \
-         notification on the topic of the agent or agent type it is for. It needs the graph \
-         (GRAPH_*).",
+        "The processor subscribes to the changes the scheduler observer publishes from the \
+         schedules repository (scheduler.in). It writes each signed document to the graph and, \
+         when its version is new, forwards it untouched to the agent it is addressed to; a file \
+         that is not a signed document is ignored. It also records each agent's outcome for a \
+         document. It needs the graph (GRAPH_*).",
     );
 
     async fn start(configured: Configured) -> Result<(), StartError> {

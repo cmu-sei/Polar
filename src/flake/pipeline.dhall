@@ -53,8 +53,6 @@ let binaries =
       , "jira-observer"
       , "kube-consumer"
       , "kube-observer"
-      , "mock-adhoc-agent"
-      , "mock-agent"
       , "openapi-observer"
       , "orchestrator-core"
       , "pipeline-manifest.pinned.json"

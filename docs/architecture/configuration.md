@@ -100,6 +100,9 @@ The scheduler already exists in outline (`polar-scheduler`): a git observer publ
 to `scheduler.in`; a processor stores each `ScheduleNode` in the graph and publishes a
 notification to `agent.<id>.schedule`; agents announce themselves on `scheduler.adhoc`. A
 node's `config` is an untyped JSON value today. The declarations become the schema for it.
+*(Superseded: the scheduler now handles signed documents only, forwarded on `agent.<agent>.configuration`;
+the unsigned `ScheduleNode` path, `agent.<id>.schedule` and `scheduler.adhoc` were removed on 2026-10-21,
+`policy-enforcement.md`, "Decisions".)*
 
 Properties the design needs:
 
@@ -203,7 +206,9 @@ startup snapshot. Nothing yet sends it an update, no variable in the workspace i
 it does not decide who may send one.
 
 Next, in order: the scheduler integration (a subscriber on `agent.<id>.schedule` that turns a `ScheduleNotification`
-into an update), signed configuration in front of `apply`, then the credentials agent's use of it. Every step is
+into an update), signed configuration in front of `apply`, then the credentials agent's use of it. *(Done another way:
+every agent subscribes to `agent.<name>.configuration` for signed documents, and the unsigned `ScheduleNotification`
+path was removed on 2026-10-21.)* Every step is
 in `remaining-work.md`.
 
 ## 9. The agent's own interface (decided 2026-10-09, not yet built)

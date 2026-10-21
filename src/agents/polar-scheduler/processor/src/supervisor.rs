@@ -47,8 +47,7 @@ use polar_agent_builder::{
     InfrastructureSupervisorMessage, Subscription, spawn_graph_controller, stop_graph_controller,
 };
 use polar_scheduler_common::{
-    AdhocAgentAnnouncement, CONFIGURATION_OUTCOME_TOPIC, ConfigurationOutcome, GitScheduleChange,
-    SCHEDULER_ADHOC_TOPIC, SCHEDULER_IN_TOPIC,
+    CONFIGURATION_OUTCOME_TOPIC, ConfigurationOutcome, GitScheduleChange, SCHEDULER_IN_TOPIC,
 };
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
@@ -73,8 +72,6 @@ pub enum SchedulerSupervisorMessage {
     },
     /// A schedule changed in the repository.
     ScheduleChanged(GitScheduleChange),
-    /// An ad-hoc agent announced itself with a default schedule.
-    Announced(AdhocAgentAnnouncement),
     /// An agent says what it did with a signed configuration document.
     Outcome {
         outcome: ConfigurationOutcome,
@@ -93,7 +90,6 @@ pub enum SchedulerSupervisorMessage {
 /// only sees values; one that does not decode is logged and dropped.
 pub fn subscriptions(supervisor: &ActorRef<SchedulerSupervisorMessage>) -> Vec<Subscription> {
     let for_changes = supervisor.clone();
-    let for_announcements = supervisor.clone();
     let for_outcomes = supervisor.clone();
     vec![
         Subscription::new(SCHEDULER_IN_TOPIC, move |incoming| {
@@ -108,21 +104,6 @@ pub fn subscriptions(supervisor: &ActorRef<SchedulerSupervisorMessage>) -> Vec<S
                 Err(e) => error!("failed to deserialize a GitScheduleChange: {e:?}"),
             }
         }),
-        Subscription::new(
-            SCHEDULER_ADHOC_TOPIC,
-            move |incoming| match rkyv::from_bytes::<AdhocAgentAnnouncement, rkyv::rancor::Error>(
-                &incoming.payload,
-            ) {
-                Ok(announcement) => {
-                    if let Err(e) =
-                        for_announcements.cast(SchedulerSupervisorMessage::Announced(announcement))
-                    {
-                        error!("failed to hand an announcement to the supervisor: {e}");
-                    }
-                }
-                Err(e) => error!("failed to deserialize an ad-hoc announcement: {e:?}"),
-            },
-        ),
         Subscription::new(
             CONFIGURATION_OUTCOME_TOPIC,
             move |incoming| match rkyv::from_bytes::<ConfigurationOutcome, rkyv::rancor::Error>(
@@ -243,13 +224,6 @@ impl Actor for SchedulerSupervisor {
                     processor.cast(ProcessorMsg::GitChange(change))?;
                 }
             }
-            SchedulerSupervisorMessage::Announced(announcement) => {
-                if state.drain.is_draining() {
-                    warn!("draining -- an ad-hoc announcement will be lost on exit");
-                } else if let Some(processor) = &state.processor {
-                    processor.cast(ProcessorMsg::Announcement(announcement))?;
-                }
-            }
             SchedulerSupervisorMessage::Outcome {
                 outcome,
                 reported_by,
@@ -323,7 +297,7 @@ impl Actor for SchedulerSupervisor {
 mod tests {
     use super::*;
     use polar_router::IncomingMessage;
-    use polar_scheduler_common::{AdhocAgentAnnouncement, GitScheduleChange};
+    use polar_scheduler_common::GitScheduleChange;
     use std::sync::{Arc, Mutex};
     use std::time::Duration as StdDuration;
 
@@ -352,7 +326,6 @@ mod tests {
         ) -> Result<(), ActorProcessingErr> {
             let kind = match message {
                 SchedulerSupervisorMessage::ScheduleChanged(_) => "change",
-                SchedulerSupervisorMessage::Announced(_) => "announcement",
                 SchedulerSupervisorMessage::Outcome { reported_by, .. } => {
                     if reported_by.as_deref() == Some("the-broker-says") {
                         "outcome from the broker's identity"
@@ -398,32 +371,15 @@ mod tests {
             .unwrap();
         let subs = subscriptions(&sink);
         let topics: Vec<&str> = subs.iter().map(|s| s.topic.as_str()).collect();
-        assert_eq!(
-            topics,
-            [
-                SCHEDULER_IN_TOPIC,
-                SCHEDULER_ADHOC_TOPIC,
-                CONFIGURATION_OUTCOME_TOPIC
-            ]
-        );
+        assert_eq!(topics, [SCHEDULER_IN_TOPIC, CONFIGURATION_OUTCOME_TOPIC]);
 
         let change = rkyv::to_bytes::<rkyv::rancor::Error>(&GitScheduleChange::Delete {
             path: "a.dhall".into(),
         })
         .unwrap()
         .to_vec();
-        let announcement = rkyv::to_bytes::<rkyv::rancor::Error>(&AdhocAgentAnnouncement {
-            agent_type: "worker".into(),
-            version: 1,
-            default_schedule_json: "{}".into(),
-        })
-        .unwrap()
-        .to_vec();
-
         (subs[0].deliver)(message(SCHEDULER_IN_TOPIC, change));
-        (subs[1].deliver)(message(SCHEDULER_ADHOC_TOPIC, announcement));
         (subs[0].deliver)(message(SCHEDULER_IN_TOPIC, vec![1, 2, 3]));
-        (subs[1].deliver)(message(SCHEDULER_ADHOC_TOPIC, vec![9]));
 
         // An outcome keeps the identity the broker gave for whoever published it.
         let outcome = rkyv::to_bytes::<rkyv::rancor::Error>(&ConfigurationOutcome {
@@ -441,17 +397,13 @@ mod tests {
         .to_vec();
         let mut from_broker = message(CONFIGURATION_OUTCOME_TOPIC, outcome);
         from_broker.published_by = Some("the-broker-says".into());
-        (subs[2].deliver)(from_broker);
-        (subs[2].deliver)(message(CONFIGURATION_OUTCOME_TOPIC, vec![7, 7]));
+        (subs[1].deliver)(from_broker);
+        (subs[1].deliver)(message(CONFIGURATION_OUTCOME_TOPIC, vec![7, 7]));
 
         tokio::time::sleep(StdDuration::from_millis(100)).await;
         assert_eq!(
             *got.lock().unwrap(),
-            [
-                "change",
-                "announcement",
-                "outcome from the broker's identity"
-            ]
+            ["change", "outcome from the broker's identity"]
         );
     }
 }

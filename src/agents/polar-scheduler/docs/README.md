@@ -23,37 +23,36 @@
 
 # Scheduler Agent – Design Overview
 
-The Scheduler Agent is responsible for managing the lifecycle of all schedules in Polar.
-It consists of a single **RootSupervisor** actor that spawns the **ScheduleInfoProcessor**.
+The scheduler is two agents. The **observer** (`polar-scheduler-observer`) keeps a checkout of the `polar-schedules`
+repository on the Polar git server and publishes each file that changes on `scheduler.in`. The **processor**
+(`polar-scheduler`) handles what it publishes: it writes each signed document to the graph and forwards it, untouched, to
+the agent it is addressed to (`agent.<agent>.configuration`), which verifies it. Neither verifies a document; the receiver
+does.
 
-## Components
+## Message flow
 
-- **RootSupervisor**  
-  - Initialises the Cassini client.  
-  - Subscribes to `scheduler.in` (Git changes), `scheduler.adhoc` (agent registrations), and `events.#` (ephemeral triggers).  
-  - Spawns the `ScheduleInfoProcessor` as a linked actor.
+- **A push to `polar-schedules`** → `polar-git-repo-changed` → the observer syncs its checkout → each changed file on
+  `scheduler.in`.
+- **A signed document** (`scheduler.in`) → the processor writes a `(:Schedule:Configuration {id})` node and, when its
+  version is new, publishes a `ConfigurationNotification` on `agent.<agent>.configuration`. A document it cannot route is
+  written and goes nowhere.
+- **A file that is not a signed document** → logged and ignored. The unsigned schedule path (`permanent`, `adhoc` and
+  `ephemeral` schedules, `scheduler.adhoc`, `agent.<id>.schedule`, `agent.type.<type>.schedule`) was removed on
+  2026-10-21 (`docs/architecture/policy-enforcement.md`, "Decisions").
+- **An agent's outcome** (`polar-configuration-outcome`) → the processor writes a `ConfigurationOutcome` node linked to
+  the document.
+- **An agent asking for a replay** (`polar-configuration-replay`) → the observer publishes the documents it holds for that
+  agent on its configuration topic.
 
-- **ScheduleInfoProcessor**  
-  - Maintains an in‑memory cache of all schedules.  
-  - Writes to / reads from the knowledge graph.  
-  - Publishes schedule updates to agent‑specific topics (`agent.<id>.schedule`, `agent.type.<type>.schedule`).  
-  - Registers event patterns and triggers ephemeral launches.
+The sequences are drawn in `docs/architecture/sequences/general/signed_configuration_delivery.mmd`, and the kinds of
+document in `docs/architecture/scheduling-kinds.md`.
 
-- **Git Watcher Observer** (separate binary)  
-  - Watches the GitOps repo and publishes file changes to `scheduler.in`.
+## Key design decisions
 
-## Message Flow
-
-- **Git change** → `scheduler.in` → `ScheduleInfoProcessor` updates graph and cache → publishes to agent topics.
-- **Ad‑hoc agent registration** → `scheduler.adhoc` → `ScheduleInfoProcessor` creates/updates type schedule node → publishes current schedule to agent type topic.
-- **Ephemeral event** → `events.#` → `ScheduleInfoProcessor` matches pattern → triggers launcher with instance config.
-
-## Key Design Decisions
-
-- The Scheduler **does not** start agents; it only provides configuration.  
-- All inter‑component communication goes through Cassini topics.  
-- The knowledge graph is the source of truth; the cache is only for performance.  
-- Dhall is used for authoring schedules; evaluated to JSON at runtime.
+- The scheduler does not start agents; it only delivers their configuration.
+- All communication between components goes through Cassini topics.
+- The knowledge graph keeps every document received, and every outcome reported.
+- Documents are authored and signed with `polar-sign` and evaluated to JSON in the repository.
 
 
 # Integration Testing
