@@ -25,7 +25,7 @@
 //! `polar_agent_builder::PolarAgent`.
 
 use crate::supervisor::{ObserverSupervisor, SERVICE_NAME, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
+use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
@@ -37,6 +37,56 @@ impl PolarAgent for CredentialsObserver {
     const PURPOSE: &'static str = "The HTTP front of the credentials agent: relays certificate, account and admin requests to the consumer over Cassini";
     const NEEDS: &'static [Capability] = &[];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
+            "a certificate request from HTTP (POST /issue)",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
+            "polar-init's workload session and issuance (/workload/session, /workload/issue)",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
+            "an identity to normalize, from HTTP (/identity)",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
+            "an agent's escrow public key, asked for over HTTP (/agent-escrow-key)",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC,
+            "an account request from HTTP (/account)",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC,
+            "a signed administrator action from HTTP (/admin-action)",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_ISSUANCE_REPLIES_TOPIC,
+            "the answer to an issuance it relayed",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC,
+            "the answer to a workload's request it relayed",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC,
+            "the answer to a normalization it relayed",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
+            "the answer to an escrow key lookup it relayed",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_ACCOUNT_REPLIES_TOPIC,
+            "the answer to an account request it relayed",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC,
+            "the answer to an administrator action it relayed",
+        ),
+    ];
     const SECTIONS: &'static [&'static Section] = &[&crate::settings::SECTION];
     const HELP: Option<&'static str> = Some(
         "The observer takes the credentials agent's requests over HTTP, publishes each on Cassini \

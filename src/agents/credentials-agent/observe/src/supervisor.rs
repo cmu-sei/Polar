@@ -408,6 +408,18 @@ mod tests {
     }
 
     #[test]
+    fn every_topic_it_subscribes_to_is_in_its_declared_set() {
+        let set = polar_agent_builder::agent::topic_set::<crate::agent::CredentialsObserver>();
+        for subscription in reply_subscriptions(&ReplyRouters::default()) {
+            assert!(
+                set.allows(&subscription.topic, polar_agent_builder::Access::Subscribe),
+                "{} is not declared",
+                subscription.topic
+            );
+        }
+    }
+
+    #[test]
     fn subscribes_to_exactly_the_six_reply_topics() {
         let subs = reply_subscriptions(&ReplyRouters::default());
         let mut topics: Vec<&str> = subs.iter().map(|s| s.topic.as_str()).collect();

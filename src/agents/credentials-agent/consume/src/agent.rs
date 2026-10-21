@@ -27,7 +27,7 @@
 //! Its settings are a section of its own (`settings.rs`), read from the snapshot the builder took.
 
 use crate::supervisor::{ConsumerSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
+use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
@@ -42,6 +42,136 @@ impl PolarAgent for CredentialsConsumer {
     // truth and the graph only a projection).
     const NEEDS: &'static [Capability] = &[];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_GRANTS_TOPIC,
+            "grants, which nothing publishes yet",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_REVOCATIONS_TOPIC,
+            "revocations, which nothing publishes yet",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC,
+            "account provisioning, which nothing publishes yet",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC,
+            "a signed administrator action, relayed by the observer",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC,
+            "an account request, relayed by the observer",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
+            "a certificate issuance request, relayed by the observer",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
+            "an identity to normalize, relayed by the observer",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
+            "a request for its escrow public key",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC,
+            "a certificate lookup, which nothing publishes yet",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+            "a secret to store, from its owner",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
+            "a request for a stored secret, decided by policy",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
+            "an agent's request for its own escrow keypair",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
+            "an agent asking for an escrow keypair to be issued",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
+            "a request for another agent's escrow public key",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
+            "a decryption on behalf of an agent, which nothing publishes yet",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
+            "a workload's certificate request, relayed by the observer",
+        ),
+        TopicDecl::subscribe(
+            credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC,
+            "an agent asking for the current policy and permissions",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC,
+            "the answer to an administrator action",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_ACCOUNT_REPLIES_TOPIC,
+            "the answer to an account request",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_ISSUANCE_REPLIES_TOPIC,
+            "an issued certificate, or why not",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC,
+            "a normalized identity, or why not",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC,
+            "its escrow public key",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_CERTIFICATE_REPLIES_TOPIC,
+            "the answer to a certificate lookup",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_STORE_SECRET_REPLIES_TOPIC,
+            "whether a secret was stored",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC,
+            "a secret, encrypted to the requester, or the refusal",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
+            "an agent's escrow keypair, or the refusal",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
+            "an issued escrow keypair, or why not",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
+            "another agent's escrow public key",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_DECRYPT_ON_BEHALF_OF_REPLIES_TOPIC,
+            "the answer to a decryption on behalf of an agent",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC,
+            "a workload's certificate, or why not",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::authority_update::AUTHORITY_UPDATES_TOPIC,
+            "a signed change of policy, groups or revoked serials",
+        ),
+        TopicDecl::publish(
+            credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
+            "the signed current policy and permissions, on request, at start and every half hour",
+        ),
+    ];
     const SECTIONS: &'static [&'static Section] = &[
         &polar::graph::environment::SECTION,
         &crate::settings::SECTION,
@@ -80,4 +210,19 @@ mod tests {
     use super::*;
 
     polar_agent_builder::polar_agent_tests!(CredentialsConsumer);
+
+    #[test]
+    fn every_topic_it_subscribes_to_is_in_its_declared_set() {
+        use polar_agent_builder::Access;
+        let set = polar_agent_builder::agent::topic_set::<CredentialsConsumer>();
+        for topic in crate::supervisor::REQUEST_TOPICS
+            .iter()
+            .chain([&credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC])
+        {
+            assert!(
+                set.allows(topic, Access::Subscribe),
+                "{topic} is not declared"
+            );
+        }
+    }
 }
