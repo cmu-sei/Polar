@@ -281,9 +281,13 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   any would be denied, the whole policy is refused with the reason, and the old one stays in force, as for a policy that
   does not parse or validate. Cedar keeps overriding the certificate both ways; a policy that would cut the channel through
   which policy is corrected, or certificates renewed, is never accepted.
-- **C. The size of a certificate's topic list** (stage 3). The credentials agent alone subscribes to its 16 request topics and the
-  snapshot requests, and publishes their replies and the authority topics; those would be implied, not written, but a workload with many declared topics makes a large certificate. A limit, or
-  a compact form, may be needed.
+- **C. The size of a certificate's topic list** (stage 3). *Decided 2026-10-21: no compact form, no hard limit.* The
+  largest declared sets are the credentials agent consumer's (about 34 `p:` names: its 16 request and 16 reply topics and
+  the two authority topics) and the scheduler processor's (one per workload, about 20 today); most agents declare 1 to 8.
+  At 40 to 60 bytes a name that is about 2 KB, far inside what a TLS handshake carries (the tightest limit in the path is
+  a JDK's default of 32 KiB for a handshake message, if Neo4j's TLS is the JDK's; rustls and Go allow 64 KiB, OpenSSL
+  100 KiB for the certificate list). The render warns when a workload declares more than 64 topics, as a signal to look
+  at its design, not a failure.
 
 ## Sequence diagrams
 
