@@ -412,7 +412,27 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
 - Each sink writes one record per run: the run's parameters, the broker's image, throughput, latency percentiles and
   loss. A small nu script collects the records and compares runs as a table.
 - A baseline of today's broker, recorded, before stage 5b changes it.
-- The details are planned when the stage starts.
+- *Planned 2026-10-21:*
+  - the producer and the sink become builder agents, `harness-producer` and `harness-sink` (one binary per workload,
+    as the secret harness), declaring their topics, so in stage 5b their certificates carry them and the broker judges
+    them as it does any agent. Their catalog entries (`infra/config/workloads/cassini-harness.nuon`) are added to a
+    target only when it is being measured;
+  - a run is a set of Kubernetes Jobs made from the catalog's rendered pod spec: the identity, image, certificate and
+    topics are the catalog's, and only the run's parameters are given, as environment variables. The script starts the
+    sinks, waits until they are Ready (a sink is Ready once the broker has acknowledged its subscription), starts the
+    producers, collects the result lines and deletes the Jobs; an agent exits 0 when its run is done. (Chosen over
+    long-running Deployments given each run as a signed configuration update, which would make every point of a grid a
+    document to sign, and over patching the Deployments' environment, which drifts from the render and which Flux
+    reverts.);
+  - the measuring is rebuilt, not patched: the sink today `fsync`s a file for every message and the producer makes a
+    random string and a SHA-256 for every message, so either would measure itself, not the broker, and nothing measures
+    latency. The payload is made once per run; each message carries its producer, a sequence number and its send time;
+    the sink keeps latencies in memory and reports p50, p90, p99 and max, throughput, loss, duplicates and messages out of
+    order; the producer reports the rate it reached and its refused or failed publishes; each writes one result line at
+    the end. Latency is only right when producer and sink share a clock (one node); the script says when they do not;
+  - the controller and its control channel (`cassini/test/control`, `harness-common`'s `ControlClient`) are removed;
+  - a nu script runs a plan (a list of runs, or a grid of sizes, rates, producers and sinks), keeps the results, and
+    compares runs as a table.
 
 **Stage 5b: the broker enforces** (gaps 7, 8, 11)
 
