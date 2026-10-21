@@ -112,7 +112,7 @@ use ractor::{ActorProcessingErr, ActorRef};
 pub mod agent;
 pub mod supervisor;
 
-pub const BROKER_CLIENT_NAME: &str = "kubernetes.cluster.cassini.client";
+pub const BROKER_CLIENT_NAME: &str = "kube-consumer";
 
 // ---------------------------------------------------------------------------
 // Time helpers — the only place timestamps are constructed.

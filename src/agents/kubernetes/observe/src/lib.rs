@@ -50,7 +50,7 @@ use tracing::{debug, error, instrument, trace, warn};
 pub mod agent;
 pub mod supervisor;
 
-pub const TCP_CLIENT_NAME: &str = "kubernetes.cluster_name.supervisor_name.client";
+pub const TCP_CLIENT_NAME: &str = "kube-observer";
 
 pub struct KubernetesObserver;
 

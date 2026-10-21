@@ -30,4 +30,4 @@ pub mod projects;
 pub mod supervisor;
 pub mod users;
 
-pub const BROKER_CLIENT_NAME: &str = "JIRA_CONSUMER_CLIENT";
+pub const BROKER_CLIENT_NAME: &str = "jira-processor";

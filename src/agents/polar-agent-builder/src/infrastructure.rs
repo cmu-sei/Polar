@@ -2554,7 +2554,7 @@ mod tests {
     #[test]
     fn the_probe_topic_has_no_colon_in_it() {
         // The broker names a subscription `{session}:{topic}` and splits it at the first colon;
-        // some services are named `jira:observer:web_client`.
+        // a service named `jira:observer:web_client`, as the Jira observer once was, still gets one.
         assert_eq!(
             self_test_topic("jira:observer:web_client"),
             "selftest.jira-observer-web_client"

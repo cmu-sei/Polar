@@ -32,14 +32,15 @@ below are relative to `src/agents/`. Who may use which topic is not decided anyw
 An agent's topics are named after the **service name** it passes to `AgentBuilder::new` (`polar-agent-builder/src/lib.rs:
 220-223, 433`), not after its `PolarAgent::NAME`, and the broker knows it by a third name, its **identity** (the
 certificate's first DNS SAN, from its ServiceAccount: `<workload>.<namespace>.serviceaccount.<domain>`,
-`cert-issuer/common/src/identity.rs:52-53, 125`). For most agents the service name is the workload name; for some it is not:
+`cert-issuer/common/src/identity.rs:52-53, 125`). The service name is the workload name, a constant in each agent's
+code, one binary per workload (`policy-enforcement.md`, "Decisions"), so the identity maps to it mechanically:
 
 | Workload | Service name (its topics) | Identity (what the broker sees) |
 |---|---|---|
-| kube-observer | `kubernetes.cluster_name.supervisor_name.client` (`kubernetes/observe/src/lib.rs:53`) | `kube-observer.polar.serviceaccount.cluster.local` |
-| kube-consumer | `kubernetes.cluster.cassini.client` (`kubernetes/consume/src/lib.rs:115`) | `kube-consumer.polar.serviceaccount.cluster.local` |
-| jira, oci-resolver | a client-name constant (not checked) | `<workload>.polar.serviceaccount.cluster.local` |
-| git, scheduler, credentials agents | the workload name | `<workload>.polar.serviceaccount.cluster.local` |
+| every agent but one | the workload name (since 2026-10-21 for kube-observer, kube-consumer, jira-observer, jira-processor, oci-registry-resolver, git-repo-processor and polar-scheduler, which passed other names) | `<workload>.polar.serviceaccount.cluster.local` |
+| credentials-agent | `credentials-agent-consumer` (`credentials-agent/consume/src/supervisor.rs:127`), still to change | `credentials-agent.polar.serviceaccount.cluster.local` |
+
+Not built yet: the builder checking at start that its name is its own certificate's identity.
 
 A signed document must name the service name in `target.agent` (`signed.rs:312`, `configuration.rs:706`). A rule about
 who may use an agent's topics has to join the two.

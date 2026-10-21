@@ -54,7 +54,7 @@ use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use tracing::{debug, error, info, warn};
 
-pub const SERVICE_NAME: &str = "polar.scheduler";
+pub const SERVICE_NAME: &str = "polar-scheduler";
 
 const DRAIN_WINDOW_SECS: u64 = 5;
 const GRAPH_STOP_SECS: u64 = 30;

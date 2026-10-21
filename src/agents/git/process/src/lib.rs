@@ -27,4 +27,4 @@ pub mod agent;
 pub mod ops;
 pub mod supervisor;
 
-pub const SERVICE_NAME: &str = "git.repositories.processor";
+pub const SERVICE_NAME: &str = "git-repo-processor";

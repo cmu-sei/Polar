@@ -44,7 +44,7 @@ const JIRA_PROJECT_OBSERVER: &str = "jira.observer.projects";
 const JIRA_GROUP_OBSERVER: &str = "jira.observer.groups";
 const JIRA_USER_OBSERVER: &str = "jira.observer.users";
 const JIRA_ISSUE_OBSERVER: &str = "jira.observer.issues";
-pub const BROKER_CLIENT_NAME: &str = "jira:observer:web_client";
+pub const BROKER_CLIENT_NAME: &str = "jira-observer";
 
 /// Authentication mode for the Jira REST API.
 ///
