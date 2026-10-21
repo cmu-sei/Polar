@@ -206,7 +206,8 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
 **Stage 2: the catalog carries the sets, and the render writes the floors** (gaps 1, 3, 6)
 
 - `resolve.nu` reads each workload's set from its scaffold. The scheduler's family (`agent.<workload>.configuration`
-  for each workload) is generated from the catalog as exact names (open point A, below).
+  for each workload) is generated from the catalog as exact names: the render passes the list of workloads to the scheduler, which expands it
+  in its computed set (open point A, decided).
 - The render writes each workload's declared topics into the credentials agent's issuance floor and, for the bootstrap
   services, into cert-issuer's floor, as server names are written today. `render.nu` checks that every declared topic has
   at least one other side (a subscriber for a publish, a publisher for a subscribe), so a mismatch fails the render.
@@ -268,10 +269,10 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
 
 **Open points, to settle before the stage that needs them**
 
-- **A. The scheduler's family and the computed set** (stage 2). The set is computed once, in the builder, from the
-  agent's code; but the scheduler's per-workload topics come from the catalog, which the builder does not have when it
-  prints its scaffold. Either the scheduler declares the family in its code and the catalog expands it (a pattern by
-  another name), or the render gives the scheduler the list of workloads as an input it reads at start and prints.
+- **A. The scheduler's family and the computed set** (stage 2). *Decided 2026-10-21:* the render gives the scheduler the
+  list of workloads it serves as an input (an environment variable from the catalog); the builder reads it at start and
+  expands it into exact names in the computed set, and `--scaffold` is asked with the same input, so every consumer still
+  reads one computed set. The scheduler does not declare a pattern.
 - **B. Can a policy cut off the authority channel?** (stage 5). If a `forbid` can refuse `polar-authority-updates` or the
   credentials agent's request topics, a bad policy can stop its own correction and every certificate renewal. Either those
   topics are decided by the floor alone, whatever the policy says, or the credentials agent refuses to publish a policy
