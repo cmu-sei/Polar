@@ -85,6 +85,7 @@ sequenceDiagram
     Up->>K: kubectl logs credentials-agent until it says the policy is published (3 minutes)
 
     Note over Up,N4: 5 browser certificate and Neo4j password
+    Note over Up,Brw: from the dev pod (bin/polar-dev) the browser is on the operator's machine: this step pauses<br/>for "bin/polar-dev cert U" and "bin/polar-dev forward" there, then checks Neo4j as below
     Up->>Brw: read the Librewolf certificate store (read-only): does it trust this CA<br/>and hold U's current certificate?
     alt something is missing or stale
         Up->>Op: PAUSE: close Librewolf so its store is not locked

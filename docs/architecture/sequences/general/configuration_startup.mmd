@@ -19,6 +19,7 @@
 %%
 %% DM26-0670
 
+%% Built (configuration-flow.md); the shaded part is designed (policy-enforcement.md, stages 0, 1, 6), not built.
 sequenceDiagram
     autonumber
     participant KL as Kubelet
@@ -48,3 +49,11 @@ sequenceDiagram
     DS->>AB: build()
     AB->>IS: spawn: health, router, subscriptions, Cassini client, crypto
     IS-->>DS: AgentResources, including the same Config
+
+    rect rgb(235, 219, 178)
+    Note over AB,IS: DESIGNED (policy-enforcement.md, stages 0, 1 and 6), not built
+    AB->>AB: the service name must be the workload name (POLAR_WORKLOAD), else refuse to start
+    AB->>AB: the topic set: TOPICS declared, plus implied (the builder's own topics, those NEEDS bring),<br/>the same set --scaffold prints, each implied topic with its rule
+    IS->>IS: every subscribe and publish outside the set is refused here, in the agent's log
+    IS->>IS: not healthy until a snapshot from the credentials agent is verified<br/>(a bootstrap service is: it runs on the certificate floor until its first)
+    end

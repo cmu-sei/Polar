@@ -20,20 +20,21 @@
 %% DM26-0670
 
 %% Phase 2 of the sandbox-local bootstrap: Flux reconciles the deployment repo, layer by layer.
-%% This ran on a podman dev node on 2026-10-19. The layers, their order and what each waits for are declared in
+%% This ran on a podman dev node on 2026-10-19, and from the dev pod on 2026-10-21 (registry and deployment git server in the cluster).
+%% Shaded: designed, not built (policy-enforcement.md, stages 3 and 5). The layers, their order and what each waits for are declared in
 %% infra/targets/T/target.nu (apply_layers) and travel in the repo as the Kustomizations under flux/.
 sequenceDiagram
     autonumber
     participant Up as infra/flux.nu wait<br/>called by up.nu
     participant SC as Flux source-controller
-    participant DGit as deployment git server
+    participant DGit as deployment git server<br/>(in the cluster, polar-deploy)
     participant KC as Flux kustomize-controller
     participant K as Kubernetes API
-    participant Reg as registry :5000<br/>(nodes pull from POLAR_NODE_REGISTRY)
+    participant Reg as registry in the cluster<br/>(nodes pull from localhost:30500)
     participant W as workloads of the layer
 
     Up->>DGit: git ls-remote as "flux": the commit that was published
-    SC->>DGit: git clone over mTLS, presenting the "flux" certificate<br/>(Secret deploy-repo-auth), trusting ca.crt, by the name polar-deploy-git.flux-system.svc.cluster.local<br/>(a Service whose EndpointSlice leads to the host)
+    SC->>DGit: git clone over mTLS, presenting the "flux" certificate<br/>(Secret deploy-repo-auth), trusting ca.crt, by its Service, polar-deploy-git.polar-deploy.svc.cluster.local:9443
     DGit->>DGit: the identity "flux" is a reader of deploy-T: allowed
     DGit-->>SC: the tree at COMMIT (layers/, flux/, provenance.json)
     SC->>K: artifact for COMMIT, GitRepository Ready
@@ -57,6 +58,9 @@ sequenceDiagram
     KC->>K: agents: jaeger, ace, kube, jira, git, polar-git-server, scheduler, secret-harness (Jobs)
     Note over KC,W: A Job that runs until replaced never completes, and Flux's own Job reader<br/>counts only a completed Job as healthy, so a running agent is waited for through the<br/>Endpoints of its Service. A layer with a Job is applied with force: its pod template is immutable.<br/>jira-observer fails when no Jira is set up: expected.
 
+    rect rgb(235, 219, 178)
+    Note over KC,W: DESIGNED: as each workload's pod starts, polar-init gets a certificate carrying its declared topics<br/>(p:pub, p:sub, from the issuance floor the render wrote). The broker, cert-issuer and the credentials agent<br/>run on that floor before any policy exists, and every subscribe and publish is decided at the broker.<br/>(general/topic_floor_issuance)
+    end
     KC->>K: record each Kustomization Ready at COMMIT
     loop every 5 seconds until the timeout
         Up->>K: every Kustomization Ready, and applied from COMMIT (not an earlier commit)?

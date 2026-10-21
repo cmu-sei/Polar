@@ -19,73 +19,42 @@
 %%
 %% DM26-0670
 
+%% A client subscribes to a topic. The path is the code as built (2026-10-21, docs/architecture/cassini-broker.md);
+%% the decision at the Listener is the design (docs/architecture/policy-enforcement.md, stage 5), not built yet.
 sequenceDiagram
-    participant Client
-    participant TcpClientActor
-    participant Listener
-    participant Broker
-    participant SessionManager
-    participant TopicManager
-    participant SubscriberManager
-    participant SubscriberAgent
-
     autonumber
-    Client->>TcpClientActor: SubscribeRequest(topic)
-    TcpClientActor->>Listener: Forward SubscribeRequest(topic)
+    participant Client as Agent (TcpClientActor)
+    participant Listener
+    participant Policy as Broker's PolicyLookup<br/>(designed)
+    participant Session as SessionAgent
+    participant Broker
+    participant Topics as TopicManager / TopicAgent
+    participant Subs as SubscriberManager / SubscriberAgent
 
-    alt Listener Exists
-        Listener->>Broker: Forward SubscribeRequest(topic)
-    else Listener Missing
-        Listener-->>Client: Error("Listener not found")
+    Note over Client,Listener: the connection's identity is the leaf certificate's first DNS SAN,<br/>taken at the handshake, and the leaf is kept (designed) for its p: names
+    Client->>Listener: SubscribeRequest(registration_id, topic)
+    alt not registered, or another session's id
+        Listener-->>Client: SubscribeAcknowledgment(Err "not registered")
     end
 
-    alt Broker Exists
-        activate Broker
-        Broker->>SessionManager: Validate Session
-        deactivate Broker
-    else Broker Missing
-        Broker-->>Client: Error("Broker not found")
+    rect rgb(235, 219, 178)
+    Note over Listener,Policy: DESIGNED: the decision, before anything is created
+    Listener->>Policy: subscribe, Topic::"topic", Identity::"identity",<br/>facts: workload, declared or implied
+    alt policy loaded and it speaks
+        Policy-->>Listener: Allow or Deny (Cedar overrides the certificate, both ways)
+    else no policy, or it does not speak
+        Listener->>Listener: the floor: implied topics from the identity,<br/>declared topics from the certificate's p:sub: names
+    end
+    alt refused (default deny)
+        Listener-->>Client: SubscribeAcknowledgment(Err "refused: ...")
+        Note right of Client: ClientEvent::SubscribeRefused (stage 0), the agent logs it
+    end
     end
 
-    alt Session Exists
-        activate SessionManager
-        SessionManager-->>Broker: OK
-        deactivate SessionManager
-    else Session Missing
-        SessionManager-->>Broker: Error("Session not found")
-        Broker-->>Client: Error("Subscription Failed")
-    end
-
-    Broker->>TopicManager: Ensure Topic Exists
-
-    alt Topic Exists
-        TopicManager-->>Broker: OK
-    else Topic Missing
-        activate TopicManager
-        TopicManager->>TopicAgent: Create Topic
-        deactivate TopicManager
-        TopicAgent-->>Broker: OK
-    end
-
-    activate Broker
-    Broker->>SubscriberManager: Create SubscriberAgent
-    deactivate Broker
-
-    alt Subscriber Creation Succeeds
-        activate SubscriberManager
-        SubscriberManager->>SubscriberAgent: Initialize Subscription
-        deactivate SubscriberManager
-        SubscriberAgent-->>SubscriberManager: OK
-        SubscriberManager-->>Broker: Subscription Successful
-    else Subscriber Creation Fails
-        SubscriberManager-->>Broker: Error("Subscriber Creation Failed")
-        Broker-->>Client: Error("Subscription Failed")
-    end
-
-    Broker-->>Listener: Subscription Ack
-    Listener-->>TcpClientActor: Subscription Ack
-    TcpClientActor-->>Client: Subscription Ack
-
-    note over Broker, SubscriberManager: If subscriber fails to initialize, error is returned
-    note over SessionManager: If session is missing, error should be logged and returned
-    note over TopicManager: New topics are created dynamically
+    Listener->>Session: SubscribeRequest(topic)
+    Session->>Broker: SubscribeRequest(registration_id, topic)
+    Broker->>Topics: ensure_topic_and_subscribe (a topic is created on first use)
+    Topics->>Subs: CreateSubscriber(registration_id:topic)
+    Subs-->>Topics: SubscriberAgent
+    Topics->>Topics: TopicAgent AddSubscriber, deliver any queued messages
+    Listener-->>Client: SubscribeAcknowledgment(Ok) (designed: today a success is not acknowledged)

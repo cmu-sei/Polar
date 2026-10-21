@@ -47,8 +47,8 @@ sequenceDiagram
     CA->>CA: 2. chain to pinned CA, cert valid
     CA->>CA: 3. signature over the payload, then read it
     CA->>CA: 4. addressed to this agent
-    CA->>CA: 5. signer may update config
-    CA->>CA: 6. not revoked (hook only)
+    CA->>CA: 5. signer may update each variable: Cedar first (update-configuration on Variable "agent/NAME"),<br/>the signer's c:update-configuration where no policy speaks (built 2026-10-13)
+    CA->>CA: 6. the signer's certificate is not revoked (the authority's revoked serials)
     CA->>CA: 7. version above the last
     alt every check passes
         CA->>CA: apply: all or none

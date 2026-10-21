@@ -19,6 +19,7 @@
 %%
 %% DM26-0670
 
+%% Built (health-and-shutdown.md); the authority branch is designed (policy-enforcement.md, stage 6), not built.
 sequenceDiagram
     participant Kubelet
     participant Probe as polar-healthcheck
@@ -56,6 +57,14 @@ sequenceDiagram
         Note over Health: own cert below 60s, graph or Cassini deadline
         Health->>Infra: HealthVerdict::Unhealthy(reason)
         Note over Infra: begin_shutdown, same orderly path
+    end
+
+    rect rgb(235, 219, 178)
+    alt DESIGNED (policy-enforcement.md, stage 6): the authority aged out
+        Note over Health: no verified message from the credentials agent for POLAR_AUTHORITY_MAX_AGE_SECS (90 min),<br/>after the degraded window in which the cached policy kept applying
+        Health->>Infra: HealthVerdict::Unhealthy("no authority update heard for 90 minutes")
+        Note over Infra: begin_shutdown, exit 1: the Job's new pod waits in init for the credentials agent
+    end
     end
 
     alt process wedged

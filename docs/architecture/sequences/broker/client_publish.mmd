@@ -19,82 +19,48 @@
 %%
 %% DM26-0670
 
+%% A client publishes on a topic. The path is the code as built (2026-10-21, docs/architecture/cassini-broker.md);
+%% the decision at the Listener is the design (docs/architecture/policy-enforcement.md, stage 5), not built yet.
 sequenceDiagram
-    participant Client
-    participant TcpClientActor
-    participant Listener
-    participant Broker
-    participant SessionManager
-    participant TopicManager
-    participant SubscriberManager
-    participant SubscriberAgent
-    participant TopicAgent
-
     autonumber
-    Client->>TcpClientActor: PublishRequest(topic, payload)
-    TcpClientActor->>Listener: Forward PublishRequest(topic, payload)
+    participant Client as Agent (TcpClientActor)
+    participant Listener
+    participant Policy as Broker's PolicyLookup<br/>(designed)
+    participant Session as SessionAgent
+    participant Broker
+    participant Topic as TopicManager / TopicAgent
+    participant Sub as SubscriberAgent
+    participant Peer as each subscriber's session
 
-    alt Listener Exists
-        Listener->>Broker: Forward PublishRequest(topic, payload)
-    else Listener Missing
-        Listener-->>Client: Error("Listener not found")
+    Client->>Listener: PublishRequest(registration_id, topic, payload, share_identity)
+    alt no active session, or another session's id
+        Listener-->>Client: ErrorMessage("Bad request: ...")
+    end
+    Listener->>Listener: published_by = the connection's identity, when share_identity
+
+    rect rgb(235, 219, 178)
+    Note over Listener,Policy: DESIGNED: the decision
+    Listener->>Policy: publish, Topic::"topic", Identity::"identity",<br/>facts: workload, declared or implied
+    alt policy loaded and it speaks
+        Policy-->>Listener: Allow or Deny
+    else no policy, or it does not speak
+        Listener->>Listener: the floor: implied topics from the identity,<br/>declared topics from the certificate's p:pub: names
+    end
+    alt refused (default deny)
+        Listener-->>Client: PublishResponse(Err "refused: ...")
+        Note right of Client: ClientEvent::PublishRefused (stage 0), no PublishAcknowledged
+    end
     end
 
-    alt Broker Exists
-        activate Broker
-        Broker->>SessionManager: Validate Session
-        deactivate Broker
-    else Broker Missing
-        Broker-->>Client: Error("Broker not found")
+    Listener->>Session: PublishRequest(topic, payload, published_by)
+    Session->>Broker: PublishRequest(reply_to: the session)
+    Broker->>Topic: handle_publish_request (a topic is created on first use)
+    alt the topic has subscribers
+        Topic->>Sub: PublishResponse(topic, payload, published_by)
+        Sub->>Peer: push the message
+        Peer-->>Peer: the subscriber reads published_by and may check it
+    else no subscribers yet
+        Topic->>Topic: queue it for the first subscriber
     end
-
-    alt Session Exists
-        activate SessionManager
-        SessionManager-->>Broker: OK
-        deactivate SessionManager
-    else Session Missing
-        SessionManager-->>Broker: Error("Session not found")
-        Broker-->>Client: Error("Publish Failed")
-    end
-
-    Broker->>TopicManager: Locate Topic
-
-    alt Topic Exists
-        TopicManager-->>Broker: OK
-    else Topic Missing
-        activate TopicManager
-        TopicManager->>TopicAgent: Create Topic
-        deactivate TopicManager
-        TopicAgent-->>Broker: OK
-    end
-
-    activate Broker
-    Broker->>TopicAgent: Forward PublishRequest(topic, payload)
-    deactivate Broker
-
-    alt TopicAgent Exists
-        activate TopicAgent
-        TopicAgent->>SubscriberManager: Notify Subscribers
-        deactivate TopicAgent
-    else TopicAgent Missing
-        TopicManager-->>Broker: Error("Topic Not Found")
-        Broker-->>Client: Error("Publish Failed")
-    end
-
-    alt Subscribers Exist
-        activate SubscriberManager
-        SubscriberManager->>SubscriberAgent: Deliver Message
-        deactivate SubscriberManager
-        SubscriberAgent-->>SubscriberManager: OK
-        SubscriberManager-->>Broker: Delivery Successful
-    else No Subscribers
-        SubscriberManager-->>Broker: No active subscribers
-    end
-
-    Broker-->>Listener: Publish Ack
-    Listener-->>TcpClientActor: Publish Ack
-    TcpClientActor-->>Client: Publish Ack
-
-    note over Broker, SubscriberManager: If no subscribers, message is ignored
-    note over SessionManager: If session is missing, error is logged and returned
-    note over TopicManager: New topics are created dynamically
+    Topic-->>Session: PublishRequestAck
+    Session-->>Client: PublishRequestAck (ClientEvent::PublishAcknowledged)
