@@ -213,9 +213,12 @@ capability decides, as it does today. Once a policy is loaded the request goes t
 `Deny` refuses them, and `NotDetermined` (no rule applies) falls back to the capabilities in the certificate. So the
 certificate stays the coarse default and policy overrides it in either direction.
 
-The principal's attributes, including its groups as parents and the capabilities its certificate carries, come only
-from `PermissionsActor` (**built**: `ResolvePrincipal`, `UpdateGroups`; a rule can say `principal in Group::"operators"`
-or read `principal.capabilities`).
+The principal's attributes and parents come only from `PermissionsActor` (**built**: `ResolvePrincipal`,
+`UpdateGroups`). Since 2026-10-21 (stage 4 of `policy-enforcement.md`) its parents are its groups (its certificate's
+`g:` names, or the groups document's list when that names it), its capabilities (`principal in
+Capability::"update-policy"`) and its communication permissions (`principal in Permission::"s2s"`), and groups nest and
+hold roles through the groups document's `groups` and `roles`; `principal.capabilities` is gone. A rule speaks the
+schema in `polar-policy/src/schema.rs`.
 
 ## What the builder gains
 

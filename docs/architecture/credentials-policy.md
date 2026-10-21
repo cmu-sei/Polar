@@ -37,12 +37,16 @@ Where policy is enforced across Polar, and what each component does when there i
 For the credentials agent itself:
 
 - `polar-policy` wraps Cedar (`src/agents/polar-policy/src/lib.rs`). Its `PolicyActor` holds a `PolicySet` parsed from a
-  source string and replaced whole (`UpdatePolicy { policy_source }`, 196-206; a set that does not parse leaves the old
-  one in force). It never links templates and validates against no schema (`None` for entities and request, 351, 361).
-- **The principal** is `Identity::"<id>"` with `permissions` (from `p:` SANs, plus supplemental permissions, which no
-  production code sets) and `capabilities` (the `c:` names), and `Group` parents from `PermissionsActor` (265-316).
-  **The resource** is an entity only when the asker gives `Facts` (`owner`, `namespace`, string labels; `owner`,
-  `namespace` and `frozen` are reserved as label names). **The context** is `{ now_secs }`.
+  source string and replaced whole (`UpdatePolicy { policy_source }`; a set that does not load leaves the old one in
+  force). It never links templates. Since 2026-10-21 a source loads only if it validates strictly, warnings included,
+  against the schema in `polar-policy/src/schema.rs` (`load_source`), and every request and context is checked against
+  it too (`evaluate`).
+- **The principal** is `Identity::"<id>"` with a `workload` attribute when its identity is a workload's, and parents:
+  its groups (the certificate's `g:` names, or the groups document's list when that names it), its `Capability`s (the
+  `c:` names) and its `Permission`s (the `p:` names), all from `PermissionsActor`. Groups nest and hold roles through
+  the groups document's `groups` and `roles`, added to the entity store once per groups update. **The resource** is an
+  entity only when the asker gives `Facts`: `owner` and `namespace` as attributes, labels as entity tags (`hasTag`,
+  `getTag`). **The context** is `{ now_secs }`, and for a topic also `declared` and `implied`.
 - **A policy is loaded in production.** The signed `policy` runtime section (`c:update-policy`) is seeded at setup
   (`infra/seed.nu`, `permanent/credentials-agent-policy.dhall`, from `infra/seeds/signed/policy.cedar`), applied by the
   consumer, re-signed with its escrow key and published to every builder agent (`authority-distribution.md`). The admin
@@ -83,9 +87,9 @@ change what a type is. A document is **rejected whole, and the previous policy s
 
 1. the Cedar source parses;
 2. every policy validates against the agent's schema (a misspelt attribute or an action the schema does not
-   know is an error at signing time and at receipt, not a mystery denial later). *Designed, not built (2026-10-21):
-   there is no schema; `validate_source` only parses and enforces 256 KiB, so a misspelt attribute is a denial at
-   evaluation;*
+   know is an error at signing time and at receipt, not a mystery denial later). *Built 2026-10-21: the schema is
+   `polar-policy/src/schema.rs`, checked strictly by `validate_source` (on arrival), by the policy actor before it
+   replaces the policy in force, and by `polar-sign` before signing;*
 3. the `entities` parse and validate against the schema, and use no reserved attribute (below). *Withdrawn: the body
    carries `source` only (the note below).*
 

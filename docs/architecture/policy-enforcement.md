@@ -218,10 +218,11 @@ Numbered so a plan can refer to them. "Core" gaps block enforcement anywhere; th
    running on the floor while the credentials agent is away; the model above says the certificate decides when
    infrastructure is unavailable.
 5. **Cedar has no schema and no vocabulary for topics** (or pods) (decided for topics, above; not built). Policies are only parsed (256 KiB), so a misspelt
-   attribute denies at evaluation; resource facts are the asker's to give; and no decision is recorded.
+   attribute denies at evaluation; resource facts are the asker's to give; and no decision is recorded. *Schema and
+   topic vocabulary built 2026-10-21 (stage 4); pods and a record of decisions are not.*
 6. **Seeds and templates are not generated.** One seed exists (the credentials agent's `policy`); no `groups` seed, no
    per-agent templates from scaffolds, and `polar-sign runtime` (what the seed uses) skips the scaffold check; Cedar is
-   not validated when signed.
+   not validated when signed. *Cedar is validated when signed since 2026-10-21 (stage 4).*
 
 **The broker**
 
@@ -362,11 +363,18 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   validate) and by `polar-sign` before signing.
 - Facts for a topic request: the workload the identity maps to, and whether the topic is in its declared or implied set.
 - The hierarchy ("Decisions", 2026-10-21): capabilities and groups as the principal's parents, the certificate's `g:`
-  groups merged with the groups document's, the groups document able to nest groups and define roles, and the
-  hierarchy built once per update and kept.
+  groups used unless the groups document names the identity (then its list replaces them, as built), the groups
+  document able to nest groups and define roles, and the hierarchy built once per update and kept.
 - Tests: the schema refuses a misspelt attribute; a permit and a forbid for a topic decide as stated; membership through
-  a nested group and a role decides; certificate groups and document groups both count; the hierarchy is not rebuilt
-  per request.
+  a nested group and a role decides; certificate groups count, and a document that names the identity replaces them;
+  the hierarchy is not rebuilt per request.
+- *Built 2026-10-21, not yet run on a cluster:* the schema and its strict checks, on arrival, at every decision and in
+  `polar-sign` (`1da06f75`, `cd76cbe7`); labels as tags, capabilities and permissions as parents, the workload
+  attribute and the topic facts (`1da06f75`); nested groups and roles, built once per groups update (`348172ef`); and a
+  certificate's `g:` groups as the principal's, the groups document's list replacing them when it names the identity,
+  so it adds and removes alike (`392927e6`). Found on the way: a strict schema cannot test a set of records with an
+  optional field, so the `p:` communication permissions became parents like the capabilities; and Cedar reports a rule
+  that can never apply as a warning, which is refused like an error.
 
 **Stage 5: the broker enforces** (gaps 7, 8, 11)
 

@@ -33,16 +33,16 @@ sequenceDiagram
     participant Ag as every builder agent<br/>(AuthorityActor, PolicyActor)
 
     Admin->>Sign: polar-sign runtime --agent credentials-agent --section policy --version N
-    Note over Sign: designed: the Cedar text is validated against the schema before signing
+    Note over Sign: the Cedar text is validated against Polar's schema before signing (polar-sign)
     Sign-->>Admin: the signed document (c:update-policy)
     Admin->>GS: push permanent/... over mTLS
     GS->>Sch: RepoChanged
     Sch->>CA: agent.credentials-agent.configuration (forwarded unverified, the receiver verifies)
-    CA->>CA: verify chain, signer's c:update-policy (capability only, Cedar never governs its own authorship),<br/>revocation, version higher, then the schema (designed)
+    CA->>CA: verify chain, signer's c:update-policy (capability only, Cedar never governs its own authorship),<br/>revocation, version higher, then the schema
     CA->>CA: re-sign as an authority Update with the escrow key, apply locally
     CA->>Bk: publish polar-authority-updates
     Bk->>Ag: deliver
-    Ag->>Ag: AuthorityCore: published_by is the credentials agent, key pinned from the first snapshot,<br/>signature, sequence: SetPolicy to the PolicyActor (a set that does not parse leaves the old one)
+    Ag->>Ag: AuthorityCore: published_by is the credentials agent, key pinned from the first snapshot,<br/>signature, sequence: SetPolicy to the PolicyActor (a set that does not validate leaves the old one)
 
     rect rgb(235, 219, 178)
     Note over Bk: DESIGNED: the broker holds an authority too, fed in process from its own Listener
