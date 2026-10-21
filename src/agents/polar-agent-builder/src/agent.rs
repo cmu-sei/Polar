@@ -279,6 +279,10 @@ pub struct AgentDocument {
     /// declared.
     #[serde(default)]
     pub topics: Vec<TopicEntry>,
+    /// The groups the agent is in, which decide its implied topics: the catalog writes them into its floor, and its
+    /// certificate carries them as `g:` names.
+    #[serde(default)]
+    pub groups: Vec<String>,
     /// The agent's topic families, unexpanded: what `POLAR_SERVED_WORKLOADS` expands.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub topic_families: Vec<FamilyDocument>,
@@ -491,6 +495,10 @@ pub fn scaffold_document<A: PolarAgent>() -> AgentDocument {
             })
             .collect(),
         topics: topic_set::<A>().entries(),
+        groups: crate::topics::groups_for(&topic_facts::<A>())
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         topic_families: A::TOPIC_FAMILIES
             .iter()
             .map(|f| FamilyDocument {
@@ -1473,6 +1481,11 @@ mod tests {
     #[test]
     fn a_service_that_is_not_a_cassini_client_uses_no_topics() {
         assert!(scaffold_document::<Serving>().topics.is_empty());
+        assert!(scaffold_document::<Serving>().groups.is_empty());
+        assert_eq!(
+            scaffold_document::<Example>().groups,
+            ["cassini-client", "self-test"]
+        );
     }
 
     #[test]

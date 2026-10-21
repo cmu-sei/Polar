@@ -171,6 +171,24 @@ pub enum Rule {
 }
 
 impl Rule {
+    /// Every rule there is.
+    pub const ALL: [Rule; 3] = [Rule::Agent, Rule::SelfTest, Rule::Encryption];
+
+    /// The group whose members the rule applies to (docs/architecture/policy-enforcement.md, "Decisions"): the
+    /// certificate carries it as `g:<group>`, so the broker knows what the agent knows.
+    pub fn group(self) -> &'static str {
+        match self {
+            Rule::Agent => "cassini-client",
+            Rule::SelfTest => "self-test",
+            Rule::Encryption => "encryption",
+        }
+    }
+
+    /// The rule a group stands for; none for a group that implies no topics.
+    pub fn for_group(group: &str) -> Option<Rule> {
+        Rule::ALL.into_iter().find(|rule| rule.group() == group)
+    }
+
     pub fn describe(self) -> &'static str {
         match self {
             Rule::Agent => "every agent that is a Cassini client",
@@ -237,6 +255,26 @@ pub fn implied_by(rule: Rule, name: &str) -> Vec<(String, Access)> {
             )
             .collect(),
     }
+}
+
+/// The groups an agent with these facts is in: what its scaffold prints and its certificate carries.
+pub fn groups_for(facts: &Facts) -> Vec<&'static str> {
+    rules_for(facts).into_iter().map(Rule::group).collect()
+}
+
+/// The implied topics of the workload `name` in `groups`, each with the rule that implied it: the one function the
+/// agent computes its set with and the broker its floor, from the certificate's identity and `g:` names. A group that
+/// implies nothing adds nothing.
+pub fn implied_topics<G: AsRef<str>>(name: &str, groups: &[G]) -> Vec<((String, Access), Rule)> {
+    groups
+        .iter()
+        .filter_map(|group| Rule::for_group(group.as_ref()))
+        .flat_map(|rule| {
+            implied_by(rule, name)
+                .into_iter()
+                .map(move |key| (key, rule))
+        })
+        .collect()
 }
 
 /// The rules that apply to an agent.
@@ -324,16 +362,14 @@ impl TopicSet {
                     });
             }
         }
-        for rule in rules_for(facts) {
-            for key in implied_by(rule, facts.name) {
-                entries.insert(
-                    key,
-                    Origin::Implied {
-                        rule,
-                        why: rule.describe().to_string(),
-                    },
-                );
-            }
+        for (key, rule) in implied_topics(facts.name, &groups_for(facts)) {
+            entries.insert(
+                key,
+                Origin::Implied {
+                    rule,
+                    why: rule.describe().to_string(),
+                },
+            );
         }
         Self { entries }
     }
@@ -634,6 +670,36 @@ mod tests {
         assert!(family_problems(&[FAMILY]).is_empty());
     }
 
+    #[test]
+    fn each_rule_is_a_group_and_the_group_brings_the_rule_back() {
+        for rule in Rule::ALL {
+            assert_eq!(Rule::for_group(rule.group()), Some(rule));
+        }
+        assert_eq!(Rule::for_group("operators"), None);
+        let facts = Facts {
+            encryption: true,
+            ..agent("kube-consumer")
+        };
+        assert_eq!(
+            groups_for(&facts),
+            ["cassini-client", "self-test", "encryption"]
+        );
+        let service = Facts {
+            cassini_client: false,
+            ..agent("cassini")
+        };
+        assert!(groups_for(&service).is_empty());
+    }
+
+    #[test]
+    fn a_group_that_implies_nothing_adds_nothing() {
+        assert!(implied_topics("kube-observer", &["operators"]).is_empty());
+        assert_eq!(
+            implied_topics("kube-observer", &["cassini-client", "operators"]).len(),
+            implied_topics("kube-observer", &["cassini-client"]).len()
+        );
+    }
+
     fn topic() -> impl Strategy<Value = String> {
         "[a-z][a-z0-9.:-]{0,24}"
     }
@@ -716,6 +782,23 @@ mod tests {
             let expected: std::collections::BTreeSet<String> =
                 workloads.iter().map(|w| FAMILY.topic_for(w)).collect();
             prop_assert_eq!(family, expected);
+        }
+
+        /// What the broker derives from a certificate (its identity's name and its groups) is exactly the implied part
+        /// of the set the agent computes, for any agent.
+        #[test]
+        fn the_broker_s_implied_topics_are_the_agent_s(
+            (name, cassini, self_test, encryption) in facts_strategy(),
+        ) {
+            let facts = Facts { name: &name, cassini_client: cassini, self_test, encryption };
+            let from_certificate: std::collections::BTreeSet<(String, Access)> =
+                implied_topics(&name, &groups_for(&facts)).into_iter().map(|(key, _)| key).collect();
+            let from_agent: std::collections::BTreeSet<(String, Access)> = TopicSet::compute(&facts, &[])
+                .entries()
+                .into_iter()
+                .map(|e| (e.name, e.access))
+                .collect();
+            prop_assert_eq!(from_certificate, from_agent);
         }
 
         /// The set is exactly the declared topics and those the agent's rules imply: nothing is lost and

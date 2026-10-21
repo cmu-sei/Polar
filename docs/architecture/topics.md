@@ -58,11 +58,17 @@ prints the whole set, each topic with where it came from (`declared`, with its p
 nothing else recomputes it (`policy-enforcement.md`, "Decisions"). Built 2026-10-21: every builder agent declares its topics,
 and its client refuses a publish or subscribe outside its set unless its policy permits it (`topic_gate.rs`).
 
-| Rule | Applies when | Topics, for an agent named `<name>` |
+| Rule (group) | Applies when | Topics, for an agent named `<name>` |
 |---|---|---|
-| `agent` | the agent is a Cassini client (or may be one: `OPTIONAL` holds `Cassini`) | subscribe `agent.<name>.configuration`, `agent.<name>.command`, `polar-authority-updates`, `polar-authority-snapshot-replies`; publish `polar-configuration-replay`, `polar-configuration-outcome`, `polar-command-outcome`, `polar-authority-snapshot-requests` |
-| `self_test` | `agent` applies and `SELF_TEST` is on | publish and subscribe `selftest.<name>` (a `:` in the name as `-`) |
-| `encryption` | `agent` applies and the agent needs `Encryption` | publish the six request topics of its crypto actor, subscribe their six replies (`polar_crypto::REQUEST_TOPICS`, `REPLY_TOPICS`) |
+| `agent` (`cassini-client`) | the agent is a Cassini client (or may be one: `OPTIONAL` holds `Cassini`) | subscribe `agent.<name>.configuration`, `agent.<name>.command`, `polar-authority-updates`, `polar-authority-snapshot-replies`; publish `polar-configuration-replay`, `polar-configuration-outcome`, `polar-command-outcome`, `polar-authority-snapshot-requests` |
+| `self_test` (`self-test`) | `agent` applies and `SELF_TEST` is on | publish and subscribe `selftest.<name>` (a `:` in the name as `-`) |
+| `encryption` (`encryption`) | `agent` applies and the agent needs `Encryption` | publish the six request topics of its crypto actor, subscribe their six replies (`polar_crypto::REQUEST_TOPICS`, `REPLY_TOPICS`) |
+
+Each rule is a group (`policy-enforcement.md`, "Decisions"): the scaffold prints the agent's `groups`, the catalog writes
+them into its floor, and its certificate carries them as `g:` names, so the broker knows them as the agent does.
+`implied_topics(name, groups)` is the one function from a name and its groups to the implied topics; the agent computes
+its set through it, and the broker will compute its floor with it (a property test holds the two equal). A group that
+implies nothing (`operators`) adds nothing.
 
 A service that is not a Cassini client (the broker) has no topics. The set is ordered and has each topic once per
 access; it does not depend on the order of the declarations, and it is exactly the declared and the implied topics
