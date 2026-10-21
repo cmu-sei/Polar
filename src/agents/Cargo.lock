@@ -1135,6 +1135,7 @@ version = "1.0.0"
 dependencies = [
  "clap",
  "fqdn",
+ "proptest",
  "rand 0.10.3",
  "rcgen",
  "rkyv",
@@ -5610,6 +5611,7 @@ dependencies = [
  "polar-router",
  "polar-scheduler-common",
  "polar-signing",
+ "proptest",
  "ractor",
  "rand 0.10.3",
  "rcgen",

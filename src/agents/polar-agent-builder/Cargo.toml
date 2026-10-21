@@ -54,6 +54,7 @@ tracing.workspace = true
 [dev-dependencies]
 polar-signing = { workspace = true, features = ["testing"] }
 polar-health = { path = "../polar-health", features = ["virtual-time"] }
+proptest.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 libc.workspace = true

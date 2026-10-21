@@ -39,5 +39,6 @@ rcgen.workspace = true
 rand.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 rcgen.workspace = true
 serde_json.workspace = true

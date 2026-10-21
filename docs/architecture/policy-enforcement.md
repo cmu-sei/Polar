@@ -211,9 +211,16 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   subscribe seen by the `Collector`.
 - Resuming a session checks that the connection's identity is the session's (`session.rs:595-622`); a mismatch is a new
   session, never the old one. Test: two identities, one registration id.
-- One name: kube-observer, kube-consumer, jira and oci-resolver pass their workload name to `AgentBuilder`; the builder
-  refuses a service name that is not the workload name (`POLAR_WORKLOAD`, from the catalog). Tests: the builder's start
-  check; `topics.md` updated.
+- One name: every agent's service name is its workload name, a constant in its code, and its `PolarAgent::NAME` is the
+  same constant; the builder refuses to start when the workload its own certificate names is not that name. Tests: the
+  builder's start check; `topics.md` updated.
+  *Built 2026-10-21:* the refusal events (`e75bbc42`), the resume check (`c9969cd0`), and one name: the secret harness
+  built twice (`ff2147ef`), seven agents renamed (`aca90ec1`), `NAME` from the service constant (`4c604db3`), the
+  credentials agent as `credentials-agent` (`e53336c6`), and the start check (`workload_of` in
+  `cert-issuer/common/src/identity.rs`, the inverse of `normalize_identity`; `polar-agent-builder/src/own_name.rs`,
+  called from `ConfiguredAgent::build` before anything is spawned), each with a property test. Not checked: services
+  that are not Cassini clients (`ServiceBuilder`: the broker), whose certificates are not a workload's identity. Not yet
+  run on a cluster.
 
 **Stage 1: agents declare their topics** (gap 1)
 

@@ -42,7 +42,8 @@ code, one binary per workload (`policy-enforcement.md`, "Decisions"), so the ide
 Each agent's `PolarAgent::NAME` is the same constant, so its scaffold is `<workload>.json`, the file `polar-sign` opens
 for `--agent <workload>`.
 
-Not built yet: the builder checking at start that its name is its own certificate's identity.
+The builder refuses to start an agent whose certificate names another workload, or no workload
+(`polar-agent-builder/src/own_name.rs`, built 2026-10-21).
 
 A signed document must name the service name in `target.agent` (`signed.rs:312`, `configuration.rs:706`). A rule about
 who may use an agent's topics has to join the two.

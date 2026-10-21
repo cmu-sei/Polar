@@ -74,6 +74,7 @@ pub mod selftest;
 pub mod shutdown;
 pub mod signed;
 pub use signed::{Rejection, UpdateVerifier};
+pub(crate) mod own_name;
 pub(crate) mod startup;
 pub use shutdown::{DEFAULT_SHUTDOWN_BUDGET, SHUTDOWN_BUDGET_ENV};
 
@@ -418,6 +419,14 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
 
         let commands = resolve_commands(this.declared_commands, this.commands)
             .map_err(|problems| ActorProcessingErr::from(format!("the commands: {problems}")))?;
+
+        // The agent is the workload its certificate names, or it does not start.
+        let certificate = startup
+            .config
+            .read(&cassini_client::environment::TLS_CLIENT_CERT)
+            .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
+        own_name::check_certificate(&this.service_name, &certificate)
+            .map_err(ActorProcessingErr::from)?;
 
         let myself_cell = this.myself.get_cell();
 
@@ -988,6 +997,44 @@ mod tests {
         );
         // It stopped before it spawned anything.
         assert!(ractor::registry::where_is("no-handlers.tcp".to_string()).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_agent_with_another_workloads_certificate_does_not_build_and_starts_nothing() {
+        let (idle, _) = Actor::spawn(None, Idle, ()).await.unwrap();
+        let other =
+            own_name::tests::certificate_for("kube-consumer.polar.serviceaccount.cluster.local");
+        let path = other.path().to_str().unwrap().to_string();
+        let mut pairs: Vec<(&str, &str)> = environment::fixtures::CASSINI_ENV
+            .iter()
+            .filter(|(name, _)| *name != "TLS_CLIENT_CERT")
+            .copied()
+            .collect();
+        pairs.push(("TLS_CLIENT_CERT", &path));
+        let env = map(&pairs);
+        let required = vec![Capability::Cassini];
+        let startup = startup::prepare(&env, &[], &required, None).unwrap();
+        let configured = Configured {
+            startup,
+            required,
+            optional_off: Vec::new(),
+            self_test: false,
+            commands: &[],
+            runtime: &[],
+            hooks: crate::agent::Hooks::real(),
+        };
+        let error = AgentBuilder::new(idle, "kube-observer")
+            .into_configured(configured)
+            .build()
+            .await
+            .err()
+            .expect("it must not build");
+        let said = error.to_string();
+        assert!(
+            said.contains("`kube-observer`") && said.contains("`kube-consumer`"),
+            "{said}"
+        );
+        assert!(ractor::registry::where_is("kube-observer.tcp".to_string()).is_none());
     }
 
     #[tokio::test]

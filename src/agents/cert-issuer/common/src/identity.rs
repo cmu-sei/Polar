@@ -154,6 +154,23 @@ pub fn normalize_identity(
     }
 }
 
+/// The workload a certificate identity names: `<workload>` of the
+/// `<workload>.<namespace>.serviceaccount.<domain>` that
+/// [`normalize_identity`] makes of a Kubernetes service account. None for
+/// any other identity (a user's, say). The workload and the namespace are
+/// each one DNS label, so the mapping reads back what it was given; a
+/// service account with a dotted name is not a workload.
+///
+/// An agent's name is its workload's (docs/architecture/policy-enforcement.md,
+/// "Decisions"), so this is how an identity is joined to an agent, its topics
+/// and the documents addressed to it.
+pub fn workload_of(identity: &str) -> Option<&str> {
+    let (workload, rest) = identity.split_once('.')?;
+    let (namespace, rest) = rest.split_once('.')?;
+    let domain = rest.strip_prefix("serviceaccount.")?;
+    (!workload.is_empty() && !namespace.is_empty() && !domain.is_empty()).then_some(workload)
+}
+
 /// Every dot-separated segment of `value` must be a valid DNS label:
 /// letters, digits, and hyphens only, and non-empty. Applied to raw
 /// claim values before they become part of a SAN -- unlike the
@@ -383,5 +400,77 @@ mod unit_tests {
         )
         .unwrap();
         assert_ne!(a, b);
+    }
+
+    use super::workload_of;
+
+    #[test]
+    fn a_workload_identity_names_its_workload() {
+        assert_eq!(
+            workload_of("kube-observer.polar.serviceaccount.cluster.local"),
+            Some("kube-observer")
+        );
+        assert_eq!(
+            workload_of("credentials-agent.polar.serviceaccount.prod.internal"),
+            Some("credentials-agent")
+        );
+    }
+
+    #[test]
+    fn an_identity_that_is_not_a_workload_names_none() {
+        for identity in [
+            "",
+            "alice.example.org",
+            "alice",
+            "kube-observer.polar.cluster.local",
+            "kube-observer.polar.serviceaccount.",
+            ".polar.serviceaccount.cluster.local",
+            "kube-observer..serviceaccount.cluster.local",
+            // A dotted service account name is not a workload's: a workload is named by one DNS label.
+            "kube.observer.polar.serviceaccount.cluster.local",
+        ] {
+            assert_eq!(workload_of(identity), None, "{identity:?}");
+        }
+    }
+
+    mod props {
+        use super::{k8s, normalize_identity, workload_of};
+        use proptest::prelude::*;
+
+        fn label() -> impl Strategy<Value = String> {
+            "[a-z0-9]([a-z0-9-]{0,20}[a-z0-9])?"
+        }
+
+        fn domain() -> impl Strategy<Value = String> {
+            prop::collection::vec(label(), 1..4).prop_map(|labels| labels.join("."))
+        }
+
+        proptest! {
+            /// The identity cert-issuer gives a service account names that service account's workload,
+            /// whatever the namespace and the cluster domain: the one mapping, read back.
+            #[test]
+            fn the_identity_of_a_service_account_names_its_workload(
+                name in label(),
+                namespace in label(),
+                domain in domain(),
+            ) {
+                let identity = normalize_identity(
+                    &format!("system:serviceaccount:{namespace}:{name}"),
+                    None,
+                    &k8s(&domain),
+                )
+                .unwrap();
+                prop_assert_eq!(workload_of(&identity), Some(name.as_str()));
+            }
+
+            /// No suffixed identity (a user's) is taken for a workload unless its scope is shaped like a
+            /// cluster's service account domain.
+            #[test]
+            fn a_user_identity_is_no_workload(user in label(), scope in domain()) {
+                prop_assume!(!scope.split('.').any(|l| l == "serviceaccount"));
+                let identity = format!("{user}.{scope}");
+                prop_assert_eq!(workload_of(&identity), None);
+            }
+        }
     }
 }
