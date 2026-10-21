@@ -45,6 +45,14 @@ code today, and what stands between the two. The detail of each part is in the d
   retrieves what was escrowed for its use alone. Any other agent's attempt to use its topics, or its attempt to use any
   other topic, is denied.
 
+## Decisions
+
+- **Degraded is bounded, then a restart into init (2026-10-21, gap 4).** When required infrastructure is not available,
+  decisions fall back to the certificate, for a bounded time; past it, the agent fails its health check and restarts
+  into its init container, which waits for the infrastructure. A cluster that has lost its authority does not run on
+  certificates indefinitely. This keeps the aging design in `authority-distribution.md` and replaces the open-ended
+  degraded state `cert-issuer-isolation.md` described.
+
 ## Where policy is enforced today
 
 | Point | Cedar asked | Without a policy, or when it does not speak | Detail |
@@ -73,7 +81,8 @@ Numbered so a plan can refer to them. "Core" gaps block enforcement anywhere; th
    would add them, but grants are single-use and none are configured); `c:` capabilities are administrative and minted
    only for accounts (`cert-issuer-isolation.md`). The certificate fallback for a workload is therefore its identity alone,
    until certificates carry what the declarations say.
-4. **No degraded mode, and two answers in the docs.** Nothing tells "the credentials agent is unavailable" from "no
+4. **No degraded mode** (the answer is decided, above; none of it is built). Before the decision there were two answers in
+   the docs. Nothing tells "the credentials agent is unavailable" from "no
    policy", a policy once loaded never ages, and `admit` refuses (does not fall back) when its policy actor does not
    answer. `authority-distribution.md` designs aging that ends in a restart into init; `cert-issuer-isolation.md` describes
    running on the floor while the credentials agent is away; the model above says the certificate decides when

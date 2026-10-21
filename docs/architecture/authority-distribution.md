@@ -132,7 +132,9 @@ has a lifetime.
   declared `SectionAuthority::Capability`, which skips Cedar (the credentials agent's `policy` and `groups`).
 - **The authority holder exists only for Cassini clients** (`infrastructure.rs:614-633`). The broker (`ServiceBuilder`,
   `CASSINI_CLIENT=false`), cert-issuer and a standalone polar-git-server have none.
-- **The docs disagree on degraded operation.** This file says a cluster that has lost the authority ages its caches
+- **Settled 2026-10-21: degraded is bounded.** The certificate decides while the authority is away, for a bounded time,
+  then the agent restarts into init (`policy-enforcement.md`, "Decisions"). The aging above stands. Before that:
+- **The docs disagreed on degraded operation.** This file says a cluster that has lost the authority ages its caches
   out and restarts its pods into init, "in place of an agent running in a degraded state". `cert-issuer-isolation.md`
   (128-135) describes a degraded state that keeps running on the static floor while the credentials agent is away, as a
   domain member uses its cached credentials. To be settled: see `policy-enforcement.md`.
