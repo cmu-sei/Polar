@@ -278,6 +278,17 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   infra test over source builds fails otherwise, and the render warns about a topic one-sided in its target
   ("Decisions").
 - Tests: the render of `local-minimal` and `sandbox-local`; the cross-check refuses a one-sided topic.
+- *Built 2026-10-21, not yet run on a cluster:* a declaration's reason to wait and a bare `--scaffold` that expands
+  families from `POLAR_SERVED_WORKLOADS` (`626f347e`); the nine waiting topics' reasons (`91a1c7a0`); the cross-check
+  (`infra/topics.nu`, `infra/tests/catalog-topics.nu`, and `resolve.nu topics-check` at the end of a render, `d6bbb03f`),
+  with the scaffolds collected under the served list so they carry the scheduler's exact names; cert-issuer's floor
+  entries for the bootstrap services with their declared topics (`1c6041ff`); and the credentials agent's issuance floor,
+  `CREDENTIALS_AGENT_ISSUANCE_TOPICS`, written by the render and judged at start (`137958b7`). Nothing reads the topics
+  in either floor yet: stage 3 writes them into certificates. Checked by hand: renders of `local-minimal` and
+  `sandbox-local` from locally built scaffolds warn about kube-consumer's two topics (neither runs the resolver), give
+  cert-issuer the credentials agent's 15 and 17 topics and its observer's 6 and 6, and give the credentials agent a
+  floor of its ten workloads, which cert-issuer and the credentials agent read and accept. `render-determinism.nu`
+  collects its own scaffolds on a cluster and was not run.
 
 **Stage 3: certificates carry the floor** (gap 3)
 

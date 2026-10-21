@@ -1,4 +1,3 @@
-
 # ACE Tool
 #
 # Copyright 2026 Carnegie Mellon University.
