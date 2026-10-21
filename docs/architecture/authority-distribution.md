@@ -120,6 +120,23 @@ has a lifetime.
   has no clock, no expiry and no deadline, and the builder creates the authority holder only for Cassini clients.
   Both would change. Tests first: an injected clock (the publisher's tests already use paused time).
 
+## As built, and what "degraded" means today (read from the code, 2026-10-21)
+
+- **No code tells "degraded" from "no policy".** `PolicyLookup` (`polar-agent-builder/src/authority.rs:443-537`) answers
+  `Ok(Decision)`, `Err(NoPolicyLoaded)` (the actor runs with no rules) or `Err(Unavailable)` (the local actor is missing
+  or did not answer). Nothing notices that the credentials agent itself is unreachable, and a policy once loaded stays
+  in force with no age: the aging above (`POLAR_AUTHORITY_MAX_AGE_SECS`, the revision notice) is not built.
+- **The fallback, where it exists** (`policy_authority.rs:67-113`, `admit`): no policy actor, `NotDetermined` or
+  `NoPolicyLoaded` go to the certificate's capability; `Allow` admits; `Deny` refuses; any other error refuses. It is used
+  for `update-configuration`, `update-runtime` and `run-command` in every builder agent, except a runtime section
+  declared `SectionAuthority::Capability`, which skips Cedar (the credentials agent's `policy` and `groups`).
+- **The authority holder exists only for Cassini clients** (`infrastructure.rs:614-633`). The broker (`ServiceBuilder`,
+  `CASSINI_CLIENT=false`), cert-issuer and a standalone polar-git-server have none.
+- **The docs disagree on degraded operation.** This file says a cluster that has lost the authority ages its caches
+  out and restarts its pods into init, "in place of an agent running in a degraded state". `cert-issuer-isolation.md`
+  (128-135) describes a degraded state that keeps running on the static floor while the credentials agent is away, as a
+  domain member uses its cached credentials. To be settled: see `policy-enforcement.md`.
+
 ## Where things are decided
 
 There are two evaluation sites, running the same machinery:

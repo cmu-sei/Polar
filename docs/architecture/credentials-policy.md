@@ -31,21 +31,33 @@ as built. It says how the credentials agent decides who may have a secret, where
 Direction: certificates were always a coarse mechanism; signed policy updates are the opportunity to do
 much better, and the expressiveness gained from Cedar's more advanced features justifies the added complexity.
 
-## What exists, and what does not (read from the code, 2026-10-12)
+## What exists, and what does not (read from the code, 2026-10-21)
 
-- `polar-policy` wraps Cedar. Its `PolicyActor` holds a `PolicySet` parsed from a source string
-  (`UpdatePolicy { policy_source }`). It never links templates and validates against no schema.
-- For each request it builds **one entity**: the requester as `Identity::"<id>"` with a single attribute,
-  `permissions` (resolved from the certificate by `PermissionsActor`), and **no parents**. The resource is only
-  an ID string, not an entity: it has no attributes and no parents. The context is empty.
-- **Nothing loads a policy in production.** `UpdatePolicy` is called only from tests. The admin action
-  `PolicyUpdate` exists in the wire types and is refused as `NotYetSupported`. With no policy set the engine
-  says "no policy set has been loaded yet".
-- `RetrieveSecret` returned any stored secret to any authenticated requester that knew its name, encrypted to the
-  requester's mTLS key. Fixed 2026-10-12: it now asks policy (`Action::"retrieve"`, resource
-  `Secret::"<name>"`), fails closed, and encrypts to the requester's agent escrow key. `DecryptOnBehalfOf`
-  already asked policy (`Action::"decrypt"`), still encrypts to the mTLS key, and is not changed here.
-- Consequence today: every retrieval and every decrypt fails closed, because no policy is ever loaded.
+Where policy is enforced across Polar, and what each component does when there is none, is in `policy-enforcement.md`.
+For the credentials agent itself:
+
+- `polar-policy` wraps Cedar (`src/agents/polar-policy/src/lib.rs`). Its `PolicyActor` holds a `PolicySet` parsed from a
+  source string and replaced whole (`UpdatePolicy { policy_source }`, 196-206; a set that does not parse leaves the old
+  one in force). It never links templates and validates against no schema (`None` for entities and request, 351, 361).
+- **The principal** is `Identity::"<id>"` with `permissions` (from `p:` SANs, plus supplemental permissions, which no
+  production code sets) and `capabilities` (the `c:` names), and `Group` parents from `PermissionsActor` (265-316).
+  **The resource** is an entity only when the asker gives `Facts` (`owner`, `namespace`, string labels; `owner`,
+  `namespace` and `frozen` are reserved as label names). **The context** is `{ now_secs }`.
+- **A policy is loaded in production.** The signed `policy` runtime section (`c:update-policy`) is seeded at setup
+  (`infra/seed.nu`, `permanent/credentials-agent-policy.dhall`, from `infra/seeds/signed/policy.cedar`), applied by the
+  consumer, re-signed with its escrow key and published to every builder agent (`authority-distribution.md`). The admin
+  action `PolicyUpdate` is still refused as `NotYetSupported`: the runtime section is the way.
+- **Retrieve** (`Action::"retrieve"` on `Secret::"<name>"`, Facts: the ledger's `stored_by` as owner, namespace, labels)
+  and **decrypt** (`Action::"decrypt"` on the caller's `resource_id`, no Facts) admit only on `Allow`: no certificate
+  fallback, by design. **Store** admits on `Allow`, refuses on `Deny`, and on `NotDetermined` or no policy falls to its
+  floor (the requester's own `<identity>/...` names and `agent-escrow-keypair:<id>`); a policy actor that does not answer
+  is a failure, never the floor.
+- **Admin actions and issuance** are decided by the certificate's capabilities alone; Cedar is not asked.
+- The seeded rules (`policy.cedar`) are: the owner of a secret may retrieve it, and anything `frozen` is forbidden. The
+  `frozen` rule cannot fire yet: `frozen` is reserved as a label, and nothing marks a secret frozen.
+
+History: on 2026-10-12 nothing loaded a policy, so every retrieval and decrypt failed closed; the seed and authority
+distribution (2026-10-12 to 14) changed that.
 
 ## The design
 
@@ -61,8 +73,7 @@ payload = {
   type: "runtime", id, target: { agent: "credentials-agent-consumer" },
   section: "policy", version,
   body: {
-    policies: "<Cedar source text>",
-    entities: [ ... groups, memberships, and attributes on secrets ... ]
+    source: "<Cedar source text>"
   }
 }
 ```
@@ -72,8 +83,11 @@ change what a type is. A document is **rejected whole, and the previous policy s
 
 1. the Cedar source parses;
 2. every policy validates against the agent's schema (a misspelt attribute or an action the schema does not
-   know is an error at signing time and at receipt, not a mystery denial later);
-3. the `entities` parse and validate against the schema, and use no reserved attribute (below).
+   know is an error at signing time and at receipt, not a mystery denial later). *Designed, not built (2026-10-21):
+   there is no schema; `validate_source` only parses and enforces 256 KiB, so a misspelt attribute is a denial at
+   evaluation;*
+3. the `entities` parse and validate against the schema, and use no reserved attribute (below). *Withdrawn: the body
+   carries `source` only (the note below).*
 
 The outcome is reported like every runtime document (applied, or refused with the reason and the signer).
 

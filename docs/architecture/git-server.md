@@ -65,8 +65,10 @@ only then spawns `receive-pack`. No hook scripts, so nothing in git has to call 
 
 ## Authorization
 
-- Default policy is static and lives in the server's configuration: per repo, the identities (by
-  permission SAN or uid) allowed to read and to write. By default the scheduler observer is the
+- Default policy is static and lives in the server's configuration: per repo, the identities allowed to read
+  and to write. *As built (2026-10-21): an identity is the certificate's first DNS SAN, matched exactly against
+  `readers`, `writers` and `admins` (`server/src/access.rs:43-90`, `StaticAcl`/`RuntimeAcl`); `p:` and `c:` SANs are not
+  read, and the Cedar authorizer below is not wired (`access.rs:24` mentions it only in a comment).* By default the scheduler observer is the
   only agent that may read, and admins write. Who the admins are is a fact about the deployment, so `POLAR_GIT_SERVER_ADMINS` names them apart from the repository declaration (and in addition to the `admins` in it); in development `up.nu` records the first admin's identity (the DNS name in the certificate `just admin-claim` made, their ledger identity, which changes when the cluster is reset) as a gitignored cluster input (`infra/targets/<target>/cluster-inputs.nuon`), renders it into this setting, and publishes it in the signed record (`docs/architecture/cluster-bootstrap.md`).
 - The decision goes through one function behind a trait, so a Cedar evaluator (`polar-policy`)
   can replace or override it. Cedar-defined groups (for example "config policy authors") then

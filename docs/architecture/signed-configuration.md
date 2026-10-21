@@ -133,7 +133,10 @@ closed). The history records the signer (username or identity, and serial) of ev
 document refused before its payload could be trusted is recorded with version zero and no signer, and no
 value of any kind is ever recorded.
 
-Until a receiver has what it needs to verify (the CA, a policy) it **fails closed**: it refuses.
+Until a receiver has what it needs to verify (the CA) it **fails closed**: it refuses. *As built (2026-10-21): a
+missing policy is not a refusal for a signed document. With no policy loaded, or a policy that does not speak to the
+request, the signer's certificate capability decides (`authority-distribution.md`, "As built"); only the CA, the
+signature and the revocation list fail closed.*
 
 ## How it fits together
 
@@ -304,6 +307,9 @@ signing any update, to any agent. It is a capability of its own, decided (2026-1
 is for Cedar policy updates, so a person who changes configuration needs no policy privilege and the reverse, unless
 the repository holds both. It is checked by a small pure function with tests, which also check that
 `c:update-policy` alone is refused for configuration.
+
+*Superseded, built 2026-10-13: Cedar is asked first, per variable, section or command, and the capability is the
+fallback (`authority-distribution.md`). The paragraph below is the plan as it was.*
 
 **Later:** "may this signer set this variable on this agent" is finer than the closed capability enum
 can say, so it becomes a policy question for `polar-policy` (Cedar), asked through a trait so a
