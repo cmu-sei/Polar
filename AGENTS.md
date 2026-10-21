@@ -121,6 +121,19 @@ pub type GraphController<T> = ActorRef<GraphControllerMsg<T>>;
 - Integration tests: use `testcontainers` for Neo4j and other external deps
 - Use `rstest` for parameterized and async test helpers
 - Tests that require env vars: check `example.env` first
+- Write the test first, then the change; commit when the package's tests and the checks pass
+- Write property tests (`proptest`, a workspace dependency) wherever a function has an invariant over its inputs, as
+  well as the example tests. They earn their keep where an example can only spot-check:
+  - parsers and encoders: a round trip (encode then parse gives back the value) and rejection of malformed input
+    (a certificate's `p:` names, topic strings, signed payloads, wire types);
+  - decisions: the outcome follows a stated rule for every input (Cedar first, then the floor; default deny; a
+    refusal never contains a reserved phrase);
+  - computed sets: deterministic, independent of input order, and the union of their parts (an agent's declared and
+    implied topics);
+  - state machines: an invariant holds after any sequence of events (sessions, retention, aging).
+  A property states an invariant of the code under test; one that only restates the generator, or holds for any
+  implementation, is not worth having. Keep generators small and shrinkable, and put them beside the tests
+  (`tests/props.rs`, as `cassini/broker` and `polar-scheduler` do)
 
 ## Workflow
 

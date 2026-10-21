@@ -175,7 +175,12 @@ Numbered so a plan can refer to them. "Core" gaps block enforcement anywhere; th
 
 ## The build plan (2026-10-21)
 
-Each stage is built test first, ends with the repository's checks passing (`cargo check`, `clippy -D warnings`, `fmt`,
+Each stage is built test first, with property tests where a function has an invariant over its inputs (`AGENTS.md`,
+"Testing"): stage 0, a refusal never asks the client to re-register and a resumed session never changes identity; stage 1,
+an agent's set is deterministic, order-independent and the union of declared and implied; stage 3, a topic `p:` name
+round-trips through a certificate and malformed names are refused; stage 4 and 5, a decision follows the rule (Cedar
+first, then the floor, default deny) for any request; stage 6, the aging state machine never decides on an expired cache.
+It ends with the repository's checks passing (`cargo check`, `clippy -D warnings`, `fmt`,
 the package's tests, the infra tests), and is committed when they do. A stage names the gaps it closes. Nothing in a
 stage relies on a later one; each leaves the cluster working, with enforcement switched on only in stage 5.
 
