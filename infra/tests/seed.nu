@@ -76,7 +76,7 @@ def main [] {
             name: "the first policy is seeded for the credentials agent's policy section"
             body: {
                 let p = (documents | where section == "policy" | first)
-                assert equal $p.agent "credentials-agent-consumer"
+                assert equal $p.agent "credentials-agent"
                 assert equal $p.field "source"
             }
         }

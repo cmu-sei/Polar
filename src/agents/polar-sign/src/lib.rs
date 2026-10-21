@@ -288,7 +288,7 @@ mod tests {
         roundtrip(json!({ "nested": { "list": [ "x", "y" ] } }));
         roundtrip(json!({ "records": [ { "name": "RUST_LOG", "value": "debug" } ] }));
         roundtrip(configuration_payload(
-            "credentials-agent-consumer",
+            "credentials-agent",
             3,
             "11111111-2222-4333-8444-555555555555",
             &[("RUST_LOG".to_string(), "info,polar=debug".to_string())],
@@ -416,15 +416,9 @@ mod tests {
     #[test]
     fn a_runtime_payload_has_the_fields_the_receiver_reads() {
         let body = json!({ "source": "permit (principal, action, resource);" });
-        let p = runtime_payload(
-            "credentials-agent-consumer",
-            "policy",
-            3,
-            "id-1",
-            body.clone(),
-        );
+        let p = runtime_payload("credentials-agent", "policy", 3, "id-1", body.clone());
         assert_eq!(p["type"], "runtime");
-        assert_eq!(p["target"]["agent"], "credentials-agent-consumer");
+        assert_eq!(p["target"]["agent"], "credentials-agent");
         assert_eq!(p["section"], "policy");
         assert_eq!(p["version"], 3);
         assert_eq!(p["body"], body);
@@ -448,7 +442,7 @@ mod tests {
         let source = include_str!("../../../../infra/seeds/signed/policy.cedar");
         let ca = root("Polar Internal CA");
         let payload = runtime_payload(
-            "credentials-agent-consumer",
+            "credentials-agent",
             "policy",
             1,
             "id-1",

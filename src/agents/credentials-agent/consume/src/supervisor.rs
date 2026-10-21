@@ -124,14 +124,14 @@ const LEDGER_ACTOR_NAME: &str = "polar.credentials-agent.ledger";
 
 /// Name given to the agent builder. It registers the Cassini client as
 /// "<SERVICE_NAME>.tcp".
-pub const SERVICE_NAME: &str = "credentials-agent-consumer";
+pub const SERVICE_NAME: &str = "credentials-agent";
 
 /// How the handler actors find the Cassini client to publish their replies:
 /// by registry name, on every publish. It must equal the name the builder
 /// registers (checked by a test), and because it is looked up each time, a
 /// client the builder respawns under the same name is picked up with no
 /// further wiring.
-pub const BROKER_CLIENT_NAME: &str = "credentials-agent-consumer.tcp";
+pub const BROKER_CLIENT_NAME: &str = "credentials-agent.tcp";
 
 /// How long in-flight requests get to finish once shutdown has begun, with
 /// new ones no longer arriving, before the ledger and projection are stopped.

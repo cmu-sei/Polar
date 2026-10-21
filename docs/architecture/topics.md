@@ -37,8 +37,10 @@ code, one binary per workload (`policy-enforcement.md`, "Decisions"), so the ide
 
 | Workload | Service name (its topics) | Identity (what the broker sees) |
 |---|---|---|
-| every agent but one | the workload name (since 2026-10-21 for kube-observer, kube-consumer, jira-observer, jira-processor, oci-registry-resolver, git-repo-processor and polar-scheduler, which passed other names) | `<workload>.polar.serviceaccount.cluster.local` |
-| credentials-agent | `credentials-agent-consumer` (`credentials-agent/consume/src/supervisor.rs:127`), still to change | `credentials-agent.polar.serviceaccount.cluster.local` |
+| every agent | the workload name (since 2026-10-21 for kube-observer, kube-consumer, jira-observer, jira-processor, oci-registry-resolver, git-repo-processor, polar-scheduler and the credentials agent, which passed other names; the credentials agent was `credentials-agent-consumer`, still the name of its binary and image) | `<workload>.polar.serviceaccount.cluster.local` |
+
+Each agent's `PolarAgent::NAME` is the same constant, so its scaffold is `<workload>.json`, the file `polar-sign` opens
+for `--agent <workload>`.
 
 Not built yet: the builder checking at start that its name is its own certificate's identity.
 

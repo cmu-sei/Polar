@@ -2560,8 +2560,8 @@ mod tests {
             "selftest.jira-observer-web_client"
         );
         assert_eq!(
-            self_test_topic("credentials-agent-consumer"),
-            "selftest.credentials-agent-consumer"
+            self_test_topic("credentials-agent"),
+            "selftest.credentials-agent"
         );
     }
 

@@ -42,7 +42,7 @@ export def documents [] {
     [
         {
             path: "permanent/credentials-agent-policy.dhall"
-            agent: "credentials-agent-consumer"
+            agent: "credentials-agent"
             section: "policy"
             version: 1
             capability: "c:update-policy"

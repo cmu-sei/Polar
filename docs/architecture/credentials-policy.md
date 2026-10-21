@@ -70,7 +70,7 @@ just started. The latest version replaces the one before, whole.
 
 ```
 payload = {
-  type: "runtime", id, target: { agent: "credentials-agent-consumer" },
+  type: "runtime", id, target: { agent: "credentials-agent" },
   section: "policy", version,
   body: {
     source: "<Cedar source text>"

@@ -35,7 +35,7 @@ use std::time::Duration;
 pub struct CredentialsConsumer;
 
 impl PolarAgent for CredentialsConsumer {
-    const NAME: &'static str = "credentials-agent-consumer";
+    const NAME: &'static str = crate::supervisor::SERVICE_NAME;
     const PURPOSE: &'static str = "Issues certificates and keeps the credentials ledger: the cluster's certificate authority front end";
     // The graph is declared as a section of its own, not required as a capability: this agent
     // projects to the graph but its health must not depend on Neo4j (the ledger is its source of
@@ -57,9 +57,9 @@ impl PolarAgent for CredentialsConsumer {
     );
 
     async fn start(configured: Configured) -> Result<(), StartError> {
-        configured.init_logging("credentials-agent-consumer");
+        configured.init_logging(crate::supervisor::SERVICE_NAME);
         let (_agent, handle) = Actor::spawn(
-            Some("credentials-agent-consumer.supervisor".to_string()),
+            Some(format!("{}.supervisor", crate::supervisor::SERVICE_NAME)),
             ConsumerSupervisor,
             configured,
         )
