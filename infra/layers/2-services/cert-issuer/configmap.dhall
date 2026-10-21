@@ -91,6 +91,7 @@ let render =
                 , vouchedOnly : Bool
                 , publish : List Text
                 , subscribe : List Text
+                , groups : List Text
                 }
           , mtlsEnforceBootstrap : Bool
           -- Where cert-issuer's CA comes from. See ca-provisioning.dhall.
@@ -258,6 +259,7 @@ let render =
                                                     , vouchedOnly : Bool
                                                     , publish : List Text
                                                     , subscribe : List Text
+                                                    , groups : List Text
                                                     }
                                                     JSON.Type
                                                     ( \ ( b
@@ -267,6 +269,7 @@ let render =
                                                           , vouchedOnly : Bool
                                                           , publish : List Text
                                                           , subscribe : List Text
+                                                          , groups : List Text
                                                           }
                                                         ) ->
                                                         JSON.object
@@ -300,6 +303,14 @@ let render =
                                                                         JSON.Type
                                                                         JSON.string
                                                                         b.subscribe
+                                                                    )
+                                                              , groups =
+                                                                  JSON.array
+                                                                    ( Prelude.List.map
+                                                                        Text
+                                                                        JSON.Type
+                                                                        JSON.string
+                                                                        b.groups
                                                                     )
                                                               }
                                                           )

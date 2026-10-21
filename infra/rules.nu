@@ -148,13 +148,14 @@ export def issuer_problems [records: list, enforced: bool]: nothing -> record {
     { errors: $errors, pending: $pending }
 }
 
-# A workload's own topics, as its scaffold prints them in `topics`: the declared and family ones, which its
-# certificates carry, and not the implied ones, which follow from its identity. Sorted, each once.
+# What a workload's certificates carry of its scaffold: the declared and family topics (`topics`), not the implied
+# ones, which follow from its identity and its groups; and its `groups`, which decide those. Sorted, each once.
 def own_topics [r: record]: nothing -> record {
     let own = ($r.topics? | default [] | where {|t| $t.from != "implied" })
     {
         publish: ($own | where access == "publish" | get name | uniq | sort)
         subscribe: ($own | where access == "subscribe" | get name | uniq | sort)
+        groups: ($r.groups? | default [] | uniq | sort)
     }
 }
 
@@ -200,6 +201,7 @@ export def floor_entries [records: list]: nothing -> record {
                     vouchedOnly: false
                     publish: $own.publish
                     subscribe: $own.subscribe
+                    groups: $own.groups
                 })
             }
         } else if $r.issuer == "credentials-agent" {
@@ -212,6 +214,7 @@ export def floor_entries [records: list]: nothing -> record {
                     vouchedOnly: true
                     publish: []
                     subscribe: []
+                    groups: []
                 })
             }
         }

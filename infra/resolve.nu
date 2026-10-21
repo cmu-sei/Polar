@@ -251,13 +251,15 @@ def spec_of [name: string, target: string, kinds: record] {
 # of every workload, from inside the credentials agent's, would resolve the credentials agent again).
 def issuance_record [w: record, target: string, kinds: record] {
     let s = (spec_of $w.name $target $kinds).spec
+    let scaffold = (scaffold_of $w.name $w)
     {
         who: $w.name
         namespace: $s.namespace
         service_account: ($s.service_account? | default $w.name)
         issuer: $s.issuer
         bootstrap: $s.bootstrap
-        topics: ((scaffold_of $w.name $w).topics? | default [])
+        topics: $scaffold.topics?
+        groups: $scaffold.groups?
     }
 }
 
@@ -667,9 +669,9 @@ def enabled_problems [target: string] {
 def floor_of [target: string] {
     let records = (all_workloads $target | each {|w|
         let r = (resolve $w.name $target)
-        # The topics its scaffold prints (declared, family and implied): floor_entries writes a bootstrap service's own.
-        let topics = ((scaffold_of $w.name $w).topics? | default [])
-        { who: $w.name, namespace: $r.namespace, service_account: $r.service_account, issuer: $r.issuer, bootstrap: $r.bootstrap, certs: $r.certs, topics: $topics }
+        # The topics and groups its scaffold prints: floor_entries writes a bootstrap service's own.
+        let scaffold = (scaffold_of $w.name $w)
+        { who: $w.name, namespace: $r.namespace, service_account: $r.service_account, issuer: $r.issuer, bootstrap: $r.bootstrap, certs: $r.certs, topics: ($scaffold.topics? | default []), groups: ($scaffold.groups? | default []) }
     })
     floor_entries $records
 }

@@ -255,6 +255,7 @@ fn a_sound_floor_is_accepted_and_so_is_an_empty_one() {
         vouched_only: false,
         publish: vec![],
         subscribe: vec![],
+        groups: vec![],
     }];
     assert!(config_with_floor(Some(floor)).validate().is_ok());
     // Present and empty is a closed floor: nobody is a bootstrap identity.
@@ -275,6 +276,7 @@ fn a_floor_that_lists_a_permission_or_a_wildcard_does_not_load() {
             vouched_only: false,
             publish: vec![],
             subscribe: vec![],
+            groups: vec![],
         }];
         let err = config_with_floor(Some(floor)).validate().unwrap_err();
         assert!(err.to_string().contains("mtls.bootstrap"), "{name}: {err}");

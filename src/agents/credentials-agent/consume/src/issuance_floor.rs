@@ -40,6 +40,9 @@ pub struct WorkloadTopics {
     pub publish: Vec<String>,
     #[serde(default)]
     pub subscribe: Vec<String>,
+    /// The groups the catalog puts it in, which decide its implied topics; its certificates carry them as `g:`.
+    #[serde(default)]
+    pub groups: Vec<String>,
 }
 
 /// The floor, by workload.
@@ -68,6 +71,14 @@ impl IssuanceFloor {
                 if topic.trim().is_empty() || topic.contains(char::is_whitespace) {
                     problems.push(format!(
                         "the issuance floor gives `{}` `{topic}`, which is not a topic name",
+                        entry.workload
+                    ));
+                }
+            }
+            for group in &entry.groups {
+                if !cert_issuer_common::group::is_group_name(group) {
+                    problems.push(format!(
+                        "the issuance floor gives `{}` `{group}`, which is not a group name",
                         entry.workload
                     ));
                 }
@@ -117,6 +128,7 @@ mod tests {
             .topics_for("system:serviceaccount:polar:kube-observer")
             .unwrap();
         assert_eq!(observer.publish, ["kubernetes.cluster.consumer.Pod"]);
+        assert!(observer.groups.is_empty());
         assert!(observer.subscribe.is_empty());
         assert!(
             floor
@@ -131,7 +143,7 @@ mod tests {
         assert!(IssuanceFloor::parse("{}").is_err());
         assert!(IssuanceFloor::parse(r#"[{"workload": "w", "extra": 1}]"#).is_err());
         let said = IssuanceFloor::parse(
-            r#"[{"workload": ""}, {"workload": "w", "publish": ["", "two words"]}, {"workload": "w"}]"#,
+            r#"[{"workload": ""}, {"workload": "w", "publish": ["", "two words"], "groups": ["Bad"]}, {"workload": "w"}]"#,
         )
         .unwrap_err()
         .join("\n");
@@ -139,6 +151,10 @@ mod tests {
         assert!(said.contains("gives `w` ``"), "{said}");
         assert!(said.contains("gives `w` `two words`"), "{said}");
         assert!(said.contains("lists `w` more than once"), "{said}");
+        assert!(
+            said.contains("gives `w` `Bad`, which is not a group name"),
+            "{said}"
+        );
     }
 
     fn name() -> impl Strategy<Value = String> {
@@ -149,11 +165,24 @@ mod tests {
         /// What the render writes is read back as written, for any workloads with any exact topic names.
         #[test]
         fn a_written_floor_reads_back_as_written(
-            entries in prop::collection::btree_map(name(), (prop::collection::vec(name(), 0..4), prop::collection::vec(name(), 0..4)), 0..6)
+            entries in prop::collection::btree_map(
+                name(),
+                (
+                    prop::collection::vec(name(), 0..4),
+                    prop::collection::vec(name(), 0..4),
+                    prop::collection::vec("[a-z0-9][a-z0-9-]{0,12}", 0..3),
+                ),
+                0..6,
+            )
         ) {
             let written: Vec<WorkloadTopics> = entries
                 .iter()
-                .map(|(w, (p, s))| WorkloadTopics { workload: w.clone(), publish: p.clone(), subscribe: s.clone() })
+                .map(|(w, (p, s, g))| WorkloadTopics {
+                    workload: w.clone(),
+                    publish: p.clone(),
+                    subscribe: s.clone(),
+                    groups: g.clone(),
+                })
                 .collect();
             let floor = IssuanceFloor::parse(&serde_json::to_string(&written).unwrap()).unwrap();
             prop_assert_eq!(floor.len(), written.len());

@@ -137,6 +137,7 @@ fn floor_with_this_workload() -> Option<Vec<BootstrapIdentity>> {
         vouched_only: false,
         publish: vec![],
         subscribe: vec![],
+        groups: vec![],
     }])
 }
 
@@ -149,6 +150,7 @@ fn floor_without_this_workload() -> Option<Vec<BootstrapIdentity>> {
         vouched_only: false,
         publish: vec![],
         subscribe: vec![],
+        groups: vec![],
     }])
 }
 
@@ -263,6 +265,7 @@ fn floor_with_this_workload_vouched_only() -> Option<Vec<BootstrapIdentity>> {
         vouched_only: true,
         publish: vec![],
         subscribe: vec![],
+        groups: vec![],
     }])
 }
 

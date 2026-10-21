@@ -190,8 +190,8 @@ def main [] {
             let f = (floor_entries $r)
             assert equal $f.problems []
             assert equal $f.entries [
-                { workload: "system:serviceaccount:polar:cassini", certType: "SERVER", names: ["cassini-ip-svc.polar.svc.cluster.local"], vouchedOnly: false, publish: [], subscribe: [] }
-                { workload: "system:serviceaccount:polar:credentials-agent", certType: "CLIENT", names: [], vouchedOnly: false, publish: [], subscribe: [] }
+                { workload: "system:serviceaccount:polar:cassini", certType: "SERVER", names: ["cassini-ip-svc.polar.svc.cluster.local"], vouchedOnly: false, publish: [], subscribe: [], groups: [] }
+                { workload: "system:serviceaccount:polar:credentials-agent", certType: "CLIENT", names: [], vouchedOnly: false, publish: [], subscribe: [], groups: [] }
             ]
         }
 
@@ -205,7 +205,7 @@ def main [] {
             let f = (floor_entries $r)
             assert equal $f.problems []
             assert equal $f.entries [
-                { workload: "system:serviceaccount:polar:polar-git-server", certType: "SERVER", names: ["polar-git-server.polar.svc.cluster.local"], vouchedOnly: true, publish: [], subscribe: [] }
+                { workload: "system:serviceaccount:polar:polar-git-server", certType: "SERVER", names: ["polar-git-server.polar.svc.cluster.local"], vouchedOnly: true, publish: [], subscribe: [], groups: [] }
             ]
         }
 
@@ -214,6 +214,7 @@ def main [] {
             let r = [
                 { who: "credentials-agent", namespace: "polar", service_account: "credentials-agent", issuer: "cert-issuer", bootstrap: true,
                   certs: ["client:/etc/tls/certs:ecdsa-p256:"]
+                  groups: ["cassini-client" "self-test"]
                   topics: [
                     (do $topic "polar-authority-updates" "publish" "declared")
                     (do $topic "credentials-grants" "subscribe" "declared")
@@ -228,14 +229,15 @@ def main [] {
             ]
             let f = (floor_entries $r)
             assert equal $f.problems []
-            assert equal ($f.entries | first | select publish subscribe) { publish: ["agent.x.configuration" "polar-authority-updates"], subscribe: ["credentials-grants"] }
-            assert equal ($f.entries | last | select publish subscribe) { publish: [], subscribe: [] }
+            assert equal ($f.entries | first | select publish subscribe groups) { publish: ["agent.x.configuration" "polar-authority-updates"], subscribe: ["credentials-grants"], groups: ["cassini-client" "self-test"] }
+            assert equal ($f.entries | last | select publish subscribe groups) { publish: [], subscribe: [], groups: [] }
         }
 
         "the credentials agent's floor names each workload it issues, with its declared and family topics, and no other": {
             let topic = {|name, access, from| { name: $name, access: $access, from: $from } }
             let r = [
                 { who: "kube-observer", namespace: "polar", service_account: "kube-observer", issuer: "credentials-agent", bootstrap: false, certs: []
+                  groups: ["self-test" "cassini-client"]
                   topics: [(do $topic "kubernetes.cluster.consumer.Pod" "publish" "declared") (do $topic "agent.kube-observer.configuration" "subscribe" "implied")] }
                 { who: "polar-scheduler", namespace: "polar", service_account: "polar-scheduler", issuer: "credentials-agent", bootstrap: false, certs: []
                   topics: [(do $topic "scheduler.in" "subscribe" "declared") (do $topic "agent.kube-observer.configuration" "publish" "family")] }
@@ -245,8 +247,8 @@ def main [] {
                 { who: "jira-observer", namespace: "polar", service_account: "jira-observer", issuer: "cert-issuer", bootstrap: false, certs: [] }
             ]
             assert equal (issuance_topics $r) [
-                { workload: "system:serviceaccount:polar:kube-observer", publish: ["kubernetes.cluster.consumer.Pod"], subscribe: [] }
-                { workload: "system:serviceaccount:polar:polar-scheduler", publish: ["agent.kube-observer.configuration"], subscribe: ["scheduler.in"] }
+                { workload: "system:serviceaccount:polar:kube-observer", publish: ["kubernetes.cluster.consumer.Pod"], subscribe: [], groups: ["cassini-client" "self-test"] }
+                { workload: "system:serviceaccount:polar:polar-scheduler", publish: ["agent.kube-observer.configuration"], subscribe: ["scheduler.in"], groups: [] }
             ]
         }
 

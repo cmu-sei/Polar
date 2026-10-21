@@ -63,6 +63,10 @@ pub struct BootstrapIdentity {
     pub publish: Vec<String>,
     #[serde(default)]
     pub subscribe: Vec<String>,
+    /// The groups the catalog puts a bootstrap service in, which decide its implied topics, for its certificates to
+    /// carry as `g:` names (stage 3). Empty for anything that is not a bootstrap service.
+    #[serde(default)]
+    pub groups: Vec<String>,
 }
 
 /// Why a token-only request is not signed.
@@ -176,6 +180,14 @@ pub fn problems(floor: &[BootstrapIdentity]) -> Vec<String> {
                 problems.push(format!("`{}` lists the wildcard `{name}`", entry.workload));
             }
         }
+        for group in &entry.groups {
+            if !cert_issuer_common::group::is_group_name(group) {
+                problems.push(format!(
+                    "`{}` lists `{group}`, which is not a group name",
+                    entry.workload
+                ));
+            }
+        }
         for topic in entry.publish.iter().chain(&entry.subscribe) {
             if topic.trim().is_empty() || topic.contains(char::is_whitespace) {
                 problems.push(format!(
@@ -201,6 +213,7 @@ mod tests {
                 vouched_only: false,
                 publish: vec![],
                 subscribe: vec![],
+                groups: vec![],
             },
             BootstrapIdentity {
                 workload: "system:serviceaccount:polar:cassini".to_string(),
@@ -209,6 +222,7 @@ mod tests {
                 vouched_only: false,
                 publish: vec![],
                 subscribe: vec![],
+                groups: vec![],
             },
         ]
     }
@@ -359,6 +373,7 @@ mod tests {
             vouched_only: true,
             publish: vec![],
             subscribe: vec![],
+            groups: vec![],
         });
         f
     }
@@ -487,6 +502,7 @@ mod tests {
                 vouched_only: false,
                 publish: vec![],
                 subscribe: vec![],
+                groups: vec![],
             },
             BootstrapIdentity {
                 workload: "a".into(),
@@ -495,6 +511,7 @@ mod tests {
                 vouched_only: false,
                 publish: vec![],
                 subscribe: vec![],
+                groups: vec![],
             },
             BootstrapIdentity {
                 workload: "a".into(),
@@ -503,6 +520,7 @@ mod tests {
                 vouched_only: false,
                 publish: vec![],
                 subscribe: vec![],
+                groups: vec![],
             },
         ];
         let p = problems(&bad);
@@ -538,6 +556,12 @@ mod tests {
         assert_eq!(topics.publish, ["polar-authority-updates"]);
         assert_eq!(topics.subscribe, ["credentials-grants"]);
         assert!(no_names.publish.is_empty() && no_names.subscribe.is_empty());
+        let grouped: BootstrapIdentity = serde_json::from_str(
+            r#"{"workload": "w", "cert_type": "CLIENT", "groups": ["cassini-client", "self-test"]}"#,
+        )
+        .unwrap();
+        assert_eq!(grouped.groups, ["cassini-client", "self-test"]);
+        assert!(no_names.groups.is_empty());
     }
 
     #[test]
@@ -545,6 +569,7 @@ mod tests {
         let mut floor = floor();
         floor[0].publish = vec!["polar-authority-updates".into(), "".into()];
         floor[0].subscribe = vec!["two words".into()];
+        floor[0].groups = vec!["Not A Group".into()];
         let said = problems(&floor).join("\n");
         assert!(
             said.contains("lists ``, which is not a topic name"),
@@ -554,6 +579,10 @@ mod tests {
             said.contains("lists `two words`, which is not a topic name"),
             "{said}"
         );
-        assert_eq!(problems(&floor).len(), 2);
+        assert!(
+            said.contains("lists `Not A Group`, which is not a group name"),
+            "{said}"
+        );
+        assert_eq!(problems(&floor).len(), 3);
     }
 }
