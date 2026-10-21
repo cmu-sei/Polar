@@ -377,6 +377,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_topic_it_subscribes_to_is_in_its_declared_set() {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let (sink, _) = Actor::spawn(None, Sink { got }, ()).await.unwrap();
+        let set = polar_agent_builder::agent::topic_set::<crate::agent::SchedulerProcessor>();
+        for subscription in subscriptions(&sink) {
+            assert!(
+                set.allows(&subscription.topic, polar_agent_builder::Access::Subscribe),
+                "{} is not declared",
+                subscription.topic
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn each_topic_reaches_the_supervisor_as_its_own_message_and_garbage_is_dropped() {
         let got = Arc::new(Mutex::new(Vec::new()));
         let (sink, _) = Actor::spawn(None, Sink { got: got.clone() }, ())

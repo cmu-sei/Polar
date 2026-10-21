@@ -22,7 +22,7 @@
 */
 
 use crate::supervisor::{SERVICE_NAME, SHUTDOWN_BUDGET, SchedulerObserverSupervisor};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
+use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
@@ -34,6 +34,20 @@ impl PolarAgent for SchedulerObserver {
     const PURPOSE: &'static str = "Keeps a checkout of the schedules repository current and publishes each schedule change on Cassini";
     const NEEDS: &'static [Capability] = &[];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::subscribe(
+            polar_git_server_common::POLAR_GIT_REPO_CHANGED_TOPIC,
+            "a push to the schedules repository, which starts a sync",
+        ),
+        TopicDecl::subscribe(
+            polar_scheduler_common::CONFIGURATION_REPLAY_TOPIC,
+            "an agent asking for the documents held for it",
+        ),
+        TopicDecl::publish(
+            polar_scheduler_common::SCHEDULER_IN_TOPIC,
+            "each schedule created, changed or deleted in the checkout",
+        ),
+    ];
     const SECTIONS: &'static [&'static Section] = &[&crate::settings::SECTION];
     const HELP: Option<&'static str> = Some(
         "The observer clones the schedules repository from its remote, watches the checkout, \

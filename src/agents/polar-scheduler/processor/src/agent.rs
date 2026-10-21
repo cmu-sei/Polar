@@ -25,7 +25,7 @@
 //! `polar_agent_builder::PolarAgent`.
 
 use crate::supervisor::{SERVICE_NAME, SHUTDOWN_BUDGET, SchedulerSupervisor};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
+use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
 use ractor::Actor;
 use std::time::Duration;
 
@@ -37,6 +37,20 @@ impl PolarAgent for SchedulerProcessor {
         "Records schedule changes in the graph and notifies the agents they concern";
     const NEEDS: &'static [Capability] = &[Capability::GraphWrite];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::subscribe(
+            polar_scheduler_common::SCHEDULER_IN_TOPIC,
+            "the observer's schedule changes",
+        ),
+        TopicDecl::subscribe(
+            polar_scheduler_common::SCHEDULER_ADHOC_TOPIC,
+            "an ad hoc agent announcing itself",
+        ),
+        TopicDecl::subscribe(
+            polar_scheduler_common::CONFIGURATION_OUTCOME_TOPIC,
+            "each agent's outcome for a configuration document, recorded in the graph",
+        ),
+    ];
     const HELP: Option<&'static str> = Some(
         "The processor subscribes to the schedule changes the scheduler observer publishes \
          (scheduler.in) and to the announcements of ad-hoc agents (scheduler.adhoc). It stores \
