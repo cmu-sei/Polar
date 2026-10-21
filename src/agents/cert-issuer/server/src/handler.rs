@@ -254,6 +254,17 @@ impl Handler {
             );
         }
 
+        // ---- Step 3.3: the floor's topics and groups ----
+        //
+        // A bootstrap service signed on its token alone carries the topics and groups the catalog wrote into its
+        // entry; the credentials agent states a vouched workload's own.
+        let floor_names = match (&self.floor, self.vouched_for(peer_identity)) {
+            (Some(floor), false) => {
+                crate::floor::floor_names(floor, &claims.workload_identity, &request.cert_type)
+            }
+            _ => Vec::new(),
+        };
+
         // ---- Steps 3.5-5: shared signing path ----
         //
         // Everything past identity verification is identical for
@@ -263,7 +274,7 @@ impl Handler {
             &parsed_csr,
             request.csr_pem,
             request.cert_type,
-            request.extra_sans,
+            request.extra_sans.into_iter().chain(floor_names).collect(),
             request.subject_dn_defaults,
             None,
         )

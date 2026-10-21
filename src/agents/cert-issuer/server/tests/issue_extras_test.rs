@@ -419,3 +419,84 @@ async fn validate_does_not_answer_a_workload_that_is_reached_only_through_the_cr
         .await;
     assert_eq!(refused.status, 403);
 }
+
+// ---- the topics and groups of the floor (docs/architecture/policy-enforcement.md, stage 3) ---------------------
+
+/// A bootstrap service's entry with the topics and groups the catalog gives it.
+fn floor_with_topics() -> Option<Vec<BootstrapIdentity>> {
+    Some(vec![BootstrapIdentity {
+        workload: WORKLOAD.to_string(),
+        cert_type: CertType::Client,
+        names: vec![],
+        vouched_only: false,
+        publish: vec!["polar-authority-updates".to_string()],
+        subscribe: vec!["credentials-grants".to_string()],
+        groups: vec!["cassini-client".to_string(), "self-test".to_string()],
+    }])
+}
+
+#[tokio::test]
+async fn a_bootstrap_service_is_signed_with_the_topics_and_groups_its_floor_gives_it() {
+    let (handler, ca) = rig(floor_with_topics());
+    let response = handler
+        .handle(None, &mint_default_token(), request(CertType::Client, &[]))
+        .await;
+    assert_eq!(response.status, 200, "{:?}", response.body);
+    let asked = ca.asked.lock().unwrap();
+    let sans = &asked[0].1;
+    for expected in [
+        "p:pub:polar-authority-updates",
+        "p:sub:credentials-grants",
+        "g:cassini-client",
+        "g:self-test",
+    ] {
+        assert!(
+            sans.iter().any(|s| s == expected),
+            "{expected} is not in {sans:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_bootstrap_service_cannot_ask_for_a_topic_or_a_group_itself() {
+    // What it carries is what the catalog wrote down, never what it asks for.
+    let (handler, ca) = rig(floor_with_topics());
+    for extra in ["p:pub:somebody.elses.topic", "g:operators"] {
+        let response = handler
+            .handle(
+                None,
+                &mint_default_token(),
+                request(CertType::Client, &[extra]),
+            )
+            .await;
+        assert!(
+            refused_as_not_authorized(&response),
+            "{extra}: {:?}",
+            response.body
+        );
+    }
+    assert!(ca.asked.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_credentials_agent_states_a_workload_s_topics_and_groups_on_the_vouched_path() {
+    // Like the permissions of a grant, they are the credentials agent's to state, from its own floor.
+    let (handler, ca) = rig(floor_without_this_workload());
+    let response = handler
+        .handle(
+            Some(CREDENTIALS_AGENT),
+            &mint_default_token(),
+            request(
+                CertType::Client,
+                &["p:pub:kubernetes.cluster.consumer.Pod", "g:cassini-client"],
+            ),
+        )
+        .await;
+    assert_eq!(response.status, 200, "{:?}", response.body);
+    let asked = signed(&ca);
+    assert!(
+        asked.contains("p:pub:kubernetes.cluster.consumer.Pod")
+            && asked.contains("g:cassini-client"),
+        "{asked}"
+    );
+}

@@ -188,7 +188,8 @@ impl CaClient for RcgenCaClient {
                 // no such hostname expectation; a colon is ordinary,
                 // defining syntax there. Every other extra SAN keeps its
                 // existing DnsName treatment.
-                if s.starts_with("p:") || s.starts_with("c:") {
+                // A group (`g:`) is the same kind of metadata.
+                if s.starts_with("p:") || s.starts_with("c:") || s.starts_with("g:") {
                     Ok(rcgen::SanType::URI(ia5))
                 } else {
                     Ok(rcgen::SanType::DnsName(ia5))
@@ -794,9 +795,17 @@ mod tests {
         let client = make_client();
         let identity = "git-observer.polar.svc.cluster.local";
         let permission_san = "p:s2s:cassini.cluster.local";
+        // A topic and a group are the same kind of metadata, and land the same way.
+        let topic_san = "p:sub:jira:consumer:projects";
+        let group_san = "g:cassini-client";
         let req = CaIssueRequest {
             csr_pem: make_csr(identity),
-            sans: vec![identity.to_string(), permission_san.to_string()],
+            sans: vec![
+                identity.to_string(),
+                permission_san.to_string(),
+                topic_san.to_string(),
+                group_san.to_string(),
+            ],
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
             subject_dn: Default::default(),
@@ -837,7 +846,7 @@ mod tests {
         // and the identity SAN must still be DnsName, proving the
         // distinction is genuinely per-entry, not all-or-nothing.
         assert_eq!(dns_names, vec![identity]);
-        assert_eq!(uris, vec![permission_san]);
+        assert_eq!(uris, vec![permission_san, topic_san, group_san]);
     }
 
     #[tokio::test]

@@ -131,8 +131,9 @@ pub fn admit_token_only(
 
 /// Whether a request the credentials agent vouches for may be signed: its names are checked here too, so a
 /// compromised or mistaken credentials agent cannot have a workload signed with a name that is not its own.
-/// The permissions of a grant (`p:`) are the credentials agent's to state and are not names; every other extra
-/// must be on the list of the workload's entry, for the type it asks for.
+/// The permissions of a grant and the topics of its floor (`p:`), and the groups of its floor (`g:`), are the
+/// credentials agent's to state and are not names; every other extra must be on the list of the workload's entry,
+/// for the type it asks for.
 pub fn admit_vouched(
     floor: &[BootstrapIdentity],
     workload: &str,
@@ -142,15 +143,58 @@ pub fn admit_vouched(
     let entry = floor
         .iter()
         .find(|b| b.workload == workload && &b.cert_type == cert_type);
-    for name in extra_sans
-        .iter()
-        .filter(|n| !n.trim().to_ascii_lowercase().starts_with("p:"))
-    {
+    for name in extra_sans.iter().filter(|n| {
+        let n = n.trim().to_ascii_lowercase();
+        !(n.starts_with("p:") || n.starts_with("g:"))
+    }) {
         if !entry.is_some_and(|e| e.names.iter().any(|allowed| allowed == name)) {
             return Err(Refusal::NameNotAllowed(name.clone()));
         }
     }
     Ok(())
+}
+
+/// What a bootstrap service's certificate carries beyond what it asks for: the topics and groups its entry gives it
+/// (docs/architecture/policy-enforcement.md, stage 3), as `p:pub:`, `p:sub:` and `g:` names. None for a workload
+/// with no entry of its own for this type, or one issued only through the credentials agent, which states them
+/// itself. A bootstrap service never asks for them: what it carries is what the catalog wrote down.
+pub fn floor_names(
+    floor: &[BootstrapIdentity],
+    workload: &str,
+    cert_type: &CertType,
+) -> Vec<String> {
+    use cert_issuer_common::group::Group;
+    use cert_issuer_common::permission::{TopicAccess, TopicPermission};
+    let Some(entry) = floor
+        .iter()
+        .find(|b| b.workload == workload && !b.vouched_only && &b.cert_type == cert_type)
+    else {
+        return Vec::new();
+    };
+    let topic = |access, topic: &String| {
+        TopicPermission {
+            access,
+            topic: topic.clone(),
+        }
+        .to_san_string()
+    };
+    entry
+        .publish
+        .iter()
+        .map(|t| topic(TopicAccess::Publish, t))
+        .chain(
+            entry
+                .subscribe
+                .iter()
+                .map(|t| topic(TopicAccess::Subscribe, t)),
+        )
+        .chain(
+            entry
+                .groups
+                .iter()
+                .map(|g| Group(g.clone()).to_san_string()),
+        )
+        .collect()
 }
 
 /// Whether a bootstrap entry is well formed: a name that is a permission, a capability, a wildcard or empty
