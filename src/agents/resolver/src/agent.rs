@@ -27,7 +27,7 @@
 use crate::RESOLVER_SUPERVISOR_NAME;
 use crate::settings;
 use crate::supervisor::{ResolverSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
+use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
@@ -39,6 +39,20 @@ impl PolarAgent for OciResolver {
     const PURPOSE: &'static str = "Follows image references other agents discover to their registry and publishes the verified manifest";
     const NEEDS: &'static [Capability] = &[];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::subscribe(
+            polar::topics::PROVENANCE_DISCOVERY,
+            "an image reference to resolve against its registry",
+        ),
+        TopicDecl::publish(
+            polar::topics::KUBERNETES_RESOLUTION_EVENTS,
+            "what it resolved for a Kubernetes container, for kube-consumer",
+        ),
+        TopicDecl::publish(
+            polar::topics::PROVENANCE_EVENTS,
+            "every artifact it resolved (manifest, digest, registry), for the provenance stream",
+        ),
+    ];
     const SECTIONS: &'static [&'static Section] = &[&settings::SECTION];
     const HELP: Option<&'static str> = Some(
         "The resolver subscribes to the provenance discovery topic on Cassini. For each image \
