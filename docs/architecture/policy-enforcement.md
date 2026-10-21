@@ -137,6 +137,18 @@ code today, and what stands between the two. The detail of each part is in the d
   it disables. The render does the target-level part: a topic one-sided in its target, with no reason given, is a
   warning that names it. (Decided over failing every render per target, which would have failed today on nine topics
   catalog-wide and two more on `local-minimal`, and over asking the disabled workloads' images in every render.)
+- **The facts implied topics depend on are groups, with the catalog's membership in the certificate (2026-10-21).**
+  An implied rule applies because of what an agent is, which the identity alone does not say: whether it is a
+  Cassini client at all, whether its self-test is on, whether it needs encryption. These are groups,
+  `cassini-client`, `self-test` and `encryption`, the same principal data `PermissionsActor` resolves and Cedar refers
+  to (`principal in Group::"encryption"`, `authority-distribution.md`). The scaffold says which an agent is in; the
+  render writes that membership into the floors beside the declared topics, and each certificate carries it as a `g:`
+  name, beside `c:` and `p:`, so the floor holds with no policy and no snapshot (the bootstrap services, and the window
+  before the first snapshot). The signed groups document adds to or overrides the certificate's membership at run
+  time, as Cedar does the certificate. One function, in `polar-agent-builder`, maps a workload name and its groups to
+  its implied topics; the agent computes its set with it and the broker its floor, so they cannot differ. (Chosen over
+  the broker applying every rule to every identity, which would admit the self-test and credentials topics for
+  agents that never use them, and over writing the implied topics themselves into each certificate.)
 - **Open: an administrator's scheduled override or addition to an agent's set.** Considered, not decided: a signed,
   scheduled document that adds topics to (or overrides) what the scaffold declares and implies. If it comes, it is one
   more input every consumer reads the same way, and the builder's run-time check must honour it.
@@ -293,8 +305,9 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
 **Stage 3: certificates carry the floor** (gap 3)
 
 - A `p:` form for topics in `cert-issuer-common` (`p:pub:<topic>`, `p:sub:<topic>`), parsed and written by the same
-  module as the existing scopes; the implied topics are derived from the identity by one function, shared by the builder
-  and the broker.
+  module as the existing scopes, and a `g:<group>` form for the catalog's group membership; the implied topics are
+  derived from the identity and its groups by one function, shared by the builder and the broker ("Decisions"). The
+  scaffold prints the agent's groups, and both floors carry them.
 - The credentials agent writes a workload's declared topics into each certificate it issues, from its floor; cert-issuer
   does the same for the bootstrap services.
 - Tests: issuance unit tests; a certificate's SANs for a catalog workload; the size of the largest set (open point C); and
