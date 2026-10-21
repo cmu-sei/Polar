@@ -20,9 +20,11 @@
 %% DM26-0670
 
 %% A client publishes on a topic. The path is the code as built (2026-10-21, docs/architecture/cassini-broker.md);
-%% the decision at the Listener is the design (docs/architecture/policy-enforcement.md, stage 5), not built yet.
+%% the decision at the Listener is the design (docs/architecture/policy-enforcement.md, stage 5), not built yet, and so
+%% is the agent's own check before it sends (stage 1, decided 2026-10-21: the same rule as the broker's).
 sequenceDiagram
     autonumber
+    participant Own as the agent's check and its PolicyActor<br/>(designed)
     participant Client as Agent (TcpClientActor)
     participant Listener
     participant Policy as Broker's PolicyLookup<br/>(designed)
@@ -31,6 +33,19 @@ sequenceDiagram
     participant Topic as TopicManager / TopicAgent
     participant Sub as SubscriberAgent
     participant Peer as each subscriber's session
+
+    rect rgb(235, 219, 178)
+    Note over Own,Client: DESIGNED (stage 1): before anything is sent
+    Client->>Own: publish, topic
+    alt the agent's policy speaks
+        Own-->>Client: permit (even outside the computed set) or forbid (even inside it)
+    else no policy yet, or it does not speak
+        Own-->>Client: the computed set: declared and implied topics
+    end
+    alt refused
+        Client->>Client: log it, ClientEvent::PublishRefused, nothing sent
+    end
+    end
 
     Client->>Listener: PublishRequest(registration_id, topic, payload, share_identity)
     alt no active session, or another session's id

@@ -20,9 +20,11 @@
 %% DM26-0670
 
 %% A client subscribes to a topic. The path is the code as built (2026-10-21, docs/architecture/cassini-broker.md);
-%% the decision at the Listener is the design (docs/architecture/policy-enforcement.md, stage 5), not built yet.
+%% the decision at the Listener is the design (docs/architecture/policy-enforcement.md, stage 5), not built yet, and so
+%% is the agent's own check before it sends (stage 1, decided 2026-10-21: the same rule as the broker's).
 sequenceDiagram
     autonumber
+    participant Own as the agent's check and its PolicyActor<br/>(designed)
     participant Client as Agent (TcpClientActor)
     participant Listener
     participant Policy as Broker's PolicyLookup<br/>(designed)
@@ -32,6 +34,19 @@ sequenceDiagram
     participant Subs as SubscriberManager / SubscriberAgent
 
     Note over Client,Listener: the connection's identity is the leaf certificate's first DNS SAN,<br/>taken at the handshake, and the leaf is kept (designed) for its p: names
+    rect rgb(235, 219, 178)
+    Note over Own,Client: DESIGNED (stage 1): before anything is sent
+    Client->>Own: subscribe, topic
+    alt the agent's policy speaks
+        Own-->>Client: permit (even outside the computed set) or forbid (even inside it)
+    else no policy yet, or it does not speak
+        Own-->>Client: the computed set: declared and implied topics
+    end
+    alt refused
+        Client->>Client: log it, ClientEvent::SubscribeRefused, nothing sent
+    end
+    end
+
     Client->>Listener: SubscribeRequest(registration_id, topic)
     alt not registered, or another session's id
         Listener-->>Client: SubscribeAcknowledgment(Err "not registered")
@@ -57,4 +72,4 @@ sequenceDiagram
     Topics->>Subs: CreateSubscriber(registration_id:topic)
     Subs-->>Topics: SubscriberAgent
     Topics->>Topics: TopicAgent AddSubscriber, deliver any queued messages
-    Listener-->>Client: SubscribeAcknowledgment(Ok) (designed: today a success is not acknowledged)
+    Topics-->>Client: SubscribeAcknowledgment(Ok), through the session's listener (ClientEvent::ClientSubscribed)

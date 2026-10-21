@@ -84,6 +84,17 @@ code today, and what stands between the two. The detail of each part is in the d
   declared and implied topics for every agent.** The way to hold that: the set is computed once, in the agent (the
   builder), and printed in full in its scaffold, each implied topic with the rule that implied it; nothing else
   recomputes it, and the builder refuses at run time to publish or subscribe outside it.
+- **The agent's own client decides as the broker does: Cedar first, then the set (2026-10-21).** Before a publish or a
+  subscribe leaves the agent, the builder's check asks the agent's PolicyActor; a `permit` admits a topic outside the
+  computed set (an administrator's runtime addition, such as a workload the scheduler now serves, takes effect without a
+  restart), a `forbid` refuses one inside it, and where no policy speaks the computed set decides. With no policy yet
+  (before the first snapshot) the set decides. The check is a function the builder hands the Cassini client, so
+  `cassini-client` does not depend on `polar-policy`; a refusal is logged in the agent and reported as
+  `PublishRefused` or `SubscribeRefused`, and nothing is sent. It is the same rule the broker applies (stage 5), so an
+  agent never sends what the broker would refuse for policy, and never refuses what policy permits. Until 2026-10-21
+  the client consulted no policy at all (its `connect.rs` "Policy" is the connection retry setting); the PolicyActor
+  was asked only for signed documents (`configuration.rs:261`), commands (`command_actor.rs:215`) and the credentials
+  agent's requests.
 - **Topics are exact names (2026-10-21).** No patterns. An agent that serves a family of topics (the scheduler, which
   publishes `agent.<workload>.configuration` for every workload) has its list generated from the catalog, one exact name
   per workload, so policy and the broker deal only in exact strings.
@@ -210,7 +221,11 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
 - The builder computes the agent's full set: declared, plus implied, each implied topic with the rule that implied it.
   The rules are written in `topics.md` ("Implied topics"), and are code in one place in `polar-agent-builder`.
 - `--scaffold` prints the full set; `resolve.nu`, the catalog and `polar-sign` read it and never recompute it.
-- The builder refuses, at run time, to publish or subscribe outside the set (an error in the agent's own log).
+- The builder refuses, at run time, to publish or subscribe outside the set (an error in the agent's own log), asking
+  the agent's PolicyActor first: a `permit` admits beyond the set, a `forbid` refuses within it, the set decides where
+  policy is silent or there is no policy yet ("Decisions"). The client is given the check as a function. Cedar's
+  vocabulary for topics is stage 4's, so until then no policy speaks about topics and the set decides; the check is
+  in place and asks.
 - Every agent declares what it uses today (`topics.md`'s inventory). Unused and mismatched topics are fixed or removed
   as they are met (the openapi pair's mismatch, the unused constants).
 - Tests: per agent, the scaffold's set equals what its code uses (a test that runs the agent's subscriptions and
