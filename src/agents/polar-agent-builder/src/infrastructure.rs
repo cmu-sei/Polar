@@ -162,8 +162,15 @@ impl TcpClientSpawner for CassiniSpawner {
         router: ActorRef<polar_router::RouterMessage>,
         config: TCPClientConfig,
     ) -> Result<TcpClient, ActorProcessingErr> {
-        TcpClient::spawn_with_router_config(service_name, supervisor, lifecycle, router, config)
-            .await
+        TcpClient::spawn_with_router_config(
+            service_name,
+            supervisor,
+            lifecycle,
+            router,
+            config,
+            None,
+        )
+        .await
     }
 }
 

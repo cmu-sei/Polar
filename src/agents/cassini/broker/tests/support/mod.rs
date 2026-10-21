@@ -660,6 +660,7 @@ impl FacadeClient {
                 transport_name: transport_name.clone(),
                 spawner: Arc::new(TlsTransportSpawner),
                 online: online.clone(),
+                gate: None,
                 buffer_limit: DEFAULT_OFFLINE_BUFFER,
                 backoff: Backoff {
                     first: Duration::from_millis(200),

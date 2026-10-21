@@ -49,10 +49,39 @@ use async_trait::async_trait;
 use cassini_types::ClientEvent;
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SupervisionEvent};
 use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
+
+/// What an agent is about to do with a topic, as its [`TopicGate`] is asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopicUse {
+    Publish,
+    Subscribe,
+}
+
+impl TopicUse {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TopicUse::Publish => "publish",
+            TopicUse::Subscribe => "subscribe",
+        }
+    }
+}
+
+/// Decides, before a publish or a subscribe leaves the agent, whether the agent may: `Err` carries why not.
+/// The facade asks it for every publish and subscribe as it arrives, in order, and a refused one is neither
+/// held nor sent; the agent is told with `PublishRefused` or `SubscribeRefused`. The agent builder supplies
+/// it (the agent's policy first, then its topic set: docs/architecture/policy-enforcement.md, "Decisions"),
+/// so this crate decides nothing itself.
+pub type TopicGate = Arc<
+    dyn Fn(TopicUse, String) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// How many publishes are held while there is no registered transport. The oldest is dropped
 /// first when it is full.
@@ -128,6 +157,8 @@ pub struct FacadeArgs {
     pub online: Arc<AtomicBool>,
     pub buffer_limit: usize,
     pub backoff: Backoff,
+    /// Asked before each publish and subscribe; none admits everything.
+    pub gate: Option<TopicGate>,
 }
 
 pub struct FacadeState {
@@ -257,6 +288,26 @@ impl Actor for TcpClientFacade {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        if let Some(gate) = &state.args.gate {
+            let asked = match &message {
+                TcpClientMessage::Publish { topic, .. } => Some((TopicUse::Publish, topic.clone())),
+                TcpClientMessage::Subscribe { topic, .. } => {
+                    Some((TopicUse::Subscribe, topic.clone()))
+                }
+                _ => None,
+            };
+            if let Some((use_, topic)) = asked
+                && let Err(reason) = gate(use_, topic.clone()).await
+            {
+                error!(%topic, %reason, "this agent may not {} on the topic; nothing was sent", use_.as_str());
+                let event = match use_ {
+                    TopicUse::Publish => ClientEvent::PublishRefused { topic, reason },
+                    TopicUse::Subscribe => ClientEvent::SubscribeRefused { topic, reason },
+                };
+                TcpClientActor::dispatch_event(&state.delivery, event);
+                return Ok(());
+            }
+        }
         match message {
             TcpClientMessage::ClientRegistered(id) => {
                 state.registration_id = Some(id);
@@ -470,6 +521,10 @@ mod tests {
     }
 
     async fn rig(buffer_limit: usize) -> Rig {
+        gated_rig(buffer_limit, None).await
+    }
+
+    async fn gated_rig(buffer_limit: usize, gate: Option<TopicGate>) -> Rig {
         let spawner = Arc::new(FakeSpawner::default());
         let online = Arc::new(AtomicBool::new(false));
         let events = Arc::new(ractor::OutputPort::default());
@@ -484,6 +539,7 @@ mod tests {
                 online: online.clone(),
                 buffer_limit,
                 backoff: Backoff::default(),
+                gate,
             },
         )
         .await
@@ -521,6 +577,153 @@ mod tests {
         rig.events.send(ClientEvent::Registered {
             registration_id: id.to_string(),
         });
+    }
+
+    type Asked = Arc<Mutex<Vec<(TopicUse, String)>>>;
+
+    /// A gate that admits every topic but `refused`, and remembers what it was asked.
+    fn gate_refusing(refused: &'static str) -> (TopicGate, Asked) {
+        let asked: Asked = Arc::new(Mutex::new(Vec::new()));
+        let noted = asked.clone();
+        let gate: TopicGate = Arc::new(move |use_, topic: String| {
+            noted.lock().unwrap().push((use_, topic.clone()));
+            Box::pin(async move {
+                if topic == refused {
+                    Err(format!("{topic} is not this agent's"))
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        (gate, asked)
+    }
+
+    type Refusals = Arc<Mutex<Vec<(&'static str, String, String)>>>;
+
+    /// Stands for the agent: notes each refusal it is told of.
+    struct Listener {
+        seen: Refusals,
+    }
+
+    #[async_trait]
+    impl Actor for Listener {
+        type Msg = ClientEvent;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            event: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            match event {
+                ClientEvent::PublishRefused { topic, reason } => {
+                    self.seen.lock().unwrap().push(("publish", topic, reason))
+                }
+                ClientEvent::SubscribeRefused { topic, reason } => {
+                    self.seen.lock().unwrap().push(("subscribe", topic, reason))
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    /// The refusals the agent is told of, as (kind, topic, reason).
+    async fn refusals(rig: &Rig) -> Refusals {
+        let seen: Refusals = Arc::new(Mutex::new(Vec::new()));
+        let (listener, _) = Actor::spawn(None, Listener { seen: seen.clone() }, ())
+            .await
+            .unwrap();
+        rig.events.subscribe(listener, Some);
+        seen
+    }
+
+    fn refusal(kind: &'static str, topic: &str) -> (&'static str, String, String) {
+        (
+            kind,
+            topic.to_string(),
+            format!("{topic} is not this agent's"),
+        )
+    }
+
+    fn subscribe(topic: &str) -> TcpClientMessage {
+        TcpClientMessage::Subscribe {
+            topic: topic.to_string(),
+            trace_ctx: None,
+        }
+    }
+
+    fn subscribed(received: &Received) -> Vec<String> {
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                TcpClientMessage::Subscribe { topic, .. } => Some(topic.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_publish_the_gate_refuses_is_neither_sent_nor_held_and_the_agent_is_told() {
+        let (gate, asked) = gate_refusing("not-mine");
+        let rig = gated_rig(10, Some(gate)).await;
+        let refused = refusals(&rig).await;
+        // Offline: a refused publish is not held for later either.
+        rig.facade.cast(publish("not-mine")).unwrap();
+        rig.facade.cast(publish("mine")).unwrap();
+        settle().await;
+        registered(&rig, "reg-1");
+        settle().await;
+        rig.facade.cast(publish("not-mine")).unwrap();
+        rig.facade.cast(publish("mine")).unwrap();
+        settle().await;
+
+        assert_eq!(topics(&rig.spawner.latest().1), ["mine", "mine"]);
+        assert_eq!(
+            *refused.lock().unwrap(),
+            vec![refusal("publish", "not-mine"); 2]
+        );
+        assert!(
+            asked
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(use_, _)| *use_ == TopicUse::Publish)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subscribe_the_gate_refuses_is_not_sent_and_the_agent_is_told() {
+        let (gate, asked) = gate_refusing("not-mine");
+        let rig = gated_rig(10, Some(gate)).await;
+        let refused = refusals(&rig).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        rig.facade.cast(subscribe("not-mine")).unwrap();
+        rig.facade.cast(subscribe("mine")).unwrap();
+        settle().await;
+
+        assert_eq!(subscribed(&rig.spawner.latest().1), ["mine"]);
+        assert_eq!(*refused.lock().unwrap(), [refusal("subscribe", "not-mine")]);
+        assert_eq!(
+            *asked.lock().unwrap(),
+            [
+                (TopicUse::Subscribe, "not-mine".to_string()),
+                (TopicUse::Subscribe, "mine".to_string())
+            ]
+        );
     }
 
     #[tokio::test(start_paused = true)]

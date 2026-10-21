@@ -23,7 +23,7 @@
 
 use async_trait::async_trait;
 use cassini_client::facade::{
-    Backoff, DEFAULT_OFFLINE_BUFFER, FacadeArgs, TcpClientFacade, TlsTransportSpawner,
+    Backoff, DEFAULT_OFFLINE_BUFFER, FacadeArgs, TcpClientFacade, TlsTransportSpawner, TopicGate,
 };
 pub use cassini_client::{MessageQueue, OfflineBehavior, PublishRequest, QueueEntry};
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
@@ -171,19 +171,22 @@ impl TcpClient {
             map_event,
             router,
             TCPClientConfig::new()?,
+            None,
         )
         .await
     }
 
     /// As [`spawn_with_router`](Self::spawn_with_router), with the broker coordinates
     /// supplied instead of read from the process environment. The agent builder uses this,
-    /// handing the client what it read once into its snapshot.
+    /// handing the client what it read once into its snapshot, and the check each publish and
+    /// subscribe passes before it is sent (`gate`; none admits everything).
     pub async fn spawn_with_router_config<M, F>(
         service_name: &str,
         supervisor: ActorRef<M>,
         map_event: F,
         router: ActorRef<polar_router::RouterMessage>,
         config: TCPClientConfig,
+        gate: Option<TopicGate>,
     ) -> Result<Self, ActorProcessingErr>
     where
         M: Send + 'static,
@@ -215,6 +218,7 @@ impl TcpClient {
                 online: online.clone(),
                 buffer_limit: DEFAULT_OFFLINE_BUFFER,
                 backoff: Backoff::default(),
+                gate,
             },
             supervisor.into(),
         )
