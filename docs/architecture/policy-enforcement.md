@@ -165,6 +165,19 @@ code today, and what stands between the two. The detail of each part is in the d
   A rule that read `principal.capabilities.contains("x")` is written `principal in Capability::"x"`; today only the
   tests use the attribute. Datalog stays out unless rules must derive facts recursively beyond membership (delegation),
   which Cedar deliberately cannot express.
+- **The schema's shapes (2026-10-21, for stage 4).** A strict schema, carried in `polar-policy`, given to every
+  evaluation and used to validate a policy when it arrives and before it is signed. Its choices:
+  - a secret's labels are Cedar **entity tags** (`entity Secret tags String`), so they stay free-form and the schema stays
+    strict; a rule reads `resource.hasTag("kind") && resource.getTag("kind") == "token"` instead of `resource.kind`
+    (chosen over a fixed set of label keys, and over leaving resources unchecked);
+  - `frozen` is an optional boolean of `Secret`. Nothing sets it yet, so the seed's `forbid` on it is inert until
+    something does;
+  - decrypt-on-behalf's resource is `KubeSecret`, the one shape in use; any other type is refused;
+  - the principal is always `Identity`: a workload's DNS identity for secrets and topics, a person's username for signed
+    documents. The groups document is keyed the same way, by whichever the request carries;
+  - a topic request's facts: the identity's workload is an optional attribute of the principal (`principal.workload`,
+    from `workload_of`), and `publish` and `subscribe` carry in their context whether the topic is in the requester's
+    declared set (`context.declared`, family topics included) or its implied set (`context.implied`).
 - **Open: an administrator's scheduled override or addition to an agent's set.** Considered, not decided: a signed,
   scheduled document that adds topics to (or overrides) what the scaffold declares and implies. If it comes, it is one
   more input every consumer reads the same way, and the builder's run-time check must honour it.
