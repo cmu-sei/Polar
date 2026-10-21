@@ -95,6 +95,12 @@ code today, and what stands between the two. The detail of each part is in the d
   implied set. A schema, carried in the code that evaluates, validates a policy when it arrives (the broker, every builder
   agent) and before it is signed (`polar-sign`). The builder's run-time check and the broker ask the same question
   through the same `PolicyLookup`, so an agent and the broker cannot disagree about a topic.
+- **Applying the catalog is the administrator's sign-off (2026-10-21, gap 6).** The administrator applies the catalog:
+  its render and apply (on a Flux target, its signed publish, with provenance) are the approval of every workload's
+  declared topics. There is no separate grants document. The render writes each workload's declared topics into the
+  credentials agent's issuance floor, as it writes cert-issuer's floor of server names today, and into cert-issuer's for
+  the bootstrap services; each certificate carries them from the first one issued. A change to an agent's topics is a
+  change to the catalog, applied like any other, and reaches the agent with its next certificate.
 - **Open: an administrator's scheduled override or addition to an agent's set.** Considered, not decided: a signed,
   scheduled document that adds topics to (or overrides) what the scaffold declares and implies. If it comes, it is one
   more input every consumer reads the same way, and the builder's run-time check must honour it.
