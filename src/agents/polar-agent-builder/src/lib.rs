@@ -76,6 +76,7 @@ pub mod signed;
 pub use signed::{Rejection, UpdateVerifier};
 pub(crate) mod own_name;
 pub(crate) mod startup;
+pub(crate) mod topic_gate;
 pub mod topics;
 pub use shutdown::{DEFAULT_SHUTDOWN_BUDGET, SHUTDOWN_BUDGET_ENV};
 pub use topics::{Access, TopicDecl, TopicSet};
@@ -178,6 +179,8 @@ pub struct AgentBuilder<M: ractor::Message> {
     declared_commands: &'static [CommandSpec],
     /// The runtime sections the agent declared (`PolarAgent::RUNTIME`).
     declared_runtime: &'static [&'static RuntimeSection],
+    /// The agent's topics, from `PolarAgent`; with them the client checks each publish and subscribe.
+    topics: Option<Arc<topics::TopicSet>>,
 }
 
 /// Pairs each command an agent declared with its handler, and says what does not pair: a declared command
@@ -234,6 +237,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
             commands: Vec::new(),
             declared_commands: &[],
             declared_runtime: &[],
+            topics: None,
         }
     }
 
@@ -377,6 +381,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
         self.self_test = configured.self_test;
         self.declared_commands = configured.commands;
         self.declared_runtime = configured.runtime;
+        self.topics = Some(configured.topics.clone());
         ConfiguredAgent {
             builder: self,
             startup: configured.startup,
@@ -427,8 +432,13 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
             .config
             .read(&cassini_client::environment::TLS_CLIENT_CERT)
             .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
-        own_name::check_certificate(&this.service_name, &certificate)
+        let identity = own_name::check_certificate(&this.service_name, &certificate)
             .map_err(ActorProcessingErr::from)?;
+        // Each publish and subscribe is checked before it leaves: the agent's policy, then its topics.
+        let gate = this
+            .topics
+            .clone()
+            .map(|set| topic_gate::gate(&this.service_name, identity, set));
 
         let myself_cell = this.myself.get_cell();
 
@@ -451,7 +461,7 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
                 shutdown_budget: startup.shutdown_budget,
                 listen_for_signals: true,
                 process_exit: shutdown::real_process_exit(),
-                tcp_spawner: Arc::new(infrastructure::CassiniSpawner),
+                tcp_spawner: Arc::new(infrastructure::CassiniSpawner { gate }),
                 commands,
                 runtime_sections: this.declared_runtime,
             },
@@ -594,7 +604,7 @@ impl<M: ractor::Message> ConfiguredService<M> {
                 shutdown_budget: startup.shutdown_budget,
                 listen_for_signals: hooks.listen_for_signals,
                 process_exit: hooks.process_exit.clone(),
-                tcp_spawner: Arc::new(infrastructure::CassiniSpawner),
+                tcp_spawner: Arc::new(infrastructure::CassiniSpawner::default()),
                 commands: Vec::new(),
                 runtime_sections: &[],
             },

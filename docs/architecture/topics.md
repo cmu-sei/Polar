@@ -55,7 +55,8 @@ for). The topics it uses because it is an agent at all, or because of what it ne
 them, and declaring one is a declaration problem. The rules are code in one place, `polar-agent-builder/src/topics.rs`
 (`implied_by`, `rules_for`), and that is where the set is computed (`TopicSet::compute`): the agent's `--scaffold`
 prints the whole set, each topic with where it came from (`declared`, with its purpose, or `implied`, with its rule), and
-nothing else recomputes it (`policy-enforcement.md`, "Decisions"). Built 2026-10-21; no agent declares its topics yet.
+nothing else recomputes it (`policy-enforcement.md`, "Decisions"). Built 2026-10-21: every builder agent declares its topics,
+and its client refuses a publish or subscribe outside its set unless its policy permits it (`topic_gate.rs`).
 
 | Rule | Applies when | Topics, for an agent named `<name>` |
 |---|---|---|

@@ -45,13 +45,15 @@ pub(crate) fn judge(service: &str, identity: &str) -> Result<(), String> {
     }
 }
 
-/// [`judge`] on the certificate at `path` (the agent's `TLS_CLIENT_CERT`).
-pub(crate) fn check_certificate(service: &str, path: &str) -> Result<(), String> {
+/// [`judge`] on the certificate at `path` (the agent's `TLS_CLIENT_CERT`): the identity it names, when the agent
+/// may run with it.
+pub(crate) fn check_certificate(service: &str, path: &str) -> Result<String, String> {
     let pem = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read this agent's certificate {path}: {e}"))?;
     let identity = extract_own_identity(&pem)
         .map_err(|e| format!("this agent's certificate {path} names no identity: {e}"))?;
-    judge(service, &identity)
+    judge(service, &identity)?;
+    Ok(identity)
 }
 
 #[cfg(test)]

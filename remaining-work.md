@@ -550,6 +550,12 @@ Principle: declare each environment variable once, with its type, default, docum
 
 ## Dev environment and hygiene
 
+- [ ] `cassini/broker/tests/supersede.rs` is flaky: one run in six to eight fails "timed out waiting for its connection
+  to be closed" (`support/mod.rs:610`, a 5 s wait for the superseded connection to close), more often under load (twice
+  in a workspace run alongside the Neo4j containers). Measured 2026-10-21 on the commit before the session-identity
+  change (`e75bbc42`) as well as after it, so it is not that change. Not investigated further: whether the broker is slow
+  to close the old connection or the wait is too short.
+
 - [ ] No `just` recipe runs the catalog's Nushell tests. There are five files: `nu infra/tests/rules.nu` (11 tests: the grace period against the budget, Job replacement, the apply order), `nu infra/tests/resolve.nu` (15: what the resolver produces for the real catalog, including that `check` passes and that the image's scaffold equals the source tree's, skipped without podman and a pushed image), `nu infra/tests/apply.nu` (16: the decisions `up.nu` makes), `nu infra/tests/secrets.nu` (7: the secrets decision) and `nu infra/tests/document.nu` (12: how a scaffold is filled, and the image command). Add a recipe (for example `just infra-test`, running them and `nu infra/resolve.nu check`) and decide where it runs before a commit. Found 2026-10-07; counts brought up to date 2026-10-09
 - [ ] Workspace clippy cannot pass `-D warnings`, so the `AGENTS.md` rule (`cargo clippy --workspace -- -D warnings` before a commit) cannot be met as written. Found 2026-10-07; the choice was to leave it for now and handle it after the health work. About 19 findings in five crates, all from the toolchain in use (nightly 1.101). `cargo clippy -- -D warnings` applies to every workspace crate it compiles, so the first failing crate (`polar-router`) stops the run, which is why it looks like one problem. The list:
   - `polar-router/src/lib.rs:110`: `clippy::map_entry`, `contains_key` then `insert` on `state.registrations` (use the `Entry` API; keep the duplicate-registration error)

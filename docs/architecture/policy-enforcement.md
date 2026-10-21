@@ -245,6 +245,18 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   as they are met (the openapi pair's mismatch, the unused constants).
 - Tests: per agent, the scaffold's set equals what its code uses (a test that runs the agent's subscriptions and
   publishes against a recording client); the builder's refusal; `infra/tests` reads the scaffold's set unchanged.
+- *Built 2026-10-21, not yet run on a cluster:* the set computed in one place (`polar-agent-builder/src/topics.rs`,
+  `56333f5e`) and printed in the scaffold; the facade's gate (`cassini-client/src/facade.rs`, `deccfb28`); every builder
+  agent's declarations (`bb2ae854`, `4c413f46`, `a819892c`, `ae305041`, `a259d913`, `1a9d5955`, `1e963d0d`), with the
+  unused topic constants removed; the scheduler's unsigned path removed (`8f62eb99`); families and the served workloads
+  (open point A, `6fc3c65d`, brought forward from stage 2 so the scheduler's set is whole before anything refuses); and
+  the check itself, policy first then the set (`polar-agent-builder/src/topic_gate.rs`, handed to the client through
+  the builder's spawner), on for every builder agent. Tested: the rule as a property and against a real policy actor
+  (a permit admits outside the set, a forbid refuses inside it, silence leaves it to the set); every list of
+  subscriptions an agent's code builds in a function is in its set (kube-consumer, jira-processor, git-repo-processor,
+  polar-scheduler, the credentials agent and its observer). Not done as planned: the per-agent test does not run the
+  agent's publishes against a recording client; publishes are checked at run time by the gate, which logs a refusal.
+  `resolve.nu` gives a family agent its workloads but does not yet read the sets (stage 2).
 
 **Stage 2: the catalog carries the sets, and the render writes the floors** (gaps 1, 3, 6)
 

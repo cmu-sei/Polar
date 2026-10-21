@@ -150,7 +150,11 @@ pub(crate) trait TcpClientSpawner: Send + Sync {
     ) -> Result<TcpClient, ActorProcessingErr>;
 }
 
-pub(crate) struct CassiniSpawner;
+/// Spawns the real client, handing it the agent's topic check (`topic_gate`) when it has one.
+#[derive(Default)]
+pub(crate) struct CassiniSpawner {
+    pub(crate) gate: Option<cassini_client::facade::TopicGate>,
+}
 
 #[async_trait]
 impl TcpClientSpawner for CassiniSpawner {
@@ -168,7 +172,7 @@ impl TcpClientSpawner for CassiniSpawner {
             lifecycle,
             router,
             config,
-            None,
+            self.gate.clone(),
         )
         .await
     }
@@ -2654,7 +2658,7 @@ mod service_tests {
                     shutdown_budget: budget,
                     listen_for_signals: false,
                     process_exit: Arc::new(move |code| recorded.lock().unwrap().push(code)),
-                    tcp_spawner: Arc::new(CassiniSpawner),
+                    tcp_spawner: Arc::new(CassiniSpawner::default()),
                     commands: vec![],
                     runtime_sections: &[],
                     self_test: false,
