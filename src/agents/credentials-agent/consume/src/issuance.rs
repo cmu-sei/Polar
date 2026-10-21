@@ -95,17 +95,20 @@ pub fn check_request_shape(
     }
 }
 
-/// The extra names the certificate is signed with: a client certificate carries the permissions of its grant, a
-/// server certificate the names it asked for and no permissions.
+/// The extra names the certificate is signed with: a client certificate carries the permissions of its grant and
+/// the topics and groups its workload's floor entry gives it (none for a requester the floor does not name, a
+/// person's for one), a server certificate the names it asked for and nothing else.
 fn extra_sans_for(
     cert_type: WorkloadCertType,
     names: &[String],
     grant_permissions: &[cert_issuer_common::permission::Permission],
+    floor: Option<&crate::issuance_floor::WorkloadTopics>,
 ) -> Vec<String> {
     match cert_type {
         WorkloadCertType::Client => grant_permissions
             .iter()
             .map(|p| p.to_san_string())
+            .chain(floor.map(|f| f.san_strings()).unwrap_or_default())
             .collect(),
         WorkloadCertType::Server => names.to_vec(),
     }
@@ -128,6 +131,9 @@ pub struct IssuanceHandler {
     pub introspection: Option<IntrospectionClient>,
     pub known_kubernetes_issuers: Vec<String>,
     pub escrow_keypair: Arc<EscrowKeypair>,
+    /// The topics and groups the catalog gives each workload, written into its client certificates
+    /// (docs/architecture/policy-enforcement.md, stage 3).
+    pub issuance_floor: Arc<crate::issuance_floor::IssuanceFloor>,
 }
 
 impl IssuanceHandler {
@@ -288,7 +294,12 @@ impl IssuanceHandler {
         };
 
         // ---- Step 6: sign, via cert-issuer's /issue ----
-        let extra_sans = extra_sans_for(request.cert_type, &request.names, &permissions);
+        let extra_sans = extra_sans_for(
+            request.cert_type,
+            &request.names,
+            &permissions,
+            self.issuance_floor.topics_for(&token_identity),
+        );
         let issued = match self
             .cert_issuer
             .issue(
@@ -482,6 +493,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
+            issuance_floor: Default::default(),
         };
         let reply = handler
             .handle(IssuanceRequest {
@@ -536,6 +548,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
+            issuance_floor: Default::default(),
         };
 
         let reply = handler
@@ -548,6 +561,97 @@ pub(crate) mod tests {
             .await;
 
         assert!(matches!(reply, IssuanceReply::Issued { .. }));
+    }
+
+    /// A cert-issuer that validates any token as the workload `workload`, and signs only a request whose extra names
+    /// are exactly `sans`.
+    async fn issuer_expecting(workload: &str, sans: &[&str]) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/validate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::ValidateResponse {
+                    workload_identity: format!("system:serviceaccount:polar:{workload}"),
+                    instance_binding: Some(format!("{workload}-uid")),
+                    jti: None,
+                    normalized_identity: Some(format!(
+                        "{workload}.polar.serviceaccount.cluster.local"
+                    )),
+                },
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .and(body_partial_json(serde_json::json!({ "extra_sans": sans })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fake_issue_response()))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn floor_for_kube_consumer() -> Arc<crate::issuance_floor::IssuanceFloor> {
+        Arc::new(
+            crate::issuance_floor::IssuanceFloor::parse(
+                r#"[{"workload": "system:serviceaccount:polar:kube-consumer",
+                     "publish": ["polar.provenance.discovery"],
+                     "subscribe": ["kubernetes.cluster.consumer.Pod"],
+                     "groups": ["cassini-client", "encryption"]}]"#,
+            )
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_workload_s_client_certificate_carries_the_topics_and_groups_its_floor_gives_it() {
+        let server = issuer_expecting(
+            "kube-consumer",
+            &[
+                "p:pub:polar.provenance.discovery",
+                "p:sub:kubernetes.cluster.consumer.Pod",
+                "g:cassini-client",
+                "g:encryption",
+            ],
+        )
+        .await;
+        let handler = IssuanceHandler {
+            issuance_floor: floor_for_kube_consumer(),
+            ..handler_for(&server, spawn_test_ledger().await).await
+        };
+        let reply = handler
+            .handle(request_for(WorkloadCertType::Client, &[]))
+            .await;
+        assert!(matches!(reply, IssuanceReply::Issued { .. }), "{reply:?}");
+    }
+
+    #[tokio::test]
+    async fn a_server_certificate_carries_its_names_and_no_topics_or_groups() {
+        let server =
+            issuer_expecting("kube-consumer", &["kube-consumer.polar.svc.cluster.local"]).await;
+        let handler = IssuanceHandler {
+            issuance_floor: floor_for_kube_consumer(),
+            ..handler_for(&server, spawn_test_ledger().await).await
+        };
+        let reply = handler
+            .handle(request_for(
+                WorkloadCertType::Server,
+                &["kube-consumer.polar.svc.cluster.local"],
+            ))
+            .await;
+        assert!(matches!(reply, IssuanceReply::Issued { .. }), "{reply:?}");
+    }
+
+    #[tokio::test]
+    async fn a_workload_the_floor_does_not_name_carries_no_topics_or_groups() {
+        let server = issuer_expecting("admin-tool", &[]).await;
+        let handler = IssuanceHandler {
+            issuance_floor: floor_for_kube_consumer(),
+            ..handler_for(&server, spawn_test_ledger().await).await
+        };
+        let reply = handler
+            .handle(request_for(WorkloadCertType::Client, &[]))
+            .await;
+        assert!(matches!(reply, IssuanceReply::Issued { .. }), "{reply:?}");
     }
 
     #[tokio::test]
@@ -622,6 +726,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
+            issuance_floor: Default::default(),
         };
 
         let reply = handler
@@ -733,6 +838,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
+            issuance_floor: Default::default(),
         };
 
         let reply = handler
@@ -812,6 +918,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
+            issuance_floor: Default::default(),
         };
 
         let reply = handler
@@ -861,6 +968,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
+            issuance_floor: Default::default(),
         };
 
         let reply = handler
@@ -893,6 +1001,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
+            issuance_floor: Default::default(),
         };
 
         let reply = handler
@@ -985,12 +1094,12 @@ pub(crate) mod tests {
             target: None,
         }];
         assert_eq!(
-            extra_sans_for(Client, &[], &grant),
+            extra_sans_for(Client, &[], &grant, None),
             vec!["p:s2s".to_string()]
         );
-        assert!(extra_sans_for(Client, &[], &[]).is_empty());
+        assert!(extra_sans_for(Client, &[], &[], None).is_empty());
         assert_eq!(
-            extra_sans_for(Server, &names(&[CASSINI_NAME]), &grant),
+            extra_sans_for(Server, &names(&[CASSINI_NAME]), &grant, None),
             names(&[CASSINI_NAME])
         );
     }
@@ -1029,6 +1138,7 @@ pub(crate) mod tests {
             introspection: None,
             known_kubernetes_issuers: vec![K8S.to_string()],
             escrow_keypair: crate::escrow::tests::test_keypair(),
+            issuance_floor: Default::default(),
         }
     }
 

@@ -782,6 +782,8 @@ impl Actor for ConsumerSupervisor {
         // Two actors issue: the one for requests that arrive with a clear credential (the admin tool and
         // people) and the one for a workload's, whose token arrives sealed. Each owns its own handler, so each
         // is built the same way from the same settings.
+        // What each workload's client certificates carry, from the catalog (stage 3).
+        let issuance_floor = std::sync::Arc::new(settings.issuance_floor.clone());
         let make_issuance_handler = || async {
             Ok::<_, ActorProcessingErr>(IssuanceHandler {
                 ledger: ledger.clone(),
@@ -801,6 +803,7 @@ impl Actor for ConsumerSupervisor {
                 }),
                 known_kubernetes_issuers: settings.kubernetes_issuers.clone(),
                 escrow_keypair: escrow_keypair.clone(),
+                issuance_floor: issuance_floor.clone(),
             })
         };
 
@@ -1519,6 +1522,7 @@ mod issuance_wiring_tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
+            issuance_floor: Default::default(),
         };
 
         let (issuance_actor, _) = IssuanceActor::spawn(
@@ -1691,6 +1695,7 @@ mod issuance_wiring_tests {
                         "https://kubernetes.default.svc.cluster.local".to_string(),
                     ],
                     escrow_keypair: crate::escrow::tests::test_keypair(),
+                    issuance_floor: Default::default(),
                 }),
             },
         )

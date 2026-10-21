@@ -45,6 +45,31 @@ pub struct WorkloadTopics {
     pub groups: Vec<String>,
 }
 
+impl WorkloadTopics {
+    /// What its certificates carry of it: `p:pub:` and `p:sub:` for its topics, `g:` for its groups.
+    pub fn san_strings(&self) -> Vec<String> {
+        use cert_issuer_common::group::Group;
+        use cert_issuer_common::permission::{TopicAccess, TopicPermission};
+        let topic = |access, topic: &String| {
+            TopicPermission {
+                access,
+                topic: topic.clone(),
+            }
+            .to_san_string()
+        };
+        self.publish
+            .iter()
+            .map(|t| topic(TopicAccess::Publish, t))
+            .chain(
+                self.subscribe
+                    .iter()
+                    .map(|t| topic(TopicAccess::Subscribe, t)),
+            )
+            .chain(self.groups.iter().map(|g| Group(g.clone()).to_san_string()))
+            .collect()
+    }
+}
+
 /// The floor, by workload.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IssuanceFloor {
