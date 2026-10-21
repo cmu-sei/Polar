@@ -433,6 +433,12 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   - the controller and its control channel (`cassini/test/control`, `harness-common`'s `ControlClient`) are removed;
   - a nu script runs a plan (a list of runs, or a grid of sizes, rates, producers and sinks), keeps the results, and
     compares runs as a table.
+  - the raw records (each run's parameters, the broker's image digest, the commit, the node, and what was measured)
+    are kept outside the repository, in `~/.cache/polar/harness/<plan>-<time>.nuon`, since they hold only for the
+    machine that made them; `compare` reads any of them. What is worth keeping, the baseline first, is written into the
+    docs as a summary table naming the machine, the commit and the plan, together with the procedure that produced it
+    (the state of the cluster, the target, the plan, and the commands run, in order), so a later run can be made the
+    same way and compared with it.
 
 **Stage 5b: the broker enforces** (gaps 7, 8, 11)
 
