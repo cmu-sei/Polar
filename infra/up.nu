@@ -35,7 +35,9 @@
 #
 # Every step checks its own precondition, so after a failure or a pause you can
 # re-run the same command and it resumes. It stops for a human only where a
-# human is required (closing the browser, the Neo4j password).
+# human is required: closing the browser for the certificate import, and the
+# Neo4j password only if Neo4j still has its factory default (it is checked,
+# and a cluster brought up by this script already has the agents' one).
 #
 # Steps (each enabled only when the target needs it):
 #   preflight   cluster reachable, namespaces can be made, run from the repo root; a container runtime   always
@@ -55,7 +57,7 @@
 #   forwards    just port-forwards-up <only what is needed>               credentials-agent (observer) or neo4j
 #   admin       admin-bootstrap / admin-provision / admin-claim           credentials-agent deployed
 #   seed        sign the first policy and push it to polar-schedules      credentials-agent, polar-git-server and polar-scheduler-observer deployed
-#   browser     user-cert-install, then the Neo4j password                credentials-agent and neo4j deployed
+#   browser     user-cert-install, then check the Neo4j password          credentials-agent and neo4j deployed
 
 const POLAR = "polar"
 const GRAPH = "polar-graph"
