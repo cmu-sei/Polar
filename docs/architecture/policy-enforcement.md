@@ -238,7 +238,9 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   from its own Listener); where no policy speaks, the floor (the implied topics from the identity, the declared topics
   from the certificate). Default deny. A refusal is sent to the client (stage 0).
 - The bootstrap services start on the floor, healthy without a snapshot; the authority channel and the credentials
-  agent's request and reply topics are on every workload's implied floor (open point B).
+  agent's request and reply topics are on every workload's implied floor, and the credentials agent refuses a policy that
+  would deny them (open point B, decided; its test: a policy forbidding a workload `polar-authority-updates` is refused
+  whole, and the old policy stays).
 - Reply topics stay shared; their privacy is the payload's encryption, as now.
 - Tests: the broker harness with certificates that carry topic `p:` names: an undeclared publish refused, a declared one
   delivered, a Cedar forbid refusing a declared one, a Cedar permit admitting an undeclared one.
@@ -273,10 +275,12 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   list of workloads it serves as an input (an environment variable from the catalog); the builder reads it at start and
   expands it into exact names in the computed set, and `--scaffold` is asked with the same input, so every consumer still
   reads one computed set. The scheduler does not declare a pattern.
-- **B. Can a policy cut off the authority channel?** (stage 5). If a `forbid` can refuse `polar-authority-updates` or the
-  credentials agent's request topics, a bad policy can stop its own correction and every certificate renewal. Either those
-  topics are decided by the floor alone, whatever the policy says, or the credentials agent refuses to publish a policy
-  that would cut them.
+- **B. Can a policy cut off the authority channel?** (stage 5). *Decided 2026-10-21: no exception to the rule; a check on
+  arrival.* Before the credentials agent accepts a new policy, it evaluates it against a fixed set of requests: every
+  catalog workload's identity against the authority topics and the credentials agent's own request and reply topics. If
+  any would be denied, the whole policy is refused with the reason, and the old one stays in force, as for a policy that
+  does not parse or validate. Cedar keeps overriding the certificate both ways; a policy that would cut the channel through
+  which policy is corrected, or certificates renewed, is never accepted.
 - **C. The size of a certificate's topic list** (stage 3). The credentials agent alone subscribes to its 16 request topics and the
   snapshot requests, and publishes their replies and the authority topics; those would be implied, not written, but a workload with many declared topics makes a large certificate. A limit, or
   a compact form, may be needed.
