@@ -76,7 +76,9 @@ pub mod signed;
 pub use signed::{Rejection, UpdateVerifier};
 pub(crate) mod own_name;
 pub(crate) mod startup;
+pub mod topics;
 pub use shutdown::{DEFAULT_SHUTDOWN_BUDGET, SHUTDOWN_BUDGET_ENV};
+pub use topics::{Access, TopicDecl, TopicSet};
 
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;

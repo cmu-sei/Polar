@@ -48,6 +48,25 @@ The builder refuses to start an agent whose certificate names another workload, 
 A signed document must name the service name in `target.agent` (`signed.rs:312`, `configuration.rs:706`). A rule about
 who may use an agent's topics has to join the two.
 
+## Implied topics
+
+An agent declares the topics it uses itself (`PolarAgent::TOPICS`: each topic, `publish` or `subscribe`, and what it is
+for). The topics it uses because it is an agent at all, or because of what it needs, are implied: it does not declare
+them, and declaring one is a declaration problem. The rules are code in one place, `polar-agent-builder/src/topics.rs`
+(`implied_by`, `rules_for`), and that is where the set is computed (`TopicSet::compute`): the agent's `--scaffold`
+prints the whole set, each topic with where it came from (`declared`, with its purpose, or `implied`, with its rule), and
+nothing else recomputes it (`policy-enforcement.md`, "Decisions"). Built 2026-10-21; no agent declares its topics yet.
+
+| Rule | Applies when | Topics, for an agent named `<name>` |
+|---|---|---|
+| `agent` | the agent is a Cassini client (or may be one: `OPTIONAL` holds `Cassini`) | subscribe `agent.<name>.configuration`, `agent.<name>.command`, `polar-authority-updates`, `polar-authority-snapshot-replies`; publish `polar-configuration-replay`, `polar-configuration-outcome`, `polar-command-outcome`, `polar-authority-snapshot-requests` |
+| `self_test` | `agent` applies and `SELF_TEST` is on | publish and subscribe `selftest.<name>` (a `:` in the name as `-`) |
+| `encryption` | `agent` applies and the agent needs `Encryption` | publish the six request topics of its crypto actor, subscribe their six replies (`polar_crypto::REQUEST_TOPICS`, `REPLY_TOPICS`) |
+
+A service that is not a Cassini client (the broker) has no topics. The set is ordered and has each topic once per
+access; it does not depend on the order of the declarations, and it is exactly the declared and the implied topics
+(property tests in `topics.rs`).
+
 ## Every builder agent
 
 | Topic | Publishes | Subscribes | Carries |

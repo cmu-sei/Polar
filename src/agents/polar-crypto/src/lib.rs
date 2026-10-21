@@ -105,6 +105,28 @@ use tracing::{error, info, warn};
 use x25519_dalek::{EphemeralSecret, PublicKey};
 pub use zeroize::Zeroizing;
 
+/// The credentials agent's request topics the actor publishes to, one for each request it makes. An agent
+/// that encrypts uses them because of that need (docs/architecture/topics.md, "Implied topics").
+pub const REQUEST_TOPICS: [&str; 6] = [
+    CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
+    CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
+    CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
+];
+
+/// Their replies, which the actor subscribes to. They are shared by every crypto actor: each takes its own
+/// by correlation id.
+pub const REPLY_TOPICS: [&str; 6] = [
+    CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC,
+    CREDENTIALS_STORE_SECRET_REPLIES_TOPIC,
+    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
+    CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC,
+];
+
 /// How long CryptoActor waits for a single correlated reply from the
 /// Credentials Agent before giving up -- generous relative to what a
 /// live broker round trip should ever actually take, matching the
@@ -483,14 +505,7 @@ impl Actor for CryptoActor {
         // itself do the real, per-topic deserialization/routing --
         // mirroring kube-consumer's own, established
         // register_kube_topics pattern exactly.
-        for topic in [
-            CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC,
-            CREDENTIALS_STORE_SECRET_REPLIES_TOPIC,
-            CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
-            CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
-            CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
-            CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC,
-        ] {
+        for topic in REPLY_TOPICS {
             let myself_for_deliver = myself.clone();
             if let Err(e) = args
                 .router
@@ -574,14 +589,7 @@ impl Actor for CryptoActor {
                 // CryptoActor is a requester here, not a responder, so it
                 // needs the reply topics, not the request topics (easy to
                 // transpose by accident, worth being explicit about).
-                for topic in [
-                    CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC,
-                    CREDENTIALS_STORE_SECRET_REPLIES_TOPIC,
-                    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
-                    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
-                    CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
-                    CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC,
-                ] {
+                for topic in REPLY_TOPICS {
                     if let Err(e) = state.tcp_client.send_message(TcpClientMessage::Subscribe {
                         topic: topic.to_string(),
                         trace_ctx: None,

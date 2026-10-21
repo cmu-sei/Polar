@@ -204,7 +204,7 @@ const SELF_TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The topic an agent's probes travel on. Shared by every instance of the service: each tells its
 /// own probes from the others by the instance id they carry.
-fn self_test_topic(service_name: &str) -> String {
+pub(crate) fn self_test_topic(service_name: &str) -> String {
     // The broker names a subscription `{session}:{topic}` and splits it at the first colon, and
     // some services are named with colons.
     format!("selftest.{}", service_name.replace(':', "-"))

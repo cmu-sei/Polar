@@ -69,6 +69,7 @@ use crate::command::{CommandSpec, spec_problems};
 use crate::environment;
 use crate::runtime::RuntimeSection;
 use crate::startup::{self, Startup};
+use crate::topics::{Facts, TopicDecl, TopicEntry, TopicSet};
 use polar_env::{DocValue, Document, DocumentError, Env, FileEnv, ProcessEnv, Section, Source};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -126,6 +127,10 @@ pub trait PolarAgent: Sized + 'static {
     /// `ConfigurationHandle::runtime`. They appear in the schema export beside the variable sections. A
     /// section not declared here is refused however it is signed.
     const RUNTIME: &'static [&'static RuntimeSection] = &[];
+    /// The topics the agent uses itself, each with its access and its purpose (docs/architecture/topics.md).
+    /// The topics every agent uses, and those a need brings, are implied and not listed here; the scaffold
+    /// prints the whole set, and the agent's client refuses what is outside it unless policy permits it.
+    const TOPICS: &'static [TopicDecl] = &[];
 
     /// The agent proper. It is given the configuration the infrastructure judged, and builds
     /// its infrastructure from it (see `AgentBuilder::into_configured`). It returns when the
@@ -255,6 +260,10 @@ pub struct AgentDocument {
     /// `sections`, which are the variables.
     #[serde(default)]
     pub runtime: Vec<RuntimeDocument>,
+    /// Every topic the agent uses, declared or implied, each with where it comes from: the one computed
+    /// set, which the catalog and the certificates take from here and never recompute.
+    #[serde(default)]
+    pub topics: Vec<TopicEntry>,
     #[serde(flatten)]
     pub document: Document,
     /// Every problem found, when the document was filled from a file.
@@ -333,6 +342,22 @@ fn cassini_optional<A: PolarAgent>() -> bool {
     A::OPTIONAL.contains(&Capability::Cassini)
 }
 
+/// What the topic rules read about `A`. An agent that may run without the broker uses its topics when it
+/// has one, so its set is the one it has then.
+fn topic_facts<A: PolarAgent>() -> Facts<'static> {
+    Facts {
+        name: A::NAME,
+        cassini_client: A::CASSINI_CLIENT || cassini_optional::<A>(),
+        self_test: A::SELF_TEST,
+        encryption: A::NEEDS.contains(&Capability::Encryption),
+    }
+}
+
+/// The whole set of topics `A` uses: what it declares and what is implied for it.
+pub fn topic_set<A: PolarAgent>() -> TopicSet {
+    TopicSet::compute(&topic_facts::<A>(), A::TOPICS)
+}
+
 /// The sections that apply to `A`, each with the capability that brings it in (none for the
 /// ones every agent has, and for its own).
 fn sections_of<A: PolarAgent>() -> Vec<(Option<Capability>, &'static Section)> {
@@ -407,6 +432,7 @@ pub fn scaffold_document<A: PolarAgent>() -> AgentDocument {
                 body: serde_json::from_str(section.body).unwrap_or(serde_json::Value::Null),
             })
             .collect(),
+        topics: topic_set::<A>().entries(),
         document: Document::scaffold(&tagged),
         problems: Vec::new(),
     }
@@ -433,8 +459,8 @@ fn load(path: &Path, process: impl Env + 'static) -> Result<Loaded, String> {
 /// Every problem with a document, as `A` would find them starting on it: what is wrong with
 /// the document itself, what it sets that the agent does not declare, and everything the
 /// agent's own judgement of its configuration finds.
-/// What is wrong with what the agent offers to signed documents, its commands and its runtime sections,
-/// whatever the configuration.
+/// What is wrong with what the agent offers to signed documents, its commands and its runtime sections, and
+/// with the topics it declares, whatever the configuration.
 fn surface_problems<A: PolarAgent>() -> Vec<String> {
     let mut problems = spec_problems(A::COMMANDS);
     if !A::COMMANDS.is_empty() && !A::CASSINI_CLIENT {
@@ -444,6 +470,7 @@ fn surface_problems<A: PolarAgent>() -> Vec<String> {
         ));
     }
     problems.extend(crate::runtime::check_declarations(A::RUNTIME));
+    problems.extend(crate::topics::problems(&topic_facts::<A>(), A::TOPICS));
     if !A::RUNTIME.is_empty() && !A::CASSINI_CLIENT {
         problems.push(format!(
             "{} declares runtime sections but is not a Cassini client, so no document can reach it",
@@ -908,6 +935,10 @@ mod tests {
         const SHUTDOWN_BUDGET: Duration = Duration::from_secs(30);
         const SECTIONS: &'static [&'static Section] = &[&OWN];
         const HELP: Option<&'static str> = Some("It reads from the bucket and writes the graph.");
+        const TOPICS: &'static [TopicDecl] = &[
+            TopicDecl::subscribe("bucket.changes", "what changed in the bucket"),
+            TopicDecl::publish("bucket.copied", "what it copied"),
+        ];
 
         async fn start(configured: Configured) -> Result<(), StartError> {
             // It reads its own settings from the snapshot it was given.
@@ -971,6 +1002,23 @@ mod tests {
         const NEEDS: &'static [Capability] = &[Capability::Cassini];
         const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
         const CASSINI_CLIENT: bool = false;
+        async fn start(_: Configured) -> Result<(), StartError> {
+            Ok(())
+        }
+    }
+
+    /// One that declares a topic it is given anyway.
+    struct Redundant;
+
+    impl PolarAgent for Redundant {
+        const NAME: &'static str = "redundant";
+        const PURPOSE: &'static str = "Declares what is implied";
+        const NEEDS: &'static [Capability] = &[];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+        const TOPICS: &'static [TopicDecl] = &[TopicDecl::subscribe(
+            "agent.redundant.configuration",
+            "its configuration",
+        )];
         async fn start(_: Configured) -> Result<(), StartError> {
             Ok(())
         }
@@ -1159,6 +1207,54 @@ mod tests {
         assert_eq!(doc.requires, vec!["cassini", "graph-write"]);
         assert_eq!(doc.shutdown_budget_minimum_secs, 30);
         assert_eq!(doc.document.format, polar_env::DOCUMENT_FORMAT);
+    }
+
+    #[test]
+    fn the_scaffold_holds_every_topic_the_agent_uses_and_where_each_comes_from() {
+        use crate::topics::{Access, Origin, Rule};
+        let doc = scaffold_document::<Example>();
+        let find = |name: &str, access: Access| {
+            doc.topics
+                .iter()
+                .find(|t| t.name == name && t.access == access)
+                .unwrap_or_else(|| panic!("{name} is not in {:?}", doc.topics))
+                .origin
+                .clone()
+        };
+        assert_eq!(
+            find("bucket.copied", Access::Publish),
+            Origin::Declared {
+                purpose: "what it copied".into()
+            }
+        );
+        assert!(matches!(
+            find("agent.example-agent.configuration", Access::Subscribe),
+            Origin::Implied {
+                rule: Rule::Agent,
+                ..
+            }
+        ));
+        assert!(matches!(
+            find("selftest.example-agent", Access::Publish),
+            Origin::Implied {
+                rule: Rule::SelfTest,
+                ..
+            }
+        ));
+        // It is the set the builder computes, whole.
+        assert_eq!(doc.topics, topic_set::<Example>().entries());
+    }
+
+    #[test]
+    fn a_service_that_is_not_a_cassini_client_uses_no_topics() {
+        assert!(scaffold_document::<Serving>().topics.is_empty());
+    }
+
+    #[test]
+    fn declaring_an_implied_topic_is_a_declaration_problem() {
+        let said = declaration_problems::<Redundant>().join("\n");
+        assert!(said.contains("agent.redundant.configuration"), "{said}");
+        assert!(declaration_problems::<Example>().is_empty());
     }
 
     #[test]
