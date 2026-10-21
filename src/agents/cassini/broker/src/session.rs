@@ -591,13 +591,23 @@ impl SessionManager {
             return Ok(());
         };
 
-        // Try to reuse an existing session
+        // Try to reuse an existing session. Only the identity that owns it may: a registration id is not a bearer token.
         if let Some(existing_id) = &registration_id {
-            if let Some(session) = state
-                .sessions
-                .get_mut(existing_id)
-                .filter(|session| !session.superseded)
+            if let Some(session) = state.sessions.get(existing_id)
+                && !session.superseded
+                && !may_resume(session.identity.as_deref(), peer_identity.as_deref())
             {
+                warn!(
+                    registration_id = %existing_id,
+                    session_identity = ?session.identity,
+                    connection_identity = ?peer_identity,
+                    "a connection asked to resume a session that is not its identity's: giving it a new one"
+                );
+            }
+            if let Some(session) = state.sessions.get_mut(existing_id).filter(|session| {
+                !session.superseded
+                    && may_resume(session.identity.as_deref(), peer_identity.as_deref())
+            }) {
                 info!(registration_id = %existing_id, "reusing existing session");
                 session.detached_at = None;
                 if let Err(e) = session
@@ -1486,4 +1496,10 @@ impl SessionAgent {
             });
         Ok(())
     }
+}
+
+/// Whether a connection presenting `connection` may resume a session that belongs to `session`: only the same
+/// identity, and never when either is unknown (a certificate with no DNS name has no identity to match). Pure.
+pub fn may_resume(session: Option<&str>, connection: Option<&str>) -> bool {
+    matches!((session, connection), (Some(s), Some(c)) if s == c)
 }
