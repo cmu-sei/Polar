@@ -52,6 +52,9 @@ code today, and what stands between the two. The detail of each part is in the d
   into its init container, which waits for the infrastructure. A cluster that has lost its authority does not run on
   certificates indefinitely. This keeps the aging design in `authority-distribution.md` and replaces the open-ended
   degraded state `cert-issuer-isolation.md` described.
+- **In the window, the cached policy keeps applying (2026-10-21).** An agent decides as when nominal: the last policy it
+  verified first, the certificate where that policy is silent. Only fresh policy stops arriving. A signed `forbid` does
+  not lose force because its publisher is unreachable; the bound limits how stale it can get.
 
 ## Where policy is enforced today
 
