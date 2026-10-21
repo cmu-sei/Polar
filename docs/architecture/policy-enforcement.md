@@ -128,6 +128,15 @@ code today, and what stands between the two. The detail of each part is in the d
   credentials agent's issuance floor, as it writes cert-issuer's floor of server names today, and into cert-issuer's for
   the bootstrap services; each certificate carries them from the first one issued. A change to an agent's topics is a
   change to the catalog, applied like any other, and reaches the agent with its next certificate.
+- **A topic with no other side fails the check catalog-wide, unless it says why it waits (2026-10-21).** A declared
+  topic needs another side somewhere in the catalog: a subscriber (declared or implied) for a publish, a publisher for
+  a subscribe. One that has none fails, unless its declaration gives the reason it waits (no publisher yet, or a
+  reader outside the catalog, such as `build-processor`, a chart); the scaffold prints the reason. The catalog-wide
+  check is an infra test over every catalog agent built from the workspace, each asked for its own `--scaffold` (no
+  cluster), because a render has only the scaffolds of the workloads its target runs and cannot see the topics of those
+  it disables. The render does the target-level part: a topic one-sided in its target, with no reason given, is a
+  warning that names it. (Decided over failing every render per target, which would have failed today on nine topics
+  catalog-wide and two more on `local-minimal`, and over asking the disabled workloads' images in every render.)
 - **Open: an administrator's scheduled override or addition to an agent's set.** Considered, not decided: a signed,
   scheduled document that adds topics to (or overrides) what the scaffold declares and implies. If it comes, it is one
   more input every consumer reads the same way, and the builder's run-time check must honour it.
@@ -264,8 +273,10 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   for each workload) is generated from the catalog as exact names: the render passes the list of workloads to the scheduler, which expands it
   in its computed set (open point A, decided).
 - The render writes each workload's declared topics into the credentials agent's issuance floor and, for the bootstrap
-  services, into cert-issuer's floor, as server names are written today. `render.nu` checks that every declared topic has
-  at least one other side (a subscriber for a publish, a publisher for a subscribe), so a mismatch fails the render.
+  services, into cert-issuer's floor, as server names are written today. Every declared topic has at least one other
+  side in the catalog (a subscriber for a publish, a publisher for a subscribe), or a reason in its declaration: an
+  infra test over source builds fails otherwise, and the render warns about a topic one-sided in its target
+  ("Decisions").
 - Tests: the render of `local-minimal` and `sandbox-local`; the cross-check refuses a one-sided topic.
 
 **Stage 3: certificates carry the floor** (gap 3)
