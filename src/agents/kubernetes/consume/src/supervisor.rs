@@ -726,6 +726,27 @@ mod subscription_tests {
     }
 
     #[tokio::test]
+    async fn every_topic_it_subscribes_to_is_in_its_declared_set() {
+        let (fake_supervisor, _) = Actor::spawn(
+            None,
+            FakeSupervisor {
+                received: Arc::new(Mutex::new(Vec::new())),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        let set = polar_agent_builder::agent::topic_set::<crate::agent::KubeConsumer>();
+        for subscription in ClusterConsumerSupervisor::kube_subscriptions(&fake_supervisor) {
+            assert!(
+                set.allows(&subscription.topic, polar_agent_builder::Access::Subscribe),
+                "{} is not declared",
+                subscription.topic
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn each_real_deliver_closure_genuinely_forwards_a_correctly_reconstructed_client_event() {
         let received = Arc::new(Mutex::new(Vec::new()));
         let (fake_supervisor, _) = Actor::spawn(

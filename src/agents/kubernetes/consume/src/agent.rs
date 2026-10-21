@@ -24,7 +24,7 @@
 //! What kube-consumer is, as the infrastructure asks to be told: see `polar_agent_builder::PolarAgent`.
 
 use crate::supervisor::{ClusterConsumerSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
+use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
 use ractor::Actor;
 use std::time::Duration;
 
@@ -36,6 +36,20 @@ impl PolarAgent for KubeConsumer {
         "Projects the Kubernetes resources the observer publishes into the Polar knowledge graph";
     const NEEDS: &'static [Capability] = &[Capability::GraphWrite, Capability::Encryption];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::subscribe(
+            kube_common::KUBERNETES_CONSUMER,
+            "the observer's resource changes, projected into the graph",
+        ),
+        TopicDecl::subscribe(
+            polar::topics::KUBERNETES_RESOLUTION_EVENTS,
+            "what the resolver found for a container's image, joined to the container",
+        ),
+        TopicDecl::publish(
+            polar::topics::PROVENANCE_DISCOVERY,
+            "each container image it meets, for the resolver to resolve",
+        ),
+    ];
     const HELP: Option<&'static str> = Some(
         "kube-consumer subscribes to the Kubernetes observer's topics on Cassini, writes what it \
          receives into the graph (nodes, ownership edges and temporal state), and answers the \

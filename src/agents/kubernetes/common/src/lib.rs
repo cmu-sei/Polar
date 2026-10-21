@@ -31,7 +31,6 @@ pub mod flux;
 // ideally we could name consumers and observers exactly after the resource they're supposed to look for, but the strings aren't known yet
 // It looks like the API sets types to things like PodList, for example, if this is open information, we can go off of the latest api!
 // Also, make sure we have names for each reasource type, KUBE_POD_OBSERVER, KUBE_NODE_OBSERVER etc
-pub const KUBERNETES_OBSERVER: &str = "kubernetes.cluster.observer.pods";
 pub const KUBERNETES_CONSUMER: &str = "kubernetes.cluster.consumer.Pod";
 pub const BATCH_PROCESS_ACTION: &str = "BatchProcess";
 pub const RESOURCE_APPLIED_ACTION: &str = "Applied";
@@ -78,11 +77,4 @@ pub enum KubeMessage {
     //     namespace: Option<String>,
     //     resource_kind: String,
     // },
-}
-
-pub fn get_consumer_name(cluster_name: &str, kind: &str) -> String {
-    format!("kubernetes.{cluster_name}.consumer.{kind}")
-}
-pub fn get_observer_name(cluster_name: &str, kind: &str) -> String {
-    format!("kubernetes.{cluster_name}.observer.{kind}")
 }
