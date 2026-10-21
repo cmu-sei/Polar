@@ -19,7 +19,7 @@
 --
 -- DM26-0670
 
--- src/agents/secret-harness/container.dhall
+-- src/agents/secret-harness/container-owner.dhall
 
 let Lib = ../../containers/container-lib.dhall
 
@@ -31,7 +31,7 @@ let healthcheckLayer =
     ]
 
 in defaults.minimalContainer //
-  { name       = "secret-harness"
+  { name       = "secret-harness-owner"
   , entrypoint = Some "secret-harness"
   , staticUid  = Some 1000
   , staticGid  = Some 1000

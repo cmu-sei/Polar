@@ -73,7 +73,8 @@
   {image: "scheduler-observer",  tag: "latest", kind: "nix", attr: "polarPkgs.scheduler.observerImage"}
   {image: "scheduler-processor", tag: "latest", kind: "nix", attr: "polarPkgs.scheduler.processorImage"}
   {image: "polar-git-server",    tag: "latest", kind: "nix", attr: "polarPkgs.polarGitServer.image"}
-  {image: "secret-harness",      tag: "latest", kind: "nix", attr: "polarPkgs.secretHarness.image"}
+  {image: "secret-harness-owner",    tag: "latest", kind: "nix", attr: "polarPkgs.secretHarness.ownerImage"}
+  {image: "secret-harness-intruder", tag: "latest", kind: "nix", attr: "polarPkgs.secretHarness.intruderImage"}
   {image: "oci-resolver",        tag: "latest", kind: "nix", attr: "polarPkgs.ociResolver.resolverImage"}
   {image: "build-processor",     tag: "latest", kind: "nix", attr: "buildProcessorImage"}
 

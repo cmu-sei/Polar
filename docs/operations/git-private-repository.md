@@ -55,7 +55,7 @@ must be rebuilt and pushed in one go.
 first and bring up later:
 
 ```fish
-just images-push git-observer git-controller git-processor credentials-agent-consumer credentials-agent-observer kube-consumer secret-harness
+just images-push git-observer git-controller git-processor credentials-agent-consumer credentials-agent-observer kube-consumer secret-harness-owner secret-harness-intruder
 nu infra/images.nu list                                          # every image name, if one of those is not right
 ```
 

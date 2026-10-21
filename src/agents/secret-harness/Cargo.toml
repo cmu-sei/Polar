@@ -25,6 +25,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# The harness is built twice, once per workload (one binary per workload: docs/architecture/policy-enforcement.md):
+# without features it is `secret-harness-owner`, with `intruder` it is `secret-harness-intruder`.
+[features]
+intruder = []
+
 [dependencies]
 cassini-types.workspace = true
 credentials_agent_common.workspace = true

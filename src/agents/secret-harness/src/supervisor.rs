@@ -36,7 +36,12 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait}
 use std::time::Duration;
 use tracing::{error, info, warn};
 
-pub const SERVICE_NAME: &str = "secret-harness";
+/// The workload this build is: one binary per workload, so the owner and the intruder are two builds of this crate
+/// (the `intruder` feature), each with its own name, the name of its catalog workload and of its certificate.
+#[cfg(not(feature = "intruder"))]
+pub const SERVICE_NAME: &str = "secret-harness-owner";
+#[cfg(feature = "intruder")]
+pub const SERVICE_NAME: &str = "secret-harness-intruder";
 
 /// Nothing here has anything to finish before it stops.
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);

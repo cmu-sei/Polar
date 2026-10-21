@@ -32,24 +32,29 @@
 }:
 
 let
-  harness = craneLib.buildPackage (crateArgs // {
-    pname = "secret-harness";
-    cargoExtraArgs = "--bin secret-harness --locked";
+  # One binary per workload: the role and the service name are compile-time constants
+  # (src/settings.rs, src/supervisor.rs), so the owner and the intruder are two builds.
+  build = pname: features: craneLib.buildPackage (crateArgs // {
+    inherit pname;
+    cargoExtraArgs = "--bin secret-harness --locked" + features;
     src = workspaceFileset ./.;
   });
 
-  container = nix-container-lib.lib.${system}.mkContainer {
-    inherit system pkgs;
+  owner = build "secret-harness-owner" "";
+  intruder = build "secret-harness-intruder" " --features intruder";
+
+  container = configNixPath: binary: nix-container-lib.lib.${system}.mkContainer {
+    inherit system pkgs configNixPath;
     inputs = inputs // {
       polar-healthcheck = {
         packages.${system}.default = healthcheckDrv;
       };
     };
-    configNixPath = ./container.nix;
-    extraDerivations = [ harness ];
+    extraDerivations = [ binary ];
   };
 in
 {
-  inherit harness;
-  image = container.image;
+  inherit owner intruder;
+  ownerImage = (container ./container-owner.nix owner).image;
+  intruderImage = (container ./container-intruder.nix intruder).image;
 }

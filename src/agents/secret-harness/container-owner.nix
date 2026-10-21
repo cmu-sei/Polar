@@ -43,7 +43,7 @@
   ];
   mode = u:
     u.Minimal;
-  name = "secret-harness";
+  name = "secret-harness-owner";
   nix = {
     buildUserCount = u:
       u.Dynamic;
