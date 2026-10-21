@@ -397,6 +397,29 @@ pub enum TcpClientMessage {
 }
 
 impl TcpClientMessage {
+    /// The message's kind, its variant's name: what a span records of it. Its Debug would write out a publish's
+    /// payload.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            TcpClientMessage::RegistrationResponse { .. } => "RegistrationResponse",
+            TcpClientMessage::ErrorMessage { .. } => "ErrorMessage",
+            TcpClientMessage::GetRegistrationId { .. } => "GetRegistrationId",
+            TcpClientMessage::ClientRegistered { .. } => "ClientRegistered",
+            TcpClientMessage::Register => "Register",
+            TcpClientMessage::Publish { .. } => "Publish",
+            TcpClientMessage::Subscribe { .. } => "Subscribe",
+            TcpClientMessage::UnsubscribeRequest { .. } => "UnsubscribeRequest",
+            TcpClientMessage::Disconnect { .. } => "Disconnect",
+            TcpClientMessage::ControlRequest { .. } => "ControlRequest",
+            TcpClientMessage::ListSessions { .. } => "ListSessions",
+            TcpClientMessage::ListTopics { .. } => "ListTopics",
+            TcpClientMessage::GetSession { .. } => "GetSession",
+            TcpClientMessage::Reconnect => "Reconnect",
+            TcpClientMessage::Reconnected { .. } => "Reconnected",
+            TcpClientMessage::SessionInvalidated => "SessionInvalidated",
+        }
+    }
+
     /// The common case -- identity shared with subscribers. Prefer
     /// this over constructing Publish directly.
     pub fn publish(topic: String, payload: Vec<u8>, trace_ctx: Option<WireTraceCtx>) -> Self {
@@ -1352,10 +1375,12 @@ impl Actor for TcpClientActor {
         Ok(())
     }
 
+    // The message is recorded by its kind, never by Debug: Debug writes a publish's payload out byte by byte, and this
+    // span is at INFO, so every publish of every agent paid about 27 ms a MiB for it (stage 5a's load harness).
     #[tracing::instrument(
         name = "cassini.tcp_client.handle",
-        skip(self, myself, state),
-        fields(registration = ?state.registration, msg = ?message),
+        skip(self, myself, state, message),
+        fields(registration = ?state.registration, msg = message.kind()),
     )]
     async fn handle(
         &self,
@@ -1481,6 +1506,18 @@ impl Actor for TcpClientActor {
 
 #[cfg(test)]
 mod process_client_message_tests {
+    /// A message is named by its kind, and the kind does not hold the payload, however large it is.
+    #[test]
+    fn a_message_is_named_by_its_kind_not_its_payload() {
+        let publish = TcpClientMessage::publish("t".to_string(), vec![7u8; 1 << 20], None);
+        assert_eq!(publish.kind(), "Publish");
+        assert_eq!(TcpClientMessage::Register.kind(), "Register");
+        assert_eq!(
+            TcpClientMessage::SessionInvalidated.kind(),
+            "SessionInvalidated"
+        );
+    }
+
     use super::*;
     use std::sync::{Arc, Mutex};
 

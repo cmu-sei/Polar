@@ -592,6 +592,16 @@ impl TestClient {
             .collect()
     }
 
+    /// How many messages have been delivered on `topic`, without copying them (as `received` does).
+    pub fn received_count(&self, topic: &str) -> usize {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, ClientEvent::MessagePublished { topic: t, .. } if t == topic))
+            .count()
+    }
+
     /// How many publishes on `topic` the broker has acknowledged.
     pub fn acknowledged(&self, topic: &str) -> usize {
         self.events

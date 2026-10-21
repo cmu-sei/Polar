@@ -53,7 +53,7 @@ async fn every_message_is_delivered_and_acknowledged(publishers: usize) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         while tokio::time::Instant::now() < deadline
             && !pairs.iter().all(|(topic, subscriber, publisher)| {
-                subscriber.received(topic).len() >= MESSAGES && publisher.acknowledged(topic) >= MESSAGES
+                subscriber.received_count(topic) >= MESSAGES && publisher.acknowledged(topic) >= MESSAGES
             })
         {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -85,4 +85,37 @@ async fn one_publisher_s_every_message_is_delivered_and_acknowledged() {
 #[tokio::test(flavor = "multi_thread")]
 async fn four_publishers_every_message_is_delivered_and_acknowledged() {
     every_message_is_delivered_and_acknowledged(4).await;
+}
+
+/// How fast large messages go through one publisher, one topic and one subscriber, printed; not a check. Run with
+/// `cargo test -p cassini-broker --test load --release -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn throughput_of_large_messages() {
+    for (size, count) in [(256usize, 20000usize), (65536, 2000), (1 << 20, 200)] {
+        with_broker(|broker| async move {
+            let topic = "throughput";
+            let subscriber = TestClient::connect(&broker, "subscriber.test").await;
+            subscriber.subscribe(topic);
+            subscriber
+                .wait_for("the subscription", Duration::from_secs(10), |c| c.subscribed(topic))
+                .await;
+            let publisher = TestClient::connect(&broker, "publisher.test").await;
+            let payload = vec![7u8; size];
+            let start = std::time::Instant::now();
+            for _ in 0..count {
+                publisher.publish(topic, &payload);
+            }
+            subscriber
+                .wait_for("every message", Duration::from_secs(300), |c| c.received_count(topic) >= count)
+                .await;
+            let secs = start.elapsed().as_secs_f64();
+            println!(
+                "THROUGHPUT size={size} count={count} secs={secs:.2} msgs_per_sec={:.0} mb_per_sec={:.1}",
+                count as f64 / secs,
+                (count * size) as f64 / secs / 1e6
+            );
+        })
+        .await;
+    }
 }
