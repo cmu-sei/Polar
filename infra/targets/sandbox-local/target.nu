@@ -144,6 +144,9 @@ def main [] {
                 "polar-scheduler-observer.yaml"
                 "polar-scheduler-resources.yaml"
                 "polar-scheduler.yaml"
+                # The load harness's accounts and configuration only: infra/load-harness.nu makes its Jobs per run.
+                "harness-producer-resources.yaml"
+                "harness-sink-resources.yaml"
             ]
         }
     ]
