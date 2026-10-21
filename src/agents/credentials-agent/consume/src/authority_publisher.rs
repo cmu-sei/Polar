@@ -193,7 +193,16 @@ fn body_of(section: &str, body: &Value) -> Result<AuthorityBody, String> {
                 .cloned()
                 .ok_or_else(|| "the groups section has no `memberships`".to_string())
                 .and_then(|m| serde_json::from_value(m).map_err(|e| e.to_string()))?;
-            Ok(AuthorityBody::Groups { memberships })
+            let hierarchy: cert_issuer_common::hierarchy::Hierarchy =
+                serde_json::from_value(serde_json::json!({
+                    "groups": body.get("groups").cloned().unwrap_or(serde_json::json!({})),
+                    "roles": body.get("roles").cloned().unwrap_or(serde_json::json!({})),
+                }))
+                .map_err(|e| e.to_string())?;
+            Ok(AuthorityBody::Groups {
+                memberships,
+                hierarchy,
+            })
         }
         other => Err(format!("`{other}` is not a section that is published")),
     }
@@ -293,6 +302,35 @@ impl Actor for AuthorityPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_groups_section_s_arrangement_is_carried_into_the_update() {
+        let body = serde_json::json!({
+            "memberships": { "alice": ["operators"] },
+            "groups": { "operators": { "roles": ["policy-author"] } },
+            "roles": { "policy-author": { "capabilities": ["update-policy"] } }
+        });
+        let AuthorityBody::Groups {
+            memberships,
+            hierarchy,
+        } = body_of("groups", &body).unwrap()
+        else {
+            panic!("not a groups update");
+        };
+        assert_eq!(memberships["alice"], ["operators"]);
+        assert_eq!(hierarchy.groups["operators"].roles, ["policy-author"]);
+        assert_eq!(
+            hierarchy.roles["policy-author"].capabilities,
+            ["update-policy"]
+        );
+        // One with no arrangement carries an empty one.
+        let AuthorityBody::Groups { hierarchy, .. } =
+            body_of("groups", &serde_json::json!({ "memberships": {} })).unwrap()
+        else {
+            panic!("not a groups update");
+        };
+        assert!(hierarchy.is_empty());
+    }
     use crate::ledger::{LedgerActor, LedgerActorArgs};
     use credentials_agent_common::authority_update::{AuthoritySnapshot, AuthorityUpdate, verify};
     use credentials_agent_common::events::{CredentialsEvent, RevocationReason};
@@ -670,7 +708,7 @@ mod tests {
             handled
                 .effects
                 .iter()
-                .any(|e| matches!(e, Effect::SetGroups(_)))
+                .any(|e| matches!(e, Effect::SetGroups(..)))
         );
 
         // ...and a live update after it, in order, is not a missed one.

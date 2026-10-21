@@ -118,6 +118,7 @@ mod tests {
             version,
             body: AuthorityBody::Groups {
                 memberships: Default::default(),
+                hierarchy: Default::default(),
             },
             authored_by: None,
         }

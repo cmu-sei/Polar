@@ -33,6 +33,7 @@ pub mod ca_root;
 pub mod capability;
 pub mod csr_san;
 pub mod group;
+pub mod hierarchy;
 pub mod identity;
 pub mod key_match;
 pub mod keypair;

@@ -73,9 +73,15 @@ pub enum AuthorityUpdateError {
 pub enum AuthorityBody {
     /// The Cedar rules.
     Policy { source: String },
-    /// Who is in which group: for each identity, its groups.
+    /// Who is in which group: for each identity, its groups; and how groups and roles are arranged (left out when
+    /// there is no arrangement, so an update signed before there could be one reads back as it was signed).
     Groups {
         memberships: BTreeMap<String, Vec<String>>,
+        #[serde(
+            default,
+            skip_serializing_if = "cert_issuer_common::hierarchy::Hierarchy::is_empty"
+        )]
+        hierarchy: cert_issuer_common::hierarchy::Hierarchy,
     },
     /// The serials of the certificates that are revoked.
     Revoked { serials: Vec<String> },
@@ -218,6 +224,23 @@ pub fn verify(
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_groups_update_with_no_arrangement_is_written_as_it_was_before_there_could_be_one() {
+        // Its signature was made over these bytes, so they must not change.
+        let body = AuthorityBody::Groups {
+            memberships: [("alice".to_string(), vec!["operators".to_string()])].into(),
+            hierarchy: Default::default(),
+        };
+        assert_eq!(
+            serde_json::to_string(&body).unwrap(),
+            r#"{"kind":"groups","memberships":{"alice":["operators"]}}"#
+        );
+        let read: AuthorityBody =
+            serde_json::from_str(r#"{"kind":"groups","memberships":{"alice":["operators"]}}"#)
+                .unwrap();
+        assert_eq!(read, body);
+    }
+
     fn key() -> RsaPrivateKey {
         use std::sync::OnceLock;
         static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
@@ -238,6 +261,7 @@ mod tests {
             version: 3,
             body: AuthorityBody::Groups {
                 memberships: [("alice".to_string(), vec!["operators".to_string()])].into(),
+                hierarchy: Default::default(),
             },
             authored_by: Some("alice".into()),
         }
@@ -263,6 +287,16 @@ mod tests {
             },
             AuthorityBody::Groups {
                 memberships: BTreeMap::new(),
+                hierarchy: Default::default(),
+            },
+            // With an arrangement of groups and roles too.
+            AuthorityBody::Groups {
+                memberships: [("alice".to_string(), vec!["operators".to_string()])].into(),
+                hierarchy: serde_json::from_value(serde_json::json!({
+                    "groups": { "operators": { "groups": ["staff"], "roles": ["policy-author"] } },
+                    "roles": { "policy-author": { "capabilities": ["update-policy"] } }
+                }))
+                .unwrap(),
             },
             AuthorityBody::Revoked {
                 serials: vec!["01ab".into(), "02cd".into()],

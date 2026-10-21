@@ -353,10 +353,12 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
 
 **Stage 4: Cedar knows topics** (gap 5)
 
-- A schema in `polar-policy`, in code: `Identity`, `Group`, `Role`, `Capability`, `Topic`, and the actions in use
-  (`publish`, `subscribe`, `retrieve`, `store`, `decrypt`, `update-configuration`, `update-runtime`, `run-command`), with
-  their attributes and their membership (`Identity in [Group, Role, Capability]`, `Group in [Group]`, `Role in [Role,
-  Capability]`). A policy is validated against it on arrival (it is refused whole, and the old one stays, if it does not
+- A schema in `polar-policy`, in code: `Identity`, `Group`, `Role`, `Capability`, `Permission`, `Topic`, and the actions
+  in use (`publish`, `subscribe`, `retrieve`, `store`, `decrypt`, `update-configuration`, `update-runtime`,
+  `run-command`), with their attributes and their membership (`Identity in [Group, Role, Capability, Permission]`,
+  `Group in [Group, Role]`, `Role in [Role, Capability, Permission]`): a group may hold roles, and the `p:`
+  communication permissions are parents like the capabilities (a strict rule cannot test a set of records with an
+  optional field). A policy is validated against it on arrival (it is refused whole, and the old one stays, if it does not
   validate) and by `polar-sign` before signing.
 - Facts for a topic request: the workload the identity maps to, and whether the topic is in its declared or implied set.
 - The hierarchy ("Decisions", 2026-10-21): capabilities and groups as the principal's parents, the certificate's `g:`

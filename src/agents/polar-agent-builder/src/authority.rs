@@ -47,7 +47,10 @@ pub enum Effect {
     /// Replace the policy rules.
     SetPolicy(String),
     /// Replace group membership.
-    SetGroups(BTreeMap<String, Vec<String>>),
+    SetGroups(
+        BTreeMap<String, Vec<String>>,
+        cert_issuer_common::hierarchy::Hierarchy,
+    ),
     /// Replace the set of revoked certificate serials.
     SetRevoked(Vec<String>),
     /// Tell the agent's own actors that authority of this kind changed.
@@ -174,7 +177,10 @@ impl AuthorityCore {
     fn effects_of(body: &AuthorityBody, version: u64, effects: &mut Vec<Effect>) {
         effects.push(match body {
             AuthorityBody::Policy { source } => Effect::SetPolicy(source.clone()),
-            AuthorityBody::Groups { memberships } => Effect::SetGroups(memberships.clone()),
+            AuthorityBody::Groups {
+                memberships,
+                hierarchy,
+            } => Effect::SetGroups(memberships.clone(), hierarchy.clone()),
             AuthorityBody::Revoked { serials } => Effect::SetRevoked(serials.clone()),
         });
         effects.push(Effect::Changed {
@@ -332,11 +338,15 @@ impl AuthorityActorState {
                         Err(e) => error!("the policy actor did not answer: {e}"),
                     }
                 }
-                Effect::SetGroups(memberships) => {
+                Effect::SetGroups(memberships, hierarchy) => {
                     let memberships: HashMap<String, Vec<String>> =
                         memberships.into_iter().collect();
                     if let Err(e) = ractor::call!(self.args.permissions, |reply| {
-                        PermissionsMessage::UpdateGroups { memberships, reply }
+                        PermissionsMessage::UpdateGroups {
+                            memberships,
+                            hierarchy,
+                            reply,
+                        }
                     }) {
                         error!("the permissions actor did not take the groups: {e}");
                     }
@@ -718,6 +728,7 @@ mod tests {
             version,
             body: AuthorityBody::Groups {
                 memberships: [("alice".to_string(), vec!["operators".to_string()])].into(),
+                hierarchy: Default::default(),
             },
             authored_by: None,
         }
@@ -791,7 +802,10 @@ mod tests {
                     kind: AuthorityKind::Policy,
                     version: 2
                 },
-                Effect::SetGroups([("alice".to_string(), vec!["operators".to_string()])].into()),
+                Effect::SetGroups(
+                    [("alice".to_string(), vec!["operators".to_string()])].into(),
+                    Default::default()
+                ),
                 Effect::Changed {
                     kind: AuthorityKind::Groups,
                     version: 1
@@ -860,7 +874,7 @@ mod tests {
             handled
                 .effects
                 .iter()
-                .any(|e| matches!(e, Effect::SetGroups(_))),
+                .any(|e| matches!(e, Effect::SetGroups(..))),
             "the update that arrived is applied all the same"
         );
     }
@@ -920,7 +934,7 @@ mod tests {
             handled
                 .effects
                 .iter()
-                .any(|e| matches!(e, Effect::SetGroups(_)))
+                .any(|e| matches!(e, Effect::SetGroups(..)))
         );
         assert!(
             !handled
@@ -1316,6 +1330,7 @@ mod actor_tests {
                 1,
                 AuthorityBody::Groups {
                     memberships: [("alice".to_string(), vec!["operators".to_string()])].into(),
+                    hierarchy: Default::default(),
                 },
             )]),
             Some(CREDENTIALS.into()),

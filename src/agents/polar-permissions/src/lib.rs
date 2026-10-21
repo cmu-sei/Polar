@@ -69,6 +69,10 @@ pub struct Principal {
     pub capabilities: Vec<Capability>,
     /// The groups the identity is in, as the latest signed membership says.
     pub groups: Vec<String>,
+    /// How groups and roles are arranged, as the latest signed groups document says, and which arrangement it is
+    /// (counted up with each), so the policy actor builds Cedar's hierarchy from it once and not for each request.
+    pub hierarchy: std::sync::Arc<cert_issuer_common::hierarchy::Hierarchy>,
+    pub hierarchy_version: u64,
 }
 
 pub enum PermissionsMessage {
@@ -93,6 +97,8 @@ pub enum PermissionsMessage {
     /// signed membership document, never a patch, so a removal is simply an absence.
     UpdateGroups {
         memberships: HashMap<String, Vec<String>>,
+        /// How groups and roles are arranged: the rest of the same document.
+        hierarchy: cert_issuer_common::hierarchy::Hierarchy,
         reply: RpcReplyPort<()>,
     },
     /// Replaces `identity`'s own, real, cached supplemental
@@ -112,6 +118,8 @@ pub struct PermissionsActor;
 pub struct PermissionsActorState {
     supplemental: HashMap<String, Vec<Permission>>,
     groups: HashMap<String, Vec<String>>,
+    hierarchy: std::sync::Arc<cert_issuer_common::hierarchy::Hierarchy>,
+    hierarchy_version: u64,
 }
 
 #[async_trait]
@@ -128,6 +136,8 @@ impl Actor for PermissionsActor {
         Ok(PermissionsActorState {
             supplemental: HashMap::new(),
             groups: HashMap::new(),
+            hierarchy: Default::default(),
+            hierarchy_version: 0,
         })
     }
 
@@ -154,8 +164,14 @@ impl Actor for PermissionsActor {
                 let result = Self::resolve_principal(state, &identity, certificate_pem.as_deref());
                 let _ = reply.send(result);
             }
-            PermissionsMessage::UpdateGroups { memberships, reply } => {
+            PermissionsMessage::UpdateGroups {
+                memberships,
+                hierarchy,
+                reply,
+            } => {
                 state.groups = memberships;
+                state.hierarchy = std::sync::Arc::new(hierarchy);
+                state.hierarchy_version += 1;
                 let _ = reply.send(());
             }
             PermissionsMessage::UpdateSupplementalPermissions {
@@ -186,6 +202,8 @@ impl PermissionsActor {
             permissions: Self::resolve(state, identity, certificate_pem)?,
             capabilities,
             groups: state.groups.get(identity).cloned().unwrap_or_default(),
+            hierarchy: state.hierarchy.clone(),
+            hierarchy_version: state.hierarchy_version,
         })
     }
 
@@ -378,6 +396,7 @@ mod tests {
                 vec!["credential-managers".to_string(), "operators".to_string()],
             )]
             .into(),
+            hierarchy: Default::default(),
             reply,
         })
         .unwrap();
@@ -429,6 +448,7 @@ mod tests {
                 ("bob".to_string(), vec!["operators".to_string()]),
             ]
             .into(),
+            hierarchy: Default::default(),
             reply,
         })
         .unwrap();
@@ -441,6 +461,7 @@ mod tests {
         // The next version replaces the membership whole: bob is no longer anywhere.
         ractor::call!(actor, |reply| PermissionsMessage::UpdateGroups {
             memberships: [("alice".to_string(), vec!["auditors".to_string()])].into(),
+            hierarchy: Default::default(),
             reply,
         })
         .unwrap();

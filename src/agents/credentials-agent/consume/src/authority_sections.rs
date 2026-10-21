@@ -49,8 +49,8 @@ pub static POLICY: RuntimeSection = RuntimeSection {
 pub static GROUPS: RuntimeSection = RuntimeSection {
     authority: SectionAuthority::Capability(Capability::UpdateGroups),
     name: "groups",
-    doc: "Who is in which group, for the rules that say `principal in Group::\"...\"`. Replaced whole by each version, so a removal is an absence. Signed by a holder of c:update-groups.",
-    body: r#"{"memberships": {"type": "map from an identity (a username, or an agent's name) to the list of groups it is in", "required": true}}"#,
+    doc: "Who is in which group, and how groups and roles are arranged, for the rules that say `principal in Group::\"...\"` or `principal in Role::\"...\"`: a group may be in other groups and hold roles, and a role may hold roles, capabilities and permissions. Replaced whole by each version, so a removal is an absence. Signed by a holder of c:update-groups.",
+    body: r#"{"memberships": {"type": "map from an identity (a person's username, or a workload's identity, <workload>.<namespace>.serviceaccount.<domain>) to the list of groups it is in", "required": true}, "groups": {"type": "map from a group to {groups: the groups it is in, roles: the roles it holds}", "required": false}, "roles": {"type": "map from a role to {roles: the roles it holds, capabilities: e.g. update-policy, permissions: e.g. s2s}", "required": false}}"#,
     validate: validate_groups,
 };
 
@@ -90,13 +90,24 @@ fn name_problem(what: &str, name: &str) -> Option<String> {
 }
 
 fn validate_groups(body: &Value) -> Result<(), Vec<String>> {
-    only_fields(body, &["memberships"])?;
+    only_fields(body, &["memberships", "groups", "roles"])?;
+    let hierarchy: Result<cert_issuer_common::hierarchy::Hierarchy, _> =
+        serde_json::from_value(serde_json::json!({
+            "groups": body.get("groups").cloned().unwrap_or(serde_json::json!({})),
+            "roles": body.get("roles").cloned().unwrap_or(serde_json::json!({})),
+        }));
+    let hierarchy_problems = match hierarchy {
+        Ok(hierarchy) => hierarchy.problems(),
+        Err(e) => vec![format!(
+            "`groups` and `roles` must be the arrangement of groups and roles: {e}"
+        )],
+    };
     let Some(memberships) = body.get("memberships").and_then(Value::as_object) else {
         return Err(vec![
             "`memberships` must map each identity to its groups".to_string(),
         ]);
     };
-    let mut problems = Vec::new();
+    let mut problems = hierarchy_problems;
     if memberships.len() > MAX_IDENTITIES {
         problems.push(format!(
             "`memberships` names {} identities, and at most {MAX_IDENTITIES} are taken",
@@ -187,6 +198,28 @@ mod tests {
     fn the_policy_s_text_is_described_as_policy_text_so_polar_sign_checks_it() {
         let description: serde_json::Value = serde_json::from_str(POLICY.body).unwrap();
         assert_eq!(description["source"]["type"], polar_policy::POLICY_TEXT);
+    }
+
+    #[test]
+    fn a_groups_document_may_arrange_groups_and_roles_and_a_wrong_arrangement_is_refused() {
+        let sound = json!({
+            "memberships": { "alice": ["operators"] },
+            "groups": { "operators": { "groups": ["staff"], "roles": ["policy-author"] } },
+            "roles": { "policy-author": { "capabilities": ["update-policy"], "permissions": ["s2s"] } }
+        });
+        assert!(validate_groups(&sound).is_ok());
+        let wrong = json!({
+            "memberships": {},
+            "groups": { "a": { "groups": ["b"] }, "b": { "groups": ["a"] } },
+            "roles": { "r": { "capabilities": ["fly"] } }
+        });
+        let said = validate_groups(&wrong).unwrap_err().join("; ");
+        assert!(
+            said.contains("in itself") && said.contains("`fly`"),
+            "{said}"
+        );
+        let stray = json!({ "memberships": {}, "groups": { "a": { "parents": ["b"] } } });
+        assert!(validate_groups(&stray).is_err());
     }
 
     #[test]

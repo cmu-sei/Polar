@@ -276,6 +276,7 @@ mod tests {
         let (permissions, _) = Actor::spawn(None, PermissionsActor, ()).await.unwrap();
         ractor::call!(permissions, |reply| PermissionsMessage::UpdateGroups {
             memberships: [("alice".to_string(), vec!["git-authors".to_string()])].into(),
+            hierarchy: Default::default(),
             reply,
         })
         .unwrap();

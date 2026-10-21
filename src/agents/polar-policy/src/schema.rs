@@ -44,7 +44,7 @@ use std::sync::OnceLock;
 
 /// The schema, in Cedar's schema language.
 pub const SCHEMA: &str = r#"
-entity Group in [Group];
+entity Group in [Group, Role];
 entity Capability;
 entity Permission;
 entity Role in [Role, Capability, Permission];

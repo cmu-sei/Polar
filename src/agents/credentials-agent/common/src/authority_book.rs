@@ -161,6 +161,7 @@ mod tests {
     fn groups() -> AuthorityBody {
         AuthorityBody::Groups {
             memberships: [("alice".to_string(), vec!["operators".to_string()])].into(),
+            hierarchy: Default::default(),
         }
     }
 

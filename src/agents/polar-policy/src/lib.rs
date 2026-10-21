@@ -188,6 +188,61 @@ pub struct PolicyActorState {
     policy_set: Option<PolicySet>,
     authorizer: Authorizer,
     permissions_actor: ActorRef<polar_permissions::PermissionsMessage>,
+    /// Cedar's store for the arrangement of groups and roles, built once for each version PermissionsActor holds.
+    hierarchy: HierarchyStore,
+}
+
+/// The entities of an arrangement of groups and roles, kept for the version they were built from, so the closure
+/// over them is computed once per groups document and not for each request.
+#[derive(Default)]
+pub(crate) struct HierarchyStore {
+    built: Option<(u64, Entities)>,
+}
+
+impl HierarchyStore {
+    /// The store for `version` of `hierarchy`, building it only when the version is not the one kept. Returns it and
+    /// whether it was built now.
+    pub(crate) fn for_version(
+        &mut self,
+        version: u64,
+        hierarchy: &cert_issuer_common::hierarchy::Hierarchy,
+    ) -> Result<(&Entities, bool), PolicyError> {
+        let fresh = !matches!(&self.built, Some((kept, _)) if *kept == version);
+        if fresh {
+            self.built = Some((version, Self::build(hierarchy)?));
+        }
+        Ok((&self.built.as_ref().expect("built above").1, fresh))
+    }
+
+    fn build(
+        hierarchy: &cert_issuer_common::hierarchy::Hierarchy,
+    ) -> Result<Entities, PolicyError> {
+        let reference = |kind: &str, id: &String| serde_json::json!({ "type": kind, "id": id });
+        let groups = hierarchy.groups.iter().map(|(name, def)| {
+            serde_json::json!({
+                "uid": { "type": "Group", "id": name },
+                "attrs": {},
+                "parents": def.groups.iter().map(|g| reference("Group", g))
+                    .chain(def.roles.iter().map(|r| reference("Role", r)))
+                    .collect::<Vec<_>>(),
+            })
+        });
+        let roles = hierarchy.roles.iter().map(|(name, def)| {
+            serde_json::json!({
+                "uid": { "type": "Role", "id": name },
+                "attrs": {},
+                "parents": def.roles.iter().map(|r| reference("Role", r))
+                    .chain(def.capabilities.iter().map(|c| reference("Capability", c)))
+                    .chain(def.permissions.iter().map(|p| reference("Permission", p)))
+                    .collect::<Vec<_>>(),
+            })
+        });
+        Entities::from_json_value(
+            serde_json::Value::Array(groups.chain(roles).collect()),
+            Some(schema::schema()),
+        )
+        .map_err(|e| PolicyError::RequestConstruction(format!("the groups and roles: {e}")))
+    }
 }
 
 #[async_trait]
@@ -205,6 +260,7 @@ impl Actor for PolicyActor {
             policy_set: None,
             authorizer: Authorizer::new(),
             permissions_actor: args.permissions_actor,
+            hierarchy: HierarchyStore::default(),
         })
     }
 
@@ -260,7 +316,7 @@ impl PolicyActor {
     /// a caller supplies), and evaluate. There is no path here for a
     /// caller to influence the principal's own attributes at all.
     async fn evaluate(
-        state: &PolicyActorState,
+        state: &mut PolicyActorState,
         requester_identity: &str,
         requester_certificate_pem: Option<String>,
         action: &str,
@@ -363,9 +419,15 @@ impl PolicyActor {
             }));
         }
         let schema = schema::schema();
-        let entities =
-            Entities::from_json_value(serde_json::Value::Array(entities_json), Some(schema))
-                .map_err(|e| PolicyError::RequestConstruction(format!("entities: {e}")))?;
+        // The arrangement of groups and roles is built once per version; only the principal and the resource are
+        // added for this request, and the closure is repaired for them alone.
+        let (hierarchy, _) = state
+            .hierarchy
+            .for_version(principal.hierarchy_version, &principal.hierarchy)?;
+        let entities = hierarchy
+            .clone()
+            .add_entities_from_json_value(serde_json::Value::Array(entities_json), Some(schema))
+            .map_err(|e| PolicyError::RequestConstruction(format!("entities: {e}")))?;
 
         // The time is this actor's own, never a caller's.
         let now_secs = std::time::SystemTime::now()
@@ -753,6 +815,7 @@ mod tests {
             polar_permissions::PermissionsMessage::UpdateGroups {
                 memberships: [("alice".to_string(), vec!["credential-managers".to_string()])]
                     .into(),
+                hierarchy: Default::default(),
                 reply,
             }
         })
@@ -932,6 +995,114 @@ mod tests {
         );
         // The forbid did not come in with it: the old policy still decides.
         assert_eq!(ask_topic(&actor, "anyone").await, Decision::Allow);
+    }
+
+    /// A policy actor whose permissions say `alice` is in `operators`, arranged as `hierarchy`.
+    async fn arranged(hierarchy: serde_json::Value) -> ActorRef<PolicyMessage> {
+        let permissions_actor = spawn_permissions_actor().await;
+        ractor::call!(permissions_actor, |reply| {
+            polar_permissions::PermissionsMessage::UpdateGroups {
+                memberships: [("alice".to_string(), vec!["operators".to_string()])].into(),
+                hierarchy: serde_json::from_value(hierarchy).unwrap(),
+                reply,
+            }
+        })
+        .unwrap();
+        Actor::spawn(None, PolicyActor, PolicyActorArgs { permissions_actor })
+            .await
+            .unwrap()
+            .0
+    }
+
+    #[tokio::test]
+    async fn membership_follows_nested_groups_and_the_roles_a_group_holds() {
+        let actor = arranged(serde_json::json!({
+            "groups": {
+                "operators": { "groups": ["staff"], "roles": ["policy-author"] },
+                "staff": { "groups": ["everyone"] }
+            },
+            "roles": { "policy-author": { "roles": ["reader"], "capabilities": ["update-policy"] } }
+        }))
+        .await;
+        for rule in [
+            // two groups up
+            r#"permit (principal in Group::"everyone", action == Action::"subscribe", resource);"#,
+            // a role the group holds, and a role that role holds
+            r#"permit (principal in Role::"policy-author", action == Action::"subscribe", resource);"#,
+            r#"permit (principal in Role::"reader", action == Action::"subscribe", resource);"#,
+            // a capability the role gives
+            r#"permit (principal in Capability::"update-policy", action == Action::"subscribe", resource);"#,
+        ] {
+            load(&actor, rule).await;
+            assert_eq!(ask_topic(&actor, "alice").await, Decision::Allow, "{rule}");
+            assert_eq!(
+                ask_topic(&actor, "bob").await,
+                Decision::NotDetermined,
+                "{rule}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_arrangement_is_built_once_for_each_version() {
+        let hierarchy: cert_issuer_common::hierarchy::Hierarchy =
+            serde_json::from_value(serde_json::json!({ "groups": { "a": { "groups": ["b"] } } }))
+                .unwrap();
+        let mut store = HierarchyStore::default();
+        assert!(
+            store.for_version(1, &hierarchy).unwrap().1,
+            "built the first time"
+        );
+        assert!(
+            !store.for_version(1, &hierarchy).unwrap().1,
+            "kept for the same version"
+        );
+        assert!(!store.for_version(1, &hierarchy).unwrap().1);
+        assert!(
+            store.for_version(2, &hierarchy).unwrap().1,
+            "built again for a new one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_groups_document_is_seen_at_once() {
+        let permissions_actor = spawn_permissions_actor().await;
+        let (actor, _) = Actor::spawn(
+            None,
+            PolicyActor,
+            PolicyActorArgs {
+                permissions_actor: permissions_actor.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        load(
+            &actor,
+            r#"permit (principal in Group::"staff", action == Action::"subscribe", resource);"#,
+        )
+        .await;
+        let arrange = |staff: bool| {
+            let permissions_actor = permissions_actor.clone();
+            async move {
+                let groups = if staff {
+                    serde_json::json!({ "groups": { "operators": { "groups": ["staff"] } } })
+                } else {
+                    serde_json::json!({})
+                };
+                ractor::call!(permissions_actor, |reply| {
+                    polar_permissions::PermissionsMessage::UpdateGroups {
+                        memberships: [("alice".to_string(), vec!["operators".to_string()])].into(),
+                        hierarchy: serde_json::from_value(groups).unwrap(),
+                        reply,
+                    }
+                })
+                .unwrap();
+            }
+        };
+        arrange(true).await;
+        assert_eq!(ask_topic(&actor, "alice").await, Decision::Allow);
+        arrange(false).await;
+        assert_eq!(ask_topic(&actor, "alice").await, Decision::NotDetermined);
     }
 
     #[test]
