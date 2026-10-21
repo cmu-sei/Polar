@@ -76,6 +76,12 @@ code today, and what stands between the two. The detail of each part is in the d
   declared and implied topics for every agent.** The way to hold that: the set is computed once, in the agent (the
   builder), and printed in full in its scaffold, each implied topic with the rule that implied it; nothing else
   recomputes it, and the builder refuses at run time to publish or subscribe outside it.
+- **Topics are exact names (2026-10-21).** No patterns. An agent that serves a family of topics (the scheduler, which
+  publishes `agent.<workload>.configuration` for every workload) has its list generated from the catalog, one exact name
+  per workload, so policy and the broker deal only in exact strings.
+- **Open: an administrator's scheduled override or addition to an agent's set.** Considered, not decided: a signed,
+  scheduled document that adds topics to (or overrides) what the scaffold declares and implies. If it comes, it is one
+  more input every consumer reads the same way, and the builder's run-time check must honour it.
 
 ## Where policy is enforced today
 
