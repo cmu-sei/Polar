@@ -19,9 +19,8 @@
 %%
 %% DM26-0670
 
-%% From an agent's declared topics to the broker's decision (policy-enforcement.md, decisions of 2026-10-21). Built to the
-%% floors (stages 1 and 2, 2026-10-21, not yet run on a cluster); issuance with the topics and the broker's decision are
-%% designed (stages 3 and 5). Applying the catalog is the administrator's sign-off: there is no separate grants document.
+%% From an agent's declared topics to the broker's decision (policy-enforcement.md, decisions of 2026-10-21). Built
+%% through issuance (stages 1 to 3, 2026-10-21, not yet run on a cluster); the broker's decision is designed (stage 5). Applying the catalog is the administrator's sign-off: there is no separate grants document.
 sequenceDiagram
     autonumber
     participant Code as the agent's code<br/>(PolarAgent::TOPICS)
@@ -44,10 +43,10 @@ sequenceDiagram
 
     Note over Init,CA: a workload's pod starts, or rejuvenates
     Init->>CA: workload issuance (the sealed ServiceAccount token)
-    CA->>CA: identity from the token, then this workload's declared topics from the floor
-    CA-->>Init: certificate: DNS identity, p:pub:topic and p:sub:topic for each declared topic<br/>(implied topics are not written: they follow from the identity)
-    Note over CI: the broker, cert-issuer and the credentials agent are issued by cert-issuer the same way
+    CA->>CA: identity from the token, then this workload's declared topics and groups from the floor
+    CA-->>Init: certificate: DNS identity, p:pub:topic and p:sub:topic for each declared topic,<br/>g:group for each group (implied topics are not written: they follow from the identity and the groups)
+    Note over CI: the bootstrap services are signed by cert-issuer, with the topics and groups of their own floor entry
 
     Init->>Bk: (the agent) connect with that certificate, subscribe, publish
-    Bk->>Bk: Cedar first (permit and forbid both override), else the floor:<br/>implied from the identity, declared from the p: names, else refuse
+    Bk->>Bk: Cedar first (permit and forbid both override), else the floor:<br/>implied from the identity and its g: groups (implied_topics), declared from the p: names, else refuse
     Note over Admin,Bk: a change to an agent's topics is a change to the catalog, applied like any other:<br/>the agent has it with its next certificate (within the hour), and Cedar can act at once meanwhile

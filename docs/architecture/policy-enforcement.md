@@ -314,6 +314,14 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   a certificate with a few hundred topic `p:` names presented to the broker (rustls) and to Neo4j (whose TLS stack, the
   JDK's or OpenSSL's, sets the tightest limit), to confirm the handshake limits rather than trust the defaults.
 
+- *Built 2026-10-21, not yet run on a cluster:* the forms (`TopicPermission` in `cert-issuer-common/src/permission.rs`,
+  `Group` in `group.rs`, `2786d359`); implied topics from groups by one function, `topics::implied_topics`
+  (`a5b316de`); both floors carrying groups (`73ef132a`); cert-issuer signing a bootstrap service with its floor's
+  topics and groups, and taking a vouched workload's from the credentials agent (`f0393a41`); the credentials agent
+  writing a workload's floor into its client certificates (`a3050c9a`); and the size checks (`d527c2ee`). Not done
+  here: `PermissionsActor` reading a certificate's `g:` names beside the groups document, which Cedar needs to say
+  `principal in Group::"encryption"` (stage 4), and the broker deciding on any of it (stage 5).
+
 **Stage 4: Cedar knows topics** (gap 5)
 
 - A schema in `polar-policy`, in code: `Identity`, `Group`, `Topic`, and the actions in use (`publish`, `subscribe`,
@@ -380,6 +388,12 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   a JDK's default of 32 KiB for a handshake message, if Neo4j's TLS is the JDK's; rustls and Go allow 64 KiB, OpenSSL
   100 KiB for the certificate list). The render warns when a workload declares more than 64 topics, as a signal to look
   at its design, not a failure.
+  *Measured 2026-10-21 (stage 3):* the credentials agent's real set (32 topics and two groups) makes a 2.5 KB
+  certificate. Neo4j (the JDK's TLS, `infra/tests/neo4j-certificate-size.nu`) accepts 30.7 KB and refuses 35.3 KB, its
+  32 KiB handshake message: about 560 topic names of 55 characters. The broker (rustls) serves a 300-name certificate as
+  any other (`cassini/broker/tests/large_certificate.rs`), accepts up to about 1,050 names (60 KB), and at 1,200 the
+  client cannot load the certificate at all (webpki, near 64 KiB). The tightest limit is Neo4j's, more than ten times
+  the largest real set.
 
 ## Sequence diagrams
 
