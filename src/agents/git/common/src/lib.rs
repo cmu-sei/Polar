@@ -29,8 +29,6 @@ use polar::graph::nodes::git::RepoId;
 use rkyv::{Archive, Deserialize, Serialize};
 
 pub const GIT_REPO_CONFIG_EVENTS: &str = "git.repo.config.events";
-pub const GIT_REPO_EVENTS: &str = "git.repo.events";
-pub const GIT_REPO_PROCESSING_TOPIC: &str = "polar.git.processor";
 
 /* ============================
  * Shared types

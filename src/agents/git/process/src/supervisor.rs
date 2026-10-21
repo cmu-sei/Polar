@@ -432,4 +432,18 @@ mod tests {
         );
         supervisor.stop(None);
     }
+
+    #[tokio::test]
+    async fn every_topic_it_subscribes_to_is_in_its_declared_set() {
+        let (supervisor, _) = Actor::spawn(None, NullActor, ()).await.unwrap();
+        let set = polar_agent_builder::agent::topic_set::<crate::agent::GitProcessor>();
+        for subscription in subscriptions(&supervisor) {
+            assert!(
+                set.allows(&subscription.topic, polar_agent_builder::Access::Subscribe),
+                "{} is not declared",
+                subscription.topic
+            );
+        }
+        supervisor.stop(None);
+    }
 }

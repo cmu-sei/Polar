@@ -26,7 +26,7 @@
 
 use crate::SERVICE_NAME;
 use crate::supervisor::{RootSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
+use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
 use ractor::Actor;
 use std::time::Duration;
 
@@ -41,6 +41,20 @@ impl PolarAgent for GitController {
         "Decides which git repositories are observed, and tells the git observer";
     const NEEDS: &'static [Capability] = &[];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::subscribe(
+            git_agent_common::proposal::PROPOSAL_OBSERVE_REPO_TOPIC,
+            "a proposal that a repository be observed, with its evidence",
+        ),
+        TopicDecl::publish(
+            git_agent_common::GIT_REPO_CONFIG_EVENTS,
+            "the whole set of repositories to observe, for the observer",
+        ),
+        TopicDecl::publish(
+            git_agent_common::proposal::PROPOSAL_DECISIONS_TOPIC,
+            "what it decided about each proposal, and why",
+        ),
+    ];
     const SECTIONS: &'static [&'static polar_env::Section] = &[&crate::settings::SECTION];
     const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] =
         &[&crate::desired::REPOSITORIES, &crate::admission::ADMISSION];

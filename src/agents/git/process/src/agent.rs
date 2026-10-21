@@ -26,7 +26,7 @@
 
 use crate::SERVICE_NAME;
 use crate::supervisor::{GitProcessorSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
+use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
 use ractor::Actor;
 use std::time::Duration;
 
@@ -38,6 +38,20 @@ impl PolarAgent for GitProcessor {
         "Records the commits and ref updates the git observer publishes in the graph";
     const NEEDS: &'static [Capability] = &[Capability::GraphWrite];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::subscribe(
+            polar::topics::GIT_REPOSITORY_EVENTS,
+            "the observer's commits and ref updates, written to the graph",
+        ),
+        TopicDecl::subscribe(
+            git_agent_common::status::GIT_REPO_OBSERVATION_STATUS,
+            "the observer's status for each repository, written to the graph",
+        ),
+        TopicDecl::subscribe(
+            git_agent_common::proposal::PROPOSAL_DECISIONS_TOPIC,
+            "the controller's decisions, written to the graph",
+        ),
+    ];
     const HELP: Option<&'static str> = Some(
         "The git processor subscribes to the repository events the git observer publishes \
          (polar.git.repositories.events). Each discovered commit becomes a commit node in its \
