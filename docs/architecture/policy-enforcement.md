@@ -55,6 +55,13 @@ code today, and what stands between the two. The detail of each part is in the d
 - **In the window, the cached policy keeps applying (2026-10-21).** An agent decides as when nominal: the last policy it
   verified first, the certificate where that policy is silent. Only fresh policy stops arriving. A signed `forbid` does
   not lose force because its publisher is unreachable; the bound limits how stale it can get.
+- **Bootstrap services start on the floor, and their clock starts at their first snapshot (2026-10-21).** The broker,
+  cert-issuer and the credentials agent run before any authority exists (the credentials agent's own traffic, issuance
+  and escrow go through the broker). They decide on the certificate floor from the start, which admits that traffic by
+  identity, and are healthy without a snapshot. Once one has verified its first snapshot it ages like any agent: the
+  cached policy in the degraded window, then the bound and a restart into init. The credentials agent is exempt from
+  aging: it is the authority. Every other agent is unhealthy until it has verified a snapshot. The bound is 90 minutes
+  by default (`POLAR_AUTHORITY_MAX_AGE_SECS`), tunable.
 
 ## Where policy is enforced today
 
