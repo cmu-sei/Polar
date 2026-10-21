@@ -592,6 +592,16 @@ pub fn scaffold_json<A: PolarAgent>(
     process: impl Env + 'static,
 ) -> Result<String, String> {
     let mut document = scaffold_document::<A>();
+    if config.is_none() && !A::TOPIC_FAMILIES.is_empty() {
+        // Asked with no document, a family is expanded for the workloads the environment names, which is how
+        // the render asks it, with the list it writes into the agent's document.
+        let env = polar_env::Config::builder(&process)
+            .register(&crate::topics::FAMILY_SECTION)
+            .build();
+        if let Ok(served) = served_by::<A>(&env) {
+            document.topics = topic_set_serving::<A>(&served).entries();
+        }
+    }
     if let Some(path) = config {
         let loaded = load(path, process)?;
         document.problems = problems_of::<A>(&loaded);
@@ -1326,7 +1336,8 @@ mod tests {
         assert_eq!(
             find("bucket.copied", Access::Publish),
             Origin::Declared {
-                purpose: "what it copied".into()
+                purpose: "what it copied".into(),
+                waits: None,
             }
         );
         assert!(matches!(
@@ -1428,6 +1439,34 @@ mod tests {
                     "kube-observer".to_string()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn asked_with_no_document_the_scaffold_expands_a_family_for_the_workloads_its_environment_names()
+     {
+        let env =
+            |name: &str| (name == "POLAR_SERVED_WORKLOADS").then(|| "b-agent,a-agent".to_string());
+        let doc: AgentDocument =
+            serde_json::from_str(&scaffold_json::<Scheduling>(None, env).unwrap()).unwrap();
+        let expanded: Vec<String> = doc
+            .topics
+            .iter()
+            .filter(|t| matches!(t.origin, crate::topics::Origin::Family { .. }))
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(
+            expanded,
+            ["agent.a-agent.configuration", "agent.b-agent.configuration"]
+        );
+        // With nothing named, nothing is expanded.
+        let bare: AgentDocument =
+            serde_json::from_str(&scaffold_json::<Scheduling>(None, |_: &str| None).unwrap())
+                .unwrap();
+        assert!(
+            bare.topics
+                .iter()
+                .all(|t| !matches!(t.origin, crate::topics::Origin::Family { .. }))
         );
     }
 

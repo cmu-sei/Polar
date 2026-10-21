@@ -55,6 +55,10 @@ pub struct TopicDecl {
     pub name: &'static str,
     pub access: Access,
     pub purpose: &'static str,
+    /// Why nothing in the catalog is on the other side of it yet, when nothing is: no publisher yet, or a reader
+    /// outside the catalog. A declared topic with no other side and no reason fails the catalog's check
+    /// (docs/architecture/policy-enforcement.md, "Decisions").
+    pub waits: Option<&'static str>,
 }
 
 impl TopicDecl {
@@ -63,6 +67,7 @@ impl TopicDecl {
             name,
             access: Access::Publish,
             purpose,
+            waits: None,
         }
     }
 
@@ -71,6 +76,15 @@ impl TopicDecl {
             name,
             access: Access::Subscribe,
             purpose,
+            waits: None,
+        }
+    }
+
+    /// The same declaration, saying why nothing in the catalog is on its other side.
+    pub const fn waiting(self, reason: &'static str) -> Self {
+        Self {
+            waits: Some(reason),
+            ..self
         }
     }
 }
@@ -244,8 +258,12 @@ pub fn rules_for(facts: &Facts) -> Vec<Rule> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "from", rename_all = "snake_case")]
 pub enum Origin {
-    /// The agent declared it, for this purpose.
-    Declared { purpose: String },
+    /// The agent declared it, for this purpose; `waits` says why nothing in the catalog is on its other side.
+    Declared {
+        purpose: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        waits: Option<String>,
+    },
     /// One of the agent's families, expanded for one workload it serves.
     Family {
         pattern: String,
@@ -292,6 +310,7 @@ impl TopicSet {
                 .entry((decl.name.to_string(), decl.access))
                 .or_insert_with(|| Origin::Declared {
                     purpose: decl.purpose.to_string(),
+                    waits: decl.waits.map(str::to_string),
                 });
         }
         for family in families {
@@ -399,6 +418,9 @@ pub fn problems(facts: &Facts, declared: &[TopicDecl]) -> Vec<String> {
                 "{what} has no purpose: say what the agent uses it for"
             ));
         }
+        if decl.waits.is_some_and(|reason| reason.trim().is_empty()) {
+            problems.push(format!("{what} waits, but gives no reason"));
+        }
         if !seen.insert((decl.name, decl.access)) {
             problems.push(format!("{what} is declared twice"));
         }
@@ -483,7 +505,8 @@ mod tests {
         assert_eq!(
             pod.origin,
             Origin::Declared {
-                purpose: "the events it observes".into()
+                purpose: "the events it observes".into(),
+                waits: None,
             }
         );
         let own = entries
@@ -500,6 +523,38 @@ mod tests {
     }
 
     #[test]
+    fn a_declaration_says_why_it_waits_and_the_set_carries_it() {
+        let declared = [
+            TopicDecl::publish("polar.provenance.events", "what it resolved")
+                .waiting("read by build-processor, a chart outside the catalog"),
+        ];
+        let set = TopicSet::compute(&agent("oci-registry-resolver"), &declared);
+        let entry = set
+            .entries()
+            .into_iter()
+            .find(|e| e.name == "polar.provenance.events")
+            .unwrap();
+        assert_eq!(
+            entry.origin,
+            Origin::Declared {
+                purpose: "what it resolved".into(),
+                waits: Some("read by build-processor, a chart outside the catalog".into()),
+            }
+        );
+        // In the scaffold's JSON it is `waits`, and a topic that does not wait has none.
+        let json = serde_json::to_value(set.entries()).unwrap();
+        assert!(
+            json.to_string()
+                .contains("\"waits\":\"read by build-processor")
+        );
+        assert!(
+            !serde_json::to_string(&TopicSet::compute(&agent("x"), &[]).entries())
+                .unwrap()
+                .contains("waits")
+        );
+    }
+
+    #[test]
     fn a_declaration_that_is_wrong_is_a_problem() {
         let facts = agent("kube-observer");
         let declared = [
@@ -509,6 +564,7 @@ mod tests {
             TopicDecl::publish("y", "twice"),
             TopicDecl::publish("y", "twice"),
             TopicDecl::subscribe("agent.kube-observer.configuration", "its configuration"),
+            TopicDecl::publish("z", "silent").waiting(" "),
         ];
         let said = problems(&facts, &declared).join("\n");
         assert!(said.contains("`` (publish) is not a topic name"), "{said}");
@@ -519,6 +575,10 @@ mod tests {
         assert!(said.contains("`x` (publish) has no purpose"), "{said}");
         assert!(said.contains("`y` (publish) is declared twice"), "{said}");
         assert!(said.contains("is implied (every agent"), "{said}");
+        assert!(
+            said.contains("`z` (publish) waits, but gives no reason"),
+            "{said}"
+        );
         assert!(problems(&facts, DECLARED).is_empty());
     }
 
