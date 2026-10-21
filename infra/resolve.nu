@@ -51,7 +51,7 @@ const INFRA = (path self | path dirname)
 use cluster-inputs.nu [env_for, env_merged, path_of, read_inputs]
 use registry.nu [node_registry, push_registry]
 use agent-pods.nu [collect_scaffolds, run_checks]
-use topics.nu [served, judge]
+use topics.nu [served, judge, oversized]
 const CONFIG = ($INFRA | path join "config")
 
 const DEFAULT_TARGET = "local-minimal"
@@ -971,6 +971,10 @@ def "main topics-check" [--target: string = $DEFAULT_TARGET] {
     }
     if ($j.failures | is-empty) {
         print $"ok: every declared topic in ($target) has another side, or says why it waits \(($j.waiting | length) wait\)"
+    }
+    # Decision C: more than 64 topics in one certificate is a signal to look at the agent's design.
+    for o in (oversized $sets 64) {
+        print -e $"  WARNING: ($o.workload) would carry ($o.carried) topics in its certificates \(more than 64\)"
     }
 }
 

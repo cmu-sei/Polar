@@ -105,6 +105,26 @@ impl Pki {
     pub fn ca(&self) -> PathBuf {
         self.path("ca.pem")
     }
+
+    /// Issues the client certificate for `identity` carrying `uris` as URI names besides it, as cert-issuer writes
+    /// `p:` and `g:` names, and returns its size in DER. `client` and `TestClient::connect` use it from then on.
+    pub fn issue_client_carrying(&self, identity: &str, uris: &[String]) -> usize {
+        let name = format!("client-{identity}");
+        let key = KeyPair::generate().expect("a key");
+        let mut params = CertificateParams::new(vec![identity.to_string()]).expect("parameters");
+        for uri in uris {
+            params.subject_alt_names.push(rcgen::SanType::URI(
+                uri.clone().try_into().expect("a URI name"),
+            ));
+        }
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let cert = params
+            .signed_by(&key, &self.issuer)
+            .expect("a signed certificate");
+        std::fs::write(self.path(&format!("{name}.pem")), cert.pem()).unwrap();
+        std::fs::write(self.path(&format!("{name}.key")), key.serialize_pem()).unwrap();
+        cert.der().len()
+    }
 }
 
 /// What the builder made for the broker, left where a test can reach it.

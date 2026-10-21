@@ -58,3 +58,13 @@ export def judge [sets: list]: nothing -> record {
     let found = (one_sided $sets)
     { failures: ($found | where waits == null), waiting: ($found | where waits != null) }
 }
+
+# The workloads whose certificates would carry more than `limit` topic names (declared and family; implied ones are not
+# written), each with how many. Decision C of docs/architecture/policy-enforcement.md: a warning, as a signal to look at
+# the agent's design, not a failure; a certificate's hard limit is far above it (measured: about 560 such names fit the
+# JDK's 32 KiB handshake message, which Neo4j's TLS enforces, and about 1,100 rustls' 64 KiB).
+export def oversized [sets: list, limit: int]: nothing -> list {
+    $sets
+    | each {|s| { workload: $s.workload, carried: ($s.topics | where {|t| $t.from != "implied" } | length) } }
+    | where carried > $limit
+}

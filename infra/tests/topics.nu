@@ -24,7 +24,7 @@
 # The catalog's topics (infra/topics.nu): the workloads a family serves, and the declared topics with no other side.
 
 use std/assert
-use ../topics.nu [served, one_sided, judge]
+use ../topics.nu [served, one_sided, judge, oversized]
 
 def t [name: string, access: string, from: string, waits?: string] {
     let base = { name: $name, access: $access, from: $from }
@@ -99,6 +99,18 @@ def main [] {
                 assert equal ($j.waiting | get topic) ["polar.provenance.events"]
                 assert equal ($j.waiting | first | get waits) "read by build-processor, a chart"
                 assert equal (judge [(set "a" [(t "x" "publish" "declared")]) (set "b" [(t "x" "subscribe" "declared")])]).failures []
+            }
+        }
+        {
+            name: "a workload whose certificate would carry more than the limit of topics and groups is named, with its count"
+            body: {
+                let many = (0..<65 | each {|i| t $"topic-($i)" "publish" "declared" })
+                let sets = [
+                    (set "big" ($many ++ [(t "x" "subscribe" "implied")]))
+                    (set "small" [(t "a" "publish" "declared") (t "b" "subscribe" "family")])
+                ]
+                assert equal (oversized $sets 64) [{ workload: "big", carried: 65 }]
+                assert equal (oversized $sets 65) []
             }
         }
     ]
