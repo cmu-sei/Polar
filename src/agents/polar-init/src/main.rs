@@ -75,6 +75,24 @@ use ractor::Actor;
 
 const POLL_INTERVAL_SECS: u64 = 5;
 
+/// How long the escrow-keypair bootstrap may take once the certificates are issued: its own Cassini client registering,
+/// then the credentials agent answering. Neither wait ends on its own, so a client that never registers (or has died)
+/// or an answer that never comes would hold the pod in its init container for good, with nothing to retry it. Past this
+/// it exits 1 and the pod is replaced (2026-10-21: a load-harness pod waited eleven minutes, after its certificate was
+/// issued, for an escrow request that never reached the credentials agent).
+const ESCROW_BOOTSTRAP_DEADLINE: Duration = Duration::from_secs(120);
+
+/// `work`, or why it did not finish within `deadline`.
+async fn within<T>(
+    deadline: Duration,
+    what: &str,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    tokio::time::timeout(deadline, work)
+        .await
+        .map_err(|_| format!("{what} did not finish within {deadline:?}"))
+}
+
 // ---------------------------------------------------------------------------
 // CertRequest — parsed from --cert <type:dir:key-algorithm:extra-sans>
 // ---------------------------------------------------------------------------
@@ -344,7 +362,21 @@ async fn main() {
             "{} is set, skipping escrow-keypair bootstrap",
             environment::SKIP_ESCROW_BOOTSTRAP.name()
         ),
-        Some(escrow) => ensure_escrow_bootstrapped(&dns_identity, escrow).await,
+        Some(escrow) => {
+            if let Err(why) = within(
+                ESCROW_BOOTSTRAP_DEADLINE,
+                "the escrow-keypair bootstrap",
+                ensure_escrow_bootstrapped(&dns_identity, escrow),
+            )
+            .await
+            {
+                eprintln!(
+                    "error: {why} (its Cassini client never registered, or the credentials agent never answered); \
+                     exiting so the pod is replaced"
+                );
+                std::process::exit(1);
+            }
+        }
     }
 
     tracing::info!("polar-init complete, handing off to main container");
@@ -418,14 +450,29 @@ async fn ensure_escrow_bootstrapped(own_identity: &str, escrow: &environment::Es
     // wait for a registration id before telling CryptoActor to subscribe.
     // This binary has no supervisor to forward ClientEvent::Registered,
     // and its lifecycle closure above is a no-op.
+    let mut polls: u64 = 0;
     loop {
         match ractor::call!(
             tcp_client,
             cassini_client::TcpClientMessage::GetRegistrationId
         ) {
             Ok(Some(_)) => break,
-            _ => tokio::time::sleep(Duration::from_millis(200)).await,
+            Ok(None) => {}
+            // A client that has died answers nothing, ever: say so, and let the deadline end the wait.
+            Err(e) => {
+                if polls.is_multiple_of(50) {
+                    tracing::warn!("the Cassini client does not answer: {e}");
+                }
+            }
         }
+        polls += 1;
+        if polls.is_multiple_of(50) {
+            tracing::info!(
+                "still waiting for the Cassini client to register ({}s)",
+                polls / 5
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
     if let Err(e) = crypto_actor.send_message(polar_crypto::CryptoMessage::ClientRegistered) {
         tracing::warn!("failed to tell CryptoActor the client registered: {e}");
@@ -753,6 +800,22 @@ mod tests {
     }
 
     const MILLISECOND: Duration = Duration::from_millis(1);
+
+    #[tokio::test]
+    async fn a_wait_that_never_ends_is_ended_at_its_deadline_and_says_what_it_was() {
+        let said = within(
+            10 * MILLISECOND,
+            "the escrow-keypair bootstrap",
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            said.contains("the escrow-keypair bootstrap did not finish within"),
+            "{said}"
+        );
+        assert_eq!(within(10 * MILLISECOND, "x", async { 7 }).await, Ok(7));
+    }
 
     #[tokio::test]
     async fn a_flooded_observer_is_waited_out_and_the_certificate_then_comes() {
