@@ -22,7 +22,7 @@
 */
 
 //! The client hears what the broker did with its subscriptions: a subscription taken is acknowledged
-//! (docs/architecture/policy-enforcement.md, stage 0). Refusals are tested where the broker refuses (stage 5): today it
+//! (docs/architecture/policy-enforcement.md, stage 0). Refusals are tested where the broker refuses (stage 5b): today it
 //! refuses only while shutting down, when it is already closing every connection.
 mod support;
 use std::time::Duration;

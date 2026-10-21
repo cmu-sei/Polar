@@ -98,7 +98,7 @@ code today, and what stands between the two. The detail of each part is in the d
   restart), a `forbid` refuses one inside it, and where no policy speaks the computed set decides. With no policy yet
   (before the first snapshot) the set decides. The check is a function the builder hands the Cassini client, so
   `cassini-client` does not depend on `polar-policy`; a refusal is logged in the agent and reported as
-  `PublishRefused` or `SubscribeRefused`, and nothing is sent. It is the same rule the broker applies (stage 5), so an
+  `PublishRefused` or `SubscribeRefused`, and nothing is sent. It is the same rule the broker applies (stage 5b), so an
   agent never sends what the broker would refuse for policy, and never refuses what policy permits. Until 2026-10-21
   the client consulted no policy at all (its `connect.rs` "Policy" is the connection retry setting); the PolicyActor
   was asked only for signed documents (`configuration.rs:261`), commands (`command_actor.rs:215`) and the credentials
@@ -178,6 +178,34 @@ code today, and what stands between the two. The detail of each part is in the d
   - a topic request's facts: the identity's workload is an optional attribute of the principal (`principal.workload`,
     from `workload_of`), and `publish` and `subscribe` carry in their context whether the topic is in the requester's
     declared set (`context.declared`, family topics included) or its implied set (`context.implied`).
+- **The broker judges held subscriptions again (2026-10-21, for stage 5b).** A subscription is decided when it is
+  made, and again whenever the broker's policy or groups change and when a session is resumed (a resumed session may
+  come with a renewed certificate that carries fewer topics). One that is now refused is dropped, and the client is
+  told with an unasked `SubscribeRefused`. Without it a `forbid` on a subscription would bite only when the client
+  reconnects, which a long-lived observer may never do.
+- **The broker caches its decisions (2026-10-21, for stage 5b).** The broker is built to be fast, and a decision
+  otherwise costs two actor hops, a certificate parse and a Cedar evaluation for every publish. Each connection's
+  Listener keeps its own cache, keyed by topic and access (no lock shared between connections), emptied whenever the
+  policy or groups change (the same signal that re-judges held subscriptions); a renewed certificate is a new
+  connection, so it starts empty. An entry also expires after a short, configurable time, which bounds how late a rule
+  that reads `context.now_secs` can be; how short is set by measurement (stage 5a).
+- **An agent acts on a refusal it did not expect (2026-10-21, for stage 5b).** The broker and the agent's own gate decide
+  by the same rule, so a broker refusal of what the gate admitted means one of them holds stale authority:
+  - the agent asks for the current authority (its asks are already at most one per five seconds), and its gate decides
+    again with what arrives;
+  - a subscription the broker refuses, or drops, is kept as wanted and refused: it is not sent again at every
+    registration, and when the agent's own authority changes its gate judges the refused ones again and sends those it
+    now admits, so a later `permit` brings a subscription back without a restart (the mirror of the broker dropping on
+    a change);
+  - the refused topics and their reasons are written into the agent's health file as information, beside its phase. A
+    refusal does not make the agent unhealthy: a restart cannot fix a policy, and an operator can see that an agent is
+    cut off from a topic it needs.
+- **The broker is measured before it enforces (2026-10-21, stage 5a).** The Cassini test harness's producer and sink
+  are brought up to the current client and run in the cluster, so a baseline of today's broker exists before stage 5b,
+  and enforcement without and with the cache is compared against it instead of guessed at. A run varies message size,
+  rate, the number of producers and sinks, and (from stage 5b) the cache; each sink records what it measured
+  (throughput, latency percentiles, loss) with the run's parameters, and a small script collects the records and
+  compares runs.
 - **Open: an administrator's scheduled override or addition to an agent's set.** Considered, not decided: a signed,
   scheduled document that adds topics to (or overrides) what the scaffold declares and implies. If it comes, it is one
   more input every consumer reads the same way, and the builder's run-time check must honour it.
@@ -260,7 +288,7 @@ round-trips through a certificate and malformed names are refused; stage 4 and 5
 first, then the floor, default deny) for any request; stage 6, the aging state machine never decides on an expired cache.
 It ends with the repository's checks passing (`cargo check`, `clippy -D warnings`, `fmt`,
 the package's tests, the infra tests), and is committed when they do. A stage names the gaps it closes. Nothing in a
-stage relies on a later one; each leaves the cluster working, with enforcement switched on only in stage 5.
+stage relies on a later one; each leaves the cluster working, with enforcement switched on only in stage 5b.
 
 **Stage 0: what the later stages stand on** (gaps 2, 9, 10)
 
@@ -350,7 +378,7 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   topics and groups, and taking a vouched workload's from the credentials agent (`f0393a41`); the credentials agent
   writing a workload's floor into its client certificates (`a3050c9a`); and the size checks (`d527c2ee`). Not done
   here: `PermissionsActor` reading a certificate's `g:` names beside the groups document, which Cedar needs to say
-  `principal in Group::"encryption"` (stage 4), and the broker deciding on any of it (stage 5).
+  `principal in Group::"encryption"` (stage 4), and the broker deciding on any of it (stage 5b).
 
 **Stage 4: Cedar knows topics** (gap 5)
 
@@ -376,7 +404,17 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   optional field, so the `p:` communication permissions became parents like the capabilities; and Cedar reports a rule
   that can never apply as a warning, which is refused like an error.
 
-**Stage 5: the broker enforces** (gaps 7, 8, 11)
+**Stage 5a: the broker is measured** ("Decisions", 2026-10-21)
+
+- The producer and the sink of `cassini/test` brought up to the current Cassini client, and run in the cluster as Jobs
+  from a run plan (message size, rate, how many producers and sinks; the cache from stage 5b); the controller, which
+  spawns local processes over its own socket (`control/improvements.md`), is replaced by the cluster.
+- Each sink writes one record per run: the run's parameters, the broker's image, throughput, latency percentiles and
+  loss. A small nu script collects the records and compares runs as a table.
+- A baseline of today's broker, recorded, before stage 5b changes it.
+- The details are planned when the stage starts.
+
+**Stage 5b: the broker enforces** (gaps 7, 8, 11)
 
 - The Listener keeps the leaf certificate, and decides each subscribe and publish: Cedar first, through an
   `AuthorityHandle` the broker runs itself (fed the authority topics' publishes in process, with the publisher identity
@@ -386,9 +424,17 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   agent's request and reply topics are on every workload's implied floor, and the credentials agent refuses a policy that
   would deny them (open point B, decided; its test: a policy forbidding a workload `polar-authority-updates` is refused
   whole, and the old policy stays).
+- Held subscriptions judged again on every change of policy or groups and on a resumed session, a refused one dropped
+  with an unasked `SubscribeRefused`; decisions cached per connection, emptied on a change, entries expiring after a
+  short time; measured against stage 5a's baseline, without and with the cache.
+- The agent: a broker refusal its gate did not predict asks for the current authority; refused subscriptions are kept
+  as wanted, not re-sent at registration, and judged again by its gate when its authority changes; refused topics are
+  written into its health file, and do not make it unhealthy.
 - Reply topics stay shared; their privacy is the payload's encryption, as now.
 - Tests: the broker harness with certificates that carry topic `p:` names: an undeclared publish refused, a declared one
-  delivered, a Cedar forbid refusing a declared one, a Cedar permit admitting an undeclared one.
+  delivered, a Cedar forbid refusing a declared one, a Cedar permit admitting an undeclared one; a held subscription
+  dropped by a new forbid and the client told; a cached decision not outliving a change; and the agent re-sending a
+  refused subscription once a permit arrives.
 
 **Stage 6: degraded is bounded** (gap 4)
 
@@ -420,7 +466,7 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   list of workloads it serves as an input (an environment variable from the catalog); the builder reads it at start and
   expands it into exact names in the computed set, and `--scaffold` is asked with the same input, so every consumer still
   reads one computed set. The scheduler does not declare a pattern.
-- **B. Can a policy cut off the authority channel?** (stage 5). *Decided 2026-10-21: no exception to the rule; a check on
+- **B. Can a policy cut off the authority channel?** (stage 5b). *Decided 2026-10-21: no exception to the rule; a check on
   arrival.* Before the credentials agent accepts a new policy, it evaluates it against a fixed set of requests: every
   catalog workload's identity against the authority topics and the credentials agent's own request and reply topics. If
   any would be denied, the whole policy is refused with the reason, and the old one stays in force, as for a policy that
