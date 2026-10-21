@@ -47,6 +47,25 @@ Last updated: 2026-10-10.
 - [x] Image building in stages (`infra/images.nu`, `just images-build|images-push|images-mirror|image|images-all`): `build` needs only nix; `push` needs the registry but not the cluster; `mirror` copies third-party images; `sync` does all of it and drops the u7s node's cached copy of rebuilt images. A failing image no longer aborts a stage (rest are attempted, summary, non-zero exit); mirror retries 3 times; error messages are one clean line. Verified against the real tools: build, push, mirror, sync, the failure summary (bogus mirror row), eviction (image pulled into the node cache, gone after `just image`), registry-down and unknown-name errors. `images.nu push` no longer mirrors or evicts; that is `sync`
 - [x] `images.nuon` has a row for every agent image (added git-observer/processor/scheduler, openapi-observer/processor, scheduler-observer/processor, oci-resolver, build-processor; each attr checked with `nix eval`, each built with `just images-build`, not pushed or deployed); the `git-agents`, `build-agents`, `openapi` and `scheduler` recipes are removed
 
+## Found by the load harness, 2026-10-21 (docs/architecture/broker-baseline.md)
+
+Fixed, with tests: the broker shutting down on a subscription it could not make (`2bc47be7`), topics keeping ended
+subscribers (`dc06e841`), unanswered subscriptions holding up publishing (`631fb0e1`), ractor output ports dropping a
+subscriber that falls behind (`92bc4822`), every publish formatting its payload into a span (`dfb432cb`), and
+`polar-init` waiting in init for good (`8030abdd`). Open:
+
+- **Pods of one workload share an identity**, and the broker keeps one live session per identity (a new one supersedes
+  the rest and closes their connections). So a workload cannot run several pods at once, and the harness cannot measure
+  several connections. A decision: an identity per pod (a workload per pod, or a pod-instance name in the certificate),
+  or sessions keyed by pod instance as well as identity.
+- The Cassini client's read loop goes on after a failed `read_exact`, reading from the middle of a frame (`cassini/client/src/lib.rs`,
+  the read loop); it should end the transport.
+- Stage 5b is measured against the baseline, without and with its decision cache.
+- The dev host's storage: about 750 GiB of the `nix` volume group is unallocated, `/` is a 199 GB f2fs on a 400 GB
+  volume (never grown), and the nix-usernetes node's containerd and kubelet state share `/home` with everything else,
+  so a large Cargo `target` directory tainted the node with disk pressure and evicted every pod (2026-10-21). f2fs grows
+  only unmounted. A volume of its own for the node's state would stop builds evicting the cluster.
+
 ## Done 2026-10-16, and what it leaves open
 
 - **polar-tools image.** `polar-sign`, `polar-admin-grant`, `cassini-c2`, `cassini-client`, `user-cert-fetcher`,

@@ -445,6 +445,15 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
     (the state of the cluster, the target, the plan, and the commands run, in order), so a later run can be made the
     same way and compared with it.
 
+- *Built 2026-10-21, and measured:* the harness (`59184906`, `c49dae43`, `885ad8c2`, `f91822c6`), on `sandbox-local`
+  (`db4ba7d6`); the baseline, its procedure and what it found are in `broker-baseline.md`. Measuring found four faults in
+  the broker and its client, now fixed (a subscription that could not be made shut the broker down; topics kept ended
+  subscribers; subscriptions went unanswered and held up publishing; ractor's output ports dropped a subscriber that fell
+  behind; every publish formatted its payload into a span), and that pods of one workload share an identity, so the
+  broker supersedes all but one of their sessions: the baseline measures one connection, and several at once wait on a
+  way to give pods identities of their own. As built, a sink says it is ready in its log rather than through a
+  readiness probe, and the producer's window is counted in messages as well as bytes.
+
 **Stage 5b: the broker enforces** (gaps 7, 8, 11)
 
 - The Listener keeps the leaf certificate, and decides each subscribe and publish: Cedar first, through an

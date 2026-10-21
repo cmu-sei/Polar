@@ -21,6 +21,11 @@
   DM26-0670
 -->
 
+> **Superseded 2026-10-21.** The control plane described below was never finished and is gone. The load harness is now two
+> builder agents run as Kubernetes Jobs by `infra/load-harness.nu` (`src/agents/cassini/test/README.md`), and what it
+> measured is in `broker-baseline.md`. This page is kept for its history.
+
+
 ## 🔹 Abstract Control Plane Architecture
 
 ### 1. **Roles**
