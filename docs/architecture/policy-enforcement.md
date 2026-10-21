@@ -172,3 +172,118 @@ Numbered so a plan can refer to them. "Core" gaps block enforcement anywhere; th
 15. kube-observer has no crypto actor (no `Encryption` need), so it cannot retrieve a secret escrowed for it; its
     Kubernetes access is a mounted token with `*/*` get, list and watch, cluster-wide.
 16. kube-consumer does not check `published_by` on the observations it reads.
+
+## The build plan (2026-10-21)
+
+Each stage is built test first, ends with the repository's checks passing (`cargo check`, `clippy -D warnings`, `fmt`,
+the package's tests, the infra tests), and is committed when they do. A stage names the gaps it closes. Nothing in a
+stage relies on a later one; each leaves the cluster working, with enforcement switched on only in stage 5.
+
+**Stage 0: what the later stages stand on** (gaps 2, 9, 10)
+
+- The client turns refusals into events: `ClientEvent::SubscribeRefused { topic, reason }` and
+  `PublishRefused { topic, reason }`, from the broker's refusal replies, which never contain "session mismatch" (the
+  client re-registers on that). The broker acknowledges a successful subscribe. Tests: the broker harness, a refused
+  subscribe seen by the `Collector`.
+- Resuming a session checks that the connection's identity is the session's (`session.rs:595-622`); a mismatch is a new
+  session, never the old one. Test: two identities, one registration id.
+- One name: kube-observer, kube-consumer, jira and oci-resolver pass their workload name to `AgentBuilder`; the builder
+  refuses a service name that is not the workload name (`POLAR_WORKLOAD`, from the catalog). Tests: the builder's start
+  check; `topics.md` updated.
+
+**Stage 1: agents declare their topics** (gap 1)
+
+- `PolarAgent::TOPICS`: each topic, its access (`publish`, `subscribe`) and its purpose.
+- The builder computes the agent's full set: declared, plus implied, each implied topic with the rule that implied it.
+  The rules are written in `topics.md` ("Implied topics"), and are code in one place in `polar-agent-builder`.
+- `--scaffold` prints the full set; `resolve.nu`, the catalog and `polar-sign` read it and never recompute it.
+- The builder refuses, at run time, to publish or subscribe outside the set (an error in the agent's own log).
+- Every agent declares what it uses today (`topics.md`'s inventory). Unused and mismatched topics are fixed or removed
+  as they are met (the openapi pair's mismatch, the unused constants).
+- Tests: per agent, the scaffold's set equals what its code uses (a test that runs the agent's subscriptions and
+  publishes against a recording client); the builder's refusal; `infra/tests` reads the scaffold's set unchanged.
+
+**Stage 2: the catalog carries the sets, and the render writes the floors** (gaps 1, 3, 6)
+
+- `resolve.nu` reads each workload's set from its scaffold. The scheduler's family (`agent.<workload>.configuration`
+  for each workload) is generated from the catalog as exact names (open point A, below).
+- The render writes each workload's declared topics into the credentials agent's issuance floor and, for the bootstrap
+  services, into cert-issuer's floor, as server names are written today. `render.nu` checks that every declared topic has
+  at least one other side (a subscriber for a publish, a publisher for a subscribe), so a mismatch fails the render.
+- Tests: the render of `local-minimal` and `sandbox-local`; the cross-check refuses a one-sided topic.
+
+**Stage 3: certificates carry the floor** (gap 3)
+
+- A `p:` form for topics in `cert-issuer-common` (`p:pub:<topic>`, `p:sub:<topic>`), parsed and written by the same
+  module as the existing scopes; the implied topics are derived from the identity by one function, shared by the builder
+  and the broker.
+- The credentials agent writes a workload's declared topics into each certificate it issues, from its floor; cert-issuer
+  does the same for the bootstrap services.
+- Tests: issuance unit tests; a certificate's SANs for a catalog workload; the size of the largest set (open point C).
+
+**Stage 4: Cedar knows topics** (gap 5)
+
+- A schema in `polar-policy`, in code: `Identity`, `Group`, `Topic`, and the actions in use (`publish`, `subscribe`,
+  `retrieve`, `store`, `decrypt`, `update-configuration`, `update-runtime`, `run-command`), with their attributes. A
+  policy is validated against it on arrival (it is refused whole, and the old one stays, if it does not validate) and by
+  `polar-sign` before signing.
+- Facts for a topic request: the workload the identity maps to, and whether the topic is in its declared or implied set.
+- Tests: the schema refuses a misspelt attribute; a permit and a forbid for a topic decide as stated.
+
+**Stage 5: the broker enforces** (gaps 7, 8, 11)
+
+- The Listener keeps the leaf certificate, and decides each subscribe and publish: Cedar first, through an
+  `AuthorityHandle` the broker runs itself (fed the authority topics' publishes in process, with the publisher identity
+  from its own Listener); where no policy speaks, the floor (the implied topics from the identity, the declared topics
+  from the certificate). Default deny. A refusal is sent to the client (stage 0).
+- The bootstrap services start on the floor, healthy without a snapshot; the authority channel and the credentials
+  agent's request and reply topics are on every workload's implied floor (open point B).
+- Reply topics stay shared; their privacy is the payload's encryption, as now.
+- Tests: the broker harness with certificates that carry topic `p:` names: an undeclared publish refused, a declared one
+  delivered, a Cedar forbid refusing a declared one, a Cedar permit admitting an undeclared one.
+
+**Stage 6: degraded is bounded** (gap 4)
+
+- `POLAR_AUTHORITY_MAX_AGE_SECS` (default 90 minutes), the heartbeat (any verified message from the credentials agent),
+  a snapshot asked for at 45 minutes, and on expiry a failed health check that restarts the agent into init.
+- An agent that is not a bootstrap service is unhealthy until it has verified a snapshot; the bootstrap services start
+  their clock at their first; the credentials agent does not age.
+- Tests: an injected clock (the publisher's tests use paused time); the health verdict at the bound.
+
+**Stage 7: the Kubernetes agent, end to end** (gaps 15, 16)
+
+- kube-observer gains the `Encryption` need (a crypto actor), so it can retrieve what was escrowed for it alone.
+- On a cluster: the pair declares its topics; the observer's observations reach the consumer; another agent publishing
+  on the observer's topic is refused, and so is the observer publishing on a topic it did not declare; the observer
+  retrieves a secret escrowed for it, and another agent cannot.
+
+**Stage 8: the other enforcement points** (gaps 12, 13, 14)
+
+- The scheduler verifies a signed document before forwarding it, refuses unsigned schedules, and answers a replay only
+  for the requester's own workload.
+- The credentials agent asks Cedar for admin actions and issuance, with the capability as the fallback; `DecryptOnBehalfOf`
+  binds its resource to the ciphertext.
+- cert-issuer and the Polar git server get an authority holder (service mode) and ask Cedar, with their static floors as
+  the fallback.
+
+**Open points, to settle before the stage that needs them**
+
+- **A. The scheduler's family and the computed set** (stage 2). The set is computed once, in the builder, from the
+  agent's code; but the scheduler's per-workload topics come from the catalog, which the builder does not have when it
+  prints its scaffold. Either the scheduler declares the family in its code and the catalog expands it (a pattern by
+  another name), or the render gives the scheduler the list of workloads as an input it reads at start and prints.
+- **B. Can a policy cut off the authority channel?** (stage 5). If a `forbid` can refuse `polar-authority-updates` or the
+  credentials agent's request topics, a bad policy can stop its own correction and every certificate renewal. Either those
+  topics are decided by the floor alone, whatever the policy says, or the credentials agent refuses to publish a policy
+  that would cut them.
+- **C. The size of a certificate's topic list** (stage 3). The credentials agent alone subscribes to its 16 request topics and the
+  snapshot requests, and publishes their replies and the authority topics; those would be implied, not written, but a workload with many declared topics makes a large certificate. A limit, or
+  a compact form, may be needed.
+
+## Sequence diagrams
+
+Under `sequences/`; each diagram says whether it shows the code as built or the design. Updated 2026-10-21 for these
+decisions: `broker/client_registration`, `broker/client_reconnect`, `broker/client_subscription`, `broker/client_publish`,
+`general/policy_update_enforcement`, `general/health_rejuvenation`, `general/configuration_startup`, the new
+`general/topic_floor_issuance`, and `bootstrap/overview`, `bootstrap/phase1-before-flux`, `bootstrap/phase2-flux`, `bootstrap/phase3-after-flux` and
+`general/signed_configuration_delivery` (which also lagged what was built).
