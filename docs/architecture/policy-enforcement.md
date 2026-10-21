@@ -89,6 +89,12 @@ code today, and what stands between the two. The detail of each part is in the d
   certificate carries, and a `forbid` refuses what it carries; where no policy speaks, the certificate decides. This is
   the rule `authority-distribution.md` has held since 2026-10-12 ("Cedar overrides the certificate; the certificate is
   the fallback"), now applied to topics. "Floor" and "ceiling" mean which comes first, not that policy may only narrow.
+- **The Cedar vocabulary for topics (2026-10-21, gap 5).** `Action::"publish"` and `Action::"subscribe"` on
+  `Topic::"<exact name>"`; the principal as today, `Identity::"<certificate identity>"` with its permissions, capabilities
+  and groups. The broker gives as facts the workload the identity maps to and whether the topic is in its declared or
+  implied set. A schema, carried in the code that evaluates, validates a policy when it arrives (the broker, every builder
+  agent) and before it is signed (`polar-sign`). The builder's run-time check and the broker ask the same question
+  through the same `PolicyLookup`, so an agent and the broker cannot disagree about a topic.
 - **Open: an administrator's scheduled override or addition to an agent's set.** Considered, not decided: a signed,
   scheduled document that adds topics to (or overrides) what the scaffold declares and implies. If it comes, it is one
   more input every consumer reads the same way, and the builder's run-time check must honour it.
@@ -128,7 +134,7 @@ Numbered so a plan can refer to them. "Core" gaps block enforcement anywhere; th
    answer. `authority-distribution.md` designs aging that ends in a restart into init; `cert-issuer-isolation.md` describes
    running on the floor while the credentials agent is away; the model above says the certificate decides when
    infrastructure is unavailable.
-5. **Cedar has no schema and no vocabulary for topics** (or pods). Policies are only parsed (256 KiB), so a misspelt
+5. **Cedar has no schema and no vocabulary for topics** (or pods) (decided for topics, above; not built). Policies are only parsed (256 KiB), so a misspelt
    attribute denies at evaluation; resource facts are the asker's to give; and no decision is recorded.
 6. **Seeds and templates are not generated.** One seed exists (the credentials agent's `policy`); no `groups` seed, no
    per-agent templates from scaffolds, and `polar-sign runtime` (what the seed uses) skips the scaffold check; Cedar is
