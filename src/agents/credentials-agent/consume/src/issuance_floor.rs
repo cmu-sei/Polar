@@ -141,6 +141,48 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    /// Slice 8 of the authority model (docs/architecture/authority-model.md): before this floor is removed, the model gives
+    /// every workload the credentials agent issues the same names this floor gave it, the two rendered from the same
+    /// catalog (`model/tests/fixtures/regenerate.nu`), each workload found by its one identity rather than its token's
+    /// subject; and the model issues no workload this floor did not name.
+    #[test]
+    fn the_model_gives_every_workload_the_names_this_floor_gave_it() {
+        let floor = IssuanceFloor::parse(include_str!(
+            "../../model/tests/fixtures/sandbox-floor.json"
+        ))
+        .unwrap();
+        let model = credentials_agent_model::Model::parse(include_str!(
+            "../../model/tests/fixtures/sandbox-model.json"
+        ))
+        .unwrap();
+        let strategy =
+            cert_issuer_common::identity::IdentityNormalization::KubernetesServiceAccount {
+                cluster_domain: "cluster.local".to_string(),
+            };
+        let sorted = |mut names: Vec<String>| {
+            names.sort();
+            names
+        };
+        for (subject, entry) in &floor.by_workload {
+            let identity =
+                cert_issuer_common::identity::normalize_identity(subject, None, &strategy).unwrap();
+            let names = model
+                .issued_by_the_credentials_agent(&identity)
+                .unwrap_or_else(|| panic!("the model does not issue {identity}"));
+            assert_eq!(
+                sorted(names.san_strings()),
+                sorted(entry.san_strings()),
+                "{identity}"
+            );
+        }
+        let issued = model
+            .workloads
+            .iter()
+            .filter(|w| model.issued_by_the_credentials_agent(&w.identity).is_some())
+            .count();
+        assert_eq!(issued, floor.len());
+    }
+
     #[test]
     fn the_render_s_form_is_read_and_each_workload_found_by_its_token_name() {
         let floor = IssuanceFloor::parse(

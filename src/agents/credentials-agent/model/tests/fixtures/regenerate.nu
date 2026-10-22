@@ -32,6 +32,9 @@ use ../../../../../../infra/topics.nu [served]
 
 const ROOT = path self ../../../../../..
 const OUT = path self sandbox-model.json
+# The issuance floor the render gives the credentials agent today, from the same catalog: slice 8 compares it with what
+# the model gives each workload, then removes it.
+const FLOOR = path self sandbox-floor.json
 
 def main [] {
     let catalog = (glob ($ROOT | path join "infra/config/workloads/*.nuon") | sort | each {|f| open $f } | flatten)
@@ -57,8 +60,11 @@ def main [] {
         ^nu ($ROOT | path join "infra/resolve.nu") resources credentials-agent --target sandbox-local
     } | from json | get config_maps)
     rm -rf $dir
-    let model = ($maps | first | get content | from json | get sections | each {|s| $s.variables } | flatten
-        | where name == "CREDENTIALS_AGENT_AUTHORITY_MODEL" | get 0.value | from json)
+    let variables = ($maps | first | get content | from json | get sections | each {|s| $s.variables } | flatten)
+    let model = ($variables | where name == "CREDENTIALS_AGENT_AUTHORITY_MODEL" | get 0.value | from json)
     $model | to json --indent 2 | save --force $OUT
     print $"wrote ($OUT): ($model.workloads | length) workloads"
+    let floor = ($variables | where name == "CREDENTIALS_AGENT_ISSUANCE_TOPICS" | get 0.value | from json)
+    $floor | to json --indent 2 | save --force $FLOOR
+    print $"wrote ($FLOOR): ($floor | length) workloads"
 }

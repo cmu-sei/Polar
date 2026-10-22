@@ -30,6 +30,9 @@ use polar_agent_builder::topics::TopicEntry;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The issuer the render names for a workload the credentials agent issues (`infra/rules.nu`).
+pub const CREDENTIALS_AGENT: &str = "credentials-agent";
+
 /// The format of the model document this crate reads.
 pub const FORMAT: u32 = 1;
 
@@ -105,6 +108,86 @@ impl Model {
     /// Every identity the model knows.
     pub(crate) fn identities(&self) -> BTreeSet<&str> {
         self.workloads.iter().map(|w| w.identity.as_str()).collect()
+    }
+}
+
+/// What a workload's certificates carry of it: its declared and family topics, as `p:pub:` and `p:sub:` names, and its
+/// groups, as `g:` names (docs/architecture/policy-enforcement.md, stage 2). Its implied topics are not written: they
+/// follow from its identity and its groups. Each once, sorted.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CertificateNames {
+    pub publish: Vec<String>,
+    pub subscribe: Vec<String>,
+    pub groups: Vec<String>,
+}
+
+impl CertificateNames {
+    /// The names as a certificate carries them.
+    pub fn san_strings(&self) -> Vec<String> {
+        use cert_issuer_common::group::Group;
+        use cert_issuer_common::permission::{TopicAccess, TopicPermission};
+        let topic = |access, topic: &String| {
+            TopicPermission {
+                access,
+                topic: topic.clone(),
+            }
+            .to_san_string()
+        };
+        self.publish
+            .iter()
+            .map(|t| topic(TopicAccess::Publish, t))
+            .chain(
+                self.subscribe
+                    .iter()
+                    .map(|t| topic(TopicAccess::Subscribe, t)),
+            )
+            .chain(self.groups.iter().map(|g| Group(g.clone()).to_san_string()))
+            .collect()
+    }
+}
+
+impl Workload {
+    /// What this workload's certificates carry.
+    pub fn certificate_names(&self) -> CertificateNames {
+        let own = |access: polar_agent_builder::Access| -> Vec<String> {
+            self.topics
+                .iter()
+                .filter(|t| {
+                    t.access == access
+                        && !matches!(
+                            t.origin,
+                            polar_agent_builder::topics::Origin::Implied { .. }
+                        )
+                })
+                .map(|t| t.name.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        };
+        CertificateNames {
+            publish: own(polar_agent_builder::Access::Publish),
+            subscribe: own(polar_agent_builder::Access::Subscribe),
+            groups: self
+                .groups
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        }
+    }
+}
+
+impl Model {
+    /// What the certificates of the workload known by `identity` carry, when the credentials agent issues it; none for a
+    /// workload it does not issue (a bootstrap service is issued by cert-issuer, with cert-issuer's floor) or an identity
+    /// the model does not know. Issuance asks this by the identity cert-issuer's validation returns, never by the token's
+    /// subject (docs/architecture/authority-model.md, "Decisions": one identity).
+    pub fn issued_by_the_credentials_agent(&self, identity: &str) -> Option<CertificateNames> {
+        self.workloads
+            .iter()
+            .find(|w| w.identity == identity && w.issuer == CREDENTIALS_AGENT && !w.bootstrap)
+            .map(Workload::certificate_names)
     }
 }
 

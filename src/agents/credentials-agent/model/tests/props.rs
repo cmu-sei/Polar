@@ -164,4 +164,32 @@ proptest! {
         prop_assert_eq!(a.goals, b.goals);
         prop_assert_eq!(a.renewal_witness, b.renewal_witness);
     }
+
+    /// What a workload's certificates carry is a set: the same whatever the order of its topics and its groups, and
+    /// however often one is listed, for every workload the credentials agent issues; and it is each name once, in order.
+    #[test]
+    fn a_workload_s_certificate_names_do_not_depend_on_the_order_or_repetition_of_its_facts(
+        seed in any::<u64>(),
+        repeats in proptest::collection::vec(any::<prop::sample::Index>(), 0..6),
+    ) {
+        let m = model();
+        let mut s = seed;
+        let mut next = || { s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (s >> 33) as usize };
+        for w in m.workloads.iter().filter(|w| m.issued_by_the_credentials_agent(&w.identity).is_some()) {
+            let mut shuffled = w.clone();
+            for r in &repeats {
+                let again = shuffled.topics[r.index(shuffled.topics.len())].clone();
+                shuffled.topics.push(again);
+                let group = shuffled.groups[r.index(shuffled.groups.len())].clone();
+                shuffled.groups.push(group);
+            }
+            for i in (1..shuffled.topics.len()).rev() { let j = next() % (i + 1); shuffled.topics.swap(i, j); }
+            for i in (1..shuffled.groups.len()).rev() { let j = next() % (i + 1); shuffled.groups.swap(i, j); }
+            let names = w.certificate_names();
+            prop_assert_eq!(shuffled.certificate_names(), names.clone());
+            for list in [&names.publish, &names.subscribe, &names.groups] {
+                prop_assert!(list.windows(2).all(|pair| pair[0] < pair[1]), "{:?}", list);
+            }
+        }
+    }
 }

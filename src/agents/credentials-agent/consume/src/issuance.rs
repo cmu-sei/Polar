@@ -96,19 +96,19 @@ pub fn check_request_shape(
 }
 
 /// The extra names the certificate is signed with: a client certificate carries the permissions of its grant and
-/// the topics and groups its workload's floor entry gives it (none for a requester the floor does not name, a
-/// person's for one), a server certificate the names it asked for and nothing else.
+/// the topics and groups the authority model gives its workload (none for a requester the model does not have the
+/// credentials agent issue, a person's for one), a server certificate the names it asked for and nothing else.
 fn extra_sans_for(
     cert_type: WorkloadCertType,
     names: &[String],
     grant_permissions: &[cert_issuer_common::permission::Permission],
-    floor: Option<&crate::issuance_floor::WorkloadTopics>,
+    model_gives: Option<credentials_agent_model::CertificateNames>,
 ) -> Vec<String> {
     match cert_type {
         WorkloadCertType::Client => grant_permissions
             .iter()
             .map(|p| p.to_san_string())
-            .chain(floor.map(|f| f.san_strings()).unwrap_or_default())
+            .chain(model_gives.map(|n| n.san_strings()).unwrap_or_default())
             .collect(),
         WorkloadCertType::Server => names.to_vec(),
     }
@@ -131,9 +131,10 @@ pub struct IssuanceHandler {
     pub introspection: Option<IntrospectionClient>,
     pub known_kubernetes_issuers: Vec<String>,
     pub escrow_keypair: Arc<EscrowKeypair>,
-    /// The topics and groups the catalog gives each workload, written into its client certificates
-    /// (docs/architecture/policy-enforcement.md, stage 3).
-    pub issuance_floor: Arc<crate::issuance_floor::IssuanceFloor>,
+    /// The deployment's authority model, whose topics and groups for each workload are written into its client
+    /// certificates (docs/architecture/authority-model.md, slice 8); none when the render gave none, and then a
+    /// certificate carries no topics or groups.
+    pub authority_model: Option<Arc<credentials_agent_model::Model>>,
 }
 
 impl IssuanceHandler {
@@ -298,7 +299,10 @@ impl IssuanceHandler {
             request.cert_type,
             &request.names,
             &permissions,
-            self.issuance_floor.topics_for(&token_identity),
+            // By the workload's one identity, never its token's subject.
+            self.authority_model
+                .as_ref()
+                .and_then(|model| model.issued_by_the_credentials_agent(&identity)),
         );
         let issued = match self
             .cert_issuer
@@ -493,7 +497,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
-            issuance_floor: Default::default(),
+            authority_model: None,
         };
         let reply = handler
             .handle(IssuanceRequest {
@@ -548,7 +552,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
-            issuance_floor: Default::default(),
+            authority_model: None,
         };
 
         let reply = handler
@@ -590,20 +594,27 @@ pub(crate) mod tests {
         server
     }
 
-    fn floor_for_kube_consumer() -> Arc<crate::issuance_floor::IssuanceFloor> {
-        Arc::new(
-            crate::issuance_floor::IssuanceFloor::parse(
-                r#"[{"workload": "system:serviceaccount:polar:kube-consumer",
-                     "publish": ["polar.provenance.discovery"],
-                     "subscribe": ["kubernetes.cluster.consumer.Pod"],
-                     "groups": ["cassini-client", "encryption"]}]"#,
+    /// A model in which the credentials agent issues kube-consumer, with a declared topic each way, groups, and an
+    /// implied topic its certificates do not carry.
+    fn model_with_kube_consumer() -> Option<Arc<credentials_agent_model::Model>> {
+        Some(Arc::new(
+            credentials_agent_model::Model::parse(
+                r#"{"format": 1, "workloads": [{
+                     "workload": "kube-consumer", "identity": "kube-consumer.polar.serviceaccount.cluster.local",
+                     "issuer": "credentials-agent", "bootstrap": false, "groups": ["encryption", "cassini-client"],
+                     "topics": [
+                       {"name": "polar.provenance.discovery", "access": "publish", "from": "declared", "purpose": "p"},
+                       {"name": "kubernetes.cluster.consumer.Pod", "access": "subscribe", "from": "declared", "purpose": "p"},
+                       {"name": "polar-authority-updates", "access": "subscribe", "from": "implied",
+                        "rule": "agent", "why": "w"}
+                     ]}]}"#,
             )
             .unwrap(),
-        )
+        ))
     }
 
     #[tokio::test]
-    async fn a_workload_s_client_certificate_carries_the_topics_and_groups_its_floor_gives_it() {
+    async fn a_workload_s_client_certificate_carries_the_topics_and_groups_the_model_gives_it() {
         let server = issuer_expecting(
             "kube-consumer",
             &[
@@ -615,7 +626,7 @@ pub(crate) mod tests {
         )
         .await;
         let handler = IssuanceHandler {
-            issuance_floor: floor_for_kube_consumer(),
+            authority_model: model_with_kube_consumer(),
             ..handler_for(&server, spawn_test_ledger().await).await
         };
         let reply = handler
@@ -629,7 +640,7 @@ pub(crate) mod tests {
         let server =
             issuer_expecting("kube-consumer", &["kube-consumer.polar.svc.cluster.local"]).await;
         let handler = IssuanceHandler {
-            issuance_floor: floor_for_kube_consumer(),
+            authority_model: model_with_kube_consumer(),
             ..handler_for(&server, spawn_test_ledger().await).await
         };
         let reply = handler
@@ -642,10 +653,10 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_workload_the_floor_does_not_name_carries_no_topics_or_groups() {
+    async fn a_workload_the_model_does_not_have_this_agent_issue_carries_no_topics_or_groups() {
         let server = issuer_expecting("admin-tool", &[]).await;
         let handler = IssuanceHandler {
-            issuance_floor: floor_for_kube_consumer(),
+            authority_model: model_with_kube_consumer(),
             ..handler_for(&server, spawn_test_ledger().await).await
         };
         let reply = handler
@@ -726,7 +737,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
-            issuance_floor: Default::default(),
+            authority_model: None,
         };
 
         let reply = handler
@@ -838,7 +849,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
-            issuance_floor: Default::default(),
+            authority_model: None,
         };
 
         let reply = handler
@@ -918,7 +929,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
-            issuance_floor: Default::default(),
+            authority_model: None,
         };
 
         let reply = handler
@@ -968,7 +979,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
-            issuance_floor: Default::default(),
+            authority_model: None,
         };
 
         let reply = handler
@@ -1001,7 +1012,7 @@ pub(crate) mod tests {
                 "https://kubernetes.default.svc.cluster.local".to_string(),
             ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
-            issuance_floor: Default::default(),
+            authority_model: None,
         };
 
         let reply = handler
@@ -1138,7 +1149,7 @@ pub(crate) mod tests {
             introspection: None,
             known_kubernetes_issuers: vec![K8S.to_string()],
             escrow_keypair: crate::escrow::tests::test_keypair(),
-            issuance_floor: Default::default(),
+            authority_model: None,
         }
     }
 

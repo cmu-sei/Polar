@@ -1,0 +1,206 @@
+[
+  {
+    "workload": "system:serviceaccount:polar:git-repo-controller",
+    "publish": [
+      "git.repo.config.events",
+      "polar.git.proposals.decisions"
+    ],
+    "subscribe": [
+      "polar-proposal-observe-repo"
+    ],
+    "groups": [
+      "cassini-client",
+      "self-test"
+    ]
+  },
+  {
+    "workload": "system:serviceaccount:polar:git-repo-observer",
+    "publish": [
+      "polar.git.observation.status",
+      "polar.git.repositories.events"
+    ],
+    "subscribe": [
+      "git.repo.config.events"
+    ],
+    "groups": [
+      "cassini-client",
+      "encryption",
+      "self-test"
+    ]
+  },
+  {
+    "workload": "system:serviceaccount:polar:git-repo-processor",
+    "publish": [],
+    "subscribe": [
+      "polar.git.observation.status",
+      "polar.git.proposals.decisions",
+      "polar.git.repositories.events"
+    ],
+    "groups": [
+      "cassini-client",
+      "self-test"
+    ]
+  },
+  {
+    "workload": "system:serviceaccount:polar:harness-producer",
+    "publish": [
+      "cassini.harness.lane.0",
+      "cassini.harness.lane.1",
+      "cassini.harness.lane.2",
+      "cassini.harness.lane.3",
+      "cassini.harness.lane.4",
+      "cassini.harness.lane.5",
+      "cassini.harness.lane.6",
+      "cassini.harness.lane.7"
+    ],
+    "subscribe": [],
+    "groups": [
+      "cassini-client",
+      "self-test"
+    ]
+  },
+  {
+    "workload": "system:serviceaccount:polar:harness-sink",
+    "publish": [],
+    "subscribe": [
+      "cassini.harness.lane.0",
+      "cassini.harness.lane.1",
+      "cassini.harness.lane.2",
+      "cassini.harness.lane.3",
+      "cassini.harness.lane.4",
+      "cassini.harness.lane.5",
+      "cassini.harness.lane.6",
+      "cassini.harness.lane.7"
+    ],
+    "groups": [
+      "cassini-client",
+      "self-test"
+    ]
+  },
+  {
+    "workload": "system:serviceaccount:polar:jira-observer",
+    "publish": [
+      "jira:consumer:groups",
+      "jira:consumer:issues",
+      "jira:consumer:projects",
+      "jira:consumer:users"
+    ],
+    "subscribe": [],
+    "groups": [
+      "cassini-client",
+      "self-test"
+    ]
+  },
+  {
+    "workload": "system:serviceaccount:polar:jira-processor",
+    "publish": [],
+    "subscribe": [
+      "jira:consumer:groups",
+      "jira:consumer:issues",
+      "jira:consumer:projects",
+      "jira:consumer:users"
+    ],
+    "groups": [
+      "cassini-client",
+      "self-test"
+    ]
+  },
+  {
+    "workload": "system:serviceaccount:polar:kube-consumer",
+    "publish": [
+      "polar.provenance.discovery"
+    ],
+    "subscribe": [
+      "kubernetes.cluster.consumer.Pod",
+      "polar.kubernetes.cluster.resolution"
+    ],
+    "groups": [
+      "cassini-client",
+      "encryption",
+      "self-test"
+    ]
+  },
+  {
+    "workload": "system:serviceaccount:polar:kube-observer",
+    "publish": [
+      "kubernetes.cluster.consumer.Pod"
+    ],
+    "subscribe": [],
+    "groups": [
+      "cassini-client",
+      "self-test"
+    ]
+  },
+  {
+    "workload": "system:serviceaccount:polar:polar-git-server",
+    "publish": [
+      "polar-git-repo-changed"
+    ],
+    "subscribe": [],
+    "groups": [
+      "cassini-client",
+      "self-test"
+    ]
+  },
+  {
+    "workload": "system:serviceaccount:polar:polar-scheduler",
+    "publish": [
+      "agent.credentials-agent-observer.configuration",
+      "agent.credentials-agent.configuration",
+      "agent.git-repo-controller.configuration",
+      "agent.git-repo-observer.configuration",
+      "agent.git-repo-processor.configuration",
+      "agent.harness-producer.configuration",
+      "agent.harness-sink.configuration",
+      "agent.jira-observer.configuration",
+      "agent.jira-processor.configuration",
+      "agent.kube-consumer.configuration",
+      "agent.kube-observer.configuration",
+      "agent.oci-registry-resolver.configuration",
+      "agent.polar-git-server.configuration",
+      "agent.polar-scheduler-observer.configuration",
+      "agent.polar-scheduler.configuration",
+      "agent.secret-harness-intruder.configuration",
+      "agent.secret-harness-owner.configuration"
+    ],
+    "subscribe": [
+      "polar-configuration-outcome",
+      "scheduler.in"
+    ],
+    "groups": [
+      "cassini-client",
+      "self-test"
+    ]
+  },
+  {
+    "workload": "system:serviceaccount:polar:polar-scheduler-observer",
+    "publish": [
+      "agent.credentials-agent-observer.configuration",
+      "agent.credentials-agent.configuration",
+      "agent.git-repo-controller.configuration",
+      "agent.git-repo-observer.configuration",
+      "agent.git-repo-processor.configuration",
+      "agent.harness-producer.configuration",
+      "agent.harness-sink.configuration",
+      "agent.jira-observer.configuration",
+      "agent.jira-processor.configuration",
+      "agent.kube-consumer.configuration",
+      "agent.kube-observer.configuration",
+      "agent.oci-registry-resolver.configuration",
+      "agent.polar-git-server.configuration",
+      "agent.polar-scheduler-observer.configuration",
+      "agent.polar-scheduler.configuration",
+      "agent.secret-harness-intruder.configuration",
+      "agent.secret-harness-owner.configuration",
+      "scheduler.in"
+    ],
+    "subscribe": [
+      "polar-configuration-replay",
+      "polar-git-repo-changed"
+    ],
+    "groups": [
+      "cassini-client",
+      "self-test"
+    ]
+  }
+]

@@ -243,3 +243,114 @@ fn judging_a_document_over_the_real_model_is_quick() {
     assert!(j.refuses());
     assert!(took < std::time::Duration::from_secs(10), "{took:?}");
 }
+
+/// The names a credentials-agent-issued workload's certificates carry are its declared and family topics and its groups;
+/// its implied topics are not written, since they follow from its identity.
+#[test]
+fn a_workload_the_credentials_agent_issues_carries_its_declared_and_family_topics_and_its_groups() {
+    let m = model();
+    let scheduler = m.workload("polar-scheduler").unwrap();
+    let names = m
+        .issued_by_the_credentials_agent(&id("polar-scheduler"))
+        .expect("the credentials agent issues the scheduler");
+    let own = |access: Access| -> Vec<String> {
+        let mut topics: Vec<String> = scheduler
+            .topics
+            .iter()
+            .filter(|t| {
+                t.access == access
+                    && !matches!(
+                        t.origin,
+                        polar_agent_builder::topics::Origin::Implied { .. }
+                    )
+            })
+            .map(|t| t.name.clone())
+            .collect();
+        topics.sort();
+        topics.dedup();
+        topics
+    };
+    assert_eq!(names.publish, own(Access::Publish));
+    assert_eq!(names.subscribe, own(Access::Subscribe));
+    assert!(
+        names
+            .publish
+            .iter()
+            .any(|t| t == "agent.credentials-agent.configuration"),
+        "a family topic: {names:?}"
+    );
+    assert_eq!(names.groups, ["cassini-client", "self-test"]);
+    // A use of a topic that only a rule implies is not written; the same topic used another way may be.
+    let implied: Vec<String> = scheduler
+        .topics
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.origin,
+                polar_agent_builder::topics::Origin::Implied { .. }
+            )
+        })
+        .filter(|t| !own(t.access).contains(&t.name))
+        .map(|t| {
+            let access = if t.access == Access::Publish {
+                "pub"
+            } else {
+                "sub"
+            };
+            format!("p:{access}:{}", t.name)
+        })
+        .collect();
+    assert!(!implied.is_empty());
+    let sans = names.san_strings();
+    for name in &implied {
+        assert!(!sans.contains(name), "{name} is implied: {sans:?}");
+    }
+    assert!(
+        sans.contains(&"p:pub:agent.credentials-agent.configuration".to_string()),
+        "{sans:?}"
+    );
+    assert!(sans.contains(&"g:self-test".to_string()), "{sans:?}");
+}
+
+#[test]
+fn a_bootstrap_service_or_an_identity_the_model_does_not_know_is_not_issued_by_the_credentials_agent()
+ {
+    let m = model();
+    assert_eq!(
+        m.issued_by_the_credentials_agent(&id("credentials-agent")),
+        None
+    );
+    assert_eq!(m.issued_by_the_credentials_agent(&id("nobody")), None);
+    // The token's subject is not an identity.
+    assert_eq!(
+        m.issued_by_the_credentials_agent("system:serviceaccount:polar:polar-scheduler"),
+        None
+    );
+}
+
+/// The credentials agent issues a workload whose issuer is the credentials agent and which is no bootstrap service: one
+/// still asking cert-issuer directly is in neither floor, and a bootstrap service is cert-issuer's, whatever else is said.
+#[test]
+fn only_a_workload_the_credentials_agent_issues_and_that_is_no_bootstrap_service_is_issued_by_it() {
+    let workload = |name: &str, issuer: &str, bootstrap: bool| {
+        serde_json::json!({
+            "workload": name, "identity": id(name), "issuer": issuer, "bootstrap": bootstrap, "groups": ["g"],
+            "topics": [{"name": "news", "access": "publish", "from": "declared", "purpose": "p"}]
+        })
+    };
+    let m = Model::parse(
+        &serde_json::json!({"format": 1, "workloads": [
+            workload("issued", "credentials-agent", false),
+            workload("direct", "cert-issuer", false),
+            workload("booted", "credentials-agent", true),
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let issued = m
+        .issued_by_the_credentials_agent(&id("issued"))
+        .expect("issued");
+    assert_eq!(issued.san_strings(), ["p:pub:news", "g:g"]);
+    assert_eq!(m.issued_by_the_credentials_agent(&id("direct")), None);
+    assert_eq!(m.issued_by_the_credentials_agent(&id("booted")), None);
+}
