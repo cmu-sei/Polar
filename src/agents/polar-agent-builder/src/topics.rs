@@ -48,6 +48,69 @@ impl Access {
     }
 }
 
+/// What makes an agent publish on a topic, as its code knows it (docs/architecture/authority-model.md, "Decisions":
+/// local causes, derived paths, and the vocabulary of causes). An agent says only what its own code does: the
+/// authority derives the paths through the system from everyone's causes. Every cause but `Topic` is an entry, a way
+/// in from outside the agent's subscriptions, which a subscription may answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    /// A message arrived on a topic the agent subscribes to.
+    Topic(&'static str),
+    /// A request on a route the agent serves.
+    Http(&'static str),
+    /// The agent registered with Cassini (again).
+    Registered,
+    /// The agent's own interval.
+    Timer(&'static str),
+    /// Something outside Polar the agent watches.
+    Outside(&'static str),
+}
+
+/// A [`Cause`] as the set holds it and the scaffold prints it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "name", rename_all = "snake_case")]
+pub enum CauseEntry {
+    Topic(String),
+    Http(String),
+    Registered,
+    Timer(String),
+    Outside(String),
+}
+
+impl From<Cause> for CauseEntry {
+    fn from(cause: Cause) -> Self {
+        match cause {
+            Cause::Topic(name) => CauseEntry::Topic(name.to_string()),
+            Cause::Http(route) => CauseEntry::Http(route.to_string()),
+            Cause::Registered => CauseEntry::Registered,
+            Cause::Timer(name) => CauseEntry::Timer(name.to_string()),
+            Cause::Outside(source) => CauseEntry::Outside(source.to_string()),
+        }
+    }
+}
+
+impl CauseEntry {
+    /// The name it carries, if any: a topic, a route, a timer, a source.
+    fn name(&self) -> Option<&str> {
+        match self {
+            CauseEntry::Topic(n)
+            | CauseEntry::Http(n)
+            | CauseEntry::Timer(n)
+            | CauseEntry::Outside(n) => Some(n),
+            CauseEntry::Registered => None,
+        }
+    }
+}
+
+/// What a topic of the set says about causes: for a publish, what causes it, or why nothing does; for a
+/// subscription, the entry it answers, if it answers one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct Causes {
+    causes: Vec<CauseEntry>,
+    answers: Option<CauseEntry>,
+    unprompted: Option<String>,
+}
+
 /// A topic an agent declares it uses, and what for. A topic it both publishes and subscribes to is
 /// declared twice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +122,12 @@ pub struct TopicDecl {
     /// outside the catalog. A declared topic with no other side and no reason fails the catalog's check
     /// (docs/architecture/policy-enforcement.md, "Decisions").
     pub waits: Option<&'static str>,
+    /// For a publish, what causes it ([`because`](Self::because)).
+    pub causes: &'static [Cause],
+    /// For a subscription, the entry it answers ([`answers`](Self::answers)).
+    pub answers: Option<Cause>,
+    /// For a publish nothing causes, why the agent publishes it of its own accord.
+    pub unprompted: Option<&'static str>,
 }
 
 impl TopicDecl {
@@ -68,6 +137,9 @@ impl TopicDecl {
             access: Access::Publish,
             purpose,
             waits: None,
+            causes: &[],
+            answers: None,
+            unprompted: None,
         }
     }
 
@@ -77,6 +149,9 @@ impl TopicDecl {
             access: Access::Subscribe,
             purpose,
             waits: None,
+            causes: &[],
+            answers: None,
+            unprompted: None,
         }
     }
 
@@ -85,6 +160,35 @@ impl TopicDecl {
         Self {
             waits: Some(reason),
             ..self
+        }
+    }
+
+    /// The same publish, saying what causes the agent to make it.
+    pub const fn because(self, causes: &'static [Cause]) -> Self {
+        Self { causes, ..self }
+    }
+
+    /// The same subscription, saying it answers `entry`: what the agent sent when the entry came in comes back here.
+    pub const fn answers(self, entry: Cause) -> Self {
+        Self {
+            answers: Some(entry),
+            ..self
+        }
+    }
+
+    /// The same publish, which nothing causes: the agent publishes it of its own accord, for `reason`.
+    pub const fn of_its_own_accord(self, reason: &'static str) -> Self {
+        Self {
+            unprompted: Some(reason),
+            ..self
+        }
+    }
+
+    fn causes(&self) -> Causes {
+        Causes {
+            causes: self.causes.iter().map(|c| CauseEntry::from(*c)).collect(),
+            answers: self.answers.map(CauseEntry::from),
+            unprompted: self.unprompted.map(str::to_string),
         }
     }
 }
@@ -101,6 +205,10 @@ pub struct FamilyDecl {
     pub pattern: &'static str,
     pub access: Access,
     pub purpose: &'static str,
+    /// For a publish, what causes it, as for a [`TopicDecl`].
+    pub causes: &'static [Cause],
+    /// For a publish nothing causes, why the agent publishes it of its own accord.
+    pub unprompted: Option<&'static str>,
 }
 
 impl FamilyDecl {
@@ -109,6 +217,8 @@ impl FamilyDecl {
             pattern,
             access: Access::Publish,
             purpose,
+            causes: &[],
+            unprompted: None,
         }
     }
 
@@ -117,6 +227,21 @@ impl FamilyDecl {
             pattern,
             access: Access::Subscribe,
             purpose,
+            causes: &[],
+            unprompted: None,
+        }
+    }
+
+    /// The same family, saying what causes the agent to publish on it.
+    pub const fn because(self, causes: &'static [Cause]) -> Self {
+        Self { causes, ..self }
+    }
+
+    /// The same family, which nothing causes: the agent publishes on it of its own accord, for `reason`.
+    pub const fn of_its_own_accord(self, reason: &'static str) -> Self {
+        Self {
+            unprompted: Some(reason),
+            ..self
         }
     }
 
@@ -262,6 +387,75 @@ pub fn groups_for(facts: &Facts) -> Vec<&'static str> {
     rules_for(facts).into_iter().map(Rule::group).collect()
 }
 
+/// What causes the topics `rule` implies for the agent `name` (docs/architecture/authority-model.md, "Decisions"): its
+/// requests for a replay and for the authority are made when it registers (and the latter when it sees an update it
+/// cannot check), its outcomes when a document or a command arrives, its probe on its own interval; its crypto
+/// actor's requests are made when the agent encrypts or decrypts, which no topic or entry causes.
+fn implied_causes(rule: Rule, name: &str) -> BTreeMap<(String, Access), Causes> {
+    use credentials_agent_common::authority_update::{
+        AUTHORITY_SNAPSHOT_REPLIES_TOPIC, AUTHORITY_SNAPSHOT_REQUESTS_TOPIC,
+        AUTHORITY_UPDATES_TOPIC,
+    };
+    use polar_scheduler_common as scheduler;
+    let caused = |causes: Vec<CauseEntry>| Causes {
+        causes,
+        ..Causes::default()
+    };
+    let answering = |entry: CauseEntry| Causes {
+        answers: Some(entry),
+        ..Causes::default()
+    };
+    match rule {
+        Rule::Agent => BTreeMap::from([
+            (
+                (scheduler::CONFIGURATION_REPLAY_TOPIC.to_string(), Access::Publish),
+                caused(vec![CauseEntry::Registered]),
+            ),
+            (
+                (scheduler::CONFIGURATION_OUTCOME_TOPIC.to_string(), Access::Publish),
+                caused(vec![CauseEntry::Topic(scheduler::configuration_topic(name))]),
+            ),
+            (
+                (scheduler::COMMAND_OUTCOME_TOPIC.to_string(), Access::Publish),
+                caused(vec![CauseEntry::Topic(scheduler::command_topic(name))]),
+            ),
+            (
+                (AUTHORITY_SNAPSHOT_REQUESTS_TOPIC.to_string(), Access::Publish),
+                caused(vec![
+                    CauseEntry::Registered,
+                    CauseEntry::Topic(AUTHORITY_UPDATES_TOPIC.to_string()),
+                ]),
+            ),
+            (
+                (AUTHORITY_SNAPSHOT_REPLIES_TOPIC.to_string(), Access::Subscribe),
+                answering(CauseEntry::Registered),
+            ),
+        ]),
+        Rule::SelfTest => {
+            let topic = crate::infrastructure::self_test_topic(name);
+            let tick = || CauseEntry::Timer("self-test".to_string());
+            BTreeMap::from([
+                ((topic.clone(), Access::Publish), caused(vec![tick()])),
+                ((topic, Access::Subscribe), answering(tick())),
+            ])
+        }
+        Rule::Encryption => polar_crypto::REQUEST_TOPICS
+            .iter()
+            .map(|t| {
+                (
+                    (t.to_string(), Access::Publish),
+                    Causes {
+                        unprompted: Some(
+                            "its crypto actor asks the credentials agent when the agent encrypts or decrypts".to_string(),
+                        ),
+                        ..Causes::default()
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
 /// The implied topics of the workload `name` in `groups`, each with the rule that implied it: the one function the
 /// agent computes its set with and the broker its floor, from the certificate's identity and `g:` names. A group that
 /// implies nothing adds nothing.
@@ -319,12 +513,22 @@ pub struct TopicEntry {
     pub access: Access,
     #[serde(flatten)]
     pub origin: Origin,
+    /// For a publish, what causes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub causes: Vec<CauseEntry>,
+    /// For a subscription, the entry it answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<CauseEntry>,
+    /// For a publish nothing causes, why the agent publishes it of its own accord.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unprompted: Option<String>,
 }
 
 /// An agent's whole set of topics: declared and implied, each once, in a fixed order.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicSet {
     entries: BTreeMap<(String, Access), Origin>,
+    causes: BTreeMap<(String, Access), Causes>,
 }
 
 impl TopicSet {
@@ -343,26 +547,43 @@ impl TopicSet {
         workloads: &[String],
     ) -> Self {
         let mut entries = BTreeMap::new();
+        let mut causes = BTreeMap::new();
         for decl in declared {
-            entries
-                .entry((decl.name.to_string(), decl.access))
-                .or_insert_with(|| Origin::Declared {
+            let key = (decl.name.to_string(), decl.access);
+            if let std::collections::btree_map::Entry::Vacant(slot) = entries.entry(key.clone()) {
+                slot.insert(Origin::Declared {
                     purpose: decl.purpose.to_string(),
                     waits: decl.waits.map(str::to_string),
                 });
+                causes.insert(key, decl.causes());
+            }
         }
         for family in families {
             for workload in workloads {
-                entries
-                    .entry((family.topic_for(workload), family.access))
-                    .or_insert_with(|| Origin::Family {
+                let key = (family.topic_for(workload), family.access);
+                if let std::collections::btree_map::Entry::Vacant(slot) = entries.entry(key.clone())
+                {
+                    slot.insert(Origin::Family {
                         pattern: family.pattern.to_string(),
                         workload: workload.clone(),
                         purpose: family.purpose.to_string(),
                     });
+                    causes.insert(
+                        key,
+                        Causes {
+                            causes: family.causes.iter().map(|c| CauseEntry::from(*c)).collect(),
+                            answers: None,
+                            unprompted: family.unprompted.map(str::to_string),
+                        },
+                    );
+                }
             }
         }
         for (key, rule) in implied_topics(facts.name, &groups_for(facts)) {
+            let implied = implied_causes(rule, facts.name)
+                .remove(&key)
+                .unwrap_or_default();
+            causes.insert(key.clone(), implied);
             entries.insert(
                 key,
                 Origin::Implied {
@@ -371,7 +592,7 @@ impl TopicSet {
                 },
             );
         }
-        Self { entries }
+        Self { entries, causes }
     }
 
     /// Whether the agent may use `topic` this way.
@@ -402,10 +623,20 @@ impl TopicSet {
     pub fn entries(&self) -> Vec<TopicEntry> {
         self.entries
             .iter()
-            .map(|((name, access), origin)| TopicEntry {
-                name: name.clone(),
-                access: *access,
-                origin: origin.clone(),
+            .map(|((name, access), origin)| {
+                let causes = self
+                    .causes
+                    .get(&(name.clone(), *access))
+                    .cloned()
+                    .unwrap_or_default();
+                TopicEntry {
+                    name: name.clone(),
+                    access: *access,
+                    origin: origin.clone(),
+                    causes: causes.causes,
+                    answers: causes.answers,
+                    unprompted: causes.unprompted,
+                }
             })
             .collect()
     }
@@ -485,6 +716,90 @@ pub fn problems(facts: &Facts, declared: &[TopicDecl]) -> Vec<String> {
                 "{what} is implied ({}): do not declare it",
                 rule.describe()
             ));
+        }
+    }
+    problems.extend(cause_problems(
+        &TopicSet::compute(facts, declared).entries(),
+    ));
+    problems
+}
+
+/// What is wrong with the causes of a set's topics (docs/architecture/authority-model.md, "Decisions"): a cause on a
+/// subscription, an answer on a publish, a topic cause the agent does not subscribe to, an answer to an entry none of
+/// its publishes takes or to a topic, a cause that names nothing, one named twice, and a publish both caused and
+/// unprompted, or unprompted for no reason.
+pub fn cause_problems(entries: &[TopicEntry]) -> Vec<String> {
+    let subscribed: std::collections::BTreeSet<&str> = entries
+        .iter()
+        .filter(|e| e.access == Access::Subscribe)
+        .map(|e| e.name.as_str())
+        .collect();
+    let taken: std::collections::BTreeSet<&CauseEntry> = entries
+        .iter()
+        .filter(|e| e.access == Access::Publish)
+        .flat_map(|e| e.causes.iter())
+        .filter(|c| !matches!(c, CauseEntry::Topic(_)))
+        .collect();
+    let mut problems = Vec::new();
+    for entry in entries {
+        let what = format!("the topic `{}` ({})", entry.name, entry.access.as_str());
+        match entry.access {
+            Access::Subscribe => {
+                if !entry.causes.is_empty() || entry.unprompted.is_some() {
+                    problems.push(format!("{what} is subscribed to, so nothing causes it"));
+                }
+            }
+            Access::Publish => {
+                if entry.answers.is_some() {
+                    problems.push(format!(
+                        "{what} answers an entry, but only a subscription can"
+                    ));
+                }
+                if !entry.causes.is_empty() && entry.unprompted.is_some() {
+                    problems.push(format!(
+                        "{what} has a cause and says it publishes of its own accord"
+                    ));
+                }
+            }
+        }
+        if entry
+            .unprompted
+            .as_deref()
+            .is_some_and(|reason| reason.trim().is_empty())
+        {
+            problems.push(format!(
+                "{what} publishes of its own accord, but gives no reason"
+            ));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for cause in &entry.causes {
+            if !seen.insert(cause) {
+                problems.push(format!("{what} names a cause twice"));
+            }
+            match cause {
+                CauseEntry::Topic(topic) if topic.trim().is_empty() => {
+                    problems.push(format!("{what} names no topic as its cause"))
+                }
+                CauseEntry::Topic(topic) if !subscribed.contains(topic.as_str()) => problems.push(
+                    format!("{what} is caused by `{topic}`, which the agent does not subscribe to"),
+                ),
+                other if other.name().is_some_and(|n| n.trim().is_empty()) => {
+                    problems.push(format!("{what} names no entry"))
+                }
+                _ => {}
+            }
+        }
+        match &entry.answers {
+            Some(CauseEntry::Topic(_)) => {
+                problems.push(format!("{what} answers a topic: an answer is to an entry"))
+            }
+            Some(entry_cause) if entry_cause.name().is_some_and(|n| n.trim().is_empty()) => {
+                problems.push(format!("{what} names no entry"))
+            }
+            Some(entry_cause) if !taken.contains(entry_cause) => {
+                problems.push(format!("{what} answers an entry the agent does not take"))
+            }
+            _ => {}
         }
     }
     problems
@@ -855,6 +1170,210 @@ mod tests {
                     matches!(entry.origin, Origin::Implied { .. }),
                     implied.contains(&key)
                 );
+            }
+        }
+    }
+
+    // -- causes (docs/architecture/authority-model.md, "Decisions": local causes, derived paths) --------------------
+
+    const ROUTE: &str = "/workload/issue";
+
+    #[test]
+    fn a_publish_says_what_causes_it_and_the_scaffold_prints_it() {
+        let declared = [
+            TopicDecl::publish("issuance-requests", "a workload's issuance")
+                .because(&[Cause::Http(ROUTE)]),
+            TopicDecl::subscribe("issuance-replies", "the answer").answers(Cause::Http(ROUTE)),
+            TopicDecl::publish("heartbeat", "that it is alive")
+                .of_its_own_accord("it says so every minute"),
+        ];
+        let set = TopicSet::compute(&agent("credentials-agent-observer"), &declared);
+        let printed = serde_json::to_value(set.entries()).unwrap();
+        let find = |name: &str| {
+            printed
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["name"] == name)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(
+            find("issuance-requests")["causes"],
+            serde_json::json!([{ "kind": "http", "name": ROUTE }])
+        );
+        assert_eq!(
+            find("issuance-replies")["answers"],
+            serde_json::json!({ "kind": "http", "name": ROUTE })
+        );
+        assert_eq!(find("heartbeat")["unprompted"], "it says so every minute");
+        // A topic with nothing to say about causes prints none of it.
+        let plain = TopicSet::compute(&agent("x"), &[TopicDecl::subscribe("news", "the news")]);
+        let plain = serde_json::to_value(plain.entries()).unwrap();
+        let news = plain
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "news")
+            .unwrap();
+        assert!(
+            news.get("causes").is_none()
+                && news.get("answers").is_none()
+                && news.get("unprompted").is_none()
+        );
+        assert!(problems(&agent("credentials-agent-observer"), &declared).is_empty());
+    }
+
+    #[test]
+    fn a_cause_that_does_not_fit_its_declaration_is_refused() {
+        let facts = agent("kube-observer");
+        let refused = |declared: &[TopicDecl], expect: &str| {
+            let found = problems(&facts, declared);
+            assert!(
+                found.iter().any(|p| p.contains(expect)),
+                "expected a problem containing {expect:?}, got {found:?}"
+            );
+        };
+        refused(
+            &[TopicDecl::subscribe("news", "p").because(&[Cause::Registered])],
+            "is subscribed to, so nothing causes it",
+        );
+        refused(
+            &[TopicDecl::publish("news", "p").answers(Cause::Http(ROUTE))],
+            "answers an entry, but only a subscription can",
+        );
+        refused(
+            &[TopicDecl::publish("news", "p").because(&[Cause::Topic("weather")])],
+            "is caused by `weather`, which the agent does not subscribe to",
+        );
+        refused(
+            &[TopicDecl::subscribe("replies", "p").answers(Cause::Http(ROUTE))],
+            "answers an entry the agent does not take",
+        );
+        refused(
+            &[TopicDecl::subscribe("replies", "p").answers(Cause::Topic("news"))],
+            "answers a topic: an answer is to an entry",
+        );
+        refused(
+            &[TopicDecl::publish("news", "p").because(&[Cause::Http(" ")])],
+            "names no entry",
+        );
+        refused(
+            &[TopicDecl::publish("news", "p").of_its_own_accord(" ")],
+            "of its own accord, but gives no reason",
+        );
+        refused(
+            &[TopicDecl::subscribe("news", "p").of_its_own_accord("why")],
+            "is subscribed to, so nothing causes it",
+        );
+        refused(
+            &[TopicDecl::publish("news", "p").because(&[Cause::Registered, Cause::Registered])],
+            "names a cause twice",
+        );
+        refused(
+            &[TopicDecl::publish("news", "p")
+                .because(&[Cause::Registered])
+                .of_its_own_accord("why")],
+            "has a cause and says it publishes of its own accord",
+        );
+        // What it subscribes to by rule may cause a publish, as may an entry another of its publishes takes.
+        assert!(
+            problems(
+                &facts,
+                &[
+                    TopicDecl::publish("kubernetes.cluster.consumer.Pod", "what it saw").because(
+                        &[
+                            Cause::Topic("agent.kube-observer.command"),
+                            Cause::Outside("the Kubernetes API")
+                        ]
+                    )
+                ]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_topics_an_agent_uses_by_rule_carry_their_causes() {
+        let set = TopicSet::compute(&agent("kube-observer"), &[]);
+        let entries = set.entries();
+        let entry = |name: &str, access: Access| {
+            entries
+                .iter()
+                .find(|e| e.name == name && e.access == access)
+                .cloned()
+                .unwrap()
+        };
+        use credentials_agent_common::authority_update::{
+            AUTHORITY_SNAPSHOT_REPLIES_TOPIC, AUTHORITY_SNAPSHOT_REQUESTS_TOPIC,
+        };
+        assert_eq!(
+            entry(AUTHORITY_SNAPSHOT_REQUESTS_TOPIC, Access::Publish).causes,
+            [
+                CauseEntry::Registered,
+                CauseEntry::Topic("polar-authority-updates".to_string())
+            ]
+        );
+        assert_eq!(
+            entry(AUTHORITY_SNAPSHOT_REPLIES_TOPIC, Access::Subscribe).answers,
+            Some(CauseEntry::Registered)
+        );
+        assert_eq!(
+            entry(
+                polar_scheduler_common::CONFIGURATION_OUTCOME_TOPIC,
+                Access::Publish
+            )
+            .causes,
+            [CauseEntry::Topic(
+                "agent.kube-observer.configuration".to_string()
+            )]
+        );
+    }
+
+    fn causes_strategy() -> impl Strategy<Value = Vec<(String, bool, u8)>> {
+        prop::collection::vec(("[a-z][a-z.-]{0,10}", any::<bool>(), 0u8..4), 0..6)
+    }
+
+    proptest! {
+        /// What the scaffold prints of a set, causes and all, reads back as the same set's entries.
+        #[test]
+        fn the_printed_entries_read_back_as_they_were(raw in causes_strategy()) {
+            let declared: Vec<TopicDecl> = raw
+                .iter()
+                .map(|(name, publish, cause)| {
+                    let name: &'static str = Box::leak(name.clone().into_boxed_str());
+                    let cause = match cause {
+                        0 => Cause::Registered,
+                        1 => Cause::Http("/r"),
+                        2 => Cause::Timer("tick"),
+                        _ => Cause::Outside("the world"),
+                    };
+                    if *publish {
+                        TopicDecl::publish(name, "p").because(Box::leak(Box::new([cause])))
+                    } else {
+                        TopicDecl::subscribe(name, "p").answers(cause)
+                    }
+                })
+                .collect();
+            let entries = TopicSet::compute(&agent("x"), &declared).entries();
+            let text = serde_json::to_string(&entries).unwrap();
+            let back: Vec<TopicEntry> = serde_json::from_str(&text).unwrap();
+            prop_assert_eq!(back, entries);
+        }
+
+        /// The topics an agent uses by rule pass the checks an agent's own declarations must: every publish has a
+        /// cause or a reason, every topic that causes one is one the agent subscribes to, and every answer is to
+        /// an entry the agent takes. For any agent.
+        #[test]
+        fn the_topics_used_by_rule_meet_the_checks_on_causes(
+            (name, cassini, self_test, encryption) in facts_strategy(),
+        ) {
+            let facts = Facts { name: &name, cassini_client: cassini, self_test, encryption };
+            prop_assert!(cause_problems(&TopicSet::compute(&facts, &[]).entries()).is_empty());
+            for entry in TopicSet::compute(&facts, &[]).entries() {
+                if entry.access == Access::Publish {
+                    prop_assert!(!entry.causes.is_empty() || entry.unprompted.is_some(), "{entry:?}");
+                }
             }
         }
     }

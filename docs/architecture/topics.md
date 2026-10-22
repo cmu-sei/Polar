@@ -94,10 +94,42 @@ publish; a publisher for a subscribe), or its declaration says why it waits (`To
 scheduler's family expanded for every agent the catalog serves, and fails on a one-sided topic with no reason; the logic
 is `infra/topics.nu` (tests `infra/tests/topics.nu`). A render warns about a topic one-sided in its target
 (`resolve.nu topics-check`), since it cannot see the workloads its target disables. Built 2026-10-21. Waiting today:
-seven of the credentials agent's request and reply topics (nothing calls them yet), the git controller's
+four of the credentials agent's request and reply topics (nothing calls them yet; three more that waited were the
+unsigned grants, revocations and provisioning, removed 2026-10-22), the git controller's
 `polar-proposal-observe-repo` (no catalog agent proposes yet), and the resolver's `polar.provenance.events` (read by
 `build-processor`, a chart). `local-minimal` warns about kube-consumer's discovery and resolution topics, since it does
 not run the resolver.
+
+## Causes
+
+What makes an agent publish on a topic, said beside the topic (`docs/architecture/authority-model.md`, "Decisions":
+local causes, derived paths). A publish is caused by a `Cause`: a message on a topic the agent subscribes to (`Topic`),
+a request on a route it serves (`Http`), its registration with Cassini (`Registered`), its own interval (`Timer`), or
+something outside Polar it watches (`Outside`); or nothing, and then it says why it publishes of its own accord. A
+subscription may answer an entry (every cause but `Topic`): what the agent sent when the entry came in comes back
+there. An agent says only what its own code does; the authority derives the paths through the system from everyone's
+causes.
+
+```rust
+TopicDecl::publish(WORKLOAD_ISSUANCE_REQUESTS, "polar-init's workload issuance")
+    .because(&[Cause::Http("/workload/issue")]),
+TopicDecl::subscribe(WORKLOAD_ISSUANCE_REPLIES, "the answer to it")
+    .answers(Cause::Http("/workload/issue")),
+TopicDecl::publish(HEARTBEAT, "that it is alive").of_its_own_accord("it says so every minute"),
+```
+
+A family takes `.because` and `.of_its_own_accord` the same way. Implied topics carry their causes from their rule
+(`topics.rs`, `implied_causes`): an agent's requests for a replay and for the authority are made when it registers (the
+latter also when it sees an update it cannot check), and the snapshot replies answer that; its outcomes when a document
+or a command arrives; its self-test probe on its own interval, which it hears back; its crypto actor's requests when the
+agent encrypts or decrypts, of its own accord.
+
+The scaffold prints each topic's `causes`, `answers` and `unprompted`, and leaves out what a topic does not have. The
+builder refuses to start an agent whose causes do not fit (`topics.rs`, `cause_problems`): a cause on a subscription, an
+answer on a publish, a topic cause the agent does not subscribe to, an answer to an entry none of its publishes takes or
+to a topic, a cause that names nothing or is named twice, a publish both caused and unprompted, or unprompted for no
+reason. Built 2026-10-22 (the authority model's slice 1); a publish with no cause and no reason is refused once every
+agent declares its causes (slice 2).
 
 ## Every builder agent
 

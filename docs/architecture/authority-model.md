@@ -646,6 +646,16 @@ note added here. Paths are under `src/agents` unless they start with `infra`.
 - Tests: the checks, each refusal by example; a property that an agent's causes, as the scaffold prints them, read back
   to the declarations (a round trip); and that a declaration the checks pass has a cause or a reason for every publish.
 
+- *Built 2026-10-22:* `Cause` and `CauseEntry`, `TopicDecl::because`, `answers` and `of_its_own_accord` (and
+  `FamilyDecl::because`, `of_its_own_accord`), implied causes for every rule (`implied_causes`), the checks
+  (`cause_problems`, run from `problems`), and the scaffold's `causes`, `answers` and `unprompted`
+  (`polar-agent-builder/src/topics.rs`; `topics.md`, "Causes"). Two choices made building it: a publish may have several
+  causes (the scheduler observer's is its git server's announcement and its own interval), so `because` takes a list;
+  and the check that every publish has a cause or a reason waits for slice 2, since until every agent declares its
+  causes it would stop them all from starting. Tests: each check by example, the implied causes, a property that the
+  printed entries read back as they were, and a property that the topics every agent uses by rule meet the checks,
+  checked against a deliberate break.
+
 **2. Every agent declares its causes.** Each agent's `TOPICS`, the credentials observer's six routes as `Http` with route
 constants in `credentials_agent_common`, the git server's push, the observers' `Outside` sources and `Timer`s.
 - Tests: every agent's own declaration tests, and the catalog test (`infra/tests/catalog-topics.nu`) gains: every
