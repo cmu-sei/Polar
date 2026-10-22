@@ -23,8 +23,8 @@
 
 # The authority model: one place to reason about who may do what
 
-Written 2026-10-22. **Proposed, being settled** with the maintainer, one question at a time, before any of it is built;
-what is settled is under "Decisions". It replaces stage 5b's slice 5 (the credentials agent's check of a policy on arrival, open point B in
+Written 2026-10-22. **Settled** with the maintainer, one question at a time, the same day: every open question is
+answered, under "Decisions". Not built yet; the build is to be planned and cleared before it starts. It replaces stage 5b's slice 5 (the credentials agent's check of a policy on arrival, open point B in
 `policy-enforcement.md`), which would have been a hand-written version of the same thing.
 
 ## Why
