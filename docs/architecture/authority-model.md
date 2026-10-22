@@ -249,6 +249,15 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
      effect stays in the ledger.
   3. Outcomes carry names, never values, as now: the report names identities, topics and policy ids, never the
      policy's text.
+- **The comparison covers every account the credentials agent holds (2026-10-22).** Workloads come from the catalog;
+  persons from the credentials agent's ledger, which issued every person's certificate, so every account it holds is
+  in the universe and the report is complete without guessing. Persons are on no invariant path today (an
+  administrator's step in correction is a push to the git server, decided by its access list, which is no edge), but
+  they matter to the effect report: a person's identity implies no topics, so its floor is only what its certificate
+  declares and a permit is what moves its access; a change of policy is exactly what an administrator wants to see
+  for them ("alice loses `credentials-admin-action-requests`"). Chosen over the persons the documents name (the groups
+  document's, and those a policy names outright), which would miss everyone a group rule covers whom the groups
+  document does not list. The cost is one evaluation a person a topic, small at these sizes.
 - **A groups document is checked the same way as a policy (2026-10-22).** Against the same rules: the two invariants,
   renewal derived beneath them, over the same catalog facts. The rules are judged on a pair, the policy and the groups
   document, and do not ask which of them arrived. When either arrives, the authority:
@@ -374,17 +383,19 @@ missed(A,E,T)    :- misses(A,E,T,_).
 
 "Renewal still works" is then `closes(observer, http("/workload/issue"))` under the proposed policy: no list of topics
 is written for it. The invariants are judged over `held` edges, so an agent that would not be renewed carries nothing
-for them; `held` is not recursive through `lives`, since renewal's own round trip is judged over `edge`. Reachability is where recursion earns its keep, and Cedar cannot express it, deliberately
-(`policy-enforcement.md`, "Decisions": Datalog was kept out unless rules must derive facts recursively; these do).
-Cedar still decides each request; its answers are the `allowed` facts, and Datalog does the closure.
+for them; `held` is not recursive through `lives`, since renewal's own round trip is judged over `edge`. Reachability is
+where recursion earns its keep, and Cedar cannot express it, deliberately (`policy-enforcement.md`, "Decisions": Datalog
+was kept out unless rules must derive facts recursively; these do). Cedar still decides each request; its answers are
+the `allowed` facts, and Datalog does the closure.
 
 A refusal carries its reason: the round trip that no longer closes, and the edge whose loss broke it. No engine gives
 proof trees by itself, so the witness is designed into the rules (see "The engine").
 
 ### 3. Acceptance as a comparison
 
-The catalog is closed, so the universe of requests is finite: every identity in the model, and every person the groups
-document names, against every topic in any floor or named by either policy, for publish and subscribe. When a policy or
+The catalog is closed, so the universe of requests is finite: every identity in the model, and every account the
+credentials agent's ledger holds ("Decisions"), against every topic in any floor or named by either policy, for publish
+and subscribe. When a policy or
 a groups document arrives, the credentials agent evaluates the current pair (policy, groups) and the proposed pair over
 that universe, with Cedar's own evaluator, and compares:
 
@@ -506,7 +517,7 @@ To settle one at a time, before building:
 7. ~~What a refusal and an effect report look like, and where they are recorded.~~ Settled: an `invalid` outcome and
    an `AuthorityRefused` ledger event; the effect in `AuthorityPublished`, a summary on the outcome ("Decisions",
    2026-10-22).
-8. Persons: only those the groups document names, or others too.
+8. ~~Persons.~~ Settled: every account in the credentials agent's ledger ("Decisions", 2026-10-22).
 9. Whether the render's separate projections (the issuance floor, the served workloads) are replaced by the model at
    once, or later.
 10. Whether the model also checks what the inventory found unchecked: a groups document's keys against the catalog, and
