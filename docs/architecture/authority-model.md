@@ -24,8 +24,9 @@
 # The authority model: one place to reason about who may do what
 
 Written 2026-10-22. **Settled** with the maintainer, one question at a time, the same day: every open question is
-answered, under "Decisions". Not built yet; the build is to be planned and cleared before it starts. It replaces stage 5b's slice 5 (the credentials agent's check of a policy on arrival, open point B in
-`policy-enforcement.md`), which would have been a hand-written version of the same thing.
+answered, under "Decisions". Not built yet: its build order ("Build order, tests first") is proposed, to be cleared before it starts. It replaces stage
+5b's slice 5 (the credentials agent's check of a policy on arrival, open point B in `policy-enforcement.md`), which
+would have been a hand-written version of the same thing.
 
 ## Why
 
@@ -430,8 +431,9 @@ their rule, so `cassini-client`'s authority round trip is declared once. The sca
 collects them as it collects topics now, and applying the catalog signs them off. The vocabulary of causes (which
 entries exist) is an open question.
 
-The issuance floor becomes a query on this model, not a separate variable ("Decisions": when the model lands), and the identity forms are converted in one
-place. cert-issuer keeps its own small floor, on purpose (`cert-issuer-isolation.md`).
+The issuance floor becomes a query on this model, not a separate variable ("Decisions": when the model lands), and the
+identity forms are converted in one place. cert-issuer keeps its own small floor, on purpose
+(`cert-issuer-isolation.md`).
 
 ### 2. Rules over the model
 
@@ -611,6 +613,103 @@ To settle one at a time, before building:
     2026-10-22). (b) Who publishes on the credentials agent's request topics: audited ("The consumer's request topics,
     audited"); the three that proved nothing were removed; every request is also judged by Cedar, built with the model
     ("Decisions", 2026-10-22). All settled.
+
+## Build order, tests first
+
+*Proposed 2026-10-22, to be cleared before it starts.* Slices in order, each committed when its tests pass, each test
+written first and seen to fail, with property tests where an invariant exists (`AGENTS.md`), and each slice's "Built"
+note added here. Paths are under `src/agents` unless they start with `infra`.
+
+**1. Causes are declared, and checked where they are declared.** `polar-agent-builder/src/topics.rs`.
+- A `Cause` (`Topic`, `Http`, `Registered`, `Timer`, `Outside`, "Decisions"), and on `TopicDecl` the const builders
+  `.because(cause)`, `.answers(entry)` for a subscription that answers an entry, and `.of_its_own_accord(reason)` for a
+  publish with no cause, which, like `.waiting`, must give its reason.
+- Implied topics carry causes from their rule (`implied_by`): the snapshot request and the configuration replay
+  because of `Registered`; the configuration and command outcomes because of the configuration and command topics.
+- The declaration checks at start (`topics.rs:453`, beside the ones there) refuse: a publish with no cause and no
+  reason; a `Topic` cause the agent does not subscribe to; an `answers` naming an entry the agent does not take; a cause
+  on a subscription.
+- `--scaffold` prints each topic's causes and each entry.
+- Tests: the checks, each refusal by example; a property that an agent's causes, as the scaffold prints them, read back
+  to the declarations (a round trip); and that a declaration the checks pass has a cause or a reason for every publish.
+
+**2. Every agent declares its causes.** Each agent's `TOPICS`, the credentials observer's six routes as `Http` with route
+constants in `credentials_agent_common`, the git server's push, the observers' `Outside` sources and `Timer`s.
+- Tests: every agent's own declaration tests, and the catalog test (`infra/tests/catalog-topics.nu`) gains: every
+  catalog agent declares a cause or a reason for every publish.
+
+**3. The render emits the model.** `infra/resolve.nu`, `infra/rules.nu`.
+- One document of the model's base facts (workloads with both identity forms, issuers, bootstrap, certificate groups,
+  declared topics, implied topics with their rule, causes, entries), from the scaffolds the render already collects,
+  given to the credentials agent as one variable of its configuration document, beside the issuance floor until slice 8
+  removes that.
+- Tests (`infra/tests/rules.nu`, `resolve.nu`): the facts of a small catalog, exactly; both identity forms from one
+  template; a bootstrap workload's facts present though cert-issuer issues it.
+
+**4. One Cedar evaluator, callable without the actor.** `polar-policy/src/lib.rs`.
+- The evaluation `PolicyActor::evaluate` does (`lib.rs:318`) is split into a pure core: given a policy, a groups
+  hierarchy and memberships, and a list of requests (identity, groups, capabilities, action, resource, facts), each
+  request's `Decision`. The actor calls the same core, so there is one evaluator and no second to drift.
+- Tests: the actor's existing tests unchanged; a property that the core and the actor decide every generated request
+  alike.
+
+**5. The model crate.** A new crate under `credentials-agent/`, beside `common`, `consume` and `observe`, with no actor
+and no Cassini.
+- The facts' types, read from slice 3's document; the rules as one `ascent!` block ("Rules over the model"): `edge`,
+  `reach`, `closes`, `lives`, `held`, deliveries with stratified negation, and the witness lattice, read only after a
+  run (ascent issue #22); a fresh program for every evaluation (issue #30).
+- The two invariants, named in code with the code's own constants: hearing authority and correction.
+- The comparison: a pair (policy, groups) and the facts in; for each invariant held or not, with its witness or the
+  edge lost; the effect (who gained or lost what, which round trips began or stopped closing); the groups document's
+  unknown keys.
+- Tests: the spike's three cases over the sandbox's real model (everything allowed; the observer's issuance forbidden,
+  taking correction with it; the scheduler processor's forward forbidden); a groups document moving
+  `polar-scheduler` into a forbidden group. Properties: allowing more never breaks an invariant that held (the rules are
+  monotone in `allowed`); the facts in any order give the same result; every witness is a path of edges; the comparison
+  refuses exactly when an invariant held under the current pair and not under the proposed. And the evaluation time
+  over the real model, measured and recorded.
+
+**6. A runtime section can be judged before it is replaced.** `polar-agent-builder/src/runtime.rs`, `configuration.rs`.
+- Beside `validate` (`runtime.rs:57`, a pure function of the body), an agent may give its configuration actor a judge:
+  called with the section, the candidate body and the sections in force, before the section is replaced (where
+  `validate` is called now, `configuration.rs:318`), answering accept with a summary or refuse with reasons. A refusal
+  is an `invalid` outcome, and the section in force stays.
+- Tests: a judge's refusal leaves the section in force and the outcome `invalid` with its reasons; its acceptance
+  carries the summary into the `applied` outcome; a section with no judge is as today.
+
+**7. The credentials agent judges policy and groups documents.** `credentials-agent/consume`.
+- The consumer's judge, for its `policy` and `groups` sections: the pair as it would stand, Cedar over every request in
+  the universe (every workload in the model, and every account in its ledger), the model's comparison, and the outcome
+  ("Decisions": the fixed-form reason, or the summary).
+- The ledger: a new `AuthorityRefused` event (the document, its signer, the reason), and `AuthorityPublished` gains the
+  effect.
+- Settled in this slice from the code: which names an account is known by to Cedar and the groups document (its
+  certificate's identity, its username).
+- Tests: open point B's own (a policy forbidding a workload `polar-authority-updates` is refused whole, and the old
+  policy stays); a policy cutting renewal refused as breaking correction, with that reason; a groups document refused
+  the same way; an accepted policy's effect in the ledger and its summary on the outcome; a groups document's unknown
+  key reported and a key that is no identity refused.
+
+**8. The model replaces the issuance floor.** `credentials-agent/consume/src/issuance.rs`, `issuance_floor.rs`,
+`settings.rs`; `infra/rules.nu`.
+- Issuance asks the model for a workload's topics and groups by its token identity; `issuance_floor.rs`,
+  `CREDENTIALS_AGENT_ISSUANCE_TOPICS` and the render's `issuance_topics` are removed.
+- Tests: the issuance tests, unchanged in what they expect; a certificate carries the same names as before for every
+  catalog workload (the render's old floor and the model's query compared in a test, then the old one removed).
+
+**9. Every request to the credentials agent is judged by Cedar.** `polar-policy` (the schema), `credentials-agent/consume`.
+- `Action::"request"` on a `Request` resource in the schema; every one of the thirteen request topics dispatched with
+  the broker-verified publisher (four are today, `dispatch_request`); the consumer asks Cedar, and where policy is silent
+  the floor admits the topic's declared publishers, from the model.
+- Tests: a request from a declared publisher admitted; from anyone else refused, unless a permit admits it; a forbid
+  refusing the declared publisher; the decision rule as the topic gate's (Cedar, then the floor; unavailable refuses),
+  by a property.
+
+**10. Deploy and verify.** `sandbox-local`, the new images and render together.
+- Everything healthy, as after stage 5b; a policy that would cut renewal, signed and committed to the schedules
+  repository, refused, with its reason in the graph's outcome and the ledger, and the policy in force unchanged; an
+  ordinary policy accepted, with its effect summary in the graph.
+- Docs: this document's "Built" notes, `policy-enforcement.md` (open point B built), `remaining-work.md`.
 
 ## Effect on stage 5b
 
