@@ -60,16 +60,27 @@ pub struct RuntimeSection {
 /// Judges a runtime section before it is replaced, given the sections in force: what an agent may say about what its
 /// configuration becomes beyond what [`RuntimeSection::validate`] sees of the body alone (the credentials agent's
 /// authority model judges a `policy` or `groups` document against the other: docs/architecture/authority-model.md).
-/// Called after `validate` accepts the body, and only then.
+/// Called after `validate` accepts the body, and only then. Async, so a judge may ask its own actors (the credentials
+/// agent asks its ledger for the accounts it holds) and do its work off the actor's thread.
+#[ractor::async_trait]
 pub trait SectionJudge: Send + Sync {
     /// `Ok(notes)` accepts, and the notes go with the outcome; `Err(reasons)` refuses, and the section in force stays.
     /// Names and reasons only, never a value: an outcome carries no secret.
-    fn judge(
+    async fn judge(
         &self,
-        section: &str,
-        candidate: &serde_json::Value,
+        candidate: &Candidate<'_>,
         in_force: &std::collections::HashMap<String, RuntimeValue>,
     ) -> Result<Vec<String>, Vec<String>>;
+}
+
+/// A runtime document a [`SectionJudge`] is asked about: which section it would replace, its version, who signed it
+/// (as the outcome names them), and its body.
+#[derive(Debug, Clone, Copy)]
+pub struct Candidate<'a> {
+    pub section: &'a str,
+    pub version: u64,
+    pub signer: &'a str,
+    pub body: &'a serde_json::Value,
 }
 
 /// Sent on the output port when a section was replaced.

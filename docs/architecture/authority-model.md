@@ -282,8 +282,8 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
   - a key that names no identity the authority knows is reported, not refused: it shows in the outcome's summary ("names
     no identity the authority knows: …"), since it may be deliberate (a person put in a group before their account
     exists);
-  - a key that is no identity at all, neither a workload's identity nor a username, is `invalid`; the groups section's
-    own validation can judge that alone.
+  - a key that is not a workload's identity is a person's username, converted to their account ID; one no account
+    has is refused ("A person is written by username and known by account ID", above).
 - **Every request to the credentials agent is also judged by Cedar, built with the model (2026-10-22).** The consumer
   asks Cedar whether the broker-verified publisher may make the request (`Action::"request"` on a resource naming the
   request, such as `Request::"workload-issuance"`), and where policy is silent the floor admits each topic's declared
@@ -308,6 +308,30 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
   (`normalize_identity`). An earlier draft of this document gave the model both forms, which would have built the alias
   into new code. cert-issuer's floor and workload grants are keyed the same way after this build
   (`remaining-work.md`).
+- **A person is written by username and known by account ID; the credentials agent converts (2026-10-22).** An
+  account's certificate carries two names: its first DNS name, the account ID (a UUID the credentials agent mints when
+  it provisions the account, `credentials-agent/consume/src/admin_action.rs:172`, `account.rs:246`, and keeps when a
+  revoked account is provisioned again under the same username, `admin_action.rs:155`), and its subject's `uid`, the
+  username. Topic requests named the person by the first, at the broker (`cassini/broker/src/authority.rs:117`) and at
+  every agent's gate (`polar-agent-builder/src/floor.rs:52`); signed documents and commands named them by the second
+  (`polar-agent-builder/src/signed.rs:458`, `command.rs:412`); and the groups section told authors to key a person by
+  username. So a membership `alice: [...]` applied to Alice's signed documents and never to her topic requests, and a
+  policy could name her two ways. Found while building slice 7, where the model judges topic requests as the broker
+  does and would have reported `alice` as naming no identity it knows.
+
+  Settled by the decision `credentials-policy.md` made on 2026-10-12 ("an author writes `alice`, never a UUID") and
+  never built, extended from the credentials agent's own policy to everything it publishes. In force, everyone is
+  known by their certificate's first DNS name: a person by account ID at the broker, at every gate, and as the
+  principal of a signed document or command. Authors write a person's username, in a policy (`Identity::"alice"`) and
+  as a groups document's key, and the credentials agent converts each one to the account ID from its ledger before it
+  judges the document and publishes it, the way a token's subject is converted where the token is read. A name that is
+  not a workload's identity is a username; one no account has is refused whole, so a typo or a person not yet
+  provisioned is never a silent no-match (for persons this replaces "reported, not refused" below; a workload identity
+  the catalog does not know is still reported). The username stays what it is for in the record: display, the
+  signer in history, and the commit message `polar-sign` writes. Chosen over writing the account ID, which needs no
+  conversion but puts UUIDs in reviewed documents, where a pasted wrong one grants the wrong person; and over making
+  the username the certificate's identity, which would reissue every person's certificate. No deployed policy or seed
+  named a person either way (the audit, 2026-10-22: only tests did).
 - **A groups document is checked the same way as a policy (2026-10-22).** Against the same rules: the two invariants,
   renewal derived beneath them, over the same catalog facts. The rules are judged on a pair, the policy and the groups
   document, and do not ask which of them arrived. When either arrives, the authority:
@@ -787,6 +811,35 @@ and no Cassini.
   policy stays); a policy cutting renewal refused as breaking correction, with that reason; a groups document refused
   the same way; an accepted policy's effect in the ledger and its summary on the outcome; a groups document's unknown
   key reported and a key that is no identity refused.
+
+- *Built 2026-10-22:* `credentials-agent/consume/src/authority_judge.rs`, the consumer's `SectionJudge` for `policy`
+  and `groups`, given to the builder with `ConfiguredAgent::with_section_judge` (the supervisor, before `build`).
+  - It first converts the document's usernames to account IDs (`authority_names.rs`, by the ledger's
+    `AccountNames`: every account with a certificate, revoked or not, and every one provisioned and not yet claimed),
+    and the sections in force the same way; a name that is neither a workload's identity nor an account's username
+    refuses the document. The Cedar part is `polar_policy::identities_named` and `rename_identities` (Cedar's
+    `entity_literals` and `sub_entity_literals`): rules keep their order and their `@id`s, and a policy naming no
+    person is published as written. A signed document's or command's principal is the signer's account ID
+    (`polar-agent-builder/src/signed.rs`, `command.rs`), so one name is in force everywhere.
+  - It then judges the pair as it would stand against the pair in force, over the model
+    (`CREDENTIALS_AGENT_AUTHORITY_MODEL`, read by `Model::parse` at start; a model that cannot be read stops the
+    agent) and every person the ledger holds a certificate for (`ActiveAccounts`), in `spawn_blocking`.
+  - A refusal is `invalid` with the fixed-form reasons, each loss followed by "it held through: …", the rules that
+    deny it named (`Evaluator::deciding`, `Loss::rules`), and recorded as `AuthorityRefused` (section, version,
+    signer, reasons). An acceptance carries a summary into the outcome and leaves an `Acceptance` (the converted body
+    and the effect) for the publisher, which publishes that body and records the effect in `AuthorityPublished`. A
+    section no judge saw (one held when the agent starts) is converted by the publisher itself, and not published if
+    it names no account. With no model a document is converted and accepted with the note "not judged".
+  - What a reader is told names a person by username (`legible`): the effect, the notes and the reasons. A person
+    provisioned and not yet claimed is no unknown key.
+  - Tests: open point B's own, renewal cut, a groups document against the policy in force, the sections in force
+    converted before judging, usernames converted and a name that applies to no one refused, a provisioned person,
+    an accepted document's summary and its acceptance, no model, another section, and the whole path through the
+    configuration actor with signed documents (the refused policy leaves the one in force); a property that the
+    judge refuses exactly when the model does and records only its refusals; a property that Cedar decides for a new
+    name under the renamed policy as for the old one; a property that a document is refused exactly for the names
+    that apply to no one. Mutation-checked; two survivors are equivalent today (the reasons and the notes made
+    legible: no loss names a person, since every goal is a workload's, and an unknown key is never a person's).
 
 **8. The model replaces the issuance floor.** `credentials-agent/consume/src/issuance.rs`, `issuance_floor.rs`,
 `settings.rs`; `infra/rules.nu`.

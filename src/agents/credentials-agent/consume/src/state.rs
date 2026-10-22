@@ -226,6 +226,19 @@ impl CredentialsState {
         self.last_authority_sequence
     }
 
+    /// Every account certificate the ledger holds that is not revoked: the persons the authority model judges a
+    /// change for (docs/architecture/authority-model.md, "Decisions": every account in the ledger).
+    pub fn active_account_certificates(&self) -> Vec<AccountCertificateRecord> {
+        let mut active: Vec<AccountCertificateRecord> = self
+            .account_certificates
+            .values()
+            .filter(|record| !record.revoked)
+            .cloned()
+            .collect();
+        active.sort_by(|a, b| a.account_id.cmp(&b.account_id));
+        active
+    }
+
     /// Rebuilds state by folding a full, ordered sequence of events --
     /// exactly what `EventLog::open`'s replayed events should be
     /// passed through, on every startup.
@@ -360,6 +373,8 @@ impl CredentialsState {
             CredentialsEvent::AuthorityPublished { sequence, .. } => {
                 self.last_authority_sequence = self.last_authority_sequence.max(*sequence);
             }
+            // A refused document changes nothing the state holds.
+            CredentialsEvent::AuthorityRefused { .. } => {}
             CredentialsEvent::SecretStored {
                 name,
                 secret,
@@ -621,6 +636,21 @@ impl CredentialsState {
             .filter(|record| record.serial == serial)
     }
 
+    /// Each account's username and the account ID it is known by: every account with a certificate, revoked or not,
+    /// and every one provisioned and not yet claimed. What the credentials agent converts a policy's or a groups
+    /// document's usernames by (docs/architecture/authority-model.md, "Decisions").
+    pub fn account_names(&self) -> std::collections::BTreeMap<String, String> {
+        self.account_certificates
+            .values()
+            .map(|record| (record.username.clone(), record.account_id.clone()))
+            .chain(
+                self.active_provisioned_accounts
+                    .iter()
+                    .map(|(username, record)| (username.clone(), record.account_id.clone())),
+            )
+            .collect()
+    }
+
     /// The account that holds (or last held) this username, if any.
     /// Re-provisioning after a revocation reuses its account_id, so the
     /// identity survives credential replacement.
@@ -638,7 +668,7 @@ impl CredentialsState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -947,6 +977,7 @@ mod tests {
             kind: "policy".to_string(),
             version: 1,
             timestamp: 4000,
+            effect: None,
         };
         let mut state = CredentialsState::new();
         assert_eq!(state.last_authority_sequence(), 0);
@@ -1221,7 +1252,7 @@ mod tests {
         assert_eq!(record.instance_binding, "pod-uid-2");
     }
 
-    fn provisioned(username: &str, account_id: &str) -> CredentialsEvent {
+    pub(crate) fn provisioned(username: &str, account_id: &str) -> CredentialsEvent {
         CredentialsEvent::AccountProvisioned {
             account_id: account_id.to_string(),
             username: username.to_string(),
@@ -1338,6 +1369,28 @@ mod tests {
             "acct-1"
         );
         assert!(state.account_for_username("nobody").is_none());
+    }
+
+    /// The name a person is written by and the one they are known by: every account the ledger holds, claimed or
+    /// only provisioned, revoked or not, since a revoked account provisioned again keeps its account ID.
+    #[test]
+    fn every_account_s_username_names_its_account_id() {
+        let mut state = CredentialsState::new();
+        state.apply(&provisioned("dana", "acct-1"));
+        state.apply(&account_issued("dana", "acct-1", "s1"));
+        state.apply(&revoked("s1"));
+        state.apply(&provisioned("erin", "acct-2"));
+        state.apply(&account_issued("erin", "acct-2", "s2"));
+        // Provisioned, not yet claimed.
+        state.apply(&provisioned("fay", "acct-3"));
+        assert_eq!(
+            state.account_names(),
+            std::collections::BTreeMap::from([
+                ("dana".to_string(), "acct-1".to_string()),
+                ("erin".to_string(), "acct-2".to_string()),
+                ("fay".to_string(), "acct-3".to_string()),
+            ])
+        );
     }
 
     #[test]

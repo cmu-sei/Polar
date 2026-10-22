@@ -416,6 +416,13 @@ pub struct ConfiguredAgent<M: ractor::Message> {
 }
 
 impl<M: ractor::Message> ConfiguredAgent<M> {
+    /// As [`AgentBuilder::with_section_judge`], for a judge made from what the agent builds from its settings
+    /// before the infrastructure starts (the credentials agent's, from its model and its ledger).
+    pub fn with_section_judge(mut self, judge: Arc<dyn runtime::SectionJudge>) -> Self {
+        self.builder.section_judge = Some(judge);
+        self
+    }
+
     /// The snapshot the infrastructure will run on. Read the agent's own settings from it
     /// with `config.read(&VAR)`, or parse a component's settings with its own
     /// `from_env(&*config)`.

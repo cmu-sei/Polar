@@ -455,11 +455,11 @@ impl Opened {
 
     /// What is being asked of policy: who, to do what, to which things.
     pub fn request(&self, agent: &str) -> crate::policy_authority::AuthorityRequest {
+        // The signer is known by one name, their certificate's first DNS name (an account ID), as on every topic.
         let principal = self
             .signer
-            .username
+            .identity
             .clone()
-            .or_else(|| self.signer.identity.clone())
             .unwrap_or_else(|| self.signer.serial.clone());
         let (action, resources) = match &self.body {
             OpenedBody::Configuration(payload) if payload.changes.is_empty() => {
@@ -601,6 +601,19 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A signer is known to policy by one name, their certificate's first DNS name (their account ID), as on every
+    /// topic; never by the username in its subject (docs/architecture/authority-model.md, "Decisions").
+    #[test]
+    fn a_signed_document_s_principal_is_its_signer_s_account_id() {
+        let rig = rig();
+        let doc = document(&rig, runtime_signer(), runtime_payload());
+        let opened = rig.verifier.open(&doc).unwrap();
+        assert_eq!(
+            opened.request("hello-agent").principal,
+            certs::ALICE_ACCOUNT_ID
+        );
     }
 
     #[test]

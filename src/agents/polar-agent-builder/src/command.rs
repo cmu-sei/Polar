@@ -407,11 +407,11 @@ pub struct OpenedCommand {
 impl OpenedCommand {
     /// What is being asked of policy: who, to run what.
     pub fn request(&self, agent: &str) -> crate::policy_authority::AuthorityRequest {
+        // The signer is known by one name, their certificate's first DNS name (an account ID), as on every topic.
         let principal = self
             .signer
-            .username
+            .identity
             .clone()
-            .or_else(|| self.signer.identity.clone())
             .unwrap_or_else(|| self.signer.serial.clone());
         crate::policy_authority::AuthorityRequest {
             principal,
@@ -718,6 +718,14 @@ mod tests {
 
     fn good(rig: &Rig) -> Value {
         document(rig, "c:run-command", payload())
+    }
+
+    /// A command's signer is known to policy by their account ID, as a signed document's is.
+    #[test]
+    fn a_command_s_principal_is_its_signer_s_account_id() {
+        let rig = rig();
+        let opened = rig.verifier.open(&good(&rig)).unwrap();
+        assert_eq!(opened.request(AGENT).principal, certs::ALICE_ACCOUNT_ID);
     }
 
     #[test]

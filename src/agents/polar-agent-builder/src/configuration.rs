@@ -296,15 +296,16 @@ impl ConfigurationState {
                     verified.body,
                     signer,
                 )
+                .await
             }
             Err(rejection) => self.reject(claimed(document), rejection),
         }
     }
 
     /// Replaces a runtime section, if the agent declares it, the version is higher than the section's
-    /// last, and the body fits. Otherwise nothing changes, and a refused document does not spend its
-    /// version, so a corrected one can go under the same number.
-    fn apply_runtime(
+    /// last, the body fits, and the agent's judge, if it has one, accepts it. Otherwise nothing changes, and
+    /// a refused document does not spend its version, so a corrected one can go under the same number.
+    async fn apply_runtime(
         &mut self,
         id: String,
         version: u64,
@@ -322,10 +323,19 @@ impl ConfigurationState {
                 if version <= held {
                     ApplyOutcome::Refused(Refusal::Stale { applied: held })
                 } else {
-                    let judged = (declared.validate)(&body).and_then(|()| match &self.judge {
-                        Some(judge) => judge.judge(section, &body, &self.runtime),
-                        None => Ok(Vec::new()),
-                    });
+                    let judged = match ((declared.validate)(&body), &self.judge) {
+                        (Err(problems), _) => Err(problems),
+                        (Ok(()), None) => Ok(Vec::new()),
+                        (Ok(()), Some(judge)) => {
+                            let candidate = crate::runtime::Candidate {
+                                section,
+                                version,
+                                signer: &signer,
+                                body: &body,
+                            };
+                            judge.judge(&candidate, &self.runtime).await
+                        }
+                    };
                     match judged {
                         Err(problems) => ApplyOutcome::Refused(Refusal::Invalid(problems)),
                         Ok(notes) => {
@@ -1063,7 +1073,7 @@ mod tests {
     // -- signed documents -------------------------------------------------------------------
 
     use polar_signing::Trust;
-    use polar_signing::testing::{self as certs, Spec, now, root, signer};
+    use polar_signing::testing::{self as certs, ALICE_ACCOUNT_ID, Spec, now, root, signer};
     use serde_json::{Value, json};
 
     const AGENT: &str = "hello-agent";
@@ -1740,13 +1750,14 @@ mod tests {
     /// noting what it judged: it sees the candidate and the sections in force.
     struct Gatekeeper;
 
+    #[ractor::async_trait]
     impl crate::runtime::SectionJudge for Gatekeeper {
-        fn judge(
+        async fn judge(
             &self,
-            section: &str,
-            candidate: &Value,
+            candidate: &crate::runtime::Candidate<'_>,
             in_force: &HashMap<String, RuntimeValue>,
         ) -> Result<Vec<String>, Vec<String>> {
+            let (section, candidate) = (candidate.section, candidate.body);
             let closed = in_force
                 .get("admission")
                 .is_some_and(|held| held.body["closed"] == json!(true));
@@ -2105,7 +2116,7 @@ mod tests {
         let config = policy_handle(
             signed.verifier(),
             Some(&format!(
-                r#"permit(principal == Identity::"alice", action == Action::"update-runtime", resource == Section::"{AGENT}/repositories");"#
+                r#"permit(principal == Identity::"{ALICE_ACCOUNT_ID}", action == Action::"update-runtime", resource == Section::"{AGENT}/repositories");"#
             )),
         )
         .await;
@@ -2136,7 +2147,7 @@ mod tests {
         let config = policy_handle(
             signed.verifier(),
             Some(&format!(
-                r#"forbid(principal == Identity::"alice", action == Action::"update-runtime", resource == Section::"{AGENT}/admission");"#
+                r#"forbid(principal == Identity::"{ALICE_ACCOUNT_ID}", action == Action::"update-runtime", resource == Section::"{AGENT}/admission");"#
             )),
         )
         .await;
@@ -2164,7 +2175,7 @@ mod tests {
         let config = policy_handle(
             signed.verifier(),
             Some(&format!(
-                r#"forbid(principal == Identity::"alice", action == Action::"update-configuration", resource == Variable::"{AGENT}/LOW");"#
+                r#"forbid(principal == Identity::"{ALICE_ACCOUNT_ID}", action == Action::"update-configuration", resource == Variable::"{AGENT}/LOW");"#
             )),
         )
         .await;
@@ -2228,8 +2239,8 @@ mod tests {
         let config = policy_handle(
             signed.verifier(),
             Some(&format!(
-                r#"forbid(principal == Identity::"alice", action == Action::"update-runtime", resource == Section::"{AGENT}/rules");
-                   permit(principal == Identity::"alice", action == Action::"update-runtime", resource == Section::"{AGENT}/rules");"#
+                r#"forbid(principal == Identity::"{ALICE_ACCOUNT_ID}", action == Action::"update-runtime", resource == Section::"{AGENT}/rules");
+                   permit(principal == Identity::"{ALICE_ACCOUNT_ID}", action == Action::"update-runtime", resource == Section::"{AGENT}/rules");"#
             )),
         )
         .await;
@@ -2255,7 +2266,7 @@ mod tests {
         let permit_only = policy_handle(
             signed.verifier(),
             Some(&format!(
-                r#"permit(principal == Identity::"alice", action, resource == Section::"{AGENT}/rules");"#
+                r#"permit(principal == Identity::"{ALICE_ACCOUNT_ID}", action, resource == Section::"{AGENT}/rules");"#
             )),
         )
         .await;

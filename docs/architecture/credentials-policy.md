@@ -138,6 +138,13 @@ revoked, and a revoked account re-provisioned under the same username gets the s
 author writes `alice`, never a UUID, and the name keeps meaning the same account. A username that no account has
 is an error in the document (refused whole), not a silent no-match.
 
+*Built 2026-10-22, and extended to everything the credentials agent publishes* (`authority-model.md`, "A person is
+written by username and known by account ID"): the credentials agent converts each username in a `policy` or `groups`
+document to its account ID before it judges and publishes it (`credentials-agent/consume/src/authority_names.rs`,
+by `polar_policy::rename_identities`), so in force a person is known by one name everywhere, as the broker knows them.
+A provisioned account not yet claimed converts too. Since then a workload is named by its one identity,
+`<workload>.<namespace>.serviceaccount.<domain>`, not its bare workload name (`policy-enforcement.md`, "Decisions").
+
 ### What a request looks like to Cedar
 
 | | Today | Under this design |

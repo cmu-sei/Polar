@@ -1494,6 +1494,7 @@ dependencies = [
  "cassini-types",
  "cert-client",
  "cert-issuer-common",
+ "credentials-agent-model",
  "credentials_agent_common",
  "jwt_utils",
  "neo4rs",

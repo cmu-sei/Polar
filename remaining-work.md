@@ -92,7 +92,15 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
 - **The authority model** (`docs/architecture/authority-model.md`, proposed 2026-10-22, to cover with David after stage
   5b's slices 6 and 7): one model of the deployment as data, rules over it, and acceptance of a policy or groups
   document as a comparison over the closed catalog. It replaces slice 5's hand-written probes. Until it is built, a
-  `forbid` on an authority path can lock a deployment out.
+  `forbid` on an authority path can lock a deployment out. **Being built** ("Build order, tests first"): slices 1 to 7 done by
+  2026-10-22. Since slice 7 the credentials agent judges every `policy` and `groups` document before accepting it,
+  so such a `forbid` is refused with its reason (open point B); slices 8 (the model replaces the issuance floor), 9
+  (Cedar on the thirteen request topics) and 10 (deploy and verify) remain.
+- **A person had two names in force** (found 2026-10-22 building slice 7; fixed the same day). Topic requests knew a
+  person by account ID, signed documents and commands by username, and a groups entry keyed by username never applied
+  to their topic requests. Settled by the 2026-10-12 decision (`credentials-policy.md`): authors write usernames, and
+  the credentials agent converts them to account IDs before judging and publishing; a signer's principal is the account
+  ID (`authority-model.md`, "A person is written by username and known by account ID").
 - The dev host's storage: about 750 GiB of the `nix` volume group is unallocated, `/` is a 199 GB f2fs on a 400 GB
   volume (never grown), and the nix-usernetes node's containerd and kubelet state share `/home` with everything else,
   so a large Cargo `target` directory tainted the node with disk pressure and evicted every pod (2026-10-21). f2fs grows

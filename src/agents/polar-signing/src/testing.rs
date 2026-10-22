@@ -86,13 +86,18 @@ pub struct Spec {
     pub is_ca: bool,
 }
 
+/// The account ID of the default signer, alice: the first DNS name of her certificate, and the name she is known by in
+/// force. An author writes her username, which the credentials agent converts (docs/architecture/authority-model.md,
+/// "Decisions").
+pub const ALICE_ACCOUNT_ID: &str = "d983a3d2-9b61-41c5-88a0-d123fb50ba33";
+
 impl Default for Spec {
     fn default() -> Self {
         Spec {
             kind: Kind::P256,
             username: "alice",
             email: "alice@example.org",
-            identity: "d983a3d2-9b61-41c5-88a0-d123fb50ba33",
+            identity: ALICE_ACCOUNT_ID,
             capabilities: vec!["c:update-configuration"],
             key_usages: vec![KeyUsagePurpose::DigitalSignature],
             not_before_year: 2026,

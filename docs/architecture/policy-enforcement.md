@@ -173,8 +173,10 @@ code today, and what stands between the two. The detail of each part is in the d
   - `frozen` is an optional boolean of `Secret`. Nothing sets it yet, so the seed's `forbid` on it is inert until
     something does;
   - decrypt-on-behalf's resource is `KubeSecret`, the one shape in use; any other type is refused;
-  - the principal is always `Identity`: a workload's DNS identity for secrets and topics, a person's username for signed
-    documents. The groups document is keyed the same way, by whichever the request carries;
+  - the principal is always `Identity`, by its certificate's first DNS name: a workload's identity, or a person's
+    account ID, for secrets, topics, signed documents and commands alike. Authors write a person's username, in a policy
+    and as a groups document's key, and the credentials agent converts it to the account ID before the document is in
+    force (`authority-model.md`, "A person is written by username and known by account ID", 2026-10-22);
   - a topic request's facts: the identity's workload is an optional attribute of the principal (`principal.workload`,
     from `workload_of`), and `publish` and `subscribe` carry in their context whether the topic is in the requester's
     declared set (`context.declared`, family topics included) or its implied set (`context.implied`).

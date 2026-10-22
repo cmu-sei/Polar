@@ -27,7 +27,8 @@
 //! is signed, and every request and its entities are checked against it when evaluated, so a misspelt attribute, an
 //! unknown type, or a rule on an attribute that may be absent without `has` is refused before it can decide anything.
 //!
-//! - A principal is always an `Identity`: a workload's DNS identity, or a person's username for a signed document. Its
+//! - A principal is always an `Identity`, by its certificate's first DNS name: a workload's identity, or a person's
+//!   account ID (an author writes the username, and the credentials agent converts it before the policy is in force). Its
 //!   parents are its groups (from its certificate's `g:` names and the signed groups document), the roles they bring,
 //!   and its capabilities (`c:` names) as `Capability` entities, so a rule says `principal in Group::"operators"`,
 //!   `principal in Role::"policy-author"` or `principal in Capability::"update-policy"`. Its `p:` communication

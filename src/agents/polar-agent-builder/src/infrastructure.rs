@@ -1734,7 +1734,7 @@ mod tests {
         use crate::configuration::{ApplyOutcome, Refusal};
         use crate::signed::Rejection;
         use credentials_agent_common::authority_update::{AuthorityBody, AuthorityPayload};
-        use polar_signing::testing::{Spec, root, signer};
+        use polar_signing::testing::{ALICE_ACCOUNT_ID, Spec, root, signer};
 
         let ca = root("Polar Internal CA");
         let dir = tempfile::tempdir().unwrap();
@@ -1790,8 +1790,9 @@ mod tests {
                     sequence: 1,
                     version: 1,
                     body: AuthorityBody::Policy {
-                        source: r#"permit(principal == Identity::"alice", action == Action::"update-runtime", resource == Section::"infra-policy-first/repositories");"#
-                            .into(),
+                        source: format!(
+                            r#"permit(principal == Identity::"{ALICE_ACCOUNT_ID}", action == Action::"update-runtime", resource == Section::"infra-policy-first/repositories");"#
+                        ),
                     },
                     authored_by: None,
                 }],
@@ -2283,7 +2284,7 @@ mod tests {
         use crate::command::{ArgSpec, CommandSpec, Delivery};
         use credentials_agent_common::authority_update::{AuthorityBody, AuthorityPayload};
         use polar_scheduler_common::command_topic;
-        use polar_signing::testing::{Spec, root, signer};
+        use polar_signing::testing::{ALICE_ACCOUNT_ID, Spec, root, signer};
 
         const PING: CommandSpec = CommandSpec {
             name: "ping",
@@ -2364,8 +2365,9 @@ mod tests {
                     sequence: 1,
                     version: 1,
                     body: AuthorityBody::Policy {
-                        source: r#"permit(principal == Identity::"alice", action == Action::"run-command", resource == Command::"infra-command-policy/ping");"#
-                            .into(),
+                        source: format!(
+                            r#"permit(principal == Identity::"{ALICE_ACCOUNT_ID}", action == Action::"run-command", resource == Command::"infra-command-policy/ping");"#
+                        ),
                     },
                     authored_by: None,
                 }],

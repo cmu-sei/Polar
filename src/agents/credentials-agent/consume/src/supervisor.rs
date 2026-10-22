@@ -673,9 +673,15 @@ impl Actor for ConsumerSupervisor {
             polar::graph::environment::GraphSettings::from_env(&**configured.config())
                 .map_err(ActorProcessingErr::from)?;
 
-        let settings =
+        let mut settings =
             ConsumerSettings::read(configured.config()).map_err(ActorProcessingErr::from)?;
         let log_path = settings.event_log_path.clone();
+        let authority_model = settings.authority_model.take().map(std::sync::Arc::new);
+        if authority_model.is_none() {
+            warn!(
+                "no authority model was given; a policy or groups document will be accepted without being judged"
+            );
+        }
 
         // ProjectionActor owns the graph projection as its own,
         // genuinely separate concern -- see projection.rs's own
@@ -987,6 +993,17 @@ impl Actor for ConsumerSupervisor {
             .config()
             .read(&polar_agent_builder::environment::AUTHORITY_PUBLISHER)
             .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
+        // A policy or groups document is judged by the authority model before it is accepted, its usernames
+        // converted to account IDs (docs/architecture/authority-model.md); what is accepted is what the publisher
+        // puts in force, and what it does is recorded when it is published.
+        let acceptances = crate::authority_judge::Acceptances::default();
+        let configured = configured.with_section_judge(std::sync::Arc::new(
+            crate::authority_judge::AuthorityJudge {
+                model: authority_model,
+                ledger: ledger.clone(),
+                acceptances: acceptances.clone(),
+            },
+        ));
         let resources = configured.build().await?;
 
         // The "infrastructure -> domain" half of the respawn/shutdown protocol.
@@ -1010,6 +1027,7 @@ impl Actor for ConsumerSupervisor {
             AuthorityPublisher,
             PublisherArgs {
                 ledger: ledger.clone(),
+                acceptances,
                 key: escrow_keypair.private_key().clone(),
                 publish: std::sync::Arc::new(move |topic: &str, payload: Vec<u8>| {
                     match where_is(broker.clone()) {

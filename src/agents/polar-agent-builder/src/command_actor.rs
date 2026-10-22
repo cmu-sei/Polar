@@ -568,7 +568,7 @@ mod tests {
     use super::*;
     use crate::command::{ArgKind, ArgSpec, Delivery};
     use crate::signed::UpdateVerifier;
-    use polar_signing::testing::{self as certs, Spec, now, root, signer};
+    use polar_signing::testing::{self as certs, ALICE_ACCOUNT_ID, Spec, now, root, signer};
     use polar_signing::{Trust, sign};
     use serde_json::json;
     use std::sync::Mutex;
@@ -1335,7 +1335,9 @@ mod tests {
         let (ran, handler) = recording();
         let rig = Rig::with_policy(
             vec![(PING, handler)],
-            r#"permit(principal == Identity::"alice", action == Action::"run-command", resource == Command::"git-agent/ping");"#,
+            &format!(
+                r#"permit(principal == Identity::"{ALICE_ACCOUNT_ID}", action == Action::"run-command", resource == Command::"git-agent/ping");"#
+            ),
         )
         .await;
         // alice holds update-configuration only, not run-command.
@@ -1353,7 +1355,9 @@ mod tests {
         let (ran, handler) = recording();
         let rig = Rig::with_policy(
             vec![(PING, handler)],
-            r#"forbid(principal == Identity::"alice", action == Action::"run-command", resource == Command::"git-agent/ping");"#,
+            &format!(
+                r#"forbid(principal == Identity::"{ALICE_ACCOUNT_ID}", action == Action::"run-command", resource == Command::"git-agent/ping");"#
+            ),
         )
         .await;
         rig.deliver(rig.command("forbidden", "ping", json!({})));
@@ -1372,7 +1376,9 @@ mod tests {
         let (ran, handler) = recording();
         let rig = Rig::with_policy(
             vec![(PING, handler)],
-            r#"forbid(principal == Identity::"alice", action == Action::"run-command", resource == Command::"git-agent/something-else");"#,
+            &format!(
+                r#"forbid(principal == Identity::"{ALICE_ACCOUNT_ID}", action == Action::"run-command", resource == Command::"git-agent/something-else");"#
+            ),
         )
         .await;
         rig.deliver(rig.command("by-certificate", "ping", json!({})));

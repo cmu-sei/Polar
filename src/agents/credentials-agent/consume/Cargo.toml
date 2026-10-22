@@ -31,6 +31,7 @@ cassini-types.workspace = true
 cert-client = { path = "../../cert-issuer/client" }
 cert-issuer-common = { path = "../../cert-issuer/common" }
 credentials_agent_common.workspace = true
+credentials-agent-model.workspace = true
 jwt_utils.workspace = true
 neo4rs.workspace = true
 polar.workspace = true
@@ -55,7 +56,7 @@ uuid.workspace = true
 base64.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-polar-signing.workspace = true
+polar-signing = { workspace = true, features = ["testing"] }
 polar-router.workspace = true
 rcgen.workspace = true
 time.workspace = true

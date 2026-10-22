@@ -178,7 +178,7 @@ impl fmt::Display for Broken {
                 access,
             } => write!(
                 f,
-                "the policy forbids {identity} to {} on `{topic}`",
+                "{identity} may no longer {} on `{topic}`",
                 access.as_str()
             ),
             Broken::NotRenewed { workload, because } => write!(
@@ -198,6 +198,9 @@ pub struct Loss {
     /// What used to hold it, under the current pair.
     pub witness: Vec<Node>,
     pub broken: Broken,
+    /// The proposed policy's rules that deny the request it turns on, by `@id` or Cedar's id; none when no rule forbids
+    /// it and it is denied because no rule permits it any longer and its own topics do not hold it (the floor).
+    pub rules: Vec<String>,
 }
 
 impl fmt::Display for Loss {
@@ -206,7 +209,44 @@ impl fmt::Display for Loss {
             f,
             "{} would stop: {} no longer: {}",
             self.invariant, self.goal, self.broken
-        )
+        )?;
+        match self.rules.as_slice() {
+            [] if self.denied().is_some() => {
+                f.write_str(" (no rule permits it any longer, and its own topics do not hold it)")
+            }
+            [] => Ok(()),
+            rules => write!(f, " (denied by {})", rules.join(", ")),
+        }
+    }
+}
+
+impl Loss {
+    /// The request whose denial breaks the goal, under any renewal it breaks.
+    pub fn denied(&self) -> Option<(&str, &str, Access)> {
+        let mut broken = &self.broken;
+        loop {
+            match broken {
+                Broken::Forbidden {
+                    identity,
+                    topic,
+                    access,
+                } => return Some((identity, topic, *access)),
+                Broken::NotRenewed { because, .. } => broken = because,
+                Broken::Unexplained => return None,
+            }
+        }
+    }
+
+    /// The path that used to hold the goal, said.
+    pub fn path(&self) -> String {
+        self.witness
+            .iter()
+            .map(|n| match n {
+                Node::Out(w, t) => format!("{w} publishes `{t}`"),
+                Node::In(w, t) => format!("{w} hears `{t}`"),
+            })
+            .collect::<Vec<_>>()
+            .join(" -> ")
     }
 }
 
@@ -711,6 +751,7 @@ pub fn compare(
                 goal: c.goal.clone(),
                 broken: explain(model, &witness, current, proposed, proposed_allowed),
                 witness,
+                rules: Vec::new(),
             }
         })
         .collect();
@@ -768,5 +809,82 @@ pub fn judge(
         .filter(|k| !known.contains(k.as_str()))
         .cloned()
         .collect();
+    if let Some(source) = &proposed.policy {
+        let evaluator = Evaluator::new(source, &proposed.hierarchy).map_err(|e| e.to_string())?;
+        for loss in &mut judgement.losses {
+            if let Some((identity, topic, access)) = loss.denied() {
+                let (identity, topic) = (identity.to_string(), topic.to_string());
+                loss.rules = deciding_rules(
+                    model, proposed, persons, &evaluator, &identity, &topic, access,
+                );
+            }
+        }
+    }
     Ok(judgement)
+}
+
+/// The rules of `evaluator` that deny `identity` using `topic` this way, under `pair`'s groups.
+fn deciding_rules(
+    model: &Model,
+    pair: &Pair,
+    persons: &[Person],
+    evaluator: &Evaluator,
+    identity: &str,
+    topic: &str,
+    access: Access,
+) -> Vec<String> {
+    let (own_groups, capabilities, origin) =
+        match model.workloads.iter().find(|w| w.identity == identity) {
+            Some(w) => (
+                w.groups.clone(),
+                Vec::new(),
+                w.topics
+                    .iter()
+                    .find(|t| t.name == topic && t.access == access)
+                    .map(|t| t.origin.clone()),
+            ),
+            None => match persons.iter().find(|p| p.identity == identity) {
+                Some(p) => (p.groups.clone(), p.capabilities.clone(), None),
+                None => return Vec::new(),
+            },
+        };
+    let groups = pair
+        .memberships
+        .get(identity)
+        .cloned()
+        .unwrap_or(own_groups);
+    let facts = TopicFacts {
+        declared: matches!(
+            origin,
+            Some(Origin::Declared { .. } | Origin::Family { .. })
+        ),
+        implied: matches!(origin, Some(Origin::Implied { .. })),
+    };
+    let (Some(action), Some(resource)) =
+        (entity("Action", access.as_str()), entity("Topic", topic))
+    else {
+        return Vec::new();
+    };
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match evaluator.deciding(
+        &Requester {
+            identity,
+            groups: &groups,
+            capabilities: &capabilities,
+            permissions: &[],
+        },
+        &action,
+        &resource,
+        &Facts {
+            topic: Some(facts),
+            ..Facts::default()
+        },
+        now_secs,
+    ) {
+        Ok((polar_policy::Decision::Deny, rules)) => rules,
+        _ => Vec::new(),
+    }
 }

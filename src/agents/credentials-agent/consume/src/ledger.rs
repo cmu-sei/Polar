@@ -107,8 +107,14 @@ pub enum LedgerMessage {
     PublishAuthority {
         kind: String,
         version: u64,
+        /// What the document does, as the authority model judged it before it was accepted, if it did.
+        effect: Option<credentials_agent_common::events::AuthorityEffect>,
         reply: RpcReplyPort<Result<u64, String>>,
     },
+    /// Every account certificate not revoked: the persons a change of authority is judged for.
+    ActiveAccounts(RpcReplyPort<Vec<crate::state::AccountCertificateRecord>>),
+    /// Each account's username and its account ID, which a policy's or groups document's usernames are converted by.
+    AccountNames(RpcReplyPort<std::collections::BTreeMap<String, String>>),
     /// The highest sequence number published so far; 0 before any.
     AuthoritySequence(RpcReplyPort<u64>),
     /// The serial of every certificate an explicit revocation named, in order.
@@ -285,6 +291,7 @@ impl Actor for LedgerActor {
             LedgerMessage::PublishAuthority {
                 kind,
                 version,
+                effect,
                 reply,
             } => {
                 let sequence = state.credentials_state.last_authority_sequence() + 1;
@@ -295,10 +302,17 @@ impl Actor for LedgerActor {
                         kind,
                         version,
                         timestamp: polar::time::now_millis(),
+                        effect,
                     },
                 )
                 .map(|()| sequence);
                 let _ = reply.send(result);
+            }
+            LedgerMessage::ActiveAccounts(reply) => {
+                let _ = reply.send(state.credentials_state.active_account_certificates());
+            }
+            LedgerMessage::AccountNames(reply) => {
+                let _ = reply.send(state.credentials_state.account_names());
             }
             LedgerMessage::AuthoritySequence(reply) => {
                 let _ = reply.send(state.credentials_state.last_authority_sequence());
@@ -426,6 +440,33 @@ fn append_and_project(
 pub(crate) mod tests {
     use super::*;
     use credentials_agent_common::events::GrantReason;
+
+    /// The ledger records `username`'s account certificate, whose first DNS name is `account_id`: a person the
+    /// authority knows, by both names.
+    pub(crate) async fn holds_account(
+        ledger: &ActorRef<LedgerMessage>,
+        username: &str,
+        account_id: &str,
+    ) {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let certificate = rcgen::CertificateParams::new(vec![account_id.to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap()
+            .pem();
+        ractor::call!(ledger, |reply| LedgerMessage::Append {
+            event: CredentialsEvent::AccountCertificateIssued {
+                account_id: account_id.to_string(),
+                username: username.to_string(),
+                serial: format!("serial-{username}"),
+                timestamp: 1,
+                certificate_pem: certificate,
+            },
+            reply
+        })
+        .unwrap()
+        .unwrap();
+    }
 
     async fn spawn_ledger(log_path: &str) -> ActorRef<LedgerMessage> {
         let (ledger, _) = Actor::spawn(
@@ -567,6 +608,7 @@ pub(crate) mod tests {
             |reply| LedgerMessage::PublishAuthority {
                 kind: kind.to_string(),
                 version,
+                effect: None,
                 reply,
             },
             None,
@@ -666,6 +708,7 @@ pub(crate) mod tests {
                 kind: "policy".into(),
                 version: 1,
                 timestamp: 1,
+                effect: None,
             },
         )
         .await

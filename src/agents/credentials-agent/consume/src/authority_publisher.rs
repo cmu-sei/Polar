@@ -86,6 +86,9 @@ pub struct PublisherArgs {
     pub local: AuthorityHandle,
     /// The identity the broker gives this agent, which its own authority actor listens to.
     pub own_identity: String,
+    /// What the judge accepted of each document: its body as it is put in force, and what the model judged it to do,
+    /// recorded with its update.
+    pub acceptances: crate::authority_judge::Acceptances,
 }
 
 pub struct PublisherState {
@@ -130,6 +133,7 @@ impl PublisherState {
         body: AuthorityBody,
         version: u64,
         authored_by: Option<String>,
+        effect: Option<credentials_agent_common::events::AuthorityEffect>,
     ) {
         let kind = body.kind();
         if !self.book.would_replace(kind, version) {
@@ -148,6 +152,7 @@ impl PublisherState {
             match ractor::call!(self.args.ledger, |reply| LedgerMessage::PublishAuthority {
                 kind: name.to_string(),
                 version,
+                effect,
                 reply,
             }) {
                 Ok(Ok(sequence)) => sequence,
@@ -178,7 +183,7 @@ impl PublisherState {
 /// What a runtime section says, as the body of an update. A section that is not one of the two, or does not
 /// read as it should, is not published: the credentials agent validates a section when it receives it, so
 /// this is a second line.
-fn body_of(section: &str, body: &Value) -> Result<AuthorityBody, String> {
+pub(crate) fn body_of(section: &str, body: &Value) -> Result<AuthorityBody, String> {
     match section {
         "policy" => body
             .get("source")
@@ -257,10 +262,27 @@ impl Actor for AuthorityPublisher {
                 version,
                 body,
                 authored_by,
-            } => match body_of(&section, &body) {
-                Ok(body) => state.publish(&myself, body, version, authored_by).await,
-                Err(e) => warn!(%section, "not published: {e}"),
-            },
+            } => {
+                // What the judge accepted, as it put it in force; a section no judge saw (one held when this agent
+                // started) is put in force here the same way.
+                let accepted = match state.args.acceptances.take(&section, version) {
+                    Some(accepted) => Ok((accepted.body, accepted.effect)),
+                    None => match crate::authority_judge::account_names(&state.args.ledger).await {
+                        Ok(names) => crate::authority_judge::in_force_body(&section, &body, &names)
+                            .map(|body| (body, None))
+                            .map_err(|reasons| reasons.join("; ")),
+                        Err(e) => Err(e),
+                    },
+                };
+                match accepted {
+                    Ok((body, effect)) => {
+                        state
+                            .publish(&myself, body, version, authored_by, effect)
+                            .await
+                    }
+                    Err(e) => warn!(%section, version, "not published: {e}"),
+                }
+            }
             PublisherMessage::RevocationsChanged => {
                 let serials = ractor::call!(state.args.ledger, LedgerMessage::RevokedSerials)
                     .map_err(|e| {
@@ -270,7 +292,13 @@ impl Actor for AuthorityPublisher {
                 if !serials.is_empty() {
                     let version = serials.len() as u64;
                     state
-                        .publish(&myself, AuthorityBody::Revoked { serials }, version, None)
+                        .publish(
+                            &myself,
+                            AuthorityBody::Revoked { serials },
+                            version,
+                            None,
+                            None,
+                        )
                         .await;
                 }
             }
@@ -345,6 +373,7 @@ mod tests {
         ledger: ActorRef<LedgerMessage>,
         local: AuthorityHandle,
         published: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        acceptances: crate::authority_judge::Acceptances,
         path: String,
         _dir: tempfile::TempDir,
     }
@@ -381,6 +410,8 @@ mod tests {
             .unwrap()
             .to_string();
         let rig = rig_at(&path).await;
+        // alice, whom the tests' documents name, has an account.
+        crate::ledger::tests::holds_account(&rig.ledger, "alice", ALICE).await;
         Rig { _dir: dir, ..rig }
     }
 
@@ -402,6 +433,7 @@ mod tests {
             .unwrap();
         let published = Arc::new(Mutex::new(Vec::new()));
         let sink = published.clone();
+        let acceptances = crate::authority_judge::Acceptances::default();
         let (publisher, _) = Actor::spawn(
             None,
             AuthorityPublisher,
@@ -413,6 +445,7 @@ mod tests {
                 }),
                 local: local.clone(),
                 own_identity: OWN.to_string(),
+                acceptances: acceptances.clone(),
             },
         )
         .await
@@ -423,6 +456,7 @@ mod tests {
             ledger,
             local,
             published,
+            acceptances,
             path: path.to_string(),
             _dir: tempfile::tempdir().unwrap(),
         }
@@ -473,6 +507,9 @@ mod tests {
         }
     }
 
+    /// alice's account ID, which a document names her by once it is in force.
+    const ALICE: &str = polar_signing::testing::ALICE_ACCOUNT_ID;
+
     fn policy_body(source: &str) -> Value {
         json!({"source": source})
     }
@@ -499,11 +536,11 @@ mod tests {
         let sequence = ractor::call!(rig.ledger, LedgerMessage::AuthoritySequence).unwrap();
         assert_eq!(sequence, 1);
 
-        // And this agent's own policy actor now decides by it, the same as everyone's.
+        // And this agent's own policy actor now decides by it, the same as everyone's, knowing alice by account ID.
         let decision = ractor::call!(rig.local.policy(), |reply| {
             polar_policy::PolicyMessage::CheckAuthorization {
                 facts: Default::default(),
-                requester_identity: "alice".to_string(),
+                requester_identity: ALICE.to_string(),
                 requester_certificate_pem: None,
                 action: r#"Action::"retrieve""#.to_string(),
                 resource: r#"Secret::"s""#.to_string(),
@@ -513,6 +550,81 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(decision, polar_policy::Decision::Allow);
+    }
+
+    /// What the judge accepted is what is published: its body as it was put in force, and its effect recorded with
+    /// that version's update.
+    #[tokio::test(start_paused = true)]
+    async fn what_the_judge_accepted_is_published_with_its_effect() {
+        let rig = rig().await;
+        let effect = credentials_agent_common::events::AuthorityEffect {
+            gained: vec!["alice subscribe polar-authority-updates".to_string()],
+            ..Default::default()
+        };
+        rig.acceptances.hold(
+            "policy",
+            4,
+            crate::authority_judge::Acceptance {
+                body: AuthorityBody::Policy {
+                    source: "// v4, as the judge put it in force".to_string(),
+                },
+                effect: Some(effect.clone()),
+            },
+        );
+        rig.change("policy", 3, policy_body("// v3"));
+        rig.change("policy", 4, policy_body("// v4"));
+        settle().await;
+        let history = ractor::call!(rig.ledger, |reply| LedgerMessage::GetFullHistory { reply })
+            .unwrap()
+            .unwrap();
+        let published: Vec<_> = history
+            .into_iter()
+            .filter_map(|(_, e)| match e {
+                CredentialsEvent::AuthorityPublished {
+                    version, effect, ..
+                } => Some((version, effect)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(published, [(3, None), (4, Some(effect))]);
+        let last = verify(&rig.updates()[1], &rig.public_key()).unwrap();
+        assert_eq!(
+            last.body,
+            AuthorityBody::Policy {
+                source: "// v4, as the judge put it in force".to_string()
+            }
+        );
+        assert!(
+            rig.acceptances.take("policy", 4).is_none(),
+            "taken by the publisher"
+        );
+    }
+
+    /// A section no judge saw (one held when the agent starts) is converted here the same way: a person by account ID,
+    /// and one that names no account is not published.
+    #[tokio::test(start_paused = true)]
+    async fn a_section_no_judge_saw_is_put_in_force_by_account_id_or_not_at_all() {
+        let rig = rig().await;
+        rig.change(
+            "policy",
+            1,
+            policy_body(r#"permit(principal == Identity::"carol", action, resource);"#),
+        );
+        settle().await;
+        assert!(rig.updates().is_empty(), "carol has no account");
+        rig.change(
+            "groups",
+            1,
+            json!({"memberships": {"alice": ["operators"]}}),
+        );
+        settle().await;
+        let payload = verify(&rig.updates()[0], &rig.public_key()).unwrap();
+        match payload.body {
+            AuthorityBody::Groups { memberships, .. } => {
+                assert_eq!(memberships.keys().collect::<Vec<_>>(), [ALICE])
+            }
+            other => panic!("not groups: {other:?}"),
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -541,7 +653,7 @@ mod tests {
         assert_eq!(rig.updates().len(), 1);
         let principal = ractor::call!(rig.local.permissions(), |reply| {
             polar_permissions::PermissionsMessage::ResolvePrincipal {
-                identity: "alice".to_string(),
+                identity: ALICE.to_string(),
                 certificate_pem: None,
                 reply,
             }

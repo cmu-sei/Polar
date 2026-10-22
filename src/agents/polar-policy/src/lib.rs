@@ -91,6 +91,83 @@ pub fn validate_source(source: &str) -> Result<(), String> {
     load_source(source).map(|_| ())
 }
 
+/// The rules in `source` in the order they were written, which is the order of the ids Cedar gives them
+/// (`policy0`, `policy1`, ...). A template is refused: Polar's policies are rules, and a template names no one yet.
+fn rules_in_order(source: &str) -> Result<Vec<cedar_policy::Policy>, String> {
+    let policies = source.parse::<PolicySet>().map_err(|e| e.to_string())?;
+    if policies.templates().next().is_some() {
+        return Err("a policy template is not taken, only rules".to_string());
+    }
+    let mut rules: Vec<(usize, cedar_policy::Policy)> = policies
+        .policies()
+        .map(|rule| {
+            let place = rule
+                .id()
+                .to_string()
+                .strip_prefix("policy")
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(usize::MAX);
+            (place, rule.clone())
+        })
+        .collect();
+    rules.sort_by_key(|(place, _)| *place);
+    Ok(rules.into_iter().map(|(_, rule)| rule).collect())
+}
+
+fn identities_in(rule: &cedar_policy::Policy) -> impl Iterator<Item = String> + '_ {
+    rule.entity_literals()
+        .into_iter()
+        .filter(|uid| uid.type_name().to_string() == "Identity")
+        .map(|uid| uid.id().unescaped().to_string())
+}
+
+/// Every identity the policy in `source` names (`Identity::"..."`), in a rule's scope or its conditions.
+pub fn identities_named(source: &str) -> Result<std::collections::BTreeSet<String>, String> {
+    Ok(rules_in_order(source)?
+        .iter()
+        .flat_map(|rule| identities_in(rule).collect::<Vec<_>>())
+        .collect())
+}
+
+/// The policy in `source` with each identity it names that `renames` has replaced by its new name, as Cedar text: the
+/// rules in their order, with their annotations. A rule that names no one renamed keeps the text it was written in, and
+/// a policy with nothing to rename is returned as it was. The credentials agent writes a person's account ID where the
+/// author wrote their username (docs/architecture/authority-model.md, "Decisions").
+pub fn rename_identities(
+    source: &str,
+    renames: &std::collections::BTreeMap<String, String>,
+) -> Result<String, String> {
+    let rules = rules_in_order(source)?;
+    if !rules
+        .iter()
+        .any(|rule| identities_in(rule).any(|name| renames.contains_key(&name)))
+    {
+        return Ok(source.to_string());
+    }
+    let identity = |name: &str| {
+        EntityUid::from_type_name_and_id(
+            "Identity".parse().expect("Identity is a type name"),
+            cedar_policy::EntityId::new(name),
+        )
+    };
+    let mapping: std::collections::BTreeMap<EntityUid, EntityUid> = renames
+        .iter()
+        .map(|(from, to)| (identity(from), identity(to)))
+        .collect();
+    let mut text = Vec::with_capacity(rules.len());
+    for rule in &rules {
+        if identities_in(rule).any(|name| renames.contains_key(&name)) {
+            let renamed = rule
+                .sub_entity_literals(mapping.clone())
+                .map_err(|e| format!("could not rename the identities in a rule: {e}"))?;
+            text.push(renamed.to_string());
+        } else {
+            text.push(rule.to_string());
+        }
+    }
+    Ok(text.join("\n"))
+}
+
 /// The policy in `source`, parsed and checked against the schema.
 fn load_source(source: &str) -> Result<PolicySet, String> {
     if source.len() > MAX_POLICY_BYTES {
@@ -418,6 +495,44 @@ impl Evaluator {
         })
     }
 
+    /// As [`decide`](Self::decide), with the rules that decided it: for a permit or a forbid, each by its `@id`
+    /// annotation, or Cedar's own id (`policy0`) when it has none; for silence, none.
+    pub fn deciding(
+        &self,
+        requester: &Requester,
+        action: &str,
+        resource: &str,
+        facts: &Facts,
+        now_secs: u64,
+    ) -> Result<(Decision, Vec<String>), PolicyError> {
+        let response = respond_with(
+            &self.policy_set,
+            &self.authorizer,
+            &self.hierarchy,
+            requester,
+            action,
+            resource,
+            facts,
+            now_secs,
+        )?;
+        let decision = PolicyActor::decide(&response);
+        let rules = if decision == Decision::NotDetermined {
+            Vec::new()
+        } else {
+            response
+                .diagnostics()
+                .reason()
+                .map(|id| {
+                    self.policy_set
+                        .policy(id)
+                        .and_then(|p| p.annotation("id").map(str::to_string))
+                        .unwrap_or_else(|| id.to_string())
+                })
+                .collect()
+        };
+        Ok((decision, rules))
+    }
+
     /// What the rules say about `requester` doing `action` on `resource`, with the asker's `facts`, at `now_secs`.
     pub fn decide(
         &self,
@@ -454,6 +569,24 @@ fn decide_with(
     facts: &Facts,
     now_secs: u64,
 ) -> Result<Decision, PolicyError> {
+    respond_with(
+        policy_set, authorizer, hierarchy, requester, action, resource, facts, now_secs,
+    )
+    .map(|response| PolicyActor::decide(&response))
+}
+
+/// Cedar's whole response to the request [`decide_with`] decides, for a caller that also wants the rules behind it.
+#[allow(clippy::too_many_arguments)]
+fn respond_with(
+    policy_set: &PolicySet,
+    authorizer: &Authorizer,
+    hierarchy: &Entities,
+    requester: &Requester,
+    action: &str,
+    resource: &str,
+    facts: &Facts,
+    now_secs: u64,
+) -> Result<cedar_policy::Response, PolicyError> {
     // Built from the type and the id as they are, never by formatting the id into text to be parsed: a
     // name with a quote or a backslash in it is that name, and no other entity.
     let principal_uid = EntityUid::from_type_name_and_id(
@@ -556,8 +689,7 @@ fn decide_with(
     )
     .map_err(|e| PolicyError::RequestConstruction(e.to_string()))?;
 
-    let response = authorizer.is_authorized(&request, policy_set, &entities);
-    Ok(PolicyActor::decide(&response))
+    Ok(authorizer.is_authorized(&request, policy_set, &entities))
 }
 
 #[cfg(test)]
@@ -1643,6 +1775,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_evaluator_names_the_rules_that_decided() {
+        let judge = Evaluator::new(
+            r#"
+            @id("no-retired-publishers")
+            forbid (principal in Group::"retired", action == Action::"publish", resource);
+            permit (principal, action == Action::"publish", resource);
+            "#,
+            &Default::default(),
+        )
+        .unwrap();
+        let retired = vec!["retired".to_string()];
+        let (decision, rules) = judge
+            .deciding(
+                &requester("bob", &retired),
+                r#"Action::"publish""#,
+                r#"Topic::"news""#,
+                &topic(true, false),
+                0,
+            )
+            .unwrap();
+        assert_eq!(decision, Decision::Deny);
+        assert_eq!(rules, ["no-retired-publishers"]);
+        // Silence names nothing.
+        let (decision, rules) = judge
+            .deciding(
+                &requester("bob", &[]),
+                r#"Action::"subscribe""#,
+                r#"Topic::"news""#,
+                &topic(true, false),
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            (decision, rules),
+            (Decision::NotDetermined, Vec::<String>::new())
+        );
+    }
+
     const IDENTITIES: &[&str] = &["alice", "bob", "carol"];
     const GROUPS: &[&str] = &["operators", "retired", "night-shift"];
     const TOPICS: &[&str] = &["news", "secrets", "weather"];
@@ -1726,6 +1897,161 @@ mod tests {
                     )
                     .unwrap();
                 proptest::prop_assert_eq!(by_evaluator, by_actor, "{} {} {}", identity, action, TOPICS[*t]);
+            }
+        }
+    }
+
+    const NAMED: &str = r#"@id("operators-hear-news")
+permit (principal == Identity::"alice", action == Action::"subscribe", resource == Topic::"news");
+forbid (principal in Group::"retired", action, resource) when { principal == Identity::"bob" };
+permit (principal == Identity::"kube-observer.polar.serviceaccount.cluster.local", action, resource);"#;
+
+    #[test]
+    fn a_policy_names_its_identities_in_its_scope_and_its_conditions_and_no_other_entity() {
+        assert_eq!(
+            identities_named(NAMED).unwrap(),
+            std::collections::BTreeSet::from([
+                "alice".to_string(),
+                "bob".to_string(),
+                "kube-observer.polar.serviceaccount.cluster.local".to_string(),
+            ])
+        );
+        assert!(identities_named("permit (principal, action, resource").is_err());
+    }
+
+    #[test]
+    fn renaming_replaces_each_identity_named_and_keeps_the_rules_their_order_and_their_ids() {
+        let renames = std::collections::BTreeMap::from([
+            (
+                "alice".to_string(),
+                "d983a3d2-9b61-41c5-88a0-d123fb50ba33".to_string(),
+            ),
+            (
+                "bob".to_string(),
+                "5b1f0c2e-7a44-4c1d-9e3b-2f6a8d0c4e11".to_string(),
+            ),
+        ]);
+        let renamed = rename_identities(NAMED, &renames).unwrap();
+        assert_eq!(
+            identities_named(&renamed).unwrap(),
+            std::collections::BTreeSet::from([
+                "d983a3d2-9b61-41c5-88a0-d123fb50ba33".to_string(),
+                "5b1f0c2e-7a44-4c1d-9e3b-2f6a8d0c4e11".to_string(),
+                "kube-observer.polar.serviceaccount.cluster.local".to_string(),
+            ])
+        );
+        assert!(validate_source(&renamed).is_ok(), "{renamed}");
+        // The rules in their order, the first still known by its id.
+        let first = renamed.find("operators-hear-news").expect("the id is kept");
+        let second = renamed.find("Group::\"retired\"").unwrap();
+        let third = renamed.find("kube-observer").unwrap();
+        assert!(first < second && second < third, "{renamed}");
+        // Nothing to rename leaves the text as it was written.
+        assert_eq!(
+            rename_identities(NAMED, &Default::default()).unwrap(),
+            NAMED
+        );
+        assert_eq!(
+            rename_identities(
+                NAMED,
+                &std::collections::BTreeMap::from([("carol".to_string(), "x".to_string())])
+            )
+            .unwrap(),
+            NAMED
+        );
+    }
+
+    /// A rule for the generated policies: its effect, its principal (one of the names, a group, or anyone), its
+    /// action, its topic, and a condition naming one of the names, or none.
+    type Rule = (
+        bool,
+        Option<Result<usize, usize>>,
+        Option<bool>,
+        Option<usize>,
+        Option<(bool, usize)>,
+    );
+
+    fn rule() -> impl proptest::strategy::Strategy<Value = Rule> {
+        use proptest::prelude::*;
+        (
+            any::<bool>(),
+            proptest::option::of(prop_oneof![
+                (0..IDENTITIES.len()).prop_map(Ok),
+                (0..GROUPS.len()).prop_map(Err)
+            ]),
+            proptest::option::of(any::<bool>()),
+            proptest::option::of(0..TOPICS.len()),
+            proptest::option::of((any::<bool>(), 0..IDENTITIES.len())),
+        )
+    }
+
+    fn rule_text((permit, principal, publish, topic, condition): &Rule) -> String {
+        let principal = match principal {
+            None => "principal".to_string(),
+            Some(Ok(i)) => format!("principal == Identity::\"{}\"", IDENTITIES[*i]),
+            Some(Err(g)) => format!("principal in Group::\"{}\"", GROUPS[*g]),
+        };
+        let action = match publish {
+            None => "action".to_string(),
+            Some(true) => r#"action == Action::"publish""#.to_string(),
+            Some(false) => r#"action == Action::"subscribe""#.to_string(),
+        };
+        let resource = match topic {
+            None => "resource".to_string(),
+            Some(t) => format!("resource == Topic::\"{}\"", TOPICS[*t]),
+        };
+        let condition = match condition {
+            None => String::new(),
+            Some((equal, i)) => format!(
+                " when {{ principal {} Identity::\"{}\" }}",
+                if *equal { "==" } else { "!=" },
+                IDENTITIES[*i]
+            ),
+        };
+        format!(
+            "{} ({principal}, {action}, {resource}){condition};",
+            if *permit { "permit" } else { "forbid" }
+        )
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// Renaming is only renaming: whatever the rules, Cedar decides for a name under the policy as written exactly
+        /// what it decides for its new name under the renamed policy, and for a name not renamed, the same as before.
+        #[test]
+        fn cedar_decides_for_a_new_name_under_the_renamed_policy_as_for_the_old_one(
+            rules in proptest::collection::vec(rule(), 0..6),
+            renamed_count in 0..=IDENTITIES.len(),
+            memberships in proptest::collection::btree_map(
+                proptest::sample::select(IDENTITIES),
+                proptest::sample::subsequence(GROUPS.to_vec(), 0..=GROUPS.len()),
+                0..=IDENTITIES.len(),
+            ),
+            questions in proptest::collection::vec(question(), 1..8),
+        ) {
+            let source = rules.iter().map(rule_text).collect::<Vec<_>>().join("\n");
+            let renames: std::collections::BTreeMap<String, String> = IDENTITIES[..renamed_count]
+                .iter()
+                .map(|name| (name.to_string(), format!("{name}-account")))
+                .collect();
+            let renamed = rename_identities(&source, &renames).unwrap();
+            let hierarchy = cert_issuer_common::hierarchy::Hierarchy::default();
+            let before = Evaluator::new(&source, &hierarchy).unwrap();
+            let after = Evaluator::new(&renamed, &hierarchy).unwrap();
+            for (who, publish, t, declared, implied) in &questions {
+                let name = IDENTITIES[*who];
+                let new_name = renames.get(name).cloned().unwrap_or_else(|| name.to_string());
+                let groups: Vec<String> = memberships
+                    .get(name)
+                    .map(|gs| gs.iter().map(|g| g.to_string()).collect())
+                    .unwrap_or_default();
+                let action = if *publish { r#"Action::"publish""# } else { r#"Action::"subscribe""# };
+                let resource = format!("Topic::\"{}\"", TOPICS[*t]);
+                let facts = topic(*declared, *implied);
+                let was = before.decide(&requester(name, &groups), action, &resource, &facts, 0).unwrap();
+                let is = after.decide(&requester(&new_name, &groups), action, &resource, &facts, 0).unwrap();
+                proptest::prop_assert_eq!(was, is, "{}\n{}", source, renamed);
             }
         }
     }

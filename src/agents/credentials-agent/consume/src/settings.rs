@@ -143,28 +143,11 @@ fn relations(env: &dyn Env) -> Vec<String> {
     if let Some(model) = env
         .var(AUTHORITY_MODEL.name())
         .filter(|v| !v.trim().is_empty())
-        && let Err(why) = model_shape(&model)
+        && let Err(why) = credentials_agent_model::Model::parse(&model)
     {
         problems.push(format!("{}: {why}", AUTHORITY_MODEL.name()));
     }
     problems
-}
-
-/// Whether the authority model is the document the render writes: a JSON object of `format` 1 with a list of
-/// `workloads`. What each workload says is read by the model itself.
-fn model_shape(text: &str) -> Result<(), String> {
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| format!("not JSON ({e})"))?;
-    if value.get("format").and_then(serde_json::Value::as_u64) != Some(1) {
-        return Err("not format 1".to_string());
-    }
-    if !value
-        .get("workloads")
-        .is_some_and(serde_json::Value::is_array)
-    {
-        return Err("has no list of workloads".to_string());
-    }
-    Ok(())
 }
 
 /// Introspection is on when its three settings are all given and off when none is. One or two of
@@ -214,6 +197,9 @@ pub struct ConsumerSettings {
     /// when its configuration is checked, before this is read; were it read anyway it would be empty, so no
     /// certificate would carry a topic it was not given.
     pub issuance_floor: crate::issuance_floor::IssuanceFloor,
+    /// The deployment's authority model, which a policy or groups document is judged by before it is accepted. A model
+    /// that cannot be read stops the agent when its configuration is checked; none given is none to judge by.
+    pub authority_model: Option<credentials_agent_model::Model>,
 }
 
 impl ConsumerSettings {
@@ -244,6 +230,9 @@ impl ConsumerSettings {
                 &config.read(&ISSUANCE_TOPICS)?,
             )
             .unwrap_or_default(),
+            authority_model: Some(config.read(&AUTHORITY_MODEL)?)
+                .filter(|text| !text.trim().is_empty())
+                .and_then(|text| credentials_agent_model::Model::parse(&text).ok()),
         })
     }
 }
@@ -285,17 +274,24 @@ mod tests {
     #[test]
     fn the_authority_model_is_given_as_json_and_one_that_is_not_stops_the_agent() {
         let model = r#"{"format": 1, "workloads": [{"workload": "kube-observer", "identity": "kube-observer.polar.serviceaccount.cluster.local", "issuer": "credentials-agent", "bootstrap": false, "groups": [], "topics": []}]}"#;
-        assert!(
-            config(&with(&[("CREDENTIALS_AGENT_AUTHORITY_MODEL", model)]))
-                .check()
-                .is_empty()
-        );
-        // None given is a model not given yet, which nothing reads until the model is used.
+        let given = with(&[("CREDENTIALS_AGENT_AUTHORITY_MODEL", model)]);
+        assert!(config(&given).check().is_empty());
+        let read = ConsumerSettings::read(&config(&given)).unwrap();
+        assert_eq!(read.authority_model.expect("read").workloads.len(), 1);
+        // None given is none to judge by.
         assert!(config(MINIMUM).check().is_empty());
+        assert!(
+            ConsumerSettings::read(&config(MINIMUM))
+                .unwrap()
+                .authority_model
+                .is_none()
+        );
         for wrong in [
             "not json",
             r#"{"format": 2, "workloads": []}"#,
             r#"{"format": 1}"#,
+            // An identity that is not the workload's own.
+            r#"{"format": 1, "workloads": [{"workload": "kube-observer", "identity": "kube-agent.polar.serviceaccount.cluster.local", "issuer": "credentials-agent", "bootstrap": false, "groups": [], "topics": []}]}"#,
         ] {
             let problems = config(&with(&[("CREDENTIALS_AGENT_AUTHORITY_MODEL", wrong)])).check();
             assert!(

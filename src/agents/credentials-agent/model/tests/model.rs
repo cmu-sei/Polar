@@ -144,6 +144,9 @@ fn cutting_renewal_is_refused_as_breaking_correction_with_the_request_that_cuts_
         said.contains("renewal") && said.contains("credentials-workload-issuance-requests"),
         "{said}"
     );
+    // It names the rule that denies the request: the policy's only one, Cedar's `policy0`.
+    assert_eq!(correction.rules, ["policy0"]);
+    assert!(said.contains("denied by policy0"), "{said}");
     // The effect says what was taken.
     assert!(j.effect.lost.contains(&(
         id("credentials-agent-observer"),

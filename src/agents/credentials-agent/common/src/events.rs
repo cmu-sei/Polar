@@ -153,13 +153,35 @@ pub enum GrantReason {
     PolicyRequirement,
 }
 
-/// A grant or revocation event -- identical whether it arrives over
-/// Cassini (rkyv, for wire transport between agents) or is read back
-/// from the Credentials Agent's own durable event log (serde JSON, for
-/// human-readable, replayable persistence -- see lib::event_log). No
-/// transformation happens between wire and log for these two, unlike
-/// the issuance flow's request/reply/outcome shapes, which are
-/// genuinely different at each stage and modeled separately.
+/// What an accepted `policy` or `groups` document does: each request gained or lost (`identity access topic`), each
+/// round trip that began or stopped closing (`workload entry sent`), and the groups document's keys that name no identity
+/// the authority knows. Names only, never a value.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Deserialize,
+    Serialize,
+    Archive,
+    SerdeDeserialize,
+    SerdeSerialize,
+)]
+pub struct AuthorityEffect {
+    pub gained: Vec<String>,
+    pub lost: Vec<String>,
+    pub began_closing: Vec<String>,
+    pub stopped_closing: Vec<String>,
+    pub unknown_keys: Vec<String>,
+}
+
+/// One entry of the Credentials Agent's durable event log (serde JSON, for
+/// human-readable, replayable persistence -- see lib::event_log). Every
+/// entry is the consumer's own, made from a request it judged: none
+/// arrives over Cassini as it is (the unsigned topics that once let one
+/// were removed: docs/architecture/authority-model.md, "The consumer's
+/// request topics, audited"). The type also derives rkyv, as the
+/// workspace's wire types do.
 ///
 /// `timestamp` is Unix milliseconds, not `chrono::DateTime` directly --
 /// `rkyv` has no native support for `chrono` types, a real, structural
@@ -345,6 +367,23 @@ pub enum CredentialsEvent {
         sequence: u64,
         kind: String,
         version: u64,
+        timestamp: i64,
+        /// What the accepted document does, as the authority model judged it before it was accepted
+        /// (docs/architecture/authority-model.md, "Decisions"): absent for a kind it does not judge (`revoked`),
+        /// for a deployment that gave no model, and in events written before it existed.
+        #[serde(default)]
+        effect: Option<AuthorityEffect>,
+    },
+    /// A `policy` or `groups` document the authority model refused, because an invariant that holds would not
+    /// (docs/architecture/authority-model.md, "Decisions"): kept, since a signed document that would lock the system
+    /// out is worth a permanent record. The section in force stays.
+    AuthorityRefused {
+        section: String,
+        version: u64,
+        /// Who signed it, as the outcome names them.
+        signer: String,
+        /// The refusal's reasons, each in the fixed form the outcome carries.
+        reasons: Vec<String>,
         timestamp: i64,
     },
     /// One accepted, signature-verified admin action -- the only way an
