@@ -200,6 +200,20 @@ code today, and what stands between the two. The detail of each part is in the d
   - the refused topics and their reasons are written into the agent's health file as information, beside its phase. A
     refusal does not make the agent unhealthy: a restart cannot fix a policy, and an operator can see that an agent is
     cut off from a topic it needs.
+- **A pod's init escrows a key only when its agent needs encryption (2026-10-22, for stage 5b).** `polar-init`'s escrow
+  bootstrap runs with the workload's own certificate (one per pod: the broker cannot tell the init container from the
+  agent), over four of the six crypto request and reply pairs (`polar-crypto/src/lib.rs`,
+  `ensure_escrow_keypair_bootstrapped`). It ran for every workload not marked `escrow-exempt`, while the floor admits
+  those topics only to the `encryption` group, so enforcement would have refused most pods in init. The escrowed
+  keypair is read only by a CryptoActor, which only an agent with the `Encryption` need has, so the others escrowed a
+  key they never used. Now the bootstrap runs only when asked, and the `encryption` capability's init footprint asks:
+  the render derives it from the scaffold's needs, as it does every other capability, and `escrow-exempt` is deleted
+  (Cassini and the credentials agent do not need encryption). No floor grows and no certificate changes. A workload
+  without a crypto actor has no escrow key, so nothing can be encrypted for it, which it could not decrypt anyway.
+  This was deferred in writing on 2026-10-09 (the `encryption` capability's comment, `config-catalog-design.md`) and
+  is settled here. (Chosen over the `Agent` rule implying the bootstrap's topics for every agent, which widens every
+  floor for a step most agents do not need, and over the render adding `encryption` or a new group to workloads that
+  bootstrap, which would make a certificate's groups differ from the set its agent computes.)
 - **The broker is measured before it enforces (2026-10-21, stage 5a).** The Cassini test harness's producer and sink
   are brought up to the current client and run in the cluster, so a baseline of today's broker exists before stage 5b,
   and enforcement without and with the cache is compared against it instead of guessed at. A run varies message size,
@@ -475,6 +489,25 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   delivered, a Cedar forbid refusing a declared one, a Cedar permit admitting an undeclared one; a held subscription
   dropped by a new forbid and the client told; a cached decision not outliving a change; and the agent re-sending a
   refused subscription once a permit arrives.
+
+- *Planned 2026-10-22:*
+  - the slices, in order, each committed when its tests pass: the escrow bootstrap derived from `encryption`
+    ("Decisions", 2026-10-22); the broker's authority and floor, and enforcement; the cache; held subscriptions judged
+    again; the credentials agent's check of a policy on arrival (open point B, not built); the agent's side; then a
+    deploy and the measurement without and with the cache;
+  - the broker applies the builder's own rule (`topic_gate::rule`, made public), not a copy, so the agent and the
+    broker decide alike by construction; the floor is read from the leaf certificate once per connection (identity,
+    workload, `g:` groups, `p:pub`/`p:sub` names) and the implied topics from `topics::implied_topics`;
+  - an identity that maps to no workload (a person's) has no implied floor: only its certificate's `p:` names and what
+    Cedar permits, so the `cassini-client` CLI is refused by default. cassini-c2's control operations are not topics
+    and are not affected;
+  - `CASSINI_DECISION_CACHE_SECS` sets how long an entry lives, `0` is no cache (the switch the measurement uses); a
+    counter of authority changes shared by every Listener makes a stale entry miss without a lock;
+  - each Listener remembers the subscriptions the broker acknowledged; on a change of authority the ListenerManager
+    tells every Listener, and each judges its own again; on a resumed session the new Listener asks for the session's
+    held topics and judges those;
+  - not in this stage: the agent's own gate also calls its policy actor for every publish, and caching it is not
+    planned; the measurement will show whether it matters.
 
 **Stage 6: degraded is bounded** (gap 4)
 
