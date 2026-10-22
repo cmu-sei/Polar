@@ -227,6 +227,28 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
   consumer's `pass_on_section` (`credentials-agent/consume/src/supervisor.rs:599`) reads a section only after it has
   been replaced, to publish it. The check needs the catalog's facts and the other document of the pair, so a runtime
   section needs a check that is given them, before the configuration actor replaces it; its shape is for the build.
+- **A refusal is an `invalid` outcome and a ledger event; an acceptance carries its effect (2026-10-22).** Two records
+  that exist already carry both:
+  - the document's outcome, `ConfigurationOutcome` (`polar-scheduler/common/src/lib.rs:164`), which every agent
+    announces for each signed document and the scheduler processor records in the graph beside it, where an
+    administrator looks for their document's fate;
+  - the credentials agent's ledger, which writes `CredentialsEvent::AuthorityPublished` for every authority it
+    publishes, numbered in sequence (`credentials-agent/consume/src/ledger.rs:292`): the durable record, with its
+    provenance.
+
+  So:
+  1. A refused document's outcome has the status `invalid` ("verified, but what it asks is not acceptable (… a
+     relation that would break)", `outcome::INVALID`), and its `detail` lines give the reason in a fixed form: the
+     invariant broken (hearing authority or correction); what broke it (the edge lost, or the renewal it depends on);
+     the request now denied (identity, action, topic) and the ids of the Cedar policies that deny it; and the witness
+     path under the current pair, what used to work. The ledger records the refusal too, as a new `AuthorityRefused`
+     event naming the document, its signer and the reason: a signed lockout is worth a permanent record.
+  2. An accepted document's effect goes into its `AuthorityPublished` event: who gained or lost what (identity, topic,
+     access), and which round trips stopped or began to close. Its `applied` outcome carries a summary in `detail`
+     ("3 identities lose 5 topics; 1 round trip stops closing"), so the graph shows it beside the document; the whole
+     effect stays in the ledger.
+  3. Outcomes carry names, never values, as now: the report names identities, topics and policy ids, never the
+     policy's text.
 - **A groups document is checked the same way as a policy (2026-10-22).** Against the same rules: the two invariants,
   renewal derived beneath them, over the same catalog facts. The rules are judged on a pair, the policy and the groups
   document, and do not ask which of them arrived. When either arrives, the authority:
@@ -481,8 +503,9 @@ To settle one at a time, before building:
 5. ~~The engine.~~ Settled: `ascent`, after the research recorded in "The engine" (2026-10-22).
 6. ~~The credentials agent, or a policy agent of its own.~~ Settled: the credentials agent, as a crate of its own
    ("Decisions", 2026-10-22).
-7. What a refusal and an effect report look like, and where they are recorded (the ledger, the configuration outcome
-   the scheduler records, or both).
+7. ~~What a refusal and an effect report look like, and where they are recorded.~~ Settled: an `invalid` outcome and
+   an `AuthorityRefused` ledger event; the effect in `AuthorityPublished`, a summary on the outcome ("Decisions",
+   2026-10-22).
 8. Persons: only those the groups document names, or others too.
 9. Whether the render's separate projections (the issuance floor, the served workloads) are replaced by the model at
    once, or later.
