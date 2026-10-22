@@ -74,6 +74,14 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
   the read loop); it should end the transport.
 - Stage 5b is measured against the baseline, without and with its decision cache: done 2026-10-22
   (`docs/architecture/broker-baseline.md`, "Stage 5b: the broker deciding").
+- **Security: three of the credentials agent's topics append whatever they carry to its ledger** (found 2026-10-22;
+  `docs/architecture/authority-model.md`, "The consumer's request topics, audited"). `credentials-grants`,
+  `credentials-revocations` and `credentials-account-provisioning` take a raw `CredentialsEvent`, any kind, with no
+  signature and no publisher, and append it. Whoever can publish on one can provision an account holding
+  `c:update-policy` and claim it, grant `p:` names, or revoke an administrator. Only the broker's floor stops it, since
+  stage 5b (nothing declares publishing on them); a Cedar `permit` would open it, and before stage 5b nothing stopped
+  it. The signed administrator actions already carry all three, so the raw topics are a parallel path nothing uses: to
+  decide whether they go, or are refused until they carry a signed action.
 - **The authority model** (`docs/architecture/authority-model.md`, proposed 2026-10-22, to cover with David after stage
   5b's slices 6 and 7): one model of the deployment as data, rules over it, and acceptance of a policy or groups
   document as a comparison over the closed catalog. It replaces slice 5's hand-written probes. Until it is built, a

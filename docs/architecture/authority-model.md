@@ -312,6 +312,49 @@ Where the groups document names an identity, its list replaces that identity's c
 (`polar-permissions/src/lib.rs:192`, `resolve_principal`). The floor, and so the broker's admission where policy is
 silent, always reads the certificate's groups.
 
+## The consumer's request topics, audited (2026-10-22)
+
+For open question 10: for each topic the credentials agent's consumer serves (`REQUEST_TOPICS`,
+`credentials-agent/consume/src/supervisor.rs:148`), what a request proves by itself, whether the consumer is given the
+broker-verified publisher (only four are, `dispatch_request`, `supervisor.rs:619`), and what a client publishing on it
+directly, not through the observer or the agent meant to, could do. Read from the code.
+
+| Topic | Meant to publish it | What the request proves | Publisher given | Published directly, it could |
+|---|---|---|---|---|
+| `credentials-grants` | nothing in the catalog (`.waiting`) | nothing | no | append any ledger event (below) |
+| `credentials-revocations` | nothing in the catalog | nothing | no | append any ledger event (below) |
+| `credentials-account-provisioning` | nothing in the catalog | nothing | no | append any ledger event (below) |
+| `credentials-admin-action-requests` | the observer | a known, unrevoked author's signature, the required `c:`, no replay (`admin_action.rs:57`) | no | no more than through the observer |
+| `credentials-account-requests` | the observer | bootstrap: the bootstrap service account's token; native: a username and email matching a provisioned account, "no out-of-band secret" (`account_claim.rs:51`) | no | no more than through the observer |
+| `credentials-issuance-requests` | the observer | an IdP token, introspected, and a grant (`issuance.rs:168`) | no | no more than through the observer |
+| `credentials-workload-issuance-requests` | the observer | a Kubernetes token cert-issuer validates; one certificate per identity, binding and type | no | no more than through the observer |
+| `credentials-identity-normalization-requests` | the observer | a token cert-issuer validates | no | learn the normalized identity of a token it already holds |
+| `credentials-agent-escrow-key-requests` | the observer | nothing needed: it answers with a public key | no | read a public key |
+| `credentials-escrow-key-requests` | encryption agents' crypto actor | nothing needed: the escrow public key | no | read a public key |
+| `credentials-certificate-requests` | encryption agents' crypto actor | nothing needed: another identity's public certificate | no | read a public certificate |
+| `credentials-agent-escrow-issuance-requests` | polar-init, for encryption agents | a Kubernetes token cert-issuer validates | no | no more than polar-init |
+| `credentials-store-secret-requests` | encryption agents | the publisher, a payload encrypted to the escrow key, and Cedar | yes | only what it may itself |
+| `credentials-retrieve-secret-requests` | encryption agents | the publisher, and Cedar | yes | only what it may itself |
+| `credentials-retrieve-agent-escrow-keypair-requests` | polar-init | the publisher, which names the keypair (`agent_escrow_keypair_bootstrap.rs:65`) | yes | only its own keypair |
+| `credentials-decrypt-on-behalf-of-requests` | encryption agents | the publisher, and Cedar | yes | only what it may itself |
+
+Thirteen of the sixteen prove themselves, or carry the broker's publisher and Cedar. **The first three prove nothing.** A
+message on any of them is read as a `CredentialsEvent` and appended to the ledger as it is (`supervisor.rs`, the
+fall-through of `deserialize_and_dispatch`; `ledger.rs:319`, `AppendNoReply`): no signature, no publisher, and any kind of
+event, the ones documented as "published internally by the consumer itself" (`IssuanceCompleted`, `SecretStored`)
+included. So a client that could publish on one could, for example:
+- provision an account holding `c:update-policy` (`AccountProvisioned`), then claim it with the username and email it
+  chose, and sign policy;
+- grant an IdP identity `p:` names of its choosing, which issuance writes into its certificate (`Grant`);
+- revoke an administrator's certificate (`Revoke`), which the credentials agent publishes as authority, so every agent
+  refuses that administrator's signature.
+
+What stands in the way today is the broker alone: nothing declares publishing on these topics, so since stage 5b the
+floor refuses everyone, and only a Cedar `permit` would open one. Before stage 5b was deployed (2026-10-22) the broker
+admitted every client's publish. The signed administrator actions already carry all three (`AdminAction::ProvisionAccount`,
+`Grant`, `Revoke`; `credentials-agent/common/src/admin_action.rs:40`), through `credentials-admin-action-requests`, so the
+raw topics are a parallel path that nothing in the catalog uses. Recorded in `remaining-work.md`.
+
 ## The proposal
 
 Three parts. The standard names help: the authority is the policy administration point (it decides which policy is
