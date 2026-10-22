@@ -23,8 +23,8 @@
 
 # The authority model: one place to reason about who may do what
 
-Written 2026-10-22. **Proposed, not settled.** It is to be covered with the maintainer, one question at a time, before
-any of it is built. It replaces stage 5b's slice 5 (the credentials agent's check of a policy on arrival, open point B in
+Written 2026-10-22. **Proposed, being settled** with the maintainer, one question at a time, before any of it is built;
+what is settled is under "Decisions". It replaces stage 5b's slice 5 (the credentials agent's check of a policy on arrival, open point B in
 `policy-enforcement.md`), which would have been a hand-written version of the same thing.
 
 ## Why
@@ -159,6 +159,21 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
   broker's decision limits who publishes.
 - Why a bootstrap service is critical, and which path it carries.
 
+## Decisions
+
+- **Agents declare local causes; the paths are derived (2026-10-22).** Paths are declared in code, like everything else
+  ("nothing is hand-rolled configuration"), but no developer declares a path. Each agent states only what its own code
+  does: what it publishes and subscribes to (as now), and what causes each publish: a message arriving on a topic, an
+  external entry (an HTTP route, a git fetch, a timer), or nothing, for what the agent publishes of its own accord. An
+  entry that waits for an answer says which topic answers it. Nothing names another agent or a path. The authority holds
+  the rules and computes the paths from everyone's facts, with Datalog: a path is reachability over the edges that
+  publishes, subscriptions and causes make, under the policy being judged. A hop added later (an agent between two
+  others) changes the path and the check follows, with no one editing a goal. Chosen over a path declared on each
+  topic, which made the author of one agent know the shape of a path through others. The facts are one set and each
+  viewpoint is a query over it (the authority's acceptance, an agent's own round trips, an operator's comparison of two
+  versions); derived facts may be published with the authority for leaves to read, but they explain and accept,
+  never enforce: the broker and the agents still decide by Cedar and the certificate.
+
 ## The proposal
 
 Three parts. The standard names help: the authority is the policy administration point (it decides which policy is
@@ -177,16 +192,34 @@ The render emits one document of base facts, applied with the catalog, so applyi
 | `cert_group(W, G)` | the groups its certificate carries | its scaffold, through the catalog |
 | `declares(W, T, A)` | a topic it declares (families expanded) | its scaffold |
 | `implies(G, W, T, A)` | a topic group `G` implies for `W` | its scaffold's computed set, with the rule as origin |
-| `carries(P, W, T, A)` | `W`'s use of `T` is a step of path `P` (renewal, correction, hearing, encryption) | its scaffold (see below) |
+| `causes(W, In, T)` | `W` publishes on `T` because of `In`: a message on a topic, or an entry | its scaffold (see below) |
+| `entry(W, E, Sent, Answer)` | `W` takes external entry `E` (an HTTP route, a git fetch, a timer), publishes on `Sent`, and answers it from `Answer` | its scaffold |
 
 The runtime documents add facts as they are accepted: `member(I, G)` and the group and role hierarchy from the groups
 document, and the policy itself, which Cedar evaluates.
 
-**Where the path facts come from.** Not a hand-written list in the catalog ("nothing is hand-rolled configuration",
-`policy-enforcement.md`, "The model"). The declaring code says it: a `TopicDecl` gains an optional path, so the
-observer's publish of `credentials-workload-issuance-requests` is declared as a step of renewal, and the scheduler
-processor's family as a step of correction; implied topics carry theirs from their rule (`cassini-client`'s authority
-topics are hearing). The scaffold prints them, the render collects them, as it collects topics now.
+**Where the cause facts come from** ("Decisions"). The declaring code says what causes each publish, beside the topic.
+The observer:
+
+```rust
+TopicDecl::publish(WORKLOAD_ISSUANCE_REQUESTS, "polar-init's workload issuance")
+    .because(Cause::Http("/workload/issue")),
+TopicDecl::subscribe(WORKLOAD_ISSUANCE_REPLIES, "the answer to it")
+    .answers(Cause::Http("/workload/issue")),
+```
+
+The consumer:
+
+```rust
+TopicDecl::subscribe(WORKLOAD_ISSUANCE_REQUESTS, "a workload's issuance request"),
+TopicDecl::publish(WORKLOAD_ISSUANCE_REPLIES, "the certificate, or why not")
+    .because(Cause::Topic(WORKLOAD_ISSUANCE_REQUESTS)),
+```
+
+Neither says "renewal" nor names the other. Request and reply may get a shorthand. Implied topics carry their causes from
+their rule, so `cassini-client`'s authority round trip is declared once. The scaffold prints the causes, the render
+collects them as it collects topics now, and applying the catalog signs them off. The vocabulary of causes (which
+entries exist) is an open question.
 
 The issuance floor becomes a query on this model, not a separate variable, and the identity forms are converted in one
 place. cert-issuer keeps its own small floor, on purpose (`cert-issuer-isolation.md`).
@@ -206,15 +239,23 @@ group(I, P)           :- group(I, G), parent(G, P).
 floor(I, T, A)        :- identity(W, _, I), declares(W, T, A).
 floor(I, T, A)        :- identity(W, _, I), cert_group(W, G), implies(G, W, T, A).
 
-% What must stay allowed: every step of every path, for whoever carries it.
-critical(I, T, A, P)  :- identity(W, _, I), carries(P, W, T, A), floor(I, T, A).
+% A message on T goes from A to B if both may use T (allowed: Cedar's answers, then the floor, under the policy judged).
+edge(out(A,T), in(B,T)) :- publishes(A,T), subscribes(B,T), allowed(A,T,pub), allowed(B,T,sub).
+% Inside an agent, what arrives leads to what it publishes.
+edge(in(A,I), out(A,O))  :- causes(A, I, O).
+reach(X,Y) :- edge(X,Y).
+reach(X,Z) :- reach(X,Y), edge(Y,Z).
+% An entry's round trip closes when what it sends comes back to where it is answered.
+closes(A,E) :- entry(A,E,Sent,Answer), reach(out(A,Sent), in(A,Answer)).
 ```
 
-A path is the place where recursion earns its keep: "can workload W still be renewed?" is reachability along a chain of
-steps, each a publish and a matching subscribe, and so is "can the policy still be corrected?". Cedar cannot express
-that, deliberately (`policy-enforcement.md`, "Decisions": Datalog was kept out unless rules must derive facts
-recursively; these do). A Datalog engine can also say which facts derived a conclusion, so a refusal carries its own
-reason.
+"Renewal still works" is then `closes(observer, http("/workload/issue"))` under the proposed policy: no list of topics
+is written for it. Reachability is where recursion earns its keep, and Cedar cannot express it, deliberately
+(`policy-enforcement.md`, "Decisions": Datalog was kept out unless rules must derive facts recursively; these do).
+Cedar still decides each request; its answers are the `allowed` facts, and Datalog does the closure.
+
+A refusal carries its reason: the round trip that no longer closes, and the edge whose loss broke it. No engine gives
+proof trees by itself, so the witness is designed into the rules (see "The engine").
 
 ### 3. Acceptance as a comparison
 
@@ -223,11 +264,13 @@ document names, against every topic in any floor or named by either policy, for 
 a groups document arrives, the credentials agent evaluates the current pair (policy, groups) and the proposed pair over
 that universe, with Cedar's own evaluator, and compares:
 
-- a request in the critical set that would go from allowed to denied refuses the document whole, with the reason: the
-  request, the path it is a step of, and the rule that denies it. For example: "refused: forbids
-  credentials-agent-observer to publish credentials-workload-issuance-requests, a step of renewal for every workload the
-  credentials agent issues";
-- any other change is accepted, and its effect (who gained, who lost what) is recorded with the outcome.
+- a round trip the authority's code names as an invariant (hearing authority, renewal, correction) that closes under the
+  current pair and not under the proposed one refuses the document whole, with the reason: the round trip, the edge
+  lost, and the rule that denies it. For example: "refused: renewal (credentials-agent-observer's /workload/issue) no
+  longer closes: the policy forbids credentials-agent-observer to publish credentials-workload-issuance-requests";
+- any other change, a round trip that is not an invariant included, is accepted, and its effect (who gained, who lost
+  what, which round trips stopped closing) is recorded with the outcome. So an administrator can still cut a workload
+  off on purpose, to quarantine it.
 
 It runs on either document's arrival, against the pair as it would stand, so a groups document that moves a workload
 into a forbidden group is refused as a policy that forbids it would be. There is no second evaluator to drift from
@@ -263,25 +306,34 @@ code. That allows an engine whose rules are compiled in:
   needs);
 - `datafrog`: the small engine Polonius used; lower level, rules written by hand as joins.
 
-If administrators ever need to write their own rules, that is a runtime engine, and a separate decision.
+`ascent` also has lattices, which give the explanation a refusal needs: keep, for each pair of nodes, the shortest witness
+path, and reachability over a cycle still ends.
+
+The model is small (about 20 agents and 150 topics), so a full evaluation takes milliseconds; an incremental engine
+(differential dataflow, DBSP) would be more than it needs.
+
+If administrators ever need to write their own rules, that is a runtime engine (Biscuit's Datalog, say), with rules as
+signed documents like the policy, and a separate decision.
 
 ## Open questions
 
 To settle one at a time, before building:
 
-1. Where the path facts come from: an optional path on each declaration (proposed), or something else.
-2. Which rules refuse and which only report: the paths above refuse; a topic left with no permitted publisher, say,
-   might only be reported.
-3. Whether the groups document is checked too (proposed: yes, against the pair).
-4. The engine: `ascent`, `crepe`, `datafrog`, or a hand-written closure until paths need more.
-5. The credentials agent, or a policy agent of its own.
-6. What a refusal and an effect report look like, and where they are recorded (the ledger, the configuration outcome
+1. ~~Where the path facts come from.~~ Settled: local causes, derived paths ("Decisions", 2026-10-22).
+2. Which rules refuse and which only report. Proposed: the round trips the authority's code names (hearing authority,
+   renewal, correction) refuse; every other round trip, and a topic left with no permitted publisher, is reported.
+3. The vocabulary of causes: which external entries exist (HTTP routes, git fetches, timers, anything else), and how an
+   entry names itself so that a round trip can be named in an invariant.
+4. Whether the groups document is checked too (proposed: yes, against the pair).
+5. The engine: `ascent`, `crepe`, `datafrog`, or a hand-written closure until paths need more.
+6. The credentials agent, or a policy agent of its own.
+7. What a refusal and an effect report look like, and where they are recorded (the ledger, the configuration outcome
    the scheduler records, or both).
-7. Persons: only those the groups document names, or others too.
-8. Whether the render's separate projections (the issuance floor, the served workloads) are replaced by the model at
+8. Persons: only those the groups document names, or others too.
+9. Whether the render's separate projections (the issuance floor, the served workloads) are replaced by the model at
    once, or later.
-9. Whether the model also checks what the inventory found unchecked: a groups document's keys against the catalog, and
-   who publishes on the credentials agent's request topics.
+10. Whether the model also checks what the inventory found unchecked: a groups document's keys against the catalog, and
+    who publishes on the credentials agent's request topics.
 
 ## Effect on stage 5b
 
