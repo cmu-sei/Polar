@@ -85,12 +85,13 @@ def main [] {
             assert (((value_of $vars "POLAR_INIT_CERT_ISSUER_URL") | default "") == "")
         }
 
-        "Neo4j still asks for the server certificate it did and skips the escrow bootstrap": {
+        "Neo4j still asks for the server certificate it did and runs no escrow bootstrap": {
             let out = (render neo4j {})
             let text = (open --raw ($out | path join "neo4j-statefulset.yaml"))
             assert ($text | str contains "server:/etc/neo4j-tls:ecdsa-p256:")
             let vars = (init_env ($out | path join "neo4j-statefulset.yaml"))
-            assert ((value_of $vars "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP") == "true")
+            assert (($vars | where name == "POLAR_INIT_ESCROW_BOOTSTRAP") | is-empty)
+            assert (($vars | where name == "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP") | is-empty)
         }
 
         "Neo4j's configuration reaches its ConfigMap exactly, whatever characters it has": {

@@ -218,6 +218,8 @@ let credentialsAgentIssuerEnv =
         , kubernetes.EnvVar::{ name = "POLAR_INIT_OBSERVER_URL", value = Some observerUrl }
         ]
 
+-- The escrow bootstrap runs only when `extraEnv` asks for it (POLAR_INIT_ESCROW_BOOTSTRAP): the
+-- catalog's `encryption` capability does, for an agent that needs encryption, and no hand chart does.
 let makePolarInitContainer =
       \(polarInitImage : Text) ->
       \(imagePullPolicy : Text) ->
@@ -228,7 +230,6 @@ let makePolarInitContainer =
       \(extraMounts : List kubernetes.VolumeMount.Type) ->
       \(depCerts : List Text) ->
       \(certs : List Text) ->
-      \(skipEscrowBootstrap : Bool) ->
         kubernetes.Container::{
         , name            = "polar-init"
         , image           = Some polarInitImage
@@ -246,14 +247,6 @@ let makePolarInitContainer =
               ]
             # Constants.commonClientEnv
             # extraEnv
-            # (   if    skipEscrowBootstrap
-                  then  [ kubernetes.EnvVar::{
-                          , name  = "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP"
-                          , value = Some "true"
-                          }
-                        ]
-                  else  [] : List kubernetes.EnvVar.Type
-              )
           )
         , args = Some
           (   Prelude.List.concatMap Text Text (\(d : Text) -> ["--check-dep-cert", d]) depCerts

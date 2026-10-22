@@ -395,7 +395,8 @@ render asks the images already in the registry, and says which one is missing.
    are declared (`settings.rs` in each) and both are catalog workloads on a document, with the
    catalog taught what their hand charts did (`config/workloads/credentials.nuon`, the
    `persistent-data`, `pinned-ca` and `escrow-exempt` capabilities, the `init` facet, and the
-   entry fields `provides`, `no_start_wait` and `service`).
+   entry fields `provides`, `no_start_wait` and `service`; `escrow-exempt` was removed on 2026-10-22, when the
+   bootstrap came to follow the `encryption` need instead).
 5. Agents that bypass the catalog, later (see `remaining-work.md`).
 
 ### 9.9 Still open

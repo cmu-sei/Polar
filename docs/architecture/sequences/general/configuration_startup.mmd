@@ -32,7 +32,9 @@ sequenceDiagram
 
     KL->>PI: start, with --cert and --check-dep-cert arguments
     PI->>PI: wait for the dependencies' certificates, get this agent's certificates
-    PI->>PI: escrow key bootstrap, leave a kernel key handle for the workload
+    opt the agent needs encryption (POLAR_INIT_ESCROW_BOOTSTRAP)
+        PI->>PI: escrow key bootstrap, leave a kernel key handle for the workload
+    end
     PI-->>KL: exit 0
     KL->>AG: start, with the environment the resolver derived
     AG->>DS: spawn the domain supervisor

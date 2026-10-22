@@ -288,11 +288,21 @@ def main [] {
             assert (resolve "kube-consumer" | get dep_checks | is-not-empty)
         }
 
-        "the escrow authority's polar-init is told to skip the escrow bootstrap, and no other is": {
-            let consumer = (resolve "credentials-agent")
-            assert ($consumer.init_env | any {|e| $e.name == "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP" and $e.value == "true" })
-            let other = (resolve "kube-consumer")
-            assert ($other.init_env | where name == "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP" | is-empty)
+        "only an agent that needs encryption escrows a key in init, and the escrow authority does not": {
+            # The escrowed keypair is read only by a crypto actor, so the bootstrap follows the `encryption` need
+            # the scaffold declares (docs/architecture/policy-enforcement.md, "Decisions", 2026-10-22).
+            let consumer = (resolve "kube-consumer")
+            assert equal (init_env_value $consumer "POLAR_INIT_ESCROW_BOOTSTRAP") "true"
+            assert ("encryption" in $consumer.needs)
+            for name in ["kube-observer" "jira-observer" "credentials-agent" "credentials-agent-observer"] {
+                let r = (resolve $name)
+                assert ("encryption" not-in $r.needs) $"($name) does not need encryption"
+                assert equal (init_env_value $r "POLAR_INIT_ESCROW_BOOTSTRAP") null $"($name) escrows nothing"
+            }
+            # and the old switch is gone from every pod
+            for name in ["kube-consumer" "credentials-agent" "cassini"] {
+                assert ((resolve $name).init_env | where name == "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP" | is-empty)
+            }
         }
 
         "the observer is a Service on the port its code listens on": {
@@ -350,8 +360,7 @@ def main [] {
         }
 
         "the broker starts without the escrow bootstrap, which needs the broker": {
-            let r = (resolve "cassini")
-            assert ($r.init_env | any {|e| $e.name == "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP" and $e.value == "true" })
+            assert equal (init_env_value (resolve "cassini") "POLAR_INIT_ESCROW_BOOTSTRAP") null
         }
 
         "the broker's Service has the name its clients use, selects the broker, and exposes the one port it listens on": {

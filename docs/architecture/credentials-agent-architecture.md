@@ -305,7 +305,10 @@ that makes surviving rejuvenation possible at all.
 
 ## Agent escrow bootstrap: retrieve, fall back to issue-then-escrow
 
-**The actual startup sequence, per agent, per pod.** An agent's own
+**The actual startup sequence, per agent, per pod.** (Only for an agent
+that needs encryption, since 2026-10-22: the escrowed keypair is read by
+its crypto actor alone, so `polar-init` runs the bootstrap only when the
+`encryption` capability asks; `policy-enforcement.md`, "Decisions".) An agent's own
 escrow identity bootstrap is retrieve-first, issuance-as-fallback —
 not two independent paths. On startup: attempt to retrieve a
 previously-escrowed keypair for this service identity. If one exists,

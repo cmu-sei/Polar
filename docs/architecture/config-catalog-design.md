@@ -135,9 +135,9 @@ Agreed properties (all implemented as of the builder-capability slice):
    `POLAR_HEALTH_DEP_ENDPOINTS`, derived from the same `needs`, and derives
    `expects_graph` from `graph-write`. `with_health_check` was removed.
    `encryption` is opt-in (observers do not declare it): polar-crypto serves escrow
-   keys and mTLS, but observers never encrypt payloads; polar-init's escrow bootstrap
-   still runs for every agent and is revisited when the builder's mTLS integration
-   through the CryptoActor lands.
+   keys and mTLS, but observers never encrypt payloads. polar-init's escrow bootstrap
+   ran for every agent until 2026-10-22; it now runs only for an agent that needs
+   `encryption`, whose capability asks for it (`policy-enforcement.md`, "Decisions").
 4. The vocabulary starts with what exists and grows with the builder; catalog entries
    use capability names from the start so a later Rust rename does not touch the
    deployment side.
@@ -251,7 +251,7 @@ Then: credentials-agent (tests the escape hatch).
 ## 9. Open items
 
 - (done) Capability rename and `POLAR_CAPABILITIES` cross-check in the Rust builder; `HealthCheckArgs` is derived inside the builder (polar-health keeps its own struct).
-- Decide baseline vs derived `encryption`, and the polar-init escrow bootstrap, when mTLS integration through the builder lands.
+- ~~Decide baseline vs derived `encryption`, and the polar-init escrow bootstrap, when mTLS integration through the builder lands.~~ Decided 2026-10-22: derived (`policy-enforcement.md`, "Decisions").
 - Move the graph controller into the builder as infrastructure (`.with_graph_write()` spawning it, wiring `GraphSignal`, owning the flush) and make the shutdown handshake builder-owned, so a migrated agent cannot forget its half of it (kube-consumer did).
 - Pass `--cluster-domain` to polar-init from `cluster.domain`.
 - Derive init env (currently `Constants.commonClientEnv`) from the cassini capability.

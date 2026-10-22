@@ -183,12 +183,9 @@ let render =
                         "/workspace/token"
                         [ kubernetes.VolumeMount::{ name = "neo4j-tls", mountPath = "/etc/neo4j-tls" } ]
                         ([] : List Text)
+                        -- The credentials agent does not need Neo4j to answer, so
+                        -- getting the server certificate from it is no startup deadlock.
                         [ "server:/etc/neo4j-tls:ecdsa-p256:${Prelude.Text.concatSep "," v.neo4jSans}" ]
-                        -- Neo4j is storage, not an agent: it has no Cassini
-                        -- connection, so it has no escrow identity to bootstrap. (The
-                        -- credentials agent does not need Neo4j to answer, so getting
-                        -- the server certificate from it is no startup deadlock.)
-                        True
                     , kubernetes.Container::{
                       , name            = "neo4j-init"
                       , image           = Some v.nuInitImage

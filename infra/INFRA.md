@@ -323,8 +323,7 @@ Today's capabilities are `cassini`, `graph-write`, `encryption`,
 `kube-api-read`, and others that describe the shape of the pod rather than what
 the code needs: `persistent-data` (a claim named for the workload, mounted at
 `/var/lib/<workload>`), `pinned-ca` (polar-init and the container trust the Polar CA
-from a mounted file) and `escrow-exempt` (polar-init skips the escrow
-bootstrap, because this workload serves it or is what the request travels through), `tracing` (every workload sends its traces to Jaeger, from its kind) and `oci-registry-auth` (registry credentials mounted as a Docker config). An agent on a document says what its
+from a mounted file), `tracing` (every workload sends its traces to Jaeger, from its kind) and `oci-registry-auth` (registry credentials mounted as a Docker config). An agent on a document says what its
 code requires in its own scaffold; its entry adds what else the deployment gives
 it with `provides`, lists services it watches but does not wait for at start with
 `no_start_wait`, and, if it answers requests, a `service` (a port, which becomes
@@ -792,10 +791,11 @@ hand). If the variable is unset, for example when running outside the cluster,
 the builder logs a warning and starts anyway; it only refuses on a real mismatch.
 
 `encryption` is **opt-in**: an agent that never encrypts a payload (the observers)
-does not declare it. It currently contributes nothing to the manifest (all facets
-are `{}`), because polar-init's escrow bootstrap for polar-crypto runs for every
-agent. When the builder's mTLS integration through the CryptoActor lands, decide
-whether encryption becomes a baseline or stays derived from a capability.
+does not declare it. Its one footprint is in init: `POLAR_INIT_ESCROW_BOOTSTRAP=true`,
+so polar-init escrows the workload's keypair, which only the agent's crypto actor
+reads. No other workload runs the bootstrap: the credentials agent serves it and the
+broker carries it, and neither needs encryption (decided 2026-10-22,
+`docs/architecture/policy-enforcement.md`, "Decisions").
 
 Health configuration is no longer passed from Rust: the builder derives
 `expects_graph` from the capabilities and reads the dependency endpoints from

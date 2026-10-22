@@ -191,7 +191,6 @@ let render =
                     )
                     v.dep_checks
                     v.certs
-                    False
                 ]
               , containers =
                 [ kubernetes.Container::{

@@ -73,12 +73,14 @@ pub const CA_CERT: Optional<String> = Optional::text(
     "path to the Polar CA certificate cert-issuer is verified against from the first request; unset means the CA is fetched once and pinned",
 );
 
-/// Skips the escrow-keypair bootstrap when set to any non-empty value. Required for the three
-/// core services (the Credentials Agent, cert-issuer and Cassini), whose own polar-init would
-/// otherwise wait on a service that cannot exist yet.
-pub const SKIP_ESCROW_BOOTSTRAP: Optional<String> = Optional::text(
-    "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP",
-    "set to any non-empty value to skip the escrow-keypair bootstrap, as the core services (credentials agent, cert-issuer, Cassini) must",
+/// Runs the escrow-keypair bootstrap. Only an agent with a crypto actor reads the escrowed keypair, so the render
+/// sets it for a workload whose code needs encryption (the `encryption` capability), and for no other: the core
+/// services, which the bootstrap travels through or asks, never do (docs/architecture/policy-enforcement.md,
+/// "Decisions", 2026-10-22).
+pub const ESCROW_BOOTSTRAP: Defaulted<bool> = Defaulted::flag(
+    "POLAR_INIT_ESCROW_BOOTSTRAP",
+    "whether to escrow this workload's keypair with the credentials agent before it starts: true for a workload whose agent needs encryption, which the render derives from its scaffold",
+    "false",
 );
 
 static VARIABLES: &[&dyn Described] = &[
@@ -87,7 +89,7 @@ static VARIABLES: &[&dyn Described] = &[
     &OBSERVER_URL,
     &TOKEN_PATH,
     &CA_CERT,
-    &SKIP_ESCROW_BOOTSTRAP,
+    &ESCROW_BOOTSTRAP,
 ];
 
 /// What polar-init reads of its own.
@@ -121,7 +123,7 @@ fn issuer_is_consistent(env: &dyn Env) -> Vec<String> {
     }
 }
 
-/// What the escrow bootstrap needs, which a core service's init does not.
+/// What the escrow bootstrap needs, which an init that does not run it does not.
 #[derive(Debug, Clone)]
 pub struct EscrowSettings {
     pub client: TCPClientConfig,
@@ -145,7 +147,7 @@ pub enum Issuance {
 pub struct InitSettings {
     pub issuance: Issuance,
     pub token_path: String,
-    /// `None` when the bootstrap is skipped, in which case nothing of the client's or the
+    /// `None` when the bootstrap is not asked for, in which case nothing of the client's or the
     /// crypto actor's is read or required.
     pub escrow: Option<EscrowSettings>,
 }
@@ -207,16 +209,15 @@ impl InitSettings {
                 ca_cert_path,
             },
         };
-        // Any non-empty value skips, as it always did (the value itself does not matter).
-        let skip = match SKIP_ESCROW_BOOTSTRAP.read(env) {
-            Ok(value) => value.is_some(),
+        let bootstrap = match ESCROW_BOOTSTRAP.read(env) {
+            Ok(value) => value,
             Err(error) => {
                 note(error.to_string());
                 false
             }
         };
 
-        let escrow = if skip {
+        let escrow = if !bootstrap {
             None
         } else {
             let client = TCPClientConfig::from_env(env);
@@ -272,10 +273,12 @@ mod tests {
         env(&parts.concat())
     }
 
+    /// Asks for the bootstrap, as the `encryption` capability's init footprint does.
+    const ESCROW: &[(&str, &str)] = &[("POLAR_INIT_ESCROW_BOOTSTRAP", "true")];
+
     #[test]
-    fn a_core_service_needs_only_the_issuer_url() {
-        let s = InitSettings::from_env(&with(&[OWN, &[("POLAR_INIT_SKIP_ESCROW_BOOTSTRAP", "1")]]))
-            .unwrap();
+    fn with_nothing_said_there_is_no_bootstrap_and_nothing_of_the_client_is_read() {
+        let s = InitSettings::from_env(&with(&[OWN])).unwrap();
         assert_eq!(
             s.issuance,
             Issuance::CertIssuer {
@@ -284,24 +287,34 @@ mod tests {
             }
         );
         assert_eq!(s.token_path, DEFAULT_TOKEN_PATH);
-        assert!(s.escrow.is_none(), "skipped: nothing of the client is read");
+        assert!(
+            s.escrow.is_none(),
+            "not asked: nothing of the client is read"
+        );
     }
 
     #[test]
-    fn any_non_empty_value_skips_and_an_empty_one_does_not() {
-        for skipping in ["1", "true", "false", "no"] {
-            let s = InitSettings::from_env(&with(&[
-                OWN,
-                &[("POLAR_INIT_SKIP_ESCROW_BOOTSTRAP", skipping)],
-            ]))
+    fn the_bootstrap_runs_only_when_asked_and_a_value_that_is_not_a_flag_is_a_problem() {
+        let s = InitSettings::from_env(&with(&[OWN, &[("POLAR_INIT_ESCROW_BOOTSTRAP", "false")]]))
             .unwrap();
-            assert!(s.escrow.is_none(), "{skipping:?} skips, as it always did");
-        }
-        // Not skipped, so the bootstrap's settings are required.
-        let error =
-            InitSettings::from_env(&with(&[OWN, &[("POLAR_INIT_SKIP_ESCROW_BOOTSTRAP", "")]]))
-                .unwrap_err();
+        assert!(s.escrow.is_none(), "false does not ask");
+        // Asked, so the bootstrap's settings are required.
+        let error = InitSettings::from_env(&with(&[OWN, ESCROW])).unwrap_err();
         assert!(error.contains("BROKER_ADDR"), "{error}");
+        let error = InitSettings::from_env(&with(&[OWN, &[("POLAR_INIT_ESCROW_BOOTSTRAP", "1x")]]))
+            .unwrap_err();
+        assert!(error.contains("POLAR_INIT_ESCROW_BOOTSTRAP"), "{error}");
+    }
+
+    #[test]
+    fn the_old_skip_variable_means_nothing_now() {
+        // A pod rendered before the switch was inverted sets it; it is not declared, so it is not even read.
+        let s = InitSettings::from_env(&snapshot(&with(&[
+            OWN,
+            &[("POLAR_INIT_SKIP_ESCROW_BOOTSTRAP", "")],
+        ])))
+        .unwrap();
+        assert!(s.escrow.is_none());
     }
 
     #[test]
@@ -309,6 +322,7 @@ mod tests {
         let s = InitSettings::from_env(&with(&[
             OWN,
             BOOTSTRAP,
+            ESCROW,
             &[
                 ("KUBERNETES_SA_TOKEN", "/workspace/token"),
                 ("POLAR_INIT_CA_CERT", "/ca/ca.pem"),
@@ -316,7 +330,7 @@ mod tests {
             ],
         ]))
         .unwrap();
-        let escrow = s.escrow.expect("bootstrap not skipped");
+        let escrow = s.escrow.expect("bootstrap asked for");
         assert_eq!(escrow.client.broker_endpoint, "cassini:8080");
         assert_eq!(escrow.crypto.own_certificate_path, "/c/cert.pem");
         assert_eq!(escrow.crypto.service_account_token_path, "/workspace/token");
@@ -332,7 +346,7 @@ mod tests {
 
     #[test]
     fn every_problem_is_reported_together_before_anything_waits() {
-        let error = InitSettings::from_env(&env(&[])).unwrap_err();
+        let error = InitSettings::from_env(&with(&[ESCROW])).unwrap_err();
         for name in [
             "POLAR_INIT_CERT_ISSUER_URL",
             "TLS_CLIENT_CERT",
@@ -347,11 +361,8 @@ mod tests {
 
     #[test]
     fn a_blank_issuer_url_is_missing() {
-        let error = InitSettings::from_env(&with(&[
-            &[("POLAR_INIT_CERT_ISSUER_URL", "  ")],
-            &[("POLAR_INIT_SKIP_ESCROW_BOOTSTRAP", "1")],
-        ]))
-        .unwrap_err();
+        let error =
+            InitSettings::from_env(&with(&[&[("POLAR_INIT_CERT_ISSUER_URL", "  ")]])).unwrap_err();
         assert!(error.contains("POLAR_INIT_CERT_ISSUER_URL"), "{error}");
     }
 
@@ -360,6 +371,7 @@ mod tests {
         let config = snapshot(&with(&[
             OWN,
             BOOTSTRAP,
+            ESCROW,
             &[("AN_UNRELATED_SECRET", "leak-me"), ("GRAPH_PASSWORD", "no")],
         ]));
         assert_eq!(config.var("AN_UNRELATED_SECRET"), None);
@@ -370,26 +382,21 @@ mod tests {
 
     // ---- where the certificates are requested from ---------------------------------------------------------
 
-    const SKIP: &[(&str, &str)] = &[("POLAR_INIT_SKIP_ESCROW_BOOTSTRAP", "1")];
-
     #[test]
     fn with_no_issuer_named_the_certificates_come_from_cert_issuer_as_they_always_did() {
-        let s = InitSettings::from_env(&with(&[OWN, SKIP])).unwrap();
+        let s = InitSettings::from_env(&with(&[OWN])).unwrap();
         assert!(matches!(s.issuance, Issuance::CertIssuer { .. }));
     }
 
     #[test]
     fn a_workload_asks_the_credentials_agent_through_its_observer_and_needs_no_cert_issuer() {
-        let s = InitSettings::from_env(&with(&[
-            &[
-                ("POLAR_INIT_ISSUER", "credentials-agent"),
-                (
-                    "POLAR_INIT_OBSERVER_URL",
-                    "http://credentials-agent-observer:8080",
-                ),
-            ],
-            SKIP,
-        ]))
+        let s = InitSettings::from_env(&with(&[&[
+            ("POLAR_INIT_ISSUER", "credentials-agent"),
+            (
+                "POLAR_INIT_OBSERVER_URL",
+                "http://credentials-agent-observer:8080",
+            ),
+        ]]))
         .unwrap();
         assert_eq!(
             s.issuance,
@@ -403,14 +410,11 @@ mod tests {
     fn the_rendered_observer_mode_has_a_blank_cert_issuer_address_and_that_is_fine() {
         // The catalog renders POLAR_INIT_CERT_ISSUER_URL as an empty string for a workload on the credentials
         // agent, so that nothing in its pod is told where cert-issuer is.
-        let s = InitSettings::from_env(&with(&[
-            &[
-                ("POLAR_INIT_CERT_ISSUER_URL", ""),
-                ("POLAR_INIT_ISSUER", "credentials-agent"),
-                ("POLAR_INIT_OBSERVER_URL", "http://obs:8080"),
-            ],
-            SKIP,
-        ]))
+        let s = InitSettings::from_env(&with(&[&[
+            ("POLAR_INIT_CERT_ISSUER_URL", ""),
+            ("POLAR_INIT_ISSUER", "credentials-agent"),
+            ("POLAR_INIT_OBSERVER_URL", "http://obs:8080"),
+        ]]))
         .unwrap();
         assert_eq!(
             s.issuance,
@@ -422,35 +426,28 @@ mod tests {
 
     #[test]
     fn each_mode_names_the_address_it_is_missing_and_not_the_other() {
-        let error = InitSettings::from_env(&with(&[
-            &[("POLAR_INIT_ISSUER", "credentials-agent")],
-            SKIP,
-        ]))
-        .unwrap_err();
+        let error = InitSettings::from_env(&with(&[&[("POLAR_INIT_ISSUER", "credentials-agent")]]))
+            .unwrap_err();
         assert!(error.contains("POLAR_INIT_OBSERVER_URL"), "{error}");
         assert!(!error.contains("POLAR_INIT_CERT_ISSUER_URL"), "{error}");
 
-        let error = InitSettings::from_env(&with(&[&[("POLAR_INIT_ISSUER", "cert-issuer")], SKIP]))
-            .unwrap_err();
+        let error =
+            InitSettings::from_env(&with(&[&[("POLAR_INIT_ISSUER", "cert-issuer")]])).unwrap_err();
         assert!(error.contains("POLAR_INIT_CERT_ISSUER_URL"), "{error}");
         assert!(!error.contains("POLAR_INIT_OBSERVER_URL"), "{error}");
     }
 
     #[test]
     fn a_blank_observer_address_is_missing_and_an_unknown_issuer_is_named() {
-        let error = InitSettings::from_env(&with(&[
-            &[
-                ("POLAR_INIT_ISSUER", "credentials-agent"),
-                ("POLAR_INIT_OBSERVER_URL", "   "),
-            ],
-            SKIP,
-        ]))
+        let error = InitSettings::from_env(&with(&[&[
+            ("POLAR_INIT_ISSUER", "credentials-agent"),
+            ("POLAR_INIT_OBSERVER_URL", "   "),
+        ]]))
         .unwrap_err();
         assert!(error.contains("POLAR_INIT_OBSERVER_URL"), "{error}");
 
-        let error =
-            InitSettings::from_env(&with(&[OWN, &[("POLAR_INIT_ISSUER", "the-moon")], SKIP]))
-                .unwrap_err();
+        let error = InitSettings::from_env(&with(&[OWN, &[("POLAR_INIT_ISSUER", "the-moon")]]))
+            .unwrap_err();
         assert!(
             error.contains("the-moon") && error.contains("credentials-agent"),
             "{error}"
@@ -460,13 +457,10 @@ mod tests {
     #[test]
     fn the_issuer_variables_are_in_the_snapshot_and_the_section_is_sound() {
         assert_eq!(SECTION.defaults_problems(), Vec::<String>::new());
-        let config = snapshot(&with(&[
-            &[
-                ("POLAR_INIT_ISSUER", "credentials-agent"),
-                ("POLAR_INIT_OBSERVER_URL", "http://o:8080"),
-            ],
-            SKIP,
-        ]));
+        let config = snapshot(&with(&[&[
+            ("POLAR_INIT_ISSUER", "credentials-agent"),
+            ("POLAR_INIT_OBSERVER_URL", "http://o:8080"),
+        ]]));
         assert_eq!(
             config.var("POLAR_INIT_ISSUER").as_deref(),
             Some("credentials-agent")

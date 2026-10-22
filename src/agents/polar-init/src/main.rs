@@ -45,11 +45,11 @@
 //!                                verified against from the first request.
 //!                                If unset, the CA is fetched once from
 //!                                GET /ca without verification and pinned.
-//!   POLAR_INIT_SKIP_ESCROW_BOOTSTRAP
-//!                                Any non-empty value skips the escrow bootstrap
+//!   POLAR_INIT_ESCROW_BOOTSTRAP  `true` runs the escrow bootstrap (default:
+//!                                false); set for an agent that needs encryption
 //!   TLS_*, BROKER_ADDR, CASSINI_SERVER_NAME, KUBERNETES_SA_TOKEN
 //!                                The Cassini client's and the crypto actor's,
-//!                                required unless the bootstrap is skipped
+//!                                required when the bootstrap runs
 
 // Reading the process environment goes through polar-env (see clippy.toml).
 #![deny(clippy::disallowed_methods)]
@@ -351,16 +351,16 @@ async fn main() {
     tracing::info!("all certs issued");
 
     // Phase 4: ensure this identity's own escrow keypair genuinely
-    // exists and is escrowed with the Credentials Agent -- skipped
-    // entirely for the three core services (see
-    // environment::SKIP_ESCROW_BOOTSTRAP's own doc comment for why). This is
+    // exists and is escrowed with the Credentials Agent -- only for an
+    // agent that needs encryption (see environment::ESCROW_BOOTSTRAP's
+    // own doc comment for why). This is
     // the only point in this agent's entire lifecycle where the SA
     // token read above is ever readable at all; the main, long-
     // running agent container never has it mounted.
     match &settings.escrow {
         None => tracing::info!(
-            "{} is set, skipping escrow-keypair bootstrap",
-            environment::SKIP_ESCROW_BOOTSTRAP.name()
+            "{} is not true: this workload escrows no keypair",
+            environment::ESCROW_BOOTSTRAP.name()
         ),
         Some(escrow) => {
             if let Err(why) = within(

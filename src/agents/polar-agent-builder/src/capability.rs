@@ -250,12 +250,11 @@ mod tests {
     }
 
     /// Capabilities the catalog gives a deployment that no code ever requires: the shape of the
-    /// pod (a persistent volume, a pinned CA, an init container that skips the escrow bootstrap),
+    /// pod (a persistent volume, a pinned CA, a server certificate),
     /// not something the agent's own health depends on. They are in `POLAR_CAPABILITIES`, which
     /// ignores names the code does not know.
     const DEPLOYMENT_ONLY: &[&str] = &[
         "cassini-server",
-        "escrow-exempt",
         "git-server",
         "oci-registry-auth",
         "persistent-data",

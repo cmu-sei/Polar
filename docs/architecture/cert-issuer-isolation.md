@@ -252,7 +252,8 @@ handlers (which need both) work as built.
 One run per pod, one service-account token, then one `POST /issue` to cert-issuer per `--cert` argument, writing
 `cert.pem`, `key.pem` and `ca.pem` into each directory. Transient trouble (unreachable, a malformed response) is
 retried every 5 seconds forever; a rejection is fatal (exit 1). After the certificates it runs the escrow bootstrap
-over Cassini with the certificate it just obtained. The requests across the rendered manifests:
+over Cassini with the certificate it just obtained, for an agent that needs encryption only (since 2026-10-22,
+`policy-enforcement.md`, "Decisions"). The requests across the rendered manifests:
 
 - 15 workloads ask for a client certificate (`/etc/tls/certs`); 6 of those also ask for a second client certificate
   for Neo4j (`/etc/neo4j-client-tls`): `credentials-agent`, `git-repo-processor`,

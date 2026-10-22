@@ -34,9 +34,8 @@
     # It cannot be issued through the credentials agent: the agent needs it to run.
     bootstrap: true
     config: "document"
-    # Its server certificate and addresses (cassini-server), and no escrow bootstrap, which
-    # travels through the broker itself (escrow-exempt).
-    provides: ["cassini-server", "escrow-exempt"]
+    # Its server certificate and addresses (cassini-server).
+    provides: ["cassini-server"]
     # What clients connect to. The name and the port are the ones services.nuon gives.
     service: {
       name: "{cassini.name}"
