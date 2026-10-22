@@ -222,9 +222,11 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
   policy can lock everyone out), and it would add a bootstrap service and a path the invariants must protect. The
   spike's figures (tens of microseconds an evaluation) leave no load reason to split. Reasons to split it later: the
   analysis growing heavy enough to slow the credentials agent, or needing a release cadence of its own. One consequence
-  for the build: a section's `validate` today is a pure function of the body (`authority_sections.rs`), and the check
-  needs the catalog's facts and the other document of the pair, so the consumer judges a policy or groups document
-  where it holds both (`supervisor.rs`, `pass_on_section`), before the section is accepted.
+  for the build: the check must run before the section is replaced, and the only hook there today is the builder's
+  `validate: fn(&serde_json::Value)` (`polar-agent-builder/src/runtime.rs:57`), a pure function of the body; the
+  consumer's `pass_on_section` (`credentials-agent/consume/src/supervisor.rs:599`) reads a section only after it has
+  been replaced, to publish it. The check needs the catalog's facts and the other document of the pair, so a runtime
+  section needs a check that is given them, before the configuration actor replaces it; its shape is for the build.
 - **A groups document is checked the same way as a policy (2026-10-22).** Against the same rules: the two invariants,
   renewal derived beneath them, over the same catalog facts. The rules are judged on a pair, the policy and the groups
   document, and do not ask which of them arrived. When either arrives, the authority:
