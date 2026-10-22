@@ -99,6 +99,21 @@ impl Actor for SubscriberManager {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            BrokerMessage::SubscriptionsOf {
+                registration_id,
+                reply_to,
+            } => {
+                let topics = myself
+                    .get_children()
+                    .into_iter()
+                    .filter_map(|cell| {
+                        let name = cell.get_name()?;
+                        let (id, topic) = name.split_once(':')?;
+                        (id == registration_id).then(|| topic.to_string())
+                    })
+                    .collect();
+                let _ = reply_to.send(topics);
+            }
             BrokerMessage::InitiateShutdownPhase { phase }
                 if phase == ShutdownPhase::TerminateSubscribers =>
             {

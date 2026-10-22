@@ -445,6 +445,13 @@ impl Actor for ListenerManager {
             } => {
                 state.listeners.insert(client_id, listener_ref);
             }
+            BrokerMessage::JudgeSubscriptions { topics } => {
+                for listener in state.listeners.values() {
+                    let _ = listener.send_message(BrokerMessage::JudgeSubscriptions {
+                        topics: topics.clone(),
+                    });
+                }
+            }
             BrokerMessage::RegistrationResponse {
                 client_id,
                 result,
@@ -638,6 +645,12 @@ struct ListenerState {
     authority: BrokerAuthority,
     /// This connection's recent decisions (no lock is shared with any other connection).
     decisions: DecisionCache,
+    /// The topics the broker has acknowledged this client's subscription to, which are judged again on a change of
+    /// authority.
+    subscribed: std::collections::HashSet<String>,
+    /// Subscriptions the broker dropped itself: the client was told it was refused, so the acknowledgment of the
+    /// unsubscribe is not passed on.
+    dropped: std::collections::HashSet<String>,
 }
 
 struct ListenerArguments {
@@ -678,6 +691,35 @@ impl Listener {
             changes,
         );
         decided
+    }
+
+    /// Ends a subscription the broker no longer admits: the session unsubscribes, and the client is told, unasked,
+    /// that it is refused (`SubscribeRefused`), so it can keep it as wanted and ask again when its authority changes.
+    async fn drop_subscription(state: &mut ListenerState, topic: String, reason: String) {
+        if !state.subscribed.remove(&topic) && state.dropped.contains(&topic) {
+            return;
+        }
+        warn!(%topic, identity = ?state.peer_identity, %reason, "a held subscription is no longer admitted: dropped");
+        state.dropped.insert(topic.clone());
+        if let Some(registration_id) = state.registration_id.clone()
+            && let Some(session) = where_is(registration_id.clone())
+        {
+            let _ = session.send_message(BrokerMessage::UnsubscribeRequest {
+                registration_id,
+                topic: topic.clone(),
+                trace_ctx: None,
+            });
+        }
+        let msg = ClientMessage::SubscribeAcknowledgment {
+            topic,
+            result: Err(reason),
+            trace_ctx: WireTraceCtx::from_current_span(),
+        };
+        if let Err(e) =
+            Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+        {
+            error!(error = ?e, "Failed to tell the client a subscription was dropped");
+        }
     }
 
     /// Write a framed ClientMessage to the peer.
@@ -747,6 +789,8 @@ impl Actor for Listener {
             floor: args.floor,
             decisions: args.authority.cache(),
             authority: args.authority,
+            subscribed: std::collections::HashSet::new(),
+            dropped: std::collections::HashSet::new(),
         })
     }
 
@@ -877,6 +921,20 @@ impl Actor for Listener {
         match message {
             BrokerMessage::SetListenerSessionRef { session_ref } => {
                 state.session_ref = Some(session_ref);
+            }
+            BrokerMessage::JudgeSubscriptions { topics } => {
+                let topics: Vec<String> = match topics {
+                    Some(resumed) => {
+                        state.subscribed.extend(resumed.iter().cloned());
+                        resumed
+                    }
+                    None => state.subscribed.iter().cloned().collect(),
+                };
+                for topic in topics {
+                    if let Err(reason) = Self::decide(state, &topic, Access::Subscribe).await {
+                        Self::drop_subscription(state, topic, reason).await;
+                    }
+                }
             }
             BrokerMessage::RegistrationRequest {
                 registration_id,
@@ -1115,6 +1173,28 @@ impl Listener {
                                     BrokerMessage::SetListenerSessionRef { session_ref },
                                 );
                                 debug!("Cached session ref for listener");
+                                // A resumed session keeps the subscriptions it had, made under the certificate it
+                                // had: they are judged again under this connection's.
+                                if let Some(subscribers) =
+                                    where_is(crate::SUBSCRIBER_MANAGER_NAME.to_string())
+                                    && let Ok(CallResult::Success(topics)) =
+                                        ActorRef::<BrokerMessage>::from(subscribers)
+                                            .call(
+                                                |reply_to| BrokerMessage::SubscriptionsOf {
+                                                    registration_id: reg_id_clone.clone(),
+                                                    reply_to,
+                                                },
+                                                Some(Duration::from_secs(2)),
+                                            )
+                                            .await
+                                    && !topics.is_empty()
+                                {
+                                    let _ = myself_clone.send_message(
+                                        BrokerMessage::JudgeSubscriptions {
+                                            topics: Some(topics),
+                                        },
+                                    );
+                                }
                             }
                             _ => {
                                 error!(
@@ -1309,6 +1389,21 @@ impl Listener {
         let span =
             trace_span!("cassini.listener.publish_response", topic = ?topic, ok = result.is_ok());
         try_set_parent_otel(&span, trace_ctx);
+        // A delivery is written only on a topic this connection may still subscribe to: a subscription dropped by
+        // a change of authority or a resume can have messages already on their way, and a resumed session is
+        // replayed what it held before its subscriptions are judged. Decided (from the cache, usually) before the
+        // span is entered, which must not be held across a wait.
+        if result.is_ok() {
+            let decided = Self::decide(state, &topic, Access::Subscribe)
+                .instrument(span.clone())
+                .await;
+            if let Err(reason) = decided {
+                Self::drop_subscription(state, topic, reason)
+                    .instrument(span.clone())
+                    .await;
+                return Ok(());
+            }
+        }
         let _g = span.enter();
         trace!("Listener received publish response");
         let msg = ClientMessage::PublishResponse {
@@ -1362,6 +1457,10 @@ impl Listener {
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
 
+        if result.is_ok() {
+            state.dropped.remove(&topic);
+            state.subscribed.insert(topic.clone());
+        }
         let msg = ClientMessage::SubscribeAcknowledgment {
             topic,
             result,
@@ -1535,6 +1634,11 @@ impl Listener {
         let _g = span.enter();
 
         debug!(topic = ?topic, "Unsubscribe acknowledged");
+        state.subscribed.remove(&topic);
+        if state.dropped.contains(&topic) {
+            // The broker ended it, and the client was told it is refused.
+            return Ok(());
+        }
         let msg = ClientMessage::UnsubscribeAcknowledgment {
             topic,
             result,

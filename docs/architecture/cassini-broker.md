@@ -157,6 +157,20 @@ Read 2026-10-22, after stage 5a found the first while measuring (`broker-baselin
   load test (20,000 messages) took 12.5 s deciding every publish and 1.5 s with the cache. Tests: the cache's own
   (`authority.rs`, with a property that no answer outlives its time or a change), and three in `enforcement.rs` (no
   cache: the next publish; a kept decision lasting its time; a change ending it at once, with a ten-minute cache).
+- **Held subscriptions, judged again.** Each Listener remembers the subscriptions the broker acknowledged. After a
+  change of authority is counted, `ChangeCounter` tells the ListenerManager, which tells every Listener
+  (`BrokerMessage::JudgeSubscriptions`), and each decides its own again (the count has moved, so none comes from the
+  cache). One now refused is dropped (`Listener::drop_subscription`): the session unsubscribes, and the client gets an
+  unasked `SubscribeAcknowledgment` with `Err`, which it reports as `SubscribeRefused`; the acknowledgment of that
+  unsubscribe is not passed on. A resumed session's subscriptions, made under the certificate it had, are listed by the
+  SubscriberManager (`BrokerMessage::SubscriptionsOf`) once the new connection has the session, and judged the same
+  way. Because a resumed session is replayed what was held for it before that judgment, and messages can be on their
+  way when a subscription is dropped, every delivery is written only on a topic the connection may still subscribe to
+  (`handle_publish_response`, the cache answering), and a delivery on a refused topic drops its subscription. A
+  decision that could not be made (the policy actor not answering) refuses, as everywhere, so it drops a held
+  subscription too. Tests: in `enforcement.rs`, a new forbid dropping a held subscription and the client told; one the
+  new authority still admits kept; a resumed session whose renewed certificate carries fewer topics losing the rest,
+  with a message held for it and with nothing held.
 - **A trap found building it:** the decision waits on the policy actor, and the Listener's handlers hold an entered
   span; a span held across a wait broke the tracing registry's per-thread stack when the task resumed on another thread
   (a panic in `tracing-subscriber`'s `sharded.rs`, and two in five messages lost in the four-publisher load test). The

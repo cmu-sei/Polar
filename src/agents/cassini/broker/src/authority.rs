@@ -186,6 +186,13 @@ impl Actor for ChangeCounter {
     ) -> Result<(), ActorProcessingErr> {
         let count = changes.fetch_add(1, Ordering::AcqRel) + 1;
         info!(kind = ?changed.kind, version = changed.version, count, "authority changed: every cached decision is stale");
+        // Counted first, so the subscriptions are judged under the new authority, not from a kept decision.
+        if let Some(listeners) =
+            ractor::registry::where_is(crate::LISTENER_MANAGER_NAME.to_string())
+        {
+            let listeners: ActorRef<BrokerMessage> = listeners.into();
+            let _ = listeners.send_message(BrokerMessage::JudgeSubscriptions { topics: None });
+        }
         Ok(())
     }
 }

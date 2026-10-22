@@ -282,6 +282,17 @@ pub enum BrokerMessage {
         registration_id: String,
         reply_to: ractor::RpcReplyPort<Vec<String>>,
     },
+    /// Internal: a Listener decides its client's subscriptions again, and drops those now refused, telling the
+    /// client (docs/architecture/policy-enforcement.md, "Decisions": held subscriptions are judged again). `None` is
+    /// every subscription it holds, after a change of authority; a list is a resumed session's.
+    JudgeSubscriptions {
+        topics: Option<Vec<String>>,
+    },
+    /// Internal: the topics a session is subscribed to, which a Listener judges when the session is resumed.
+    SubscriptionsOf {
+        registration_id: String,
+        reply_to: ractor::RpcReplyPort<Vec<String>>,
+    },
     /// Internal: a subscriber of a superseded session keeps what it receives instead of
     /// forwarding it, and stays subscribed.
     HoldSubscription {

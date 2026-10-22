@@ -160,13 +160,21 @@ async fn cedar_forbids_a_declared_topic_and_permits_an_undeclared_one() {
 }
 
 fn snapshot_forbidding_the_producer_news(signer: &RsaPrivateKey) -> Vec<u8> {
+    snapshot_of_policy(
+        signer,
+        &format!(
+            r#"forbid (principal == Identity::"{PRODUCER}", action == Action::"publish", resource == Topic::"news");"#
+        ),
+    )
+}
+
+/// The credentials agent's snapshot carrying `source` as the policy, signed by `signer`.
+fn snapshot_of_policy(signer: &RsaPrivateKey, source: &str) -> Vec<u8> {
     let policy = AuthorityPayload {
         sequence: 1,
         version: 1,
         body: AuthorityBody::Policy {
-            source: format!(
-                r#"forbid (principal == Identity::"{PRODUCER}", action == Action::"publish", resource == Topic::"news");"#
-            ),
+            source: source.to_string(),
         },
         authored_by: None,
     };
@@ -314,4 +322,150 @@ async fn broker_caching(cache: Duration) -> TestBroker {
         &["p:sub:news".to_string(), "g:cassini-client".to_string()],
     );
     broker
+}
+
+/// The broker with the credentials agent able to publish its snapshots, and the sink subscribed to `news`.
+async fn sink_subscribed_to_news(broker: &TestBroker) -> (TestClient, TestClient, TestClient) {
+    broker.pki.issue_client_carrying(
+        CREDENTIALS,
+        &[
+            format!("p:pub:{AUTHORITY_SNAPSHOT_REPLIES_TOPIC}"),
+            "g:cassini-client".to_string(),
+        ],
+    );
+    let producer = TestClient::connect(broker, PRODUCER).await;
+    let sink = TestClient::connect(broker, SINK).await;
+    sink.subscribe("news");
+    sink.wait_for("the subscription", Duration::from_secs(10), |c| {
+        c.subscribed("news")
+    })
+    .await;
+    let credentials = TestClient::connect(broker, CREDENTIALS).await;
+    (producer, sink, credentials)
+}
+
+#[tokio::test]
+async fn a_held_subscription_a_new_forbid_refuses_is_dropped_and_the_client_told() {
+    let _serial = serial().await;
+    let broker = broker_with_two_workloads().await;
+    let (producer, sink, credentials) = sink_subscribed_to_news(&broker).await;
+    let signer = RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+    credentials.publish(
+        AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
+        &snapshot_of_policy(
+            &signer,
+            &format!(
+                r#"forbid (principal == Identity::"{SINK}", action == Action::"subscribe", resource == Topic::"news");"#
+            ),
+        ),
+    );
+    // Told without asking: the subscription it held is gone.
+    let why = refused(&sink, "news").await;
+    assert!(why.contains("policy forbids"), "{why}");
+    producer.publish("news", b"after the forbid");
+    producer
+        .wait_for("the publish to be taken", Duration::from_secs(10), |c| {
+            c.acknowledged("news") >= 1
+        })
+        .await;
+    support::pause().await;
+    assert_eq!(
+        sink.received_count("news"),
+        0,
+        "nothing reaches a dropped subscription"
+    );
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn a_held_subscription_the_new_authority_still_admits_is_kept() {
+    let _serial = serial().await;
+    let broker = broker_with_two_workloads().await;
+    let (producer, sink, credentials) = sink_subscribed_to_news(&broker).await;
+    let signer = RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+    credentials.publish(
+        AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
+        &snapshot_of_policy(
+            &signer,
+            &format!(
+                r#"forbid (principal == Identity::"{SINK}", action == Action::"subscribe", resource == Topic::"weather");"#
+            ),
+        ),
+    );
+    // Once the change has applied (the producer's decisions are made again under it), news still flows.
+    support::pause().await;
+    producer.publish("news", b"still flowing");
+    assert_eq!(sink.wait_for_messages("news", 1).await.len(), 1);
+    assert!(sink.refusals("news").is_empty());
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn a_resumed_session_whose_renewed_certificate_carries_fewer_topics_loses_the_rest() {
+    let _serial = serial().await;
+    let broker = TestBroker::start_enforcing().await;
+    broker.pki.issue_client_carrying(
+        PRODUCER,
+        &["p:pub:news".to_string(), "g:cassini-client".to_string()],
+    );
+    broker.pki.issue_client_carrying(
+        SINK,
+        &["p:sub:news".to_string(), "g:cassini-client".to_string()],
+    );
+    let producer = TestClient::connect(&broker, PRODUCER).await;
+    let sink = TestClient::connect(&broker, SINK).await;
+    let session = sink.registration_id().unwrap();
+    sink.subscribe("news");
+    sink.wait_for("the subscription", Duration::from_secs(10), |c| {
+        c.subscribed("news")
+    })
+    .await;
+    sink.vanish().await;
+    support::pause().await;
+    producer.publish("news", b"held while it was away");
+    support::pause().await;
+
+    // Its renewed certificate no longer carries the topic.
+    broker
+        .pki
+        .issue_client_carrying(SINK, &["g:cassini-client".to_string()]);
+    let back = TestClient::connect_resuming(&broker, SINK, Some(session.clone())).await;
+    assert_eq!(back.registration_id().unwrap(), session, "the same session");
+    let why = refused(&back, "news").await;
+    assert!(
+        why.contains("not among its declared or implied topics"),
+        "{why}"
+    );
+    support::pause().await;
+    assert_eq!(
+        back.received_count("news"),
+        0,
+        "what was held is not delivered either"
+    );
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn a_resumed_session_is_told_what_it_lost_even_with_nothing_held_for_it() {
+    let _serial = serial().await;
+    let broker = TestBroker::start_enforcing().await;
+    broker.pki.issue_client_carrying(
+        SINK,
+        &["p:sub:news".to_string(), "g:cassini-client".to_string()],
+    );
+    let sink = TestClient::connect(&broker, SINK).await;
+    let session = sink.registration_id().unwrap();
+    sink.subscribe("news");
+    sink.wait_for("the subscription", Duration::from_secs(10), |c| {
+        c.subscribed("news")
+    })
+    .await;
+    sink.vanish().await;
+    support::pause().await;
+    broker
+        .pki
+        .issue_client_carrying(SINK, &["g:cassini-client".to_string()]);
+    let back = TestClient::connect_resuming(&broker, SINK, Some(session)).await;
+    refused(&back, "news").await;
+    broker.stop().await;
 }
