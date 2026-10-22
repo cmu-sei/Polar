@@ -164,7 +164,8 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
 - **Agents declare local causes; the paths are derived (2026-10-22).** Paths are declared in code, like everything else
   ("nothing is hand-rolled configuration"), but no developer declares a path. Each agent states only what its own code
   does: what it publishes and subscribes to (as now), and what causes each publish: a message arriving on a topic, an
-  external entry (an HTTP route, a git fetch, a timer), or nothing, for what the agent publishes of its own accord. An
+  external entry (an HTTP route, its registration, a timer, something outside Polar it watches), or nothing, for what the
+  agent publishes of its own accord. An
   entry that waits for an answer says which topic answers it. Nothing names another agent or a path. The authority holds
   the rules and computes the paths from everyone's facts, with Datalog: a path is reachability over the edges that
   publishes, subscriptions and causes make, under the policy being judged. A hop added later (an agent between two
@@ -173,6 +174,27 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
   viewpoint is a query over it (the authority's acceptance, an agent's own round trips, an operator's comparison of two
   versions); derived facts may be published with the authority for leaves to read, but they explain and accept,
   never enforce: the broker and the agents still decide by Cedar and the certificate.
+- **The vocabulary of causes (2026-10-22).** A publish is caused by one of these, and the list grows when Polar needs it:
+
+  | Cause | Means | Used by |
+  |---|---|---|
+  | `Topic(name)` | a message arrived on a topic | the consumer answering a request; the scheduler processor forwarding `scheduler.in` |
+  | `Http(route)` | a request on a route this agent serves | the observer's six routes; the git server's push |
+  | `Registered` | the agent registered with Cassini (again) | the authority ask, the configuration replay |
+  | `Timer(name)` | its own interval | polling observers; the scheduler observer's pull |
+  | `Outside(source)` | something it watches outside Polar | kube-observer (the Kubernetes API), the Jira, GitLab and OpenAPI observers |
+  | none | of its own accord | rare, and the exception that gives a reason, as `waits` does now |
+
+  With it:
+  - an invariant has one of two shapes, both from the same edges: a **round trip** (an entry's request comes back to
+    where it is answered: renewal, the observer's `/workload/issue`) and a **delivery** (what an entry starts reaches
+    every subscriber of a topic: correction, a push to the git server reaching the credentials agent through the git
+    server's announcement and the scheduler pair; hearing authority, `polar-authority-updates` reaching every agent);
+  - only what policy can cut is an edge. A call outside Cassini (the scheduler observer's fetch from the git server,
+    decided by the git server's access list) is recorded as a fact and is no edge, until what decides it is governed
+    by policy too;
+  - an invariant names its entry by agent and cause, with the constant the code uses (a route is a constant in the shared
+    crate), so the invariant cannot drift from the route.
 
 ## The proposal
 
@@ -193,7 +215,7 @@ The render emits one document of base facts, applied with the catalog, so applyi
 | `declares(W, T, A)` | a topic it declares (families expanded) | its scaffold |
 | `implies(G, W, T, A)` | a topic group `G` implies for `W` | its scaffold's computed set, with the rule as origin |
 | `causes(W, In, T)` | `W` publishes on `T` because of `In`: a message on a topic, or an entry | its scaffold (see below) |
-| `entry(W, E, Sent, Answer)` | `W` takes external entry `E` (an HTTP route, a git fetch, a timer), publishes on `Sent`, and answers it from `Answer` | its scaffold |
+| `entry(W, E, Sent, Answer)` | `W` takes entry `E` (a cause other than a topic: "Decisions"), publishes on `Sent`, and answers it from `Answer` | its scaffold |
 
 The runtime documents add facts as they are accepted: `member(I, G)` and the group and role hierarchy from the groups
 document, and the policy itself, which Cedar evaluates.
@@ -245,8 +267,13 @@ edge(out(A,T), in(B,T)) :- publishes(A,T), subscribes(B,T), allowed(A,T,pub), al
 edge(in(A,I), out(A,O))  :- causes(A, I, O).
 reach(X,Y) :- edge(X,Y).
 reach(X,Z) :- reach(X,Y), edge(Y,Z).
-% An entry's round trip closes when what it sends comes back to where it is answered.
+% A round trip: an entry's request comes back to where it is answered.
 closes(A,E) :- entry(A,E,Sent,Answer), reach(out(A,Sent), in(A,Answer)).
+% A delivery: what an entry starts reaches every subscriber of T (stratified negation: a subscriber it misses).
+reached(A,E,Y)   :- causes(A,E,O), reach(out(A,O), Y).
+misses(A,E,T,B)  :- causes(A,E,_), subscribes(B,T), !reached(A,E,in(B,T)).
+delivers(A,E,T)  :- causes(A,E,_), subscribes(_,T), !missed(A,E,T).
+missed(A,E,T)    :- misses(A,E,T,_).
 ```
 
 "Renewal still works" is then `closes(observer, http("/workload/issue"))` under the proposed policy: no list of topics
@@ -322,8 +349,7 @@ To settle one at a time, before building:
 1. ~~Where the path facts come from.~~ Settled: local causes, derived paths ("Decisions", 2026-10-22).
 2. Which rules refuse and which only report. Proposed: the round trips the authority's code names (hearing authority,
    renewal, correction) refuse; every other round trip, and a topic left with no permitted publisher, is reported.
-3. The vocabulary of causes: which external entries exist (HTTP routes, git fetches, timers, anything else), and how an
-   entry names itself so that a round trip can be named in an invariant.
+3. ~~The vocabulary of causes.~~ Settled ("Decisions", 2026-10-22), to grow as Polar needs.
 4. Whether the groups document is checked too (proposed: yes, against the pair).
 5. The engine: `ascent`, `crepe`, `datafrog`, or a hand-written closure until paths need more.
 6. The credentials agent, or a policy agent of its own.
