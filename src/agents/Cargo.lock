@@ -5709,6 +5709,7 @@ dependencies = [
  "cedar-policy",
  "cert-issuer-common",
  "polar-permissions",
+ "proptest",
  "ractor",
  "rand 0.10.3",
  "rcgen",

@@ -700,6 +700,14 @@ constants in `credentials_agent_common`, the git server's push, the observers' `
 - Tests: the actor's existing tests unchanged; a property that the core and the actor decide every generated request
   alike.
 
+- *Built 2026-10-22:* `polar_policy::Evaluator` (a loaded policy and an arrangement of groups, built with
+  `Evaluator::new`, which refuses a policy as the actor does) decides a `Requester` (an identity with its groups,
+  capabilities and permissions, already resolved) with the asker's `Facts` at a given time. The policy actor resolves
+  its principal through PermissionsActor as before, then calls the same function (`decide_with`), so there is one
+  evaluation. Tests: the evaluator's permit, forbid, silence and context by example, a policy that would not load
+  refused, and a property that the evaluator, given the groups PermissionsActor would resolve, decides every generated
+  request as the actor does, checked against a deliberate break.
+
 **5. The model crate.** A new crate under `credentials-agent/`, beside `common`, `consume` and `observe`, with no actor
 and no Cassini.
 - The facts' types, read from slice 3's document; the rules as one `ascent!` block ("Rules over the model"): `edge`,

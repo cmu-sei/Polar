@@ -323,10 +323,9 @@ impl PolicyActor {
         resource: &str,
         facts: &Facts,
     ) -> Result<Decision, PolicyError> {
-        let policy_set = state
-            .policy_set
-            .as_ref()
-            .ok_or(PolicyError::NoPolicyLoaded)?;
+        if state.policy_set.is_none() {
+            return Err(PolicyError::NoPolicyLoaded);
+        }
 
         let principal = ractor::call!(state.permissions_actor, |reply| {
             polar_permissions::PermissionsMessage::ResolvePrincipal {
@@ -338,123 +337,31 @@ impl PolicyActor {
         .map_err(|e| PolicyError::PermissionsResolution(e.to_string()))?
         .map_err(|e| PolicyError::PermissionsResolution(e.to_string()))?;
 
-        // Built from the type and the id as they are, never by formatting the id into text to be parsed: a
-        // name with a quote or a backslash in it is that name, and no other entity.
-        let principal_uid = EntityUid::from_type_name_and_id(
-            "Identity"
-                .parse::<cedar_policy::EntityTypeName>()
-                .map_err(|e| PolicyError::RequestConstruction(format!("principal: {e}")))?,
-            cedar_policy::EntityId::new(requester_identity),
-        );
-        let action_uid: EntityUid = action
-            .parse()
-            .map_err(|e| PolicyError::RequestConstruction(format!("action: {e}")))?;
-        let resource_uid: EntityUid = resource
-            .parse()
-            .map_err(|e| PolicyError::RequestConstruction(format!("resource: {e}")))?;
-
-        // The principal is built from what PermissionsActor resolved and from nothing a caller said. Its
-        // groups and its capabilities are its parents, so a rule can say `principal in Group::"operators"` or
-        // `principal in Capability::"update-policy"`; its workload, when its identity is a workload's, is
-        // `principal.workload`.
-        let mut principal_attrs = serde_json::Map::new();
-        if let Some(workload) = cert_issuer_common::identity::workload_of(requester_identity) {
-            principal_attrs.insert(
-                "workload".to_string(),
-                serde_json::Value::String(workload.to_string()),
-            );
-        }
-        let parents: Vec<serde_json::Value> = principal
-            .groups
-            .iter()
-            .map(|g| serde_json::json!({ "type": "Group", "id": g }))
-            .chain(principal.capabilities.iter().map(|c| {
-                serde_json::json!({
-                    "type": "Capability",
-                    "id": c.to_san_string().trim_start_matches("c:"),
-                })
-            }))
-            .chain(principal.permissions.iter().map(|p| {
-                serde_json::json!({
-                    "type": "Permission",
-                    "id": p.to_san_string().trim_start_matches("p:"),
-                })
-            }))
-            .collect();
-        let mut entities_json = vec![serde_json::json!({
-            "uid": { "type": "Identity", "id": requester_identity },
-            "attrs": principal_attrs,
-            "parents": parents,
-        })];
-        // The resource, with the attributes its records give it. Built from the parsed id and not from the
-        // text, like the principal. Only the attributes that exist are given, so a rule on one that does not
-        // cannot be satisfied.
-        if facts.owner.is_some() || facts.namespace.is_some() || !facts.labels.is_empty() {
-            let mut attrs = serde_json::Map::new();
-            let tags: serde_json::Map<String, serde_json::Value> = facts
-                .labels
-                .iter()
-                .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
-                .collect();
-            if let Some(owner) = &facts.owner {
-                attrs.insert(
-                    "owner".to_string(),
-                    serde_json::json!({ "__entity": { "type": "Identity", "id": owner } }),
-                );
-            }
-            if let Some(namespace) = &facts.namespace {
-                attrs.insert(
-                    "namespace".to_string(),
-                    serde_json::json!({ "__entity": { "type": "Identity", "id": namespace } }),
-                );
-            }
-            entities_json.push(serde_json::json!({
-                "uid": {
-                    "type": resource_uid.type_name().to_string(),
-                    "id": resource_uid.id().unescaped(),
-                },
-                "attrs": attrs,
-                "parents": [],
-                "tags": tags,
-            }));
-        }
-        let schema = schema::schema();
         // The arrangement of groups and roles is built once per version; only the principal and the resource are
         // added for this request, and the closure is repaired for them alone.
         let (hierarchy, _) = state
             .hierarchy
             .for_version(principal.hierarchy_version, &principal.hierarchy)?;
-        let entities = hierarchy
-            .clone()
-            .add_entities_from_json_value(serde_json::Value::Array(entities_json), Some(schema))
-            .map_err(|e| PolicyError::RequestConstruction(format!("entities: {e}")))?;
-
         // The time is this actor's own, never a caller's.
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let mut context = serde_json::json!({ "now_secs": now_secs });
-        if let Some(topic) = facts.topic {
-            context["declared"] = serde_json::Value::Bool(topic.declared);
-            context["implied"] = serde_json::Value::Bool(topic.implied);
-        }
-        let context = Context::from_json_value(context, Some((schema, &action_uid)))
-            .map_err(|e| PolicyError::RequestConstruction(format!("context: {e}")))?;
-        let request = Request::new(
-            principal_uid,
-            action_uid,
-            resource_uid,
-            context,
-            Some(schema),
+        decide_with(
+            state.policy_set.as_ref().expect("checked above"),
+            &state.authorizer,
+            hierarchy,
+            &Requester {
+                identity: requester_identity,
+                groups: &principal.groups,
+                capabilities: &principal.capabilities,
+                permissions: &principal.permissions,
+            },
+            action,
+            resource,
+            facts,
+            now_secs,
         )
-        .map_err(|e| PolicyError::RequestConstruction(e.to_string()))?;
-
-        let response = state
-            .authorizer
-            .is_authorized(&request, policy_set, &entities);
-
-        Ok(Self::decide(&response))
     }
 
     /// The three answers out of Cedar's two. A rule that could not be evaluated is a denial: it may have
@@ -476,6 +383,181 @@ impl PolicyActor {
             cedar_policy::Decision::Deny => Decision::NotDetermined,
         }
     }
+}
+
+/// The principal of a request, already resolved: who it is, the groups it is in, and the capabilities and permissions
+/// it holds. The policy actor resolves it through PermissionsActor (the groups document's list where it names the
+/// identity, else the certificate's); a caller judging a policy that is not loaded, as the authority model does, gives
+/// it from what it knows. Either way the rules see it as Cedar's principal and nothing else.
+pub struct Requester<'a> {
+    pub identity: &'a str,
+    pub groups: &'a [String],
+    pub capabilities: &'a [cert_issuer_common::capability::Capability],
+    pub permissions: &'a [cert_issuer_common::permission::Permission],
+}
+
+/// A policy and an arrangement of groups and roles, loaded together to decide requests without an actor: the same
+/// evaluation the policy actor makes ([`decide_with`]), so a policy can be judged before it is in force
+/// (docs/architecture/authority-model.md, "Acceptance as a comparison").
+pub struct Evaluator {
+    policy_set: PolicySet,
+    hierarchy: Entities,
+    authorizer: Authorizer,
+}
+
+impl Evaluator {
+    /// `source` as the policy, refused as the policy actor refuses it, and `hierarchy` as the arrangement.
+    pub fn new(
+        source: &str,
+        hierarchy: &cert_issuer_common::hierarchy::Hierarchy,
+    ) -> Result<Self, PolicyError> {
+        Ok(Self {
+            policy_set: load_source(source).map_err(PolicyError::PolicyParse)?,
+            hierarchy: HierarchyStore::build(hierarchy)?,
+            authorizer: Authorizer::new(),
+        })
+    }
+
+    /// What the rules say about `requester` doing `action` on `resource`, with the asker's `facts`, at `now_secs`.
+    pub fn decide(
+        &self,
+        requester: &Requester,
+        action: &str,
+        resource: &str,
+        facts: &Facts,
+        now_secs: u64,
+    ) -> Result<Decision, PolicyError> {
+        decide_with(
+            &self.policy_set,
+            &self.authorizer,
+            &self.hierarchy,
+            requester,
+            action,
+            resource,
+            facts,
+            now_secs,
+        )
+    }
+}
+
+/// The one evaluation: Cedar's answer about `requester` doing `action` (a Cedar entity UID, `Action::"decrypt"`) on
+/// `resource` (`Secret::"name"`), under `policy_set` and the arrangement `hierarchy`, with the asker's `facts` as the
+/// resource's attributes and the request's context, at `now_secs`. The policy actor and [`Evaluator`] both call it.
+#[allow(clippy::too_many_arguments)]
+fn decide_with(
+    policy_set: &PolicySet,
+    authorizer: &Authorizer,
+    hierarchy: &Entities,
+    requester: &Requester,
+    action: &str,
+    resource: &str,
+    facts: &Facts,
+    now_secs: u64,
+) -> Result<Decision, PolicyError> {
+    // Built from the type and the id as they are, never by formatting the id into text to be parsed: a
+    // name with a quote or a backslash in it is that name, and no other entity.
+    let principal_uid = EntityUid::from_type_name_and_id(
+        "Identity"
+            .parse::<cedar_policy::EntityTypeName>()
+            .map_err(|e| PolicyError::RequestConstruction(format!("principal: {e}")))?,
+        cedar_policy::EntityId::new(requester.identity),
+    );
+    let action_uid: EntityUid = action
+        .parse()
+        .map_err(|e| PolicyError::RequestConstruction(format!("action: {e}")))?;
+    let resource_uid: EntityUid = resource
+        .parse()
+        .map_err(|e| PolicyError::RequestConstruction(format!("resource: {e}")))?;
+
+    // The principal is built from what was resolved and from nothing a caller said. Its groups and its
+    // capabilities are its parents, so a rule can say `principal in Group::"operators"` or
+    // `principal in Capability::"update-policy"`; its workload, when its identity is a workload's, is
+    // `principal.workload`.
+    let mut principal_attrs = serde_json::Map::new();
+    if let Some(workload) = cert_issuer_common::identity::workload_of(requester.identity) {
+        principal_attrs.insert(
+            "workload".to_string(),
+            serde_json::Value::String(workload.to_string()),
+        );
+    }
+    let parents: Vec<serde_json::Value> = requester
+        .groups
+        .iter()
+        .map(|g| serde_json::json!({ "type": "Group", "id": g }))
+        .chain(requester.capabilities.iter().map(|c| {
+            serde_json::json!({
+                "type": "Capability",
+                "id": c.to_san_string().trim_start_matches("c:"),
+            })
+        }))
+        .chain(requester.permissions.iter().map(|p| {
+            serde_json::json!({
+                "type": "Permission",
+                "id": p.to_san_string().trim_start_matches("p:"),
+            })
+        }))
+        .collect();
+    let mut entities_json = vec![serde_json::json!({
+        "uid": { "type": "Identity", "id": requester.identity },
+        "attrs": principal_attrs,
+        "parents": parents,
+    })];
+    // The resource, with the attributes its records give it. Built from the parsed id and not from the
+    // text, like the principal. Only the attributes that exist are given, so a rule on one that does not
+    // cannot be satisfied.
+    if facts.owner.is_some() || facts.namespace.is_some() || !facts.labels.is_empty() {
+        let mut attrs = serde_json::Map::new();
+        let tags: serde_json::Map<String, serde_json::Value> = facts
+            .labels
+            .iter()
+            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+            .collect();
+        if let Some(owner) = &facts.owner {
+            attrs.insert(
+                "owner".to_string(),
+                serde_json::json!({ "__entity": { "type": "Identity", "id": owner } }),
+            );
+        }
+        if let Some(namespace) = &facts.namespace {
+            attrs.insert(
+                "namespace".to_string(),
+                serde_json::json!({ "__entity": { "type": "Identity", "id": namespace } }),
+            );
+        }
+        entities_json.push(serde_json::json!({
+            "uid": {
+                "type": resource_uid.type_name().to_string(),
+                "id": resource_uid.id().unescaped(),
+            },
+            "attrs": attrs,
+            "parents": [],
+            "tags": tags,
+        }));
+    }
+    let schema = schema::schema();
+    let entities = hierarchy
+        .clone()
+        .add_entities_from_json_value(serde_json::Value::Array(entities_json), Some(schema))
+        .map_err(|e| PolicyError::RequestConstruction(format!("entities: {e}")))?;
+
+    let mut context = serde_json::json!({ "now_secs": now_secs });
+    if let Some(topic) = facts.topic {
+        context["declared"] = serde_json::Value::Bool(topic.declared);
+        context["implied"] = serde_json::Value::Bool(topic.implied);
+    }
+    let context = Context::from_json_value(context, Some((schema, &action_uid)))
+        .map_err(|e| PolicyError::RequestConstruction(format!("context: {e}")))?;
+    let request = Request::new(
+        principal_uid,
+        action_uid,
+        resource_uid,
+        context,
+        Some(schema),
+    )
+    .map_err(|e| PolicyError::RequestConstruction(e.to_string()))?;
+
+    let response = authorizer.is_authorized(&request, policy_set, &entities);
+    Ok(PolicyActor::decide(&response))
 }
 
 #[cfg(test)]
@@ -1454,5 +1536,197 @@ mod tests {
         };
         assert_eq!(go("late").await, Decision::Allow);
         assert_eq!(go("early").await, Decision::NotDetermined);
+    }
+
+    // -- one evaluator, callable without the actor (docs/architecture/authority-model.md, slice 4) -------------------
+
+    const JUDGED: &str = r#"
+        permit (principal in Group::"operators", action == Action::"subscribe", resource);
+        forbid (principal in Group::"retired", action == Action::"publish", resource);
+        permit (principal == Identity::"alice", action == Action::"publish", resource == Topic::"news")
+            when { context.declared };
+        forbid (principal, action == Action::"subscribe", resource == Topic::"secrets") unless { context.implied };
+    "#;
+
+    fn topic(declared: bool, implied: bool) -> Facts {
+        Facts {
+            topic: Some(TopicFacts { declared, implied }),
+            ..Facts::default()
+        }
+    }
+
+    fn requester<'a>(identity: &'a str, groups: &'a [String]) -> Requester<'a> {
+        Requester {
+            identity,
+            groups,
+            capabilities: &[],
+            permissions: &[],
+        }
+    }
+
+    #[test]
+    fn a_policy_that_is_not_loaded_decides_without_an_actor() {
+        let hierarchy: cert_issuer_common::hierarchy::Hierarchy =
+            serde_json::from_value(serde_json::json!({
+                "groups": { "night-shift": { "groups": ["operators"] } }
+            }))
+            .unwrap();
+        let judge = Evaluator::new(JUDGED, &hierarchy).unwrap();
+        let ask = |identity: &str, groups: &[&str], action: &str, resource: &str, facts: Facts| {
+            let groups: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
+            judge
+                .decide(&requester(identity, &groups), action, resource, &facts, 0)
+                .unwrap()
+        };
+        // A permit, through a nested group.
+        assert_eq!(
+            ask(
+                "bob",
+                &["night-shift"],
+                r#"Action::"subscribe""#,
+                r#"Topic::"news""#,
+                topic(false, false)
+            ),
+            Decision::Allow
+        );
+        // A forbid.
+        assert_eq!(
+            ask(
+                "bob",
+                &["retired"],
+                r#"Action::"publish""#,
+                r#"Topic::"news""#,
+                topic(true, false)
+            ),
+            Decision::Deny
+        );
+        // Silence.
+        assert_eq!(
+            ask(
+                "carol",
+                &[],
+                r#"Action::"publish""#,
+                r#"Topic::"weather""#,
+                topic(true, false)
+            ),
+            Decision::NotDetermined
+        );
+        // The facts are the context.
+        assert_eq!(
+            ask(
+                "alice",
+                &[],
+                r#"Action::"publish""#,
+                r#"Topic::"news""#,
+                topic(true, false)
+            ),
+            Decision::Allow
+        );
+        assert_eq!(
+            ask(
+                "alice",
+                &[],
+                r#"Action::"publish""#,
+                r#"Topic::"news""#,
+                topic(false, false)
+            ),
+            Decision::NotDetermined
+        );
+        // A policy that would not load is refused, as the actor refuses it.
+        assert!(Evaluator::new("permit (principal, action, resource", &hierarchy).is_err());
+        assert!(
+            Evaluator::new(
+                "permit (principal, action == Action::\"no-such\", resource);",
+                &hierarchy
+            )
+            .is_err()
+        );
+    }
+
+    const IDENTITIES: &[&str] = &["alice", "bob", "carol"];
+    const GROUPS: &[&str] = &["operators", "retired", "night-shift"];
+    const TOPICS: &[&str] = &["news", "secrets", "weather"];
+
+    fn question() -> impl proptest::strategy::Strategy<Value = (usize, bool, usize, bool, bool)> {
+        use proptest::prelude::*;
+        (
+            0..IDENTITIES.len(),
+            any::<bool>(),
+            0..TOPICS.len(),
+            any::<bool>(),
+            any::<bool>(),
+        )
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+        /// The evaluator a caller holds, given the groups the PermissionsActor would resolve, decides every request as
+        /// the policy actor does, for any memberships and any request: there is one evaluator, and no second to drift.
+        #[test]
+        fn the_evaluator_and_the_actor_decide_alike(
+            memberships in proptest::collection::btree_map(
+                proptest::sample::select(IDENTITIES),
+                proptest::sample::subsequence(GROUPS.to_vec(), 0..=GROUPS.len()),
+                0..=IDENTITIES.len(),
+            ),
+            questions in proptest::collection::vec(question(), 1..8),
+        ) {
+            let hierarchy: cert_issuer_common::hierarchy::Hierarchy = serde_json::from_value(serde_json::json!({
+                "groups": { "night-shift": { "groups": ["operators"] } }
+            }))
+            .unwrap();
+            let judge = Evaluator::new(JUDGED, &hierarchy).unwrap();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let by_actor: Vec<Decision> = runtime.block_on(async {
+                let permissions_actor = spawn_permissions_actor().await;
+                let listed: std::collections::HashMap<String, Vec<String>> = memberships
+                    .iter()
+                    .map(|(who, groups)| (who.to_string(), groups.iter().map(|g| g.to_string()).collect()))
+                    .collect();
+                ractor::call!(permissions_actor, |reply| polar_permissions::PermissionsMessage::UpdateGroups {
+                    memberships: listed,
+                    hierarchy: hierarchy.clone(),
+                    reply,
+                })
+                .unwrap();
+                let (actor, _) = Actor::spawn(None, PolicyActor, PolicyActorArgs { permissions_actor }).await.unwrap();
+                load(&actor, JUDGED).await;
+                let mut said = Vec::new();
+                for (who, publish, t, declared, implied) in &questions {
+                    let action = if *publish { r#"Action::"publish""# } else { r#"Action::"subscribe""# };
+                    let decision = ractor::call!(actor, |reply| PolicyMessage::CheckAuthorization {
+                        requester_identity: IDENTITIES[*who].to_string(),
+                        requester_certificate_pem: None,
+                        action: action.to_string(),
+                        resource: format!("Topic::\"{}\"", TOPICS[*t]),
+                        facts: topic(*declared, *implied),
+                        reply,
+                    })
+                    .unwrap()
+                    .unwrap();
+                    said.push(decision);
+                }
+                said
+            });
+            for ((who, publish, t, declared, implied), by_actor) in questions.iter().zip(by_actor) {
+                let identity = IDENTITIES[*who];
+                let groups: Vec<String> = memberships
+                    .get(identity)
+                    .map(|gs| gs.iter().map(|g| g.to_string()).collect())
+                    .unwrap_or_default();
+                let action = if *publish { r#"Action::"publish""# } else { r#"Action::"subscribe""# };
+                let by_evaluator = judge
+                    .decide(
+                        &requester(identity, &groups),
+                        action,
+                        &format!("Topic::\"{}\"", TOPICS[*t]),
+                        &topic(*declared, *implied),
+                        0,
+                    )
+                    .unwrap();
+                proptest::prop_assert_eq!(by_evaluator, by_actor, "{} {} {}", identity, action, TOPICS[*t]);
+            }
+        }
     }
 }

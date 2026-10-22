@@ -40,3 +40,4 @@ rand.workspace = true
 rcgen.workspace = true
 rsa.workspace = true
 tokio.workspace = true
+proptest.workspace = true
