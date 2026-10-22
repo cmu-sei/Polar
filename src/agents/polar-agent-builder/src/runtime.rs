@@ -57,6 +57,21 @@ pub struct RuntimeSection {
     pub validate: fn(&serde_json::Value) -> Result<(), Vec<String>>,
 }
 
+/// Judges a runtime section before it is replaced, given the sections in force: what an agent may say about what its
+/// configuration becomes beyond what [`RuntimeSection::validate`] sees of the body alone (the credentials agent's
+/// authority model judges a `policy` or `groups` document against the other: docs/architecture/authority-model.md).
+/// Called after `validate` accepts the body, and only then.
+pub trait SectionJudge: Send + Sync {
+    /// `Ok(notes)` accepts, and the notes go with the outcome; `Err(reasons)` refuses, and the section in force stays.
+    /// Names and reasons only, never a value: an outcome carries no secret.
+    fn judge(
+        &self,
+        section: &str,
+        candidate: &serde_json::Value,
+        in_force: &std::collections::HashMap<String, RuntimeValue>,
+    ) -> Result<Vec<String>, Vec<String>>;
+}
+
 /// Sent on the output port when a section was replaced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeChanged {

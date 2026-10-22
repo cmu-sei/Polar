@@ -764,6 +764,17 @@ and no Cassini.
 - Tests: a judge's refusal leaves the section in force and the outcome `invalid` with its reasons; its acceptance
   carries the summary into the `applied` outcome; a section with no judge is as today.
 
+- *Built 2026-10-22:* `polar_agent_builder::runtime::SectionJudge`, given the section, the candidate body and the
+  sections in force, answers `Ok(notes)` or `Err(reasons)`. An agent supplies one with `AgentBuilder::with_section_judge`;
+  the configuration actor calls it in `apply_runtime` once `validate` has accepted the body, and only then. A refusal is
+  `Refusal::Invalid` with the judge's reasons (an `invalid` outcome), the section in force stays and the version is not
+  spent; an acceptance carries the notes in `ApplyOutcome::Applied { changed, notes }` into the outcome's `detail`. An
+  agent with no judge is as before. The judge is called synchronously inside the configuration actor: a judgement over
+  the real model takes about a tenth of a second in a release build, and documents are rare. Tests: a judge that refuses
+  one section while another in force says it is closed: refused with its reason, the section in force kept, the notes on
+  the applied outcome, and the same version accepted once the other section opens; checked against a deliberate break
+  (an actor that never asks the judge). The whole path through the builder is exercised by slice 7's tests.
+
 **7. The credentials agent judges policy and groups documents.** `credentials-agent/consume`.
 - The consumer's judge, for its `policy` and `groups` sections: the pair as it would stand, Cedar over every request in
   the universe (every workload in the model, and every account in its ledger), the model's comparison, and the outcome

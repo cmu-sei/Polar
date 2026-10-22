@@ -213,6 +213,8 @@ pub struct InfrastructureSupervisorArgs {
     )>,
     /// The runtime sections the agent declared: what its configuration actor will accept.
     pub(crate) runtime_sections: &'static [&'static crate::runtime::RuntimeSection],
+    /// The agent's judge of a runtime section before it is replaced, if it has one.
+    pub(crate) section_judge: Option<Arc<dyn crate::runtime::SectionJudge>>,
     /// Publish probes to the agent itself and expect them back; see `selftest`.
     pub(crate) self_test: bool,
 }
@@ -686,6 +688,7 @@ impl Actor for InfrastructureSupervisor {
             verifier,
             args.runtime_sections,
             authority.as_ref().map(|a| a.policy()),
+            args.section_judge.clone(),
             myself_cell.clone(),
         )
         .await?;
@@ -1367,6 +1370,7 @@ mod tests {
                     tcp_spawner: spawner.clone(),
                     commands,
                     runtime_sections: runtime,
+                    section_judge: None,
                     self_test: self_test.is_some(),
                 },
             )
@@ -2791,6 +2795,7 @@ mod service_tests {
                     tcp_spawner: Arc::new(CassiniSpawner::default()),
                     commands: vec![],
                     runtime_sections: &[],
+                    section_judge: None,
                     self_test: false,
                 },
             )

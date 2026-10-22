@@ -80,9 +80,11 @@ pub enum Refusal {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyOutcome {
-    /// The names whose effective value changed (empty if the update changed nothing).
+    /// The names whose effective value changed (empty if the update changed nothing), and what the agent's judge
+    /// said about it ([`SectionJudge`](crate::runtime::SectionJudge)), if anything.
     Applied {
         changed: Vec<String>,
+        notes: Vec<String>,
     },
     Refused(Refusal),
 }
@@ -164,6 +166,8 @@ pub struct ConfigurationArgs {
     /// The agent's policy actor. When there is one with a policy loaded, it is asked before the signer's
     /// certificate whether they may make a change (docs/architecture/authority-distribution.md).
     pub policy: Option<ActorRef<PolicyMessage>>,
+    /// The agent's judge of a runtime section before it is replaced, if it has one.
+    pub judge: Option<Arc<dyn crate::runtime::SectionJudge>>,
 }
 
 pub struct ConfigurationState {
@@ -182,6 +186,7 @@ pub struct ConfigurationState {
     /// The latest accepted body of each runtime section, by name. Versions are per section.
     runtime: HashMap<String, RuntimeValue>,
     policy: Option<ActorRef<PolicyMessage>>,
+    judge: Option<Arc<dyn crate::runtime::SectionJudge>>,
 }
 
 /// The id and version a document says it has, read without trusting any of it: only to label an outcome.
@@ -198,8 +203,10 @@ fn claimed(document: &serde_json::Value) -> (Option<String>, Option<u64>) {
 fn describe_outcome(outcome: &ApplyOutcome) -> (&'static str, Vec<String>, Vec<String>) {
     use polar_scheduler_common::outcome::{APPLIED, INVALID, STALE, UNCHANGED, UNVERIFIED};
     match outcome {
-        ApplyOutcome::Applied { changed } if changed.is_empty() => (UNCHANGED, vec![], vec![]),
-        ApplyOutcome::Applied { changed } => (APPLIED, changed.clone(), vec![]),
+        ApplyOutcome::Applied { changed, notes } if changed.is_empty() => {
+            (UNCHANGED, vec![], notes.clone())
+        }
+        ApplyOutcome::Applied { changed, notes } => (APPLIED, changed.clone(), notes.clone()),
         ApplyOutcome::Refused(Refusal::Stale { applied }) => (
             STALE,
             vec![],
@@ -315,9 +322,13 @@ impl ConfigurationState {
                 if version <= held {
                     ApplyOutcome::Refused(Refusal::Stale { applied: held })
                 } else {
-                    match (declared.validate)(&body) {
+                    let judged = (declared.validate)(&body).and_then(|()| match &self.judge {
+                        Some(judge) => judge.judge(section, &body, &self.runtime),
+                        None => Ok(Vec::new()),
+                    });
+                    match judged {
                         Err(problems) => ApplyOutcome::Refused(Refusal::Invalid(problems)),
-                        Ok(()) => {
+                        Ok(notes) => {
                             self.runtime.insert(
                                 section.to_string(),
                                 RuntimeValue {
@@ -328,6 +339,7 @@ impl ConfigurationState {
                             );
                             ApplyOutcome::Applied {
                                 changed: vec![section.to_string()],
+                                notes,
                             }
                         }
                     }
@@ -419,6 +431,7 @@ impl ConfigurationState {
                     self.last_version = version;
                     ApplyOutcome::Applied {
                         changed: changed.into_iter().map(str::to_string).collect(),
+                        notes: Vec::new(),
                     }
                 }
                 Err(problems) => ApplyOutcome::Refused(Refusal::Invalid(problems)),
@@ -426,7 +439,7 @@ impl ConfigurationState {
         };
 
         match &outcome {
-            ApplyOutcome::Applied { changed } => {
+            ApplyOutcome::Applied { changed, .. } => {
                 info!(version, ?changed, "configuration update applied");
                 if !changed.is_empty() {
                     self.current = Arc::new(self.config.clone());
@@ -470,6 +483,7 @@ impl Actor for ConfigurationActor {
             runtime_changes: args.runtime_changes,
             runtime: HashMap::new(),
             policy: args.policy,
+            judge: args.judge,
         })
     }
 
@@ -547,13 +561,15 @@ impl ConfigurationHandle {
             verifier,
             runtime_sections,
             None,
+            None,
             supervisor,
         )
         .await
     }
 
-    /// Starts the actor with everything: runtime sections, and the policy actor to ask before the
-    /// signer's certificate whether a change is allowed.
+    /// Starts the actor with everything: runtime sections, the policy actor to ask before the signer's
+    /// certificate whether a change is allowed, and the agent's judge of a runtime section.
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_full(
         name: Option<String>,
         agent: impl Into<String>,
@@ -561,6 +577,7 @@ impl ConfigurationHandle {
         verifier: Option<UpdateVerifier>,
         runtime_sections: &'static [&'static RuntimeSection],
         policy: Option<ActorRef<PolicyMessage>>,
+        judge: Option<Arc<dyn crate::runtime::SectionJudge>>,
         supervisor: ractor::ActorCell,
     ) -> Result<Self, ActorProcessingErr> {
         let changes = Arc::new(OutputPort::default());
@@ -578,6 +595,7 @@ impl ConfigurationHandle {
                 runtime_sections,
                 runtime_changes: runtime_changes.clone(),
                 policy,
+                judge,
             },
             supervisor,
         )
@@ -825,7 +843,8 @@ mod tests {
         assert_eq!(
             outcome,
             ApplyOutcome::Applied {
-                changed: vec!["HIGH".to_string()]
+                changed: vec!["HIGH".to_string()],
+                notes: Vec::new(),
             }
         );
         assert_eq!(config.current().await.unwrap().read(&HIGH).unwrap(), 20);
@@ -965,7 +984,13 @@ mod tests {
             .apply_unchecked(1, change("HIGH", "10"))
             .await
             .unwrap();
-        assert_eq!(outcome, ApplyOutcome::Applied { changed: vec![] });
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Applied {
+                changed: vec![],
+                notes: Vec::new()
+            }
+        );
         settle().await;
         assert!(seen.lock().unwrap().is_empty());
         assert!(matches!(
@@ -1095,7 +1120,8 @@ mod tests {
         assert_eq!(
             outcome,
             ApplyOutcome::Applied {
-                changed: vec!["HIGH".to_string()]
+                changed: vec!["HIGH".to_string()],
+                notes: Vec::new(),
             }
         );
         assert_eq!(high(&config).await, 20);
@@ -1710,6 +1736,118 @@ mod tests {
         json!({"repositories": urls.iter().map(|u| json!({"url": u})).collect::<Vec<_>>()})
     }
 
+    /// A judge that refuses `repositories` while the `admission` in force says it is closed, and otherwise accepts,
+    /// noting what it judged: it sees the candidate and the sections in force.
+    struct Gatekeeper;
+
+    impl crate::runtime::SectionJudge for Gatekeeper {
+        fn judge(
+            &self,
+            section: &str,
+            candidate: &Value,
+            in_force: &HashMap<String, RuntimeValue>,
+        ) -> Result<Vec<String>, Vec<String>> {
+            let closed = in_force
+                .get("admission")
+                .is_some_and(|held| held.body["closed"] == json!(true));
+            if section == "repositories" && closed {
+                let asked = candidate["repositories"].as_array().map_or(0, Vec::len);
+                return Err(vec![format!(
+                    "admission is closed, so {asked} repositories are refused"
+                )]);
+            }
+            Ok(vec![format!("{section} judged")])
+        }
+    }
+
+    async fn judged_handle(verifier: UpdateVerifier) -> ConfigurationHandle {
+        struct Parent;
+        #[ractor::async_trait]
+        impl Actor for Parent {
+            type Msg = ();
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(&self, _: ActorRef<()>, _: ()) -> Result<(), ActorProcessingErr> {
+                Ok(())
+            }
+        }
+        let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
+        ConfigurationHandle::spawn_full(
+            None,
+            AGENT,
+            config(),
+            Some(verifier),
+            &RUNTIME_SECTIONS,
+            None,
+            Some(Arc::new(Gatekeeper)),
+            parent.get_cell(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_judge_s_refusal_leaves_the_section_in_force_and_its_acceptance_carries_its_notes() {
+        let signed = Signed::new();
+        let config = judged_handle(signed.verifier()).await;
+        let seen = watch(&config).await;
+        let first = config
+            .submit(signed.runtime("repositories", 1, repos(&["https://a.example/r.git"])))
+            .await
+            .unwrap();
+        assert_eq!(
+            first,
+            ApplyOutcome::Applied {
+                changed: vec!["repositories".to_string()],
+                notes: vec!["repositories judged".to_string()],
+            }
+        );
+        config
+            .submit(signed.runtime("admission", 1, json!({"closed": true})))
+            .await
+            .unwrap();
+        let refused = config
+            .submit(signed.runtime("repositories", 2, repos(&["https://b.example/r.git"])))
+            .await
+            .unwrap();
+        assert_eq!(
+            refused,
+            ApplyOutcome::Refused(Refusal::Invalid(vec![
+                "admission is closed, so 1 repositories are refused".to_string()
+            ]))
+        );
+        // The section in force stays.
+        let held = config.runtime("repositories").await.unwrap().unwrap();
+        assert_eq!(
+            (held.version, held.body),
+            (1, repos(&["https://a.example/r.git"]))
+        );
+        settle().await;
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(
+                seen.iter().map(|o| o.status.as_str()).collect::<Vec<_>>(),
+                ["applied", "applied", "invalid"]
+            );
+            // The notes go with the applied outcome; the reasons with the refused one.
+            assert_eq!(seen[0].detail, ["repositories judged"]);
+            assert_eq!(
+                seen[2].detail,
+                ["admission is closed, so 1 repositories are refused"]
+            );
+        }
+        // A refused version is not spent: once admission opens, the same version is accepted.
+        config
+            .submit(signed.runtime("admission", 2, json!({"closed": false})))
+            .await
+            .unwrap();
+        let again = config
+            .submit(signed.runtime("repositories", 2, repos(&["https://b.example/r.git"])))
+            .await
+            .unwrap();
+        assert!(matches!(again, ApplyOutcome::Applied { .. }), "{again:?}");
+    }
+
     #[tokio::test]
     async fn a_runtime_document_is_held_whole_and_subscribers_are_told_which_section() {
         let signed = Signed::new();
@@ -1723,7 +1861,8 @@ mod tests {
         assert_eq!(
             outcome,
             ApplyOutcome::Applied {
-                changed: vec!["repositories".to_string()]
+                changed: vec!["repositories".to_string()],
+                notes: Vec::new(),
             }
         );
         let held = config.runtime("repositories").await.unwrap().unwrap();
@@ -1945,6 +2084,7 @@ mod tests {
             Some(verifier),
             &RUNTIME_SECTIONS,
             Some(policy),
+            None,
             parent.get_cell(),
         )
         .await

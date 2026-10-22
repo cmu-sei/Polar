@@ -181,6 +181,8 @@ pub struct AgentBuilder<M: ractor::Message> {
     declared_commands: &'static [CommandSpec],
     /// The runtime sections the agent declared (`PolarAgent::RUNTIME`).
     declared_runtime: &'static [&'static RuntimeSection],
+    /// The agent's judge of a runtime section before it is replaced ([`with_section_judge`](Self::with_section_judge)).
+    section_judge: Option<Arc<dyn runtime::SectionJudge>>,
     /// The agent's topics, from `PolarAgent`; with them the client checks each publish and subscribe.
     topics: Option<Arc<topics::TopicSet>>,
 }
@@ -239,6 +241,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
             commands: Vec::new(),
             declared_commands: &[],
             declared_runtime: &[],
+            section_judge: None,
             topics: None,
         }
     }
@@ -319,6 +322,14 @@ impl<M: ractor::Message> AgentBuilder<M> {
 
     pub fn with_subscription(mut self, subscription: Subscription) -> Self {
         self.subscriptions.push(subscription);
+        self
+    }
+
+    /// Has `judge` decide whether a runtime section may be replaced, given the sections in force, once its own check
+    /// has accepted the body: a refusal is an `invalid` outcome with the judge's reasons, and the section in force
+    /// stays; an acceptance carries the judge's notes into the `applied` outcome.
+    pub fn with_section_judge(mut self, judge: Arc<dyn runtime::SectionJudge>) -> Self {
+        self.section_judge = Some(judge);
         self
     }
 
@@ -466,6 +477,7 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
                 tcp_spawner: Arc::new(infrastructure::CassiniSpawner { gate }),
                 commands,
                 runtime_sections: this.declared_runtime,
+                section_judge: this.section_judge,
             },
             myself_cell,
         )
@@ -609,6 +621,7 @@ impl<M: ractor::Message> ConfiguredService<M> {
                 tcp_spawner: Arc::new(infrastructure::CassiniSpawner::default()),
                 commands: Vec::new(),
                 runtime_sections: &[],
+                section_judge: None,
             },
             this.myself.get_cell(),
         )
