@@ -30,6 +30,8 @@ rkyv = { workspace = true }
 polar = { path = "../../lib" }
 polar-health = { workspace = true }
 polar-agent-builder.workspace = true
+# The authority topics' types: the broker keeps the credentials agent's authority to decide by.
+credentials_agent_common.workspace = true
 polar-env.workspace = true
 async-trait.workspace = true
 ractor.workspace = true
@@ -61,3 +63,7 @@ cassini-client.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 libc.workspace = true
+# A test signs the credentials agent's authority, and gives the broker's policy actor a policy.
+polar-policy.workspace = true
+rand.workspace = true
+rsa.workspace = true

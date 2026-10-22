@@ -22,6 +22,7 @@
 */
 
 use crate::UNEXPECTED_MESSAGE_STR;
+use crate::authority::BrokerAuthority;
 use crate::{
     PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT, SESSION_MISSING_REASON_STR,
     SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT,
@@ -31,6 +32,7 @@ use cassini_types::{
     ArchivedClientMessage, BrokerMessage, ClientMessage, ControlError, ControlOp, ControlResult,
     DisconnectReason, ShutdownPhase, WireTraceCtx,
 };
+use polar_agent_builder::{Access, Floor};
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent, registry::where_is, rpc::CallResult,
 };
@@ -52,7 +54,9 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
-use tracing::{debug, debug_span, error, info, info_span, instrument, trace, trace_span, warn};
+use tracing::{
+    Instrument, debug, debug_span, error, info, info_span, instrument, trace, trace_span, warn,
+};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use cassini_tracing::try_set_parent_otel;
@@ -115,6 +119,20 @@ fn extract_peer_identity(stream: &TlsStream<TcpStream>) -> Option<String> {
     None
 }
 
+/// What the connecting client's verified certificate admits where no policy speaks (its declared topics, and those
+/// its workload and groups imply), read once, right after the handshake, as the identity is. A certificate that cannot
+/// be read gives the reason, and every publish and subscribe on the connection is refused with it.
+fn extract_peer_floor(stream: &TlsStream<TcpStream>) -> Result<Arc<Floor>, String> {
+    let (_, connection) = stream.get_ref();
+    let leaf = connection
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .ok_or_else(|| "the connection presented no certificate".to_string())?;
+    Floor::from_certificate_der(leaf.as_ref())
+        .map(Arc::new)
+        .map_err(|e| format!("the connection's certificate cannot be read: {e}"))
+}
+
 // ============================== Listener Manager ============================== //
 
 pub struct ListenerManager;
@@ -128,6 +146,7 @@ pub struct ListenerManagerState {
     shutdown_token: CancellationToken,
     listeners: HashMap<String, ActorRef<BrokerMessage>>, // client_id -> listener ref
     session_mgr: ActorRef<BrokerMessage>,
+    authority: BrokerAuthority,
 }
 
 pub struct ListenerManagerArgs {
@@ -137,6 +156,8 @@ pub struct ListenerManagerArgs {
     pub ca_cert_file: String,
     pub session_mgr: ActorRef<BrokerMessage>,
     pub shutdown_auth_token: Option<String>,
+    /// Who may publish and subscribe to what, which every Listener asks.
+    pub authority: BrokerAuthority,
 }
 
 #[async_trait]
@@ -205,6 +226,7 @@ impl Actor for ListenerManager {
             terminating_listeners: false,
             listeners: HashMap::new(),
             session_mgr: args.session_mgr,
+            authority: args.authority,
         })
     }
 
@@ -229,11 +251,13 @@ impl Actor for ListenerManager {
         info!("Server running on {bind_addr}");
         let shutdown_token = state.shutdown_token.clone();
         let session_mgr = state.session_mgr.clone(); // clone for use in spawned tasks
+        let authority = state.authority.clone();
 
         // Accept loop runs in its own task; do NOT keep an entered span alive forever.
         let join_handle = tokio::spawn({
             let myself = myself.clone();
             let session_mgr = session_mgr; // move into closure
+            let authority = authority;
             async move {
                 loop {
                     let (stream, peer_addr) = match server.accept().await {
@@ -266,6 +290,7 @@ impl Actor for ListenerManager {
                     let acceptor = acceptor.clone();
                     let myself = myself.clone();
                     let session_mgr = session_mgr.clone(); // clone again for inner spawn
+                    let authority = authority.clone();
 
                     tokio::spawn(async move {
                         let _g = handshake_span.enter();
@@ -281,6 +306,10 @@ impl Actor for ListenerManager {
                         // is only reachable through the still-unified
                         // TlsStream.
                         let peer_identity = extract_peer_identity(&stream);
+                        let floor = extract_peer_floor(&stream);
+                        if let Err(why) = &floor {
+                            warn!(%why, "every publish and subscribe on this connection will be refused");
+                        }
                         let client_id = Uuid::new_v4().to_string();
                         let (reader, writer) = split(stream);
                         let writer = BufWriter::new(writer);
@@ -295,6 +324,8 @@ impl Actor for ListenerManager {
                                 .expect("ListenerManager must have a supervisor (the broker)")
                                 .into(),
                             peer_identity,
+                            floor,
+                            authority,
                         };
 
                         let spawn_span = info_span!(
@@ -602,6 +633,9 @@ struct ListenerState {
     task_handle: Option<JoinHandle<()>>,
     broker: ActorRef<BrokerMessage>,
     peer_identity: Option<String>,
+    /// What this connection's certificate admits where no policy speaks, or why it cannot be read.
+    floor: Result<Arc<Floor>, String>,
+    authority: BrokerAuthority,
 }
 
 struct ListenerArguments {
@@ -612,9 +646,20 @@ struct ListenerArguments {
     registration_id: Option<String>,
     broker: ActorRef<BrokerMessage>,
     peer_identity: Option<String>,
+    floor: Result<Arc<Floor>, String>,
+    authority: BrokerAuthority,
 }
 
 impl Listener {
+    /// Whether this connection may use `topic` this way: the broker's policy first, then the certificate's floor,
+    /// refused by default. `Err` is the reason, which the client is told.
+    async fn decide(state: &ListenerState, topic: &str, access: Access) -> Result<(), String> {
+        match &state.floor {
+            Ok(floor) => state.authority.decide(floor, topic, access).await,
+            Err(why) => Err(format!("the broker refused: {why}")),
+        }
+    }
+
     /// Write a framed ClientMessage to the peer.
     ///
     /// Header is **u32 big-endian length**, followed by payload bytes.
@@ -679,6 +724,8 @@ impl Actor for Listener {
             task_handle: None,
             broker: args.broker,
             peer_identity: args.peer_identity,
+            floor: args.floor,
+            authority: args.authority,
         })
     }
 
@@ -1129,7 +1176,7 @@ impl Listener {
     ) -> Result<(), ActorProcessingErr> {
         let span = info_span!("cassini.request.publish_request", client_id = %state.client_id, %registration_id, topic = ?topic, payload_bytes = payload.len());
         try_set_parent_otel(&span, trace_ctx.clone());
-        let _g = span.enter();
+        let entered = span.enter();
         trace!("Listener received publish request");
 
         let Some(listener_reg) = state.registration_id.clone() else {
@@ -1172,6 +1219,37 @@ impl Listener {
                 return Ok(());
             }
         };
+
+        // The decision waits on the policy actor, and an entered span must not be held across a wait: the task can
+        // resume on another thread, whose span stack it is not on (tracing panics, and the Listener is lost).
+        drop(entered);
+        let decided = Self::decide(state, &topic, Access::Publish)
+            .instrument(span.clone())
+            .await;
+        let _g = span.enter();
+        if let Err(reason) = decided {
+            warn!(%topic, identity = ?state.peer_identity, %reason, "publish refused");
+            let msg = ClientMessage::PublishResponse {
+                topic,
+                payload: Arc::new(Vec::new()),
+                result: Err(reason),
+                trace_ctx: WireTraceCtx::from_current_span(),
+                published_by: None,
+            };
+            if let Err(e) =
+                Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+            {
+                error!(error = ?e, "Failed to write a publish refusal");
+            }
+            return Ok(());
+        }
+        // The broker keeps the credentials agent's authority as every agent does, believing it only from the
+        // identity this connection verified (never from what a client says about itself).
+        if BrokerAuthority::carries_authority(&topic)
+            && let Ok(floor) = &state.floor
+        {
+            state.authority.hear(&topic, &payload, floor.identity());
+        }
 
         if let Err(e) = session.send_message(BrokerMessage::PublishRequest {
             registration_id: registration_id.clone(),
@@ -1286,7 +1364,7 @@ impl Listener {
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.request.subscribe", client_id = %state.client_id, %registration_id, topic = ?topic);
         try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
+        let entered = span.enter();
         trace!("Listener received subscribe request");
 
         let Some(listener_reg) = state.registration_id.clone() else {
@@ -1305,6 +1383,23 @@ impl Listener {
             let msg = ClientMessage::SubscribeAcknowledgment {
                 topic,
                 result: Err("Bad request: session mismatch".to_string()),
+                trace_ctx: WireTraceCtx::from_current_span(),
+            };
+            let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
+            return Ok(());
+        }
+
+        // Not entered across the wait on the policy actor (see handle_publish_request).
+        drop(entered);
+        let decided = Self::decide(state, &topic, Access::Subscribe)
+            .instrument(span.clone())
+            .await;
+        let _g = span.enter();
+        if let Err(reason) = decided {
+            warn!(%topic, identity = ?state.peer_identity, %reason, "subscription refused");
+            let msg = ClientMessage::SubscribeAcknowledgment {
+                topic,
+                result: Err(reason),
                 trace_ctx: WireTraceCtx::from_current_span(),
             };
             let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;

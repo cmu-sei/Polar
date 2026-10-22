@@ -23,6 +23,7 @@
 
 #![deny(clippy::disallowed_methods)]
 pub mod agent;
+pub mod authority;
 pub mod broker;
 pub mod control;
 pub mod listener;

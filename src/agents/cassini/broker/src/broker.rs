@@ -217,6 +217,11 @@ impl Actor for Broker {
         // is what a client connects to). It tells the broker when something has decided it
         // should end: a health verdict, SIGTERM, a worker's death.
         let shutdown_budget = args.configured.shutdown_budget();
+        let publisher = args
+            .configured
+            .config()
+            .read(&polar_agent_builder::environment::AUTHORITY_PUBLISHER)
+            .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
         let infrastructure = ServiceBuilder::new(myself.clone(), "cassini")
             .into_configured(args.configured)
             .build()
@@ -253,33 +258,6 @@ impl Actor for Broker {
             error!(error = ?e, "Broker startup failed: SessionManager failed to start");
             ActorProcessingErr::from(e)
         })?;
-
-        // Now create ListenerManager, which needs the session manager
-        let listener_manager_args = ListenerManagerArgs {
-            bind_addr: args.bind_addr,
-            server_cert_file: args.server_cert_file,
-            private_key_file: args.private_key_file,
-            ca_cert_file: args.ca_cert_file,
-            session_mgr: session_mgr.clone(),
-            shutdown_auth_token: args.shutdown_auth_token.clone(),
-        };
-
-        let (listener_mgr, _) = Actor::spawn_linked(
-            Some(LISTENER_MANAGER_NAME.to_owned()),
-            ListenerManager,
-            listener_manager_args,
-            myself.clone().into(),
-        )
-        .await
-        .map_err(|e| {
-            error!(error = ?e, "Broker startup failed: ListenerManager failed to start");
-            ActorProcessingErr::from(e)
-        })?;
-
-        // Send listener manager ref to the existing session manager
-        let _ = session_mgr.send_message(BrokerMessage::SetListenerManager {
-            listener_mgr: listener_mgr.clone(),
-        });
 
         let (subscriber_mgr, _sub_handle) = Actor::spawn_linked(
             Some(SUBSCRIBER_MANAGER_NAME.to_string()),
@@ -324,6 +302,48 @@ impl Actor for Broker {
         // receive this at construction time.
         let _ = subscriber_mgr.send_message(BrokerMessage::SetTopicManagerRef {
             topic_mgr: topic_mgr.clone(),
+        });
+
+        // Who may publish and subscribe to what: the credentials agent's authority, kept as every agent keeps it,
+        // and asked for through the topic manager. It exists before the first connection is accepted.
+        let authority = crate::authority::BrokerAuthority::spawn(
+            publisher,
+            myself.get_cell(),
+            topic_mgr.clone(),
+        )
+        .await
+        .map_err(|e| {
+            error!(error = ?e, "Broker startup failed: its authority did not start");
+            e
+        })?;
+
+        // The ListenerManager comes last of the workers that serve clients: it accepts connections at once, and
+        // each needs the session manager and the authority.
+        let listener_manager_args = ListenerManagerArgs {
+            bind_addr: args.bind_addr,
+            server_cert_file: args.server_cert_file,
+            private_key_file: args.private_key_file,
+            ca_cert_file: args.ca_cert_file,
+            session_mgr: session_mgr.clone(),
+            shutdown_auth_token: args.shutdown_auth_token.clone(),
+            authority,
+        };
+
+        let (listener_mgr, _) = Actor::spawn_linked(
+            Some(LISTENER_MANAGER_NAME.to_owned()),
+            ListenerManager,
+            listener_manager_args,
+            myself.clone().into(),
+        )
+        .await
+        .map_err(|e| {
+            error!(error = ?e, "Broker startup failed: ListenerManager failed to start");
+            ActorProcessingErr::from(e)
+        })?;
+
+        // Send listener manager ref to the existing session manager
+        let _ = session_mgr.send_message(BrokerMessage::SetListenerManager {
+            listener_mgr: listener_mgr.clone(),
         });
 
         let control_mgr_args = ControlManagerState {

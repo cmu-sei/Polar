@@ -127,6 +127,11 @@ impl Pki {
     }
 }
 
+/// The policy a test broker starts with unless the test is about who may do what: everything is permitted, so the
+/// broker's refusal by default (a certificate that names no topics may use none) does not stand in the way of tests
+/// about sessions, delivery and shutdown. `TestBroker::start_enforcing` starts with none.
+pub const OPEN_POLICY: &str = "permit (principal, action, resource);";
+
 /// What the builder made for the broker, left where a test can reach it.
 type Infrastructure = Arc<Mutex<Option<polar_agent_builder::ServiceResources>>>;
 
@@ -137,6 +142,8 @@ pub struct TestBroker {
     infrastructure: Mutex<Infrastructure>,
     shutdown_token: Option<String>,
     retention_secs: Option<u64>,
+    /// Whether it starts with [`OPEN_POLICY`] (again after a restart).
+    open: bool,
     /// The exit codes the broker asked the process to exit with.
     pub exits: Arc<Mutex<Vec<i32>>>,
 }
@@ -153,10 +160,18 @@ const NAMES: [&str; 6] = [
 ];
 
 async fn clear_names() {
+    let authority = [
+        polar_agent_builder::authority::policy_actor_name(cassini_broker::authority::SERVICE),
+        polar_agent_builder::authority::permissions_actor_name(cassini_broker::authority::SERVICE),
+    ];
     for _ in 0..100 {
         let mut any = false;
-        for name in NAMES {
-            if let Some(left_over) = ractor::registry::where_is(name.to_string()) {
+        for name in NAMES
+            .iter()
+            .map(|n| n.to_string())
+            .chain(authority.iter().cloned())
+        {
+            if let Some(left_over) = ractor::registry::where_is(name) {
                 any = true;
                 left_over.kill();
             }
@@ -203,6 +218,21 @@ impl TestBroker {
         shutdown_budget: Duration,
         shutdown_token: Option<&str>,
     ) -> Self {
+        Self::start_full(retention_secs, shutdown_budget, shutdown_token, true).await
+    }
+
+    /// A broker with no policy, as on a fresh cluster: what a client's certificate admits decides, and anything
+    /// else is refused.
+    pub async fn start_enforcing() -> Self {
+        Self::start_full(None, Duration::from_secs(20), None, false).await
+    }
+
+    async fn start_full(
+        retention_secs: Option<u64>,
+        shutdown_budget: Duration,
+        shutdown_token: Option<&str>,
+        open: bool,
+    ) -> Self {
         init_logging();
         clear_names().await;
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -226,15 +256,20 @@ impl TestBroker {
 
         for _ in 0..100 {
             if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-                return Self {
+                let started = Self {
                     addr,
                     pki,
                     broker: Mutex::new(broker),
                     infrastructure: Mutex::new(infrastructure),
                     shutdown_token: token,
                     retention_secs,
+                    open,
                     exits,
                 };
+                if open {
+                    started.set_policy(OPEN_POLICY).await;
+                }
+                return started;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -296,7 +331,24 @@ impl TestBroker {
         .await;
         *self.broker.lock().unwrap() = broker;
         *self.infrastructure.lock().unwrap() = infrastructure;
+        if self.open {
+            self.set_policy(OPEN_POLICY).await;
+        }
         began.elapsed()
+    }
+
+    /// Gives the broker's policy actor `source`, as a verified update from the credentials agent would.
+    pub async fn set_policy(&self, source: &str) {
+        let policy =
+            polar_agent_builder::PolicyLookup::for_service(cassini_broker::authority::SERVICE)
+                .actor()
+                .expect("the broker's policy actor is running");
+        ractor::call!(policy, |reply| polar_policy::PolicyMessage::UpdatePolicy {
+            policy_source: source.to_string(),
+            reply,
+        })
+        .expect("the policy actor answers")
+        .expect("the policy is taken");
     }
 
     /// The health actor the builder gave the broker, to end it as it would end itself.

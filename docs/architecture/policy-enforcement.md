@@ -232,7 +232,7 @@ code today, and what stands between the two. The detail of each part is in the d
 | Credentials agent: retrieve, decrypt | yes | refused (no fallback, by design); no policy loaded is a failure, so the client retries | `credentials-policy.md` |
 | Credentials agent: store | yes | its floor: the requester's own names | `credentials-policy.md` |
 | Credentials agent: admin actions, issuance | no | the certificate capability, or the credential | `identity-and-bootstrap-update.md`, `cert-issuer-isolation.md` |
-| Broker: subscribe, publish | no | nothing is decided: every client may use every topic | `cassini-broker.md` |
+| Broker: subscribe, publish | yes, since 2026-10-22 (stage 5b; not yet on a cluster) | the certificate's floor: its `p:` names and the topics its workload and groups imply; refused by default | `cassini-broker.md` |
 | Scheduler | no | signed documents are forwarded unverified (the receiver verifies); unsigned schedules flowed unchecked until 2026-10-21, when that path was removed | `topics.md` |
 | cert-issuer | no | a static floor | `cert-issuer-isolation.md` |
 | Polar git server | no | static lists of identities per repository | `git-server.md` |

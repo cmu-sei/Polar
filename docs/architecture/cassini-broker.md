@@ -118,11 +118,45 @@ Read 2026-10-22, after stage 5a found the first while measuring (`broker-baselin
   "session mismatch" makes the client register again, so a denial must not say that. Subscriptions are sent again at
   every registration (`polar-agent-builder/src/lib.rs:617-660`), so a refused one is retried each time.
 - **No authorization of publish or subscribe exists:** any holder of a certificate from the cluster's CA may publish or
-  subscribe to any topic (`remaining-work.md`, the gap of 2026-10-14).
+  subscribe to any topic (`remaining-work.md`, the gap of 2026-10-14). *Built 2026-10-22 (stage 5b): see "Policy in the
+  broker", below. A refused publish is a `PublishResponse` with `Err` and an empty payload, a refused subscription a
+  `SubscribeAcknowledgment` with `Err`; the client turns them into `PublishRefused` and `SubscribeRefused` (stage 0).
+  Some of the points above are older than stage 0, which made a subscribe acknowledged and refusals events.*
 
 ## Policy in the broker
 
-The broker is built with `ServiceBuilder` (`CASSINI_CLIENT = false`, `broker/src/agent.rs:44-53`), so it has a health
+*Built 2026-10-22 (stage 5b), and not yet run on a cluster:*
+
+- **Its authority.** The broker starts an `AuthorityHandle` of its own under the Broker actor, its policy and
+  permissions actors registered as `cassini.policy` and `cassini.permissions` (`authority.rs`, `BrokerAuthority::spawn`,
+  started in `broker.rs` before the ListenerManager, which now comes last so no connection is accepted before it
+  exists). It believes only `POLAR_AUTHORITY_PUBLISHER` (the builder's variable, default the credentials agent's
+  identity), and asks for the current authority at start and whenever its authority wants to, by publishing
+  `AuthoritySnapshotRequest` on `polar-authority-snapshot-requests` through the TopicManager under the registration
+  id `cassini` (no client has it).
+- **Hearing it.** A publish on `polar-authority-updates` or `polar-authority-snapshot-replies` that the broker admits
+  is delivered as any other and also handed to its authority, as published by the identity the Listener verified,
+  never by what the client says (`listener.rs`, `handle_publish_request`, `BrokerAuthority::hear`).
+- **The floor.** Read once per connection, right after the handshake, from the leaf certificate
+  (`extract_peer_floor`, `polar_agent_builder::Floor`): the identity (first DNS name), the `p:pub:`/`p:sub:` names, and
+  the topics `topics::implied_topics` gives the identity's workload and the certificate's `g:` groups. An identity that
+  names no workload (a person's) implies nothing. A certificate that cannot be read makes every publish and subscribe on
+  the connection refused, with the reason.
+- **The decision.** The Listener decides each publish and subscribe after its session checks (`Listener::decide`):
+  `BrokerAuthority::decide` asks `cassini.policy` with `polar_agent_builder::topic_gate::ask` and applies the builder's
+  own `rule`, so a `permit` admits beyond the floor, a `forbid` refuses within it, silence or no policy leaves it to
+  the floor, and no answer refuses. Every refusal starts "the broker refused:" and never contains "session mismatch".
+- **A trap found building it:** the decision waits on the policy actor, and the Listener's handlers hold an entered
+  span; a span held across a wait broke the tracing registry's per-thread stack when the task resumed on another thread
+  (a panic in `tracing-subscriber`'s `sharded.rs`, and two in five messages lost in the four-publisher load test). The
+  decision runs with the span left and instrumented by it. The Listener's writes still wait inside entered spans, which
+  has not been seen to fail; it would under a slow reader, when a write waits on the socket.
+- **Tests:** `broker/tests/enforcement.rs` (declared admitted and undeclared refused with no policy; implied topics;
+  a certificate naming nothing; a Cedar forbid and permit; a snapshot believed from the credentials agent and not from
+  an impostor allowed to publish on the topic). Every other broker test starts its broker with a policy that permits
+  everything (`support::OPEN_POLICY`); `TestBroker::start_enforcing` starts one without.
+
+Before stage 5b: the broker is built with `ServiceBuilder` (`CASSINI_CLIENT = false`, `broker/src/agent.rs:44-53`), so it has a health
 check but no `AuthorityHandle`: no PolicyActor, no PermissionsActor, no authority updates
 (`polar-agent-builder/src/infrastructure.rs:614-633`). It cannot be a client of itself (its certificate is a server
 certificate). `AuthorityHandle::spawn` is public, so the broker can start one itself and feed it the authority topics'

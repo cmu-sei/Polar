@@ -25,7 +25,9 @@
 //! topic set, the same rule the broker applies (docs/architecture/policy-enforcement.md, "Decisions"). A `permit`
 //! admits a topic outside the set, a `forbid` refuses one inside it, and where no policy speaks, or there is none
 //! yet, the set decides. A policy that cannot be consulted refuses: nothing here fails open. The Cassini client is
-//! handed it as a function (`cassini_client::facade::TopicGate`) and decides nothing itself.
+//! handed it as a function (`cassini_client::facade::TopicGate`) and decides nothing itself. The broker applies the
+//! same [`rule`], with [`ask`], to the floor its client's certificate gives ([`Floor`](crate::Floor)), so the agent and
+//! the broker decide alike by construction.
 
 use crate::authority::{LookupError, PolicyLookup};
 use crate::policy_authority::entity;
@@ -36,7 +38,7 @@ use std::sync::Arc;
 
 /// What the agent's policy said about one use of a topic, as the gate reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PolicySaid {
+pub enum PolicySaid {
     /// No policy actor is running yet.
     NotRunning,
     /// It answered.
@@ -49,12 +51,7 @@ pub(crate) enum PolicySaid {
 
 /// The rule, on its own: whether an agent may use `topic` this way, given what policy said and whether the topic
 /// is in the agent's set.
-pub(crate) fn rule(
-    said: &PolicySaid,
-    in_set: bool,
-    topic: &str,
-    access: Access,
-) -> Result<(), String> {
+pub fn rule(said: &PolicySaid, in_set: bool, topic: &str, access: Access) -> Result<(), String> {
     let floor = || {
         if in_set {
             Ok(())
@@ -83,7 +80,7 @@ pub(crate) fn rule(
 
 /// Asks the agent's policy, as `identity`, about using `topic` this way: `Action::"publish"` or
 /// `Action::"subscribe"` on `Topic::"<topic>"`.
-pub(crate) async fn ask(
+pub async fn ask(
     lookup: &PolicyLookup,
     identity: &str,
     certificate_pem: Option<String>,

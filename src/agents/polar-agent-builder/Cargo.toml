@@ -28,6 +28,8 @@ authors.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+# The broker reads a floor from the certificate the TLS handshake gives as DER; the extractors read PEM.
+base64.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
 credentials_agent_common.workspace = true
