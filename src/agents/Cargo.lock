@@ -886,6 +886,7 @@ dependencies = [
  "polar-env",
  "polar-health",
  "polar-policy",
+ "polar-router",
  "proptest",
  "ractor",
  "rand 0.10.3",
@@ -5621,6 +5622,7 @@ name = "polar-health"
 version = "1.0.0"
 dependencies = [
  "polar-env",
+ "proptest",
  "ractor",
  "rand 0.10.3",
  "rcgen",

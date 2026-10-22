@@ -595,6 +595,7 @@ pub async fn register(
             config: client_config,
             registration_id: None,
             delivery: DeliveryMode::Broadcast(events_output),
+            answers: None,
         },
     )
     .await?;

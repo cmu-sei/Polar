@@ -57,6 +57,7 @@ name = "cassini-server"
 path = "src/main.rs"
 
 [dev-dependencies]
+polar-router.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }
 cassini-client.workspace = true

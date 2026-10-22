@@ -23,7 +23,8 @@
 
 use async_trait::async_trait;
 use cassini_client::facade::{
-    Backoff, DEFAULT_OFFLINE_BUFFER, FacadeArgs, TcpClientFacade, TlsTransportSpawner, TopicGate,
+    Backoff, DEFAULT_OFFLINE_BUFFER, FacadeArgs, RefusalWatch, TcpClientFacade,
+    TlsTransportSpawner, TopicGate,
 };
 pub use cassini_client::{MessageQueue, OfflineBehavior, PublishRequest, QueueEntry};
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
@@ -126,6 +127,7 @@ impl TcpClient {
                 config,
                 registration_id: None,
                 delivery: cassini_client::DeliveryMode::Broadcast(events_output),
+                answers: None,
             },
             supervisor.into(),
         )
@@ -172,6 +174,7 @@ impl TcpClient {
             router,
             TCPClientConfig::new()?,
             None,
+            None,
         )
         .await
     }
@@ -179,7 +182,8 @@ impl TcpClient {
     /// As [`spawn_with_router`](Self::spawn_with_router), with the broker coordinates
     /// supplied instead of read from the process environment. The agent builder uses this,
     /// handing the client what it read once into its snapshot, and the check each publish and
-    /// subscribe passes before it is sent (`gate`; none admits everything).
+    /// subscribe passes before it is sent (`gate`; none admits everything), and who is told what the
+    /// agent was refused (`watch`; none tells no one).
     pub async fn spawn_with_router_config<M, F>(
         service_name: &str,
         supervisor: ActorRef<M>,
@@ -187,6 +191,7 @@ impl TcpClient {
         router: ActorRef<polar_router::RouterMessage>,
         config: TCPClientConfig,
         gate: Option<TopicGate>,
+        watch: Option<RefusalWatch>,
     ) -> Result<Self, ActorProcessingErr>
     where
         M: Send + 'static,
@@ -219,6 +224,7 @@ impl TcpClient {
                 buffer_limit: DEFAULT_OFFLINE_BUFFER,
                 backoff: Backoff::default(),
                 gate,
+                watch,
             },
             supervisor.into(),
         )

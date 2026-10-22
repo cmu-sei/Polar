@@ -98,6 +98,8 @@ pub(crate) struct HealthMachine {
     /// The verdict, once one has been given. After it the machine judges nothing
     /// more: it only keeps the health file fresh while the agent shuts down.
     concluded: Option<HealthVerdict>,
+    /// The topics the agent was last told it is refused, carried in every write.
+    refused: Vec<crate::RefusedTopic>,
 }
 
 impl HealthMachine {
@@ -115,6 +117,7 @@ impl HealthMachine {
             start_secs: now,
             write_failures: 0,
             concluded: None,
+            refused: Vec::new(),
         }
     }
 
@@ -165,6 +168,7 @@ impl HealthMachine {
     fn unhealthy(&self, now: u64, cassini: bool, graph: bool) -> HealthState {
         HealthState::at(crate::HealthStatus::Unhealthy, now, cassini, graph)
             .with_phase(self.file_phase())
+            .with_refused(self.refused.clone())
     }
 
     fn healthy(&self, now: u64) -> HealthState {
@@ -175,6 +179,7 @@ impl HealthMachine {
             self.graph_connected,
         )
         .with_phase(self.file_phase())
+        .with_refused(self.refused.clone())
     }
 
     /// The state to write on a tick that has no other news: healthy or unhealthy
@@ -232,6 +237,11 @@ impl HealthMachine {
                 // The graph deadline, checked every tick, decides when it has
                 // gone on too long.
                 Some(self.unhealthy(now, self.cassini_connected, self.graph_connected))
+            }
+            // News for the next write, which every tick makes; it judges nothing.
+            HealthCheckMessage::TopicsRefused(topics) => {
+                self.refused = topics.clone();
+                None
             }
             HealthCheckMessage::Tick | HealthCheckMessage::DepsChecked(_) => None,
         }
@@ -1119,5 +1129,152 @@ mod tests {
         // writes, and the gap to the stop, must stay within one tick.
         assert!(written.windows(2).all(|w| w[1] - w[0] == 30), "{written:?}");
         assert!(now - written.last().unwrap() <= 30);
+    }
+
+    // -- topics the agent was refused -------------------------------------------
+
+    fn refused(topic: &str) -> crate::RefusedTopic {
+        crate::RefusedTopic {
+            topic: topic.to_string(),
+            access: "subscribe".to_string(),
+            reason: format!("policy forbids this agent to subscribe on `{topic}`"),
+        }
+    }
+
+    #[test]
+    fn the_topics_an_agent_was_refused_are_in_every_write_after_and_change_nothing_else() {
+        let mut m = connected(false);
+        assert!(
+            m.on_message(
+                &HealthCheckMessage::TopicsRefused(vec![refused("news")]),
+                T0 + 1
+            )
+            .is_none(),
+            "a refusal is news for the next write, not a write of its own"
+        );
+        let w = done(m.tick(T0 + 30, &certs(None))).write.unwrap();
+        assert_eq!(w.status, HealthStatus::Healthy);
+        assert_eq!(w.refused_topics, [refused("news")]);
+        // A disconnect's write carries them too.
+        let w = m
+            .on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 31)
+            .unwrap();
+        assert_eq!(w.refused_topics, [refused("news")]);
+        // Taken in the end: the next write has none.
+        m.on_message(&HealthCheckMessage::TopicsRefused(vec![]), T0 + 32);
+        m.on_message(&HealthCheckMessage::CassiniConnected, T0 + 33);
+        let w = done(m.tick(T0 + 60, &certs(None))).write.unwrap();
+        assert!(w.refused_topics.is_empty());
+    }
+
+    #[test]
+    fn a_file_without_refused_topics_reads_as_none_and_none_are_not_written() {
+        let old =
+            r#"{"status":"healthy","timestamp":1,"cassini_connected":true,"graph_connected":true}"#;
+        let state: HealthState = serde_json::from_str(old).unwrap();
+        assert!(state.refused_topics.is_empty());
+        let written = serde_json::to_string(&HealthState::healthy(true, true)).unwrap();
+        assert!(!written.contains("refused_topics"), "{written}");
+    }
+
+    #[derive(Debug, Clone)]
+    enum Event {
+        Message(HealthCheckMessage),
+        Tick,
+        Refused(Vec<crate::RefusedTopic>),
+    }
+
+    fn events() -> impl proptest::strategy::Strategy<Value = Vec<(u64, Event)>> {
+        use proptest::prelude::*;
+        let event = prop_oneof![
+            Just(Event::Message(HealthCheckMessage::CassiniConnected)),
+            Just(Event::Message(HealthCheckMessage::CassiniDisconnected)),
+            Just(Event::Message(HealthCheckMessage::GraphConnected)),
+            Just(Event::Message(HealthCheckMessage::GraphDisconnected)),
+            Just(Event::Message(HealthCheckMessage::GraphAvailable)),
+            Just(Event::Message(HealthCheckMessage::GraphOpFailed(
+                "boom".into()
+            ))),
+            Just(Event::Tick),
+            proptest::collection::vec(
+                proptest::sample::select(&["news", "weather", "sport"][..]),
+                0..3
+            )
+            .prop_map(|topics| Event::Refused(topics.into_iter().map(refused).collect())),
+        ];
+        proptest::collection::vec((1u64..40, event), 0..40)
+    }
+
+    /// What a machine writes and decides for `events`, with the refusals taken out of each write; and, for each
+    /// write, the refusals it carried beside the refusals last told before it.
+    #[allow(clippy::type_complexity)]
+    fn run(
+        expects_graph: bool,
+        events: &[(u64, Event)],
+    ) -> (
+        Vec<String>,
+        Vec<(Vec<crate::RefusedTopic>, Vec<crate::RefusedTopic>)>,
+    ) {
+        let mut m = machine(expects_graph);
+        let mut now = T0;
+        let mut said = Vec::new();
+        let mut carried = Vec::new();
+        let mut last: Vec<crate::RefusedTopic> = Vec::new();
+        for (gap, event) in events {
+            now += gap;
+            let (write, next) = match event {
+                Event::Message(message) => (m.on_message(message, now), None),
+                Event::Refused(topics) => {
+                    last = topics.clone();
+                    (
+                        m.on_message(&HealthCheckMessage::TopicsRefused(topics.clone()), now),
+                        None,
+                    )
+                }
+                Event::Tick => {
+                    let outcome = match m.tick(now, &certs(None)) {
+                        TickStep::Done(outcome) => outcome,
+                        TickStep::NeedDeps => m.deps_checked(now, true, 0),
+                    };
+                    (outcome.write, Some(format!("{:?}", outcome.next)))
+                }
+            };
+            if let Some(mut w) = write {
+                carried.push((std::mem::take(&mut w.refused_topics), last.clone()));
+                said.push(format!("{w:?}"));
+            }
+            if let Some(next) = next {
+                said.push(next);
+            }
+        }
+        (said, carried)
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(128))]
+
+        /// Being refused a topic never makes an agent unhealthy, nor changes anything else the health file or the
+        /// verdict says: the same events with the refusals left out are written and decided alike. And every write
+        /// carries the refusals last told.
+        #[test]
+        fn refusals_never_change_what_the_health_says(
+            expects_graph in proptest::prelude::any::<bool>(),
+            events in events(),
+        ) {
+            let without: Vec<(u64, Event)> = events
+                .iter()
+                .map(|(gap, e)| match e {
+                    // The time still passes, without the refusal.
+                    Event::Refused(_) => (*gap, Event::Message(HealthCheckMessage::Tick)),
+                    other => (*gap, other.clone()),
+                })
+                .collect();
+            let (with_said, carried) = run(expects_graph, &events);
+            let (without_said, _) = run(expects_graph, &without);
+            proptest::prop_assert_eq!(with_said, without_said);
+            for (written, told) in carried {
+                proptest::prop_assert_eq!(written, told);
+            }
+        }
     }
 }

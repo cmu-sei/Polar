@@ -555,8 +555,9 @@ pub enum ClientEvent {
         topic: String,
     },
     /// The subscription was refused (`reason` says why), by the broker or, before it was sent, by the agent's own
-    /// topic check: nothing published on `topic` is delivered to this client. An agent logs it; it is not retried
-    /// until the client registers again.
+    /// topic check: nothing published on `topic` is delivered to this client. An agent logs it. The client's facade
+    /// keeps it as wanted: it is not sent again when the agent subscribes again on registering, only when the agent's
+    /// authority changes and its topic check admits it (docs/architecture/policy-enforcement.md, stage 5b).
     SubscribeRefused {
         topic: String,
         reason: String,

@@ -172,6 +172,21 @@ pub struct HealthState {
     /// Informational. Files written before this field existed read as `Normal`.
     #[serde(default)]
     pub phase: HealthPhase,
+    /// The topics the agent wants and was refused, by its own topic check or the broker's: informational, so an
+    /// operator can see why an agent hears nothing on a topic. A refusal never makes the agent unhealthy
+    /// (docs/architecture/policy-enforcement.md, stage 5b). Not written when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused_topics: Vec<RefusedTopic>,
+}
+
+/// A topic an agent wants and was refused, as its health file says it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefusedTopic {
+    pub topic: String,
+    /// `publish` or `subscribe`.
+    pub access: String,
+    /// Why, as the refusal said it.
+    pub reason: String,
 }
 
 impl HealthState {
@@ -188,11 +203,17 @@ impl HealthState {
             cassini_connected,
             graph_connected,
             phase: HealthPhase::Normal,
+            refused_topics: Vec::new(),
         }
     }
 
     pub fn with_phase(mut self, phase: HealthPhase) -> Self {
         self.phase = phase;
+        self
+    }
+
+    pub fn with_refused(mut self, refused_topics: Vec<RefusedTopic>) -> Self {
+        self.refused_topics = refused_topics;
         self
     }
 
@@ -203,6 +224,7 @@ impl HealthState {
             cassini_connected,
             graph_connected,
             phase: HealthPhase::Normal,
+            refused_topics: Vec::new(),
         }
     }
 
@@ -213,6 +235,7 @@ impl HealthState {
             cassini_connected,
             graph_connected,
             phase: HealthPhase::Normal,
+            refused_topics: Vec::new(),
         }
     }
 
@@ -566,6 +589,9 @@ pub enum HealthCheckMessage {
     /// A real operation against Neo4j failed. Carries a short reason,
     /// logged but not immediately fatal — see graph_deadline_secs.
     GraphOpFailed(String),
+    /// The topics the agent wants and is refused now, replacing those told before (an empty list: none). Written
+    /// into the health file from the next write on; it changes nothing else.
+    TopicsRefused(Vec<RefusedTopic>),
     /// Internal periodic tick — do not send externally.
     Tick,
     /// Internal: the dependency check a tick started has finished — do not send

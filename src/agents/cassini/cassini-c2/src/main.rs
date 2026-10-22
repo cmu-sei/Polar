@@ -72,6 +72,7 @@ impl Actor for ShutdownController {
             config,
             registration_id: None,
             delivery: cassini_client::DeliveryMode::Broadcast(events_output),
+            answers: None,
         };
 
         let (client, _) = Actor::spawn_linked(

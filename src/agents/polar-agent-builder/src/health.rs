@@ -61,6 +61,13 @@ impl HealthHandle {
     pub fn as_actor_ref(&self) -> ActorRef<HealthCheckMessage> {
         self.actor.clone()
     }
+
+    /// The topics the agent wants and is refused now, for its health file. They never make it unhealthy.
+    pub fn topics_refused(&self, topics: Vec<polar_health::RefusedTopic>) {
+        if let Err(e) = self.actor.cast(HealthCheckMessage::TopicsRefused(topics)) {
+            tracing::warn!("the health actor was not told the topics refused: {e}");
+        }
+    }
 }
 
 impl HealthClient for HealthHandle {

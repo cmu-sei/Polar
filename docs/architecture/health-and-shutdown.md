@@ -166,6 +166,12 @@ The actor writes a JSON file each tick: `status`, `timestamp`,
 the file tell "rejuvenating" from "unhealthy", the probe ignores it, and files
 written before it existed read as `normal`.
 
+`refused_topics` (2026-10-22) lists the topics the agent wants and was refused, by its own
+topic check or the broker's: `topic`, `access` (`publish` or `subscribe`) and `reason`. It is
+informational, so an operator can see why an agent hears nothing on a topic; a refusal never
+makes the agent unhealthy, and the field is left out when there are none
+(`docs/architecture/policy-enforcement.md`, stage 5b).
+
 The file is written every tick in every phase, healthy or unhealthy according to
 the connection state. (It used to be written only in the Normal phase, so a
 rejuvenation that waited longer than the probe's 90 s limit let the file go stale

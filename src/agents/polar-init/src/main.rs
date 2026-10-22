@@ -423,6 +423,7 @@ async fn ensure_escrow_bootstrapped(own_identity: &str, escrow: &environment::Es
                     router: router.clone(),
                     lifecycle: lifecycle.clone(),
                 },
+                answers: None,
             },
         )
         .await

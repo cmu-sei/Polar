@@ -130,6 +130,8 @@ pub enum InfrastructureSupervisorMessage {
     /// The agent wants the current authority from the credentials agent: publish the request on the client as
     /// it is now.
     AuthorityAsk,
+    /// What the Cassini client says about the topics the agent was refused.
+    Refusals(cassini_client::facade::RefusalNews),
 }
 
 /// The lifecycle callback the Cassini client is given.
@@ -166,6 +168,13 @@ impl TcpClientSpawner for CassiniSpawner {
         router: ActorRef<polar_router::RouterMessage>,
         config: TCPClientConfig,
     ) -> Result<TcpClient, ActorProcessingErr> {
+        // What the agent was refused comes back here: to ask for the authority, and for its health file.
+        let told = supervisor.clone();
+        let watch: cassini_client::facade::RefusalWatch = Arc::new(move |news| {
+            if let Err(e) = told.send_message(InfrastructureSupervisorMessage::Refusals(news)) {
+                tracing::warn!("InfrastructureSupervisor: not told of a refusal: {e}");
+            }
+        });
         TcpClient::spawn_with_router_config(
             service_name,
             supervisor,
@@ -173,6 +182,7 @@ impl TcpClientSpawner for CassiniSpawner {
             router,
             config,
             self.gate.clone(),
+            Some(watch),
         )
         .await
     }
@@ -508,6 +518,13 @@ impl InfrastructureSupervisor {
                 client_config,
             )
             .await?;
+        // A change of authority may admit what the agent was refused: the client asks its gate again.
+        setup
+            .authority
+            .changes()
+            .subscribe(tcp_client.as_actor_ref(), |_| {
+                Some(cassini_client::TcpClientMessage::JudgeAgain)
+            });
 
         let crypto = if setup.wants_crypto {
             let (crypto_actor, _) = polar_crypto::CryptoActor::spawn_linked(
@@ -839,6 +856,35 @@ impl Actor for InfrastructureSupervisor {
                     ),
                 }
             }
+            InfrastructureSupervisorMessage::Refusals(news) => match news {
+                cassini_client::facade::RefusalNews::Unpredicted {
+                    topic,
+                    use_,
+                    reason,
+                } => {
+                    tracing::info!(
+                        %topic,
+                        %reason,
+                        "the broker refused to {} what this agent's own check let through; asking for the current authority",
+                        use_.as_str()
+                    );
+                    if let Some(authority) = &state.authority {
+                        authority.behind();
+                    }
+                }
+                cassini_client::facade::RefusalNews::Standing(standing) => {
+                    state.healthcheck.topics_refused(
+                        standing
+                            .into_iter()
+                            .map(|s| polar_health::RefusedTopic {
+                                topic: s.topic,
+                                access: s.use_.as_str().to_string(),
+                                reason: s.reason,
+                            })
+                            .collect(),
+                    );
+                }
+            },
             InfrastructureSupervisorMessage::AuthorityAsk => {
                 if let Some(client) = &state.client {
                     match rkyv::to_bytes::<rkyv::rancor::Error>(
@@ -1003,6 +1049,8 @@ mod tests {
         echo_to: Option<ActorRef<polar_router::RouterMessage>>,
         /// Every topic and payload published, in order.
         published: Published,
+        /// How many times it was told to judge its refusals again.
+        judged: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -1025,6 +1073,9 @@ mod tests {
             message: Self::Msg,
             _state: &mut Self::State,
         ) -> Result<(), ActorProcessingErr> {
+            if let TcpClientMessage::JudgeAgain = message {
+                self.judged.fetch_add(1, Ordering::SeqCst);
+            }
             if let TcpClientMessage::Publish { topic, payload, .. } = message {
                 self.published
                     .lock()
@@ -1060,6 +1111,8 @@ mod tests {
         configs: Mutex<Vec<TCPClientConfig>>,
         /// What every client published.
         published: Published,
+        /// How many times every client was told to judge its refusals again.
+        judged: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -1088,6 +1141,7 @@ mod tests {
                         .load(Ordering::SeqCst)
                         .then(|| router.clone()),
                     published: self.published.clone(),
+                    judged: self.judged.clone(),
                 },
                 (),
                 supervisor.get_cell(),
@@ -1454,6 +1508,82 @@ mod tests {
         rig.registered().await;
         rig.settle().await;
         assert_eq!(requests_for_authority(&rig), 1);
+    }
+
+    // -- what the agent was refused (docs/architecture/policy-enforcement.md, stage 5b) ------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_the_gate_did_not_predict_asks_for_the_current_authority() {
+        let rig = Rig::standard("infra-refusal-ask").await;
+        rig.registered().await;
+        rig.settle().await;
+        assert_eq!(requests_for_authority(&rig), 1);
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        rig.infra
+            .cast(InfrastructureSupervisorMessage::Refusals(
+                cassini_client::facade::RefusalNews::Unpredicted {
+                    topic: "news".to_string(),
+                    use_: cassini_client::facade::TopicUse::Subscribe,
+                    reason: "the broker refused: no".to_string(),
+                },
+            ))
+            .unwrap();
+        rig.settle().await;
+        assert_eq!(requests_for_authority(&rig), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_topics_an_agent_is_refused_are_in_its_health_file_and_it_stays_healthy() {
+        let rig = Rig::standard("infra-refusal-health").await;
+        rig.registered().await;
+        rig.infra
+            .cast(InfrastructureSupervisorMessage::Refusals(
+                cassini_client::facade::RefusalNews::Standing(vec![
+                    cassini_client::refused::StandingRefusal {
+                        topic: "news".to_string(),
+                        use_: cassini_client::facade::TopicUse::Subscribe,
+                        reason: "policy forbids this agent to subscribe on `news`".to_string(),
+                        by_broker: false,
+                    },
+                ]),
+            ))
+            .unwrap();
+        rig.settle().await;
+        // The next write carries it.
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        rig.settle().await;
+        let health = rig.health();
+        assert_eq!(health.status, polar_health::HealthStatus::Healthy);
+        assert_eq!(
+            health.refused_topics,
+            [polar_health::RefusedTopic {
+                topic: "news".to_string(),
+                access: "subscribe".to_string(),
+                reason: "policy forbids this agent to subscribe on `news`".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_change_of_authority_has_the_client_judge_what_it_was_refused_again() {
+        use credentials_agent_common::authority_update::{AuthorityBody, AuthorityPayload};
+        let rig = Rig::standard("infra-refusal-judge").await;
+        assert_eq!(rig.spawner.judged.load(Ordering::SeqCst), 0);
+        let key = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        let snapshot = authority_snapshot(
+            &key,
+            &[AuthorityPayload {
+                sequence: 1,
+                version: 1,
+                body: AuthorityBody::Policy {
+                    source: r#"permit(principal == Identity::"alice", action, resource);"#.into(),
+                },
+                authored_by: None,
+            }],
+        );
+        deliver_snapshot(&rig, &snapshot, Some(CREDENTIALS));
+        rig.settle().await;
+        assert_eq!(rig.spawner.judged.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]

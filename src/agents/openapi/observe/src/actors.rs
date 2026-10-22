@@ -109,6 +109,7 @@ impl Actor for ObserverSupervisor {
                 config,
                 registration_id: None,
                 delivery: cassini_client::DeliveryMode::Broadcast(events_output),
+                answers: None,
             },
             myself.clone().into(),
         )

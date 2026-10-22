@@ -141,6 +141,7 @@ where
             config,
             registration_id: None,
             delivery: cassini_client::DeliveryMode::Broadcast(events_output),
+            answers: None,
         },
         supervisor.into(),
     )

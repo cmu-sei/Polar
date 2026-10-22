@@ -283,6 +283,9 @@ pub enum AuthorityMessage {
     },
     /// The Cassini client registered (again): ask for the current authority.
     Registered,
+    /// The broker refused what this agent's own gate let through: the authority it holds may be behind the
+    /// broker's, so ask for the current one.
+    Behind,
     /// Time to ask again if there is still no key.
     Tick,
     Versions(RpcReplyPort<HashMap<AuthorityKind, u64>>),
@@ -422,7 +425,7 @@ impl Actor for AuthorityActor {
                 let result = state.core.on_snapshot(&snapshot, published_by.as_deref());
                 state.handled(result).await;
             }
-            AuthorityMessage::Registered => state.ask(),
+            AuthorityMessage::Registered | AuthorityMessage::Behind => state.ask(),
             AuthorityMessage::Tick => {
                 if !state.core.has_key() {
                     state.ask();
@@ -642,6 +645,12 @@ impl AuthorityHandle {
     /// The Cassini client registered: ask for the current authority.
     pub fn registered(&self) {
         self.cast(AuthorityMessage::Registered);
+    }
+
+    /// The broker refused what this agent's gate let through: ask for the current authority, as for an update that
+    /// cannot be checked, no more than once in the interval.
+    pub fn behind(&self) {
+        self.cast(AuthorityMessage::Behind);
     }
 
     pub fn tick(&self) {
@@ -1431,6 +1440,25 @@ mod actor_tests {
             1,
             "three in a burst are one question, not three"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_its_gate_did_not_predict_asks_for_the_authority_even_with_a_key_once_in_the_interval()
+     {
+        let rig = rig().await;
+        rig.handle.snapshot(snapshot(&[]), Some(CREDENTIALS.into()));
+        settle().await;
+        let before = rig.asks.lock().unwrap().len();
+        // A burst of refusals is one question.
+        rig.handle.behind();
+        rig.handle.behind();
+        rig.handle.behind();
+        settle().await;
+        assert_eq!(rig.asks.lock().unwrap().len(), before + 1);
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        rig.handle.behind();
+        settle().await;
+        assert_eq!(rig.asks.lock().unwrap().len(), before + 2);
     }
 
     #[tokio::test]

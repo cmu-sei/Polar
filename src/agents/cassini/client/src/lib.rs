@@ -26,6 +26,7 @@ pub use cassini_tracing::{try_set_parent_otel, try_set_parent_wire};
 mod connect;
 pub mod environment;
 pub mod facade;
+pub mod refused;
 
 use cassini_types::{ClientEvent, ClientMessage, ControlOp, WireTraceCtx};
 use ractor::concurrency::{Duration, sleep};
@@ -394,6 +395,16 @@ pub enum TcpClientMessage {
     /// a transition back to Unregistered and a fresh registration,
     /// rather than retrying the same now-invalid registration_id forever.
     SessionInvalidated,
+    /// From the transport to the facade: the broker's answer to a subscribe or a publish this client sent (`Ok`
+    /// only for a subscription taken). The facade keeps what was refused (`refused`).
+    BrokerAnswered {
+        topic: String,
+        use_: facade::TopicUse,
+        result: Result<(), String>,
+    },
+    /// The agent's authority changed: the facade asks its gate again about every topic it was refused, and sends
+    /// the wanted subscriptions it now admits.
+    JudgeAgain,
 }
 
 impl TcpClientMessage {
@@ -417,6 +428,8 @@ impl TcpClientMessage {
             TcpClientMessage::Reconnect => "Reconnect",
             TcpClientMessage::Reconnected { .. } => "Reconnected",
             TcpClientMessage::SessionInvalidated => "SessionInvalidated",
+            TcpClientMessage::BrokerAnswered { .. } => "BrokerAnswered",
+            TcpClientMessage::JudgeAgain => "JudgeAgain",
         }
     }
 
@@ -498,12 +511,16 @@ pub struct TcpClientState {
     delivery: DeliveryMode,
     abort_handle: Option<AbortHandle>, // abort handle switch for the stream read loop
     reconnect: ReconnectMode,
+    answers: Option<ActorRef<TcpClientMessage>>,
 }
 
 pub struct TcpClientArgs {
     pub config: TCPClientConfig,
     pub registration_id: Option<String>,
     pub delivery: DeliveryMode,
+    /// Told the broker's answer to each subscribe and publish (`BrokerAnswered`): the facade, which keeps what was
+    /// refused. None for a client without one.
+    pub answers: Option<ActorRef<TcpClientMessage>>,
 }
 
 /// TCP client actor
@@ -580,6 +597,7 @@ impl TcpClientActor {
         let reader = state.reader.take().expect("Reader already taken");
 
         let delivery = state.delivery.clone();
+        let answers = state.answers.clone();
         let broker_addr = state.bind_addr.clone();
         let reconnect = state.reconnect;
 
@@ -618,6 +636,7 @@ impl TcpClientActor {
                                             TcpClientActor::process_client_message(
                                                 myself.clone(),
                                                 &delivery,
+                                                answers.as_ref(),
                                                 message,
                                             );
                                         }
@@ -673,8 +692,20 @@ impl TcpClientActor {
     fn process_client_message(
         myself: ActorRef<TcpClientMessage>,
         delivery: &DeliveryMode,
+        answers: Option<&ActorRef<TcpClientMessage>>,
         message: ClientMessage,
     ) {
+        let answer = |topic: &str, use_: facade::TopicUse, result: &Result<(), String>| {
+            if let Some(answers) = answers
+                && let Err(e) = answers.send_message(TcpClientMessage::BrokerAnswered {
+                    topic: topic.to_string(),
+                    use_,
+                    result: result.clone(),
+                })
+            {
+                warn!("the broker's answer on {topic} could not be passed on: {e}");
+            }
+        };
         match message {
             ClientMessage::RegistrationResponse { result, trace_ctx } => {
                 let span = trace_span!("client.handle_registration_response");
@@ -723,6 +754,7 @@ impl TcpClientActor {
                 } else if let Err(reason) = result {
                     // The broker did not take our publish: the agent hears it, not only the log.
                     warn!("The broker refused a publish on {topic}: {reason}");
+                    answer(&topic, facade::TopicUse::Publish, &Err(reason.clone()));
                     TcpClientActor::dispatch_event(
                         delivery,
                         ClientEvent::PublishRefused {
@@ -741,6 +773,7 @@ impl TcpClientActor {
                 try_set_parent_wire(&span, trace_ctx);
                 let _g = span.enter();
 
+                answer(&topic, facade::TopicUse::Subscribe, &result);
                 match result {
                     Ok(()) => {
                         info!("Subscribed to topic: {topic}");
@@ -1315,6 +1348,7 @@ impl Actor for TcpClientActor {
             client_config: Arc::new(client_config),
             delivery: args.delivery,
             abort_handle: None,
+            answers: args.answers,
         };
 
         Ok(state)
@@ -1626,6 +1660,7 @@ mod process_client_message_tests {
         TcpClientActor::process_client_message(
             myself,
             &delivery,
+            None,
             ClientMessage::PublishResponse {
                 topic: "a-real-topic".to_string(),
                 payload: b"real payload".to_vec().into(),
@@ -1658,7 +1693,7 @@ mod process_client_message_tests {
     async fn dispatched_for(message: ClientMessage) -> Vec<ClientEvent> {
         let (myself, _received) = spawn_fake_tcp_client().await;
         let (delivery, captured) = broadcast_delivery().await;
-        TcpClientActor::process_client_message(myself, &delivery, message);
+        TcpClientActor::process_client_message(myself, &delivery, None, message);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         captured.lock().unwrap().clone()
     }
@@ -1706,6 +1741,86 @@ mod process_client_message_tests {
             matches!(events.as_slice(), [ClientEvent::SubscribeRefused { topic, reason }]
                 if topic == "news" && reason == "refused: not declared"),
             "{events:?}"
+        );
+    }
+
+    /// The broker's answers to this client's subscribes and publishes, as whoever is told of them (the facade) hears
+    /// them, for each message from the broker.
+    async fn answered_for(
+        messages: Vec<ClientMessage>,
+    ) -> Vec<(String, crate::facade::TopicUse, Result<(), String>)> {
+        let (myself, _) = spawn_fake_tcp_client().await;
+        let (answers, told) = spawn_fake_tcp_client().await;
+        let (delivery, _captured) = broadcast_delivery().await;
+        for message in messages {
+            TcpClientActor::process_client_message(
+                myself.clone(),
+                &delivery,
+                Some(&answers),
+                message,
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        told.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                TcpClientMessage::BrokerAnswered {
+                    topic,
+                    use_,
+                    result,
+                } => Some((topic.clone(), *use_, result.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_broker_s_answers_to_subscribes_and_publishes_are_told_and_a_delivery_is_not_one() {
+        use crate::facade::TopicUse;
+        let answered = answered_for(vec![
+            ClientMessage::SubscribeAcknowledgment {
+                topic: "news".to_string(),
+                result: Ok(()),
+                trace_ctx: None,
+            },
+            ClientMessage::SubscribeAcknowledgment {
+                topic: "weather".to_string(),
+                result: Err("the broker refused: no".to_string()),
+                trace_ctx: None,
+            },
+            ClientMessage::PublishResponse {
+                topic: "sport".to_string(),
+                payload: Vec::new().into(),
+                result: Err("the broker refused: no".to_string()),
+                trace_ctx: None,
+                published_by: None,
+            },
+            // Someone else's message, delivered: not an answer to anything this client asked.
+            ClientMessage::PublishResponse {
+                topic: "news".to_string(),
+                payload: b"x".to_vec().into(),
+                result: Ok(()),
+                trace_ctx: None,
+                published_by: None,
+            },
+        ])
+        .await;
+        assert_eq!(
+            answered,
+            [
+                ("news".to_string(), TopicUse::Subscribe, Ok(())),
+                (
+                    "weather".to_string(),
+                    TopicUse::Subscribe,
+                    Err("the broker refused: no".to_string())
+                ),
+                (
+                    "sport".to_string(),
+                    TopicUse::Publish,
+                    Err("the broker refused: no".to_string())
+                ),
+            ]
         );
     }
 
@@ -1759,6 +1874,7 @@ mod process_client_message_tests {
         TcpClientActor::process_client_message(
             myself,
             &delivery,
+            None,
             ClientMessage::ErrorMessage {
                 error: "session mismatch: unknown registration".to_string(),
                 trace_ctx: None,
@@ -1784,6 +1900,7 @@ mod process_client_message_tests {
         TcpClientActor::process_client_message(
             myself,
             &delivery,
+            None,
             ClientMessage::ErrorMessage {
                 error: "some other, unrelated broker error".to_string(),
                 trace_ctx: None,
@@ -1838,6 +1955,7 @@ mod registration_tests {
                 lifecycle: Arc::new(move |event| captured.lock().unwrap().push(event)),
             },
             abort_handle: None,
+            answers: None,
         };
         (state, events)
     }

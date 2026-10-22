@@ -120,7 +120,7 @@ pub async fn ask(
 /// The gate for an agent named `service`, whose certificate's identity is `identity` and whose topics are `set`.
 /// `certificate_pem` is its own certificate, read when it started, so the groups it carries count (its groups do not
 /// change when it is renewed: they are the catalog's).
-pub(crate) fn gate(
+pub fn gate(
     service: &str,
     identity: String,
     certificate_pem: Option<String>,

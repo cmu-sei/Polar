@@ -42,13 +42,14 @@
 //! lost, because nothing acknowledges it. That is the next step of the design in
 //! `docs/architecture/cassini-client-reliability.md`.
 
+use crate::refused::{RefusedTopics, StandingRefusal};
 use crate::{
     DeliveryMode, ReconnectMode, TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage,
 };
 use async_trait::async_trait;
 use cassini_types::ClientEvent;
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SupervisionEvent};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -57,7 +58,7 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 /// What an agent is about to do with a topic, as its [`TopicGate`] is asked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TopicUse {
     Publish,
     Subscribe,
@@ -82,6 +83,24 @@ pub type TopicGate = Arc<
         + Send
         + Sync,
 >;
+
+/// What the facade tells the agent builder about the topics the agent was refused
+/// (docs/architecture/policy-enforcement.md, stage 5b).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefusalNews {
+    /// The broker refused what the agent's gate let through: the agent's authority may be behind the broker's, so
+    /// the builder asks for the current one.
+    Unpredicted {
+        topic: String,
+        use_: TopicUse,
+        reason: String,
+    },
+    /// What stands refused changed: the topics the agent wants and is refused now, for its health file.
+    Standing(Vec<StandingRefusal>),
+}
+
+/// Told [`RefusalNews`] as it happens. The agent builder supplies it, as it does the gate.
+pub type RefusalWatch = Arc<dyn Fn(RefusalNews) + Send + Sync>;
 
 /// How many publishes are held while there is no registered transport. The oldest is dropped
 /// first when it is full.
@@ -159,6 +178,8 @@ pub struct FacadeArgs {
     pub backoff: Backoff,
     /// Asked before each publish and subscribe; none admits everything.
     pub gate: Option<TopicGate>,
+    /// Told what the agent was refused; none tells no one.
+    pub watch: Option<RefusalWatch>,
 }
 
 pub struct FacadeState {
@@ -170,6 +191,8 @@ pub struct FacadeState {
     buffer: VecDeque<TcpClientMessage>,
     attempt: u32,
     closing: bool,
+    /// What the agent was refused and still wants. It outlives every transport, as the agent's wanting does.
+    refused: RefusedTopics,
 }
 
 pub struct TcpClientFacade;
@@ -220,6 +243,8 @@ impl TcpClientFacade {
                     // whichever session it is given if that one is gone.
                     registration_id: state.registration_id.clone(),
                     delivery: state.delivery.clone(),
+                    // The broker's answers come here, so what was refused is kept across transports.
+                    answers: Some(myself.clone()),
                 },
                 myself.get_cell(),
             )
@@ -245,6 +270,44 @@ impl TcpClientFacade {
             );
         }
         state.buffer.push_back(message);
+    }
+
+    /// Tells the watch what stands refused now.
+    fn tell_standing(state: &FacadeState) {
+        if let Some(watch) = &state.args.watch {
+            watch(RefusalNews::Standing(state.refused.standing()));
+        }
+    }
+
+    /// The agent's authority changed: asks the gate again about everything refused, and sends each wanted
+    /// subscription it admits now. With no gate the broker alone decides, so each is sent again.
+    async fn judge_again(state: &mut FacadeState) {
+        let mut verdicts = BTreeMap::new();
+        for (topic, use_) in state.refused.refused() {
+            let verdict = match &state.args.gate {
+                Some(gate) => gate(use_, topic.clone()).await,
+                None => Ok(()),
+            };
+            verdicts.insert((topic, use_), verdict);
+        }
+        let (send, changed) = state.refused.judged(&verdicts);
+        if changed {
+            Self::tell_standing(state);
+        }
+        for topic in send {
+            info!(%topic, "a subscription refused before is admitted now, and sent");
+            // Not registered: the agent subscribes to everything it wants when it is, and this is no longer held
+            // back.
+            if let Some(transport) = &state.transport
+                && state.registered
+                && let Err(e) = transport.send_message(TcpClientMessage::Subscribe {
+                    topic,
+                    trace_ctx: None,
+                })
+            {
+                warn!("a subscription admitted again could not be sent to the transport: {e}");
+            }
+        }
     }
 
     fn set_online(state: &mut FacadeState, online: bool) {
@@ -274,6 +337,7 @@ impl Actor for TcpClientFacade {
             buffer: VecDeque::new(),
             attempt: 0,
             closing: false,
+            refused: RefusedTopics::default(),
         };
         // The first transport is part of starting: if it cannot be built (a missing certificate,
         // say) the facade does not start, as the transport did not before it. Later failures are
@@ -288,6 +352,19 @@ impl Actor for TcpClientFacade {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        // A subscription refused before is held back: the agent subscribes to everything it wants each time it
+        // registers, and this one waits for its authority to change.
+        if let TcpClientMessage::Subscribe { topic, .. } = &message
+            && state.refused.holds_back(topic)
+        {
+            debug!(%topic, "a refused subscription is held back until this agent's authority changes");
+            return Ok(());
+        }
+        if let TcpClientMessage::UnsubscribeRequest { topic, .. } = &message
+            && state.refused.clear(topic, TopicUse::Subscribe)
+        {
+            Self::tell_standing(state);
+        }
         if let Some(gate) = &state.args.gate {
             let asked = match &message {
                 TcpClientMessage::Publish { topic, .. } => Some((TopicUse::Publish, topic.clone())),
@@ -300,6 +377,9 @@ impl Actor for TcpClientFacade {
                 && let Err(reason) = gate(use_, topic.clone()).await
             {
                 error!(%topic, %reason, "this agent may not {} on the topic; nothing was sent", use_.as_str());
+                if state.refused.refuse(&topic, use_, &reason, false) {
+                    Self::tell_standing(state);
+                }
                 let event = match use_ {
                     TopicUse::Publish => ClientEvent::PublishRefused { topic, reason },
                     TopicUse::Subscribe => ClientEvent::SubscribeRefused { topic, reason },
@@ -321,6 +401,31 @@ impl Actor for TcpClientFacade {
                     }
                 }
             }
+            TcpClientMessage::BrokerAnswered {
+                topic,
+                use_,
+                result,
+            } => match result {
+                Ok(()) => {
+                    if state.refused.clear(&topic, use_) {
+                        Self::tell_standing(state);
+                    }
+                }
+                Err(reason) => {
+                    // The gate let it through, or it would not have been sent.
+                    if let Some(watch) = &state.args.watch {
+                        watch(RefusalNews::Unpredicted {
+                            topic: topic.clone(),
+                            use_,
+                            reason: reason.clone(),
+                        });
+                    }
+                    if state.refused.refuse(&topic, use_, &reason, true) {
+                        Self::tell_standing(state);
+                    }
+                }
+            },
+            TcpClientMessage::JudgeAgain => Self::judge_again(state).await,
             TcpClientMessage::Reconnect => {
                 if state.transport.is_none()
                     && !state.closing
@@ -525,6 +630,14 @@ mod tests {
     }
 
     async fn gated_rig(buffer_limit: usize, gate: Option<TopicGate>) -> Rig {
+        watched_rig(buffer_limit, gate, None).await
+    }
+
+    async fn watched_rig(
+        buffer_limit: usize,
+        gate: Option<TopicGate>,
+        watch: Option<RefusalWatch>,
+    ) -> Rig {
         let spawner = Arc::new(FakeSpawner::default());
         let online = Arc::new(AtomicBool::new(false));
         let events = Arc::new(ractor::OutputPort::default());
@@ -540,6 +653,7 @@ mod tests {
                 buffer_limit,
                 backoff: Backoff::default(),
                 gate,
+                watch,
             },
         )
         .await
@@ -916,5 +1030,223 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(asked.last(), Some(&Some("reg-1".to_string())));
+    }
+    // -- what the agent was refused --------------------------------------------------------------------------------
+
+    type Admitted = Arc<Mutex<std::collections::BTreeSet<String>>>;
+    type Watched = Arc<Mutex<Vec<RefusalNews>>>;
+
+    /// A gate that admits what `admitted` holds at the time it is asked, as a policy that changes would.
+    fn gate_admitting(admitted: &Admitted) -> (TopicGate, Asked) {
+        let asked: Asked = Arc::new(Mutex::new(Vec::new()));
+        let noted = asked.clone();
+        let admitted = admitted.clone();
+        let gate: TopicGate = Arc::new(move |use_, topic: String| {
+            noted.lock().unwrap().push((use_, topic.clone()));
+            let verdict = if admitted.lock().unwrap().contains(&topic) {
+                Ok(())
+            } else {
+                Err(format!("{topic} is not admitted"))
+            };
+            Box::pin(async move { verdict })
+        });
+        (gate, asked)
+    }
+
+    fn watch() -> (RefusalWatch, Watched) {
+        let watched: Watched = Arc::new(Mutex::new(Vec::new()));
+        let noted = watched.clone();
+        (
+            Arc::new(move |news| noted.lock().unwrap().push(news)),
+            watched,
+        )
+    }
+
+    /// What stands refused, as the agent was last told it.
+    fn standing(watched: &Watched) -> Vec<(String, TopicUse, bool)> {
+        watched
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|news| match news {
+                RefusalNews::Standing(standing) => Some(
+                    standing
+                        .iter()
+                        .map(|s| (s.topic.clone(), s.use_, s.by_broker))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    fn unpredicted(watched: &Watched) -> Vec<(String, TopicUse)> {
+        watched
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|news| match news {
+                RefusalNews::Unpredicted { topic, use_, .. } => Some((topic.clone(), *use_)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn broker_answered(rig: &Rig, topic: &str, use_: TopicUse, result: Result<(), String>) {
+        rig.facade
+            .cast(TcpClientMessage::BrokerAnswered {
+                topic: topic.to_string(),
+                use_,
+                result,
+            })
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_subscription_is_held_back_when_the_agent_subscribes_again_on_registering() {
+        let admitted: Admitted = Arc::default();
+        let (gate, asked) = gate_admitting(&admitted);
+        let (watch, watched) = watch();
+        let rig = watched_rig(10, Some(gate), Some(watch)).await;
+        let refused = refusals(&rig).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        rig.facade.cast(subscribe("news")).unwrap();
+        settle().await;
+        // The agent registers again, and subscribes again to everything it wants.
+        registered(&rig, "reg-2");
+        settle().await;
+        rig.facade.cast(subscribe("news")).unwrap();
+        settle().await;
+
+        assert!(subscribed(&rig.spawner.latest().1).is_empty());
+        assert_eq!(asked.lock().unwrap().len(), 1, "asked once, not each time");
+        assert_eq!(refused.lock().unwrap().len(), 1, "told once, not each time");
+        assert_eq!(
+            standing(&watched),
+            [("news".to_string(), TopicUse::Subscribe, false)]
+        );
+        // The gate said so: nothing to ask the authority about.
+        assert!(unpredicted(&watched).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn once_its_authority_changes_a_held_subscription_the_gate_admits_is_sent_once() {
+        let admitted: Admitted = Arc::default();
+        let (gate, _) = gate_admitting(&admitted);
+        let (watch, watched) = watch();
+        let rig = watched_rig(10, Some(gate), Some(watch)).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        rig.facade.cast(subscribe("news")).unwrap();
+        settle().await;
+        // A change that does not admit it: still held back.
+        rig.facade.cast(TcpClientMessage::JudgeAgain).unwrap();
+        settle().await;
+        assert!(subscribed(&rig.spawner.latest().1).is_empty());
+
+        admitted.lock().unwrap().insert("news".to_string());
+        rig.facade.cast(TcpClientMessage::JudgeAgain).unwrap();
+        settle().await;
+        rig.facade.cast(TcpClientMessage::JudgeAgain).unwrap();
+        settle().await;
+        assert_eq!(subscribed(&rig.spawner.latest().1), ["news"]);
+        assert!(standing(&watched).is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_the_gate_did_not_predict_is_told_as_such_and_held_back() {
+        let admitted: Admitted =
+            Arc::new(Mutex::new(["news".to_string(), "sport".to_string()].into()));
+        let (gate, _) = gate_admitting(&admitted);
+        let (watch, watched) = watch();
+        let rig = watched_rig(10, Some(gate), Some(watch)).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        rig.facade.cast(subscribe("news")).unwrap();
+        settle().await;
+        broker_answered(
+            &rig,
+            "news",
+            TopicUse::Subscribe,
+            Err("the broker refused: no".into()),
+        );
+        broker_answered(
+            &rig,
+            "sport",
+            TopicUse::Publish,
+            Err("the broker refused: no".into()),
+        );
+        settle().await;
+        rig.facade.cast(subscribe("news")).unwrap();
+        settle().await;
+
+        assert_eq!(subscribed(&rig.spawner.latest().1), ["news"], "sent once");
+        assert_eq!(
+            unpredicted(&watched),
+            [
+                ("news".to_string(), TopicUse::Subscribe),
+                ("sport".to_string(), TopicUse::Publish)
+            ]
+        );
+        assert_eq!(
+            standing(&watched),
+            [
+                ("news".to_string(), TopicUse::Subscribe, true),
+                ("sport".to_string(), TopicUse::Publish, true)
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subscription_taken_or_given_up_stands_refused_no_more() {
+        let (watch, watched) = watch();
+        let rig = watched_rig(10, None, Some(watch)).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        broker_answered(&rig, "news", TopicUse::Subscribe, Err("no".into()));
+        broker_answered(&rig, "sport", TopicUse::Subscribe, Err("no".into()));
+        settle().await;
+        assert_eq!(standing(&watched).len(), 2);
+        broker_answered(&rig, "news", TopicUse::Subscribe, Ok(()));
+        rig.facade
+            .cast(TcpClientMessage::UnsubscribeRequest {
+                topic: "sport".to_string(),
+                trace_ctx: None,
+            })
+            .unwrap();
+        settle().await;
+        assert!(standing(&watched).is_empty());
+        // The unsubscribe still reaches the broker.
+        assert!(
+            rig.spawner
+                .latest()
+                .1
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| matches!(
+                    m,
+                    TcpClientMessage::UnsubscribeRequest { topic, .. } if topic == "sport"
+                ))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn with_no_gate_a_change_of_authority_sends_again_what_the_broker_refused() {
+        let rig = gated_rig(10, None).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        rig.facade.cast(subscribe("news")).unwrap();
+        settle().await;
+        broker_answered(&rig, "news", TopicUse::Subscribe, Err("no".into()));
+        settle().await;
+        rig.facade.cast(subscribe("news")).unwrap();
+        settle().await;
+        assert_eq!(subscribed(&rig.spawner.latest().1), ["news"]);
+        rig.facade.cast(TcpClientMessage::JudgeAgain).unwrap();
+        settle().await;
+        assert_eq!(subscribed(&rig.spawner.latest().1), ["news", "news"]);
     }
 }

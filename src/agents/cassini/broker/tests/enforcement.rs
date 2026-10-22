@@ -469,3 +469,354 @@ async fn a_resumed_session_is_told_what_it_lost_even_with_nothing_held_for_it() 
     refused(&back, "news").await;
     broker.stop().await;
 }
+
+// -- the agent's side (stage 5b) --------------------------------------------------------------------------------------
+
+use cassini_client::TcpClientMessage;
+use cassini_client::facade::{RefusalNews, TopicUse};
+use cassini_client::refused::StandingRefusal;
+use credentials_agent_common::authority_update::AUTHORITY_UPDATES_TOPIC;
+use polar_agent_builder::authority::AuthorityHandle;
+use polar_agent_builder::topics::Facts;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// An agent's Cassini client, made as the agent builder makes one (polar-agent-builder's `infrastructure`): its gate
+/// (its policy, then its topic set), its authority actor hearing the credentials agent, what it was refused judged
+/// again on each change of its authority, and a refusal its gate did not predict asking for the authority.
+struct Agent {
+    /// The authority's actors and the client hang off these; stopping them ends the agent.
+    parent: ractor::ActorRef<()>,
+    registrar: ractor::ActorRef<cassini_types::ClientEvent>,
+    router: ractor::ActorRef<polar_router::RouterMessage>,
+    authority: AuthorityHandle,
+    delivered: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+    standing: Arc<Mutex<Vec<StandingRefusal>>>,
+    unpredicted: Arc<AtomicUsize>,
+}
+
+/// Subscribes, each time the client registers, to the authority and to what the agent wants, as the builder's
+/// lifecycle handler does.
+struct Registrar {
+    client: Arc<OnceLock<ractor::ActorRef<TcpClientMessage>>>,
+    wants: Vec<String>,
+    authority: AuthorityHandle,
+}
+
+#[ractor::async_trait]
+impl ractor::Actor for Registrar {
+    type Msg = cassini_types::ClientEvent;
+    type State = ();
+    type Arguments = ();
+    async fn pre_start(
+        &self,
+        _: ractor::ActorRef<Self::Msg>,
+        _: (),
+    ) -> Result<(), ractor::ActorProcessingErr> {
+        Ok(())
+    }
+    async fn handle(
+        &self,
+        _: ractor::ActorRef<Self::Msg>,
+        event: Self::Msg,
+        _: &mut (),
+    ) -> Result<(), ractor::ActorProcessingErr> {
+        if let cassini_types::ClientEvent::Registered { .. } = event
+            && let Some(client) = self.client.get()
+        {
+            for topic in [AUTHORITY_UPDATES_TOPIC, AUTHORITY_SNAPSHOT_REPLIES_TOPIC]
+                .into_iter()
+                .map(str::to_string)
+                .chain(self.wants.iter().cloned())
+            {
+                client.send_message(TcpClientMessage::Subscribe {
+                    topic,
+                    trace_ctx: None,
+                })?;
+            }
+            self.authority.registered();
+        }
+        Ok(())
+    }
+}
+
+struct Parent;
+
+#[ractor::async_trait]
+impl ractor::Actor for Parent {
+    type Msg = ();
+    type State = ();
+    type Arguments = ();
+    async fn pre_start(
+        &self,
+        _: ractor::ActorRef<()>,
+        _: (),
+    ) -> Result<(), ractor::ActorProcessingErr> {
+        Ok(())
+    }
+}
+
+/// The agent of the workload `name` with the certificate of `identity`, declaring `declared` and subscribing to
+/// `wants`. Its actors are named for a service of its own, as tests run one after another in one process.
+async fn agent(
+    broker: &TestBroker,
+    identity: &str,
+    name: &str,
+    declared: &[polar_agent_builder::TopicDecl],
+    wants: &[&str],
+) -> Agent {
+    use ractor::Actor;
+    let service = format!("{name}-{}", uuid::Uuid::new_v4());
+    let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
+    let authority = AuthorityHandle::spawn(&service, CREDENTIALS, parent.get_cell())
+        .await
+        .unwrap();
+    let (router, _) = Actor::spawn(None, polar_router::RouterActor, ())
+        .await
+        .unwrap();
+    let delivered: Arc<Mutex<Vec<(String, Vec<u8>)>>> = Arc::default();
+    let mut subscriptions = polar_agent_builder::authority::subscriptions(&authority);
+    for topic in wants {
+        let delivered = delivered.clone();
+        subscriptions.push(polar_agent_builder::Subscription::new(
+            *topic,
+            move |incoming| {
+                delivered
+                    .lock()
+                    .unwrap()
+                    .push((incoming.topic, incoming.payload))
+            },
+        ));
+    }
+    for subscription in subscriptions {
+        router
+            .clone()
+            .send_message(polar_router::RouterMessage::Register {
+                topic: subscription.topic,
+                deliver: subscription.deliver,
+            })
+            .unwrap();
+    }
+
+    let (cert, key) = broker.pki.client(identity);
+    let set = polar_agent_builder::TopicSet::compute(
+        &Facts {
+            name,
+            cassini_client: true,
+            self_test: false,
+            encryption: false,
+        },
+        declared,
+    );
+    let gate = polar_agent_builder::topic_gate::gate(
+        &service,
+        identity.to_string(),
+        Some(std::fs::read_to_string(&cert).unwrap()),
+        Arc::new(set),
+    );
+    let standing: Arc<Mutex<Vec<StandingRefusal>>> = Arc::default();
+    let unpredicted = Arc::new(AtomicUsize::new(0));
+    let watch: cassini_client::facade::RefusalWatch = {
+        let authority = authority.clone();
+        let standing = standing.clone();
+        let unpredicted = unpredicted.clone();
+        Arc::new(move |news| match news {
+            RefusalNews::Unpredicted { .. } => {
+                unpredicted.fetch_add(1, Ordering::SeqCst);
+                authority.behind();
+            }
+            RefusalNews::Standing(now) => *standing.lock().unwrap() = now,
+        })
+    };
+
+    let client = Arc::new(OnceLock::new());
+    let (registrar, _) = Actor::spawn(
+        None,
+        Registrar {
+            client: client.clone(),
+            wants: wants.iter().map(|t| t.to_string()).collect(),
+            authority: authority.clone(),
+        },
+        (),
+    )
+    .await
+    .unwrap();
+    let tcp = polar::cassini::TcpClient::spawn_with_router_config(
+        &service,
+        registrar.clone(),
+        Some,
+        router.clone(),
+        cassini_client::TCPClientConfig::from_values(
+            broker.addr.clone(),
+            "localhost".to_string(),
+            broker.pki.ca().to_string_lossy().into_owned(),
+            cert.to_string_lossy().into_owned(),
+            key.to_string_lossy().into_owned(),
+        ),
+        Some(gate),
+        Some(watch),
+    )
+    .await
+    .unwrap();
+    authority
+        .changes()
+        .subscribe(tcp.as_actor_ref(), |_| Some(TcpClientMessage::JudgeAgain));
+    client.set(tcp.as_actor_ref()).unwrap();
+    Agent {
+        parent,
+        registrar,
+        router,
+        authority,
+        delivered,
+        standing,
+        unpredicted,
+    }
+}
+
+impl Agent {
+    async fn stop(self) {
+        for cell in [
+            self.registrar.get_cell(),
+            self.router.get_cell(),
+            self.parent.get_cell(),
+        ] {
+            cell.stop_and_wait(None, None).await.ok();
+        }
+    }
+
+    fn standing(&self) -> Vec<(String, TopicUse, bool)> {
+        self.standing
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| (s.topic.clone(), s.use_, s.by_broker))
+            .collect()
+    }
+
+    fn delivered(&self, topic: &str) -> usize {
+        self.delivered
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(t, _)| t == topic)
+            .count()
+    }
+}
+
+/// Waits for `ready`, doing `step` between looks, for up to ten seconds.
+async fn until(what: &str, mut step: impl FnMut(), ready: impl Fn() -> bool) {
+    for _ in 0..50 {
+        if ready() {
+            return;
+        }
+        step();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    panic!("never: {what}");
+}
+
+#[tokio::test]
+async fn an_agent_sends_a_refused_subscription_again_once_a_permit_arrives() {
+    let _serial = serial().await;
+    let broker = TestBroker::start_enforcing().await;
+    broker
+        .pki
+        .issue_client_carrying(SINK, &["g:cassini-client".to_string()]);
+    broker.pki.issue_client_carrying(
+        PRODUCER,
+        &["p:pub:weather".to_string(), "g:cassini-client".to_string()],
+    );
+    broker.pki.issue_client_carrying(
+        CREDENTIALS,
+        &[
+            format!("p:pub:{AUTHORITY_SNAPSHOT_REPLIES_TOPIC}"),
+            "g:cassini-client".to_string(),
+        ],
+    );
+    let sink = agent(&broker, SINK, "harness-sink", &[], &["weather"]).await;
+    // Not its topic, and no policy says otherwise: its own gate refuses it, and it stands refused.
+    until(
+        "the sink is refused weather",
+        || {},
+        || sink.standing() == [("weather".to_string(), TopicUse::Subscribe, false)],
+    )
+    .await;
+
+    let producer = TestClient::connect(&broker, PRODUCER).await;
+    let credentials = TestClient::connect(&broker, CREDENTIALS).await;
+    let signer = RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+    let permit = snapshot_of_policy(
+        &signer,
+        &format!(
+            r#"permit (principal == Identity::"{SINK}", action == Action::"subscribe", resource == Topic::"weather");"#
+        ),
+    );
+    // The credentials agent publishes the permit; the sink and the broker both hear it.
+    let versions = Arc::new(Mutex::new(0usize));
+    {
+        let held = versions.clone();
+        let authority = sink.authority.clone();
+        tokio::spawn(async move {
+            for _ in 0..100 {
+                *held.lock().unwrap() = authority.versions().await.map(|v| v.len()).unwrap_or(0);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+    }
+    until(
+        "the sink holds the permit",
+        || credentials.publish(AUTHORITY_SNAPSHOT_REPLIES_TOPIC, &permit),
+        || *versions.lock().unwrap() > 0,
+    )
+    .await;
+    // Judged again, admitted, and sent: it stands refused no more.
+    until(
+        "the sink's refusal is lifted",
+        || {},
+        || sink.standing().is_empty(),
+    )
+    .await;
+    until(
+        "weather reaches the sink",
+        || producer.publish("weather", b"sunny"),
+        || sink.delivered("weather") > 0,
+    )
+    .await;
+    assert_eq!(
+        sink.unpredicted.load(Ordering::SeqCst),
+        0,
+        "the gate and the broker agreed throughout"
+    );
+    sink.stop().await;
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn a_refusal_the_agent_s_gate_did_not_predict_stands_refused_and_asks_for_the_authority() {
+    let _serial = serial().await;
+    let broker = TestBroker::start_enforcing().await;
+    // The agent declares news, but its certificate does not carry it: the broker refuses what its gate admits.
+    broker
+        .pki
+        .issue_client_carrying(SINK, &["g:cassini-client".to_string()]);
+    let sink = agent(
+        &broker,
+        SINK,
+        "harness-sink",
+        &[polar_agent_builder::TopicDecl::subscribe(
+            "news",
+            "what the test publishes",
+        )],
+        &["news"],
+    )
+    .await;
+    until(
+        "the broker refuses the sink news",
+        || {},
+        || sink.standing() == [("news".to_string(), TopicUse::Subscribe, true)],
+    )
+    .await;
+    assert!(sink.unpredicted.load(Ordering::SeqCst) >= 1);
+    sink.stop().await;
+    broker.stop().await;
+}

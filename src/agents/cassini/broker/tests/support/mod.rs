@@ -547,6 +547,7 @@ impl TestClient {
                 ),
                 registration_id,
                 delivery: DeliveryMode::Broadcast(port),
+                answers: None,
             },
         )
         .await
@@ -776,6 +777,7 @@ impl FacadeClient {
                 spawner: Arc::new(TlsTransportSpawner),
                 online: online.clone(),
                 gate: None,
+                watch: None,
                 buffer_limit: DEFAULT_OFFLINE_BUFFER,
                 backoff: Backoff {
                     first: Duration::from_millis(200),

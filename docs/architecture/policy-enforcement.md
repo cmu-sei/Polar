@@ -514,6 +514,33 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   proposal, `authority-model.md`: one model of the deployment as data, rules over it, and acceptance as a comparison of
   the current and proposed policy and groups over the closed catalog. To be covered with the maintainer after slices 6
   and 7, which do not depend on it.
+- *Built 2026-10-22 (slice 6, the agent's side):*
+  - the client's facade keeps what the agent was refused and still wants (`cassini/client/src/refused.rs`). A refused
+    subscription is held back: when the agent registers again and subscribes again to everything it wants, it is
+    neither asked about nor sent. A refused publish is remembered too, for the health file;
+  - the transport tells the facade the broker's answer to each subscribe and publish (`BrokerAnswered`), so the facade
+    tells the broker's refusals from its own gate's, whatever the delivery mode. A refusal the gate did not predict is
+    reported to the builder, which asks for the current authority (`AuthorityHandle::behind`, no more than once in
+    five seconds, as for an update it cannot check);
+  - on every change of the agent's authority the builder sends the facade `JudgeAgain`: the gate is asked again about
+    everything refused, and each wanted subscription it now admits is sent. With no gate (a client the builder did not
+    make) the broker alone decides, so each is sent again;
+  - what stands refused is written into the health file (`refused_topics`: topic, access, reason) from the next write
+    on, and changes nothing else the file or the verdict says (a property test checks it against the same events
+    without the refusals);
+  - the order that makes a re-sent subscription land: the broker hears the credentials agent's update in process
+    before it forwards it (`listener.rs`, `hear` before the `PublishRequest`), and the agent's re-send follows its own
+    verification of the same update over the network. If the broker were ever behind, the re-sent subscription would be
+    refused, which is a refusal the gate did not predict: it asks for the authority and stands refused until the next
+    change;
+  - tests: the facade (a refused subscription held back on registering, sent once when admitted, a broker refusal
+    reported as unpredicted, taken or given up stands refused no more, no gate), a property over any sequence of
+    subscribes, unsubscribes, publishes, broker answers and changes of authority (every wanted subscription is sent or
+    held back, never both and never neither; only what the gate admits is sent; nothing admitted stays refused), the
+    builder's wiring, and two against a real broker with an agent's client made as the builder makes one: a permit
+    signed by the credentials agent's key lets a refused subscription through and messages arrive; a topic the agent
+    declares but its certificate does not carry is refused by the broker, stands refused as the broker's, and asks for
+    the authority. Each was checked against a deliberate break.
 
 **Stage 6: degraded is bounded** (gap 4)
 
