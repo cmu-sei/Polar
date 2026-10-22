@@ -63,20 +63,30 @@ export const DEFAULTS = {
     first_wait_secs: 300
 }
 
-# The runs a plan asks for: each of its `runs`, then every combination of its `grid`'s lists (a list of records sets
-# several fields at once), each over the plan's `defaults` over DEFAULTS, numbered `<plan>-<n>`, with its count.
-export def expand [plan: record]: nothing -> list<record> {
-    let defaults = ($DEFAULTS | merge ($plan.defaults? | default {}))
-    let grid = ($plan.grid? | default {})
-    let combos = ($grid | transpose axis values | reduce --fold [{}] {|axis, partials|
+# Every combination of the lists in `axes` (a list of records sets several fields at once); with none, one empty one.
+def combinations [axes: record]: nothing -> list<record> {
+    $axes | transpose axis values | reduce --fold [{}] {|axis, partials|
         $partials | each {|partial|
             $axis.values | each {|v|
                 $partial | merge (if ($v | describe | str starts-with "record") { $v } else { {($axis.axis): $v} })
             }
         } | flatten
+    }
+}
+
+# The runs a plan asks for: each of its `runs`, then every combination of its `grid`'s lists, each over the plan's
+# `defaults` over DEFAULTS, numbered `<plan>-<n>`, with its count. A plan's `broker` lists settings of the broker's
+# (variables its configuration document declares) to measure under: every run is made once for each combination of
+# them, in turn, with the combination as its `broker`, as text; without any, once, with `broker` empty.
+export def expand [plan: record]: nothing -> list<record> {
+    let defaults = ($DEFAULTS | merge ($plan.defaults? | default {}))
+    let grid = ($plan.grid? | default {})
+    let combos = if ($grid | is-empty) { [] } else { combinations $grid }
+    let passes = (combinations ($plan.broker? | default {}) | each {|c|
+        $c | transpose name value | reduce --fold {} {|v, acc| $acc | insert $v.name ($v.value | into string) }
     })
-    let combos = if ($grid | is-empty) { [] } else { $combos }
-    ($plan.runs? | default []) | append $combos | enumerate | each {|e|
+    $passes | each {|broker| ($plan.runs? | default []) | append $combos | each {|r| $r | upsert broker $broker } }
+    | flatten | enumerate | each {|e|
         let run = ($defaults | merge $e.item)
         $run | merge { id: $"($plan.name)-($e.index)", count: (count_for $run) }
     }
@@ -197,6 +207,7 @@ export def summarise [records: list]: nothing -> list<record> {
             lost: (do $total $sinks lost)
             refused: (do $total $producers refused)
             reported: $"($r.results | length)/($r.run.producers + $r.run.sinks)"
+            broker: ($r.run.broker? | default {} | transpose name value | each {|v| $"($v.name)=($v.value)" } | str join " ")
             one_node: $r.one_node
             error: ($r.error? | default "")
         }
@@ -274,6 +285,25 @@ def broker_image [] {
     | each {|p| $p.status.containerStatuses? | default [] | get imageID } | flatten | first
 }
 
+# Restarts the broker reading `document` in its ConfigMap `config_map`, and waits for it to be ready. Only with Flux
+# suspended, as the procedure has it for measuring (docs/architecture/broker-baseline.md), or Flux would put the
+# rendered one back; resuming it does, after a run that failed before it could.
+def set_broker [config_map: record, document: record] {
+    let flux = (^kubectl -n flux-system get kustomization polar-agents -o json | complete)
+    let suspended = if $flux.exit_code == 0 { $flux.stdout | from json | get -o spec.suspend | default false } else { false }
+    if not $suspended {
+        error make { msg: "the broker's settings are changed for a run only with Flux's polar-agents suspended" }
+    }
+    let before = (kube get pods -l "job-name=cassini" -o json | from json | get items | get metadata.name)
+    kube patch configmap $config_map.metadata.name --type merge -p ({ data: { "config.json": ($document | to json) } } | to json --raw) | ignore
+    kube delete pod -l "job-name=cassini" --wait=false | ignore
+    wait_for "the broker to come back" 5min {||
+        kube get pods -l "job-name=cassini" -o json | from json | get items
+        | where {|p| not ($p.metadata.name in $before) }
+        | any {|p| $p.status.conditions? | default [] | any {|c| $c.type == "Ready" and $c.status == "True" } }
+    }
+}
+
 def remove_run [run_id: string] {
     ^kubectl -n $NAMESPACE delete job,configmap -l $"($RUN_LABEL)=($run_id)" --wait=false | complete | ignore
 }
@@ -331,14 +361,26 @@ def "main run" [plan_file: string, --target: string = "local-minimal"] {
         dirty: ((^git -C $ROOT status --porcelain | str trim) != "")
         broker_image: (broker_image)
     }
+    let broker_config = (kube get configmap cassini-config -o json | from json)
+    let broker_document = ($broker_config.data."config.json" | from json)
     mut records = []
+    mut broker = {}
     for run in $runs {
+        if $run.broker != $broker {
+            print $"the broker restarts with ($run.broker | to nuon)"
+            set_broker $broker_config (with_values $broker_document $run.broker)
+            $broker = $run.broker
+        }
         let pace = if $run.rate == 0 { "as fast as the window allows" } else { $"at ($run.rate)/s" }
         print $"($run.id): ($run.producers)p ($run.sinks)s ($run.lanes)l, ($run.count) x ($run.size) bytes ($pace)"
         let record = ((run_one $run $templates ($out | str replace ".nuon" "-failed")) | insert context $context)
         $records = ($records | append $record)
         $records | save --force $out
         if not $record.one_node { print -e "  the pods were on more than one node: latencies compare two clocks" }
+    }
+    if $broker != {} {
+        print "the broker restarts as the target rendered it"
+        set_broker $broker_config $broker_document
     }
     print (summarise $records | table --expand)
     print $"saved ($out)"

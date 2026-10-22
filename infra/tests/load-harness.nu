@@ -49,10 +49,11 @@ def producer_result [index: int, refused: int] {
     }
 }
 
-def scaffold_of [package: string] {
+# The scaffold of `package`'s binary, which is named for the package unless `binary` says otherwise.
+def scaffold_of [package: string, binary?: string] {
     let built = (do { cd ($ROOT | path join "src/agents"); ^cargo build -q -p $package } | complete)
     if $built.exit_code != 0 { error make { msg: $"cannot build ($package): ($built.stderr | lines | last 5 | str join "\n")" } }
-    ^($ROOT | path join $"src/agents/target/debug/($package)") --scaffold | from json
+    ^($ROOT | path join $"src/agents/target/debug/($binary | default $package)") --scaffold | from json
 }
 
 def main [] {
@@ -74,6 +75,31 @@ def main [] {
                 assert equal ($runs | get rate | uniq) [$DEFAULTS.rate]
                 assert equal ($runs.0.count) 3
                 assert equal (expand { name: "e" }) []
+            }
+        }
+        {
+            name: "a plan's broker settings are each a pass of every run, in turn, numbered on; without any, one pass"
+            body: {
+                let runs = (expand {
+                    name: "p"
+                    grid: { size: [1 2] }
+                    broker: { CASSINI_DECISION_CACHE_SECS: [0 5] }
+                })
+                assert equal ($runs | get id) [p-0 p-1 p-2 p-3]
+                assert equal ($runs | get size) [1 2 1 2]
+                assert equal ($runs | get broker) [
+                    { CASSINI_DECISION_CACHE_SECS: "0" } { CASSINI_DECISION_CACHE_SECS: "0" }
+                    { CASSINI_DECISION_CACHE_SECS: "5" } { CASSINI_DECISION_CACHE_SECS: "5" }
+                ]
+                assert equal (expand { name: "q", runs: [{}] } | get broker) [{}]
+            }
+        }
+        {
+            name: "the broker's settings are variables its scaffold declares, so a rename fails before the broker restarts"
+            body: {
+                let document = (with_values (scaffold_of "cassini-broker" "cassini-server") { CASSINI_DECISION_CACHE_SECS: "0" })
+                let set = ($document.sections | each {|s| $s.variables } | flatten | where name == "CASSINI_DECISION_CACHE_SECS")
+                assert equal ($set | get value) ["0"]
             }
         }
         {
@@ -187,7 +213,10 @@ def main [] {
                 assert equal $s.lost 3
                 assert equal $s.refused 1
                 assert equal $s.reported "4/4"
+                assert equal $s.broker ""
                 assert equal $s.error ""
+                let cached = (summarise [($record | update run {|r| $r.run | upsert broker { CASSINI_DECISION_CACHE_SECS: "0" } })] | first)
+                assert equal $cached.broker "CASSINI_DECISION_CACHE_SECS=0"
                 let failed = (summarise [($record | update results [] | insert error "timed out")] | first)
                 assert equal [$failed.p99_ms $failed.lost $failed.reported $failed.error] [0 0 "0/4" "timed out"]
             }
