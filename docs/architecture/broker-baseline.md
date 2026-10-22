@@ -101,6 +101,51 @@ Read plainly: one connection now carries about 10,000 small messages a second at
 1 MiB messages; before, anything above about 14 MB/s queued for seconds, whatever the message size. At "max" the latency
 is the window over the rate (1,000 messages at 13,000 a second is about 77 ms): what saturation costs, with this window.
 
+## Stage 5b: the broker deciding (2026-10-22)
+
+The same machine, cluster and procedure, with the broker deciding every publish and subscribe (Cedar first, then the
+certificate's floor; `policy-enforcement.md`, stage 5b), measured twice by the plan `infra/load-plans/enforcement.nuon`:
+without the decision cache (`CASSINI_DECISION_CACHE_SECS` 0, every publish asks the broker's policy actor), and with its
+default of five seconds. The harness restarts the broker with each setting (Flux suspended), and puts back the rendered
+document at the end. Commit `cd57d2b0`, a clean tree, broker `cassini@sha256:3acfe504…`, record
+`~/.cache/polar/harness/enforcement-20261022T134645.nuon`. Every pod reported, on one node; nothing was lost or refused.
+The seeded policy says nothing about topics, so each decision asks Cedar, which is silent, and the floor admits it: the
+whole cost of a decision is paid. Received a second, and p50 and p99 in milliseconds, for the baseline, without the
+cache and with it:
+
+| size | rate | baseline /s | no cache /s | cache /s | baseline p50 | no cache p50 | cache p50 | baseline p99 | no cache p99 | cache p99 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 256 B | 100 | 100 | 100 | 100 | 0.39 | 0.61 | 0.4 | 1.0 | 1.16 | 0.89 |
+| 256 B | 1000 | 1000 | 1000 | 998 | 2.06 | 2.07 | 1.74 | 4.78 | 4.75 | 4.42 |
+| 256 B | 10000 | 9999 | 5310 | 9996 | 1.97 | 93.64 | 1.81 | 9.97 | 131.68 | 10.49 |
+| 256 B | max | 13138 | 5290 | 14371 | 76.69 | 95.13 | 68.03 | 105.5 | 132.74 | 98.67 |
+| 4 KiB | 100 | 100 | 100 | 100 | 0.51 | 0.72 | 0.51 | 0.83 | 1.13 | 0.91 |
+| 4 KiB | 1000 | 1000 | 1000 | 1000 | 0.48 | 0.82 | 0.53 | 0.88 | 1.39 | 0.91 |
+| 4 KiB | 10000 | 9998 | 5686 | 10000 | 2.19 | 87.72 | 1.84 | 13.26 | 122.19 | 9.19 |
+| 4 KiB | max | 11957 | 5652 | 13639 | 85.45 | 89.39 | 71.58 | 106.76 | 127.32 | 103.58 |
+| 64 KiB | 100 | 100 | 100 | 100 | 10.57 | 10.8 | 10.53 | 11.65 | 12.07 | 20.18 |
+| 64 KiB | 1000 | 1000 | 998 | 1000 | 0.6 | 1.63 | 0.82 | 2.26 | 3.72 | 3.32 |
+| 64 KiB | 10000 | 9981 | 4753 | 10000 | 3.05 | 223.09 | 2.93 | 8.07 | 366.5 | 8.83 |
+| 64 KiB | max | 9741 | 4811 | 9978 | 100.08 | 185.58 | 100.73 | 129.6 | 318.01 | 126.13 |
+| 1 MiB | 100 | 100 | 100 | 100 | 3.26 | 2.98 | 2.47 | 14.59 | 15.97 | 13.89 |
+| 1 MiB | 1000 | 997 | 997 | 995 | 4.85 | 5.57 | 4.34 | 13.91 | 13.09 | 11.9 |
+| 1 MiB | 10000 | 1456 | 1328 | 1395 | 97.88 | 71.32 | 152.4 | 170.29 | 91.25 | 220.54 |
+| 1 MiB | max | 1353 | 1283 | 1380 | 160.67 | 112.45 | 191.02 | 226.9 | 133.42 | 255.08 |
+
+Read plainly:
+- **Deciding every publish costs about 0.2 ms, one at a time.** Without the cache one connection carries at most about
+  5,300 small messages a second (4,800 of 64 KiB), against 10,000 to 13,000 before: the Listener waits for each decision
+  before the next publish, and the policy actor decides one at a time. Below that rate nothing changes but a few tenths
+  of a millisecond of p50. At 1 MiB the bytes dominate and the decision does not show.
+- **With the cache the broker is where it was.** Every row is within the baseline's run-to-run spread, the saturated
+  small-message rows a little above it. A connection decides each topic once every five seconds, and a change of
+  authority ends every kept decision at once (stage 5b, slice 3), so the default stays.
+- The 1 MiB rows at 10,000 a second and "max" are the window over the rate in both passes, as in the baseline, and move
+  by tens of milliseconds from one run to the next; they say nothing about the decision.
+
+The local load test of slice 2 agrees: four publishers deciding every publish took 12.5 s, against 1 s before the broker
+decided and 1.5 s with the cache.
+
 ## What measuring it found
 
 Each fix was made test first, the test failing before it.

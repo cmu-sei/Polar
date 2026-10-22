@@ -67,9 +67,13 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
     member; the supersede rule would then apply per member. Observers that scale out must split their source instead.
   - Cedar decides per workload either way (the replicas hold the same authority), so stage 5b and its cache do not
     depend on this. Not needed yet; decide before any workload runs more than one replica.
+- The `cassini-client` CLI's `publish` does not take a broker refusal as its answer: it logs the refusal, then waits out
+  its 10 s acknowledgement timeout and fails with "Timed out waiting for publish ack" (seen 2026-10-22 probing the
+  sandbox's broker). It should fail at once with the refusal's reason.
 - The Cassini client's read loop goes on after a failed `read_exact`, reading from the middle of a frame (`cassini/client/src/lib.rs`,
   the read loop); it should end the transport.
-- Stage 5b is measured against the baseline, without and with its decision cache.
+- Stage 5b is measured against the baseline, without and with its decision cache: done 2026-10-22
+  (`docs/architecture/broker-baseline.md`, "Stage 5b: the broker deciding").
 - **The authority model** (`docs/architecture/authority-model.md`, proposed 2026-10-22, to cover with David after stage
   5b's slices 6 and 7): one model of the deployment as data, rules over it, and acceptance of a policy or groups
   document as a comparison over the closed catalog. It replaces slice 5's hand-written probes. Until it is built, a

@@ -541,6 +541,12 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
     signed by the credentials agent's key lets a refused subscription through and messages arrive; a topic the agent
     declares but its certificate does not carry is refused by the broker, stands refused as the broker's, and asks for
     the authority. Each was checked against a deliberate break.
+- *Measured 2026-10-22 (slice 7):* deployed to `sandbox-local` (the new polar-init and render together): every agent
+  healthy and refused nothing, only the two `encryption` agents escrowed a key in init, and a person's certificate
+  publishing on a topic it has no floor for was refused by the broker with the floor's reason. Against stage 5a's
+  baseline (`broker-baseline.md`, "Stage 5b: the broker deciding"): deciding every publish caps one connection at about
+  5,300 small messages a second (a decision is about 0.2 ms, one at a time); with the default five-second cache the
+  broker is where the baseline was, every row within its spread. Nothing was lost or refused in 32 runs.
 
 **Stage 6: degraded is bounded** (gap 4)
 
