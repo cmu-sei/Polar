@@ -258,6 +258,22 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
   for them ("alice loses `credentials-admin-action-requests`"). Chosen over the persons the documents name (the groups
   document's, and those a policy names outright), which would miss everyone a group rule covers whom the groups
   document does not list. The cost is one evaluation a person a topic, small at these sizes.
+- **The model replaces the credentials agent's issuance floor when it lands (2026-10-22).** Of the render's three
+  projections of the catalog, only the issuance floor goes:
+  - cert-issuer's floor stays, as its isolation decided: it is given only the bootstrap entries it signs
+    (`cert-issuer-isolation.md`);
+  - the served workloads (`POLAR_SERVED_WORKLOADS`) stay: the scheduler reads them, not the credentials agent, and
+    expands its topic family from them at start;
+  - the issuance floor (`CREDENTIALS_AGENT_ISSUANCE_TOPICS`, `infra/rules.nu:166`, `issuance_topics`) is replaced: what
+    it lists (each workload the credentials agent issues, by token identity, with its declared topics and groups) is
+    in the model's facts (`identity`, `issuer`, `declares`, `cert_group`), and issuance becomes a query on the model.
+
+  Kept beside the model, the credentials agent would be given the same facts twice by two render functions, and on the
+  day they disagree what it writes into a certificate would differ from what it judges policy against; the model also
+  converts identity forms in one place, and the issuance floor is keyed by the token form. Applying the catalog stays
+  the sign-off of what a certificate carries, since the model is applied with the catalog. The cost is contained: the
+  issuance code (`credentials-agent/consume/src/issuance.rs`, `issuance_floor.rs`) moves onto the model's types,
+  `issuance_topics` goes from the render, and the issuance tests cover it.
 - **A groups document is checked the same way as a policy (2026-10-22).** Against the same rules: the two invariants,
   renewal derived beneath them, over the same catalog facts. The rules are judged on a pair, the policy and the groups
   document, and do not ask which of them arrived. When either arrives, the authority:
@@ -343,7 +359,7 @@ their rule, so `cassini-client`'s authority round trip is declared once. The sca
 collects them as it collects topics now, and applying the catalog signs them off. The vocabulary of causes (which
 entries exist) is an open question.
 
-The issuance floor becomes a query on this model, not a separate variable, and the identity forms are converted in one
+The issuance floor becomes a query on this model, not a separate variable ("Decisions": when the model lands), and the identity forms are converted in one
 place. cert-issuer keeps its own small floor, on purpose (`cert-issuer-isolation.md`).
 
 ### 2. Rules over the model
@@ -518,8 +534,8 @@ To settle one at a time, before building:
    an `AuthorityRefused` ledger event; the effect in `AuthorityPublished`, a summary on the outcome ("Decisions",
    2026-10-22).
 8. ~~Persons.~~ Settled: every account in the credentials agent's ledger ("Decisions", 2026-10-22).
-9. Whether the render's separate projections (the issuance floor, the served workloads) are replaced by the model at
-   once, or later.
+9. ~~Whether the render's projections are replaced.~~ Settled: the issuance floor is replaced when the model lands;
+   cert-issuer's floor and the served workloads stay ("Decisions", 2026-10-22).
 10. Whether the model also checks what the inventory found unchecked: a groups document's keys against the catalog, and
     who publishes on the credentials agent's request topics.
 
