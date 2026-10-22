@@ -1064,8 +1064,9 @@ mod environment_tests {
         GraphControllerArgs::new(std::sync::Arc::new(ractor::OutputPort::default()))
     }
 
-    #[test]
-    fn a_controller_given_its_settings_builds_its_connection_from_them() {
+    // The args hold an output port, whose fan-out task (ractor's `output-port-v2`) needs a runtime.
+    #[tokio::test]
+    async fn a_controller_given_its_settings_builds_its_connection_from_them() {
         // A developer shell may export GRAPH_ variables, so what shows which source was used
         // is the endpoint: only the settings given name this one.
         let config =
@@ -1074,8 +1075,9 @@ mod environment_tests {
         assert!(shown.contains("given-by-the-builder"), "{shown}");
     }
 
-    #[test]
-    fn a_controller_given_nothing_reads_the_process_as_it_always_did() {
+    // The args hold an output port, whose fan-out task (ractor's `output-port-v2`) needs a runtime.
+    #[tokio::test]
+    async fn a_controller_given_nothing_reads_the_process_as_it_always_did() {
         // The legacy path for agents not yet on the builder. Pinned by what it says when the
         // process has none of the variables, which names them.
         if std::env::var("GRAPH_ENDPOINT").is_err() {
