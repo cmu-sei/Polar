@@ -51,7 +51,6 @@ pub mod identity_normalization_actor;
 pub mod introspection;
 pub mod issuance;
 pub mod issuance_actor;
-pub mod issuance_floor;
 pub mod ledger;
 pub mod ledger_call;
 pub mod projection;

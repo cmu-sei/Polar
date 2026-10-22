@@ -159,17 +159,6 @@ def own_topics [r: record]: nothing -> record {
     }
 }
 
-# The credentials agent's issuance floor (CREDENTIALS_AGENT_ISSUANCE_TOPICS): for each workload it issues, the topics
-# its certificates may carry, by the workload as its token names it. A bootstrap service is issued by cert-issuer and is
-# in cert-issuer's floor instead; a workload still asking cert-issuer directly is in neither. `records` are as for
-# floor_entries. Applying the catalog is the sign-off of it (docs/architecture/policy-enforcement.md, stage 2).
-export def issuance_topics [records: list]: nothing -> list {
-    $records
-    | where {|r| $r.issuer == "credentials-agent" and (not $r.bootstrap) }
-    | each {|r| { workload: $"system:serviceaccount:($r.namespace):($r.service_account)" } | merge (own_topics $r) }
-    | sort-by workload
-}
-
 # The authority model's base facts (docs/architecture/authority-model.md, "The proposal" and "Build order", slice 3): every
 # workload, whoever issues it, by its one identity `<workload>.<namespace>.serviceaccount.<domain>` (never its token's
 # subject), with its issuer, whether it is a bootstrap service, its certificate's groups, and the whole set of topics its

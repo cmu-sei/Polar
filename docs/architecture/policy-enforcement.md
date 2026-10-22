@@ -374,7 +374,9 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   `sandbox-local` from locally built scaffolds warn about kube-consumer's two topics (neither runs the resolver), give
   cert-issuer the credentials agent's 15 and 17 topics and its observer's 6 and 6, and give the credentials agent a
   floor of its ten workloads, which cert-issuer and the credentials agent read and accept. `render-determinism.nu`
-  collects its own scaffolds on a cluster and was not run.
+  collects its own scaffolds on a cluster and was not run. *Since 2026-10-22* the credentials agent's issuance floor is
+  gone: issuance asks the authority model for a workload's topics and groups, by its one identity
+  (`authority-model.md`, "Build order", slice 8).
 
 **Stage 3: certificates carry the floor** (gap 3)
 

@@ -88,14 +88,16 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
   (`credentials-agent/consume/src/issuance.rs:219`, "Two names for one credential") are keyed by
   `system:serviceaccount:<namespace>:<serviceaccount>`, where everything else is keyed by Polar's one identity, which is
   in hand at both (cert-issuer's `normalized_identity`). Key both by the identity, and convert the token's subject only
-  where a token is read. The model's own build keys the issuance floor's replacement this way.
+  where a token is read. The issuance floor's replacement is keyed this way: since slice 8 issuance asks the authority
+  model by the identity (2026-10-22).
 - **The authority model** (`docs/architecture/authority-model.md`, proposed 2026-10-22, to cover with David after stage
   5b's slices 6 and 7): one model of the deployment as data, rules over it, and acceptance of a policy or groups
   document as a comparison over the closed catalog. It replaces slice 5's hand-written probes. Until it is built, a
-  `forbid` on an authority path can lock a deployment out. **Being built** ("Build order, tests first"): slices 1 to 7 done by
+  `forbid` on an authority path can lock a deployment out. **Being built** ("Build order, tests first"): slices 1 to 8 done by
   2026-10-22. Since slice 7 the credentials agent judges every `policy` and `groups` document before accepting it,
-  so such a `forbid` is refused with its reason (open point B); slices 8 (the model replaces the issuance floor), 9
-  (Cedar on the thirteen request topics) and 10 (deploy and verify) remain.
+  so such a `forbid` is refused with its reason (open point B); since slice 8 a certificate carries what the model
+  gives its workload, and the issuance floor is gone. Slices 9 (Cedar on the thirteen request topics) and 10 (deploy
+  and verify) remain.
 - **A person had two names in force** (found 2026-10-22 building slice 7; fixed the same day). Topic requests knew a
   person by account ID, signed documents and commands by username, and a groups entry keyed by username never applied
   to their topic requests. Settled by the 2026-10-12 decision (`credentials-policy.md`): authors write usernames, and

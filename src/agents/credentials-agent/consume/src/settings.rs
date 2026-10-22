@@ -89,14 +89,6 @@ pub static INTROSPECTION_CLIENT_SECRET: Optional<String> = Optional::text(
 )
 .secret();
 
-pub static ISSUANCE_TOPICS: Defaulted<String> = Defaulted::text(
-    "CREDENTIALS_AGENT_ISSUANCE_TOPICS",
-    "the issuance floor: for each workload this agent issues (system:serviceaccount:<namespace>:<name>), the \
-     topics its certificates may carry, as a JSON list of {workload, publish, subscribe}. The render writes it \
-     from the catalog (docs/architecture/policy-enforcement.md, stage 2); read once, at start",
-    "[]",
-);
-
 /// The authority model's base facts (docs/architecture/authority-model.md, "The proposal"): every workload by its one
 /// identity, with its issuer, its certificate's groups and its whole set of topics with their causes. The render writes
 /// it from the catalog, so applying the catalog is its sign-off.
@@ -118,7 +110,6 @@ static VARIABLES: &[&dyn Described] = &[
     &INTROSPECTION_ENDPOINT,
     &INTROSPECTION_CLIENT_ID,
     &INTROSPECTION_CLIENT_SECRET,
-    &ISSUANCE_TOPICS,
     &AUTHORITY_MODEL,
 ];
 
@@ -129,17 +120,10 @@ pub static SECTION: Section = Section {
     relations,
 };
 
-/// What is wrong across the section's variables: introspection given in part, or an issuance floor that cannot be
+/// What is wrong across the section's variables: introspection given in part, or an authority model that cannot be
 /// read.
 fn relations(env: &dyn Env) -> Vec<String> {
     let mut problems = introspection_is_all_or_none(env);
-    let floor = env
-        .var(ISSUANCE_TOPICS.name())
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| "[]".to_string());
-    if let Err(found) = crate::issuance_floor::IssuanceFloor::parse(&floor) {
-        problems.extend(found);
-    }
     if let Some(model) = env
         .var(AUTHORITY_MODEL.name())
         .filter(|v| !v.trim().is_empty())
@@ -193,10 +177,6 @@ pub struct ConsumerSettings {
     /// The agent's own mTLS identity, which it presents to cert-issuer as well as to Cassini.
     pub own_cert_path: String,
     pub own_key_path: String,
-    /// What each workload's certificates may carry, from the catalog. A floor that cannot be read stops the agent
-    /// when its configuration is checked, before this is read; were it read anyway it would be empty, so no
-    /// certificate would carry a topic it was not given.
-    pub issuance_floor: crate::issuance_floor::IssuanceFloor,
     /// The deployment's authority model, which a policy or groups document is judged by before it is accepted. A model
     /// that cannot be read stops the agent when its configuration is checked; none given is none to judge by.
     pub authority_model: Option<credentials_agent_model::Model>,
@@ -226,10 +206,6 @@ impl ConsumerSettings {
             introspection,
             own_cert_path: config.read(&TLS_CLIENT_CERT)?,
             own_key_path: config.read(&TLS_CLIENT_KEY)?,
-            issuance_floor: crate::issuance_floor::IssuanceFloor::parse(
-                &config.read(&ISSUANCE_TOPICS)?,
-            )
-            .unwrap_or_default(),
             authority_model: Some(config.read(&AUTHORITY_MODEL)?)
                 .filter(|text| !text.trim().is_empty())
                 .and_then(|text| credentials_agent_model::Model::parse(&text).ok()),
@@ -301,32 +277,6 @@ mod tests {
                 "{wrong}: {problems:?}"
             );
         }
-    }
-
-    #[test]
-    fn the_issuance_floor_is_read_from_its_variable_and_one_that_cannot_be_read_stops_the_agent() {
-        let floor = r#"[{"workload": "system:serviceaccount:polar:kube-observer", "publish": ["kubernetes.cluster.consumer.Pod"]}]"#;
-        let given = with(&[("CREDENTIALS_AGENT_ISSUANCE_TOPICS", floor)]);
-        assert!(config(&given).check().is_empty());
-        let settings = ConsumerSettings::read(&config(&given)).unwrap();
-        assert_eq!(settings.issuance_floor.len(), 1);
-        // None given is an empty floor.
-        assert!(
-            ConsumerSettings::read(&config(MINIMUM))
-                .unwrap()
-                .issuance_floor
-                .is_empty()
-        );
-        // One that cannot be read is a problem the agent stops on.
-        let wrong = with(&[(
-            "CREDENTIALS_AGENT_ISSUANCE_TOPICS",
-            r#"[{"workload": "w", "publish": ["two words"]}]"#,
-        )]);
-        let problems = config(&wrong).check();
-        assert!(
-            problems.iter().any(|p| p.contains("two words")),
-            "{problems:?}"
-        );
     }
 
     #[test]

@@ -38,7 +38,8 @@ Working out that fixed set showed that the facts it needs are in many places, an
 
 - the workloads, their groups and their declared topics are in the catalog, but the render splits them: cert-issuer is
   given the bootstrap services' (`infra/rules.nu:182`, `floor_entries`), the credentials agent the rest
-  (`infra/rules.nu:166`, `issuance_topics`, which drops `bootstrap: true`);
+  (`infra/rules.nu:166`, `issuance_topics`, which drops `bootstrap: true`; removed in slice 8, when issuance began
+  asking the model);
 - what a group implies is code (`polar-agent-builder/src/topics.rs:212`, `implied_by`);
 - a workload's identity has two forms, converted wherever someone needs it;
 - membership at runtime is the signed groups document, which replaces the certificate's groups for policy;
@@ -102,7 +103,8 @@ unless they start with `infra`.
   (`polar-agent-builder/src/agent.rs:538`, `topics.rs:453`);
 - an agent's name is the workload of its certificate's identity (`polar-agent-builder/src/own_name.rs:33`);
 - cert-issuer's floor and the credentials agent's issuance floor parse strictly (`cert-issuer/server/src/floor.rs:202`,
-  `credentials-agent/consume/src/issuance_floor.rs`); cert-issuer with no floor at all is open to any valid token, and
+  `credentials-agent/consume/src/issuance_floor.rs`, removed in slice 8); cert-issuer with no floor at all is open to
+  any valid token, and
   says so (`cert-issuer/server/src/main.rs:157`).
 
 **At issuance:**
@@ -848,6 +850,27 @@ and no Cassini.
   `CREDENTIALS_AGENT_ISSUANCE_TOPICS` and the render's `issuance_topics` are removed.
 - Tests: the issuance tests, unchanged in what they expect; a certificate carries the same names as before for every
   catalog workload (the render's old floor and the model's query compared in a test, then the old one removed).
+
+- *Built 2026-10-22:* `Model::issued_by_the_credentials_agent(identity)` (`credentials-agent/model/src/facts.rs`): a
+  workload whose issuer is the credentials agent and which is no bootstrap service gets `Workload::certificate_names`,
+  its declared and family topics and its groups, each once and sorted, its implied topics left out since they follow
+  from its identity; `CertificateNames::san_strings` writes them as the floor did (`p:pub:`, `p:sub:`, `g:`). Issuance
+  asks it by the identity cert-issuer's validation returns (`issuance.rs`, `extra_sans_for`), and with no model a
+  certificate carries no topics or groups, as with an empty floor, which the agent warns of at start.
+  - The comparison (`761ac96e`): `regenerate.nu` also wrote the floor the render gave, from the same catalog, and a
+    test showed the model gives each of the floor's 12 workloads exactly the names the floor gave it and issues no
+    other. Then `issuance_floor.rs`, `CREDENTIALS_AGENT_ISSUANCE_TOPICS` (the setting, its check and test), the render's
+    `issuance_topics` and its test, and the comparison with its fixture were removed; `resolve.nu` gives the
+    credentials agent the model alone. Checked: a resolve of the credentials agent from this tree's scaffolds
+    (`regenerate.nu`) gives the same model; `infra/tests/rules.nu` passes. `infra/tests/resolve.nu` was not run: it
+    asks the images on a cluster for their scaffolds, and the cluster was down.
+  - Tests: the issuance tests as before, from a small model that also carries an implied topic; the scheduler's
+    family and declared topics without its implied ones; the issuer and bootstrap conditions apart; a property that a
+    workload's names do not depend on the order or repetition of its facts. Mutation-checked: asking by the token's
+    subject, dropping the model's names, carrying implied topics, dropping groups, either issue condition, no dedup and
+    no sort are all caught.
+  - Still keyed by the token's subject: cert-issuer's floor and the credentials agent's grants for workloads
+    (`remaining-work.md`).
 
 **9. Every request to the credentials agent is judged by Cedar.** `polar-policy` (the schema), `credentials-agent/consume`.
 - `Action::"request"` on a `Request` resource in the schema; every one of the thirteen request topics dispatched with

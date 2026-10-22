@@ -272,25 +272,6 @@ def main [] {
             assert ($refused | str contains "kube-observer") $"($refused)"
         }
 
-        "the credentials agent's floor names each workload it issues, with its declared and family topics, and no other": {
-            let topic = {|name, access, from| { name: $name, access: $access, from: $from } }
-            let r = [
-                { who: "kube-observer", namespace: "polar", service_account: "kube-observer", issuer: "credentials-agent", bootstrap: false, certs: []
-                  groups: ["self-test" "cassini-client"]
-                  topics: [(do $topic "kubernetes.cluster.consumer.Pod" "publish" "declared") (do $topic "agent.kube-observer.configuration" "subscribe" "implied")] }
-                { who: "polar-scheduler", namespace: "polar", service_account: "polar-scheduler", issuer: "credentials-agent", bootstrap: false, certs: []
-                  topics: [(do $topic "scheduler.in" "subscribe" "declared") (do $topic "agent.kube-observer.configuration" "publish" "family")] }
-                # A bootstrap service is issued by cert-issuer, and one still on cert-issuer is not this floor's.
-                { who: "credentials-agent", namespace: "polar", service_account: "credentials-agent", issuer: "cert-issuer", bootstrap: true, certs: []
-                  topics: [(do $topic "polar-authority-updates" "publish" "declared")] }
-                { who: "jira-observer", namespace: "polar", service_account: "jira-observer", issuer: "cert-issuer", bootstrap: false, certs: [] }
-            ]
-            assert equal (issuance_topics $r) [
-                { workload: "system:serviceaccount:polar:kube-observer", publish: ["kubernetes.cluster.consumer.Pod"], subscribe: [], groups: ["cassini-client" "self-test"] }
-                { workload: "system:serviceaccount:polar:polar-scheduler", publish: ["agent.kube-observer.configuration"], subscribe: ["scheduler.in"], groups: [] }
-            ]
-        }
-
         "a bootstrap identity that is issued two types cannot be written as one floor entry": {
             let r = [{ who: "x", namespace: "polar", service_account: "x", issuer: "cert-issuer", bootstrap: true,
                        certs: ["client:/a:ecdsa-p256:", "server:/b:ecdsa-p256:x.polar"] }]

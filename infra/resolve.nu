@@ -460,19 +460,14 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         $env_list = ($env_list | append (env_entry { name: "POLAR_SERVED_WORKLOADS", value: (served (all_workloads $target)) } $vars "catalog" $name))
     }
 
-    # The credentials agent is given its issuance floor: for each workload it issues, the topics that workload's scaffold
-    # declares (rules.nu `issuance_topics`). Applying the catalog is the sign-off (policy-enforcement.md, stage 2). The
-    # value is JSON, written as it is: no placeholder in it is resolved.
+    # The credentials agent is given the authority model's facts: every workload of the target, whoever issues it, by its
+    # one identity, with its topics and their causes (rules.nu `model_facts`; docs/architecture/authority-model.md). It
+    # judges policy and groups documents by them, and writes each workload's topics and groups into the certificates it
+    # issues (slice 8). Applying the catalog is the sign-off. The value is JSON, written as it is: no placeholder in it is
+    # resolved.
     let declared_vars = ($scaffold.sections | each {|s| $s.variables | get name } | flatten)
-    let issued = ("CREDENTIALS_AGENT_ISSUANCE_TOPICS" in $declared_vars) or ("CREDENTIALS_AGENT_AUTHORITY_MODEL" in $declared_vars)
-    let records = if $issued { all_workloads $target | each {|w| issuance_record $w $target $kinds } } else { [] }
-    if "CREDENTIALS_AGENT_ISSUANCE_TOPICS" in $declared_vars {
-        $env_list = ($env_list | append { name: "CREDENTIALS_AGENT_ISSUANCE_TOPICS", value: (issuance_topics $records | to json --raw), secret: null, key: null, from: "catalog" })
-    }
-    # And the authority model's facts: every workload of the target, whoever issues it, by its one identity, with its
-    # topics and their causes (rules.nu `model_facts`; docs/architecture/authority-model.md). Applying the catalog is its
-    # sign-off too.
     if "CREDENTIALS_AGENT_AUTHORITY_MODEL" in $declared_vars {
+        let records = (all_workloads $target | each {|w| issuance_record $w $target $kinds })
         $env_list = ($env_list | append { name: "CREDENTIALS_AGENT_AUTHORITY_MODEL", value: (model_facts $records $cluster.domain | to json --raw), secret: null, key: null, from: "catalog" })
     }
 
