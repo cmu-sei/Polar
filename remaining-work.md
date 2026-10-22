@@ -82,6 +82,13 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
   stage 5b (nothing declares publishing on them); a Cedar `permit` would open it, and before stage 5b nothing stopped
   it. The signed administrator actions already carry all three, so the raw topics are a parallel path nothing uses.
   **Removed 2026-10-22**: the signed administrator actions are the only way to provision, grant and revoke.
+- **The token's subject is still a key in two tables after the authority model** (found 2026-10-22;
+  `docs/architecture/authority-model.md`, "Decisions": one identity). cert-issuer's floor
+  (`cert-issuer/server/src/floor.rs:115`) and the credentials agent's grants for workloads
+  (`credentials-agent/consume/src/issuance.rs:219`, "Two names for one credential") are keyed by
+  `system:serviceaccount:<namespace>:<serviceaccount>`, where everything else is keyed by Polar's one identity, which is
+  in hand at both (cert-issuer's `normalized_identity`). Key both by the identity, and convert the token's subject only
+  where a token is read. The model's own build keys the issuance floor's replacement this way.
 - **The authority model** (`docs/architecture/authority-model.md`, proposed 2026-10-22, to cover with David after stage
   5b's slices 6 and 7): one model of the deployment as data, rules over it, and acceptance of a policy or groups
   document as a comparison over the closed catalog. It replaces slice 5's hand-written probes. Until it is built, a

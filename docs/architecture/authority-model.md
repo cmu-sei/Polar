@@ -270,8 +270,8 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
     in the model's facts (`identity`, `issuer`, `declares`, `cert_group`), and issuance becomes a query on the model.
 
   Kept beside the model, the credentials agent would be given the same facts twice by two render functions, and on the
-  day they disagree what it writes into a certificate would differ from what it judges policy against; the model also
-  converts identity forms in one place, and the issuance floor is keyed by the token form. Applying the catalog stays
+  day they disagree what it writes into a certificate would differ from what it judges policy against; and the
+  issuance floor is keyed by the token's subject, where the model knows a workload by its one identity ("Decisions"). Applying the catalog stays
   the sign-off of what a certificate carries, since the model is applied with the catalog. The cost is contained: the
   issuance code (`credentials-agent/consume/src/issuance.rs`, `issuance_floor.rs`) moves onto the model's types,
   `issuance_topics` goes from the render, and the issuance tests cover it.
@@ -295,6 +295,19 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
   model, not before it: the floor needs the declared publishers, which are the model's facts, and building it first
   would need a second list of publishers fed by hand. It costs an action and a resource type in the schema, and a
   decision per request (about 0.2 ms, at the credentials agent's low rate of requests).
+- **The model knows a workload by one identity; the token's subject is converted where a token is read (2026-10-22).**
+  "The workload name is an agent's one name" (`policy-enforcement.md`, "Decisions") made an agent's service name its
+  workload name, and an identity map to its workload mechanically. It did not reach the Kubernetes ServiceAccount
+  token's own subject, `system:serviceaccount:<namespace>:<serviceaccount>`: the credential's format, fine as an input,
+  but still a key in three of Polar's tables, cert-issuer's floor (`cert-issuer/server/src/floor.rs:115`), the credentials
+  agent's issuance floor (`credentials-agent/consume/src/issuance.rs:301`, by `token_identity`) and grants for
+  workloads (`issuance.rs:219`: "Two names for one credential"). Polar's identity is in hand at each of those points,
+  since cert-issuer's validation returns it beside the token's subject (`normalized_identity`). So the model carries one
+  identity per workload, `<workload>.<namespace>.serviceaccount.<domain>`, and the token's subject is never one of its
+  facts nor a key in what replaces the issuance floor: the conversion happens once, where the token is read
+  (`normalize_identity`). An earlier draft of this document gave the model both forms, which would have built the alias
+  into new code. cert-issuer's floor and workload grants are keyed the same way after this build
+  (`remaining-work.md`).
 - **A groups document is checked the same way as a policy (2026-10-22).** Against the same rules: the two invariants,
   renewal derived beneath them, over the same catalog facts. The rules are judged on a pair, the policy and the groups
   document, and do not ask which of them arrived. When either arrives, the authority:
@@ -397,7 +410,7 @@ The render emits one document of base facts, applied with the catalog, so applyi
 
 | Fact | Means | From |
 |---|---|---|
-| `workload(W)`, `identity(W, token, certificate)` | the workload and both its identity forms, written once | catalog |
+| `workload(W)`, `identity(W, I)` | the workload and its one identity, `<workload>.<namespace>.serviceaccount.<domain>` ("Decisions") | catalog |
 | `bootstrap(W)`, `issuer(W, I)` | how its certificates are issued | catalog |
 | `cert_group(W, G)` | the groups its certificate carries | its scaffold, through the catalog |
 | `declares(W, T, A)` | a topic it declares (families expanded) | its scaffold |
@@ -431,8 +444,8 @@ their rule, so `cassini-client`'s authority round trip is declared once. The sca
 collects them as it collects topics now, and applying the catalog signs them off. The vocabulary of causes (which
 entries exist) is an open question.
 
-The issuance floor becomes a query on this model, not a separate variable ("Decisions": when the model lands), and the
-identity forms are converted in one place. cert-issuer keeps its own small floor, on purpose
+The issuance floor becomes a query on this model, not a separate variable ("Decisions": when the model lands), keyed
+by the workload's one identity. cert-issuer keeps its own small floor, on purpose
 (`cert-issuer-isolation.md`).
 
 ### 2. Rules over the model
@@ -443,12 +456,12 @@ Derived facts, in Datalog. For example:
 % The groups policy sees: the groups document's, where it names the identity, else the certificate's.
 named(I)              :- member(I, _).
 group(I, G)           :- member(I, G).
-group(I, G)           :- identity(W, _, I), cert_group(W, G), !named(I).
+group(I, G)           :- identity(W, I), cert_group(W, G), !named(I).
 group(I, P)           :- group(I, G), parent(G, P).
 
 % The floor the broker and the agent decide on where policy is silent.
-floor(I, T, A)        :- identity(W, _, I), declares(W, T, A).
-floor(I, T, A)        :- identity(W, _, I), cert_group(W, G), implies(G, W, T, A).
+floor(I, T, A)        :- identity(W, I), declares(W, T, A).
+floor(I, T, A)        :- identity(W, I), cert_group(W, G), implies(G, W, T, A).
 
 % A message on T goes from A to B if both may use T (allowed: Cedar's answers, then the floor, under the policy judged).
 edge(out(A,T), in(B,T)) :- publishes(A,T), subscribes(B,T), allowed(A,T,pub), allowed(B,T,sub).
@@ -639,12 +652,13 @@ constants in `credentials_agent_common`, the git server's push, the observers' `
   catalog agent declares a cause or a reason for every publish.
 
 **3. The render emits the model.** `infra/resolve.nu`, `infra/rules.nu`.
-- One document of the model's base facts (workloads with both identity forms, issuers, bootstrap, certificate groups,
+- One document of the model's base facts (workloads with their one identity, issuers, bootstrap, certificate groups,
   declared topics, implied topics with their rule, causes, entries), from the scaffolds the render already collects,
   given to the credentials agent as one variable of its configuration document, beside the issuance floor until slice 8
   removes that.
-- Tests (`infra/tests/rules.nu`, `resolve.nu`): the facts of a small catalog, exactly; both identity forms from one
-  template; a bootstrap workload's facts present though cert-issuer issues it.
+- Tests (`infra/tests/rules.nu`, `resolve.nu`): the facts of a small catalog, exactly; each workload's identity the one
+  its certificate carries (and no token subject anywhere in the document); a bootstrap workload's facts present though
+  cert-issuer issues it.
 
 **4. One Cedar evaluator, callable without the actor.** `polar-policy/src/lib.rs`.
 - The evaluation `PolicyActor::evaluate` does (`lib.rs:318`) is split into a pure core: given a policy, a groups
@@ -692,7 +706,8 @@ and no Cassini.
 
 **8. The model replaces the issuance floor.** `credentials-agent/consume/src/issuance.rs`, `issuance_floor.rs`,
 `settings.rs`; `infra/rules.nu`.
-- Issuance asks the model for a workload's topics and groups by its token identity; `issuance_floor.rs`,
+- Issuance asks the model for a workload's topics and groups by its one identity, the `normalized_identity` cert-issuer's
+  validation returns, no longer by the token's subject; `issuance_floor.rs`,
   `CREDENTIALS_AGENT_ISSUANCE_TOPICS` and the render's `issuance_topics` are removed.
 - Tests: the issuance tests, unchanged in what they expect; a certificate carries the same names as before for every
   catalog workload (the render's old floor and the model's query compared in a test, then the old one removed).
