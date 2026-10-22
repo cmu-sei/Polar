@@ -132,6 +132,9 @@ impl Pki {
 /// about sessions, delivery and shutdown. `TestBroker::start_enforcing` starts with none.
 pub const OPEN_POLICY: &str = "permit (principal, action, resource);";
 
+/// How long a test broker's connections keep a decision unless a test says: the broker's own default.
+pub const DEFAULT_CACHE: Duration = Duration::from_secs(5);
+
 /// What the builder made for the broker, left where a test can reach it.
 type Infrastructure = Arc<Mutex<Option<polar_agent_builder::ServiceResources>>>;
 
@@ -144,6 +147,8 @@ pub struct TestBroker {
     retention_secs: Option<u64>,
     /// Whether it starts with [`OPEN_POLICY`] (again after a restart).
     open: bool,
+    /// How long a connection keeps a decision.
+    cache: Duration,
     /// The exit codes the broker asked the process to exit with.
     pub exits: Arc<Mutex<Vec<i32>>>,
 }
@@ -218,13 +223,25 @@ impl TestBroker {
         shutdown_budget: Duration,
         shutdown_token: Option<&str>,
     ) -> Self {
-        Self::start_full(retention_secs, shutdown_budget, shutdown_token, true).await
+        Self::start_full(
+            retention_secs,
+            shutdown_budget,
+            shutdown_token,
+            true,
+            DEFAULT_CACHE,
+        )
+        .await
     }
 
     /// A broker with no policy, as on a fresh cluster: what a client's certificate admits decides, and anything
     /// else is refused.
     pub async fn start_enforcing() -> Self {
-        Self::start_full(None, Duration::from_secs(20), None, false).await
+        Self::start_enforcing_caching(DEFAULT_CACHE).await
+    }
+
+    /// As `start_enforcing`, each connection keeping a decision for `cache` (none when zero).
+    pub async fn start_enforcing_caching(cache: Duration) -> Self {
+        Self::start_full(None, Duration::from_secs(20), None, false, cache).await
     }
 
     async fn start_full(
@@ -232,6 +249,7 @@ impl TestBroker {
         shutdown_budget: Duration,
         shutdown_token: Option<&str>,
         open: bool,
+        cache: Duration,
     ) -> Self {
         init_logging();
         clear_names().await;
@@ -251,6 +269,7 @@ impl TestBroker {
             shutdown_budget,
             &exits,
             token.clone(),
+            cache,
         )
         .await;
 
@@ -264,6 +283,7 @@ impl TestBroker {
                     shutdown_token: token,
                     retention_secs,
                     open,
+                    cache,
                     exits,
                 };
                 if open {
@@ -283,6 +303,7 @@ impl TestBroker {
         shutdown_budget: Duration,
         exits: &Arc<Mutex<Vec<i32>>>,
         shutdown_auth_token: Option<String>,
+        decision_cache: Duration,
     ) -> (ActorRef<BrokerMessage>, Infrastructure) {
         // The builder's infrastructure as the broker gets it in the pod, except that the process
         // is not ended (the code it would have exited with is recorded in `exits`) and the
@@ -305,6 +326,7 @@ impl TestBroker {
                 private_key_file: pki.path("server.key").to_string_lossy().into_owned(),
                 ca_cert_file: pki.ca().to_string_lossy().into_owned(),
                 shutdown_auth_token,
+                decision_cache,
                 configured,
             },
         )
@@ -327,6 +349,7 @@ impl TestBroker {
             Duration::from_secs(20),
             &self.exits,
             self.shutdown_token.clone(),
+            self.cache,
         )
         .await;
         *self.broker.lock().unwrap() = broker;

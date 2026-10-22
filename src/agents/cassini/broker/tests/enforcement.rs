@@ -228,3 +228,90 @@ async fn the_broker_keeps_the_credentials_agent_s_authority_and_no_one_else_s() 
     assert!(producer.refusals("news")[0].contains("policy forbids"));
     broker.stop().await;
 }
+
+/// The producer has published `news` once and it was delivered, so the broker has decided it.
+async fn decided_once(broker: &TestBroker) -> (TestClient, TestClient) {
+    let producer = TestClient::connect(broker, PRODUCER).await;
+    let sink = TestClient::connect(broker, SINK).await;
+    sink.subscribe("news");
+    sink.wait_for("the subscription", Duration::from_secs(10), |c| {
+        c.subscribed("news")
+    })
+    .await;
+    producer.publish("news", b"first");
+    sink.wait_for_messages("news", 1).await;
+    (producer, sink)
+}
+
+const FORBID_THE_PRODUCER_NEWS: &str = r#"forbid (principal == Identity::"harness-producer.polar.serviceaccount.cluster.local", action == Action::"publish", resource == Topic::"news");"#;
+
+#[tokio::test]
+async fn without_a_cache_a_new_policy_applies_to_the_very_next_publish() {
+    let _serial = serial().await;
+    let broker = broker_caching(Duration::ZERO).await;
+    let (producer, _sink) = decided_once(&broker).await;
+    broker.set_policy(FORBID_THE_PRODUCER_NEWS).await;
+    producer.publish("news", b"second");
+    assert!(refused(&producer, "news").await.contains("policy forbids"));
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn a_kept_decision_lasts_its_time_when_nothing_says_the_authority_changed() {
+    let _serial = serial().await;
+    let broker = broker_caching(Duration::from_secs(1)).await;
+    let (producer, sink) = decided_once(&broker).await;
+    // Given straight to the policy actor, as no verified update would be: nothing counts it as a change.
+    broker.set_policy(FORBID_THE_PRODUCER_NEWS).await;
+    producer.publish("news", b"kept");
+    assert_eq!(sink.wait_for_messages("news", 2).await.len(), 2);
+    assert!(producer.refusals("news").is_empty());
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    producer.publish("news", b"expired");
+    assert!(refused(&producer, "news").await.contains("policy forbids"));
+    broker.stop().await;
+}
+
+#[tokio::test]
+async fn a_change_of_authority_ends_every_kept_decision_at_once() {
+    let _serial = serial().await;
+    // Kept far longer than the test runs, so only the change can end it.
+    let broker = broker_caching(Duration::from_secs(600)).await;
+    broker.pki.issue_client_carrying(
+        CREDENTIALS,
+        &[
+            format!("p:pub:{AUTHORITY_SNAPSHOT_REPLIES_TOPIC}"),
+            "g:cassini-client".to_string(),
+        ],
+    );
+    let (producer, _sink) = decided_once(&broker).await;
+    let signer = RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+    let credentials = TestClient::connect(&broker, CREDENTIALS).await;
+    credentials.publish(
+        AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
+        &snapshot_forbidding_the_producer_news(&signer),
+    );
+    producer
+        .wait_for("the forbid to apply", Duration::from_secs(10), |c| {
+            if !c.refusals("news").is_empty() {
+                return true;
+            }
+            c.publish("news", b"until forbidden");
+            false
+        })
+        .await;
+    broker.stop().await;
+}
+
+async fn broker_caching(cache: Duration) -> TestBroker {
+    let broker = TestBroker::start_enforcing_caching(cache).await;
+    broker.pki.issue_client_carrying(
+        PRODUCER,
+        &["p:pub:news".to_string(), "g:cassini-client".to_string()],
+    );
+    broker.pki.issue_client_carrying(
+        SINK,
+        &["p:sub:news".to_string(), "g:cassini-client".to_string()],
+    );
+    broker
+}

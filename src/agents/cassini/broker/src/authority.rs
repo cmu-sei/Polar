@@ -33,12 +33,15 @@ use credentials_agent_common::authority_update::{
     AUTHORITY_SNAPSHOT_REPLIES_TOPIC, AUTHORITY_SNAPSHOT_REQUESTS_TOPIC, AUTHORITY_UPDATES_TOPIC,
     AuthoritySnapshot, AuthoritySnapshotRequest, AuthorityUpdate,
 };
-use polar_agent_builder::authority::AuthorityHandle;
+use polar_agent_builder::authority::{AuthorityChanged, AuthorityHandle};
 use polar_agent_builder::topic_gate::{ask, rule};
 use polar_agent_builder::{Access, Floor, PolicyLookup};
-use ractor::{ActorCell, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::warn;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+use tracing::{info, warn};
 
 /// The name the broker's policy and permissions actors are registered under (`cassini.policy`).
 pub const SERVICE: &str = "cassini";
@@ -51,6 +54,10 @@ const OWN_REGISTRATION: &str = "cassini";
 pub struct BrokerAuthority {
     handle: AuthorityHandle,
     lookup: PolicyLookup,
+    /// How many times the authority has changed: a decision made under an earlier count is stale.
+    changes: Arc<AtomicU64>,
+    /// How long a Listener keeps a decision; zero keeps none.
+    cache_for: Duration,
 }
 
 impl BrokerAuthority {
@@ -60,8 +67,13 @@ impl BrokerAuthority {
         publisher: String,
         supervisor: ActorCell,
         topic_mgr: ActorRef<BrokerMessage>,
+        cache_for: Duration,
     ) -> Result<Self, ActorProcessingErr> {
-        let handle = AuthorityHandle::spawn(SERVICE, publisher, supervisor).await?;
+        let handle = AuthorityHandle::spawn(SERVICE, publisher, supervisor.clone()).await?;
+        let changes = Arc::new(AtomicU64::new(0));
+        let (counter, _) =
+            Actor::spawn_linked(None, ChangeCounter, changes.clone(), supervisor).await?;
+        handle.changes().subscribe(counter, Some);
         let request: Arc<Vec<u8>> = Arc::new(
             rkyv::to_bytes::<rkyv::rancor::Error>(&AuthoritySnapshotRequest)
                 .map_err(|e| ActorProcessingErr::from(e.to_string()))?
@@ -82,7 +94,19 @@ impl BrokerAuthority {
         Ok(Self {
             handle,
             lookup: PolicyLookup::for_service(SERVICE),
+            changes,
+            cache_for,
         })
+    }
+
+    /// How many times the authority has changed so far.
+    pub fn changes(&self) -> u64 {
+        self.changes.load(Ordering::Acquire)
+    }
+
+    /// An empty cache for one connection's decisions.
+    pub fn cache(&self) -> DecisionCache {
+        DecisionCache::new(self.cache_for)
     }
 
     /// Whether the client whose floor is `floor` may use `topic` this way; `Err` says why not. The agent's own gate
@@ -133,5 +157,228 @@ impl BrokerAuthority {
 
     pub fn handle(&self) -> &AuthorityHandle {
         &self.handle
+    }
+}
+
+/// Counts the changes of authority, so that every Listener's cached decisions go stale at once without a lock or a
+/// message to each (docs/architecture/policy-enforcement.md, "Decisions": the cache is emptied on a change).
+struct ChangeCounter;
+
+#[ractor::async_trait]
+impl Actor for ChangeCounter {
+    type Msg = AuthorityChanged;
+    type State = Arc<AtomicU64>;
+    type Arguments = Arc<AtomicU64>;
+
+    async fn pre_start(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        changes: Arc<AtomicU64>,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(changes)
+    }
+
+    async fn handle(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        changed: AuthorityChanged,
+        changes: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        let count = changes.fetch_add(1, Ordering::AcqRel) + 1;
+        info!(kind = ?changed.kind, version = changed.version, count, "authority changed: every cached decision is stale");
+        Ok(())
+    }
+}
+
+/// The most decisions one connection keeps; past it they are all dropped and made again, so a client that uses
+/// endless topics cannot make the broker hold endless answers.
+pub const MOST_KEPT: usize = 1024;
+
+/// One connection's decisions, each kept for a short time under the authority it was made with: the broker is
+/// asked about every publish, and a decision otherwise costs a call to the policy actor and an evaluation. An entry
+/// made under an earlier count of changes, or older than its time, is a miss. The time bounds how late a rule that
+/// reads the clock can take effect.
+pub struct DecisionCache {
+    ttl: Duration,
+    entries: HashMap<(String, Access), Kept>,
+}
+
+struct Kept {
+    decided: Result<(), String>,
+    at: Instant,
+    changes: u64,
+}
+
+impl DecisionCache {
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            entries: HashMap::new(),
+        }
+    }
+
+    /// The decision kept for `topic`, used this way, if it is still good at `now` with the authority changed
+    /// `changes` times.
+    pub fn get(
+        &self,
+        topic: &str,
+        access: Access,
+        now: Instant,
+        changes: u64,
+    ) -> Option<Result<(), String>> {
+        let kept = self.entries.get(&(topic.to_string(), access))?;
+        (kept.changes == changes && now.saturating_duration_since(kept.at) < self.ttl)
+            .then(|| kept.decided.clone())
+    }
+
+    /// Keeps `decided`, made at `now` with the authority changed `changes` times (read before deciding, so a change
+    /// while it was being made leaves it stale).
+    pub fn put(
+        &mut self,
+        topic: &str,
+        access: Access,
+        decided: Result<(), String>,
+        now: Instant,
+        changes: u64,
+    ) {
+        if self.ttl.is_zero() {
+            return;
+        }
+        if self.entries.len() >= MOST_KEPT {
+            self.entries.clear();
+        }
+        self.entries.insert(
+            (topic.to_string(), access),
+            Kept {
+                decided,
+                at: now,
+                changes,
+            },
+        );
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::time::{Duration, Instant};
+
+    const TTL: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn a_decision_is_kept_for_its_time_under_the_authority_it_was_made_with() {
+        let mut cache = DecisionCache::new(TTL);
+        let at = Instant::now();
+        assert_eq!(cache.get("news", Access::Publish, at, 0), None);
+        cache.put("news", Access::Publish, Ok(()), at, 0);
+        assert_eq!(
+            cache.get("news", Access::Publish, at + TTL / 2, 0),
+            Some(Ok(()))
+        );
+        // Only for that use of the topic.
+        assert_eq!(cache.get("news", Access::Subscribe, at, 0), None);
+        // Not past its time, and not once the authority has changed.
+        assert_eq!(cache.get("news", Access::Publish, at + TTL, 0), None);
+        assert_eq!(cache.get("news", Access::Publish, at, 1), None);
+    }
+
+    #[test]
+    fn a_refusal_is_kept_as_a_permission_is() {
+        let mut cache = DecisionCache::new(TTL);
+        let at = Instant::now();
+        cache.put("news", Access::Publish, Err("no".into()), at, 3);
+        assert_eq!(
+            cache.get("news", Access::Publish, at, 3),
+            Some(Err("no".into()))
+        );
+    }
+
+    #[test]
+    fn with_no_time_to_keep_nothing_is_kept() {
+        let mut cache = DecisionCache::new(Duration::ZERO);
+        let at = Instant::now();
+        cache.put("news", Access::Publish, Ok(()), at, 0);
+        assert_eq!(cache.get("news", Access::Publish, at, 0), None);
+    }
+
+    #[test]
+    fn a_connection_that_uses_too_many_topics_starts_again_rather_than_growing() {
+        let mut cache = DecisionCache::new(TTL);
+        let at = Instant::now();
+        for n in 0..MOST_KEPT + 10 {
+            cache.put(&format!("topic-{n}"), Access::Publish, Ok(()), at, 0);
+        }
+        assert!(cache.len() <= MOST_KEPT);
+    }
+
+    #[derive(Debug, Clone)]
+    enum Step {
+        Put {
+            topic: u8,
+            publish: bool,
+            allowed: bool,
+        },
+        Wait(u64),
+        Change,
+    }
+
+    fn step() -> impl Strategy<Value = Step> {
+        prop_oneof![
+            (0u8..3, any::<bool>(), any::<bool>()).prop_map(|(topic, publish, allowed)| {
+                Step::Put {
+                    topic,
+                    publish,
+                    allowed,
+                }
+            }),
+            (0u64..4000).prop_map(Step::Wait),
+            Just(Step::Change),
+        ]
+    }
+
+    proptest! {
+        /// Whatever happens, an answer is the last one put for that topic and use, made under the current authority
+        /// and less than its time ago; anything else is a miss.
+        #[test]
+        fn no_answer_outlives_its_time_or_a_change_of_authority(steps in proptest::collection::vec(step(), 0..40)) {
+            let mut cache = DecisionCache::new(Duration::from_millis(2500));
+            let start = Instant::now();
+            let mut now = start;
+            let mut epoch = 0u64;
+            // The last put of each key, with when and under which authority.
+            let mut last: HashMap<(u8, bool), (bool, Instant, u64)> = HashMap::new();
+            for step in steps {
+                match step {
+                    Step::Put { topic, publish, allowed } => {
+                        let access = if publish { Access::Publish } else { Access::Subscribe };
+                        let decided = if allowed { Ok(()) } else { Err("no".to_string()) };
+                        cache.put(&format!("t{topic}"), access, decided, now, epoch);
+                        last.insert((topic, publish), (allowed, now, epoch));
+                    }
+                    Step::Wait(ms) => now += Duration::from_millis(ms),
+                    Step::Change => epoch += 1,
+                }
+                for topic in 0u8..3 {
+                    for publish in [true, false] {
+                        let access = if publish { Access::Publish } else { Access::Subscribe };
+                        let got = cache.get(&format!("t{topic}"), access, now, epoch);
+                        let expected = last.get(&(topic, publish)).and_then(|(allowed, at, made)| {
+                            (*made == epoch && now.duration_since(*at) < Duration::from_millis(2500))
+                                .then(|| if *allowed { Ok(()) } else { Err("no".to_string()) })
+                        });
+                        prop_assert_eq!(got, expected);
+                    }
+                }
+            }
+        }
     }
 }

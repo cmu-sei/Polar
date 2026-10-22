@@ -146,6 +146,17 @@ Read 2026-10-22, after stage 5a found the first while measuring (`broker-baselin
   `BrokerAuthority::decide` asks `cassini.policy` with `polar_agent_builder::topic_gate::ask` and applies the builder's
   own `rule`, so a `permit` admits beyond the floor, a `forbid` refuses within it, silence or no policy leaves it to
   the floor, and no answer refuses. Every refusal starts "the broker refused:" and never contains "session mismatch".
+- **The cache.** Each Listener keeps its own decisions (`DecisionCache`, `authority.rs`), keyed by topic and access,
+  refusals as well as permissions, for `CASSINI_DECISION_CACHE_SECS` (default 5; `0` keeps none, the switch the
+  measurement uses). A change of authority (the `AuthorityChanged` its `AuthorityHandle` announces when a verified
+  update or snapshot is applied) adds one to a count every Listener reads (`ChangeCounter`), and a decision made under
+  an earlier count is a miss, so every connection's cache is emptied at once with no lock and no message to each. The
+  count is read before deciding, so a change while a decision is made leaves it stale. At most 1,024 decisions are
+  kept per connection; past that they are dropped and made again. A policy given straight to the policy actor (as the
+  tests' `set_policy` does) is not a change: it applies when the kept decisions run out. Locally, the four-publisher
+  load test (20,000 messages) took 12.5 s deciding every publish and 1.5 s with the cache. Tests: the cache's own
+  (`authority.rs`, with a property that no answer outlives its time or a change), and three in `enforcement.rs` (no
+  cache: the next publish; a kept decision lasting its time; a change ending it at once, with a ten-minute cache).
 - **A trap found building it:** the decision waits on the policy actor, and the Listener's handlers hold an entered
   span; a span held across a wait broke the tracing registry's per-thread stack when the task resumed on another thread
   (a panic in `tracing-subscriber`'s `sharded.rs`, and two in five messages lost in the four-publisher load test). The

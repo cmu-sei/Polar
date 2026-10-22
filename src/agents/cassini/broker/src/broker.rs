@@ -85,6 +85,9 @@ pub struct BrokerArgs {
     /// Authorization token for shutdown operations
     pub shutdown_auth_token: Option<String>,
 
+    /// How long a connection keeps the broker's decision about a topic; zero keeps none.
+    pub decision_cache: Duration,
+
     /// The configuration `run` judged: the snapshot, the health settings and the shutdown budget,
     /// from which the broker builds its infrastructure (the health check, the signals, the
     /// shutdown handshake with its budget and watchdog).
@@ -104,6 +107,7 @@ impl BrokerArgs {
             private_key_file: settings.private_key_file,
             ca_cert_file: settings.ca_cert_file,
             shutdown_auth_token: Some(settings.shutdown_auth_token),
+            decision_cache: settings.decision_cache,
             configured,
         }
     }
@@ -310,6 +314,7 @@ impl Actor for Broker {
             publisher,
             myself.get_cell(),
             topic_mgr.clone(),
+            args.decision_cache,
         )
         .await
         .map_err(|e| {

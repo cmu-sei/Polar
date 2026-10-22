@@ -60,12 +60,23 @@ pub static SHUTDOWN_TOKEN: Required<String> = Required::text(
 )
 .secret();
 
+/// How long a connection keeps the broker's decision about a topic (docs/architecture/policy-enforcement.md,
+/// "Decisions"). A change of authority makes every kept decision stale at once; the time bounds how late a rule that
+/// reads the clock takes effect. Zero keeps none, which is how enforcement without the cache is measured.
+pub static DECISION_CACHE_SECS: Defaulted<u64> = Defaulted::seconds(
+    "CASSINI_DECISION_CACHE_SECS",
+    "how long a connection keeps the broker's decision about a topic, in seconds; a change of policy or groups ends it \
+     at once, and 0 keeps none",
+    "5",
+);
+
 static VARIABLES: &[&dyn Described] = &[
     &SERVER_CERT_CHAIN,
     &SERVER_KEY,
     &CA_CERT,
     &BIND_ADDR,
     &SHUTDOWN_TOKEN,
+    &DECISION_CACHE_SECS,
 ];
 
 /// The section the broker registers.
@@ -81,6 +92,7 @@ pub struct BrokerSettings {
     pub ca_cert_file: String,
     pub bind_addr: String,
     pub shutdown_auth_token: String,
+    pub decision_cache: std::time::Duration,
 }
 
 impl BrokerSettings {
@@ -91,6 +103,7 @@ impl BrokerSettings {
             ca_cert_file: config.read(&CA_CERT)?,
             bind_addr: config.read(&BIND_ADDR)?,
             shutdown_auth_token: config.read(&SHUTDOWN_TOKEN)?,
+            decision_cache: std::time::Duration::from_secs(config.read(&DECISION_CACHE_SECS)?),
         })
     }
 }
@@ -128,14 +141,19 @@ mod tests {
         assert_eq!(settings.ca_cert_file, "/tls/ca.pem");
         assert_eq!(settings.bind_addr, DEFAULT_BIND_ADDR);
         assert_eq!(settings.shutdown_auth_token, "t0ken");
+        assert_eq!(settings.decision_cache, std::time::Duration::from_secs(5));
     }
 
     #[test]
     fn what_is_set_overrides_the_defaults() {
         let mut vars = MINIMUM.to_vec();
-        vars.extend([("CASSINI_BIND_ADDR", "0.0.0.0:9000")]);
+        vars.extend([
+            ("CASSINI_BIND_ADDR", "0.0.0.0:9000"),
+            ("CASSINI_DECISION_CACHE_SECS", "0"),
+        ]);
         let settings = BrokerSettings::read(&config(&vars)).unwrap();
         assert_eq!(settings.bind_addr, "0.0.0.0:9000");
+        assert_eq!(settings.decision_cache, std::time::Duration::ZERO);
     }
 
     #[test]

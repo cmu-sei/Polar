@@ -22,7 +22,7 @@
 */
 
 use crate::UNEXPECTED_MESSAGE_STR;
-use crate::authority::BrokerAuthority;
+use crate::authority::{BrokerAuthority, DecisionCache};
 use crate::{
     PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT, SESSION_MISSING_REASON_STR,
     SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT,
@@ -636,6 +636,8 @@ struct ListenerState {
     /// What this connection's certificate admits where no policy speaks, or why it cannot be read.
     floor: Result<Arc<Floor>, String>,
     authority: BrokerAuthority,
+    /// This connection's recent decisions (no lock is shared with any other connection).
+    decisions: DecisionCache,
 }
 
 struct ListenerArguments {
@@ -653,11 +655,29 @@ struct ListenerArguments {
 impl Listener {
     /// Whether this connection may use `topic` this way: the broker's policy first, then the certificate's floor,
     /// refused by default. `Err` is the reason, which the client is told.
-    async fn decide(state: &ListenerState, topic: &str, access: Access) -> Result<(), String> {
-        match &state.floor {
-            Ok(floor) => state.authority.decide(floor, topic, access).await,
-            Err(why) => Err(format!("the broker refused: {why}")),
+    /// A decision this connection made a moment ago, under the same authority, is not made again.
+    async fn decide(state: &mut ListenerState, topic: &str, access: Access) -> Result<(), String> {
+        let floor = match &state.floor {
+            Ok(floor) => floor.clone(),
+            Err(why) => return Err(format!("the broker refused: {why}")),
+        };
+        // Read before deciding: a change while the decision is made leaves what it keeps stale.
+        let changes = state.authority.changes();
+        if let Some(kept) = state
+            .decisions
+            .get(topic, access, std::time::Instant::now(), changes)
+        {
+            return kept;
         }
+        let decided = state.authority.decide(&floor, topic, access).await;
+        state.decisions.put(
+            topic,
+            access,
+            decided.clone(),
+            std::time::Instant::now(),
+            changes,
+        );
+        decided
     }
 
     /// Write a framed ClientMessage to the peer.
@@ -725,6 +745,7 @@ impl Actor for Listener {
             broker: args.broker,
             peer_identity: args.peer_identity,
             floor: args.floor,
+            decisions: args.authority.cache(),
             authority: args.authority,
         })
     }
