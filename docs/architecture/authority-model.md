@@ -405,6 +405,54 @@ The model is small (about 20 agents and 150 topics), so a full evaluation takes 
 If administrators ever need to write their own rules, that is a runtime engine (Biscuit's Datalog, say), with rules as
 signed documents like the policy, and a separate decision.
 
+**Chosen: `ascent` (2026-10-22), after the research below.**
+
+### Ascent, researched (2026-10-22)
+
+What it is: Datalog embedded in Rust by a macro, from Arash Sahebolamri, Thomas Gilray (University of Alabama at
+Birmingham) and Kristopher Micinski (Syracuse). It is described in "Seamless Deductive Inference via Macros" (CC 2022,
+https://doi.org/10.1145/3497776.3517779), which reimplements the Rust borrow checker in it and benchmarks it close to
+Datafrog and Soufflé. Its custom data structures are in "Bring Your Own Data Structures to Datalog" (OOPSLA 2023,
+https://doi.org/10.1145/3622840).
+
+The project, as it stood on 2026-10-22:
+- 0.8.1 is the newest release (2026-08-29); before it 0.8.0 (2025-03), 0.7.0 (2024-10), 0.6.0 (2024-03). MIT licensed,
+  not archived, last push 2026-08-29 (https://crates.io/crates/ascent, https://github.com/s-arash/ascent).
+- 660,000 downloads, 250,000 of them recent; 591 stars. One maintainer writes most of it (142 of 162 commits), with
+  outside contributions: in 2026, a change that split the generated `run()` and cut one user's build of about 4,000
+  lines of rules from 12 minutes to 1 (https://github.com/s-arash/ascent/pull/86).
+- Depended on by Quantinuum: `tket`, its quantum compiler, and `hugr-passes`, the compiler passes for its HUGR
+  representation (https://crates.io/crates/ascent/reverse_dependencies). No other production use was found.
+- Features we need, all documented (https://s-arash.github.io/ascent/): recursion; stratified negation; aggregation;
+  user lattices (the shortest-path example with `Dual<T>` is the witness we want); `ascent_par!` on rayon; columns any
+  `Clone + Eq + Hash` Rust type.
+
+Its open issues that bear on the design, and what the design does about each:
+- **A lattice joined on its lattice column can be read before it settles** (https://github.com/s-arash/ascent/issues/22,
+  open since 2023-12; the maintainer agrees it is a bug and proposes rejecting such programs). The witness lattice is
+  read after the run, as the refusal's reason, and no rule joins on it.
+- **`run()` is one-shot**: running again after removing input facts leaves stale derived facts
+  (https://github.com/s-arash/ascent/issues/30; "Ascent wasn't really designed for incremental processing of data").
+  Each evaluation builds a fresh program from the whole pair and the catalog's facts; nothing is run twice.
+- **Lattice merging is not applied to input facts** (https://github.com/s-arash/ascent/issues/26). No lattice is an
+  input.
+- **Macro hygiene in `ascent_source!`** (https://github.com/s-arash/ascent/issues/68). Not used: the rules are one
+  `ascent!` block.
+
+A spike, outside the repository, on 0.8.1 with this workspace's toolchain: the settled rules in miniature (`edge`,
+`reach`, `closes`, `lives`, `held`, a delivery with stratified negation, and the witness lattice), over the renewal and
+correction paths of the sandbox.
+- Allowing everything, both invariants hold, and the renewal witness is the four-hop round trip through the observer and
+  the consumer.
+- Forbidding the observer's issuance requests, renewal no longer closes, the three agents the credentials agent issues
+  stop living, and correction fails with them: the derived dependency, as decided.
+- Forbidding the scheduler processor's forward, correction fails and renewal still holds.
+- Each evaluation took 20 to 60 microseconds. A synthetic model far denser than Polar's (40 agents, a ring of topics with
+  cycles, 51,000 reachable pairs, each with its witness path) took 66 ms.
+- Rebuilding after a change to the rules took 2 s in release, 6 s in debug.
+- One thing learnt: a rule's body binds variables and matches enum values with `if let` clauses, not with patterns in
+  the atom; a rule's head may build them.
+
 ## Open questions
 
 To settle one at a time, before building:
@@ -415,7 +463,7 @@ To settle one at a time, before building:
 3. ~~The vocabulary of causes.~~ Settled ("Decisions", 2026-10-22), to grow as Polar needs.
 4. ~~Whether the groups document is checked too.~~ Settled: the same way as a policy, against the same rules ("Decisions",
    2026-10-22).
-5. The engine: `ascent`, `crepe`, `datafrog`, or a hand-written closure until paths need more.
+5. ~~The engine.~~ Settled: `ascent`, after the research recorded in "The engine" (2026-10-22).
 6. The credentials agent, or a policy agent of its own.
 7. What a refusal and an effect report look like, and where they are recorded (the ledger, the configuration outcome
    the scheduler records, or both).
