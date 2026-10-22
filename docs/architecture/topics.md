@@ -129,9 +129,9 @@ to the requester where it matters.
 | `credentials-agent-escrow-key` | a crypto actor, the credentials agent observer | (another agent's public key) |
 | `credentials-workload-issuance` | the credentials agent observer, relaying polar-init's HTTP | the sealed ServiceAccount token |
 | `credentials-issuance`, `-identity-normalization`, `-account`, `-admin-action` | the observer (HTTP gateway) | the request's credential or signature |
-| `credentials-grants`, `-revocations`, `-account-provisioning`, `-certificate`, `-decrypt-on-behalf-of` | nobody publishes them today | |
+| `credentials-certificate`, `-decrypt-on-behalf-of` | nobody publishes them today | |
 
-The consumer subscribes to all 16 request topics (`credentials-agent/consume/src/supervisor.rs:148-165`) and passes
+The consumer subscribes to all 13 request topics (`credentials-agent/consume/src/supervisor.rs`, `REQUEST_TOPICS`) and passes
 `published_by` through for store, retrieve, keypair retrieval and decrypt only (614-634).
 
 ## The scheduler and the git server

@@ -353,7 +353,15 @@ What stands in the way today is the broker alone: nothing declares publishing on
 floor refuses everyone, and only a Cedar `permit` would open one. Before stage 5b was deployed (2026-10-22) the broker
 admitted every client's publish. The signed administrator actions already carry all three (`AdminAction::ProvisionAccount`,
 `Grant`, `Revoke`; `credentials-agent/common/src/admin_action.rs:40`), through `credentials-admin-action-requests`, so the
-raw topics are a parallel path that nothing in the catalog uses. Recorded in `remaining-work.md`.
+raw topics are a parallel path that nothing in the catalog uses.
+
+*Removed 2026-10-22.* They were the first design (2026-08-27 for grants and revocations, 2026-09-25 for provisioning),
+replaced by the signed administrator actions on 2026-09-30 (`3ea5e754`, which says "The unsigned GRANTS, REVOCATIONS and
+ACCOUNT_PROVISIONING subscriptions are still in place and are to be removed"), and never removed; declaring the topics in
+stage 2 then marked them as waiting for a publisher, which hid the leftover. The consumer serves 13 request topics now,
+nothing reaches its ledger as it arrives (a message on a topic it has no handler for is dropped), and the ledger's
+`AppendNoReply` is gone. The `Grant`, `Revoke` and `AccountProvisioned` events stay: they are the effects derived from a
+recorded signed action (`CredentialsEvent::admin_effect`).
 
 ## The proposal
 

@@ -115,13 +115,6 @@ pub enum LedgerMessage {
     RevokedSerials(RpcReplyPort<Vec<String>>),
     /// The port on which a newly revoked serial is announced.
     RevocationChanges(RpcReplyPort<Arc<OutputPort<RevokedChanged>>>),
-    /// Fire-and-forget variant for callers with no synchronous reply
-    /// possible -- grant/revocation events arriving from Cassini via
-    /// deserialize_and_dispatch, a plain synchronous function that
-    /// can't await a ractor::rpc::call the way Append's callers can.
-    /// An append failure here is still logged loudly, just not
-    /// returned to any caller.
-    AppendNoReply(CredentialsEvent),
     /// The active grant for `identity`, if any.
     CheckGrant {
         identity: String,
@@ -315,11 +308,6 @@ impl Actor for LedgerActor {
             }
             LedgerMessage::RevocationChanges(reply) => {
                 let _ = reply.send(state.revocation_changes.clone());
-            }
-            LedgerMessage::AppendNoReply(event) => {
-                if let Err(e) = append_and_project(state, &event) {
-                    tracing::error!("Failed to append event to ledger: {e}. Event: {event:?}");
-                }
             }
             LedgerMessage::RecordAdminAction { event, reply } => {
                 let CredentialsEvent::AdminActionRecorded { payload_hash, .. } = &event else {

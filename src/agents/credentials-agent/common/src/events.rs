@@ -179,7 +179,8 @@ pub enum GrantReason {
     Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
 )]
 pub enum CredentialsEvent {
-    /// Published by an admin's tool to the `credentials-grants` topic.
+    /// The effect of a signed `AdminAction::Grant`, derived from its
+    /// `AdminActionRecorded` (`admin_effect`), never published on its own.
     /// `target_identity` must be the exact claim value the relevant
     /// issuer's `workload_identity_claim` will later extract from the
     /// user's real token -- the admin is responsible for confirming
@@ -196,8 +197,9 @@ pub enum CredentialsEvent {
         timestamp: i64,
         reason: GrantReason,
     },
-    /// Published by an admin's tool to the `credentials-revocations`
-    /// topic. Uniform for human- and workload-issued certificates
+    /// The effect of a signed `AdminAction::Revoke`, derived from its
+    /// `AdminActionRecorded` (`admin_effect`), never published on its own.
+    /// Uniform for human- and workload-issued certificates
     /// alike -- both are ultimately just certificates with serial
     /// numbers.
     Revoke {

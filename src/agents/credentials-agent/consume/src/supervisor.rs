@@ -53,13 +53,12 @@ use cassini_client::TcpClientMessage;
 
 // ---- credentials_agent_common: topics ----
 use credentials_agent_common::{
-    CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC, CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
-    CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC, CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC,
-    CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC, CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
-    CREDENTIALS_GRANTS_TOPIC, CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC, CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
+    CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC, CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
+    CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC, CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
     CREDENTIALS_ISSUANCE_REQUESTS_TOPIC, CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
-    CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC, CREDENTIALS_REVOCATIONS_TOPIC,
-    CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC, CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
+    CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC, CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+    CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
 };
 
 // ---- credentials_agent_common: wire types ----
@@ -69,7 +68,6 @@ use credentials_agent_common::agent_escrow_keypair_bootstrap::RetrieveAgentEscro
 use credentials_agent_common::certificate::CertificateRequest;
 use credentials_agent_common::decrypt_on_behalf_of::DecryptOnBehalfOfRequest;
 use credentials_agent_common::escrow_key::EscrowKeyRequest;
-use credentials_agent_common::events::CredentialsEvent;
 use credentials_agent_common::identity::IdentityNormalizationRequest;
 use credentials_agent_common::issuance::IssuanceRequest;
 use credentials_agent_common::retrieve_secret::RetrieveSecretRequest;
@@ -145,10 +143,7 @@ pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(50);
 
 /// Every topic this agent subscribes to. One subscription each; the same list
 /// is unsubscribed from when shutdown begins.
-pub const REQUEST_TOPICS: [&str; 16] = [
-    CREDENTIALS_GRANTS_TOPIC,
-    CREDENTIALS_REVOCATIONS_TOPIC,
-    CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC,
+pub const REQUEST_TOPICS: [&str; 13] = [
     credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC,
     credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC,
     CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
@@ -411,25 +406,10 @@ impl Supervisor for ConsumerSupervisor {
             return;
         }
 
-        // Both credentials-grants and credentials-revocations carry
-        // the same CredentialsEvent type -- unlike jira/process's
-        // convention, topic name isn't used to select a different
-        // actor, since there's only ever one writer (LedgerActor)
-        // here at all.
-        match rkyv::from_bytes::<CredentialsEvent, rkyv::rancor::Error>(&payload) {
-            Ok(event) => {
-                if let Some(ledger) = where_is(LEDGER_ACTOR_NAME.to_string()) {
-                    if let Err(e) = ledger.send_message(LedgerMessage::AppendNoReply(event)) {
-                        warn!("Failed to forward event from topic {topic} to ledger: {e}");
-                    }
-                } else {
-                    warn!("Ledger actor not yet registered, dropping event from topic {topic}");
-                }
-            }
-            Err(e) => {
-                warn!("Failed to deserialize CredentialsEvent from topic {topic}: {e}");
-            }
-        }
+        // Nothing reaches the ledger as it arrives: every event in it is the consumer's own, made from a request it
+        // judged (a signed admin action, a validated token). Three topics once appended whatever event they carried,
+        // unsigned; they were removed (docs/architecture/authority-model.md, "The consumer's request topics, audited").
+        warn!("CONSUMER_SUPERVISOR: no handler for topic {topic}; the message is dropped");
     }
 }
 
@@ -1313,7 +1293,7 @@ impl Actor for ConsumerSupervisor {
 mod tests {
     use super::*;
     use crate::state::GrantRecord;
-    use credentials_agent_common::events::{GrantReason, RevocationReason};
+    use credentials_agent_common::events::{CredentialsEvent, GrantReason};
 
     async fn spawn_ledger_registered(log_path: &str) -> ActorRef<LedgerMessage> {
         let (ledger, _) = Actor::spawn(
@@ -1347,13 +1327,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deserialize_and_dispatch_forwards_a_real_event_to_the_real_ledger() {
+    async fn a_raw_ledger_event_is_appended_from_no_topic() {
         let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
         let ledger = spawn_ledger_registered(path.to_str().unwrap()).await;
 
-        let event = CredentialsEvent::Grant {
+        let grant = CredentialsEvent::Grant {
             target_identity: "alice".to_string(),
             permissions: vec![cert_issuer_common::permission::Permission {
                 scope: cert_issuer_common::permission::PermissionScope::ServiceToService,
@@ -1363,45 +1343,30 @@ mod tests {
             timestamp: 1000,
             reason: GrantReason::UserOnboarding,
         };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&event)
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&grant)
             .unwrap()
             .to_vec();
 
-        // The real function every incoming Cassini message actually
-        // goes through -- not a reimplementation of it.
-        ConsumerSupervisor::deserialize_and_dispatch(CREDENTIALS_GRANTS_TOPIC.to_string(), bytes);
+        // The three topics that once appended whatever event they carried, unsigned (removed: the signed admin
+        // actions are the only way to grant, revoke and provision), and one no one has heard of.
+        for topic in [
+            "credentials-grants",
+            "credentials-revocations",
+            "credentials-account-provisioning",
+            "no-such-topic",
+        ] {
+            ConsumerSupervisor::deserialize_and_dispatch(topic.to_string(), bytes.clone());
+        }
 
-        // A subsequent call() to the same actor only returns after
-        // every prior message (including our dispatch above) has
-        // already been processed, by ractor's own sequential-mailbox
-        // guarantee -- no arbitrary sleep needed to synchronize.
-        let grant = check_grant(&ledger, "alice").await;
-        assert!(grant.is_some());
-        assert_eq!(grant.unwrap().granted_by, "admin");
+        // A call returns only after every earlier message to the ledger has been handled.
+        assert!(check_grant(&ledger, "alice").await.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap_or_default(),
+            "",
+            "nothing was appended"
+        );
 
         ledger.stop_and_wait(None, None).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn deserialize_and_dispatch_handles_missing_ledger_gracefully() {
-        let _guard = super::NAMED_ACTOR_TEST_LOCK.lock().await;
-        // No ledger registered at all -- must not panic, just log and
-        // drop, matching the documented behavior for this case.
-        let event = CredentialsEvent::Revoke {
-            serial: "abc123".to_string(),
-            reason: RevocationReason::Compromised,
-            revoked_by: "admin".to_string(),
-            timestamp: 1000,
-        };
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&event)
-            .unwrap()
-            .to_vec();
-
-        ConsumerSupervisor::deserialize_and_dispatch(
-            CREDENTIALS_REVOCATIONS_TOPIC.to_string(),
-            bytes,
-        );
-        // Reaching this line at all is the assertion -- no panic.
     }
 }
 
@@ -2696,12 +2661,19 @@ mod builder_wiring_tests {
     }
 
     #[test]
-    fn there_are_sixteen_distinct_request_topics() {
+    fn there_are_thirteen_distinct_request_topics_and_none_takes_a_raw_ledger_event() {
         let distinct: HashSet<&str> = REQUEST_TOPICS.iter().copied().collect();
-        assert_eq!(REQUEST_TOPICS.len(), 16);
+        assert_eq!(REQUEST_TOPICS.len(), 13);
+        for removed in [
+            "credentials-grants",
+            "credentials-revocations",
+            "credentials-account-provisioning",
+        ] {
+            assert!(!distinct.contains(removed), "{removed} is served again");
+        }
         assert_eq!(
             distinct.len(),
-            16,
+            13,
             "a topic is listed twice: {REQUEST_TOPICS:?}"
         );
     }

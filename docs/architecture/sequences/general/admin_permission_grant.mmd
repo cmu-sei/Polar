@@ -41,29 +41,33 @@ sequenceDiagram
     IdP-->>Admin: Exact claim value
     deactivate IdP
 
-    Note over Admin,Graph: Repeatable. Ordinary, mTLS-authenticated<br/>Cassini traffic -- no different in kind from<br/>any other agent's publish.
+    Note over Admin,Graph: Repeatable. A signed admin action, the only way to grant or revoke<br/>(the unsigned credentials-grants and credentials-revocations topics were removed,<br/>docs/architecture/authority-model.md)
 
     Admin->>GrantTool: Run tool with arguments<br/>(grant: target_identity, permissions --<br/>or revoke: serial, reason)
     activate GrantTool
+    GrantTool->>GrantTool: Sign the action with the admin's own<br/>certificate's key (SignedAdminAction:<br/>payload, author_serial, signature)
     GrantTool->>Cassini: Connect using the admin's own<br/>Polar client cert (mTLS)
     activate Cassini
-
-    alt Granting permissions
-        GrantTool->>Cassini: Publish { target_identity, permissions,<br/>granted_by, timestamp } to<br/>credentials-grants topic
-    else Revoking a certificate
-        GrantTool->>Cassini: Publish { serial, reason, revoked_by,<br/>timestamp } to<br/>credentials-revocations topic<br/>(uniform for human- and<br/>workload-issued certs alike)
-    end
-    deactivate GrantTool
+    GrantTool->>Cassini: Publish the SignedAdminAction to<br/>credentials-admin-action-requests
 
     Cassini->>CredAgentCon: Deliver message
-    deactivate Cassini
     activate CredAgentCon
-    CredAgentCon->>EventLog: Append event, fsync'd<br/>(hash includes previous entry's hash --<br/>this is the actual write- a grant is<br/>later consumed by a matching issuance,<br/>never mutated or deleted here)
-    activate EventLog
-    EventLog-->>CredAgentCon: Appended
-    deactivate EventLog
-    CredAgentCon->>Graph: Project derived state<br/>(Grant node, or mark a<br/>Certificate node revoked --<br/>rebuildable from the event log,<br/>never the source of truth)
-    activate Graph
-    Graph-->>CredAgentCon: Written
-    deactivate Graph
+    CredAgentCon->>CredAgentCon: Look the author's certificate up by serial in the ledger,<br/>refuse a revoked author, verify the signature,<br/>check the capability the action needs against the ledger record<br/>(never the certificate), refuse a replay by payload hash
+    alt Refused
+        CredAgentCon->>Cassini: Reply Refused (why) on<br/>credentials-admin-action-replies
+    else Accepted
+        CredAgentCon->>EventLog: Append AdminActionRecorded, fsync'd<br/>(hash includes previous entry's hash, the grant or<br/>revocation is derived from it in the state fold --<br/>a grant is later consumed by a matching issuance,<br/>never mutated or deleted here)
+        activate EventLog
+        EventLog-->>CredAgentCon: Appended
+        deactivate EventLog
+        CredAgentCon->>Graph: Project derived state<br/>(Grant node, or mark a<br/>Certificate node revoked --<br/>rebuildable from the event log,<br/>never the source of truth)
+        activate Graph
+        Graph-->>CredAgentCon: Written
+        deactivate Graph
+        CredAgentCon->>Cassini: Reply Recorded on<br/>credentials-admin-action-replies
+    end
     deactivate CredAgentCon
+    Cassini->>GrantTool: Deliver the reply
+    deactivate Cassini
+    GrantTool-->>Admin: Exit 0 only on Recorded
+    deactivate GrantTool

@@ -44,21 +44,6 @@ impl PolarAgent for CredentialsConsumer {
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
     const TOPICS: &'static [TopicDecl] = &[
         TopicDecl::subscribe(
-            credentials_agent_common::CREDENTIALS_GRANTS_TOPIC,
-            "grants",
-        )
-        .waiting("nothing in the catalog publishes it yet"),
-        TopicDecl::subscribe(
-            credentials_agent_common::CREDENTIALS_REVOCATIONS_TOPIC,
-            "revocations",
-        )
-        .waiting("nothing in the catalog publishes it yet"),
-        TopicDecl::subscribe(
-            credentials_agent_common::CREDENTIALS_ACCOUNT_PROVISIONING_TOPIC,
-            "account provisioning",
-        )
-        .waiting("nothing in the catalog publishes it yet"),
-        TopicDecl::subscribe(
             credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC,
             "a signed administrator action, relayed by the observer",
         ),

@@ -705,11 +705,24 @@ and does not recur unless a new admin needs to be established.
 
 ### Admin grants and revocations (repeatable, ordinary agent traffic)
 
-Once bootstrapped, an admin's ongoing actions are unremarkable Cassini
-publishes, using their normal client cert:
+Once bootstrapped, an admin's ongoing actions are signed admin actions
+(`SignedAdminAction { payload, author_serial, signature }`), signed with the
+key of their own certificate and sent over Cassini on
+`credentials-admin-action-requests`, with the answer on
+`credentials-admin-action-replies`. The consumer looks the author's
+certificate up by serial in the ledger, refuses a revoked author, verifies
+the signature, checks the capability the action needs against the ledger
+record (never the certificate), refuses a replay by payload hash, and
+records one `AdminActionRecorded` event; the grant or revocation is derived
+from it in the state fold (`CredentialsEvent::admin_effect`). This is the
+only way to grant, revoke or provision: the unsigned `credentials-grants`,
+`credentials-revocations` and `credentials-account-provisioning` topics this
+section first described appended whatever event they carried, and were
+removed on 2026-10-22 (`docs/architecture/authority-model.md`, "The
+consumer's request topics, audited"). An action carries:
 
-- **Grant**: `{ target_identity, permissions, granted_by, timestamp,
-  reason }`, published to a `credentials-grants` topic.
+- **Grant**: `{ target_identity, permissions, reason }`; the author and the
+  time come from the signature and the consumer.
   `target_identity` must be the exact claim value the relevant
   `IssuerConfig.workload_identity_claim` will later extract from that
   user's real token — the admin confirms this by querying the IdP
@@ -721,8 +734,7 @@ publishes, using their normal client cert:
   free text — genuinely Polar-specific, with no RFC to anchor
   against, but held to the same closed-set discipline as
   `RevocationReason` below regardless.
-- **Revoke**: `{ serial, reason, revoked_by, timestamp }`, published to a
-  `credentials-revocations` topic, for either a human-issued or
+- **Revoke**: `{ serial, reason }`, for either a human-issued or
   workload-issued certificate — revocation is uniform across both, since
   both are ultimately just certificates with serial numbers already
   recorded in the event log. `reason` is a closed `RevocationReason`
@@ -735,7 +747,7 @@ publishes, using their normal client cert:
   never an admin's own choice -- see the reissue behavior in "Source
   of truth," above.
 
-The Credentials Agent's consumer appends both to the event log and
+The Credentials Agent's consumer records the action in the event log and
 updates the Neo4j projection accordingly. A revoked certificate record
 is marked in place, not removed -- consistent with how this system
 treats history everywhere else -- so it, and its own revocation
