@@ -70,6 +70,10 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
 - The Cassini client's read loop goes on after a failed `read_exact`, reading from the middle of a frame (`cassini/client/src/lib.rs`,
   the read loop); it should end the transport.
 - Stage 5b is measured against the baseline, without and with its decision cache.
+- **The authority model** (`docs/architecture/authority-model.md`, proposed 2026-10-22, to cover with David after stage
+  5b's slices 6 and 7): one model of the deployment as data, rules over it, and acceptance of a policy or groups
+  document as a comparison over the closed catalog. It replaces slice 5's hand-written probes. Until it is built, a
+  `forbid` on an authority path can lock a deployment out.
 - The dev host's storage: about 750 GiB of the `nix` volume group is unallocated, `/` is a 199 GB f2fs on a 400 GB
   volume (never grown), and the nix-usernetes node's containerd and kubelet state share `/home` with everything else,
   so a large Cargo `target` directory tainted the node with disk pressure and evicted every pod (2026-10-21). f2fs grows

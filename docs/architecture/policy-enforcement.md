@@ -508,6 +508,12 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
     held topics and judges those;
   - not in this stage: the agent's own gate also calls its policy actor for every publish, and caching it is not
     planned; the measurement will show whether it matters.
+- *Changed 2026-10-22:* the credentials agent's check of a policy on arrival (open point B) is not built as planned,
+  as hand-written probes. Working out the probes showed that the facts the check needs are split across the render's
+  projections, code and the runtime documents, and that who depends on whom is recorded nowhere. It is replaced by a
+  proposal, `authority-model.md`: one model of the deployment as data, rules over it, and acceptance as a comparison of
+  the current and proposed policy and groups over the closed catalog. To be covered with the maintainer after slices 6
+  and 7, which do not depend on it.
 
 **Stage 6: degraded is bounded** (gap 4)
 
@@ -545,6 +551,7 @@ stage relies on a later one; each leaves the cluster working, with enforcement s
   any would be denied, the whole policy is refused with the reason, and the old one stays in force, as for a policy that
   does not parse or validate. Cedar keeps overriding the certificate both ways; a policy that would cut the channel through
   which policy is corrected, or certificates renewed, is never accepted.
+  *Reopened 2026-10-22:* how the check is made is proposed in `authority-model.md`; the decision itself stands.
 - **C. The size of a certificate's topic list** (stage 3). *Decided 2026-10-21: no compact form, no hard limit.* The
   largest declared sets are the credentials agent consumer's (about 34 `p:` names: its 16 request and 16 reply topics and
   the two authority topics) and the scheduler processor's (one per workload, about 20 today); most agents declare 1 to 8.
