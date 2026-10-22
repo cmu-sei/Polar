@@ -67,7 +67,7 @@ pub enum Cause {
 }
 
 /// A [`Cause`] as the set holds it and the scaffold prints it.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "name", rename_all = "snake_case")]
 pub enum CauseEntry {
     Topic(String),
@@ -959,10 +959,7 @@ mod tests {
             said.contains("`z` (publish) waits, but gives no reason"),
             "{said}"
         );
-        assert!(
-            said.contains("`x` (publish) has no cause"),
-            "{said}"
-        );
+        assert!(said.contains("`x` (publish) has no cause"), "{said}");
         assert!(problems(&facts, DECLARED).is_empty());
     }
 

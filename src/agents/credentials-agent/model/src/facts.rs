@@ -1,0 +1,128 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+//! The authority model's base facts, as the render writes them (`infra/rules.nu`, `model_facts`), and the pair of
+//! documents a judgement is made under.
+
+use cert_issuer_common::capability::Capability;
+use cert_issuer_common::hierarchy::Hierarchy;
+use polar_agent_builder::topics::TopicEntry;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// The format of the model document this crate reads.
+pub const FORMAT: u32 = 1;
+
+/// Every workload of a deployment, whoever issues it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Model {
+    pub format: u32,
+    pub workloads: Vec<Workload>,
+}
+
+/// One workload: its name, its one identity (`<workload>.<namespace>.serviceaccount.<domain>`), who issues its
+/// certificates, whether it is a bootstrap service, the groups its certificate carries, and its whole set of topics as
+/// its scaffold prints them (declared, family and implied), each with what it says about causes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Workload {
+    pub workload: String,
+    pub identity: String,
+    pub issuer: String,
+    pub bootstrap: bool,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default)]
+    pub topics: Vec<TopicEntry>,
+}
+
+impl Model {
+    /// The model in `text`. Refused when it is not the document, not its format, or names a workload twice, or by an
+    /// identity that is not its own (the model knows a workload by one identity: authority-model.md, "Decisions").
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let model: Model = serde_json::from_str(text)
+            .map_err(|e| format!("the authority model is not its document: {e}"))?;
+        if model.format != FORMAT {
+            return Err(format!(
+                "the authority model is format {}, and this reads format {FORMAT}",
+                model.format
+            ));
+        }
+        let mut names = BTreeSet::new();
+        let mut identities = BTreeSet::new();
+        for w in &model.workloads {
+            if !names.insert(w.workload.as_str()) {
+                return Err(format!("the authority model names {} twice", w.workload));
+            }
+            if !identities.insert(w.identity.as_str()) {
+                return Err(format!(
+                    "the authority model gives two workloads the identity {}",
+                    w.identity
+                ));
+            }
+            if cert_issuer_common::identity::workload_of(&w.identity) != Some(w.workload.as_str()) {
+                return Err(format!(
+                    "{}: its identity {} names another workload",
+                    w.workload, w.identity
+                ));
+            }
+        }
+        Ok(model)
+    }
+
+    /// The workload named `name`.
+    pub fn workload(&self, name: &str) -> Option<&Workload> {
+        self.workloads.iter().find(|w| w.workload == name)
+    }
+
+    /// Every topic any workload uses, each once.
+    pub(crate) fn topic_names(&self) -> BTreeSet<String> {
+        self.workloads
+            .iter()
+            .flat_map(|w| w.topics.iter().map(|t| t.name.clone()))
+            .collect()
+    }
+
+    /// Every identity the model knows.
+    pub(crate) fn identities(&self) -> BTreeSet<&str> {
+        self.workloads.iter().map(|w| w.identity.as_str()).collect()
+    }
+}
+
+/// A person the authority knows (an account in its ledger), for what a change does to them: their identity as Cedar
+/// sees it, the groups their certificate carries and the capabilities it holds. A person's identity implies no topics,
+/// so only a permit gives them one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Person {
+    pub identity: String,
+    pub groups: Vec<String>,
+    pub capabilities: Vec<Capability>,
+}
+
+/// A policy and a groups document, as they stand or as they would: what a judgement is made under. No policy is the
+/// floor alone. `memberships` replaces, for Cedar, the groups a certificate carries for each identity it names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pair {
+    pub policy: Option<String>,
+    pub memberships: BTreeMap<String, Vec<String>>,
+    pub hierarchy: Hierarchy,
+}

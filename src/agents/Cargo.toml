@@ -35,6 +35,7 @@ members = [
     "credentials-agent/common",
     "credentials-agent/consume",
     "credentials-agent/fetcher",
+    "credentials-agent/model",
     "credentials-agent/observe",
     "git/common",
     "gitlab/common",
@@ -122,6 +123,8 @@ opentelemetry-otlp = "0.32.0"
 opentelemetry_sdk = "0.32.1"
 parse_link_header = "0.4"
 proptest = "1.10.0"
+# The authority model's rules (docs/architecture/authority-model.md, "The engine"): chosen 2026-10-22, after research.
+ascent = "0.8.1"
 # output-port-v2: the first OutputPort kept ten messages per subscriber and dropped a subscriber that fell further
 # behind, for good and silently (cassini/client/tests/output_port.rs); every client's events go through these ports.
 ractor = { version = "0.15.10", features = ["async-trait", "output-port-v2"] }
@@ -167,6 +170,7 @@ cassini-types = { path = "cassini/types" }
 common = { path = "gitlab/common" }                         # gitlab common
 credentials_agent_common = { path = "credentials-agent/common" }
 credentials-agent-client = { path = "credentials-agent/client" }
+credentials-agent-model = { path = "credentials-agent/model" }
 git-agent-common = { path = "git/common" }
 gitlab-queries = { path = "gitlab/query" }
 gitlab-schema = { path = "gitlab/schema" }

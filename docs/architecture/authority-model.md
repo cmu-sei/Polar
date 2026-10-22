@@ -724,6 +724,38 @@ and no Cassini.
   refuses exactly when an invariant held under the current pair and not under the proposed. And the evaluation time
   over the real model, measured and recorded.
 
+- *Built 2026-10-22:* the crate `credentials-agent-model` (`src/agents/credentials-agent/model`), with no actor and no
+  Cassini:
+  - `facts`: the model document (`Model::parse` refuses another format, a workload named twice, two workloads with one
+    identity, and an identity that names another workload), a `Person`, and a `Pair` (a policy, or none, and a groups
+    document);
+  - `rules`: one `ascent!` program: `edge` (a publish to a subscription both allowed, and inside an agent from its
+    `Topic` causes), `reach`, `entry` and `closes`, `lives` (renewal as a dependency), `held` and `reach_held` (edges
+    between agents that live), `closes_held`, and two witness lattices (over every edge, for renewal's reason; over
+    held edges, for the goals), seeded only from where goals start, read after the run;
+  - `judge`: `allowed_under` (every workload and person against every topic the model knows, by
+    `polar_policy::Evaluator` and the topic gate's own `rule`, so the judgement and the enforcement cannot disagree),
+    `evaluate` (each goal, held or not, with its witness), `compare` and `judge` (the losses, each with the request whose
+    refusal breaks it or the renewal it breaks, the effect, and a groups document's unknown keys).
+
+  Choices made building it: the invariants name no workload. The authority publisher is whichever workload publishes
+  `polar-authority-updates`; hearing authority is its registration's updates reaching every subscriber, and every
+  agent's snapshot round trip; correction is what a push (`RECEIVE_PACK_ROUTE`) delivers to the publisher's
+  configuration topic; renewal is the round trip of whichever workload takes `/workload/issue`. A model without one of
+  them reports that invariant as not applicable. A delivery's "every subscriber" is assembled in Rust from the derived
+  `reach_held`, one goal per subscriber, rather than with stratified negation in the program, so each subscriber has
+  its own witness and reason. Tests (`tests/model.rs`, over `tests/fixtures/sandbox-model.json`, made by
+  `tests/fixtures/regenerate.nu` from this workspace's agents): every goal holds with no policy and renewal is the
+  observer's four-hop round trip; a forbid on the observer's issuance requests is refused as breaking correction within
+  one certificate lifetime, naming the forbidden request; a forbid on the scheduler's forward breaks correction alone; a
+  groups document moving `polar-scheduler` into a forbidden group is refused; a permit is accepted with its effect; an
+  unknown key is reported. Properties (`tests/props.rs`): allowing more never breaks a goal that held; every witness is
+  a path of held edges; the comparison refuses exactly when a goal is lost, and each reason names a request the current
+  pair allows and the proposed one does not; the order of the facts changes nothing. Checked against deliberate breaks
+  (renewal ignored, a comparison that never refuses); one break, witnesses over every edge rather than held ones, gives
+  the same witnesses in this model, since every goal that still holds when renewal is cut runs only through the
+  bootstrap services by direct edges. A judgement over the real model: 106 ms in a release build, 1.4 s in a debug one.
+
 **6. A runtime section can be judged before it is replaced.** `polar-agent-builder/src/runtime.rs`, `configuration.rs`.
 - Beside `validate` (`runtime.rs:57`, a pure function of the body), an agent may give its configuration actor a judge:
   called with the section, the candidate body and the sections in force, before the section is replaced (where
