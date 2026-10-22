@@ -682,6 +682,17 @@ constants in `credentials_agent_common`, the git server's push, the observers' `
   its certificate carries (and no token subject anywhere in the document); a bootstrap workload's facts present though
   cert-issuer issues it.
 
+- *Built 2026-10-22:* `model_facts` (`infra/rules.nu`) makes the document: `{format: 1, workloads: [...]}`, each
+  workload with its one identity, issuer, bootstrap flag, certificate groups and its scaffold's whole set of topics
+  (declared, family and implied) with their causes. The render fills it into the credentials agent's new variable
+  `CREDENTIALS_AGENT_AUTHORITY_MODEL` (`credentials-agent/consume/src/settings.rs`), which the agent checks is the
+  document's shape and does not read yet; beside the issuance floor, from the same records. A workload whose service
+  account is not its name is an error, since its identity would name another workload. For `sandbox-local` the
+  document is 46 KB for 15 workloads, from images that predate causes. Tests: the facts of a small catalog exactly, the
+  misnamed workload refused (`infra/tests/rules.nu`); the credentials agent's rendered document carries the model with
+  every workload by its one identity and no token subject (`infra/tests/resolve.nu`, with the workspace's own
+  credentials agent beside the other agents' images); the variable's shape checked (`settings.rs`).
+
 **4. One Cedar evaluator, callable without the actor.** `polar-policy/src/lib.rs`.
 - The evaluation `PolicyActor::evaluate` does (`lib.rs:318`) is split into a pure core: given a policy, a groups
   hierarchy and memberships, and a list of requests (identity, groups, capabilities, action, resource, facts), each

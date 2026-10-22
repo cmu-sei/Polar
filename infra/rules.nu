@@ -170,6 +170,32 @@ export def issuance_topics [records: list]: nothing -> list {
     | sort-by workload
 }
 
+# The authority model's base facts (docs/architecture/authority-model.md, "The proposal" and "Build order", slice 3): every
+# workload, whoever issues it, by its one identity `<workload>.<namespace>.serviceaccount.<domain>` (never its token's
+# subject), with its issuer, whether it is a bootstrap service, its certificate's groups, and the whole set of topics its
+# scaffold prints: declared, family and implied, each with what it says about causes. The credentials agent derives the
+# paths from these. A workload's service account is its name ("The workload name is an agent's one name",
+# policy-enforcement.md), so one that is not would put a second name in the model, and is an error. `records` are as for
+# floor_entries.
+export def model_facts [records: list, domain: string]: nothing -> record {
+    let misnamed = ($records | where {|r| $r.service_account != $r.who })
+    if ($misnamed | is-not-empty) {
+        let named = ($misnamed | each {|r| $"($r.who) \(service account ($r.service_account)\)" } | str join ", ")
+        error make { msg: $"its service account is not its name, so its identity would name another workload: ($named)" }
+    }
+    let workloads = ($records | each {|r|
+        {
+            workload: $r.who
+            identity: $"($r.who).($r.namespace).serviceaccount.($domain)"
+            issuer: $r.issuer
+            bootstrap: $r.bootstrap
+            groups: ($r.groups? | default [] | uniq | sort)
+            topics: ($r.topics? | default [] | sort-by name access)
+        }
+    } | sort-by workload)
+    { format: 1, workloads: $workloads }
+}
+
 # The entries of cert-issuer's floor, from what the catalog says each workload is issued (the `--cert` specs
 # `kind:dir:algorithm:names`). A bootstrap identity gets an entry that lets its token alone be signed, for the one
 # type it is issued and the names it carries. A workload on the credentials agent that is issued a server

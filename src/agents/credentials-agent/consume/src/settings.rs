@@ -97,6 +97,17 @@ pub static ISSUANCE_TOPICS: Defaulted<String> = Defaulted::text(
     "[]",
 );
 
+/// The authority model's base facts (docs/architecture/authority-model.md, "The proposal"): every workload by its one
+/// identity, with its issuer, its certificate's groups and its whole set of topics with their causes. The render writes
+/// it from the catalog, so applying the catalog is its sign-off.
+pub static AUTHORITY_MODEL: Defaulted<String> = Defaulted::text(
+    "CREDENTIALS_AGENT_AUTHORITY_MODEL",
+    "the authority model's facts: every workload by its identity, with its issuer, groups and topics with their \
+     causes, as JSON {format: 1, workloads: [...]}. The render writes it from the catalog \
+     (docs/architecture/authority-model.md); read once, at start",
+    "",
+);
+
 static VARIABLES: &[&dyn Described] = &[
     &CERT_ISSUER_URL,
     &CA_CERT,
@@ -108,6 +119,7 @@ static VARIABLES: &[&dyn Described] = &[
     &INTROSPECTION_CLIENT_ID,
     &INTROSPECTION_CLIENT_SECRET,
     &ISSUANCE_TOPICS,
+    &AUTHORITY_MODEL,
 ];
 
 /// The section the credentials agent consumer registers.
@@ -128,7 +140,31 @@ fn relations(env: &dyn Env) -> Vec<String> {
     if let Err(found) = crate::issuance_floor::IssuanceFloor::parse(&floor) {
         problems.extend(found);
     }
+    if let Some(model) = env
+        .var(AUTHORITY_MODEL.name())
+        .filter(|v| !v.trim().is_empty())
+        && let Err(why) = model_shape(&model)
+    {
+        problems.push(format!("{}: {why}", AUTHORITY_MODEL.name()));
+    }
     problems
+}
+
+/// Whether the authority model is the document the render writes: a JSON object of `format` 1 with a list of
+/// `workloads`. What each workload says is read by the model itself.
+fn model_shape(text: &str) -> Result<(), String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("not JSON ({e})"))?;
+    if value.get("format").and_then(serde_json::Value::as_u64) != Some(1) {
+        return Err("not format 1".to_string());
+    }
+    if !value
+        .get("workloads")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        return Err("has no list of workloads".to_string());
+    }
+    Ok(())
 }
 
 /// Introspection is on when its three settings are all given and off when none is. One or two of
@@ -244,6 +280,31 @@ mod tests {
     #[test]
     fn the_section_is_sound_and_its_defaults_parse() {
         assert_eq!(SECTION.defaults_problems(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_authority_model_is_given_as_json_and_one_that_is_not_stops_the_agent() {
+        let model = r#"{"format": 1, "workloads": [{"workload": "kube-observer", "identity": "kube-observer.polar.serviceaccount.cluster.local", "issuer": "credentials-agent", "bootstrap": false, "groups": [], "topics": []}]}"#;
+        assert!(
+            config(&with(&[("CREDENTIALS_AGENT_AUTHORITY_MODEL", model)]))
+                .check()
+                .is_empty()
+        );
+        // None given is a model not given yet, which nothing reads until the model is used.
+        assert!(config(MINIMUM).check().is_empty());
+        for wrong in [
+            "not json",
+            r#"{"format": 2, "workloads": []}"#,
+            r#"{"format": 1}"#,
+        ] {
+            let problems = config(&with(&[("CREDENTIALS_AGENT_AUTHORITY_MODEL", wrong)])).check();
+            assert!(
+                problems
+                    .iter()
+                    .any(|p| p.contains("CREDENTIALS_AGENT_AUTHORITY_MODEL")),
+                "{wrong}: {problems:?}"
+            );
+        }
     }
 
     #[test]

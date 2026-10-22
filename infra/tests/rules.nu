@@ -233,6 +233,45 @@ def main [] {
             assert equal ($f.entries | last | select publish subscribe groups) { publish: [], subscribe: [], groups: [] }
         }
 
+        "the authority model's facts are every workload, by its one identity, with its whole set of topics and their causes": {
+            let topic = {|name, access, from, extra| { name: $name, access: $access, from: $from } | merge $extra }
+            let r = [
+                { who: "kube-observer", namespace: "polar", service_account: "kube-observer", issuer: "credentials-agent", bootstrap: false
+                  groups: ["self-test" "cassini-client"]
+                  topics: [
+                    (do $topic "kubernetes.cluster.consumer" "publish" "declared" { purpose: "what it sees", causes: [{ kind: "outside", name: "the Kubernetes API" }] })
+                    (do $topic "polar-authority-snapshot-requests" "publish" "implied" { rule: "agent", causes: [{ kind: "registered" }] })
+                    (do $topic "polar-authority-snapshot-replies" "subscribe" "implied" { rule: "agent", answers: [{ kind: "registered" }] })
+                  ] }
+                # A bootstrap service is in the model too, though cert-issuer issues it: the invariants run through it.
+                { who: "credentials-agent-observer", namespace: "polar", service_account: "credentials-agent-observer", issuer: "cert-issuer", bootstrap: true
+                  groups: ["cassini-client"]
+                  topics: [(do $topic "credentials-workload-issuance-requests" "publish" "declared" { causes: [{ kind: "http", name: "/workload/issue" }] })] }
+            ]
+            let m = (model_facts $r "cluster.local")
+            assert equal $m.format 1
+            assert equal ($m.workloads | get workload) ["credentials-agent-observer" "kube-observer"]
+            let kube = ($m.workloads | where workload == "kube-observer" | first)
+            assert equal $kube.identity "kube-observer.polar.serviceaccount.cluster.local"
+            assert equal $kube.issuer "credentials-agent"
+            assert equal $kube.bootstrap false
+            assert equal $kube.groups ["cassini-client" "self-test"]
+            # Every topic of the set, the implied ones included, with what it says about causes.
+            assert equal ($kube.topics | get name) ["kubernetes.cluster.consumer" "polar-authority-snapshot-replies" "polar-authority-snapshot-requests"]
+            assert equal ($kube.topics | where name == "polar-authority-snapshot-replies" | first | get answers) [{ kind: "registered" }]
+            assert equal ($kube.topics | where name == "kubernetes.cluster.consumer" | first | get causes) [{ kind: "outside", name: "the Kubernetes API" }]
+            let observer = ($m.workloads | where workload == "credentials-agent-observer" | first)
+            assert equal [$observer.issuer $observer.bootstrap] ["cert-issuer" true]
+            # One identity per workload: the token's subject is nowhere in it (authority-model.md, "Decisions").
+            assert (not ($m | to json | str contains "system:serviceaccount")) "a token subject in the model"
+        }
+
+        "a workload whose identity is not its name has no place in the model": {
+            let r = [{ who: "kube-observer", namespace: "polar", service_account: "default", issuer: "credentials-agent", bootstrap: false, groups: [], topics: [] }]
+            let refused = (try { model_facts $r "cluster.local"; null } catch {|e| $e.msg })
+            assert ($refused | str contains "kube-observer") $"($refused)"
+        }
+
         "the credentials agent's floor names each workload it issues, with its declared and family topics, and no other": {
             let topic = {|name, access, from| { name: $name, access: $access, from: $from } }
             let r = [

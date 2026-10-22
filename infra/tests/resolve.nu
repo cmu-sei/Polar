@@ -127,6 +127,33 @@ def main [] {
     $env.POLAR_SCAFFOLD_DIR = $scaffolds
 
     let tests = {
+        "the credentials agent is given the authority model: every workload of the target, by its one identity": {
+            # The credentials agent as this workspace builds it (the images on the cluster may predate the model), and
+            # every other agent as its image has it.
+            let dir = (mktemp --directory)
+            cp ($env.POLAR_SCAFFOLD_DIR | path join "*.json" | into glob) $dir
+            let agents = ($INFRA | path dirname | path join "src/agents")
+            let built = (do { cd $agents; ^cargo build -q -p credentials-agent-consumer --bin credentials-agent-consumer } | complete)
+            assert equal $built.exit_code 0 $"cannot build the credentials agent: ($built.stderr | lines | last 3 | str join '; ')"
+            let target_dir = ($env.CARGO_TARGET_DIR? | default ($agents | path join "target"))
+            ^($target_dir | path join "debug/credentials-agent-consumer") --scaffold | save --force ($dir | path join "credentials-agent.json")
+            let model = (with-env { POLAR_SCAFFOLD_DIR: $dir } {
+                env_value (resolve_for "local" "credentials-agent") "CREDENTIALS_AGENT_AUTHORITY_MODEL" "local"
+            })
+            rm -rf $dir
+            let m = ($model | from json)
+            assert equal $m.format 1
+            let named = ($m.workloads | get workload)
+            for w in ["cassini" "credentials-agent" "credentials-agent-observer" "polar-scheduler" "polar-scheduler-observer" "polar-git-server" "kube-observer"] {
+                assert ($w in $named) $"($w) is not in the model: ($named | str join ', ')"
+            }
+            for w in $m.workloads {
+                assert equal $w.identity $"($w.workload).polar.serviceaccount.cluster.local"
+            }
+            assert (not ($model | str contains "system:serviceaccount")) "a token subject in the model"
+            let observer = ($m.workloads | where workload == "credentials-agent-observer" | first)
+            assert equal [$observer.issuer $observer.bootstrap] ["cert-issuer" true]
+        }
         "every workload's budget is in what the agent is given, as the code declared": {
             for w in ($BUDGETS | transpose name secs) {
                 let t = (target_for $w.name)
