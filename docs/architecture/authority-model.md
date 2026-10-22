@@ -213,6 +213,18 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
   would stop within one certificate lifetime: renewal for polar-scheduler no longer closes"). Chosen over naming
   renewal as a third invariant: the same policies are refused, with a truer reason, and a renewal path that no
   invariant depends on (there is none today) would only be reported.
+- **The model lives in the credentials agent, as a crate of its own (2026-10-22).** A crate under
+  `src/agents/credentials-agent/`, beside `common`, `consume` and `observe`, holding the facts' types, the rules (one
+  `ascent!` block) and the comparison of two pairs, with no actor or Cassini in it, so it is tested alone and could move
+  into an agent of its own later. The consumer uses it where it accepts a `policy` or `groups` section. Chosen over a
+  separate policy agent: accepting a policy and publishing it as authority are one step in the credentials agent, and
+  split across two agents they would be a two-party commit; a policy agent would be no less trusted (whatever accepts
+  policy can lock everyone out), and it would add a bootstrap service and a path the invariants must protect. The
+  spike's figures (tens of microseconds an evaluation) leave no load reason to split. Reasons to split it later: the
+  analysis growing heavy enough to slow the credentials agent, or needing a release cadence of its own. One consequence
+  for the build: a section's `validate` today is a pure function of the body (`authority_sections.rs`), and the check
+  needs the catalog's facts and the other document of the pair, so the consumer judges a policy or groups document
+  where it holds both (`supervisor.rs`, `pass_on_section`), before the section is accepted.
 - **A groups document is checked the same way as a policy (2026-10-22).** Against the same rules: the two invariants,
   renewal derived beneath them, over the same catalog facts. The rules are judged on a pair, the policy and the groups
   document, and do not ask which of them arrived. When either arrives, the authority:
@@ -370,7 +382,8 @@ Expected cost: a few thousand evaluations per document, which should take well u
 
 ## Where it lives
 
-In the credentials agent, as its own crate and actor, behind an interface that would let it be split out later:
+In the credentials agent, as its own crate ("Decisions", 2026-10-22), behind an interface that would let it be split out
+later:
 
 - accepting a policy and publishing it as authority are one step there today; split across two agents they would be a
   two-party commit;
@@ -464,7 +477,8 @@ To settle one at a time, before building:
 4. ~~Whether the groups document is checked too.~~ Settled: the same way as a policy, against the same rules ("Decisions",
    2026-10-22).
 5. ~~The engine.~~ Settled: `ascent`, after the research recorded in "The engine" (2026-10-22).
-6. The credentials agent, or a policy agent of its own.
+6. ~~The credentials agent, or a policy agent of its own.~~ Settled: the credentials agent, as a crate of its own
+   ("Decisions", 2026-10-22).
 7. What a refusal and an effect report look like, and where they are recorded (the ledger, the configuration outcome
    the scheduler records, or both).
 8. Persons: only those the groups document names, or others too.
