@@ -213,6 +213,43 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
   would stop within one certificate lifetime: renewal for polar-scheduler no longer closes"). Chosen over naming
   renewal as a third invariant: the same policies are refused, with a truer reason, and a renewal path that no
   invariant depends on (there is none today) would only be reported.
+- **A groups document is checked the same way as a policy (2026-10-22).** Against the same rules: the two invariants,
+  renewal derived beneath them, over the same catalog facts. The rules are judged on a pair, the policy and the groups
+  document, and do not ask which of them arrived. When either arrives, the authority:
+  1. forms the pair as it would stand: the new document with the other one in force;
+  2. asks Cedar about every request in the model under that pair, for the `allowed` facts (Cedar's `principal in
+     Group::"..."` reads the groups document's memberships);
+  3. runs the rules over those facts and the catalog's (the groups document's hierarchy also enters the Datalog
+     directly, as `group` and `parent`, where nested groups get their closure);
+  4. refuses the document whole, with the reason, if an invariant that holds now would not; otherwise accepts it and
+     records its effect.
+
+  A policy changes the rules Cedar applies, a groups document who is in which group; either can break an invariant
+  alone. A `forbid (principal in Group::"retired", action == Action::"publish", resource)` is accepted while no
+  workload is in `retired`; a later groups document that puts `polar-scheduler` in it would break correction with no
+  policy arriving, and is refused. The refusal names the groups document and the membership, though the `forbid` came
+  first; either document may be the fix (undo the membership, or narrow the `forbid`).
+
+## Two kinds of groups
+
+Polar has two, and "the groups document" is only the second (read from the code, 2026-10-22):
+
+1. **A certificate's groups.** Deployment-time. A workload's scaffold implies them (`cassini-client`, `encryption`,
+   `self-test`); the render puts them in the catalog, and the certificate carries them as `g:` names. Applying the
+   catalog is their sign-off; they change only with a redeploy.
+2. **The groups document.** Runtime configuration: the credentials agent's `groups` section
+   (`credentials-agent/consume/src/authority_sections.rs:50`): memberships (an identity to the groups it is in), and a
+   hierarchy of groups and roles (a group may be in other groups, a role may hold roles, capabilities and permissions).
+   It travels as the policy does: a holder of `c:update-groups` signs it, it is committed to the `polar-schedules`
+   repository, the scheduler pair forwards it to the credentials agent, and the credentials agent accepts it and
+   republishes it, signed, as authority to every agent and the broker.
+
+Neither is seeded: `infra/seeds/signed/` holds only `policy.cedar`, which up.nu's seed step signs and commits. No groups
+document exists in the sandbox, so today every principal's groups are its certificate's.
+
+Where the groups document names an identity, its list replaces that identity's certificate groups, for Cedar only
+(`polar-permissions/src/lib.rs:192`, `resolve_principal`). The floor, and so the broker's admission where policy is
+silent, always reads the certificate's groups.
 
 ## The proposal
 
@@ -324,8 +361,9 @@ that universe, with Cedar's own evaluator, and compares:
   what, which round trips stopped closing) is recorded with the outcome. So an administrator can still cut a workload
   off on purpose, to quarantine it.
 
-It runs on either document's arrival, against the pair as it would stand, so a groups document that moves a workload
-into a forbidden group is refused as a policy that forbids it would be. There is no second evaluator to drift from
+It runs on either document's arrival, against the pair as it would stand ("Decisions": a groups document is checked as
+a policy is), so a groups document that moves a workload into a forbidden group is refused as a policy that forbids it
+would be. There is no second evaluator to drift from
 Cedar, and no solver: Cedar has an SMT-based analysis for comparing policies, which a closed universe does not need.
 
 Expected cost: a few thousand evaluations per document, which should take well under a second; to be measured.
@@ -375,7 +413,8 @@ To settle one at a time, before building:
 2. ~~Which rules refuse and which only report.~~ Settled: hearing authority and correction refuse, renewal is derived as
    their dependency, and everything else is reported ("Decisions", 2026-10-22).
 3. ~~The vocabulary of causes.~~ Settled ("Decisions", 2026-10-22), to grow as Polar needs.
-4. Whether the groups document is checked too (proposed: yes, against the pair).
+4. ~~Whether the groups document is checked too.~~ Settled: the same way as a policy, against the same rules ("Decisions",
+   2026-10-22).
 5. The engine: `ascent`, `crepe`, `datafrog`, or a hand-written closure until paths need more.
 6. The credentials agent, or a policy agent of its own.
 7. What a refusal and an effect report look like, and where they are recorded (the ledger, the configuration outcome
