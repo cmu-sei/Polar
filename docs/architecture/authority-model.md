@@ -274,6 +274,15 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
   the sign-off of what a certificate carries, since the model is applied with the catalog. The cost is contained: the
   issuance code (`credentials-agent/consume/src/issuance.rs`, `issuance_floor.rs`) moves onto the model's types,
   `issuance_topics` goes from the render, and the issuance tests cover it.
+- **A groups document's keys are judged against what exists (2026-10-22).** Today a key is checked only for its
+  length and control characters (`credentials-agent/consume/src/authority_sections.rs:92`), so a typo
+  (`polar-scheduler.polar.serviceaccount.cluster.locl`) is accepted and applies to no one. The model knows every
+  workload identity (the catalog) and every account (the ledger), so:
+  - a key that names no identity the authority knows is reported, not refused: it shows in the outcome's summary ("names
+    no identity the authority knows: …"), since it may be deliberate (a person put in a group before their account
+    exists);
+  - a key that is no identity at all, neither a workload's identity nor a username, is `invalid`; the groups section's
+    own validation can judge that alone.
 - **A groups document is checked the same way as a policy (2026-10-22).** Against the same rules: the two invariants,
   renewal derived beneath them, over the same catalog facts. The rules are judged on a pair, the policy and the groups
   document, and do not ask which of them arrived. When either arrives, the authority:
@@ -587,8 +596,10 @@ To settle one at a time, before building:
 8. ~~Persons.~~ Settled: every account in the credentials agent's ledger ("Decisions", 2026-10-22).
 9. ~~Whether the render's projections are replaced.~~ Settled: the issuance floor is replaced when the model lands;
    cert-issuer's floor and the served workloads stay ("Decisions", 2026-10-22).
-10. Whether the model also checks what the inventory found unchecked: a groups document's keys against the catalog, and
-    who publishes on the credentials agent's request topics.
+10. Whether the model also checks what the inventory found unchecked. (a) A groups document's keys: settled ("Decisions",
+    2026-10-22). (b) Who publishes on the credentials agent's request topics: audited ("The consumer's request topics,
+    audited"); the three that proved nothing were removed; whether the other thirteen are also judged by Cedar
+    (`Action::"request"`, the floor being each topic's declared publishers) is open.
 
 ## Effect on stage 5b
 
