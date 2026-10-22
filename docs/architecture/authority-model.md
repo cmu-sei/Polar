@@ -399,7 +399,7 @@ recorded signed action (`CredentialsEvent::admin_effect`).
 
 ## The proposal
 
-Three parts. The standard names help: the authority is the policy administration point (it decides which policy is
+Three parts. The standard names help (XACML's, `oasis2013xacml`): the authority is the policy administration point (it decides which policy is
 in force); every agent and the broker are decision points and enforcement points (they evaluate the accepted policy
 locally). Only the first changes.
 
@@ -450,7 +450,8 @@ by the workload's one identity. cert-issuer keeps its own small floor, on purpos
 
 ### 2. Rules over the model
 
-Derived facts, in Datalog. For example:
+Derived facts, in Datalog (`ceri1989datalog` for the language: recursion, stratified negation, and why a bottom-up
+evaluation always ends). For example:
 
 ```
 % The groups policy sees: the groups document's, where it names the identity, else the certificate's.
@@ -559,7 +560,7 @@ signed documents like the policy, and a separate decision.
 
 ### Ascent, researched (2026-10-22)
 
-What it is: Datalog embedded in Rust by a macro, from Arash Sahebolamri, Thomas Gilray (University of Alabama at
+What it is (`sahebolamri2022ascent`, `sahebolamri2023byods`): Datalog embedded in Rust by a macro, from Arash Sahebolamri, Thomas Gilray (University of Alabama at
 Birmingham) and Kristopher Micinski (Syracuse). It is described in "Seamless Deductive Inference via Macros" (CC 2022,
 https://doi.org/10.1145/3497776.3517779), which reimplements the Rust borrow checker in it and benchmarks it close to
 Datafrog and Soufflé. Its custom data structures are in "Bring Your Own Data Structures to Datalog" (OOPSLA 2023,
@@ -752,3 +753,9 @@ and no Cassini.
 Slice 5 as planned (hand-written probes in `validate_policy`) is not built. Slices 6 (the agent's side) and 7 (the
 deploy and the measurement) do not depend on it and go ahead. Until the model is built, a `forbid` on an authority path
 can lock a deployment out now that the broker enforces.
+
+## References
+
+By key, as `docs/reference/citations.md` lists them, with links, licences and what each is for:
+`sahebolamri2022ascent`, `sahebolamri2023byods` and `ascent` (the engine); `ceri1989datalog` (Datalog);
+`cutler2024cedar` (Cedar); `oasis2013xacml` (the names of the parts of an authorization system).
