@@ -82,6 +82,27 @@ identity (the Listener's), not the session's.
 - **Disconnect:** EOF or an I/O error sends `DisconnectRequest` (`listener.rs:722-772`); a goodbye ends the session, a
   dropped connection detaches it for the retention window (`session.rs:208-339`).
 
+## One session per identity, and fan-out
+
+Read 2026-10-22, after stage 5a found the first while measuring (`broker-baseline.md`, finding 6).
+
+- **The supersede rule.** A new session of an identity takes over every older session of it, including one whose
+  client still looks connected (`supersede_older`, `session.rs:346`). The older one can no longer be resumed (597); its
+  connection is closed, all but the new client's (`CloseConnection`, 854); its subscribers stop forwarding and hold
+  what arrives (`hold_subscriptions`, `subscriber.rs:208`), and it stops once they all do (`complete_takeover`). When
+  the new session subscribes to a topic it inherits what the superseded sessions of its identity held on it, oldest
+  first (`claim_held`, `subscriber.rs:237`); what nobody claims is let go a retention window after the takeover
+  (`end_expired_sessions`). An instance that lost its session and asks to resume it is given a new one that supersedes
+  nothing, so two live instances do not take turns closing each other (682). Tests: `broker/tests/supersede.rs`.
+- **Why:** a replaced pod (a rollout, a Job retry) usually registers before the broker sees the old connection is dead.
+  The replacement takes over and inherits what was waiting for the old one.
+- **Fan-out.** A topic delivers every message to every subscriber (`topic.rs:728`). There are no consumer groups.
+- **So a workload cannot scale out.** The identity is the workload's (the certificate's first DNS SAN), so its pods
+  supersede each other. Identities per pod would stop that but would not share the work: with fan-out, every replica
+  receives every message (two `kube-consumer`s would both write each to the graph). Scaling a consumer or processor out
+  needs both a way to tell a replica from a replacement and delivery shared within a group; an observer that scales out
+  has to split its source, which the broker cannot do for it. Open, in `remaining-work.md`.
+
 ## What is refused, and what the client learns
 
 - The Listener refuses a publish or subscribe with no session or a mismatched one, and writes the refusal itself

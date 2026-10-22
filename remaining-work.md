@@ -56,8 +56,17 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
 
 - **Pods of one workload share an identity**, and the broker keeps one live session per identity (a new one supersedes
   the rest and closes their connections). So a workload cannot run several pods at once, and the harness cannot measure
-  several connections. A decision: an identity per pod (a workload per pod, or a pod-instance name in the certificate),
-  or sessions keyed by pod instance as well as identity.
+  several connections. Horizontal scaling is wanted (David, 2026-10-22), and needs two things, not one
+  (`docs/architecture/cassini-broker.md`, "One session per identity, and fan-out"):
+  - *Who a connection is:* a replica runs beside the others, a replacement takes over; the broker cannot tell them apart
+    from the certificate today. Options: an identity per pod (a workload per pod, or a pod-instance name in the
+    certificate), or sessions keyed by pod instance as well as identity.
+  - *Who gets a message:* topics fan out to every subscriber, so replicas with identities of their own would each
+    process every message. Scaling a consumer or processor needs consumer groups: replicas share a subscription and each
+    message goes to one of them; ungrouped subscribers keep fan-out. The workload is the natural group, the pod its
+    member; the supersede rule would then apply per member. Observers that scale out must split their source instead.
+  - Cedar decides per workload either way (the replicas hold the same authority), so stage 5b and its cache do not
+    depend on this. Not needed yet; decide before any workload runs more than one replica.
 - The Cassini client's read loop goes on after a failed `read_exact`, reading from the middle of a frame (`cassini/client/src/lib.rs`,
   the read loop); it should end the transport.
 - Stage 5b is measured against the baseline, without and with its decision cache.
