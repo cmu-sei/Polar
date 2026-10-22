@@ -195,6 +195,24 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
     by policy too;
   - an invariant names its entry by agent and cause, with the constant the code uses (a route is a constant in the shared
     crate), so the invariant cannot drift from the route.
+- **Two invariants refuse; renewal is derived as their dependency (2026-10-22).** The authority's code names two:
+  **hearing authority** (`polar-authority-updates` reaches every agent, and every agent's snapshot request is answered)
+  and **correction** (a push to the git server's schedules repository reaches the credentials agent). A policy or groups
+  document under which either stops holding is refused. Everything else is reported, never refused: another round trip
+  that stops closing, a topic left with no permitted publisher, an agent cut off from its own work, the `encryption`
+  agents' key requests; so an administrator can still cut a workload off on purpose and see what it loses.
+  Renewal is not a third named invariant but a dependency the rules derive. No certificate is renewed in place: a pod
+  rejuvenates as its certificate nears its end (about hourly in the sandbox) and its new init is issued one, which for
+  every workload the credentials agent issues goes polar-init, the observer's `/workload/issue`, its publish on
+  `credentials-workload-issuance-requests`, and the consumer's reply. That topic is shared, so a `forbid` on it cuts
+  issuance for all twelve such workloads at once (quarantining one is done in issuance, by its grant), among them the
+  correction path's git server and scheduler pair: nothing fails at first, and within one certificate lifetime
+  correction is gone, though a check of messages alone passed it. So an agent stays up only while its certificates can
+  be renewed (a bootstrap service renews through cert-issuer, outside policy), and an invariant holds only through
+  agents that stay up: a policy that cuts renewal is refused as breaking correction, with that reason ("correction
+  would stop within one certificate lifetime: renewal for polar-scheduler no longer closes"). Chosen over naming
+  renewal as a third invariant: the same policies are refused, with a truer reason, and a renewal path that no
+  invariant depends on (there is none today) would only be reported.
 
 ## The proposal
 
@@ -269,6 +287,11 @@ reach(X,Y) :- edge(X,Y).
 reach(X,Z) :- reach(X,Y), edge(Y,Z).
 % A round trip: an entry's request comes back to where it is answered.
 closes(A,E) :- entry(A,E,Sent,Answer), reach(out(A,Sent), in(A,Answer)).
+% An agent stays up only while its certificates can be renewed ("Decisions": renewal is a dependency, not an invariant).
+lives(W) :- issuer(W, cert_issuer).
+lives(W) :- issuer(W, credentials_agent), closes(observer, http(WORKLOAD_ISSUE)).
+% An invariant path holds only through agents that stay up.
+held(out(A,T), in(B,T)) :- edge(out(A,T), in(B,T)), lives(A), lives(B).
 % A delivery: what an entry starts reaches every subscriber of T (stratified negation: a subscriber it misses).
 reached(A,E,Y)   :- causes(A,E,O), reach(out(A,O), Y).
 misses(A,E,T,B)  :- causes(A,E,_), subscribes(B,T), !reached(A,E,in(B,T)).
@@ -277,7 +300,8 @@ missed(A,E,T)    :- misses(A,E,T,_).
 ```
 
 "Renewal still works" is then `closes(observer, http("/workload/issue"))` under the proposed policy: no list of topics
-is written for it. Reachability is where recursion earns its keep, and Cedar cannot express it, deliberately
+is written for it. The invariants are judged over `held` edges, so an agent that would not be renewed carries nothing
+for them; `held` is not recursive through `lives`, since renewal's own round trip is judged over `edge`. Reachability is where recursion earns its keep, and Cedar cannot express it, deliberately
 (`policy-enforcement.md`, "Decisions": Datalog was kept out unless rules must derive facts recursively; these do).
 Cedar still decides each request; its answers are the `allowed` facts, and Datalog does the closure.
 
@@ -291,10 +315,11 @@ document names, against every topic in any floor or named by either policy, for 
 a groups document arrives, the credentials agent evaluates the current pair (policy, groups) and the proposed pair over
 that universe, with Cedar's own evaluator, and compares:
 
-- a round trip the authority's code names as an invariant (hearing authority, renewal, correction) that closes under the
-  current pair and not under the proposed one refuses the document whole, with the reason: the round trip, the edge
-  lost, and the rule that denies it. For example: "refused: renewal (credentials-agent-observer's /workload/issue) no
-  longer closes: the policy forbids credentials-agent-observer to publish credentials-workload-issuance-requests";
+- an invariant the authority's code names (hearing authority, correction: "Decisions") that holds under the current pair
+  and not under the proposed one refuses the document whole, with the reason: the invariant, the edge or the renewal
+  lost, and the rule that denies it. For example: "refused: correction would stop within one certificate lifetime:
+  renewal for polar-scheduler no longer closes, since the policy forbids credentials-agent-observer to publish
+  credentials-workload-issuance-requests";
 - any other change, a round trip that is not an invariant included, is accepted, and its effect (who gained, who lost
   what, which round trips stopped closing) is recorded with the outcome. So an administrator can still cut a workload
   off on purpose, to quarantine it.
@@ -347,8 +372,8 @@ signed documents like the policy, and a separate decision.
 To settle one at a time, before building:
 
 1. ~~Where the path facts come from.~~ Settled: local causes, derived paths ("Decisions", 2026-10-22).
-2. Which rules refuse and which only report. Proposed: the round trips the authority's code names (hearing authority,
-   renewal, correction) refuse; every other round trip, and a topic left with no permitted publisher, is reported.
+2. ~~Which rules refuse and which only report.~~ Settled: hearing authority and correction refuse, renewal is derived as
+   their dependency, and everything else is reported ("Decisions", 2026-10-22).
 3. ~~The vocabulary of causes.~~ Settled ("Decisions", 2026-10-22), to grow as Polar needs.
 4. Whether the groups document is checked too (proposed: yes, against the pair).
 5. The engine: `ascent`, `crepe`, `datafrog`, or a hand-written closure until paths need more.
