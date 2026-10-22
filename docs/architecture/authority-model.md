@@ -283,6 +283,17 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
     exists);
   - a key that is no identity at all, neither a workload's identity nor a username, is `invalid`; the groups section's
     own validation can judge that alone.
+- **Every request to the credentials agent is also judged by Cedar, built with the model (2026-10-22).** The consumer
+  asks Cedar whether the broker-verified publisher may make the request (`Action::"request"` on a resource naming the
+  request, such as `Request::"workload-issuance"`), and where policy is silent the floor admits each topic's declared
+  publishers, read from the model's facts. Cedar stays the decider everywhere ("Cedar overrides both ways"), the floor
+  comes from declarations, and the model covers the action as any other: a permit opening it shows in the effect report.
+  The audit found no hole it would close today (each of the thirteen topics proves itself, answers only with public
+  data, or carries the broker's publisher and Cedar); it is defense in depth, and it gives a request topic added later
+  "who may send this" from its declaration, rather than from a handler's author remembering a proof. Built with the
+  model, not before it: the floor needs the declared publishers, which are the model's facts, and building it first
+  would need a second list of publishers fed by hand. It costs an action and a resource type in the schema, and a
+  decision per request (about 0.2 ms, at the credentials agent's low rate of requests).
 - **A groups document is checked the same way as a policy (2026-10-22).** Against the same rules: the two invariants,
   renewal derived beneath them, over the same catalog facts. The rules are judged on a pair, the policy and the groups
   document, and do not ask which of them arrived. When either arrives, the authority:
@@ -596,10 +607,10 @@ To settle one at a time, before building:
 8. ~~Persons.~~ Settled: every account in the credentials agent's ledger ("Decisions", 2026-10-22).
 9. ~~Whether the render's projections are replaced.~~ Settled: the issuance floor is replaced when the model lands;
    cert-issuer's floor and the served workloads stay ("Decisions", 2026-10-22).
-10. Whether the model also checks what the inventory found unchecked. (a) A groups document's keys: settled ("Decisions",
+10. ~~Whether the model also checks what the inventory found unchecked.~~ (a) A groups document's keys: settled ("Decisions",
     2026-10-22). (b) Who publishes on the credentials agent's request topics: audited ("The consumer's request topics,
-    audited"); the three that proved nothing were removed; whether the other thirteen are also judged by Cedar
-    (`Action::"request"`, the floor being each topic's declared publishers) is open.
+    audited"); the three that proved nothing were removed; every request is also judged by Cedar, built with the model
+    ("Decisions", 2026-10-22). All settled.
 
 ## Effect on stage 5b
 
