@@ -27,10 +27,15 @@
 //! Its settings are a section of its own (`settings.rs`), read from the snapshot the builder took.
 
 use crate::supervisor::{ConsumerSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
+use polar_agent_builder::{Capability, Cause, Configured, PolarAgent, StartError, TopicDecl};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
+
+/// This agent's own configuration topic, on which its `policy` and `groups` sections arrive and are accepted, each a
+/// cause of an authority update. The builder subscribes it by rule; the declaration check refuses a cause the agent does
+/// not subscribe to, so this cannot drift from `agent.<name>.configuration` unseen.
+const CONFIGURATION_TOPIC: &str = "agent.credentials-agent.configuration";
 
 pub struct CredentialsConsumer;
 
@@ -104,65 +109,88 @@ impl PolarAgent for CredentialsConsumer {
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC,
             "the answer to an administrator action",
-        ),
+        )
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC)]),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_ACCOUNT_REPLIES_TOPIC,
             "the answer to an account request",
-        ),
+        )
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC)]),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_ISSUANCE_REPLIES_TOPIC,
             "an issued certificate, or why not",
-        ),
+        )
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_ISSUANCE_REQUESTS_TOPIC)]),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REPLIES_TOPIC,
             "a normalized identity, or why not",
-        ),
+        )
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC)]),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC,
             "its escrow public key",
-        ),
+        )
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC)]),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_CERTIFICATE_REPLIES_TOPIC,
             "the answer to a certificate lookup",
         )
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC)])
         .waiting("nothing in the catalog asks for a certificate lookup yet, so nothing reads the answer"),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_STORE_SECRET_REPLIES_TOPIC,
             "whether a secret was stored",
-        ),
+        )
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC)]),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC,
             "a secret, encrypted to the requester, or the refusal",
-        ),
+        )
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC)]),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
             "an agent's escrow keypair, or the refusal",
-        ),
+        )
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC)]),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
             "an issued escrow keypair, or why not",
-        ),
+        )
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC)]),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
             "another agent's escrow public key",
-        ),
+        )
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC)]),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_DECRYPT_ON_BEHALF_OF_REPLIES_TOPIC,
             "the answer to a decryption on behalf of an agent",
         )
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC)])
         .waiting("nothing in the catalog asks for a decryption on behalf of an agent yet, so nothing reads the answer"),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC,
             "a workload's certificate, or why not",
-        ),
+        )
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC)]),
         TopicDecl::publish(
             credentials_agent_common::authority_update::AUTHORITY_UPDATES_TOPIC,
             "a signed change of policy, groups or revoked serials",
-        ),
+        )
+        .because(&[
+            Cause::Topic(CONFIGURATION_TOPIC),
+            Cause::Topic(credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC),
+            Cause::Registered,
+        ]),
         TopicDecl::publish(
             credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
             "the signed current policy and permissions, on request, at start and every half hour",
-        ),
+        )
+        .because(&[
+            Cause::Topic(credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC),
+            Cause::Registered,
+            Cause::Timer("republish"),
+        ]),
     ];
     const SECTIONS: &'static [&'static Section] = &[
         &polar::graph::environment::SECTION,

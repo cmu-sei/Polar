@@ -81,7 +81,7 @@ pub(crate) mod startup;
 pub mod topic_gate;
 pub mod topics;
 pub use shutdown::{DEFAULT_SHUTDOWN_BUDGET, SHUTDOWN_BUDGET_ENV};
-pub use topics::{Access, TopicDecl, TopicSet};
+pub use topics::{Access, Cause, TopicDecl, TopicSet};
 
 use cassini_client::TcpClientMessage;
 use cassini_types::ClientEvent;

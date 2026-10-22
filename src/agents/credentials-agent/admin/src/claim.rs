@@ -61,7 +61,11 @@ pub async fn run(args: ClaimArgs) -> Result<(), String> {
     }
 
     let http = reqwest::Client::new();
-    let url = format!("{}/account", args.observer_url.trim_end_matches('/'));
+    let url = format!(
+        "{}{}",
+        args.observer_url.trim_end_matches('/'),
+        credentials_agent_common::routes::ACCOUNT
+    );
     let claimant = Claimant::Native {
         username: args.username.clone(),
         email: args.email.clone(),

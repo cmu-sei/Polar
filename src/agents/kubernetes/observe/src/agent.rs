@@ -24,7 +24,7 @@
 //! What kube-observer is, as the infrastructure asks to be told: see `polar_agent_builder::PolarAgent`.
 
 use crate::supervisor::{ClusterObserverSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
+use polar_agent_builder::{Capability, Cause, Configured, PolarAgent, StartError, TopicDecl};
 use ractor::Actor;
 use std::time::Duration;
 
@@ -39,7 +39,8 @@ impl PolarAgent for KubeObserver {
     const TOPICS: &'static [TopicDecl] = &[TopicDecl::publish(
         kube_common::KUBERNETES_CONSUMER,
         "every change it sees to a watched resource, of any kind, as a RawKubeEvent (JSON)",
-    )];
+    )
+    .because(&[Cause::Outside("the Kubernetes API")])];
     const HELP: Option<&'static str> = Some(
         "kube-observer watches the cluster's resources through the Kubernetes API, with the \
          service account the deployment gives it (read access to everything, nothing else), and \

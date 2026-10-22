@@ -22,7 +22,7 @@
 */
 
 use crate::supervisor::{GitServerSupervisor, SERVICE_NAME, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
+use polar_agent_builder::{Capability, Cause, Configured, PolarAgent, StartError, TopicDecl};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
@@ -40,7 +40,8 @@ impl PolarAgent for GitServer {
     const TOPICS: &'static [TopicDecl] = &[TopicDecl::publish(
         polar_git_server_common::POLAR_GIT_REPO_CHANGED_TOPIC,
         "each push it accepted (repository, ref, old and new commit, pusher), when it has a broker",
-    )];
+    )
+    .because(&[Cause::Http(polar_git_server_common::RECEIVE_PACK_ROUTE)])];
     const SECTIONS: &'static [&'static Section] = &[&crate::settings::SECTION];
     const HELP: Option<&'static str> = Some(
         "The git server serves the repositories its configuration file declares to the user's own \

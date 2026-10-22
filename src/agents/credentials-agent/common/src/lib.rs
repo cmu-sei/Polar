@@ -45,6 +45,7 @@ pub mod identity;
 pub mod issuance;
 pub mod observer;
 pub mod retrieve_secret;
+pub mod routes;
 pub mod secret;
 pub mod workload_issuance;
 

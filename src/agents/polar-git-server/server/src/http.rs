@@ -65,7 +65,10 @@ pub fn router(state: ServerState) -> Router {
         .route("/admin/repos/:name", put(crate::admin::create_repo))
         .route("/:repo/info/refs", get(info_refs))
         .route("/:repo/git-upload-pack", post(upload_pack))
-        .route("/:repo/git-receive-pack", post(receive_pack))
+        .route(
+            polar_git_server_common::RECEIVE_PACK_ROUTE,
+            post(receive_pack),
+        )
         .layer(DefaultBodyLimit::max(limit))
         .with_state(state)
 }

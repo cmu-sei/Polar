@@ -38,7 +38,11 @@ pub async fn request_admin_action(
     signed: &SignedAdminAction,
     timeout: Duration,
 ) -> Result<AdminActionReply, String> {
-    let url = format!("{}/admin-action", observer_url.trim_end_matches('/'));
+    let url = format!(
+        "{}{}",
+        observer_url.trim_end_matches('/'),
+        credentials_agent_common::routes::ADMIN_ACTION
+    );
 
     let client = reqwest::Client::builder()
         .timeout(timeout)

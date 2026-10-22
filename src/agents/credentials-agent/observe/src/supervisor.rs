@@ -204,17 +204,18 @@ pub struct ObserverSupervisorState {
 
 /// Every route the observer serves. Written once so a test can serve exactly what the pod does.
 pub(crate) fn routes(state: Arc<ObserverState>) -> Router {
+    use credentials_agent_common::routes;
     Router::new()
-        .route("/issue", post(issue))
-        .route("/identity", post(identity))
-        .route("/account", post(account))
-        .route("/admin-action", post(admin_action))
+        .route(routes::ISSUE, post(issue))
+        .route(routes::IDENTITY, post(identity))
+        .route(routes::ACCOUNT, post(account))
+        .route(routes::ADMIN_ACTION, post(admin_action))
         // The public escrow certificate of an agent, for someone outside the cluster to encrypt to.
-        .route("/agent-escrow-key", post(agent_escrow_key))
+        .route(routes::AGENT_ESCROW_KEY, post(agent_escrow_key))
         // A workload's own request, before it has a certificate: open a session, then ask with the token sealed
         // to it. The observer relays both and never holds the token.
-        .route("/workload/session", post(workload_session))
-        .route("/workload/issue", post(workload_issue))
+        .route(routes::WORKLOAD_SESSION, post(workload_session))
+        .route(routes::WORKLOAD_ISSUE, post(workload_issue))
         .with_state(state)
 }
 

@@ -1040,7 +1040,8 @@ mod tests {
         const HELP: Option<&'static str> = Some("It reads from the bucket and writes the graph.");
         const TOPICS: &'static [TopicDecl] = &[
             TopicDecl::subscribe("bucket.changes", "what changed in the bucket"),
-            TopicDecl::publish("bucket.copied", "what it copied"),
+            TopicDecl::publish("bucket.copied", "what it copied")
+                .because(&[crate::topics::Cause::Topic("bucket.changes")]),
         ];
 
         async fn start(configured: Configured) -> Result<(), StartError> {

@@ -26,7 +26,7 @@
 
 use crate::supervisor::{SERVICE_NAME, SHUTDOWN_BUDGET, SchedulerSupervisor};
 use polar_agent_builder::{
-    Capability, Configured, PolarAgent, StartError, TopicDecl, topics::FamilyDecl,
+    Capability, Cause, Configured, PolarAgent, StartError, TopicDecl, topics::FamilyDecl,
 };
 use ractor::Actor;
 use std::time::Duration;
@@ -52,7 +52,8 @@ impl PolarAgent for SchedulerProcessor {
     const TOPIC_FAMILIES: &'static [FamilyDecl] = &[FamilyDecl::publish(
         "agent.{workload}.configuration",
         "a signed document for the workload, forwarded untouched for it to verify",
-    )];
+    )
+    .because(&[Cause::Topic(polar_scheduler_common::SCHEDULER_IN_TOPIC)])];
     const HELP: Option<&'static str> = Some(
         "The processor subscribes to the changes the scheduler observer publishes from the \
          schedules repository (scheduler.in). It writes each signed document to the graph and, \

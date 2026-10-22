@@ -70,7 +70,11 @@ pub async fn run(args: BootstrapArgs) -> Result<(), String> {
 
     let token = mint_token(&args).await?;
     let http = reqwest::Client::new();
-    let url = format!("{}/account", args.observer_url.trim_end_matches('/'));
+    let url = format!(
+        "{}{}",
+        args.observer_url.trim_end_matches('/'),
+        credentials_agent_common::routes::ACCOUNT
+    );
     let claimant = Claimant::Bootstrap { credential: token };
 
     // Phase 1: prove the identity, learn the account id.

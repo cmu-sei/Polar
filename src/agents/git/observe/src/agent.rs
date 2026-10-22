@@ -26,7 +26,7 @@
 
 use crate::settings;
 use crate::supervisor::{RootSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
+use polar_agent_builder::{Capability, Cause, Configured, PolarAgent, StartError, TopicDecl};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
@@ -50,11 +50,19 @@ impl PolarAgent for GitObserver {
         TopicDecl::publish(
             polar::topics::GIT_REPOSITORY_EVENTS,
             "the commits and ref updates it finds",
-        ),
+        )
+        .because(&[
+            Cause::Topic(git_agent_common::GIT_REPO_CONFIG_EVENTS),
+            Cause::Timer("observe"),
+        ]),
         TopicDecl::publish(
             git_agent_common::status::GIT_REPO_OBSERVATION_STATUS,
             "how each attempt to observe a repository went",
-        ),
+        )
+        .because(&[
+            Cause::Topic(git_agent_common::GIT_REPO_CONFIG_EVENTS),
+            Cause::Timer("observe"),
+        ]),
     ];
     const SECTIONS: &'static [&'static Section] = &[&settings::SECTION];
     const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] =

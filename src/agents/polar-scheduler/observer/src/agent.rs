@@ -23,7 +23,7 @@
 
 use crate::supervisor::{SERVICE_NAME, SHUTDOWN_BUDGET, SchedulerObserverSupervisor};
 use polar_agent_builder::{
-    Capability, Configured, PolarAgent, StartError, TopicDecl, topics::FamilyDecl,
+    Capability, Cause, Configured, PolarAgent, StartError, TopicDecl, topics::FamilyDecl,
 };
 use polar_env::Section;
 use ractor::Actor;
@@ -48,12 +48,19 @@ impl PolarAgent for SchedulerObserver {
         TopicDecl::publish(
             polar_scheduler_common::SCHEDULER_IN_TOPIC,
             "each schedule created, changed or deleted in the checkout",
-        ),
+        )
+        .because(&[
+            Cause::Topic(polar_git_server_common::POLAR_GIT_REPO_CHANGED_TOPIC),
+            Cause::Timer("pull"),
+        ]),
     ];
     const TOPIC_FAMILIES: &'static [FamilyDecl] = &[FamilyDecl::publish(
         "agent.{workload}.configuration",
         "the documents held for the workload, replayed when it asks",
-    )];
+    )
+    .because(&[Cause::Topic(
+        polar_scheduler_common::CONFIGURATION_REPLAY_TOPIC,
+    )])];
     const SECTIONS: &'static [&'static Section] = &[&crate::settings::SECTION];
     const HELP: Option<&'static str> = Some(
         "The observer clones the schedules repository from its remote, watches the checkout, \

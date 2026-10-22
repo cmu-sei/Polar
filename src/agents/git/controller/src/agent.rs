@@ -26,12 +26,17 @@
 
 use crate::SERVICE_NAME;
 use crate::supervisor::{RootSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
+use polar_agent_builder::{Capability, Cause, Configured, PolarAgent, StartError, TopicDecl};
 use ractor::Actor;
 use std::time::Duration;
 
 /// What the agent calls itself: the name a configuration or a command is addressed to.
 pub const AGENT_NAME: &str = "git-repo-controller";
+
+/// This agent's own configuration topic: a document on it changes the set of repositories, a cause of announcing it.
+/// The builder subscribes it by rule; the declaration check refuses a cause the agent does not subscribe to, so this
+/// cannot drift from `agent.<name>.configuration` unseen.
+const CONFIGURATION_TOPIC: &str = "agent.git-repo-controller.configuration";
 
 pub struct GitController;
 
@@ -53,11 +58,20 @@ impl PolarAgent for GitController {
         TopicDecl::publish(
             git_agent_common::GIT_REPO_CONFIG_EVENTS,
             "the whole set of repositories to observe, for the observer",
-        ),
+        )
+        .because(&[
+            Cause::Registered,
+            Cause::Topic(CONFIGURATION_TOPIC),
+            Cause::Topic(git_agent_common::proposal::PROPOSAL_OBSERVE_REPO_TOPIC),
+            Cause::Timer("republish"),
+        ]),
         TopicDecl::publish(
             git_agent_common::proposal::PROPOSAL_DECISIONS_TOPIC,
             "what it decided about each proposal, and why",
-        ),
+        )
+        .because(&[Cause::Topic(
+            git_agent_common::proposal::PROPOSAL_OBSERVE_REPO_TOPIC,
+        )]),
     ];
     const SECTIONS: &'static [&'static polar_env::Section] = &[&crate::settings::SECTION];
     const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] =

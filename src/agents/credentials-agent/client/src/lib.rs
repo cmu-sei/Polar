@@ -130,7 +130,7 @@ impl ObserverClient {
         csr_pem: &str,
         credential: &str,
     ) -> Result<IssuanceReply, ObserverClientError> {
-        let url = format!("{}/issue", self.base_url);
+        let url = format!("{}{}", self.base_url, credentials_agent_common::routes::ISSUE);
         let body = IssuanceRequest {
             csr_pem: csr_pem.to_string(),
             credential: credential.to_string(),
@@ -160,7 +160,11 @@ impl ObserverClient {
     }
     /// Asks for a session to seal a token to: `POST /workload/session`. The request carries nothing.
     pub async fn open_session(&self) -> Result<SessionOutcome, ObserverClientError> {
-        let url = format!("{}/workload/session", self.base_url);
+        let url = format!(
+            "{}{}",
+            self.base_url,
+            credentials_agent_common::routes::WORKLOAD_SESSION
+        );
         let response = self
             .http
             .post(&url)
@@ -190,7 +194,11 @@ impl ObserverClient {
         &self,
         request: &SealedIssuanceRequest,
     ) -> Result<SealedOutcome, ObserverClientError> {
-        let url = format!("{}/workload/issue", self.base_url);
+        let url = format!(
+            "{}{}",
+            self.base_url,
+            credentials_agent_common::routes::WORKLOAD_ISSUE
+        );
         let response = self
             .http
             .post(&url)

@@ -128,8 +128,30 @@ The scaffold prints each topic's `causes`, `answers` and `unprompted`, and leave
 builder refuses to start an agent whose causes do not fit (`topics.rs`, `cause_problems`): a cause on a subscription, an
 answer on a publish, a topic cause the agent does not subscribe to, an answer to an entry none of its publishes takes or
 to a topic, a cause that names nothing or is named twice, a publish both caused and unprompted, or unprompted for no
-reason. Built 2026-10-22 (the authority model's slice 1); a publish with no cause and no reason is refused once every
-agent declares its causes (slice 2).
+reason, or a publish with no cause and no reason. Built 2026-10-22 (the authority model's slices 1 and 2): every agent
+declares its causes, and `infra/tests/catalog-topics.nu` checks that every publish in the catalog has a cause or a
+reason.
+
+What each agent's publishes are caused by, as declared:
+
+| Agent | Publishes | Because of |
+|---|---|---|
+| credentials-agent | each reply | its request |
+| | `polar-authority-updates` | its configuration topic (a `policy` or `groups` section accepted), a signed admin action (a revocation), its registration |
+| | `polar-authority-snapshot-replies` | a snapshot request, its registration, its `republish` timer |
+| credentials-agent-observer | each request | its HTTP route (`credentials_agent_common::routes`); each reply topic answers it |
+| git-repo-controller | the repository set | its registration, its configuration topic, a proposal, its `republish` timer |
+| | the decisions | a proposal |
+| git-repo-observer | commits, ref updates, status | the repository set, its `observe` timer |
+| jira-observer | projects, groups, users, issues | its `poll` timer |
+| kube-observer | resource changes | the Kubernetes API (`Outside`) |
+| kube-consumer | image discovery | the observer's resource changes |
+| oci-registry-resolver | resolutions, provenance events | an image to resolve |
+| polar-git-server | `polar-git-repo-changed` | a push (`polar_git_server_common::RECEIVE_PACK_ROUTE`) |
+| polar-scheduler-observer | `scheduler.in` | the git server's announcement, its `pull` timer |
+| | `agent.{workload}.configuration` | a replay request |
+| polar-scheduler | `agent.{workload}.configuration` | `scheduler.in` |
+| harness-producer | its lanes | of its own accord: the load its run gives it |
 
 ## Every builder agent
 

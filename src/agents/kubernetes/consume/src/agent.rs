@@ -24,7 +24,7 @@
 //! What kube-consumer is, as the infrastructure asks to be told: see `polar_agent_builder::PolarAgent`.
 
 use crate::supervisor::{ClusterConsumerSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
+use polar_agent_builder::{Capability, Cause, Configured, PolarAgent, StartError, TopicDecl};
 use ractor::Actor;
 use std::time::Duration;
 
@@ -48,7 +48,8 @@ impl PolarAgent for KubeConsumer {
         TopicDecl::publish(
             polar::topics::PROVENANCE_DISCOVERY,
             "each container image it meets, for the resolver to resolve",
-        ),
+        )
+        .because(&[Cause::Topic(kube_common::KUBERNETES_CONSUMER)]),
     ];
     const HELP: Option<&'static str> = Some(
         "kube-consumer subscribes to the Kubernetes observer's topics on Cassini, writes what it \

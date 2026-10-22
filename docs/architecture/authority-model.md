@@ -661,6 +661,17 @@ constants in `credentials_agent_common`, the git server's push, the observers' `
 - Tests: every agent's own declaration tests, and the catalog test (`infra/tests/catalog-topics.nu`) gains: every
   catalog agent declares a cause or a reason for every publish.
 
+- *Built 2026-10-22:* every agent's publishes declare their causes (the table in `topics.md`, "Causes"), the check that
+  every publish has a cause or a reason is on, and `infra/tests/catalog-topics.nu` checks it across the catalog. The
+  observer's seven routes are constants in `credentials_agent_common::routes`, used by its router and by the clients
+  that call it (`credentials-agent-client`, `polar-admin-grant`); the git server's push route is
+  `polar_git_server_common::RECEIVE_PACK_ROUTE`, used by its router. Choices made building it: `answers` takes a list,
+  since one reply topic answers both of the observer's workload routes; the Jira observer's cause is its `poll` timer,
+  not `Outside` as the vocabulary's table guessed, since it polls; an agent's own configuration topic, a cause for the
+  credentials agent and the git controller, is a constant in its code that the declaration check holds to the topic
+  the builder subscribes. Tests: each agent's own declaration test (eleven failed the check before their causes were
+  declared; all 18 pass), and the catalog's.
+
 **3. The render emits the model.** `infra/resolve.nu`, `infra/rules.nu`.
 - One document of the model's base facts (workloads with their one identity, issuers, bootstrap, certificate groups,
   declared topics, implied topics with their rule, causes, entries), from the scaffolds the render already collects,

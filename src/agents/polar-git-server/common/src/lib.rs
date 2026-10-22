@@ -31,6 +31,11 @@ use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 /// subscribes, so against the managed server it need not poll.
 pub const POLAR_GIT_REPO_CHANGED_TOPIC: &str = "polar-git-repo-changed";
 
+/// The smart-HTTP route a push arrives on, whose acceptance the server announces on [`POLAR_GIT_REPO_CHANGED_TOPIC`].
+/// Written once, so the server's router and its topic declaration name the same route
+/// (docs/architecture/authority-model.md, "Decisions": the vocabulary of causes).
+pub const RECEIVE_PACK_ROUTE: &str = "/:repo/git-receive-pack";
+
 /// A ref of a hosted repository now points somewhere new. `pusher` is the identity from the
 /// client's verified certificate.
 #[derive(

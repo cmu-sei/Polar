@@ -27,7 +27,7 @@
 use crate::RESOLVER_SUPERVISOR_NAME;
 use crate::settings;
 use crate::supervisor::{ResolverSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
+use polar_agent_builder::{Capability, Cause, Configured, PolarAgent, StartError, TopicDecl};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
@@ -47,11 +47,13 @@ impl PolarAgent for OciResolver {
         TopicDecl::publish(
             polar::topics::KUBERNETES_RESOLUTION_EVENTS,
             "what it resolved for a Kubernetes container, for kube-consumer",
-        ),
+        )
+        .because(&[Cause::Topic(polar::topics::PROVENANCE_DISCOVERY)]),
         TopicDecl::publish(
             polar::topics::PROVENANCE_EVENTS,
             "every artifact it resolved (manifest, digest, registry), for the provenance stream",
         )
+        .because(&[Cause::Topic(polar::topics::PROVENANCE_DISCOVERY)])
         .waiting("read by build-processor, a chart outside the catalog"),
     ];
     const SECTIONS: &'static [&'static Section] = &[&settings::SECTION];

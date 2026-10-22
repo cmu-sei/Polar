@@ -31,6 +31,8 @@ use ractor::Actor;
 use std::time::Duration;
 
 const SENDS: &str = "the run's messages, when this producer's index puts it on this lane";
+/// Nothing causes a producer's publish: it sends the load its run gives it, from its start.
+const UNPROMPTED: &str = "a load test sends the messages its run gives it, from its start";
 
 pub struct HarnessProducer;
 
@@ -44,14 +46,14 @@ impl PolarAgent for HarnessProducer {
         &crate::settings::SECTION,
     ];
     const TOPICS: &'static [TopicDecl] = &[
-        TopicDecl::publish(LANES[0], SENDS),
-        TopicDecl::publish(LANES[1], SENDS),
-        TopicDecl::publish(LANES[2], SENDS),
-        TopicDecl::publish(LANES[3], SENDS),
-        TopicDecl::publish(LANES[4], SENDS),
-        TopicDecl::publish(LANES[5], SENDS),
-        TopicDecl::publish(LANES[6], SENDS),
-        TopicDecl::publish(LANES[7], SENDS),
+        TopicDecl::publish(LANES[0], SENDS).of_its_own_accord(UNPROMPTED),
+        TopicDecl::publish(LANES[1], SENDS).of_its_own_accord(UNPROMPTED),
+        TopicDecl::publish(LANES[2], SENDS).of_its_own_accord(UNPROMPTED),
+        TopicDecl::publish(LANES[3], SENDS).of_its_own_accord(UNPROMPTED),
+        TopicDecl::publish(LANES[4], SENDS).of_its_own_accord(UNPROMPTED),
+        TopicDecl::publish(LANES[5], SENDS).of_its_own_accord(UNPROMPTED),
+        TopicDecl::publish(LANES[6], SENDS).of_its_own_accord(UNPROMPTED),
+        TopicDecl::publish(LANES[7], SENDS).of_its_own_accord(UNPROMPTED),
     ];
     const HELP: Option<&'static str> = Some(
         "Once registered, it sends HARNESS_COUNT messages of HARNESS_MESSAGE_SIZE bytes on lane HARNESS_INDEX mod \

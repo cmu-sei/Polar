@@ -89,6 +89,18 @@ def main [] {
             }
         }
         {
+            name: "every publish in the catalog says what causes it, or why it publishes of its own accord"
+            body: {
+                # docs/architecture/authority-model.md, "Decisions": the authority derives the paths from these causes.
+                let uncaused = ($sets | each {|s|
+                    $s.topics | where access == "publish"
+                    | where {|t| ($t.causes? | default [] | is-empty) and ($t.unprompted? == null) }
+                    | each {|t| $"($s.workload) ($t.name)" }
+                } | flatten)
+                assert ($uncaused | is-empty) $"publishes with no cause and no reason: ($uncaused | str join '; ')"
+            }
+        }
+        {
             name: "every declared topic in the catalog has another side, or says why it waits"
             body: {
                 let j = (judge $sets)
