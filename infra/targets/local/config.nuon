@@ -27,6 +27,29 @@
 {
   cluster: {}
   workloads: {
+    # cert-issuer, a catalog workload of kind `ca` (config/workloads/cert-issuer.nuon): the issuers it trusts and the
+    # lifetimes that differ here. Written as values, and given to it as JSON.
+    cert-issuer: {
+      env: [
+        { name: "CERT_ISSUER_ISSUERS", value: [
+        {
+          issuer: "https://kubernetes.default.svc.cluster.local"
+          audience: ["polar-cert-issuer.local" "polar-cert-issuer-neo4j.local"]
+          jwks_uri: "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
+          workload_identity_claim: "sub"
+          instance_binding_claim: "kubernetes.io/pod/uid"
+          identity_normalization: { strategy: "kubernetes_service_account", cluster_domain: "cluster.local" }
+          identity_scope_claim: null
+          allowed_algorithms: ["RS256" "ES256" "EdDSA"]
+          jwks_cache_ttl_min: { secs: 30, nanos: 0 }
+          jwks_cache_ttl_max: { secs: 3600, nanos: 0 }
+        }
+        ] }
+        { name: "CERT_ISSUER_SERVER_LIFETIME_SECS", value: "43200" }
+        # A year, for the identities whose certificates are not renewed by rejuvenation.
+        { name: "CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES", value: { "graph.polar-graph.serviceaccount.cluster.local": 31536000 } }
+      ]
+    }
     # Who administers the git server in development: the DNS names in the certificates of the
     # accounts `just admin-claim` made on this cluster (alice, operator). They belong to this
     # cluster's ledger and change when it is reset: read them with

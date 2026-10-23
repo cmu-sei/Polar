@@ -148,8 +148,14 @@ def main [
     }
 
     print "Rendering catalog workloads..."
-    ^nu ($infra_root | path join "render-catalog.nu") $target $output_dir
-    if $env.LAST_EXIT_CODE != 0 { exit 1 }
+    # Neo4j is not a catalog workload, so its floor entry is handed to the catalog, which writes it into cert-issuer's
+    # floor beside every bootstrap service's (resolve.nu, POLAR_FLOOR_EXTRA).
+    let floor_extra = (neo4j_floor_entries $infra_root $config.overrides)
+    let rendered = (with-env { POLAR_FLOOR_EXTRA: $floor_extra } {
+        ^nu ($infra_root | path join "render-catalog.nu") $target $output_dir
+        $env.LAST_EXIT_CODE
+    })
+    if $rendered != 0 { exit 1 }
     print ""
     print "Checking the apply order covers the catalog's manifests..."
     let catalog_names = (^nu ($infra_root | path join "resolve.nu") names --target $target | from json)
@@ -343,15 +349,52 @@ def check_and_emit_service_accounts [output_dir: string] {
     }
 }
 
+# Neo4j's floor entry: its chart's service account and namespace, with the names its init container asks for, which
+# the target sets (`neo4jSans`). It goes through the credentials agent, so it is never signed on a token alone.
+def neo4j_floor_entries [infra_root: string, overrides: string] {
+    let values = ($infra_root | path join "layers/2-services/neo4j/values.dhall")
+    let r = ($"\(($values)\) // \(($overrides)\).neo4j" | ^dhall-to-json | complete)
+    if $r.exit_code != 0 {
+        print -e $"  ERROR: Neo4j's floor entry: ($r.stderr | str trim)"
+        exit 1
+    }
+    let neo4j = ($r.stdout | from json)
+    [{
+        workload: $"system:serviceaccount:($neo4j.namespace):($neo4j.serviceAccountName)"
+        cert_type: "SERVER"
+        names: $neo4j.neo4jSans
+        vouched_only: true
+        publish: []
+        subscribe: []
+        groups: []
+    }] | to json --raw
+}
+
+# A variable of cert-issuer's document, as the catalog wrote it (config/workloads/cert-issuer.nuon, kind `ca`): the
+# ConfigMap in cert-issuer-resources.yaml. Null when this target does not render cert-issuer; an error when it renders
+# cert-issuer and its document is not there, since a check that cannot read it must not pass in silence.
+def cert_issuer_variable [output_dir: string, name: string] {
+    if not ($output_dir | path join "cert-issuer.yaml" | path exists) { return null }
+    let file = ($output_dir | path join "cert-issuer-resources.yaml")
+    let doc = (if ($file | path exists) {
+        open --raw $file | split row "\n---\n" | each {|d| $d | from yaml }
+        | where {|o| ($o | get -o kind) == "ConfigMap" and ($o | get -o metadata.name) == "cert-issuer-config" }
+        | get -o 0.data."config.json"
+    } else { null })
+    if $doc == null {
+        print $"  ERROR: cert-issuer is rendered, but its document is not in ($file)"
+        exit 1
+    }
+    $doc | from json | get sections | each {|s| $s.variables } | flatten | where name == $name | get -o 0.value
+}
+
 # cert-issuer's TLS certificate carries CERT_ISSUER_SERVER_IDENTITY as its SAN, and
 # every caller verifies the server against the host in its URL. If the two
 # differ, every caller fails the handshake with an error that looks like a
 # network problem, so catch it here, at render time.
 def check_cert_issuer_identity [output_dir: string, cert_issuer_url: string] {
-    let cfg_file = ($output_dir | path join "cert-issuer-configmap.yaml")
-    if not ($cfg_file | path exists) { return }
-
-    let server_identity = (open $cfg_file | get data.CERT_ISSUER_SERVER_IDENTITY)
+    if not ($output_dir | path join "cert-issuer.yaml" | path exists) { return }
+    let server_identity = (cert_issuer_variable $output_dir "CERT_ISSUER_SERVER_IDENTITY")
     let url_host = ($cert_issuer_url | url parse | get host)
 
     if $server_identity != $url_host {
@@ -367,10 +410,8 @@ def check_cert_issuer_identity [output_dir: string, cert_issuer_url: string] {
 # failure to catch here. The opposite (cert-issuer provisioned, callers not
 # mounting) is harmless: callers fetch and pin.
 def check_ca_provisioning [output_dir: string, ca_configmap: string] {
-    let cfg_file = ($output_dir | path join "cert-issuer-configmap.yaml")
-    if not ($cfg_file | path exists) { return }
-
-    let provisioning = (open $cfg_file | get data.CERT_ISSUER_CA_PROVISIONING)
+    if not ($output_dir | path join "cert-issuer.yaml" | path exists) { return }
+    let provisioning = (cert_issuer_variable $output_dir "CERT_ISSUER_CA_PROVISIONING")
 
     if ($ca_configmap | is-not-empty) and $provisioning != "provisioned" {
         print $"  ERROR: callers mount the ConfigMap '($ca_configmap)', but cert-issuer's CERT_ISSUER_CA_PROVISIONING is '($provisioning)'."

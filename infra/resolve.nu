@@ -140,11 +140,17 @@ def image_ref [images: list, cluster: record, name: string, who: string] {
 def env_entry [e: record, vars: record, from: string, who: string] {
     {
         name: $e.name
-        value: (if ($e.value? | is-empty) { null } else { subst $e.value $vars $who })
+        value: (if ($e.value? | is-empty) { null } else { subst (value_text $e.value) $vars $who })
         secret: (if ($e.secret? | is-empty) { null } else { subst $e.secret $vars $who })
         key: ($e.key? | default null)
         from: $from
     }
+}
+
+# A variable's value as the document holds it: text as it is, and a list or a record (the issuers cert-issuer trusts,
+# written legibly in a target's config) as JSON.
+def value_text [value: any] {
+    if ($value | describe | str starts-with "string") { $value } else { $value | to json --raw }
 }
 
 # A kind with `extends` is that kind with its own fields laid over it: a service is an agent
@@ -333,9 +339,12 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         }
         let cap = ($caps | get $n)
 
-        # dependency: the service whose certificate must be valid first.
+        # dependency: the service whose certificate must be valid first. An agent whose scaffold says it does not depend
+        # on Cassini (cert-issuer: docs/architecture/cert-issuer-isolation.md, "The model") is not given Cassini as one:
+        # its rejuvenation would wait on the broker.
         let dep = $cap.dependency
-        if ($dep.service? | is-not-empty) {
+        let independent = ($dep.service? == "cassini") and (not ($scaffold.depends_on_cassini? | default true))
+        if ($dep.service? | is-not-empty) and (not $independent) {
             let svc = ($vars | get -o $dep.service)
             if $svc == null {
                 error make { msg: $"capability '($n)' names service '($dep.service)', which is not in services.nuon" }
@@ -375,7 +384,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
             let claim = (if ($v.claim? | is-empty) { null } else { subst $v.claim $vars $name })
             let cm = (if ($v.config_map? | is-empty) { null } else { subst $v.config_map $vars $name })
             let items = ($v.items? | default [])
-            $volumes = ($volumes | append { name: (subst $v.name $vars $name), secret: $sec, audience: null, claim: $claim, config_map: $cm, items: $items, from: $n })
+            $volumes = ($volumes | append { name: (subst $v.name $vars $name), secret: $sec, audience: null, claim: $claim, config_map: $cm, items: $items, mode: ($v.mode? | default null), from: $n })
         }
         for m in ($cap.pod.mounts? | default []) {
             $mounts = ($mounts | append { name: (subst $m.name $vars $name), path: (subst $m.path $vars $name), read_only: $m.read_only, from: $n })
@@ -471,6 +480,23 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         $env_list = ($env_list | append { name: "CREDENTIALS_AGENT_AUTHORITY_MODEL", value: (model_facts $records $cluster.domain | to json --raw), secret: null, key: null, from: "catalog" })
     }
 
+    # cert-issuer is given the floor (docs/architecture/cert-issuer-isolation.md): every bootstrap service's entry, its own
+    # among them, from each workload's spec and scaffold alone, so resolving cert-issuer does not resolve cert-issuer
+    # again; and the entries of what is rendered outside the catalog (Neo4j's, which render.nu passes in
+    # POLAR_FLOOR_EXTRA). Written only when the floor is enforced: unset is the open floor.
+    if ("CERT_ISSUER_BOOTSTRAP" in $declared_vars) and ($cluster.issuance?.floor_enforced? | default false) {
+        let floor = (floor_of $target)
+        if ($floor.problems | is-not-empty) {
+            error make { msg: $"($name): the floor: ($floor.problems | str join '; ')" }
+        }
+        let extra = ($env.POLAR_FLOOR_EXTRA? | default "[]" | from json)
+        let entries = ($floor.entries | each {|e| {
+            workload: $e.workload, cert_type: $e.certType, names: $e.names, vouched_only: $e.vouchedOnly
+            publish: $e.publish, subscribe: $e.subscribe, groups: $e.groups
+        } }) ++ $extra
+        $env_list = ($env_list | append { name: "CERT_ISSUER_BOOTSTRAP", value: ($entries | to json --raw), secret: null, key: null, from: "catalog" })
+    }
+
     # The agent reads one document, not an environment: the entries above are written into the
     # variables they name, and the pod is given the document and the secrets it refers to.
     let entries = $env_list
@@ -483,7 +509,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     $env_list = (pod_env $filled $"($DOCUMENT_DIR)/($DOCUMENT_FILE)")
     $volumes = ($volumes | append { name: $DOCUMENT_VOLUME, secret: null, audience: null, config_map: $config_map.name, from: "document" })
     $mounts = ($mounts | append { name: $DOCUMENT_VOLUME, path: $DOCUMENT_DIR, read_only: true, from: "document" })
-    $volumes = ($volumes | each {|v| $v | default null config_map | default null claim | default [] items })
+    $volumes = ($volumes | each {|v| $v | default null config_map | default null claim | default [] items | default null mode })
 
     let ci = ($vars | get cert-issuer)
     let scheme = ($services | get cert-issuer | get -o scheme | default "https")
@@ -521,6 +547,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         ttl_after_finished_secs: $spec.ttl_after_finished_secs
         probe: $spec.probe
         termination_grace_secs: $grace
+        fs_group: ($spec.fs_group? | default null)
         proxy_ca_cert: null
         needs: $needs
         env: $env_list
@@ -541,15 +568,23 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     }
 }
 
-# What the template takes: the resolved record without provenance.
+# What the template takes: the resolved record without provenance. The agent template has polar-init and no pod group
+# or Secret mode; the `ca` template has those and no polar-init (schema/ca-spec.dhall).
 def for_template [r: record] {
-    $r
-    | reject _origin _from _settings resources config_map config_problems check_names issuer bootstrap
-    | update env { reject from }
-    | update volumes { reject from }
-    | update mounts { reject from }
-    | update init_mounts { reject from }
-    | update init_env { reject from }
+    let common = (
+        $r
+        | reject _origin _from _settings resources config_map config_problems check_names issuer bootstrap
+        | update env { reject from }
+        | update volumes { reject from }
+        | update mounts { reject from }
+        | update init_mounts { reject from }
+        | update init_env { reject from }
+    )
+    if $r.kind == "ca" {
+        $common | reject polar_init_image cert_issuer_url init_mounts init_env dep_checks certs
+    } else {
+        $common | reject fs_group | update volumes { reject mode }
+    }
 }
 
 # ── Validation ───────────────────────────────────────────────────────────────
@@ -669,13 +704,39 @@ def enabled_problems [target: string] {
 
 # The floor of cert-issuer for this target, written from the catalog: what each workload is issued, resolved.
 def floor_of [target: string] {
-    let records = (all_workloads $target | each {|w|
-        let r = (resolve $w.name $target)
-        # The topics and groups its scaffold prints: floor_entries writes a bootstrap service's own.
-        let scaffold = (scaffold_of $w.name $w)
-        { who: $w.name, namespace: $r.namespace, service_account: $r.service_account, issuer: $r.issuer, bootstrap: $r.bootstrap, certs: $r.certs, topics: ($scaffold.topics? | default []), groups: ($scaffold.groups? | default []) }
-    })
+    let kinds = (open ($CONFIG | path join "kinds.nuon"))
+    let caps = (open ($CONFIG | path join "capabilities.nuon"))
+    let vars = (service_vars (open ($CONFIG | path join "services.nuon")) (load_cluster $target))
+    let records = (all_workloads $target | each {|w| floor_record $w $target $kinds $caps $vars })
     floor_entries $records
+}
+
+# What the floor needs of a workload, from its spec and its scaffold alone, as the authority model's facts are
+# (issuance_record): a full resolve of every workload, from inside cert-issuer's, would resolve cert-issuer again. Its
+# certificates are its capabilities' (the `identity` facet), as resolve writes them.
+def floor_record [w: record, target: string, kinds: record, caps: record, vars: record] {
+    let merged = (spec_of $w.name $target $kinds)
+    let s = $merged.spec
+    let scaffold = (scaffold_of $w.name $w)
+    let provided = (($merged.entry.provides? | default []) ++ ($merged.ov.provides? | default []))
+    let needs = ($merged.kind.needs ++ (requires_of $scaffold) ++ $provided | uniq)
+    let certs = ($needs | each {|n|
+        ($caps | get -o $n | default {} | get -o identity.certs | default []) | each {|c|
+            let san = (if ($c.san? | is-empty) { "" } else { subst $c.san $vars $w.name })
+            $"($c.kind? | default 'client'):($c.dir):ecdsa-p256:($san)"
+        }
+    } | flatten)
+    {
+        who: $w.name
+        namespace: $s.namespace
+        service_account: ($s.service_account? | default $w.name)
+        issuer: $s.issuer
+        bootstrap: $s.bootstrap
+        certs: $certs
+        # The topics and groups its scaffold prints: floor_entries writes a bootstrap service's own.
+        topics: ($scaffold.topics? | default [])
+        groups: ($scaffold.groups? | default [])
+    }
 }
 
 # ── Comparison with a rendered manifest ──────────────────────────────────────

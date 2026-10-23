@@ -162,6 +162,26 @@
     resources: {}
   }
 
+  # cert-issuer's CA, made ahead of time by an operator with cluster-admin rights (`polar-admin-grant bootstrap-ca`), in
+  # the Secret cert-issuer-ca, and only loaded: a missing CA is a startup error, never a reason to make a new root. Its
+  # files are readable by the pod's group alone (0440), and the pod is in that group (the `ca` kind's `fs_group`).
+  # cert-issuer declares these variables itself (`cert-issuer --scaffold`, section cert-issuer).
+  provisioned-ca: {
+    pod: {
+      env: [
+        { name: "CERT_ISSUER_CA_PROVISIONING", value: "provisioned" }
+        { name: "CERT_ISSUER_CA_CERT_PATH",    value: "/home/polar/ca/ca.crt" }
+        { name: "CERT_ISSUER_CA_KEY_PATH",     value: "/home/polar/ca/ca.key" }
+      ]
+      volumes: [ { name: "cert-issuer-ca", secret: "cert-issuer-ca", items: [ { key: "ca.crt", path: "ca/ca.crt" } { key: "ca.key", path: "ca/ca.key" } ], mode: 288 } ]
+      mounts: [ { name: "cert-issuer-ca", path: "/home/polar", read_only: true } ]
+    }
+    identity: {}
+    dependency: {}
+    init: {}
+    resources: {}
+  }
+
   # The broker's identity and arrangements: a server certificate for the Cassini service's name,
   # read-only in the container, the paths the broker reads it from, the address it listens on and the
   # shutdown token from a Secret. The broker declares these

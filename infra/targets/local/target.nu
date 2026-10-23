@@ -43,7 +43,6 @@ def main [] {
         charts : [
             ($layers | path join "1-platform/infra/namespaces/main.nu")
             ($layers | path join "1-platform/infra/storage/main.nu")
-            ($layers | path join "2-services/cert-issuer/main.nu")
             ($layers | path join "2-services/jaeger/main.nu")
             ($layers | path join "2-services/neo4j/main.nu")
             ($layers | path join "3-workloads/agents/gitlab/main.nu")
@@ -56,10 +55,9 @@ def main [] {
             "serviceaccounts.yaml"
             "local-path-provisioner.yaml"
             "storage-class.yaml"
-            "cert-issuer-pvc.yaml"
-            "cert-issuer-configmap.yaml"
-            "cert-issuer-service.yaml"
-            "cert-issuer-deployment.yaml"
+            # cert-issuer, a catalog workload of kind `ca` (config/workloads/cert-issuer.nuon)
+            "cert-issuer-resources.yaml"
+            "cert-issuer.yaml"
             "neo4j-configmap.yaml"
             "neo4j-init-script-configmap.yaml"
             "neo4j-pvcs.yaml"

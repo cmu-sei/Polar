@@ -623,6 +623,52 @@ builder and then into the catalog (`configuration.md`, 9.8), so the precedent is
     `--check --config`. The chart tests' assertions carry over. On a cluster (slice 10): `infra/tests/resolve.nu` and a
     deployment.
 
+  *1c built (2026-10-23).*
+  - **1c-i:** cert-issuer writes the CA chain it is signed under to `TLS_CA_CERT`, and the scaffold carries
+    `depends_on_cassini` (only when false).
+  - **The entry and the kind:** `config/workloads/cert-issuer.nuon` is `kind: "ca"`, `bootstrap: true`, provides
+    `provisioned-ca`, with its Service and its settings; `kinds.nuon` adds `ca`, from `service`, with `fs_group: 1000`.
+  - **The capability:** `provisioned-ca` (`capabilities.nuon`) is the Secret `cert-issuer-ca` with its two items and
+    mode 0440, mounted at `/home/polar`, and the three variables that say so.
+  - **The resolver:**
+    - a list or record value is written as JSON;
+    - Cassini is left out of the health dependencies of an agent whose scaffold says it does not depend on it;
+    - a Secret volume carries its mode, and the pod its group;
+    - each template is given its own record (`for_template`);
+    - the floor is built from each workload's spec and scaffold (`floor_record`) and written into cert-issuer's
+      document when enforced, with `POLAR_FLOOR_EXTRA`.
+  - **The template:** `schema/ca.dhall` and `ca-spec.dhall`, registered in `render-catalog.nu`.
+  - **The targets:** each target's `config.nuon` has the issuers (as values), the server lifetime and the identity
+    lifetimes. The cert-issuer layer applies `cert-issuer-resources.yaml` then `cert-issuer.yaml` and waits on
+    `job-name=cert-issuer`. No target renders the chart; its files, and the targets' `certIssuer` Dhall overrides and
+    `identity_lifetime_overrides`, stay until the cleanup.
+  - **`render.nu`** hands in Neo4j's entry (from `neo4j/values.dhall` and the target's overrides, as the chart did),
+    and its two checks read the catalog document, failing when it is missing.
+
+  Tests:
+  - **`infra/tests/ca.nu`**, eight, with no cluster: the scaffolds of cert-issuer and Cassini are built from the
+    binaries.
+    - kind `ca`;
+    - the pod: no init container, its own token mounted, the API token, the Secret's mode and items, `fsGroup`, the
+      probe;
+    - the document, with no Cassini health dependency;
+    - its own floor entry, and every bootstrap service's, written only when enforced;
+    - the extra entries;
+    - the floor built without recursing;
+    - the document accepted by `cert-issuer --check --config`;
+    - Cassini still rendered by the agent template, with polar-init.
+  - **The existing infra suites that need no cluster pass.** `render-determinism.nu` and `resolve.nu` need one.
+  - **A full render of `sandbox-local`,** with every workload's scaffold built from its binary, succeeds, and its
+    checks pass. Its floor is the chart's set: the four bootstrap services, and the vouched git server and Neo4j.
+  - **The floor built from spec and scaffold equals the floor built by full resolves**, on `sandbox-local` without
+    cert-issuer: identical.
+
+  **To know at deployment (slice 10):** a cluster that ran the chart has a Deployment `cert-issuer` whose pods carry
+  the label `name=cert-issuer`, the label the catalog's Service selects, and its ConfigMap `cert-issuer-config` is
+  replaced by the catalog's, which it cannot read. So the Deployment must go when the target switches. Flux prunes it
+  on `sandbox-local` (gitops); on a target applied with `up.nu` it has to be deleted by hand, before the Job's pod
+  starts. The chart's PVC, unused in Provisioned mode, can stay until the cleanup.
+
 Settled 2026-10-23: cert-issuer rejuvenates, as every agent does (the builder ends an agent when its shortest-lived
 certificate nears expiry, `polar-health/src/machine.rs:373`). The core plans its rejuvenation together so that no two
 of its members go at once (`core-restarts.md`); until that plan is built, each rejuvenates on its own schedule, as

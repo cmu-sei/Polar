@@ -49,12 +49,11 @@ def main [] {
         {
             name: "cert-issuer"
             depends_on: ["platform"]
-            wait_for: [ { kind: "pods", ns: "polar", ref: "name=cert-issuer", label: "cert-issuer" } ]
+            # A catalog workload of kind `ca` (config/workloads/cert-issuer.nuon): a Job, waited for through its Service.
+            wait_for: [ { kind: "pods", ns: "polar", ref: "job-name=cert-issuer", label: "cert-issuer" } ]
             files: [
-                "cert-issuer-pvc.yaml"
-                "cert-issuer-configmap.yaml"
-                "cert-issuer-service.yaml"
-                "cert-issuer-deployment.yaml"
+                "cert-issuer-resources.yaml"
+                "cert-issuer.yaml"
             ]
         }
         # the graph database, the relational store and the identity provider
@@ -147,7 +146,6 @@ def main [] {
         charts : [
             ($layers | path join "1-platform/infra/namespaces/main.nu")
             ($layers | path join "1-platform/infra/storage/main.nu")
-            ($layers | path join "2-services/cert-issuer/main.nu")
             ($layers | path join "2-services/jaeger/main.nu")
             ($layers | path join "2-services/ace/main.nu")
             ($layers | path join "2-services/neo4j/main.nu")

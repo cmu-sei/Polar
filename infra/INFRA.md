@@ -366,8 +366,12 @@ its origin: `[kind]`, `[entry]`, `[target]`, `[<capability>]` or `[derived]`.
 
 Read while planning cert-issuer's move into the catalog (`docs/architecture/cert-issuer-isolation.md`, step 1c).
 
-- **One template, a Job, always with polar-init.** `render-catalog.nu:48` maps both kinds, `agent` and `service`, to
+- **One template for agents, a Job, always with polar-init.** `render-catalog.nu:48` maps `agent` and `service` to
   `schema/agent.dhall`, and a kind with no template fails the render (`render-catalog.nu:91`: "no template for kind").
+  *Since 2026-10-23 there is a second template, for the `ca` kind, cert-issuer's alone (`schema/ca.dhall`,
+  `schema/ca-spec.dhall`): the same Job with no polar-init, the kind's projected token mounted in its own container, the
+  Kubernetes API token mounted, a Secret's file `mode`, and the pod's `fs_group`; see
+  `docs/architecture/cert-issuer-isolation.md`, step 1c.*
   The template renders one `Job` (`agent.dhall:226-246`), and its init container is unconditional
   (`agent.dhall:173-194`, `functions.dhall:223-259`); capabilities' `init` parts only add env and mounts to it. Its
   header: "If a workload does not fit this shape, it stays a custom chart (the escape hatch). Do not add a Bool to the
@@ -393,15 +397,26 @@ Read while planning cert-issuer's move into the catalog (`docs/architecture/cert
 - **Health dependencies** come from `needs`: every dependency's endpoint is in `POLAR_HEALTH_DEP_ENDPOINTS`
   (`resolve.nu:436`, `:447`), which a rejuvenation waits on; `no_start_wait` only drops it from polar-init's checks
   (`:312`, `:532`).
-- **The floor** (`resolve.nu floor`, `:949-956`) fully resolves every workload (`floor_of`, `:671-679`) and writes, for a
+- **The floor** (`resolve.nu floor`) builds each workload's record from its spec and scaffold alone (`floor_record`,
+  since 2026-10-23; it fully resolved every workload before, which cert-issuer's own resolve could not do without
+  recursing) and writes, for a
   bootstrap workload with exactly one certificate, an entry with its SANs, its declared and family topics and its
   scaffold's groups; for a non-bootstrap workload on the credentials agent with a server certificate, a `vouchedOnly`
-  entry (`rules.nu floor_entries`, `:194-238`). Neo4j's entry is added by cert-issuer's chart (`main.nu:47-52`).
+  entry (`rules.nu floor_entries`, `:194-238`). The resolver writes it into cert-issuer's document
+  (`CERT_ISSUER_BOOTSTRAP`) when the floor is enforced, with the entries `render.nu` hands it for what is rendered
+  outside the catalog (Neo4j's, from its chart's values, in `POLAR_FLOOR_EXTRA`).
 - **Waiting at apply.** A layer's `wait_for` with `ref: "name=…"` resolves only to a Deployment, StatefulSet or
   DaemonSet; `job-name=…` resolves to the Endpoints of a Service selecting the Job's pods (`layers.nu:36-37`,
   `:72-80`, `deploy-objects.nu:81-111`), which is how Cassini, a Job, is waited for.
-- **`render.nu`'s cert-issuer checks read the chart's file.** `check_cert_issuer_identity` and `check_ca_provisioning`
-  (`render.nu:350-380`) read `cert-issuer-configmap.yaml`, and return without a word when it is absent.
+- **`render.nu`'s cert-issuer checks** (`check_cert_issuer_identity`, `check_ca_provisioning`) read the chart's
+  `cert-issuer-configmap.yaml` and returned without a word when it was absent. *Since 2026-10-23 they read cert-issuer's
+  catalog document (`cert-issuer-resources.yaml`), and fail when cert-issuer is rendered and its document is not there.*
+- **A value in an entry or a target** may be a list or a record, which the resolver writes as JSON (`value_text`): the
+  issuers cert-issuer trusts are written so in each target's `config.nuon`.
+- **Health dependencies and Cassini:** an agent whose scaffold says `depends_on_cassini: false` (cert-issuer) is not
+  given Cassini as a health dependency, so its rejuvenation does not wait on the broker.
+- **`served`** (`topics.nu:32-38`), the workloads a topic family expands for, counts kind `agent` only, so neither
+  Cassini (`service`) nor cert-issuer (`ca`) is given a scheduler configuration topic.
 ---
 
 ## How a custom chart works

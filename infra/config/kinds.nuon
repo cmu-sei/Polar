@@ -83,4 +83,13 @@
     extends: "agent"
     needs: ["tracing"]
   }
+
+  # The certificate authority's front, cert-issuer, alone (docs/architecture/cert-issuer-isolation.md, step 1c). Its own
+  # template, schema/ca.dhall: it is the issuer, so its pod has no polar-init; the kind's projected token is mounted in
+  # its own container, on which it signs itself its client certificate through its own floor; the Kubernetes API token
+  # is mounted, for fetching the API server's keys; and its files are readable by this group, as a Secret's are.
+  ca: {
+    extends: "service"
+    fs_group: 1000
+  }
 }

@@ -33,6 +33,44 @@
   # since the host registry (`just registry-up`) listens on 5000.
   cluster: { issuance: { floor_enforced: true }, registry_in_cluster: { node_port: 30500, local_port: 5001 } }
   workloads: {
+    # cert-issuer, a catalog workload of kind `ca` (config/workloads/cert-issuer.nuon): the issuers it trusts and the
+    # lifetimes that differ here. Written as values, and given to it as JSON.
+    cert-issuer: {
+      env: [
+        { name: "CERT_ISSUER_ISSUERS", value: [
+        {
+          issuer: "https://kubernetes.default.svc.cluster.local"
+          audience: ["polar-cert-issuer.local" "polar-cert-issuer-neo4j.local"]
+          jwks_uri: "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
+          workload_identity_claim: "sub"
+          instance_binding_claim: "kubernetes.io/pod/uid"
+          identity_normalization: { strategy: "kubernetes_service_account", cluster_domain: "cluster.local" }
+          identity_scope_claim: null
+          allowed_algorithms: ["RS256" "ES256" "EdDSA"]
+          jwks_cache_ttl_min: { secs: 30, nanos: 0 }
+          jwks_cache_ttl_max: { secs: 3600, nanos: 0 }
+        }
+        # People's tokens, from Keycloak. `issuer` is what the tokens carry, which with --hostname-strict=false is how
+        # the person reached Keycloak to log in: the port-forward at localhost:8080. `jwks_uri` is where cert-issuer,
+        # in the cluster, fetches the keys: the Service.
+        {
+          issuer: "http://localhost:8080/realms/polar"
+          audience: ["polar-cert-issuer.local"]
+          jwks_uri: "http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar/protocol/openid-connect/certs"
+          workload_identity_claim: "preferred_username"
+          instance_binding_claim: "sid"
+          identity_normalization: { strategy: "suffixed_claim" }
+          identity_scope_claim: "identity_scope"
+          allowed_algorithms: ["RS256"]
+          jwks_cache_ttl_min: { secs: 30, nanos: 0 }
+          jwks_cache_ttl_max: { secs: 3600, nanos: 0 }
+        }
+        ] }
+        { name: "CERT_ISSUER_SERVER_LIFETIME_SECS", value: "43200" }
+        # A year, for the identities whose certificates are not renewed by rejuvenation.
+        { name: "CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES", value: { "graph.polar-graph.serviceaccount.cluster.local": 31536000, "ace.polar.serviceaccount.cluster.local": 31536000 } }
+      ]
+    }
     # The git server's administrators are this cluster's first account, an identity that only exists once the admin flow has run on the
     # live cluster. `up.nu` records it in infra/targets/<target>/cluster-inputs.nuon (gitignored), renders and publishes again, and the
     # signed provenance names that file. Nothing about it belongs here.
