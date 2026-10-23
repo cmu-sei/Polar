@@ -486,6 +486,10 @@ two (`core-restarts.md`, situation 4). So the builder gains a Cassini client tha
 `expects_graph` decides for the graph (`machine.rs:221`), for a service with no dependency on Cassini. cert-issuer signs
 its own client certificate with its CA at start, as it does its TLS certificate, and the record holds it.
 
+**Old resources go once the transition is validated (the maintainer, 2026-10-23).** What a step leaves unused (the
+hand-written chart once cert-issuer is a catalog workload, the old configuration format in `cert-issuer/server/conf/`)
+is removed only after the transition is complete and validated by testing, not in the step that replaces it.
+
 **The order (cleared 2026-10-23).** 1, cert-issuer gets a Cassini client by joining the builder; 2, the certificate
 record, asked for over Cassini; 3, `authority-model.md` slice 9, whose request gate then finds every requester's
 certificate in the ledger; 4, the questions of `core-restarts.md`, one at a time.
@@ -587,9 +591,37 @@ builder and then into the catalog (`configuration.md`, 9.8), so the precedent is
 
   Found on the way: an empty `identityLifetimeOverrides` rendered as an untyped `[ ]` that Dhall refuses; no target
   had one.
-- **1c, cert-issuer in the catalog.** A workload entry, `kind: "service"`, `bootstrap: true`, its CA volume and its
-  floor as the render writes them today, in place of the hand chart, as Cassini's and the credentials pair's entries
-  replaced theirs. Tests: the render's, `infra/tests`, and the chart's checks of the floor carried over.
+- **1c, cert-issuer in the catalog.** *Planned in detail 2026-10-23, from `infra/INFRA.md`, "What the catalog can and
+  cannot express".* cert-issuer cannot take the catalog's one shape: `schema/agent.dhall` always adds polar-init, and
+  cert-issuer is the issuer. The template's own rule is not to bend it with a Bool (`agent.dhall:30-31`), and a kind with
+  no template is not a catalog workload (`render-catalog.nu:46`). *Decided 2026-10-23 (the maintainer, option A of
+  three):* **a kind of its own, `ca`, with its own template**, by INFRA.md's "Add a kind". Being in the catalog is what
+  step 2 needs: cert-issuer's topics and groups come from its scaffold into its floor entry and into the authority
+  model, as every workload's do, not from a second list in a chart. The parts, each tests first:
+  - **1c-i, in cert-issuer and the builder.** cert-issuer writes the CA chain it is signed under to `TLS_CA_CERT`
+    beside its own certificate, so the `cassini` capability's paths serve it unchanged. The scaffold document says
+    whether an agent depends on Cassini (`DEPENDS_ON_CASSINI`), so the resolver can know it.
+  - **1c-ii, the resolver.** Kind `ca` (from `service`: no polar-init, no dependency checks before start). For an agent
+    whose scaffold says it does not depend on Cassini, Cassini is left out of `POLAR_HEALTH_DEP_ENDPOINTS`, which a
+    rejuvenation waits on: otherwise the catalog would put back the dependency 1a took out. Its own projected token is
+    mounted in its container; the Kubernetes API token is mounted without `kube-api-read`'s rights; the provisioned CA
+    is a Secret with its items, mode and the pod's `fsGroup`. The floor (`CERT_ISSUER_BOOTSTRAP`) is written when the
+    scaffold declares it and the floor is enforced, from each workload's spec and scaffold alone, as the authority model
+    is (`issuance_record`, `resolve.nu:250`), so resolving cert-issuer does not resolve cert-issuer again. Neo4j's entry,
+    from its chart's values, is handed in by `render.nu`.
+  - **1c-iii, the template**, `schema/ca.dhall` with its spec type: a Job (as Cassini is) with no init container.
+  - **1c-iv, the entry and the targets.** `config/workloads/cert-issuer.nuon` (`kind: "ca"`, `bootstrap: true`, its
+    Service); its settings (issuers, lifetimes, server identity, internal callers, overrides) move from the targets'
+    Dhall overrides into their `config.nuon`; the cert-issuer layer applies `cert-issuer-resources.yaml` then
+    `cert-issuer.yaml` and waits on `job-name=cert-issuer`. The targets stop rendering the chart; the chart's files stay
+    until the cleanup (above).
+  - **1c-v, `render.nu`'s checks** of the server identity and the CA provisioning read cert-issuer's resolved document,
+    and fail, rather than pass in silence, when cert-issuer is deployed and its document is not there.
+  - **Tests,** with no cluster: the resolver over a fixture target with cert-issuer's scaffold built by `cargo`; the
+    rendered pod (no init container, its token mounted, the API token, the Secret's mode, `fsGroup`, no Cassini in its
+    health dependencies, its floor entry from its scaffold); and the rendered document checked by cert-issuer's own
+    `--check --config`. The chart tests' assertions carry over. On a cluster (slice 10): `infra/tests/resolve.nu` and a
+    deployment.
 
 Settled 2026-10-23: cert-issuer rejuvenates, as every agent does (the builder ends an agent when its shortest-lived
 certificate nears expiry, `polar-health/src/machine.rs:373`). The core plans its rejuvenation together so that no two

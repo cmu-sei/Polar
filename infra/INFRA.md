@@ -361,6 +361,47 @@ For scalar and record fields, later wins: **kind defaults** (`kinds.nuon`) <
 unioned in declared order instead of replaced. `explain` prints each value with
 its origin: `[kind]`, `[entry]`, `[target]`, `[<capability>]` or `[derived]`.
 
+
+### What the catalog can and cannot express (read from the code, 2026-10-23)
+
+Read while planning cert-issuer's move into the catalog (`docs/architecture/cert-issuer-isolation.md`, step 1c).
+
+- **One template, a Job, always with polar-init.** `render-catalog.nu:48` maps both kinds, `agent` and `service`, to
+  `schema/agent.dhall`, and a kind with no template fails the render (`render-catalog.nu:91`: "no template for kind").
+  The template renders one `Job` (`agent.dhall:226-246`), and its init container is unconditional
+  (`agent.dhall:173-194`, `functions.dhall:223-259`); capabilities' `init` parts only add env and mounts to it. Its
+  header: "If a workload does not fit this shape, it stays a custom chart (the escape hatch). Do not add a Bool to the
+  Spec to make it fit" (`agent.dhall:30-31`).
+- **Only document agents.** `resolve.nu:297` refuses an entry without `config: "document"`, and `:301` one that lists
+  `needs`: the scaffold says what the code requires, and `provides` adds what the deployment gives (`:307-308`).
+- **The scaffolds need the registry, and usually the cluster.** `scaffold_of` (`resolve.nu:172-182`) reads
+  `$POLAR_SCAFFOLD_DIR/<workload>.json` only. `collect-scaffolds` (`agent-pods.nu:302-327`) asks the registry for each
+  image's digest, and on a cache miss runs `<image> --scaffold` in a pod on the cluster. `resolve.nu check` also runs
+  each agent's `--check --config` there (`:211-221`). With the cluster down, `render.nu <target> --charts-into <dir>`
+  renders the charts alone, and a full render works only when `POLAR_SCAFFOLD_DIR` already holds every scaffold.
+  `infra/tests/resolve.nu` needs the cluster; `rules.nu` and `charts.nu` need nothing.
+- **Volumes.** A capability's `pod.volumes` entry is a Secret (with `items`), a claim, a ConfigMap or, with none of
+  them, an emptyDir (`capabilities.nuon:32-50`). There is no `defaultMode`, and the pod has no `securityContext`
+  (`agent.dhall:166-224`). `persistent-data` is a claim named `{workload}-data` at `/var/lib/{workload}`
+  (`capabilities.nuon:136-145`).
+- **The projected token** is the kind's `sa_token` only (`kinds.nuon:77`, `resolve.nu:315-317`), for
+  `cluster.nuon`'s `sa_token_audience`, and is mounted in polar-init alone (`functions.dhall:256`). A capability's
+  volume never has an audience (`resolve.nu:378`).
+- **The Kubernetes API token** is not mounted (`automountServiceAccountToken: false`) unless a capability sets
+  `sa_token_secret` (`resolve.nu:518`); only `kube-api-read` does, and it grants read on everything
+  (`capabilities.nuon:113-129`).
+- **Health dependencies** come from `needs`: every dependency's endpoint is in `POLAR_HEALTH_DEP_ENDPOINTS`
+  (`resolve.nu:436`, `:447`), which a rejuvenation waits on; `no_start_wait` only drops it from polar-init's checks
+  (`:312`, `:532`).
+- **The floor** (`resolve.nu floor`, `:949-956`) fully resolves every workload (`floor_of`, `:671-679`) and writes, for a
+  bootstrap workload with exactly one certificate, an entry with its SANs, its declared and family topics and its
+  scaffold's groups; for a non-bootstrap workload on the credentials agent with a server certificate, a `vouchedOnly`
+  entry (`rules.nu floor_entries`, `:194-238`). Neo4j's entry is added by cert-issuer's chart (`main.nu:47-52`).
+- **Waiting at apply.** A layer's `wait_for` with `ref: "name=…"` resolves only to a Deployment, StatefulSet or
+  DaemonSet; `job-name=…` resolves to the Endpoints of a Service selecting the Job's pods (`layers.nu:36-37`,
+  `:72-80`, `deploy-objects.nu:81-111`), which is how Cassini, a Job, is waited for.
+- **`render.nu`'s cert-issuer checks read the chart's file.** `check_cert_issuer_identity` and `check_ca_provisioning`
+  (`render.nu:350-380`) read `cert-issuer-configmap.yaml`, and return without a word when it is absent.
 ---
 
 ## How a custom chart works
