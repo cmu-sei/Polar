@@ -127,6 +127,9 @@ def main [] {
                 assert equal ($ca.items | get path | sort) ["ca/ca.crt" "ca/ca.key"]
                 assert equal $pod.securityContext.fsGroup 1000
                 assert equal ($container.livenessProbe.exec.command) ["polar-healthcheck"]
+                let data = ($container.volumeMounts | where mountPath == "/var/lib/cert-issuer" | get 0)
+                assert equal ($pod.volumes | where name == $data.name | get 0.persistentVolumeClaim.claimName) "cert-issuer-data"
+                assert (($data | get -o readOnly) != true) "its record is written"
             }
         }
 
@@ -138,6 +141,10 @@ def main [] {
                 assert equal (variable $doc "CERT_ISSUER_CA_PROVISIONING") "provisioned"
                 assert equal (variable $doc "CERT_ISSUER_ISSUERS" | from json | get 0.issuer) "https://kubernetes.default.svc.cluster.local"
                 assert equal (variable $doc "TLS_CA_CERT") "/etc/tls/certs/ca.pem"
+                # Its record, on persistent storage.
+                assert equal (variable $doc "CERT_ISSUER_RECORD_PATH") "/var/lib/cert-issuer/issued.jsonl"
+                let res = (^nu $RESOLVER resources cert-issuer --target $t | from json)
+                assert equal ($res.pvcs | get name) ["cert-issuer-data"]
                 assert ((variable $doc "POLAR_HEALTH_DEP_ENDPOINTS" | default "") !~ "cassini") "Cassini is not a health dependency"
             }
         }

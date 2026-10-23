@@ -121,6 +121,8 @@ async fn client_cert(f: &Fixture, identity: &str) -> (String, String) {
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
             subject_dn: Default::default(),
+            path: cert_issuer_common::record::IssuePath::TokenOnly,
+            instance_binding: None,
         })
         .await
         .expect("issue client cert");

@@ -277,6 +277,13 @@ impl Handler {
             request.extra_sans.into_iter().chain(floor_names).collect(),
             request.subject_dn_defaults,
             None,
+            // For the record: vouched for by the credentials agent, or on the token alone.
+            if self.vouched_for(peer_identity) {
+                cert_issuer_common::record::IssuePath::Vouched
+            } else {
+                cert_issuer_common::record::IssuePath::TokenOnly
+            },
+            claims.instance_binding.clone(),
         )
         .await
     }
@@ -296,6 +303,8 @@ impl Handler {
         extra_sans: Vec<String>,
         subject_dn_defaults: Option<cert_issuer_common::SubjectDnDefaults>,
         account_subject: Option<cert_issuer_common::AccountSubject>,
+        path: cert_issuer_common::record::IssuePath,
+        instance_binding: Option<String>,
     ) -> HandlerResponse {
         // TODO: pass this in so we get a cert valid for multiple SANs
         let all_sans = match csr::validate_extra_sans(dns_identity, &extra_sans) {
@@ -382,6 +391,8 @@ impl Handler {
             lifetime,
             cert_type,
             subject_dn,
+            path,
+            instance_binding,
         };
 
         let issued = match self.ca.issue(ca_request).await {
@@ -479,6 +490,8 @@ impl Handler {
             request.extra_sans,
             request.subject_dn_defaults,
             request.account_subject,
+            cert_issuer_common::record::IssuePath::Internal,
+            None,
         )
         .await
     }

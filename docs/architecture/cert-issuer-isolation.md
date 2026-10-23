@@ -674,6 +674,65 @@ certificate nears expiry, `polar-health/src/machine.rs:373`). The core plans its
 of its members go at once (`core-restarts.md`); until that plan is built, each rejuvenates on its own schedule, as
 Cassini and the credentials agent do today.
 
+**Step 2, planned in detail (2026-10-23), each part tests first.** Read from the code: every signing goes through the
+`CaClient` trait (`ca.rs:122`); the ledger records a certificate in `IssuanceCompleted`, `AgentEscrowIssuanceCompleted`
+and the account issuance events (`credentials-agent/common/src/events.rs`), each with its serial and PEM; cert-issuer is
+now a catalog workload, so its topics come from its scaffold into its floor entry and the authority model.
+- **2a, the record, in cert-issuer.** A `CaClient` that records (`RecordingCa`) wraps the CA: it signs, appends one JSON
+  line to the log and syncs it, and only then returns the certificate; an append that fails fails the signing. Each
+  entry has a sequence number, the log's id (made with the log, so a lost or replaced log is told from a continued one),
+  the serial, the identity, the type, the path it came by (token only, vouched, internal, its own), the time, and the
+  PEM. The path is given to the CA in the request (`CaIssueRequest`), so the handler and cert-issuer's own TLS and
+  client certificates all say theirs. The log is a declared setting, `CERT_ISSUER_RECORD_PATH`, on the catalog's
+  `persistent-data` claim (`/var/lib/cert-issuer`). Tests: every path's signing is in the log with its path, in order,
+  numbers rising across restarts; an append that fails returns no certificate; a property that the log read back is
+  the signings made, in order.
+  *2a built (2026-10-23).*
+  - **The words** both sides share are in `cert-issuer-common::record`: the topics, the page size, `IssuePath`,
+    `RecordEntry`, `RecordRequest`, `RecordReply`.
+  - **The log and the recording CA** are in `cert-issuer/server/src/record.rs`. `RecordingCa` wraps the CA: it appends
+    and syncs, then returns. A failed append fails the signing. A last line cut short by a crash is dropped on opening;
+    any other unreadable line, or a log it cannot read at all, is an error, never a new log.
+  - **The path** is in `CaIssueRequest`, as are the instance binding the token gave. The handler sets `Vouched` or
+    `TokenOnly`, and `/internal/issue` sets `Internal`. cert-issuer's own TLS certificate is `Own`, and its client
+    certificate, signed on its token, is `TokenOnly`.
+  - **The setting** is `CERT_ISSUER_RECORD_PATH`. The catalog entry provides `persistent-data` and puts the log at
+    `/var/lib/cert-issuer/issued.jsonl`.
+
+  Tests:
+  - every path recorded in order;
+  - the numbers rising across a restart;
+  - each new log with its own id;
+  - a certificate that cannot be recorded is not returned;
+  - a cut-short line dropped, a malformed earlier line or an unreadable log an error;
+  - paging, the exact last page, and another log answered from the start;
+  - a property that the log is the signings made, in order, and that paging at any size gives each entry once;
+  - through the handler, each route's path and instance, and a refused request recording nothing;
+  - end to end, both of cert-issuer's own certificates in its log;
+  - in the catalog, the volume, the path, and the document accepted by `--check`.
+
+  Mutation-checked: cargo-mutants on `record.rs` (both survivors became tests; the four timeouts, an unbounded paging
+  loop, became a bounded one) and eight hand mutations of the path choices and the TLS certificate's CA, all caught.
+- **2b, the conversation.** Two topics, after the credentials agent's own (`credentials-*-requests` / `-replies`):
+  `cert-issuer-record-requests`, which the credentials agent publishes, and `cert-issuer-record-replies`, which
+  cert-issuer publishes in answer. Both are declared in the scaffolds with their causes, so they reach both certificates
+  through the floor and the authority model knows them. A request is `{ after, log }`, the last sequence number the
+  ledger holds and the log it came from; a reply is a page of entries after it (at most a hundred), whether there are
+  more, and the log's id. cert-issuer answers only a request the broker says the credentials agent published
+  (`published_by` among its internal callers); the credentials agent takes a reply only from cert-issuer's identity.
+  Tests: a page and the next; another log's id restarts from the first entry; a request from anyone else is not
+  answered; a reply from anyone else is not taken.
+- **2c, the credentials agent asks, and the ledger holds what it is told.** It asks when it registers and every 30
+  seconds, and at once again while a reply says there is more. Each entry whose serial the ledger already holds, in any
+  of its records, adds nothing; any other becomes a `CertificateReported` event with the entry and the cursor, folded
+  into a `CertificateRecord` marked as reported, so `certificate_for` finds it, a newer one supersedes it, and it can
+  be revoked. A token-only entry for an identity the model does not call a bootstrap service is recorded and reported
+  as unexpected (a warning, and in the graph). Tests: a reported certificate is found and superseded like an issued
+  one; one the ledger holds is not recorded twice; the cursor survives a replay; an unexpected entry is flagged;
+  end to end, a bootstrap service's certificate signed by cert-issuer reaches the ledger.
+- **Not in step 2:** retention (dropping entries asked past and expired: the log grows about a megabyte a day at the
+  sandbox's rate) and the narrowed Cassini route of `core-restarts.md`.
+
 Certificates signed before this is deployed are not in the log. A bootstrap service's is replaced within the hour,
 and every later one is recorded.
 

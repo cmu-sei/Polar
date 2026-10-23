@@ -93,6 +93,10 @@ pub struct CaIssueRequest {
     /// standard, not a Polar-proprietary encoding, unlike how
     /// Permission rides in SANs today.
     pub subject_dn: crate::handler::MergedSubjectDn,
+    /// How it came to be signed, for the record (`crate::record`).
+    pub path: cert_issuer_common::record::IssuePath,
+    /// The pod instance it is for, when a token said so, for the record.
+    pub instance_binding: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -731,6 +735,8 @@ mod tests {
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
             subject_dn: Default::default(),
+            path: cert_issuer_common::record::IssuePath::TokenOnly,
+            instance_binding: None,
         }
     }
 
@@ -741,6 +747,8 @@ mod tests {
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Server,
             subject_dn: Default::default(),
+            path: cert_issuer_common::record::IssuePath::TokenOnly,
+            instance_binding: None,
         }
     }
 
@@ -809,6 +817,8 @@ mod tests {
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
             subject_dn: Default::default(),
+            path: cert_issuer_common::record::IssuePath::TokenOnly,
+            instance_binding: None,
         };
         let result = client.issue(req).await.expect("must succeed");
 
@@ -860,6 +870,8 @@ mod tests {
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
             subject_dn: Default::default(),
+            path: cert_issuer_common::record::IssuePath::TokenOnly,
+            instance_binding: None,
         };
         let result = client.issue(req).await.expect("must succeed");
 
@@ -905,6 +917,8 @@ mod tests {
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
             subject_dn: Default::default(),
+            path: cert_issuer_common::record::IssuePath::TokenOnly,
+            instance_binding: None,
         };
 
         let result = client.issue(req).await;
@@ -1009,6 +1023,8 @@ mod tests {
             lifetime,
             cert_type: CertType::Client,
             subject_dn: Default::default(),
+            path: cert_issuer_common::record::IssuePath::TokenOnly,
+            instance_binding: None,
         };
 
         let before = OffsetDateTime::now_utc();
@@ -1035,6 +1051,8 @@ mod tests {
             lifetime: Duration::from_secs(3600),
             cert_type: CertType::Client,
             subject_dn: Default::default(),
+            path: cert_issuer_common::record::IssuePath::TokenOnly,
+            instance_binding: None,
         };
 
         let err = client.issue(req).await.expect_err("must fail");

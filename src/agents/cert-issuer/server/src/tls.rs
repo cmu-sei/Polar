@@ -98,6 +98,8 @@ pub async fn build_server_config(
             lifetime: std::time::Duration::from_secs(3600 * 24 * 365),
             cert_type: CertType::Server,
             subject_dn: Default::default(),
+            path: cert_issuer_common::record::IssuePath::Own,
+            instance_binding: None,
         })
         .await
         .map_err(|e| format!("failed to self-issue cert-issuer's own TLS cert: {e:?}"))?;

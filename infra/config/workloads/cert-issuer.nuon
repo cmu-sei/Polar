@@ -33,8 +33,9 @@
     # It cannot be issued through the credentials agent: everything's certificate comes from it.
     bootstrap: true
     config: "document"
-    # Its CA, made ahead of time by an operator (`polar-admin-grant bootstrap-ca`) and only loaded.
-    provides: ["provisioned-ca"]
+    # Its CA, made ahead of time by an operator (`polar-admin-grant bootstrap-ca`) and only loaded; and its own
+    # persistent volume, for the record of every certificate it signs.
+    provides: ["provisioned-ca", "persistent-data"]
     # Callers reach it here; the name and port are services.nuon's.
     service: {
       name: "{cert-issuer.name}"
@@ -52,6 +53,9 @@
       { name: "CERT_ISSUER_USER_LIFETIME_SECS",    value: "31536000" }
       # Its own token, the kind's projected one, on which it signs itself its client certificate.
       { name: "CERT_ISSUER_OWN_TOKEN",       value: "/workspace/token" }
+      # The record of every certificate it signs, which the credentials agent asks for (step 2), on its persistent
+      # volume: a certificate that cannot be recorded is not returned.
+      { name: "CERT_ISSUER_RECORD_PATH",     value: "/var/lib/cert-issuer/issued.jsonl" }
       # What fetching the Kubernetes API server's keys needs: its CA, beside the automounted token.
       { name: "KUBERNETES_CA_CERT",          value: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt" }
     ]

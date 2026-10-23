@@ -42,6 +42,7 @@ pub mod handler;
 pub mod listener;
 pub mod oidc;
 pub mod own_certificate;
+pub mod record;
 pub mod server;
 pub mod settings;
 pub mod supervisor;

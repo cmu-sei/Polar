@@ -42,6 +42,7 @@ use crate::handler::Handler;
 use crate::listener::{Listener, ListenerArgs, ListenerMessage};
 use crate::oidc::{HttpJwksSource, Validator};
 use crate::own_certificate::issue_own;
+use crate::record::{Record, RecordingCa};
 use crate::server::build_router;
 use crate::settings::Settings;
 use crate::tls::build_server_config;
@@ -162,10 +163,18 @@ impl Actor for CertIssuerSupervisor {
         );
 
         let (ca_cert_pem, ca_key_pem) = ca_materials(&config.ca)?;
-        let ca = RcgenCaClient::new(&ca_cert_pem, &ca_key_pem)
-            .map_err(|e| format!("the CA client: {e}"))?;
-        // Its own TLS server certificate, from its own CA, before the CA moves into the handler.
-        let tls = build_server_config(&ca, &ca_cert_pem, &config.mtls.server_identity)
+        // Every certificate it signs is recorded before it is returned, its own among them, so that no certificate
+        // it signs stays unknown to the credentials agent (docs/architecture/cert-issuer-isolation.md, "Step 2").
+        let record = Record::open(std::path::Path::new(&settings.record_path))?;
+        let ca = Arc::new(RecordingCa::new(
+            Arc::new(
+                RcgenCaClient::new(&ca_cert_pem, &ca_key_pem)
+                    .map_err(|e| format!("the CA client: {e}"))?,
+            ),
+            record,
+        ));
+        // Its own TLS server certificate, from its own CA, recorded like every other.
+        let tls = build_server_config(ca.as_ref(), &ca_cert_pem, &config.mtls.server_identity)
             .await
             .map_err(|e| format!("the TLS server configuration: {e}"))?;
         let validator = Validator::with_jwks_source(
@@ -177,7 +186,7 @@ impl Actor for CertIssuerSupervisor {
         );
         let handler = Arc::new(Handler {
             validator: Arc::new(validator),
-            ca: Arc::new(ca),
+            ca: ca.clone(),
             default_lifetime: config.ca.default_lifetime,
             server_lifetime: config.ca.server_lifetime,
             user_lifetime: config.ca.user_lifetime,

@@ -178,6 +178,7 @@ impl Rig {
             ("CERT_ISSUER_SERVER_IDENTITY", SERVER_IDENTITY.to_string()),
             ("CERT_ISSUER_BOOTSTRAP", floor.to_string()),
             ("CERT_ISSUER_OWN_TOKEN", at("token")),
+            ("CERT_ISSUER_RECORD_PATH", at("record/issued.jsonl")),
             ("KUBERNETES_SA_TOKEN", at("no-such-token")),
             // A broker nothing listens on.
             ("BROKER_ADDR", "127.0.0.1:1".to_string()),

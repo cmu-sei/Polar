@@ -39,6 +39,7 @@ pub mod key_match;
 pub mod keypair;
 pub mod permission;
 pub mod public_key;
+pub mod record;
 pub mod serial;
 
 // cert_issuer_common/src/lib.rs — add to IssueRequest

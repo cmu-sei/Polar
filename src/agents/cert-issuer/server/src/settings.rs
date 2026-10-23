@@ -108,6 +108,13 @@ pub static OWN_TOKEN: Required<String> = Required::text(
      own client certificate on it, through its own floor, as every bootstrap service is",
 );
 
+pub static RECORD_PATH: Required<String> = Required::text(
+    "CERT_ISSUER_RECORD_PATH",
+    "path to the record of every certificate cert-issuer signs, one JSON line each, which the credentials agent asks for \
+     (docs/architecture/cert-issuer-isolation.md, \"Step 2\"). It must be persistent storage: a certificate that cannot \
+     be recorded is not returned",
+);
+
 pub static KUBERNETES_CA_CERT: Optional<String> = Optional::text(
     "KUBERNETES_CA_CERT",
     "path to the Kubernetes API server's CA certificate, trusted beside the system's when an issuer's keys are \
@@ -135,6 +142,7 @@ static VARIABLES: &[&dyn Described] = &[
     &INTERNAL_CALLERS,
     &BOOTSTRAP,
     &OWN_TOKEN,
+    &RECORD_PATH,
     &KUBERNETES_CA_CERT,
     &KUBERNETES_SA_TOKEN,
 ];
@@ -165,6 +173,8 @@ fn relations(env: &dyn Env) -> Vec<String> {
 pub struct Settings {
     pub service: ServiceConfig,
     pub own_token: String,
+    /// Where the record of every certificate it signs is kept.
+    pub record_path: String,
     /// What fetching an issuer's keys from the Kubernetes API server needs.
     pub kubernetes_ca_cert: Option<String>,
     pub kubernetes_sa_token: String,
@@ -198,6 +208,7 @@ impl Settings {
         let internal_callers = take!(INTERNAL_CALLERS, None);
         let bootstrap_text = take!(BOOTSTRAP, None);
         let own_token = take!(OWN_TOKEN, String::new());
+        let record_path = take!(RECORD_PATH, String::new());
         let kubernetes_ca_cert = take!(KUBERNETES_CA_CERT, None);
         let kubernetes_sa_token = take!(KUBERNETES_SA_TOKEN, String::new());
 
@@ -248,6 +259,7 @@ impl Settings {
         Ok(Self {
             service,
             own_token,
+            record_path,
             kubernetes_ca_cert,
             kubernetes_sa_token,
         })
@@ -295,6 +307,10 @@ mod tests {
                 "cert-issuer.polar.svc.cluster.local",
             ),
             ("CERT_ISSUER_OWN_TOKEN", "/var/run/secrets/polar/token"),
+            (
+                "CERT_ISSUER_RECORD_PATH",
+                "/var/lib/cert-issuer/issued.jsonl",
+            ),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -358,6 +374,7 @@ mod tests {
             vec!["credentials-agent.polar.serviceaccount.cluster.local".to_string()]
         );
         assert_eq!(s.own_token, "/var/run/secrets/polar/token");
+        assert_eq!(s.record_path, "/var/lib/cert-issuer/issued.jsonl");
         assert!(checked(&whole()).is_empty(), "{:?}", checked(&whole()));
     }
 
