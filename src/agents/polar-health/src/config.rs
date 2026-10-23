@@ -40,6 +40,9 @@ use polar_env::{Env, ProcessEnv};
 pub struct HealthConfig {
     /// Does this agent connect to a graph database?
     pub expects_graph: bool,
+    /// Does this agent's health count its Cassini session? Off for a service with no dependency on Cassini that
+    /// still speaks over it (cert-issuer): a lost session is reported, and is never a reason to fail.
+    pub expects_cassini: bool,
     /// Seconds before own cert expiry to enter rejuvenation mode.
     pub rejuvenation_threshold_secs: i64,
     /// Own cert lifetime below which the agent is failed outright.
@@ -108,6 +111,7 @@ impl HealthConfig {
 
         let config = Self {
             expects_graph: args.expects_graph,
+            expects_cassini: args.expects_cassini,
             rejuvenation_threshold_secs: rejuvenation.unwrap_or(args.rejuvenation_threshold_secs),
             expiry_threshold_secs,
             tick_secs,
@@ -214,9 +218,24 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_that_does_not_expect_cassini_is_configured_so() {
+        let map: HashMap<String, String> = HashMap::new();
+        let c = HealthConfig::from_env(args().expecting_cassini(false), &map).unwrap();
+        assert!(!c.expects_cassini);
+        assert!(
+            format!("{:?}", args().expecting_cassini(false)).contains("expects_cassini: false"),
+            "and the arguments say so when printed"
+        );
+    }
+
+    #[test]
     fn defaults_apply_when_nothing_is_set() {
         let c = load(&[]).unwrap();
         assert!(c.expects_graph);
+        assert!(
+            c.expects_cassini,
+            "an agent's health counts Cassini unless it says otherwise"
+        );
         assert_eq!(c.rejuvenation_threshold_secs, 300);
         assert_eq!(c.expiry_threshold_secs, DEFAULT_EXPIRY_THRESHOLD_SECS);
         assert_eq!(c.tick_secs, DEFAULT_TICK_SECS);

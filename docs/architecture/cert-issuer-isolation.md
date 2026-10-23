@@ -501,6 +501,14 @@ builder and then into the catalog (`configuration.md`, 9.8), so the precedent is
   says nothing keeps today's behaviour. The client still connects, reconnects and passes the topic gate. Tests: a
   disconnect and an outage past the deadline leave such an agent healthy and fail any other; it reconnects; a property
   that the health verdict of an agent that counts Cassini is unchanged for any sequence of events.
+  *Built 2026-10-23:* `PolarAgent::DEPENDS_ON_CASSINI` (default on; `run` sets the health's `expects_cassini` from
+  it), `HealthCheckArgs::expecting_cassini`, `HealthConfig::expects_cassini`, and the machine leaving the session out
+  of its judgement when it is off (`connections_healthy`, the disconnect, `check_cassini_deadline`), while its file
+  still reports the session. Tests: the disconnect writes nothing; healthy past the deadline, never connected or lost,
+  where an agent that expects Cassini gets the deadline's verdict; it still rejuvenates; the real actor gives no
+  verdict either way; the setting reaches the health from the trait, and an agent that says nothing counts its
+  session. The property is stated as an equivalence: an agent that does not expect Cassini is judged as one that
+  expects it and always has it, for any sequence of events.
 - **1b, cert-issuer as a `PolarAgent`.** Its settings declared in a `polar_env` section, as Cassini's are, with the
   issuers and the floor as structured values, as the credentials agent's authority model is; its scaffold; its HTTP
   server run inside the builder's lifecycle (signals, shutdown budget). Its client certificate is signed by its own CA

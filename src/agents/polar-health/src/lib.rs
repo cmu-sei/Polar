@@ -616,6 +616,10 @@ pub struct HealthCheckArgs {
     /// Does this agent connect to a graph database?
     pub expects_graph: bool,
 
+    /// Does this agent's health count its Cassini session? On unless [`expecting_cassini`](Self::expecting_cassini)
+    /// turns it off.
+    pub expects_cassini: bool,
+
     /// Seconds before own cert expiry to enter rejuvenation mode.
     pub rejuvenation_threshold_secs: i64,
 
@@ -648,11 +652,19 @@ impl HealthCheckArgs {
     ) -> Self {
         Self {
             expects_graph,
+            expects_cassini: true,
             rejuvenation_threshold_secs,
             dep_cert_endpoints,
             verdict_to: None,
             config: None,
         }
+    }
+
+    /// Whether the agent's health counts its Cassini session. `false` is for a service with no dependency on Cassini
+    /// that still speaks over it: losing the session, or never having one, neither marks it unhealthy nor fails it.
+    pub fn expecting_cassini(mut self, expects: bool) -> Self {
+        self.expects_cassini = expects;
+        self
     }
 
     /// Send the verdict here and keep the actor alive, instead of ending it.
@@ -672,6 +684,7 @@ impl std::fmt::Debug for HealthCheckArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HealthCheckArgs")
             .field("expects_graph", &self.expects_graph)
+            .field("expects_cassini", &self.expects_cassini)
             .field(
                 "rejuvenation_threshold_secs",
                 &self.rejuvenation_threshold_secs,
@@ -1425,6 +1438,49 @@ mod tests {
             matches!(&seen[0], HealthVerdict::Unhealthy(r) if r.contains("cassini unreachable"))
         );
         assert_eq!(read_state(&file).unwrap().phase, HealthPhase::ShuttingDown);
+        assert_eq!(actor.get_status(), ActorStatus::Running);
+
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_agent_that_does_not_expect_cassini_is_never_failed_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let map: std::collections::HashMap<String, String> = [
+            (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
+            (POLAR_HEALTH_CASSINI_DEADLINE_SECS_ENV, "60"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let config = HealthConfig::from_env(
+            HealthCheckArgs::new(false, 300, vec![]).expecting_cassini(false),
+            &map,
+        )
+        .unwrap();
+
+        let (a, seen, _collector) = args_with_verdicts(config).await;
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
+        // Never connected, past the deadline.
+        tokio::time::sleep(Duration::from_secs(200)).await;
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no verdict while never connected"
+        );
+        // Connected, then lost, past the deadline again.
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        actor.cast(HealthCheckMessage::CassiniDisconnected).unwrap();
+        tokio::time::sleep(Duration::from_secs(200)).await;
+        assert!(seen.lock().unwrap().is_empty(), "no verdict once lost");
+        let state = read_state(&file).unwrap();
+        assert_eq!(state.status, HealthStatus::Healthy);
+        assert!(
+            !state.cassini_connected,
+            "the file says the session is down"
+        );
         assert_eq!(actor.get_status(), ActorStatus::Running);
 
         actor.stop(None);

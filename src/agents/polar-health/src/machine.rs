@@ -79,6 +79,8 @@ pub(crate) fn jitter_secs(random: u32) -> u64 {
 #[derive(Debug)]
 pub(crate) struct HealthMachine {
     expects_graph: bool,
+    /// Whether the session counts toward health; when it does not, it is only reported.
+    expects_cassini: bool,
     rejuvenation_threshold_secs: i64,
     graph_deadline_secs: u64,
     cassini_deadline_secs: u64,
@@ -106,6 +108,7 @@ impl HealthMachine {
     pub(crate) fn new(config: &HealthConfig, now: u64) -> Self {
         Self {
             expects_graph: config.expects_graph,
+            expects_cassini: config.expects_cassini,
             rejuvenation_threshold_secs: config.rejuvenation_threshold_secs,
             graph_deadline_secs: config.graph_deadline_secs,
             cassini_deadline_secs: config.cassini_deadline_secs,
@@ -210,8 +213,10 @@ impl HealthMachine {
                 self.cassini_down_since.get_or_insert(now);
                 tracing::warn!("healthcheck: cassini disconnected");
                 // Don't fail: the TCP client will attempt to reconnect. The tick
-                // catches it if reconnection does not succeed.
-                Some(self.unhealthy(now, false, self.graph_connected))
+                // catches it if reconnection does not succeed. An agent that does not
+                // expect Cassini is not made unhealthy by it; its next write reports it.
+                self.expects_cassini
+                    .then(|| self.unhealthy(now, false, self.graph_connected))
             }
             HealthCheckMessage::GraphConnected => {
                 self.graph_connected = true;
@@ -250,7 +255,7 @@ impl HealthMachine {
     /// All required connections are up. Uses `graph_connected` (the graph actor
     /// exists), not graph availability, which the deadline tracks separately.
     fn connections_healthy(&self) -> bool {
-        if !self.cassini_connected {
+        if self.expects_cassini && !self.cassini_connected {
             return false;
         }
         if self.expects_graph && !self.graph_connected {
@@ -300,8 +305,11 @@ impl HealthMachine {
         })
     }
 
-    /// `Err` when Cassini has been unreachable for longer than the deadline.
+    /// `Err` when an agent that expects Cassini has had it unreachable for longer than the deadline.
     fn check_cassini_deadline(&self, now: u64) -> Result<(), String> {
+        if !self.expects_cassini {
+            return Ok(());
+        }
         match self.cassini_down_since {
             Some(since) => {
                 let elapsed = now.saturating_sub(since);
@@ -354,9 +362,10 @@ impl HealthMachine {
             RejuvenationPhase::Normal => {
                 if !self.connections_healthy() {
                     tracing::warn!(
-                        "healthcheck: connections unhealthy (cassini={} graph={} expects_graph={}), waiting for recovery",
+                        "healthcheck: connections unhealthy (cassini={} graph={} expects_cassini={} expects_graph={}), waiting for recovery",
                         self.cassini_connected,
                         self.graph_connected,
+                        self.expects_cassini,
                         self.expects_graph
                     );
                     // Don't fail: reschedule and wait for recovery.
@@ -463,6 +472,7 @@ mod tests {
     fn config(expects_graph: bool) -> HealthConfig {
         HealthConfig {
             expects_graph,
+            expects_cassini: true,
             rejuvenation_threshold_secs: 300,
             expiry_threshold_secs: 60,
             tick_secs: 30,
@@ -554,6 +564,76 @@ mod tests {
             .unwrap();
         assert_eq!(w.status, HealthStatus::Unhealthy);
         assert!(w.cassini_connected && w.graph_connected);
+    }
+
+    // -- an agent whose health does not count Cassini ---------------------------
+
+    /// A machine for an agent with no dependency on Cassini that still speaks over it, as cert-issuer does
+    /// (docs/architecture/cert-issuer-isolation.md, "The model", revised 2026-10-23).
+    fn independent(expects_graph: bool) -> HealthMachine {
+        HealthMachine::new(
+            &HealthConfig {
+                expects_cassini: false,
+                ..config(expects_graph)
+            },
+            T0,
+        )
+    }
+
+    #[test]
+    fn a_cassini_disconnect_writes_nothing_for_an_agent_that_does_not_expect_cassini() {
+        let mut m = independent(false);
+        m.on_message(&HealthCheckMessage::CassiniConnected, T0);
+        assert!(
+            m.on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 7)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_agent_that_does_not_expect_cassini_stays_healthy_past_the_deadline_without_it() {
+        // Never connected, and connected then lost: either way well past the 60 s deadline.
+        let mut lost = independent(false);
+        lost.on_message(&HealthCheckMessage::CassiniConnected, T0);
+        lost.on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 1);
+        for (label, mut m) in [("never connected", independent(false)), ("lost", lost)] {
+            let o = done(m.tick(T0 + 600, &certs(Some(10_000))));
+            let w = o.write.unwrap();
+            assert_eq!(w.status, HealthStatus::Healthy, "{label}");
+            assert!(
+                !w.cassini_connected,
+                "{label}: the file still says the session is down"
+            );
+            assert!(matches!(o.next, Next::Reschedule), "{label}");
+        }
+
+        // The same, for an agent that expects Cassini, is the deadline's verdict.
+        let mut expecting = machine(false);
+        let o = done(expecting.tick(T0 + 600, &certs(Some(10_000))));
+        assert!(
+            matches!(&o.next, Next::Verdict(HealthVerdict::Unhealthy(r)) if r.contains("cassini")),
+            "{:?}",
+            o.next
+        );
+    }
+
+    #[test]
+    fn an_agent_that_does_not_expect_cassini_still_rejuvenates_without_it() {
+        let mut m = independent(false);
+        // A certificate inside the rejuvenation threshold (300 s): into rejuvenation.
+        let o = done(m.tick(T0 + 30, &certs(Some(100))));
+        assert_eq!(o.write.unwrap().status, HealthStatus::Healthy);
+        assert!(matches!(
+            m.tick(T0 + 60, &certs(Some(70))),
+            TickStep::NeedDeps
+        ));
+        m.deps_checked(T0 + 60, true, 0);
+        let o = done(m.tick(T0 + 90, &certs(Some(40))));
+        assert!(
+            matches!(o.next, Next::Verdict(HealthVerdict::Rejuvenate)),
+            "{:?}",
+            o.next
+        );
     }
 
     // -- the Normal phase -----------------------------------------------------
@@ -1215,7 +1295,20 @@ mod tests {
         Vec<String>,
         Vec<(Vec<crate::RefusedTopic>, Vec<crate::RefusedTopic>)>,
     ) {
-        let mut m = machine(expects_graph);
+        run_machine(machine(expects_graph), events, false)
+    }
+
+    /// As [`run`], on the machine `m`; with `forget_cassini`, each write's Cassini session is left out, so two runs
+    /// can be compared on what they judged alone.
+    #[allow(clippy::type_complexity)]
+    fn run_machine(
+        mut m: HealthMachine,
+        events: &[(u64, Event)],
+        forget_cassini: bool,
+    ) -> (
+        Vec<String>,
+        Vec<(Vec<crate::RefusedTopic>, Vec<crate::RefusedTopic>)>,
+    ) {
         let mut now = T0;
         let mut said = Vec::new();
         let mut carried = Vec::new();
@@ -1240,6 +1333,9 @@ mod tests {
                 }
             };
             if let Some(mut w) = write {
+                if forget_cassini {
+                    w.cassini_connected = false;
+                }
                 carried.push((std::mem::take(&mut w.refused_topics), last.clone()));
                 said.push(format!("{w:?}"));
             }
@@ -1275,6 +1371,31 @@ mod tests {
             for (written, told) in carried {
                 proptest::prop_assert_eq!(written, told);
             }
+        }
+
+        /// An agent that does not expect Cassini is judged as one that expects it and always has it, whatever comes
+        /// and goes: every write says the same of its health, and every decision is the same. Only the session its
+        /// file reports differs, so that is left out of the comparison.
+        #[test]
+        fn an_agent_that_does_not_expect_cassini_is_judged_as_if_cassini_were_always_up(
+            expects_graph in proptest::prelude::any::<bool>(),
+            events in events(),
+        ) {
+            let up: Vec<(u64, Event)> = events
+                .iter()
+                .map(|(gap, e)| match e {
+                    // The time still passes, without the session changing.
+                    Event::Message(
+                        HealthCheckMessage::CassiniConnected | HealthCheckMessage::CassiniDisconnected,
+                    ) => (*gap, Event::Message(HealthCheckMessage::Tick)),
+                    other => (*gap, other.clone()),
+                })
+                .collect();
+            let mut always_up = machine(expects_graph);
+            always_up.on_message(&HealthCheckMessage::CassiniConnected, T0);
+            let (independent_said, _) = run_machine(independent(expects_graph), &events, true);
+            let (always_up_said, _) = run_machine(always_up, &up, true);
+            proptest::prop_assert_eq!(independent_said, always_up_said);
         }
     }
 }

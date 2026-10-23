@@ -196,6 +196,11 @@ Hard deadlines belong to the actor, not to the probe:
   It is tuned together with Cassini session repair (see section 7), because a
   longer grace period is only worth having once a reconnect really restores the
   agent's subscriptions.
+  An agent with no dependency on Cassini that still speaks over it
+  (`PolarAgent::DEPENDS_ON_CASSINI = false`, `expects_cassini` off; cert-issuer,
+  `cert-issuer-isolation.md`) has no Cassini deadline: a lost session, or one never
+  made, is reported in its health file and never marks it unhealthy or fails it. It
+  still rejuvenates (2026-10-23).
 
 A deadline, or a rejuvenation, is reported as an explicit verdict message,
 `HealthVerdict::Rejuvenate` or `HealthVerdict::Unhealthy(reason)`, sent once to

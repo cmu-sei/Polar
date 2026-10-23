@@ -108,6 +108,11 @@ pub trait PolarAgent: Sized + 'static {
     /// health check, the signals and the shutdown handshake, and no router, client or
     /// subscriptions. It must also turn `SELF_TEST` off and not list `Cassini` in `NEEDS`.
     const CASSINI_CLIENT: bool = true;
+    /// Whether the agent's health depends on its Cassini session, as every agent's does. A service that Cassini itself
+    /// depends on, and that still speaks over it once it is up (cert-issuer: docs/architecture/cert-issuer-isolation.md,
+    /// "The model", revised 2026-10-23), sets this off: its client connects, reconnects and passes the topic gate as
+    /// any other, and a lost session, or one never made, is reported and never marks it unhealthy or fails it.
+    const DEPENDS_ON_CASSINI: bool = true;
     /// Capabilities the agent uses when its deployment provides them and does without when it
     /// does not, so one binary can run as part of a cluster or on its own. Only `Cassini` may be
     /// optional so far, and then `CASSINI_CLIENT` must be off: the agent is a Cassini client
@@ -944,7 +949,7 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
     // What the agent uses here: what it needs, and the optional capabilities the deployment
     // provides. A deployment that does not say runs the agent on its own.
     let used = effective_of::<A>(env.var(crate::capability::PROVIDED_ENV).as_deref());
-    let startup = match startup::prepare_from(
+    let mut startup = match startup::prepare_from(
         &*env,
         source,
         &own_sections::<A>(),
@@ -973,6 +978,7 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
             return 1;
         }
     };
+    startup.health.expects_cassini = A::DEPENDS_ON_CASSINI;
     let configured = Configured {
         topics: Arc::new(topic_set_serving::<A>(&served)),
         startup,
@@ -1794,6 +1800,73 @@ mod tests {
         let status = run_with::<Watched>(&[], |_: &str| None::<String>);
         assert_eq!(status, 1);
         assert!(!WATCHED_STARTED.load(Ordering::SeqCst));
+    }
+
+    // -- a Cassini client the agent's health does not count ------------------------------------
+
+    static CLIENT_RAN: AtomicBool = AtomicBool::new(false);
+    static CLIENT_EXPECTS_CASSINI: AtomicBool = AtomicBool::new(false);
+
+    /// A Cassini client with no dependency on Cassini, as cert-issuer is (docs/architecture/cert-issuer-isolation.md,
+    /// "The model", revised 2026-10-23).
+    struct Independent;
+
+    impl PolarAgent for Independent {
+        const NAME: &'static str = "independent";
+        const PURPOSE: &'static str = "Speaks over Cassini without depending on it";
+        const NEEDS: &'static [Capability] = &[Capability::Cassini];
+        const DEPENDS_ON_CASSINI: bool = false;
+        const SELF_TEST: bool = false;
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+        async fn start(configured: Configured) -> Result<(), StartError> {
+            CLIENT_EXPECTS_CASSINI
+                .store(configured.startup.health.expects_cassini, Ordering::SeqCst);
+            CLIENT_RAN.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The same client, saying nothing of its dependency.
+    struct Dependent;
+
+    impl PolarAgent for Dependent {
+        const NAME: &'static str = "dependent";
+        const PURPOSE: &'static str = "Speaks over Cassini and depends on it";
+        const NEEDS: &'static [Capability] = &[Capability::Cassini];
+        const SELF_TEST: bool = false;
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+        async fn start(configured: Configured) -> Result<(), StartError> {
+            CLIENT_EXPECTS_CASSINI
+                .store(configured.startup.health.expects_cassini, Ordering::SeqCst);
+            CLIENT_RAN.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_agent_that_does_not_depend_on_cassini_is_started_with_a_health_that_does_not_count_it() {
+        CLIENT_RAN.store(false, Ordering::SeqCst);
+        CLIENT_EXPECTS_CASSINI.store(true, Ordering::SeqCst);
+        assert_eq!(
+            run_with::<Independent>(&[], either_process(Some("cassini"), true)),
+            1
+        );
+        assert!(CLIENT_RAN.load(Ordering::SeqCst), "it started");
+        assert!(
+            !CLIENT_EXPECTS_CASSINI.load(Ordering::SeqCst),
+            "its health does not count its session"
+        );
+
+        CLIENT_RAN.store(false, Ordering::SeqCst);
+        assert_eq!(
+            run_with::<Dependent>(&[], either_process(Some("cassini"), true)),
+            1
+        );
+        assert!(CLIENT_RAN.load(Ordering::SeqCst), "it started");
+        assert!(
+            CLIENT_EXPECTS_CASSINI.load(Ordering::SeqCst),
+            "an agent that says nothing has a health that counts its session"
+        );
     }
 
     // -- an optional Cassini client ----------------------------------------------------------

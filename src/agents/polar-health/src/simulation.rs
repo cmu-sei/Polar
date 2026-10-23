@@ -59,6 +59,7 @@ const BASE: u64 = 1_700_000_000;
 fn config() -> HealthConfig {
     HealthConfig {
         expects_graph: false,
+        expects_cassini: true,
         rejuvenation_threshold_secs: REJUVENATION,
         expiry_threshold_secs: EXPIRY,
         tick_secs: TICK,
