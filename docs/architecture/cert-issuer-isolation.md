@@ -538,17 +538,55 @@ builder and then into the catalog (`configuration.md`, 9.8), so the precedent is
     writes it and its key where the client reads them, and the builder's check that the certificate names the agent
     (`own_name::check_certificate`) applies.
   - **The HTTP server inside the builder's lifecycle,** as the git server's is (`polar-git-server/server/src/supervisor.rs`).
-    axum is not an actor: cert-issuer's own supervisor, the one `AgentBuilder::new` is given, runs the listener as a
-    task with a stop signal and a count of connections in flight. On `PrepareShutdown` it stops accepting, lets the
-    requests in flight finish within a drain timeout, and answers `ProceedWithShutdown`; the infrastructure
-    supervisor's ending exits the process non-zero. Unlike the git server's, it also watches the listener task: one
-    that ends outside a shutdown begins one, so a CA front that serves nothing cannot look healthy.
+    with one difference (2026-10-23). axum is not an actor, and gets no supervisor of its own: the agent has one domain
+    supervisor, cert-issuer's, the one `AgentBuilder::new` is given, and the infrastructure supervisor talks only to
+    it. The listener is a small actor linked under it, not a bare task: it runs axum, and on a drain message stops
+    accepting, lets the requests in flight finish within a drain timeout, and replies. On `PrepareShutdown` the domain
+    supervisor drains it and answers `ProceedWithShutdown`; the infrastructure supervisor's ending exits the process
+    non-zero. A listener that ends any other way is a supervision event like any child's, and begins the shutdown, so
+    a CA front that serves nothing cannot look healthy. (The git server runs its listener as a task it awaits only at
+    shutdown: `remaining-work.md`.)
   - **The chart, until 1c,** gives it the builder's environment (the Cassini client's, the health file and probe) in
     place of the JSON file, and a floor entry for cert-issuer itself.
   - **Tests:** each step of today's `main.rs` (the CA loaded or made, by provisioning; the TLS certificate; the floor
     and its warning; the routes served), now through `start`; the settings refused as `validate` refuses them; its
     client certificate carries its floor entry's names and nothing more; it serves with no Cassini at all;
     `polar_agent_tests!`.
+  *1b built (2026-10-23):* cert-issuer is a `PolarAgent` (`cert-issuer/server/src/agent.rs`: `NEEDS` Cassini,
+  `DEPENDS_ON_CASSINI = false`, `SELF_TEST = false`, since a probe over Cassini would make its health wait on the
+  broker), run by `polar_agent_builder::run`. Its pieces:
+  - **Settings** (`settings.rs`): the section checks the whole configuration with `ServiceConfig::validate`, so a
+    configuration `validate` refuses is a problem at `--check` and at start. `KUBERNETES_CA_CERT` and
+    `KUBERNETES_SA_TOKEN`, which the key fetcher read from the process, are declared under their names
+    (`oidc.rs`, `HttpJwksSource::with`).
+  - **Its own certificate** (`own_certificate.rs`): signed through its own handler (`/validate`, then `/issue`, on
+    its own token), written where its client reads it, the key `0600`.
+  - **The listener** (`listener.rs`) and the supervisor (`supervisor.rs`). What a child's ending means is one
+    function (`on_child_ended`). When the infrastructure ends, the supervisor stops, so `start` returns and `run`
+    exits non-zero; unlike the git server's, it does not call `std::process::exit`, so a test can watch it end.
+  - **The chart** writes one ConfigMap key per variable, given as the environment (`envFrom`). The pod gets its own
+    projected token for the cert-issuer audience, the Cassini client's settings, the health file and the
+    `polar-healthcheck` probe (now in the image, `package.nix`), and a floor entry for cert-issuer itself
+    (`values.dhall`, group `cassini-client`). `render.nu`'s two checks read the new keys.
+
+  Tests:
+  - **Settings:** read whole, defaults, the open and the enforced floor, malformed JSON named by its variable, what
+    `validate` refuses, a missing variable reported once, and a property that the floor, the overrides and the
+    internal callers read back as written.
+  - **The listener:** serves until drained and then ends without failing, a drain waits for requests in flight and
+    gives up at its timeout, and serving that returns or panics fails the actor.
+  - **Its own certificate:** carries its identity and its floor entry's names and nothing more, is refused with no
+    entry in an enforced floor, needs a valid token, and is written with a private key.
+  - **The supervisor:** which child ended, by its id, and what each child's ending means, in and out of a shutdown.
+  - **End to end,** cert-issuer run whole through `run_with` with no broker, each test in its own process (the
+    agents' actors have registered names): it signs its own certificate, serves, and is still serving and healthy at
+    four times the Cassini deadline; a health verdict ends it through the handshake, its listener drained, with `run`
+    returning 1 inside the shutdown budget; and a listener failed outside a shutdown ends it the same way.
+  - **The chart** (`infra/tests/charts.nu`): one key per variable, its own floor entry, and its token, probe and
+    health.
+
+  Found on the way: an empty `identityLifetimeOverrides` rendered as an untyped `[ ]` that Dhall refuses; no target
+  had one.
 - **1c, cert-issuer in the catalog.** A workload entry, `kind: "service"`, `bootstrap: true`, its CA volume and its
   floor as the render writes them today, in place of the hand chart, as Cassini's and the credentials pair's entries
   replaced theirs. Tests: the render's, `infra/tests`, and the chart's checks of the floor carried over.

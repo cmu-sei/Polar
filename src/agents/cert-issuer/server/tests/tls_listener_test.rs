@@ -99,6 +99,8 @@ async fn start_with(
         listener,
         tokio_rustls::TlsAcceptor::from(tls),
         build_router(handler),
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     ));
 
     Fixture {

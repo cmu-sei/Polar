@@ -93,6 +93,7 @@ let
     certIssuer = import (workspaceRoot + /cert-issuer/package.nix) {
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
     };
 
     cassini = import (workspaceRoot + /cassini/package.nix) {

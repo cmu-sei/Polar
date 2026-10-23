@@ -176,21 +176,35 @@ pub fn extract_peer_identity(stream: &TlsStream<TcpStream>) -> Option<String> {
 /// certificate get no extension, and `/internal/issue` refuses them.
 ///
 /// A plain-HTTP client fails the handshake and is dropped here.
-pub async fn serve_tls(listener: TcpListener, acceptor: TlsAcceptor, app: axum::Router) {
+///
+/// It serves until `stop` is notified, and counts each connection in `active` while it is open, so a drain can wait
+/// for them (`crate::listener`), as the git server's listener does.
+pub async fn serve_tls(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    app: axum::Router,
+    stop: Arc<tokio::sync::Notify>,
+    active: Arc<std::sync::atomic::AtomicUsize>,
+) {
     loop {
-        let (tcp, remote) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                warn!(error = %e, "TCP accept failed");
-                // Avoid a hot loop if the failure persists (fd exhaustion).
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                continue;
-            }
+        let (tcp, remote) = tokio::select! {
+            _ = stop.notified() => return,
+            accepted = listener.accept() => match accepted {
+                Ok(conn) => conn,
+                Err(e) => {
+                    warn!(error = %e, "TCP accept failed");
+                    // Avoid a hot loop if the failure persists (fd exhaustion).
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+            },
         };
 
         let acceptor = acceptor.clone();
         let app = app.clone();
+        let guard = Connection::open(&active);
         tokio::spawn(async move {
+            let _guard = guard;
             let tls = match acceptor.accept(tcp).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -214,5 +228,21 @@ pub async fn serve_tls(listener: TcpListener, acceptor: TlsAcceptor, app: axum::
                 debug!(%remote, error = %e, "connection closed with error");
             }
         });
+    }
+}
+
+/// Counts a connection as in flight until it is dropped, so a drain can wait for them.
+struct Connection(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Connection {
+    fn open(active: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(active.clone())
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }

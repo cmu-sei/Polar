@@ -675,28 +675,34 @@ impl JwksCache {
 /// Default JWKS source that fetches over HTTPS.
 pub struct HttpJwksSource {
     client: reqwest::Client,
+    /// The token presented to the Kubernetes API server, read again at every fetch.
+    sa_token_path: String,
 }
 
 impl HttpJwksSource {
+    /// With the standard service account token and no CA beyond the system's.
     pub fn new() -> Self {
+        Self::with(None, "/var/run/secrets/kubernetes.io/serviceaccount/token")
+    }
+
+    /// With the settings cert-issuer declares (`crate::settings`): the Kubernetes API server's CA, trusted beside
+    /// the system's so that fetches from `https://kubernetes.default.svc` verify, and the token it presents.
+    pub fn with(ca_cert_path: Option<&str>, sa_token_path: &str) -> Self {
         let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
 
-        // In-cluster: add the Kubernetes API server's CA cert so
-        // JWKS fetches to https://kubernetes.default.svc.cluster.local
-        // verify correctly. The path is the standard serviceaccount
-        // mount; outside a cluster this file won't exist and we fall
-        // through to the system bundle.
-        if let Ok(ca_path) = std::env::var("KUBERNETES_CA_CERT") {
-            if let Ok(ca_bytes) = std::fs::read(&ca_path) {
-                if let Ok(cert) = reqwest::Certificate::from_pem(&ca_bytes) {
-                    builder = builder.add_root_certificate(cert);
-                    debug!("Loaded additional CA certificate for web client from: {ca_path}");
-                }
-            }
+        // In-cluster: the path is the standard serviceaccount mount; outside a cluster this file won't exist and we
+        // fall through to the system bundle.
+        if let Some(ca_path) = ca_cert_path
+            && let Ok(ca_bytes) = std::fs::read(ca_path)
+            && let Ok(cert) = reqwest::Certificate::from_pem(&ca_bytes)
+        {
+            builder = builder.add_root_certificate(cert);
+            debug!("Loaded additional CA certificate for web client from: {ca_path}");
         }
 
         Self {
             client: builder.build().expect("reqwest client"),
+            sa_token_path: sa_token_path.to_string(),
         }
     }
 }
@@ -718,11 +724,7 @@ impl JwksSource for HttpJwksSource {
         // is rotated automatically by Kubernetes; we re-read it on
         // every fetch so we always use the current value rather than
         // caching a token that may have expired.
-        if let Ok(token) =
-            std::fs::read_to_string(std::env::var("KUBERNETES_SA_TOKEN").unwrap_or_else(|_| {
-                "/var/run/secrets/kubernetes.io/serviceaccount/token".to_string()
-            }))
-        {
+        if let Ok(token) = std::fs::read_to_string(&self.sa_token_path) {
             debug!("Presenting discovered JWKS token");
             request = request.bearer_auth(token.trim());
         }

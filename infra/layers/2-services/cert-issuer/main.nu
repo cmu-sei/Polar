@@ -68,7 +68,7 @@ def main [context_nuon: string] {
     let identity_overrides_dhall = ($context.identityLifetimeOverrides
     | each {|o| $"{ identity = \"($o.identity)\", lifetimeSecs = ($o.lifetimeSecs) }" }
     | str join ", ")
-    let expr = "let v = " + $merged + " in " + $chart_dir + "/configmap.dhall { name = v.name, port = v.port, caCertPath = v.caCertPath, caKeyPath = v.caKeyPath, issuers = v.issuers, defaultLifetimeSecs = v.defaultLifetimeSecs, serverLifetimeSecs = v.serverLifetimeSecs, userLifetimeSecs = v.userLifetimeSecs, mtlsServerIdentity = v.mtlsServerIdentity, mtlsInternalCallers = v.mtlsInternalCallers, mtlsBootstrap = v.mtlsBootstrap, mtlsEnforceBootstrap = v.mtlsEnforceBootstrap, caProvisioning = v.caProvisioning, identityLifetimeOverrides = [ " + $identity_overrides_dhall + " ] }"
+    let expr = "let v = " + $merged + " in " + $chart_dir + "/configmap.dhall { name = v.name, port = v.port, caCertPath = v.caCertPath, caKeyPath = v.caKeyPath, issuers = v.issuers, defaultLifetimeSecs = v.defaultLifetimeSecs, serverLifetimeSecs = v.serverLifetimeSecs, userLifetimeSecs = v.userLifetimeSecs, mtlsServerIdentity = v.mtlsServerIdentity, mtlsInternalCallers = v.mtlsInternalCallers, mtlsBootstrap = v.mtlsBootstrap, mtlsEnforceBootstrap = v.mtlsEnforceBootstrap, caProvisioning = v.caProvisioning, identityLifetimeOverrides = [ " + $identity_overrides_dhall + " ] : List { identity : Text, lifetimeSecs : Natural } }"
     $expr | save --force $tmp
     print $"  rendering configmap.dhall -> cert-issuer-configmap.yaml"
     dhall_yaml $tmp | save --force ($output_dir | path join "cert-issuer-configmap.yaml")
@@ -84,7 +84,7 @@ def main [context_nuon: string] {
 
     # Deployment
     let tmp  = (mktemp --suffix ".dhall")
-    let expr = "let v = " + $merged + " in " + $chart_dir + "/deployment.dhall { name = v.name, image = v.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, port = v.port, caVolumeName = v.caVolumeName, caCertPath = v.caCertPath, caKeyPath = v.caKeyPath, caProvisioning = v.caProvisioning }"
+    let expr = "let v = " + $merged + " in " + $chart_dir + "/deployment.dhall { name = v.name, image = v.image, imagePullPolicy = v.imagePullPolicy, imagePullSecrets = v.imagePullSecrets, port = v.port, caVolumeName = v.caVolumeName, caCertPath = v.caCertPath, caKeyPath = v.caKeyPath, caProvisioning = v.caProvisioning, certIssuerAudience = " + ($context.certIssuerAudience | to json) + " }"
     $expr | save --force $tmp
     print $"  rendering deployment.dhall -> cert-issuer-deployment.yaml"
     dhall_yaml $tmp | save --force ($output_dir | path join "cert-issuer-deployment.yaml")

@@ -23,10 +23,11 @@
 
 # infra/tests/charts.nu
 #
-# What the hand-written service charts tell `polar-init`: Neo4j's server certificate and the ACE job's
+# What the hand-written service charts tell their pods: Neo4j's server certificate and the ACE job's
 # client certificate come from the credentials agent, not from cert-issuer. Neither is a bootstrap identity,
 # so cert-issuer will not sign either on its token alone once the floor is enforced
-# (docs/architecture/cert-issuer-isolation.md). Rendered the way render.nu renders them.
+# (docs/architecture/cert-issuer-isolation.md). And cert-issuer's own chart gives it what the agent builder
+# needs: its declared settings, its own token, the probe. Rendered the way render.nu renders them.
 #
 #   nu infra/tests/charts.nu
 
@@ -72,6 +73,20 @@ def init_env [file: string] {
 
 def value_of [vars: list, name: string] { $vars | where name == $name | get -o 0.value }
 
+# cert-issuer's chart, as render.nu renders it: the floor from the catalog (none here), whether it is enforced.
+def render_cert_issuer [enforced: bool] {
+    render cert-issuer { floor: [], floorEnforced: $enforced, identityLifetimeOverrides: [] }
+}
+
+# The pod spec of cert-issuer's Deployment.
+def cert_issuer_pod [out: string] {
+    open --raw ($out | path join "cert-issuer-deployment.yaml") | from yaml | get spec.template.spec
+}
+
+def cert_issuer_settings [out: string] {
+    open --raw ($out | path join "cert-issuer-configmap.yaml") | from yaml | get data
+}
+
 def main [] {
     # The charts' Dhall reads the node registry from the environment, which render.nu sets; these render a chart without it.
     $env.POLAR_NODE_REGISTRY = (node_registry local-minimal)
@@ -104,6 +119,47 @@ def main [] {
             let out = (render neo4j { target_dir: $dir })
             let map = (open --raw ($out | path join "neo4j-configmap.yaml") | from yaml)
             assert equal ($map | get data | get "neo4j.conf") $conf
+        }
+
+        "cert-issuer's settings reach it one declared variable each, and nothing names the file it read before": {
+            let out = (render_cert_issuer true)
+            let keys = (cert_issuer_settings $out | columns | sort)
+            assert equal $keys ([
+                CERT_ISSUER_BIND_ADDR CERT_ISSUER_BOOTSTRAP CERT_ISSUER_CA_CERT_PATH CERT_ISSUER_CA_KEY_PATH
+                CERT_ISSUER_CA_PROVISIONING CERT_ISSUER_DEFAULT_LIFETIME_SECS CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES
+                CERT_ISSUER_INTERNAL_CALLERS CERT_ISSUER_ISSUERS CERT_ISSUER_SERVER_IDENTITY
+                CERT_ISSUER_SERVER_LIFETIME_SECS CERT_ISSUER_USER_LIFETIME_SECS
+            ] | sort)
+            for key in [CERT_ISSUER_ISSUERS CERT_ISSUER_BOOTSTRAP CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES] {
+                cert_issuer_settings $out | get $key | from json
+            }
+            let container = (cert_issuer_pod $out | get containers.0)
+            assert equal ($container | get envFrom.0.configMapRef.name) "cert-issuer-config"
+            assert (($container.env | where name == "CERT_ISSUER_CONFIG") | is-empty)
+            assert (not (open --raw ($out | path join "cert-issuer-deployment.yaml") | str contains "/etc/cert-issuer"))
+        }
+
+        "cert-issuer's floor holds its own entry when it is enforced, and is unset, the open floor, when it is not": {
+            let floor = (cert_issuer_settings (render_cert_issuer true) | get CERT_ISSUER_BOOTSTRAP | from json)
+            let own = ($floor | where workload == "system:serviceaccount:polar:cert-issuer")
+            assert equal ($own | length) 1
+            assert equal ($own.0.cert_type) "CLIENT"
+            assert equal ($own.0.groups) ["cassini-client"]
+            assert equal ($own.0.names) []
+            assert (not ((cert_issuer_settings (render_cert_issuer false)) | columns | any {|c| $c == "CERT_ISSUER_BOOTSTRAP" }))
+        }
+
+        "cert-issuer's pod has its own token, for its audience, and the probe and health every builder agent has": {
+            let pod = (cert_issuer_pod (render_cert_issuer true))
+            let token = ($pod.volumes | where name == "sa-token" | get 0.projected.sources.0.serviceAccountToken)
+            assert equal $token.audience "polar-cert-issuer-neo4j.local"
+            let container = ($pod.containers.0)
+            assert equal (value_of $container.env "CERT_ISSUER_OWN_TOKEN") "/workspace/token"
+            assert (($container.volumeMounts | where name == "sa-token" and mountPath == "/workspace") | is-not-empty)
+            assert equal ($container.livenessProbe.exec.command) ["polar-healthcheck"]
+            assert equal (value_of $container.env "POLAR_HEALTH_CERTS") (value_of $container.env "TLS_CLIENT_CERT")
+            assert equal (value_of $container.env "TLS_CA_CERT") (cert_issuer_settings (render_cert_issuer true) | get CERT_ISSUER_CA_CERT_PATH)
+            assert equal (value_of $container.env "POLAR_CAPABILITIES") "cassini"
         }
 
         "the ACE job's client certificate is requested from the credentials agent": {

@@ -126,6 +126,8 @@ def main [
                     # (for the images its manifests name) does not have: it gives none, since the floor names no image.
                     floor: (if ($charts_into | is-not-empty) { [] } else { ^nu ($infra_root | path join "resolve.nu") floor --target $target | from json })
                     floorEnforced: (^nu ($infra_root | path join "resolve.nu") floor-enforced --target $target | str trim | into bool)
+                    # Its own projected token is for this audience: it is signed its client certificate on it.
+                    certIssuerAudience: $cert_issuer_audience
                 }
                 "neo4j" => { polarInitImage: $polar_init_image, credentialsObserverUrl: $credentials_observer_url }
                 "gitlab" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
@@ -341,7 +343,7 @@ def check_and_emit_service_accounts [output_dir: string] {
     }
 }
 
-# cert-issuer's TLS certificate carries mtls.server_identity as its SAN, and
+# cert-issuer's TLS certificate carries CERT_ISSUER_SERVER_IDENTITY as its SAN, and
 # every caller verifies the server against the host in its URL. If the two
 # differ, every caller fails the handshake with an error that looks like a
 # network problem, so catch it here, at render time.
@@ -349,12 +351,7 @@ def check_cert_issuer_identity [output_dir: string, cert_issuer_url: string] {
     let cfg_file = ($output_dir | path join "cert-issuer-configmap.yaml")
     if not ($cfg_file | path exists) { return }
 
-    let server_identity = (
-        open $cfg_file
-        | get data."cert-issuer.json"
-        | from json
-        | get mtls.server_identity
-    )
+    let server_identity = (open $cfg_file | get data.CERT_ISSUER_SERVER_IDENTITY)
     let url_host = ($cert_issuer_url | url parse | get host)
 
     if $server_identity != $url_host {
@@ -373,15 +370,10 @@ def check_ca_provisioning [output_dir: string, ca_configmap: string] {
     let cfg_file = ($output_dir | path join "cert-issuer-configmap.yaml")
     if not ($cfg_file | path exists) { return }
 
-    let provisioning = (
-        open $cfg_file
-        | get data."cert-issuer.json"
-        | from json
-        | get ca.provisioning
-    )
+    let provisioning = (open $cfg_file | get data.CERT_ISSUER_CA_PROVISIONING)
 
     if ($ca_configmap | is-not-empty) and $provisioning != "provisioned" {
-        print $"  ERROR: callers mount the ConfigMap '($ca_configmap)', but cert-issuer's ca.provisioning is '($provisioning)'."
+        print $"  ERROR: callers mount the ConfigMap '($ca_configmap)', but cert-issuer's CERT_ISSUER_CA_PROVISIONING is '($provisioning)'."
         print "  That ConfigMap only exists once bootstrap-ca has run, and cert-issuer must load that CA (Provisioned) for callers to verify against it."
         exit 1
     }

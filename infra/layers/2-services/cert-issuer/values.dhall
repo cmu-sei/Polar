@@ -70,22 +70,26 @@ in  { name             = "cert-issuer"
     , mtlsInternalCallers =
         [ "credentials-agent.${Constants.PolarNamespace}.serviceaccount.cluster.local" ]
     -- The issuance floor (docs/architecture/cert-issuer-isolation.md): who may
-    -- be signed what. Nothing is written here: `infra/resolve.nu floor` writes
+    -- be signed what. Only cert-issuer's own entry is written here: `infra/resolve.nu floor` writes
     -- the entries for every catalog workload from what it is issued (the
     -- bootstrap identities, which may be signed on a token alone, and the
     -- workloads on the credentials agent that are issued a server
     -- certificate), and main.nu adds Neo4j's, from its chart and the target's
     -- `neo4jSans`. Rendering puts them in front of whatever is listed here.
+    -- cert-issuer's own entry: it is a bootstrap service too, and signs itself its client certificate on its own
+    -- token, through this floor (docs/architecture/cert-issuer-isolation.md, "1b in detail"). Its group is the one
+    -- every Cassini client is in; it declares no topics of its own. Written here until cert-issuer is a catalog
+    -- workload, whose entry the catalog writes like every bootstrap service's.
     , mtlsBootstrap =
-        [] : List
-               { workload : Text
-               , certType : Text
-               , names : List Text
-               , vouchedOnly : Bool
-               , publish : List Text
-               , subscribe : List Text
-               , groups : List Text
-               }
+        [ { workload = "system:serviceaccount:${Constants.PolarNamespace}:cert-issuer"
+          , certType = "CLIENT"
+          , names = [] : List Text
+          , vouchedOnly = False
+          , publish = [] : List Text
+          , subscribe = [] : List Text
+          , groups = [ "cassini-client" ]
+          }
+        ]
     -- Whether cert-issuer enforces the floor. False is the old open
     -- behaviour (any token holder is signed what it asks for), and
     -- cert-issuer says so at every start. It is turned on in the same change

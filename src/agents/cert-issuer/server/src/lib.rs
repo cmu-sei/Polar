@@ -33,13 +33,18 @@
 //! - `config`: Configuration types loaded at startup.
 //! - `telemetry`: Structured event emission.
 
+pub mod agent;
 pub mod ca;
 pub mod config;
 pub mod csr;
 pub mod floor;
 pub mod handler;
+pub mod listener;
 pub mod oidc;
+pub mod own_certificate;
 pub mod server;
+pub mod settings;
+pub mod supervisor;
 pub mod telemetry;
 pub mod tls;
 

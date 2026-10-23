@@ -36,6 +36,8 @@ let render =
           , caCertPath      : Text
           , caKeyPath       : Text
           , caProvisioning  : CaProvisioning
+          -- The audience its own projected token is for: the one its Kubernetes issuer expects.
+          , certIssuerAudience : Text
           }
       ) ->
         -- Provisioned: mount the operator-created Secret read-only,
@@ -95,11 +97,18 @@ let render =
               , automountServiceAccountToken = Some True
               , securityContext    = podSecurityContext
               , imagePullSecrets = Some v.imagePullSecrets
+              -- The builder's drain budget (POLAR_SHUTDOWN_BUDGET_SECS) plus a margin, so Kubernetes does not kill the pod
+              -- before its own watchdog has ended it.
+              , terminationGracePeriodSeconds = Some 30
               , volumes = Some
                 [ caVolume
+                -- Its own token, on which it signs itself its client certificate through its own floor.
+                , Constants.saTokenVolume v.certIssuerAudience
+                -- Its client certificate and key, written at start, read by its Cassini client.
+                , Constants.certEmptyDirVolume
                 , k8s.Volume::{
-                  , name      = "config"
-                  , configMap = Some k8s.ConfigMapVolumeSource::{ name = Some "${v.name}-config" }
+                  , name     = "polar-health"
+                  , emptyDir = Some k8s.EmptyDirVolumeSource::{=}
                   }
                 ]
               , containers =
@@ -108,11 +117,14 @@ let render =
                   , image           = Some v.image
                   , imagePullPolicy = Some v.imagePullPolicy
                   , securityContext = Some Constants.DropAllCapSecurityContext
-                  , env = Some
-                    [ k8s.EnvVar::{
-                      , name  = "CERT_ISSUER_CONFIG"
-                      , value = Some "/etc/cert-issuer/cert-issuer.json"
+                  -- Its declared settings (src/agents/cert-issuer/server/src/settings.rs), one key each.
+                  , envFrom = Some
+                    [ k8s.EnvFromSource::{
+                      , configMapRef = Some k8s.ConfigMapEnvSource::{ name = Some "${v.name}-config" }
                       }
+                    ]
+                  , env = Some
+                    [ k8s.EnvVar::{ name = "CERT_ISSUER_OWN_TOKEN", value = Some Constants.saTokenPath }
                     , k8s.EnvVar::{
                       , name  = "RUST_LOG"
                       , value = Some "info,cert_issuer=debug"
@@ -129,6 +141,25 @@ let render =
                       , name  = "JAEGER_OTLP_ENDPOINT"
                       , value = Some "http://jaeger-svc.polar.svc.cluster.local:4318/v1/traces"
                       }
+                    -- Its Cassini client: it speaks over Cassini once Cassini is up, and does not depend on it.
+                    , k8s.EnvVar::{ name = "BROKER_ADDR", value = Some Constants.cassiniAddr }
+                    , k8s.EnvVar::{ name = "CASSINI_SERVER_NAME", value = Some Constants.cassiniDNSName }
+                    , k8s.EnvVar::{ name = "TLS_CLIENT_CERT", value = Some "${Constants.tlsPath}/cert.pem" }
+                    , k8s.EnvVar::{ name = "TLS_CLIENT_KEY", value = Some "${Constants.tlsPath}/key.pem" }
+                    , k8s.EnvVar::{ name = "TLS_CA_CERT", value = Some v.caCertPath }
+                    , k8s.EnvVar::{ name = "POLAR_CAPABILITIES", value = Some "cassini" }
+                    -- The health actor and the polar-healthcheck probe, as the catalog's kinds set them
+                    -- (infra/config/kinds.nuon, `health`).
+                    , k8s.EnvVar::{
+                      , name  = "POLAR_HEALTH_FILE"
+                      , value = Some "/var/run/polar-health/polar-health.json"
+                      }
+                    , k8s.EnvVar::{ name = "POLAR_HEALTH_CERTS", value = Some "${Constants.tlsPath}/cert.pem" }
+                    , k8s.EnvVar::{ name = "POLAR_HEALTH_EXPIRY_SECS", value = Some "60" }
+                    , k8s.EnvVar::{ name = "POLAR_HEALTH_TICK_SECS", value = Some "30" }
+                    , k8s.EnvVar::{ name = "POLAR_HEALTH_REJUVENATION_SECS", value = Some "300" }
+                    , k8s.EnvVar::{ name = "POLAR_HEALTH_STALE_SECS", value = Some "90" }
+                    , k8s.EnvVar::{ name = "POLAR_SHUTDOWN_BUDGET_SECS", value = Some "20" }
                     ]
                   , ports = Some
                     [ k8s.ContainerPort::{ containerPort = v.port, name = Some "http" } ]
@@ -138,11 +169,23 @@ let render =
                       , mountPath = "/home/polar"
                       }
                     , k8s.VolumeMount::{
-                      , name      = "config"
-                      , mountPath = "/etc/cert-issuer"
+                      , name      = Constants.saTokenVolumeName
+                      , mountPath = "/workspace"
                       , readOnly  = Some True
                       }
+                    , Constants.certVolumeMount
+                    , k8s.VolumeMount::{
+                      , name      = "polar-health"
+                      , mountPath = "/var/run/polar-health"
+                      }
                     ]
+                  , livenessProbe = Some k8s.Probe::{
+                    , exec                = Some { command = Some [ "polar-healthcheck" ] }
+                    , initialDelaySeconds = Some 150
+                    , periodSeconds       = Some 30
+                    , failureThreshold    = Some 2
+                    , timeoutSeconds      = Some 5
+                    }
                   }
                 ]
               }

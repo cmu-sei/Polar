@@ -211,52 +211,24 @@ cause every issuance to fail with `IDENTITY_MISMATCH`.
 
 ## Configuration
 
-Config is provided as a JSON file. The path is set via the
-`CERT_ISSUER_CONFIG` environment variable. Dhall is the source of
-truth for config authoring; JSON is what the binary reads.
+cert-issuer is a Polar agent on the agent builder (`docs/architecture/cert-issuer-isolation.md`, "Step 1"). Its
+settings are declared variables (`server/src/settings.rs`), read from its environment: one per scalar of the service
+(`CERT_ISSUER_BIND_ADDR`, `CERT_ISSUER_CA_CERT_PATH`, the lifetimes, `CERT_ISSUER_SERVER_IDENTITY`,
+`CERT_ISSUER_INTERNAL_CALLERS`, ...), and one JSON value each for the issuers (`CERT_ISSUER_ISSUERS`), the floor
+(`CERT_ISSUER_BOOTSTRAP`) and the lifetime overrides (`CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES`). The whole is
+checked before anything starts, by every rule `ServiceConfig::validate` applies. The builder's own flags list and check
+them:
 
 ```sh
-dhall-to-json --file conf/dev.dhall > /tmp/cert-issuer.json
-CERT_ISSUER_CONFIG=/tmp/cert-issuer.json cargo run --bin cert-issuer
+cargo run --bin cert-issuer -- --help       # every variable, with what it is for
+cargo run --bin cert-issuer -- --scaffold   # the same, as the configuration document the render fills
 ```
 
-A representative config (JSON):
-
-```json
-{
-  "bind_addr": "127.0.0.1:8443",
-  "ca": {
-    "ca_cert_path": "./dev/tmp/ca.crt",
-    "ca_key_path": "./dev/tmp/ca.key",
-    "default_lifetime": { "secs": 1800, "nanos": 0 }
-  },
-  "issuer": {
-    "issuer": "https://kubernetes.default.svc",
-    "audience": "polar-cert-issuer.prod",
-    "jwks_uri": "https://kubernetes.default.svc/openid/v1/jwks",
-    "workload_identity_claim": "sub",
-    "instance_binding_claim": "kubernetes.io/pod/uid",
-    "allowed_algorithms": ["RS256", "ES256", "EdDSA"],
-    "jwks_cache_ttl_min": { "secs": 30, "nanos": 0 },
-    "jwks_cache_ttl_max": { "secs": 3600, "nanos": 0 }
-  }
-}
-```
-
-Two fields have no defaults and must be set per-environment:
-
-- `issuer.issuer` — the OIDC issuer URL the cert issuer trusts
-- `issuer.audience` — the audience tokens must claim
-
-The Rust validator at startup rejects empty values for these fields.
-
-### TLS
-
-v1 does not terminate TLS. The binary serves plain HTTP on the
-configured `bind_addr`. TLS is the responsibility of whatever
-fronts it — a service mesh sidecar, ingress controller, or sidecar
-proxy. In Kubernetes, a NetworkPolicy restricting access to the
-cert issuer's pod is strongly recommended regardless.
+In a cluster the chart writes them into a ConfigMap (`infra/layers/2-services/cert-issuer/configmap.dhall`). It also
+needs its own service account token (`CERT_ISSUER_OWN_TOKEN`), on which it signs itself its client certificate through
+its own floor, and the Cassini client's settings (`BROKER_ADDR`, `TLS_CLIENT_CERT`, ...): it speaks over Cassini once
+Cassini is up, and does not depend on it. `conf/` holds the JSON file format the binary read before it moved onto the
+builder; it is no longer read.
 
 ## Local Development
 

@@ -55,8 +55,14 @@ dashmap = "6"
 hyper-util.workspace = true
 cert-issuer-common = { path = "../common" }
 polar = { path = "../../lib" }
+polar-env.workspace = true
+ractor.workspace = true
+polar-agent-builder.workspace = true
+cassini-client.workspace = true
+cassini-types.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 wiremock.workspace = true
 tempfile.workspace = true
 chrono.workspace = true

@@ -21,8 +21,10 @@
 
 -- infra/layers/2-services/cert-issuer/configmap.dhall
 --
--- Renders the cert-issuer's JSON config into a ConfigMap.
--- The binary reads this at startup via CERT_ISSUER_CONFIG.
+-- Renders cert-issuer's configuration into a ConfigMap, one key per variable it
+-- declares (src/agents/cert-issuer/server/src/settings.rs); the Deployment gives
+-- them to it as its environment. The issuers, the floor and the lifetime
+-- overrides are each one JSON value.
 let Constants =
       ../../../schema/constants.dhall
 
@@ -168,162 +170,73 @@ let render =
                           }
                       )
 
-        let configJson =
+        let BootstrapEntry =
+              { workload : Text
+              , certType : Text
+              , names : List Text
+              , vouchedOnly : Bool
+              , publish : List Text
+              , subscribe : List Text
+              , groups : List Text
+              }
+
+        let strings =
+              \(xs : List Text) ->
+                JSON.array (Prelude.List.map Text JSON.Type JSON.string xs)
+
+        let renderBootstrap =
+              \(b : BootstrapEntry) ->
+                JSON.object
+                  ( toMap
+                      { workload = JSON.string b.workload
+                      , cert_type = JSON.string b.certType
+                      , names = strings b.names
+                      , vouched_only = JSON.bool b.vouchedOnly
+                      , publish = strings b.publish
+                      , subscribe = strings b.subscribe
+                      , groups = strings b.groups
+                      }
+                  )
+
+        let issuersJson =
+              JSON.render
+                ( JSON.array
+                    (Prelude.List.map IssuerCfg JSON.Type renderIssuer v.issuers)
+                )
+
+        -- Seconds per identity, as CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES reads them.
+        let overridesJson =
               JSON.render
                 ( JSON.object
-                    ( toMap
-                        { bind_addr =
-                            JSON.string "0.0.0.0:${Natural/show v.port}"
-                        , ca =
-                            JSON.object
-                              ( toMap
-                                  { ca_cert_path = JSON.string v.caCertPath
-                                  , ca_key_path = JSON.string v.caKeyPath
-                                  , provisioning =
-                                      merge
-                                        { Provisioned = JSON.string "provisioned"
-                                        , SelfBootstrap = JSON.string "self_bootstrap"
-                                        }
-                                        v.caProvisioning
-                                  , default_lifetime =
-                                      JSON.object
-                                        ( toMap
-                                            { secs = JSON.natural v.defaultLifetimeSecs
-                                            , nanos = JSON.natural 0
-                                            }
-                                        )
-                                  , server_lifetime =
-                                      JSON.object
-                                        ( toMap
-                                            { secs = JSON.natural v.serverLifetimeSecs
-                                            , nanos = JSON.natural 0
-                                            }
-                                        )
-                                  , user_lifetime =
-                                      JSON.object
-                                        ( toMap
-                                            { secs = JSON.natural v.userLifetimeSecs
-                                            , nanos = JSON.natural 0
-                                            }
-                                        )
-                                  , identity_lifetime_overrides =
-                                      JSON.object
-                                        ( Prelude.List.map
-                                            { identity : Text, lifetimeSecs : Natural }
-                                            { mapKey : Text, mapValue : JSON.Type }
-                                            ( \(o : { identity : Text, lifetimeSecs : Natural }) ->
-                                                { mapKey = o.identity
-                                                , mapValue =
-                                                    JSON.object
-                                                      ( toMap
-                                                          { secs = JSON.natural o.lifetimeSecs
-                                                          , nanos = JSON.natural 0
-                                                          }
-                                                      )
-                                                }
-                                            )
-                                            v.identityLifetimeOverrides
-                                        )
-                                  }
-                              )
-                        , issuers =
-                            JSON.array
-                              ( Prelude.List.map
-                                  IssuerCfg
-                                  JSON.Type
-                                  renderIssuer
-                                  v.issuers
-                              )
-                        , mtls =
-                            JSON.object
-                              ( toMap
-                                  { server_identity =
-                                      JSON.string v.mtlsServerIdentity
-                                  , internal_callers =
-                                      JSON.array
-                                        ( Prelude.List.map
-                                            Text
-                                            JSON.Type
-                                            JSON.string
-                                            v.mtlsInternalCallers
-                                        )
-                                  }
-                              # ( if    v.mtlsEnforceBootstrap
-                                  then  toMap
-                                          { bootstrap =
-                                              JSON.array
-                                                ( Prelude.List.map
-                                                    { workload : Text
-                                                    , certType : Text
-                                                    , names : List Text
-                                                    , vouchedOnly : Bool
-                                                    , publish : List Text
-                                                    , subscribe : List Text
-                                                    , groups : List Text
-                                                    }
-                                                    JSON.Type
-                                                    ( \ ( b
-                                                        : { workload : Text
-                                                          , certType : Text
-                                                          , names : List Text
-                                                          , vouchedOnly : Bool
-                                                          , publish : List Text
-                                                          , subscribe : List Text
-                                                          , groups : List Text
-                                                          }
-                                                        ) ->
-                                                        JSON.object
-                                                          ( toMap
-                                                              { workload =
-                                                                  JSON.string b.workload
-                                                              , cert_type =
-                                                                  JSON.string b.certType
-                                                              , names =
-                                                                  JSON.array
-                                                                    ( Prelude.List.map
-                                                                        Text
-                                                                        JSON.Type
-                                                                        JSON.string
-                                                                        b.names
-                                                                    )
-                                                              , vouched_only =
-                                                                  JSON.bool b.vouchedOnly
-                                                              , publish =
-                                                                  JSON.array
-                                                                    ( Prelude.List.map
-                                                                        Text
-                                                                        JSON.Type
-                                                                        JSON.string
-                                                                        b.publish
-                                                                    )
-                                                              , subscribe =
-                                                                  JSON.array
-                                                                    ( Prelude.List.map
-                                                                        Text
-                                                                        JSON.Type
-                                                                        JSON.string
-                                                                        b.subscribe
-                                                                    )
-                                                              , groups =
-                                                                  JSON.array
-                                                                    ( Prelude.List.map
-                                                                        Text
-                                                                        JSON.Type
-                                                                        JSON.string
-                                                                        b.groups
-                                                                    )
-                                                              }
-                                                          )
-                                                    )
-                                                    v.mtlsBootstrap
-                                                )
-                                          }
-                                  else  [] : List { mapKey : Text, mapValue : JSON.Type }
-                                )
-                              )
-                        }
+                    ( Prelude.List.map
+                        { identity : Text, lifetimeSecs : Natural }
+                        { mapKey : Text, mapValue : JSON.Type }
+                        ( \(o : { identity : Text, lifetimeSecs : Natural }) ->
+                            { mapKey = o.identity
+                            , mapValue = JSON.natural o.lifetimeSecs
+                            }
+                        )
+                        v.identityLifetimeOverrides
                     )
                 )
+
+        -- The floor is written only when it is enforced: CERT_ISSUER_BOOTSTRAP unset is the open floor.
+        let floor =
+              if    v.mtlsEnforceBootstrap
+              then  [ { mapKey = "CERT_ISSUER_BOOTSTRAP"
+                      , mapValue =
+                          JSON.render
+                            ( JSON.array
+                                ( Prelude.List.map
+                                    BootstrapEntry
+                                    JSON.Type
+                                    renderBootstrap
+                                    v.mtlsBootstrap
+                                )
+                            )
+                      }
+                    ]
+              else  [] : List { mapKey : Text, mapValue : Text }
 
         in  { apiVersion = "v1"
             , kind = "ConfigMap"
@@ -331,7 +244,30 @@ let render =
               { name = "${v.name}-config"
               , namespace = Constants.PolarNamespace
               }
-            , data.`cert-issuer.json` = configJson
+            , data =
+                  toMap
+                    { CERT_ISSUER_BIND_ADDR = "0.0.0.0:${Natural/show v.port}"
+                    , CERT_ISSUER_ISSUERS = issuersJson
+                    , CERT_ISSUER_CA_CERT_PATH = v.caCertPath
+                    , CERT_ISSUER_CA_KEY_PATH = v.caKeyPath
+                    , CERT_ISSUER_CA_PROVISIONING =
+                        merge
+                          { Provisioned = "provisioned"
+                          , SelfBootstrap = "self_bootstrap"
+                          }
+                          v.caProvisioning
+                    , CERT_ISSUER_DEFAULT_LIFETIME_SECS =
+                        Natural/show v.defaultLifetimeSecs
+                    , CERT_ISSUER_SERVER_LIFETIME_SECS =
+                        Natural/show v.serverLifetimeSecs
+                    , CERT_ISSUER_USER_LIFETIME_SECS =
+                        Natural/show v.userLifetimeSecs
+                    , CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES = overridesJson
+                    , CERT_ISSUER_SERVER_IDENTITY = v.mtlsServerIdentity
+                    , CERT_ISSUER_INTERNAL_CALLERS =
+                        Prelude.Text.concatSep "," v.mtlsInternalCallers
+                    }
+                # floor
             }
 
 in  render

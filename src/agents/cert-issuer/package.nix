@@ -25,6 +25,7 @@
 , crateArgs
 , workspaceFileset
 , system
+, healthcheckDrv
 , ...
 }:
 let
@@ -69,6 +70,8 @@ let
 
     contents = [
       server
+      # The liveness probe: it reads the health file the agent builder's health actor writes.
+      healthcheckDrv
       pkgs.iana-etc
       pkgs.cacert
       pkgs.busybox
@@ -97,11 +100,6 @@ let
       mkdir -p ./home/polar/ca
       chown ${polarUid}:${polarGid} ./home/polar/ca
 
-      # Config directory is read-only at runtime (ConfigMap mount
-      # in the pod spec), but must exist in the image so the
-      # process can stat the path before the mount lands.
-      mkdir -p ./etc/cert-issuer
-      chown ${polarUid}:${polarGid} ./etc/cert-issuer
     '';
 
     config = {
@@ -113,10 +111,11 @@ let
       Env = [
         "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
         "RUST_LOG=info,cert_issuer=debug"
-        # Default CA paths pointing at the user-owned workspace.
-        # The Dhall config and pod spec ConfigMap override these
-        # in cluster — these defaults make local testing with
-        # cert-issuer-setup work without any extra configuration.
+        # Default CA paths pointing at the user-owned workspace, as
+        # cert-issuer's declared settings name them (settings.rs). The
+        # pod's ConfigMap sets them in cluster; these defaults make local
+        # testing with cert-issuer-setup work without any extra
+        # configuration.
         "CERT_ISSUER_CA_CERT_PATH=/home/polar/ca/ca.crt"
         "CERT_ISSUER_CA_KEY_PATH=/home/polar/ca/ca.key"
       ];
