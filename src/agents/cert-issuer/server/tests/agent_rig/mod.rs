@@ -184,7 +184,8 @@ impl Rig {
             ("CASSINI_SERVER_NAME", "cassini.test".to_string()),
             ("TLS_CLIENT_CERT", at("tls/client.crt")),
             ("TLS_CLIENT_KEY", at("tls/client.key")),
-            ("TLS_CA_CERT", at("ca/ca.crt")),
+            // Where the cassini capability puts it: cert-issuer writes the CA it signs under there.
+            ("TLS_CA_CERT", at("tls/ca.pem")),
             ("POLAR_CAPABILITIES", "cassini".to_string()),
             ("POLAR_HEALTH_FILE", at("health.json")),
             ("POLAR_HEALTH_CERTS", at("tls/client.crt")),

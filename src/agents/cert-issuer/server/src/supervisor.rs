@@ -197,8 +197,8 @@ impl Actor for CertIssuerSupervisor {
             ),
         }
 
-        // Its own client certificate, where its Cassini client reads it, before the builder checks that it names
-        // this agent.
+        // Its own client certificate, and the CA it is signed under, where its Cassini client reads them, before the
+        // builder checks that the certificate names this agent.
         let token = std::fs::read_to_string(&settings.own_token)
             .map_err(|e| format!("its own token, {}: {e}", settings.own_token))?;
         let own = issue_own(&handler, token.trim()).await?;
@@ -210,7 +210,11 @@ impl Actor for CertIssuerSupervisor {
             .config()
             .read(&cassini_client::environment::TLS_CLIENT_KEY)
             .map_err(|e| e.to_string())?;
-        own.write(Path::new(&certificate), Path::new(&key))?;
+        let ca = configured
+            .config()
+            .read(&cassini_client::environment::TLS_CA_CERT)
+            .map_err(|e| e.to_string())?;
+        own.write(Path::new(&certificate), Path::new(&key), Path::new(&ca))?;
         info!("signed its own client certificate through its floor");
 
         let resources = AgentBuilder::new(myself.clone(), SERVICE_NAME)

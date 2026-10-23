@@ -94,11 +94,13 @@ pub async fn issue_own(handler: &Handler, token: &str) -> Result<OwnCertificate,
 }
 
 impl OwnCertificate {
-    /// Writes the certificate and its key where the Cassini client reads them, the key readable by its owner alone.
-    pub fn write(&self, certificate: &Path, key: &Path) -> Result<(), String> {
+    /// Writes the certificate, its key and the CA chain it is signed under where the Cassini client reads them (its
+    /// `TLS_CLIENT_CERT`, `TLS_CLIENT_KEY` and `TLS_CA_CERT`), the key readable by its owner alone. The broker's
+    /// certificate is signed by the same CA, so the chain is what the client trusts it by.
+    pub fn write(&self, certificate: &Path, key: &Path, ca: &Path) -> Result<(), String> {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        for path in [certificate, key] {
+        for path in [certificate, key, ca] {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("cannot make {}: {e}", parent.display()))?;
@@ -106,6 +108,8 @@ impl OwnCertificate {
         }
         std::fs::write(certificate, &self.certificate_pem)
             .map_err(|e| format!("cannot write {}: {e}", certificate.display()))?;
+        std::fs::write(ca, &self.ca_chain_pem)
+            .map_err(|e| format!("cannot write {}: {e}", ca.display()))?;
         // Made private before the key is in it, never loosened after.
         let _ = std::fs::remove_file(key);
         std::fs::OpenOptions::new()

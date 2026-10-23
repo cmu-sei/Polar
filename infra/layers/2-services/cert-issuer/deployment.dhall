@@ -146,7 +146,9 @@ let render =
                     , k8s.EnvVar::{ name = "CASSINI_SERVER_NAME", value = Some Constants.cassiniDNSName }
                     , k8s.EnvVar::{ name = "TLS_CLIENT_CERT", value = Some "${Constants.tlsPath}/cert.pem" }
                     , k8s.EnvVar::{ name = "TLS_CLIENT_KEY", value = Some "${Constants.tlsPath}/key.pem" }
-                    , k8s.EnvVar::{ name = "TLS_CA_CERT", value = Some v.caCertPath }
+                    -- It writes the CA it signs under here, beside its own certificate: the CA's own file is on a
+                    -- read-only Secret.
+                    , k8s.EnvVar::{ name = "TLS_CA_CERT", value = Some "${Constants.tlsPath}/ca.pem" }
                     , k8s.EnvVar::{ name = "POLAR_CAPABILITIES", value = Some "cassini" }
                     -- The health actor and the polar-healthcheck probe, as the catalog's kinds set them
                     -- (infra/config/kinds.nuon, `health`).

@@ -158,7 +158,11 @@ def main [] {
             assert (($container.volumeMounts | where name == "sa-token" and mountPath == "/workspace") | is-not-empty)
             assert equal ($container.livenessProbe.exec.command) ["polar-healthcheck"]
             assert equal (value_of $container.env "POLAR_HEALTH_CERTS") (value_of $container.env "TLS_CLIENT_CERT")
-            assert equal (value_of $container.env "TLS_CA_CERT") (cert_issuer_settings (render_cert_issuer true) | get CERT_ISSUER_CA_CERT_PATH)
+            # cert-issuer writes the CA it signs under beside its own certificate, as the cassini capability names it,
+            # not over the CA's own file, which is on a read-only Secret.
+            assert equal (value_of $container.env "TLS_CA_CERT") "/etc/tls/certs/ca.pem"
+            let tls = ($container.volumeMounts | where mountPath == "/etc/tls/certs" | get 0.name)
+            assert (($pod.volumes | where name == $tls | get 0 | get -o emptyDir) != null)
             assert equal (value_of $container.env "POLAR_CAPABILITIES") "cassini"
         }
 

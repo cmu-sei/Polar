@@ -260,6 +260,14 @@ impl Configured {
 
 // -- the document --------------------------------------------------------------------------------
 
+fn depends() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 /// The configuration document of one agent: the sections that apply to it, and what it is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentDocument {
@@ -269,6 +277,11 @@ pub struct AgentDocument {
     /// The capabilities it uses when the deployment provides them and does without otherwise.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub optional: Vec<String>,
+    /// Whether the agent's health depends on its Cassini session ([`PolarAgent::DEPENDS_ON_CASSINI`]): the catalog
+    /// leaves Cassini out of the health dependencies of one that does not. Written only when it does not, so every
+    /// other agent's scaffold is as it was; a scaffold without it depends on Cassini.
+    #[serde(default = "depends", skip_serializing_if = "is_true")]
+    pub depends_on_cassini: bool,
     /// The least the deployment may give the agent to drain, in seconds.
     pub shutdown_budget_minimum_secs: u64,
     /// The commands the agent accepts, with their arguments: what a signed command may be.
@@ -468,6 +481,7 @@ pub fn scaffold_document<A: PolarAgent>() -> AgentDocument {
             .map(|c| c.as_str().to_string())
             .collect(),
         optional: A::OPTIONAL.iter().map(|c| c.as_str().to_string()).collect(),
+        depends_on_cassini: A::DEPENDS_ON_CASSINI,
         shutdown_budget_minimum_secs: A::SHUTDOWN_BUDGET.as_secs(),
         commands: A::COMMANDS
             .iter()
@@ -1841,6 +1855,25 @@ mod tests {
             CLIENT_RAN.store(true, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    #[test]
+    fn the_scaffold_says_when_an_agent_does_not_depend_on_cassini_and_says_nothing_otherwise() {
+        let independent = scaffold_document::<Independent>();
+        assert!(!independent.depends_on_cassini);
+        let text = serde_json::to_string(&independent).unwrap();
+        assert!(text.contains("\"depends_on_cassini\":false"), "{text}");
+
+        // Every other agent's scaffold is as it was, and one written before reads as depending on Cassini.
+        let dependent = scaffold_document::<Dependent>();
+        assert!(dependent.depends_on_cassini);
+        let text = serde_json::to_string(&dependent).unwrap();
+        assert!(!text.contains("depends_on_cassini"), "{text}");
+        let read: AgentDocument = serde_json::from_str(&text).unwrap();
+        assert!(read.depends_on_cassini);
+        let independent_read: AgentDocument =
+            serde_json::from_str(&serde_json::to_string(&independent).unwrap()).unwrap();
+        assert!(!independent_read.depends_on_cassini);
     }
 
     #[test]

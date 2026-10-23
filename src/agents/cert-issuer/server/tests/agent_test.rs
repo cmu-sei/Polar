@@ -48,6 +48,11 @@ fn cert_issuer_signs_its_own_certificate_and_serves_with_no_broker_long_past_the
         vec![IDENTITY.to_string(), "g:cassini-client".to_string()],
         "its own client certificate, with what its floor entry gives it"
     );
+    assert_eq!(
+        std::fs::read_to_string(rig.dir.path().join("tls/ca.pem")).unwrap(),
+        std::fs::read_to_string(rig.ca()).unwrap(),
+        "and the CA it signs under, where its Cassini client reads the broker's CA"
+    );
 
     // Four times the Cassini deadline, ticking every second, with no broker.
     std::thread::sleep(Duration::from_secs(4));

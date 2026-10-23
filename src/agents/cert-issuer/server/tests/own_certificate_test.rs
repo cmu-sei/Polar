@@ -164,7 +164,10 @@ async fn cert_issuer_is_signed_its_own_client_certificate_with_what_its_floor_en
     );
     assert!(client, "a client certificate");
     assert!(own.private_key_pem.contains("PRIVATE KEY"));
-    assert!(!own.ca_chain_pem.is_empty());
+    assert!(
+        own.ca_chain_pem.contains("BEGIN CERTIFICATE"),
+        "the chain it is signed under"
+    );
 }
 
 #[tokio::test]
@@ -191,16 +194,22 @@ async fn with_the_floor_open_it_is_signed_its_identity_alone() {
 }
 
 #[tokio::test]
-async fn its_certificate_and_key_are_written_where_its_client_reads_them_with_the_key_kept_private()
-{
+async fn its_certificate_key_and_ca_are_written_where_its_client_reads_them_with_the_key_kept_private()
+ {
     use std::os::unix::fs::PermissionsExt;
     let own = issue_own(&handler(None), &own_token()).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let cert = dir.path().join("tls/client.crt");
     let key = dir.path().join("tls/client.key");
-    own.write(&cert, &key).unwrap();
+    let ca = dir.path().join("tls/ca.pem");
+    own.write(&cert, &key, &ca).unwrap();
     assert_eq!(std::fs::read_to_string(&cert).unwrap(), own.certificate_pem);
     assert_eq!(std::fs::read_to_string(&key).unwrap(), own.private_key_pem);
+    assert_eq!(
+        std::fs::read_to_string(&ca).unwrap(),
+        own.ca_chain_pem,
+        "the CA chain it was signed under, where its client looks for the broker's CA"
+    );
     let mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "{mode:o}");
 }
