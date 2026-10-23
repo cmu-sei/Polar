@@ -722,6 +722,17 @@ now a catalog workload, so its topics come from its scaffold into its floor entr
   (`published_by` among its internal callers); the credentials agent takes a reply only from cert-issuer's identity.
   Tests: a page and the next; another log's id restarts from the first entry; a request from anyone else is not
   answered; a reply from anyone else is not taken.
+  *2b built, cert-issuer's side (2026-10-23).*
+  - **Topics:** cert-issuer subscribes to `cert-issuer-record-requests` and publishes `cert-issuer-record-replies`
+    `because` of it, both marked `waiting` until 2c's side exists.
+  - **The supervisor** turns each request into a message, answers it with `RecordingCa::answer`, and publishes the
+    reply.
+  - **`answer`** replies only to a request whose broker-verified publisher is one of its internal callers (the
+    credentials agent), and only to one that reads; the reply is at most a page.
+
+  Tests: the credentials agent's request answered with a page; anyone else's, or no one's, not answered; a request
+  that does not read, not answered; at most a page; the declarations and their cause. Mutation-checked: `answer`,
+  five of five caught. Over a real broker, end to end, in 2c.
 - **2c, the credentials agent asks, and the ledger holds what it is told.** It asks when it registers and every 30
   seconds, and at once again while a reply says there is more. Each entry whose serial the ledger already holds, in any
   of its records, adds nothing; any other becomes a `CertificateReported` event with the entry and the cursor, folded

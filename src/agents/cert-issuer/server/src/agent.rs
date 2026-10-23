@@ -25,7 +25,7 @@
 //! (docs/architecture/cert-issuer-isolation.md, "1b in detail").
 
 use crate::supervisor::{CertIssuerSupervisor, SERVICE_NAME, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
+use polar_agent_builder::{Capability, Cause, Configured, PolarAgent, StartError, TopicDecl};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
@@ -44,6 +44,23 @@ impl PolarAgent for CertIssuer {
     const SELF_TEST: bool = false;
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
     const SECTIONS: &'static [&'static Section] = &[&crate::settings::SECTION];
+    // The record of every certificate it signs, which the credentials agent asks for, a page at a time
+    // (docs/architecture/cert-issuer-isolation.md, "Step 2").
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::subscribe(
+            cert_issuer_common::record::RECORD_REQUESTS_TOPIC,
+            "the credentials agent asking for the record, after the last entry it holds",
+        )
+        .waiting("the credentials agent asks in step 2c"),
+        TopicDecl::publish(
+            cert_issuer_common::record::RECORD_REPLIES_TOPIC,
+            "a page of the record, in answer",
+        )
+        .because(&[Cause::Topic(
+            cert_issuer_common::record::RECORD_REQUESTS_TOPIC,
+        )])
+        .waiting("the credentials agent asks in step 2c"),
+    ];
     const HELP: Option<&'static str> = Some(
         "cert-issuer signs Polar's certificates. A caller with only a service account token is signed what the floor \
          (CERT_ISSUER_BOOTSTRAP) writes down for its workload; the credentials agent, by its verified mTLS \
@@ -75,4 +92,26 @@ mod tests {
     use super::*;
 
     polar_agent_builder::polar_agent_tests!(CertIssuer);
+
+    #[test]
+    fn it_hears_the_record_requests_and_answers_them_because_of_them() {
+        use cert_issuer_common::record::{RECORD_REPLIES_TOPIC, RECORD_REQUESTS_TOPIC};
+        use polar_agent_builder::Access;
+        use polar_agent_builder::topics::CauseEntry;
+        let scaffold = polar_agent_builder::agent::scaffold_document::<CertIssuer>();
+        let topic = |name: &str, access: Access| {
+            scaffold
+                .topics
+                .iter()
+                .find(|t| t.name == name && t.access == access)
+                .cloned()
+                .unwrap_or_else(|| panic!("{name} ({access:?}) is not declared"))
+        };
+        topic(RECORD_REQUESTS_TOPIC, Access::Subscribe);
+        let reply = topic(RECORD_REPLIES_TOPIC, Access::Publish);
+        assert_eq!(
+            reply.causes,
+            vec![CauseEntry::Topic(RECORD_REQUESTS_TOPIC.to_string())]
+        );
+    }
 }

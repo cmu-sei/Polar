@@ -151,6 +151,31 @@ impl RecordingCa {
     pub async fn page(&self, request: &RecordRequest, limit: usize) -> RecordReply {
         self.record.lock().await.page(request, limit)
     }
+
+    /// The reply to a request that arrived on `RECORD_REQUESTS_TOPIC`, published (the broker says) by `published_by`,
+    /// or why it is not answered: only one of `internal_callers`, the credentials agent, is answered, and only a
+    /// request that reads.
+    pub async fn answer(
+        &self,
+        payload: &[u8],
+        published_by: Option<&str>,
+        internal_callers: &[String],
+    ) -> Result<Vec<u8>, String> {
+        let Some(asker) = published_by else {
+            return Err("a request for the record with no verified publisher".to_string());
+        };
+        if !internal_callers.iter().any(|c| c == asker) {
+            return Err(format!(
+                "{asker} asked for the record, and only the credentials agent may"
+            ));
+        }
+        let request: RecordRequest = serde_json::from_slice(payload)
+            .map_err(|e| format!("a request for the record that does not read: {e}"))?;
+        let reply = self
+            .page(&request, cert_issuer_common::record::RECORD_PAGE)
+            .await;
+        serde_json::to_vec(&reply).map_err(|e| e.to_string())
+    }
 }
 
 #[async_trait::async_trait]
@@ -460,6 +485,119 @@ mod tests {
             .await;
         assert_eq!(other.entries.len(), 5);
         assert_eq!(other.log, id);
+    }
+
+    const CREDENTIALS_AGENT: &str = "credentials-agent.polar.serviceaccount.cluster.local";
+
+    #[tokio::test]
+    async fn the_credentials_agent_s_request_is_answered_with_a_page_of_the_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = recording(&dir.path().join("issued.jsonl"));
+        for i in 0..3 {
+            ca.issue(request(
+                &format!("w{i}"),
+                CertType::Client,
+                IssuePath::TokenOnly,
+            ))
+            .await
+            .unwrap();
+        }
+        let asked = serde_json::to_vec(&RecordRequest {
+            log: None,
+            after: 1,
+        })
+        .unwrap();
+        let reply = ca
+            .answer(
+                &asked,
+                Some(CREDENTIALS_AGENT),
+                &[CREDENTIALS_AGENT.to_string()],
+            )
+            .await
+            .unwrap();
+        let reply: RecordReply = serde_json::from_slice(&reply).unwrap();
+        assert_eq!(
+            reply
+                .entries
+                .iter()
+                .map(|e| e.identity.as_str())
+                .collect::<Vec<_>>(),
+            vec!["w0", "w1", "w2"]
+        );
+        assert!(!reply.more);
+    }
+
+    #[tokio::test]
+    async fn a_request_from_anyone_else_or_no_one_is_not_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = recording(&dir.path().join("issued.jsonl"));
+        ca.issue(request("w", CertType::Client, IssuePath::TokenOnly))
+            .await
+            .unwrap();
+        let asked = serde_json::to_vec(&RecordRequest {
+            log: None,
+            after: 0,
+        })
+        .unwrap();
+        let callers = [CREDENTIALS_AGENT.to_string()];
+        for who in [
+            Some("kube-observer.polar.serviceaccount.cluster.local"),
+            None,
+        ] {
+            assert!(ca.answer(&asked, who, &callers).await.is_err(), "{who:?}");
+        }
+        assert!(
+            ca.answer(&asked, Some(CREDENTIALS_AGENT), &[])
+                .await
+                .is_err(),
+            "no one is an internal caller"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_that_does_not_read_is_not_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = recording(&dir.path().join("issued.jsonl"));
+        let refused = ca
+            .answer(
+                b"not a request",
+                Some(CREDENTIALS_AGENT),
+                &[CREDENTIALS_AGENT.to_string()],
+            )
+            .await;
+        assert!(refused.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_answer_is_at_most_a_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = recording(&dir.path().join("issued.jsonl"));
+        for i in 0..(cert_issuer_common::record::RECORD_PAGE + 1) {
+            ca.issue(request(
+                &format!("w{i}"),
+                CertType::Client,
+                IssuePath::TokenOnly,
+            ))
+            .await
+            .unwrap();
+        }
+        let asked = serde_json::to_vec(&RecordRequest {
+            log: None,
+            after: 0,
+        })
+        .unwrap();
+        let reply: RecordReply = serde_json::from_slice(
+            &ca.answer(
+                &asked,
+                Some(CREDENTIALS_AGENT),
+                &[CREDENTIALS_AGENT.to_string()],
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reply.entries.len(), cert_issuer_common::record::RECORD_PAGE);
+        assert!(reply.more);
     }
 
     fn path() -> impl Strategy<Value = IssuePath> {

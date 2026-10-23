@@ -66,8 +66,15 @@ pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub enum CertIssuerSupervisorMessage {
-    ClientEvent { event: ClientEvent },
+    ClientEvent {
+        event: ClientEvent,
+    },
     PrepareShutdown,
+    /// A request for the record arrived, published (the broker says) by `published_by`.
+    RecordRequested {
+        payload: Vec<u8>,
+        published_by: Option<String>,
+    },
 }
 
 pub struct CertIssuerSupervisor;
@@ -80,6 +87,10 @@ pub struct CertIssuerSupervisorState {
     listener_id: Option<ractor::ActorId>,
     /// The shutdown has begun: a listener ending now is the drain's doing.
     shutting_down: bool,
+    /// The record, answered a page at a time to the credentials agent alone.
+    record: Arc<RecordingCa>,
+    internal_callers: Vec<String>,
+    client: polar::cassini::TcpClient,
 }
 
 /// What a child's ending means: the infrastructure's is the end of the shutdown; the listener's, outside a shutdown,
@@ -219,17 +230,31 @@ impl Actor for CertIssuerSupervisor {
             .config()
             .read(&cassini_client::environment::TLS_CLIENT_KEY)
             .map_err(|e| e.to_string())?;
-        let ca = configured
+        let ca_file = configured
             .config()
             .read(&cassini_client::environment::TLS_CA_CERT)
             .map_err(|e| e.to_string())?;
-        own.write(Path::new(&certificate), Path::new(&key), Path::new(&ca))?;
+        own.write(
+            Path::new(&certificate),
+            Path::new(&key),
+            Path::new(&ca_file),
+        )?;
         info!("signed its own client certificate through its floor");
 
+        let asked = myself.clone();
         let resources = AgentBuilder::new(myself.clone(), SERVICE_NAME)
             .with_lifecycle_handler(|event| {
                 Some(CertIssuerSupervisorMessage::ClientEvent { event })
             })
+            .with_subscription(polar_agent_builder::Subscription::new(
+                cert_issuer_common::record::RECORD_REQUESTS_TOPIC,
+                move |incoming| {
+                    let _ = asked.send_message(CertIssuerSupervisorMessage::RecordRequested {
+                        payload: incoming.payload,
+                        published_by: incoming.published_by,
+                    });
+                },
+            ))
             .into_configured(configured)
             .build()
             .await?;
@@ -264,6 +289,9 @@ impl Actor for CertIssuerSupervisor {
             listener_id: Some(listener.get_id()),
             listener: Some(listener),
             shutting_down: false,
+            record: ca,
+            internal_callers: config.mtls.internal_callers.clone(),
+            client: resources.tcp_client,
         })
     }
 
@@ -284,6 +312,27 @@ impl Actor for CertIssuerSupervisor {
                     let _ = state.healthcheck.cassini_disconnected();
                 }
                 _ => {}
+            },
+            CertIssuerSupervisorMessage::RecordRequested {
+                payload,
+                published_by,
+            } => match state
+                .record
+                .answer(&payload, published_by.as_deref(), &state.internal_callers)
+                .await
+            {
+                Ok(reply) => {
+                    if let Err(e) = state.client.as_actor_ref().send_message(
+                        cassini_client::TcpClientMessage::publish(
+                            cert_issuer_common::record::RECORD_REPLIES_TOPIC.to_string(),
+                            reply,
+                            None,
+                        ),
+                    ) {
+                        warn!("the record could not be sent: {e}");
+                    }
+                }
+                Err(why) => warn!("not answered: {why}"),
             },
             CertIssuerSupervisorMessage::PrepareShutdown => {
                 info!("PrepareShutdown received: draining the listener before infrastructure");
