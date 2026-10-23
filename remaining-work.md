@@ -711,3 +711,14 @@ Dev cluster `u7s`, images rebuilt from this branch (`up.nu local-minimal --dev`,
 - [ ] Cassini-broker actor tests (were deferred pending TLS)
 - [ ] git-repo-observer / git-repo-consumer need real GitLab credentials in `git.json`
 - [ ] `build-orchestrator` Dhall config wiring (`cyclops-k8s.dhall`, `cyclops-podman.dhall`)
+
+## From slice 10 of the authority model (2026-10-23)
+
+- The credentials agent's graph projection does not catch up after Neo4j was down: certificates reported by cert-issuer's
+  record on the first page, while Neo4j was starting, are in the ledger and not in the graph
+  (`docs/architecture/authority-model.md`, slice 10, "Found"). Decide whether the projection replays from its checkpoint.
+- The judge's summary ("N identities lose N uses of a topic, N gain N") counts requests too; say "uses of a topic or
+  request", or count them apart.
+- A record page taken is silent at INFO on both sides (`cert-issuer/server/src/supervisor.rs`, `RecordRequested`;
+  `credentials-agent/consume/src/record_asker.rs`): an INFO line when a page brings certificates the ledger did not hold.
+

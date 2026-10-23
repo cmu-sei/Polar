@@ -1010,6 +1010,45 @@ and no Cassini.
   ordinary policy accepted, with its effect summary in the graph.
 - Docs: this document's "Built" notes, `policy-enforcement.md` (open point B built), `remaining-work.md`.
 
+- *Done 2026-10-23,* on a fresh `sandbox-local` (`just reset`, `up.nu sandbox-local --dev`), images from `04157a95`.
+  - **Healthy.** Every workload runs but the Jira observer, which fails with no Jira to reach, as it always has
+    (`Justfile`, `cluster-prune-failed`). The seed policy was signed, pushed and accepted.
+  - **cert-issuer's record reached the ledger** (`cert-issuer-isolation.md`, step 2), read from the credentials agent's
+    event log on the node (`/opt/local-path-provisioner/<pvc>/events.jsonl`, since the image has no shell): 8
+    `CertificatesReported` events, the cursor through 30 entries. The five certificates the agent did not hold are
+    the bootstrap services': cert-issuer's own TLS (`own`) and client certificates, the credentials agent's and its
+    observer's client certificates, and Cassini's server certificate (`token_only`). None was unexpected.
+  - **The request gate admits what it should.** The observer's workload-issuance relays were admitted (21
+    certificates issued), which they can be only with the observer's certificate in the ledger, which only the record
+    gives. No request was refused at the gate.
+  - **A policy that would cut renewal is refused.** Version 2, the seed policy and `@id("cut-renewal") forbid
+    (principal == Identity::"credentials-agent-observer…", action == Action::"request", resource ==
+    Request::"credentials-workload-issuance-requests")`, signed by `djshepard` and pushed to `polar-schedules`: refused,
+    with 50 detail lines. Each loss names the request and the rule: "hearing authority would stop: what its
+    registration at credentials-agent starts reaches git-repo-controller on `polar-authority-updates` no longer: within
+    one certificate lifetime: renewal for git-repo-controller no longer closes, since credentials-agent-observer… may no
+    longer request on `credentials-workload-issuance-requests` (denied by cut-renewal)", then the path it held through.
+    In the graph the document `HAD_OUTCOME` `invalid`; the ledger has `AuthorityRefused`; the policy in force stayed
+    version 1. Hearing authority is lost first, before correction: every agent the credentials agent issues stops
+    living, and with it every delivery of the authority updates to it.
+  - **An ordinary policy is accepted with its effect.** Version 3, the seed policy and a `permit` for `djshepard` to
+    request on `credentials-certificate-requests`: accepted, published as authority sequence 2; the graph's outcome
+    `applied`, "judged by the authority model: 0 identities lose 0 uses of a topic, 1 gain 1; 0 round trips stop
+    closing, 0 begin"; the ledger's `AuthorityPublished` effect `gained: ["djshepard request
+    credentials-certificate-requests"]`, the person named by username.
+
+  Found:
+  - **The graph lacks the reported certificates.** The first page, with the five, came at 21:20:50, when Neo4j was not
+    up yet; the projection is best-effort and failed ("canary query failed: Connection refused"), and later pages had
+    nothing new. The ledger has them; nothing catches the graph up. Whether the projection should replay from its
+    checkpoint when the graph returns is open (`remaining-work.md`).
+  - **The outcome's summary says "uses of a topic" of requests too:** the count is right, the words are not.
+  - **A successful record page says nothing at INFO,** on either side, so the record is seen only in the ledger.
+  - **`up.nu` counts an untracked file as uncommitted** (`deploy-repo.nu:455`, `git status --porcelain`) and refuses to
+    publish; a file kept untracked on purpose has to be in `.git/info/exclude`.
+  - **The broker logs a publish at INFO only when it is queued,** so its log does not show that a delivered message
+    was sent.
+
 ## Effect on stage 5b
 
 Slice 5 as planned (hand-written probes in `validate_policy`) is not built. Slices 6 (the agent's side) and 7 (the
