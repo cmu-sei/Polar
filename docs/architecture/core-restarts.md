@@ -23,8 +23,9 @@
 
 # Restarts of the core as normal operation
 
-Status, 2026-10-23: the maintainer's design, written down with what exists today and what each part needs. Nothing here is
-built.
+Status, 2026-10-23: the maintainer's design, written down with what exists today and what each part needs. The design's
+own parts are not built; what they build on (cert-issuer as a Cassini client, its certificate record) is, as "What exists"
+says.
 
 ## The design (the maintainer, 2026-10-23)
 
@@ -112,10 +113,12 @@ record: the credentials agent learns of what it signed, and says so over Cassini
   only to the Credentials Agent's observer"). That document accepts that "if the Credentials Agent or Cassini is
   degraded, no ancillary service can renew a certificate". So Cassini cannot come up through the credentials agent on
   that path: Cassini is the one restarting.
-- **cert-issuer is reached only over HTTP today**, by the credentials agent as its verified mTLS caller
-  (`internal_callers`) and by the bootstrap identities on their tokens. It has no Cassini client
-  (`cert-issuer/server/Cargo.toml`), and keeps no state beyond its CA, so after a restart it knows nothing of the
-  state the system was in.
+- **cert-issuer signs over HTTP, and speaks over Cassini (since 2026-10-23).** Callers reach its signing routes over
+  HTTP: the credentials agent as its verified mTLS caller (`internal_callers`), the bootstrap identities on their
+  tokens. Since `cert-issuer-isolation.md` step 1 it is a builder agent with a Cassini client that does not count
+  toward its health (`DEPENDS_ON_CASSINI = false`, `cert-issuer/server/src/agent.rs`), and since step 2 it keeps a
+  durable record of every certificate it signs (`CERT_ISSUER_RECORD_PATH`). It keeps nothing about the state the system
+  was in, so after a restart it knows only what its record and Cassini tell it.
 - **Degraded is already bounded for every other agent.** An agent keeps deciding on its cached policy, with the
   certificate where policy is silent, for 90 minutes by default (`POLAR_AUTHORITY_MAX_AGE_SECS`), then fails its health
   check and restarts into init. The credentials agent is exempt (`policy-enforcement.md`, "Decisions").
@@ -124,10 +127,11 @@ record: the credentials agent learns of what it signed, and says so over Cassini
 - **The pod observer and the Reaper are designed, not built** (`pod-reaper.md`). The pod observer is the agent that sees
   pods with Kubernetes privileges, apart from the one that acts on them, so it is where "the credentials agent has
   crashed" would come from.
-- **Every certificate cert-issuer signs becoming known to the credentials agent** is proposed in
-  `cert-issuer-isolation.md` (2026-10-23): cert-issuer records each signing, and the credentials agent asks for the
-  record over mTLS, at start and on a short interval. That asking is also how each of the two would know the other is
-  there.
+- **Every certificate cert-issuer signs becomes known to the credentials agent** (`cert-issuer-isolation.md`, step 2,
+  built 2026-10-23): cert-issuer records each signing before it returns the certificate, and the credentials agent asks
+  for the record over Cassini (`cert-issuer-record-requests`, `-replies`) when it registers and every 30 seconds. That
+  asking is also how each of the two can know the other is there: cert-issuer hears the credentials agent ask, and the
+  credentials agent hears cert-issuer answer.
 
 ## What each situation needs
 
@@ -154,6 +158,36 @@ To be taken one at a time, after the certificate record (`cert-issuer-isolation.
 builds on.
 
 1. When the credentials agent restarts, who vouches for its new pod's certificate (situation 3)?
+
+   *Prepared for the maintainer, 2026-10-23; not decided.* Read from the code:
+   - The credentials agent is a catalog `agent`: a Job with `restartPolicy: Never` (`infra/config/kinds.nuon:37`). So a
+     restart, planned (rejuvenation) or not (a crash), is a new pod with a new UID, created after the old one has
+     ended. The two never overlap, so the old pod cannot vouch for the new one while both run.
+   - Today the new pod's `polar-init` asks cert-issuer on its Kubernetes token alone, and the floor signs it, since the
+     credentials agent is a bootstrap service (`infra/config/workloads/credentials.nuon:34`). So at nominal the floor
+     is open for the credentials agent's identity at every restart. Since step 2 each such certificate is in
+     cert-issuer's record and reaches the ledger within 30 seconds, so it is seen, but nothing stands between a token
+     for that service account and a certificate.
+   - cert-issuer can now tell the credentials agent is there: it hears its record requests over Cassini every 30
+     seconds, and its own Cassini session tells it whether Cassini is up.
+
+   The ways it could go:
+   - **A. As built: the floor stays open for the core's own identities.** Simplest, and observable through the record.
+     But it is the floor at nominal, which the design keeps for bootstrap.
+   - **B. A planned restart hands over.** Before it ends, the outgoing credentials agent tells cert-issuer over Cassini
+     that its successor may be signed once, for its identity, within a few minutes: a one-use, time-bound ticket,
+     itself in the record. cert-issuer signs the new pod's token-only request against the ticket, and otherwise the
+     credentials agent's floor entry stays closed. It covers rejuvenation, the common case. A crash leaves no ticket.
+   - **C. A crash opens the entry narrowly, as Cassini's route does.** cert-issuer opens the credentials agent's floor
+     entry only while it sees the credentials agent gone and the rest of the core up: no record request for longer
+     than a bound (two missed asks), while its own Cassini session holds. That is situation 3, not 4. It closes again at
+     the first request from the new credentials agent.
+   - **D. Something with Kubernetes privileges vouches.** The pod observer (`pod-reaper.md`, designed, not built) could
+     say which pod is the credentials agent's new one. It needs an agent that does not exist yet.
+
+   Recommendation: B for rejuvenation and C for a crash, with A in force until they are built. Both keep the entry
+   closed at nominal except for one identity, briefly, for a reason cert-issuer can see, and every signing is in the
+   record.
 2. What tells "two or more down" (4) from one restarting (1 to 3), and who decides it?
 3. The notice to dependents: a topic the credentials agent publishes before it ends, the pod observer's report of a
    crash, or both; and what an agent does on each.
