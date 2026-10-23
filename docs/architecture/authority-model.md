@@ -288,15 +288,16 @@ places: the default `POLAR_AUTHORITY_PUBLISHER`, cert-issuer's internal callers,
     has is refused ("A person is written by username and known by account ID", above).
 - **Every request to the credentials agent is also judged by Cedar, built with the model (2026-10-22).** The consumer
   asks Cedar whether the broker-verified publisher may make the request (`Action::"request"` on a resource naming the
-  request, such as `Request::"workload-issuance"`), and where policy is silent the floor admits each topic's declared
-  publishers, read from the model's facts. Cedar stays the decider everywhere ("Cedar overrides both ways"), the floor
-  comes from declarations, and the model covers the action as any other: a permit opening it shows in the effect report.
-  The audit found no hole it would close today (each of the thirteen topics proves itself, answers only with public
-  data, or carries the broker's publisher and Cedar); it is defense in depth, and it gives a request topic added later
-  "who may send this" from its declaration, rather than from a handler's author remembering a proof. Built with the
-  model, not before it: the floor needs the declared publishers, which are the model's facts, and building it first
-  would need a second list of publishers fed by hand. It costs an action and a resource type in the schema, and a
-  decision per request (about 0.2 ms, at the credentials agent's low rate of requests).
+  request by its topic's exact name, `Request::"credentials-workload-issuance-requests"`: one name per thing, as
+  `Topic::"<exact name>"` is named, `policy-enforcement.md`, 2026-10-23), and where policy is silent the floor admits
+  each topic's declared publishers, read from the model's facts. Cedar stays the decider everywhere ("Cedar overrides
+  both ways"), the floor comes from declarations, and the model covers the action as any other: a permit opening it
+  shows in the effect report. The audit found no hole it would close today (each of the thirteen topics proves itself,
+  answers only with public data, or carries the broker's publisher and Cedar); it is defense in depth, and it gives a
+  request topic added later "who may send this" from its declaration, rather than from a handler's author remembering a
+  proof. Built with the model, not before it: the floor needs the declared publishers, which are the model's facts, and
+  building it first would need a second list of publishers fed by hand. It costs an action and a resource type in the
+  schema, and a decision per request (about 0.2 ms, at the credentials agent's low rate of requests).
 - **The model knows a workload by one identity; the token's subject is converted where a token is read (2026-10-22).**
   "The workload name is an agent's one name" (`policy-enforcement.md`, "Decisions") made an agent's service name its
   workload name, and an identity map to its workload mechanically. It did not reach the Kubernetes ServiceAccount

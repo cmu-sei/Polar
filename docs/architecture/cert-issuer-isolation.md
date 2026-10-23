@@ -141,9 +141,14 @@ Consequences, as proposed (not yet built):
   should hold *regardless* of policy, such as a core service's name only ever being signed for that service, is an
   open option, to be added as an arrival-time validator if it is ever wanted, like `validate_source` for policy.
 - **cert-issuer cannot depend on Cassini or the scheduler, in any state.** Cassini's certificate comes from it, and
-  its health must not depend on a broker that needs its certificates. When it joins the builder it joins as a
-  service with no Cassini client.
-- **Delivery by push over the relationship that already exists.** The credentials agent is already a verified mTLS
+  its health must not depend on a broker that needs its certificates. *Revised 2026-10-23 (the maintainer): no
+  dependency, but it may speak over Cassini.* Once Cassini is up, cert-issuer may be its client, and at nominal the
+  services that talk to it, the credentials agent among them, do so over the same channels as everything else. It
+  starts, serves and stays healthy without Cassini. (It said before: "When it joins the builder it joins as a service
+  with no Cassini client.") See `core-restarts.md`.
+- *Superseded 2026-10-23: at nominal cert-issuer is spoken to over Cassini, as everything else is, so it hears the
+  authority updates as every builder agent does ("Step 1, planned", below).* **Delivery by push over the relationship
+  that already exists.** The credentials agent is already a verified mTLS
   caller of cert-issuer (`internal_callers`). It would push the same signed `AuthorityUpdate` bytes to an internal
   endpoint; `published_by` is the verified peer. Verification is the existing path (signature, sequence and
   version), with the credentials agent's key **pinned by configuration**, not on first use: this is the CA front.
@@ -412,6 +417,110 @@ lives with cert-issuer because cert-issuer reasons about policy itself; nothing 
 builder; a name not on the allowlist is refused; the crypto actor owns both certificate lifecycles. Left, to be
 read from the code and decided in the build, not asked: how the requester authenticates the credentials agent in the
 negotiation, and what the builder's graph component reads for its Neo4j connection.
+
+## Every certificate cert-issuer signs becomes known to the credentials agent (2026-10-23)
+
+**The requirement (the maintainer, 2026-10-23).** cert-issuer never signs a certificate that the credentials agent
+does not eventually know of: "Credentials agent is cert-issuer's body guard." It may not know at bootstrap, but the two
+should have that conversation as soon as they can. This is the ledger record in "The invariant wanted", above, applied
+to the bootstrap path as well. And the floor's purpose (the maintainer, 2026-10-23): "to prevent anyone from talking
+to cert-issuer directly, once the core had brought the system to nominal operation." The token-only path exists only to
+bring the core up; it is not a standing way in. A target that does not enforce the floor is a gap against this, not an
+option.
+
+**The gap, read from the code.** The ledger learns of a certificate only from the credentials agent's own issuance
+(`IssuanceCompleted`, `credentials-agent/consume/src/state.rs:331`; `certificate_for`, `state.rs:555`). Nothing tells
+it of what cert-issuer signs on a token alone:
+- the bootstrap services' certificates: the credentials agent's own, its observer's and Cassini's
+  (`infra/config/workloads/credentials.nuon:34`, `:54`; `cassini.nuon:35`), signed anew at each start, and
+  cert-issuer's own TLS certificate, which it signs for itself at start (`cert-issuer/server/src/tls.rs:95`);
+- on a target that does not enforce the floor (`infra/config/cluster.nuon:55`, `floor_enforced: false` by default;
+  `sandbox-local` and `local-minimal` enforce it), every workload whose `polar-init` still asks cert-issuer directly;
+- a certificate the credentials agent asked for and never recorded: one it crashed between cert-issuer's answer
+  and its ledger append.
+
+What it costs today:
+- Cedar at the credentials agent cannot see a bootstrap service's groups, since a check finds the requester's
+  certificate in the ledger (`store_secret.rs:113`). The observer publishes six of the thirteen request topics, so
+  this bites the request gate of `authority-model.md` slice 9.
+- A bootstrap service's certificate cannot be revoked, since the credentials agent revokes from its records.
+- The public-certificate lookup cannot answer for one.
+
+**Proposed shape.** Every signing goes through the `CaClient` trait (`cert-issuer/server/src/ca.rs:122`): the
+handler's (`handler.rs:387`) and cert-issuer's own TLS certificate (`tls.rs:95`). So the record is written there, by a
+`CaClient` that records and then hands out, and no signing can go around it.
+- **cert-issuer records each certificate before it hands it out.** It appends an entry to a log on its own durable
+  volume, and syncs it, before answering: a sequence number, the serial, the identity, the type, the path it came by
+  (token only, vouched, `/internal/issue`), the time, and the certificate itself. A certificate is public, so the log
+  holds nothing secret. If the append fails, the certificate is not returned, so none can leave unrecorded. It
+  records every path, not only the token-only one: the vouched and internal entries are how the credentials agent
+  finds one it asked for and lost.
+- **The credentials agent asks over Cassini.** cert-issuer has no dependency on Cassini but may speak over it, and at
+  nominal it is spoken to as everything else is ("The model", revised 2026-10-23). So cert-issuer becomes a Cassini
+  client once Cassini is up, and the record is asked for and answered on a request and reply topic pair. Only the
+  credentials agent may ask; the broker verifies who asks (`published_by`), and cert-issuer checks it. The credentials
+  agent asks with the last sequence number it holds, and cert-issuer answers with every entry after it. Both start
+  after Cassini at bootstrap too, so the first ask needs no other channel: the credentials agent asks when it starts,
+  and again on a short interval, since a bootstrap service's certificate lives an hour (`values.dhall:53`, `:54`).
+  cert-issuer's signing, and its health, never wait on that client: a record not yet asked for waits in the log.
+- **The ledger holds a reported certificate as it holds one it issued.** A new event, `CertificateReported`, carries
+  the entry and cert-issuer's sequence number, which is also the cursor the credentials agent resumes from. An entry
+  whose serial the ledger already holds adds nothing. Otherwise the certificate is a `CertificateRecord`, marked as
+  reported by cert-issuer: `certificate_for` finds it, a newer one supersedes it, and it can be revoked. A token-only
+  entry for an identity the model does not call a bootstrap service is recorded, and reported as unexpected (a
+  warning, and in the graph), since on an enforcing target it should not exist.
+- **Retention.** An entry may be dropped from cert-issuer's log once the credentials agent has asked past it and the
+  certificate has expired. The ledger keeps everything.
+- **Storage.** The CA's volume is a writable PVC only in `SelfBootstrap` mode. In `Provisioned` mode it is a read-only
+  Secret (`infra/layers/2-services/cert-issuer/deployment.dhall`). The log gets its own small PVC in both modes, apart
+  from the CA's key.
+
+**cert-issuer joins the builder (2026-10-23).** Its Cassini client comes from moving it onto `polar-agent-builder`,
+where Cassini (`cassini/broker/src/agent.rs`) and both halves of the credentials agent already are: the topic gate on its
+own traffic, `published_by` on what it hears, a scaffold (so the catalog and the authority model know its topics), and
+the builder's health check, signals and shutdown. Read from the code, one thing must change first: an agent's health
+counts its Cassini session (`polar-health/src/machine.rs:207`, unhealthy on a disconnect, failed by the tick if the
+outage lasts), and the builder's optional Cassini (`PolarAgent::OPTIONAL`, `polar-agent-builder/src/agent.rs:112`) is
+chosen once per deployment. A Cassini restart would then restart cert-issuer: one core service restarting would become
+two (`core-restarts.md`, situation 4). So the builder gains a Cassini client that does not count toward health, as
+`expects_graph` decides for the graph (`machine.rs:221`), for a service with no dependency on Cassini. cert-issuer signs
+its own client certificate with its CA at start, as it does its TLS certificate, and the record holds it.
+
+**The order (cleared 2026-10-23).** 1, cert-issuer gets a Cassini client by joining the builder; 2, the certificate
+record, asked for over Cassini; 3, `authority-model.md` slice 9, whose request gate then finds every requester's
+certificate in the ledger; 4, the questions of `core-restarts.md`, one at a time.
+
+**Step 1, planned (2026-10-23), each part tests first.** Read from the code: cert-issuer is a plain `tokio::main`
+(`cert-issuer/server/src/main.rs`) reading a JSON file named by `CERT_ISSUER_CONFIG`, with no health check, signal
+handling or shutdown handshake, run by a hand-written Deployment (`infra/layers/2-services/cert-issuer`), and not in the
+catalog. Cassini made the same move (`cassini/broker/src/agent.rs`), and so did the credentials pair, first onto the
+builder and then into the catalog (`configuration.md`, 9.8), so the precedent is theirs.
+- **1a, the builder: a Cassini client that does not count toward health.** `polar-health`'s machine gains for Cassini
+  what `expects_graph` is for the graph: a lost session, or one never made, neither marks the agent unhealthy nor fails
+  it at the deadline (`machine.rs:207`, `check_cassini_deadline`). `PolarAgent` says so for an agent; every agent that
+  says nothing keeps today's behaviour. The client still connects, reconnects and passes the topic gate. Tests: a
+  disconnect and an outage past the deadline leave such an agent healthy and fail any other; it reconnects; a property
+  that the health verdict of an agent that counts Cassini is unchanged for any sequence of events.
+- **1b, cert-issuer as a `PolarAgent`.** Its settings declared in a `polar_env` section, as Cassini's are, with the
+  issuers and the floor as structured values, as the credentials agent's authority model is; its scaffold; its HTTP
+  server run inside the builder's lifecycle (signals, shutdown budget). Its client certificate is signed by its own CA
+  at start, as its TLS certificate is (`tls.rs:95`). It has no topics of its own yet (step 2 adds the record's); the
+  topics every agent has come with the client, the authority updates among them, so it hears the policy in force,
+  which is how "it reasons about policy itself" (above) is delivered: over Cassini, not by a push over mTLS. The hand
+  chart gives it the builder's environment until 1c. Tests: what each of today's main.rs steps does (the CA loaded or
+  made, the TLS certificate, the floor and its warning, the routes served), now through `start`; it serves with no
+  Cassini at all; `polar_agent_tests!`.
+- **1c, cert-issuer in the catalog.** A workload entry, `kind: "service"`, `bootstrap: true`, its CA volume and its
+  floor as the render writes them today, in place of the hand chart, as Cassini's and the credentials pair's entries
+  replaced theirs. Tests: the render's, `infra/tests`, and the chart's checks of the floor carried over.
+
+Settled 2026-10-23: cert-issuer rejuvenates, as every agent does (the builder ends an agent when its shortest-lived
+certificate nears expiry, `polar-health/src/machine.rs:373`). The core plans its rejuvenation together so that no two
+of its members go at once (`core-restarts.md`); until that plan is built, each rejuvenates on its own schedule, as
+Cassini and the credentials agent do today.
+
+Certificates signed before this is deployed are not in the log. A bootstrap service's is replaced within the hour,
+and every later one is recorded.
 
 ## Order of work, tests first
 
