@@ -508,7 +508,7 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
             .unwrap_or_else(|| Box::new(|_event| None));
         resources
             .events_output
-            .subscribe(this.myself, move |event| map_lifecycle_event(event));
+            .subscribe(this.myself, map_lifecycle_event);
 
         Ok(resources)
     }

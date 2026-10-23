@@ -130,8 +130,7 @@ fn walk_nonexistent_ref_errors_cleanly() {
     init_logging();
     let (_dir, repo) = bare_repo();
     let err = GitRepoWorker::walk_commits_incremental(&repo, "refs/heads/nope", None, 10, |_| {})
-        .err()
-        .expect("expected error");
+        .expect_err("expected error");
     assert!(
         err.message().contains("reference"),
         "unexpected error: {err:?}"

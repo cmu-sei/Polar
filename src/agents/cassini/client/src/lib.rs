@@ -107,8 +107,7 @@ impl MessageQueue {
             .create(true)
             .append(true)
             .open(&self.path)?;
-        let line = serde_json::to_string(entry)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
         writeln!(file, "{}", line)
     }
 
@@ -1095,6 +1094,7 @@ impl TcpClientActor {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish(
         &self,
         myself: ActorRef<TcpClientMessage>,

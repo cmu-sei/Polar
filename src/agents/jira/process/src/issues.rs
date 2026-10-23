@@ -41,14 +41,8 @@ use tracing::{debug, warn};
 /// the actor -- strictly safer than the original, which had no such
 /// protection at all.
 fn sanitize_label(raw: &str) -> String {
-    raw.replace(' ', "_")
-        .replace('-', "_")
-        .replace('[', "_")
-        .replace(']', "_")
-        .replace('(', "")
-        .replace(')', "")
-        .replace('/', "")
-        .replace('?', "")
+    raw.replace([' ', '-', '[', ']'], "_")
+        .replace(['(', ')', '/', '?'], "")
         .replace('#', "num")
 }
 
@@ -900,10 +894,10 @@ mod tests {
                         indices_seen.push(i.value);
                     }
                 }
-                if let Some(author_prop) = props.iter().find(|p| p.0 == "author") {
-                    if let GraphValue::String(s) = &author_prop.1 {
-                        authors_seen.push(s.clone());
-                    }
+                if let Some(author_prop) = props.iter().find(|p| p.0 == "author")
+                    && let GraphValue::String(s) = &author_prop.1
+                {
+                    authors_seen.push(s.clone());
                 }
             }
         }

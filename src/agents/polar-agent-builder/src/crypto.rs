@@ -335,33 +335,31 @@ mod tests {
             let cassini_client::TcpClientMessage::Publish { topic, payload, .. } = message else {
                 return Ok(());
             };
-            if topic == credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC {
-                if let Ok(envelope) = rkyv::from_bytes::<
+            if topic == credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC
+                && let Ok(envelope) = rkyv::from_bytes::<
                     Envelope<AgentEscrowKeyRequest>,
                     rkyv::rancor::Error,
                 >(&payload)
-                {
-                    let reply = Envelope {
-                        correlation_id: envelope.correlation_id,
-                        payload: AgentEscrowKeyReply::Found {
-                            public_key_pem: self.recipient_public_key_pem.clone(),
-                            certificate_pem: String::new(),
-                        },
-                    };
-                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
-                        .unwrap()
-                        .to_vec();
-                    let _ = self.router.send_message(polar_router::RouterMessage::Route(
-                        polar_router::IncomingMessage {
-                            topic:
-                                credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC
-                                    .to_string(),
-                            payload: bytes,
-                            published_by: None,
-                            trace_ctx: None,
-                        },
-                    ));
-                }
+            {
+                let reply = Envelope {
+                    correlation_id: envelope.correlation_id,
+                    payload: AgentEscrowKeyReply::Found {
+                        public_key_pem: self.recipient_public_key_pem.clone(),
+                        certificate_pem: String::new(),
+                    },
+                };
+                let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
+                    .unwrap()
+                    .to_vec();
+                let _ = self.router.send_message(polar_router::RouterMessage::Route(
+                    polar_router::IncomingMessage {
+                        topic: credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC
+                            .to_string(),
+                        payload: bytes,
+                        published_by: None,
+                        trace_ctx: None,
+                    },
+                ));
             }
             Ok(())
         }
@@ -471,28 +469,29 @@ mod tests {
                 else {
                     return Ok(());
                 };
-                if topic == credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC {
-                    if let Ok(envelope) = rkyv::from_bytes::<
+                if topic == credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC
+                    && let Ok(envelope) = rkyv::from_bytes::<
                         Envelope<AgentEscrowKeyRequest>,
                         rkyv::rancor::Error,
                     >(&payload)
-                    {
-                        let reply = Envelope {
-                            correlation_id: envelope.correlation_id,
-                            payload: AgentEscrowKeyReply::NotFound,
-                        };
-                        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
-                            .unwrap()
-                            .to_vec();
-                        let _ = self.router.send_message(polar_router::RouterMessage::Route(
-                            polar_router::IncomingMessage {
-                                topic: credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC.to_string(),
-                                payload: bytes,
-                                published_by: None,
-                                trace_ctx: None,
-                            },
-                        ));
-                    }
+                {
+                    let reply = Envelope {
+                        correlation_id: envelope.correlation_id,
+                        payload: AgentEscrowKeyReply::NotFound,
+                    };
+                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
+                        .unwrap()
+                        .to_vec();
+                    let _ = self.router.send_message(polar_router::RouterMessage::Route(
+                        polar_router::IncomingMessage {
+                            topic:
+                                credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC
+                                    .to_string(),
+                            payload: bytes,
+                            published_by: None,
+                            trace_ctx: None,
+                        },
+                    ));
                 }
                 Ok(())
             }

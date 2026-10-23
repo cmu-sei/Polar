@@ -36,7 +36,6 @@ use credentials_agent_common::agent_escrow_keypair_bootstrap::{
     RetrieveAgentEscrowKeypairRequest, agent_escrow_keypair_secret_name,
 };
 use credentials_agent_common::ephemeral_exchange::EphemeralEncryptedPayload;
-use credentials_agent_common::escrow_secret::EscrowedSecret;
 use ractor::ActorRef;
 use std::sync::Arc;
 use tracing::error;
@@ -107,6 +106,7 @@ impl AgentEscrowKeypairBootstrapHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use credentials_agent_common::escrow_secret::EscrowedSecret;
     use crate::ledger::{LedgerActor, LedgerActorArgs};
     use credentials_agent_common::events::CredentialsEvent;
     use x25519_dalek::{EphemeralSecret, PublicKey};

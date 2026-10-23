@@ -124,7 +124,7 @@ async fn a_certificate_that_names_no_topics_and_no_workload_is_refused_everythin
     // The client re-registers on this phrase, so a refusal never carries it.
     assert!(!why.contains("session mismatch"), "{why}");
     person.publish("news", b"x");
-    assert_eq!(person.refusals("news").len() >= 1, true);
+    assert!(!person.refusals("news").is_empty());
     broker.stop().await;
 }
 

@@ -298,7 +298,7 @@ impl CassiniClient for TcpClient {
         let result = self.inner.send_message(TcpClientMessage::Publish {
             topic: req.topic.clone(),
             payload: req.payload.clone(),
-            trace_ctx: req.trace_ctx.clone(),
+            trace_ctx: req.trace_ctx,
             share_identity: req.share_identity,
         });
 

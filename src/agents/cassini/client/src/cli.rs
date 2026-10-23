@@ -30,7 +30,7 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -413,10 +413,10 @@ impl Actor for CompletionBridge {
             _ => None,
         };
 
-        if let Some(event) = terminal {
-            if let Some(tx) = state.sender.lock().unwrap().take() {
-                let _ = tx.send(event);
-            }
+        if let Some(event) = terminal
+            && let Some(tx) = state.sender.lock().unwrap().take()
+        {
+            let _ = tx.send(event);
         }
 
         Ok(())
@@ -503,8 +503,7 @@ pub async fn append_to_queue(queue_path: &PathBuf, entry: &QueueEntry) -> std::i
         .create(true)
         .append(true)
         .open(queue_path)?;
-    let line = serde_json::to_string(entry)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
     writeln!(file, "{}", line)
 }
 
@@ -850,7 +849,7 @@ async fn handle_control_ipc(
     }
 }
 
-fn resolve_pid_path(socket_path: &PathBuf) -> PathBuf {
+fn resolve_pid_path(socket_path: &Path) -> PathBuf {
     socket_path.with_extension("pid")
 }
 
@@ -858,7 +857,7 @@ fn resolve_pid_path(socket_path: &PathBuf) -> PathBuf {
 /// way `resolve_pid_path` derives the pidfile path. Used to redirect the
 /// daemonized child's stdout/stderr so that startup failures are no longer
 /// silently swallowed by `Stdio::null()`.
-fn resolve_log_path(socket_path: &PathBuf) -> PathBuf {
+fn resolve_log_path(socket_path: &Path) -> PathBuf {
     socket_path.with_extension("log")
 }
 

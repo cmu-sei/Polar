@@ -37,9 +37,7 @@ use ractor::SupervisionEvent;
 use ractor::async_trait;
 use ractor::registry::where_is;
 use reqwest::Client;
-use std::sync::Arc;
 use tracing::debug;
-use tracing::error;
 use tracing::info;
 use tracing::warn;
 
@@ -75,7 +73,7 @@ impl Actor for ObserverSupervisor {
 
         let dep_cert_endpoints = vec![
             DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
+                .map_err(ActorProcessingErr::from)?,
         ];
 
         let (healthcheck, _) = HealthCheckActor::spawn_linked(
@@ -85,7 +83,7 @@ impl Actor for ObserverSupervisor {
             myself.get_cell(),
         )
         .await
-        .map_err(|e| ActorProcessingErr::from(e))?;
+        .map_err(ActorProcessingErr::from)?;
         // --- end NEW ---
 
         let state = ObserverSupervisorState {

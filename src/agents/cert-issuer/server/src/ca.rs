@@ -494,22 +494,22 @@ fn bootstrap_and_write(
     // also write to .tmp files and rename, but the partial-state
     // detection makes that unnecessary — the operator gets a clear
     // error either way.)
-    if let Some(parent) = std::path::Path::new(cert_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                CaMaterialsError::Other(format!("create dir {}: {e}", parent.display()))
-            })?;
-        }
+    if let Some(parent) = std::path::Path::new(cert_path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            CaMaterialsError::Other(format!("create dir {}: {e}", parent.display()))
+        })?;
     }
     std::fs::write(cert_path, &cert_pem)
         .map_err(|e| CaMaterialsError::Other(format!("write {cert_path}: {e}")))?;
 
-    if let Some(parent) = std::path::Path::new(key_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                CaMaterialsError::Other(format!("create dir {}: {e}", parent.display()))
-            })?;
-        }
+    if let Some(parent) = std::path::Path::new(key_path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            CaMaterialsError::Other(format!("create dir {}: {e}", parent.display()))
+        })?;
     }
     std::fs::write(key_path, &key_pem)
         .map_err(|e| CaMaterialsError::Other(format!("write {key_path}: {e}")))?;

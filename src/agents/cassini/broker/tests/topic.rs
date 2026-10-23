@@ -160,8 +160,8 @@ async fn subscribe_through(
     while acks.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    let told = acks.lock().unwrap().clone();
-    told
+
+    acks.lock().unwrap().clone()
 }
 
 #[cfg(test)]

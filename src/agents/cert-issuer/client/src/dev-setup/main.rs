@@ -34,7 +34,7 @@
 //!   4. Mints three tokens:
 //!      - dev/token-cassini  — Cassini broker (server cert, serverAuth + clientAuth EKU)
 //!      - dev/token-neo4j    — Neo4j database (server cert, serverAuth + clientAuth EKU)
-//!                             issued with extra SANs for the in-cluster Service DNS names)
+//!        issued with extra SANs for the in-cluster Service DNS names)
 //!      - dev/token-agent    — generic agent stand-in (client cert, clientAuth EKU only)
 //!   5. Writes dev/config.json
 //!   6. Prints exact commands and env vars to run the full local stack

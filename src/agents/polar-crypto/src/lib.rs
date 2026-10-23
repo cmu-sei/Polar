@@ -1120,6 +1120,7 @@ fn read_kubernetes_sa_token(path: &str) -> Result<String, CryptoError> {
 /// The complete agent escrow-keypair bootstrap sequence -- see
 /// CryptoMessage::EnsureOwnEscrowKeypair's own doc comment for the
 /// full, intended behavior.
+#[allow(clippy::too_many_arguments)]
 async fn handle_ensure_own_escrow_keypair(
     tcp_client: ActorRef<TcpClientMessage>,
     retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
@@ -1207,6 +1208,7 @@ async fn handle_ensure_own_escrow_keypair(
 /// afterward -- so a caller re-locking the same mutex separately,
 /// after this returns, to read the now-stable value is genuinely
 /// safe, not a real race.
+#[allow(clippy::too_many_arguments)]
 async fn ensure_escrow_keypair_bootstrapped(
     tcp_client: ActorRef<TcpClientMessage>,
     retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
@@ -1312,6 +1314,7 @@ fn adopt_key_left_by_init(path: &str, own_identity: &str) -> Option<EscrowKeypai
 /// raw key itself, InMemory, as the real, correct fallback. Every
 /// later call reuses whichever was cached, without repeating any of
 /// this setup.
+#[allow(clippy::too_many_arguments)]
 async fn handle_decrypt_own_message(
     tcp_client: ActorRef<TcpClientMessage>,
     retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
@@ -1662,6 +1665,7 @@ async fn handle_retrieve_secret(
 /// behavior. Genuinely just the setup half of DecryptOwnMessage,
 /// without the final decrypt dispatch -- no ciphertext, only the
 /// real, side-effecting bootstrap itself.
+#[allow(clippy::too_many_arguments)]
 async fn handle_ensure_bootstrapped(
     tcp_client: ActorRef<TcpClientMessage>,
     retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
@@ -2159,30 +2163,29 @@ mod tests {
                         .to_vec();
                     route(CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC, bytes);
                 }
-            } else if topic == CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC {
-                if let Ok(envelope) = rkyv::from_bytes::<
+            } else if topic == CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC
+                && let Ok(envelope) = rkyv::from_bytes::<
                     Envelope<AgentEscrowKeyRequest>,
                     rkyv::rancor::Error,
                 >(&payload)
-                {
-                    self.agent_escrow_key_queries
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let reply_payload = match &self.recipient_public_key_pem {
-                        Some(pem) => AgentEscrowKeyReply::Found {
-                            public_key_pem: pem.clone(),
-                            certificate_pem: String::new(),
-                        },
-                        None => AgentEscrowKeyReply::NotFound,
-                    };
-                    let reply = Envelope {
-                        correlation_id: envelope.correlation_id,
-                        payload: reply_payload,
-                    };
-                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
-                        .unwrap()
-                        .to_vec();
-                    route(CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC, bytes);
-                }
+            {
+                self.agent_escrow_key_queries
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let reply_payload = match &self.recipient_public_key_pem {
+                    Some(pem) => AgentEscrowKeyReply::Found {
+                        public_key_pem: pem.clone(),
+                        certificate_pem: String::new(),
+                    },
+                    None => AgentEscrowKeyReply::NotFound,
+                };
+                let reply = Envelope {
+                    correlation_id: envelope.correlation_id,
+                    payload: reply_payload,
+                };
+                let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
+                    .unwrap()
+                    .to_vec();
+                route(CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC, bytes);
             }
 
             Ok(())
@@ -3584,10 +3587,10 @@ mod tests {
         );
 
         polar_kernel_keyring::unload_key(stranger);
-        if let Custody::Kernel { serial } = custody {
-            if let Some(own) = polar_kernel_keyring::KeyringSerial::new(serial) {
-                polar_kernel_keyring::unload_key(own);
-            }
+        if let Custody::Kernel { serial } = custody
+            && let Some(own) = polar_kernel_keyring::KeyringSerial::new(serial)
+        {
+            polar_kernel_keyring::unload_key(own);
         }
     }
 
@@ -3614,10 +3617,10 @@ mod tests {
         })
         .unwrap();
         assert!(custody.is_ok(), "{custody:?}");
-        if let Ok(Custody::Kernel { serial }) = custody {
-            if let Some(own) = polar_kernel_keyring::KeyringSerial::new(serial) {
-                polar_kernel_keyring::unload_key(own);
-            }
+        if let Ok(Custody::Kernel { serial }) = custody
+            && let Some(own) = polar_kernel_keyring::KeyringSerial::new(serial)
+        {
+            polar_kernel_keyring::unload_key(own);
         }
     }
 

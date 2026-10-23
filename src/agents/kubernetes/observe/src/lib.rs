@@ -400,7 +400,7 @@ macro_rules! impl_namespaced_watcher {
             ) -> Result<(), ractor::ActorProcessingErr> {
                 match message {
                     WatcherMsg::Start => {
-                        if let Err(e) = crate::list_and_watch_namespaced::<$resource_ty>(
+                        if let Err(e) = $crate::list_and_watch_namespaced::<$resource_ty>(
                             &state.tcp_client,
                             state.kube_client.clone(),
                             state.kind,

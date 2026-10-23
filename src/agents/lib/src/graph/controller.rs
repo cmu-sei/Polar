@@ -260,6 +260,7 @@ impl GraphNodeKey for DynamicNodeKey {
 /// - No generic methods.
 /// - No `Self` in return position.
 /// - `&self` receiver only.
+///
 /// The `Debug + Send + Sync` bounds are required for use in actor messages.
 pub trait GraphNodeKey: Debug + Send + Sync {
     /// Generate a parameterized Cypher node pattern and its parameter bindings.
@@ -994,7 +995,7 @@ impl Actor for GraphControllerActor {
         // perfectly healthy graph, purely from idleness. Re-arm on a fixed
         // interval, well under the healthcheck deadline (120s default),
         // so idle time alone can never trip it.
-        let _ = myself.send_interval(Duration::from_secs(30), || GraphControllerMsg::Tick);
+        drop(myself.send_interval(Duration::from_secs(30), || GraphControllerMsg::Tick));
 
         Ok(())
     }

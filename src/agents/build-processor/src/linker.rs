@@ -104,6 +104,7 @@ impl ProvenanceLinker {
     /// your ArtifactNodeKey::Package cypher_match output:
     ///   - Package node label is `Package`, MERGE key is `purl`.
     ///   - Dependency edge rel type is rel::DEPENDS_ON ("DEPENDS_ON").
+    ///
     /// If cypher_match renders Package with a different label, the string literals
     /// below must match it (RawQuery bypasses cypher_match entirely).
     pub(crate) fn handle_sbom_analyzed(
@@ -610,10 +611,7 @@ impl ProvenanceLinker {
             // have great support for array properties in MERGE, and
             // tags are informational, not identity.
             let tags_str = payload.repo_tags.join(",");
-            props.push(Property(
-                "repo_tags".into(),
-                GraphValue::String(tags_str.into()),
-            ));
+            props.push(Property("repo_tags".into(), GraphValue::String(tags_str)));
         }
 
         Self::upsert_node(

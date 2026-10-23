@@ -172,6 +172,8 @@ fn test_wire_trace_ctx_from_current_span() {
 }
 
 #[test]
+// A test of `Clone` itself, though the type is `Copy` too.
+#[allow(clippy::clone_on_copy)]
 fn test_wire_trace_ctx_clone() {
     let original = WireTraceCtx::new_for_message();
     let cloned = original.clone();

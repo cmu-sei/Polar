@@ -247,8 +247,8 @@ fn the_credentials_agent_asks_over_cassini_and_its_ledger_learns_what_cert_issue
     impostor.publish(RECORD_REQUESTS_TOPIC, &request);
     runtime.block_on(
         impostor.wait_for("the broker's refusals", Duration::from_secs(10), |c| {
-            c.refusals(RECORD_REQUESTS_TOPIC).len() >= 1
-                && c.refusals(RECORD_REPLIES_TOPIC).len() >= 1
+            !c.refusals(RECORD_REQUESTS_TOPIC).is_empty()
+                && !c.refusals(RECORD_REPLIES_TOPIC).is_empty()
         }),
     );
 

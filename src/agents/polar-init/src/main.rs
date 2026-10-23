@@ -399,7 +399,7 @@ async fn main() {
 /// is a genuine no-op: this flow never observes a ClientEvent
 /// lifecycle event (Registered, TransportError, etc.) at all, only
 /// CryptoActor's own EnsureBootstrapped reply.
-async fn ensure_escrow_bootstrapped(own_identity: &str, escrow: &environment::EscrowSettings) {
+async fn ensure_escrow_bootstrapped(_own_identity: &str, escrow: &environment::EscrowSettings) {
     // The client's coordinates (TLS_CA_CERT, TLS_CLIENT_CERT, TLS_CLIENT_KEY, BROKER_ADDR and
     // CASSINI_SERVER_NAME, the same commonClientEnv every agent's main container gets) were
     // read and judged with the rest of the environment at startup, so they are certainly here.

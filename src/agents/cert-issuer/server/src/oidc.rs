@@ -315,10 +315,10 @@ impl Validator {
         // of the token. Anything else (malformed structure, bad base64
         // in segments, missing parts) falls through to step 3 where
         // jsonwebtoken's parser produces an InvalidToken error.
-        if let Some(alg_str) = peek_alg(token) {
-            if is_forbidden_alg_str(&alg_str) {
-                return Err(ValidationError::ForbiddenAlgorithm(alg_str));
-            }
+        if let Some(alg_str) = peek_alg(token)
+            && is_forbidden_alg_str(&alg_str)
+        {
+            return Err(ValidationError::ForbiddenAlgorithm(alg_str));
         }
 
         // ---- Step 3: header parse ----
@@ -513,10 +513,10 @@ impl Validator {
         // remain usable.
         let mut keys = Vec::new();
         for jwk in jwks.keys {
-            if let Some(kid) = jwk.kid.clone() {
-                if let Some(key) = jwk_to_decoding_key(&jwk) {
-                    keys.push((kid, key));
-                }
+            if let Some(kid) = jwk.kid.clone()
+                && let Some(key) = jwk_to_decoding_key(&jwk)
+            {
+                keys.push((kid, key));
             }
         }
 
@@ -568,10 +568,10 @@ fn jwk_to_decoding_key(jwk: &Jwk) -> Option<DecodingKey> {
     // We only use this key for `use: sig` (or unspecified, which we
     // assume is signing). Keys explicitly marked for encryption are
     // skipped.
-    if let Some(use_) = &jwk.use_ {
-        if use_ != "sig" {
-            return None;
-        }
+    if let Some(use_) = &jwk.use_
+        && use_ != "sig"
+    {
+        return None;
     }
 
     match jwk.kty.as_str() {
@@ -763,10 +763,10 @@ impl JwksSource for HttpJwksSource {
 fn parse_max_age(header: &str) -> Option<Duration> {
     for part in header.split(',') {
         let part = part.trim();
-        if let Some(rest) = part.strip_prefix("max-age=") {
-            if let Ok(n) = rest.parse::<u64>() {
-                return Some(Duration::from_secs(n));
-            }
+        if let Some(rest) = part.strip_prefix("max-age=")
+            && let Ok(n) = rest.parse::<u64>()
+        {
+            return Some(Duration::from_secs(n));
         }
     }
     None

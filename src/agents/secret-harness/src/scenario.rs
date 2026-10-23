@@ -245,7 +245,7 @@ mod tests {
             let mut held = self.held.lock().unwrap();
             if let Some((by, _)) = held.0.get(&name) {
                 if by != self.who && !self.lets_anyone_store {
-                    return Err(CryptoError::Refused(self.refuses_with.clone()));
+                    return Err(CryptoError::Refused(self.refuses_with));
                 }
                 if self.ignores_replacement && by == self.who {
                     return Ok(());

@@ -129,17 +129,17 @@ impl Actor for RouterActor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            RouterMessage::Register { topic, deliver } => {
-                if state.registrations.contains_key(&topic) {
-                    error!(
-                        "RouterActor: refusing duplicate registration for topic '{topic}' -- \
+            RouterMessage::Register { topic, deliver } => match state.registrations.entry(topic) {
+                std::collections::hash_map::Entry::Occupied(existing) => error!(
+                    "RouterActor: refusing duplicate registration for topic '{}' -- \
                          a topic must have exactly one, real registered handler; the existing \
-                         one is kept"
-                    );
-                } else {
-                    state.registrations.insert(topic, deliver);
+                         one is kept",
+                    existing.key()
+                ),
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(deliver);
                 }
-            }
+            },
             RouterMessage::Route(incoming) => match state.registrations.get(&incoming.topic) {
                 Some(deliver) => deliver(incoming),
                 None => {

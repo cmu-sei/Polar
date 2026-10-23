@@ -320,11 +320,11 @@ impl Handler {
         // Authoritative username and email, from the internal caller. A
         // value that fails validation is an internal-caller bug, not a
         // CSR problem, so it's an InternalError.
-        if let Some(subject) = &account_subject {
-            if let Err(e) = validate_account_subject(subject) {
-                error!("account_subject failed validation: {e}");
-                return error_response(IssueOutcome::InternalError, &e);
-            }
+        if let Some(subject) = &account_subject
+            && let Err(e) = validate_account_subject(subject)
+        {
+            error!("account_subject failed validation: {e}");
+            return error_response(IssueOutcome::InternalError, &e);
         }
 
         // ---- Step 3.5: subject DN merge ----

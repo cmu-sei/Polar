@@ -255,7 +255,7 @@ fn each_call_produces_distinct_keypair() {
 
 #[test]
 fn empty_identity_is_rejected() {
-    let err = generate_csr("", &KeyAlgorithm::default(), &vec![])
+    let err = generate_csr("", &KeyAlgorithm::default(), &[])
         .expect_err("empty identity must be rejected before CSR generation");
     assert!(
         matches!(err, KeypairError::EmptyIdentity),

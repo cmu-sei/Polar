@@ -39,9 +39,7 @@ use ractor::ActorRef;
 use ractor::OutputPort;
 use ractor::SupervisionEvent;
 use ractor::async_trait;
-use std::sync::Arc;
 use tracing::debug;
-use tracing::error;
 use tracing::info;
 use tracing::warn;
 use utoipa::openapi::Deprecated;
@@ -97,9 +95,9 @@ impl Actor for ConsumerSupervisor {
         // rejuvenation still applies, Neo4j dep cert still checked.
         let dep_cert_endpoints = vec![
             DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
+                .map_err(ActorProcessingErr::from)?,
             DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
+                .map_err(ActorProcessingErr::from)?,
         ];
 
         let (healthcheck, _) = HealthCheckActor::spawn_linked(
@@ -109,7 +107,7 @@ impl Actor for ConsumerSupervisor {
             myself.get_cell(),
         )
         .await
-        .map_err(|e| ActorProcessingErr::from(e))?;
+        .map_err(ActorProcessingErr::from)?;
         // --- end NEW ---
 
         let events_output = std::sync::Arc::new(OutputPort::default());

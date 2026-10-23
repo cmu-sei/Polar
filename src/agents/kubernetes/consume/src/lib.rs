@@ -1706,8 +1706,8 @@ mod owner_edge_tests {
         // The recorder handles messages in order; stopping it after them means all have been seen.
         graph.drain().unwrap();
         handle.await.unwrap();
-        let out = seen.lock().unwrap().clone();
-        out
+
+        seen.lock().unwrap().clone()
     }
 
     #[tokio::test]

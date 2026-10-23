@@ -79,7 +79,7 @@ pub fn extract_sub(token: &str) -> Result<String, TokenError> {
     // A JWT is three base64url segments separated by dots.
     // We only need the second (payload) segment.
     let payload_b64 = token
-        .splitn(3, '.')
+        .split('.')
         .nth(1)
         .ok_or(TokenError::MalformedStructure)?;
 

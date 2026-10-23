@@ -2193,7 +2193,6 @@ mod retrieve_secret_wiring_tests {
     use super::*;
     use crate::retrieve_secret::RetrieveSecretHandler;
     use crate::retrieve_secret_actor::{RetrieveSecretActor, RetrieveSecretActorArgs};
-    use credentials_agent_common::escrow_secret::EscrowedSecret;
     use credentials_agent_common::retrieve_secret::{RetrieveSecretReply, RetrieveSecretRequest};
 
     struct CapturingBrokerClient {

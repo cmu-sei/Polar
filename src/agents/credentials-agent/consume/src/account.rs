@@ -181,12 +181,11 @@ impl AccountHandler {
             certificate_pem: issued.certificate_pem.clone(),
         })
         .await
-        .map_err(|e| {
+        .inspect_err(|_e| {
             error!(
                 "account {account_id}: certificate {} was issued but not recorded",
                 issued.serial_number
             );
-            e
         })?;
 
         info!(

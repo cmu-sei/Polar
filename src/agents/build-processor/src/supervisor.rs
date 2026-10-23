@@ -112,9 +112,9 @@ impl Actor for BuildProcessorSupervisor {
         // GraphAvailable/GraphOpFailed tracking applies here.
         let dep_cert_endpoints = vec![
             DepCertEndpoint::parse("cassini-ip-svc.polar.svc.cluster.local:8080:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
+                .map_err(ActorProcessingErr::from)?,
             DepCertEndpoint::parse("polar-db-svc.polar-graph.svc.cluster.local:7687:300")
-                .map_err(|e| ActorProcessingErr::from(e))?,
+                .map_err(ActorProcessingErr::from)?,
         ];
 
         let (healthcheck, _) = HealthCheckActor::spawn_linked(
@@ -124,7 +124,7 @@ impl Actor for BuildProcessorSupervisor {
             myself.get_cell(),
         )
         .await
-        .map_err(|e| ActorProcessingErr::from(e))?;
+        .map_err(ActorProcessingErr::from)?;
 
         let graph = neo4rs::Graph::connect(get_neo_config()?)?;
 
@@ -178,7 +178,7 @@ impl Actor for BuildProcessorSupervisor {
                     )
                     .await?;
 
-                    state.graph_controller = Some(controller.clone().into());
+                    state.graph_controller = Some(controller.clone());
                     let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
 
                     // ── Build handler ───────────────────────────────────────────
@@ -325,17 +325,15 @@ impl Actor for BuildProcessorSupervisor {
                 error!("child actor failed: {:?} error: {:?}", actor_name, e);
                 // TODO: implement selective restart — graph controller and linker
                 // should restart on failure; broker client failure should stop the agent.
-                if actor_name == HEALTHCHECK_ACTOR_NAME {
-                    if !state.draining {
-                        state.draining = true;
-                        warn!("entering drain window before exit ({actor_name} failed)");
-                        let _ = myself
-                            .send_after(
-                                ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS),
-                                || SupervisorMessage::ForceExit,
-                            )
-                            .await;
-                    }
+                if actor_name == HEALTHCHECK_ACTOR_NAME && !state.draining {
+                    state.draining = true;
+                    warn!("entering drain window before exit ({actor_name} failed)");
+                    let _ = myself
+                        .send_after(
+                            ractor::concurrency::Duration::from_secs(DRAIN_WINDOW_SECS),
+                            || SupervisorMessage::ForceExit,
+                        )
+                        .await;
                 }
             }
             SupervisionEvent::ProcessGroupChanged(..) => {}

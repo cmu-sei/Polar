@@ -49,11 +49,9 @@ use ractor::Actor;
 use ractor::ActorCell;
 use ractor::ActorProcessingErr;
 use ractor::ActorRef;
-use ractor::OutputPort;
 use ractor::SupervisionEvent;
 use ractor::async_trait;
 use ractor::concurrency::Duration;
-use std::sync::Arc;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -182,11 +180,10 @@ impl Actor for ConsumerSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        let tcp_client =
-            TcpClient::spawn(&BROKER_CLIENT_NAME.to_string(), myself.clone(), |event| {
-                Some(SupervisorMessage::ClientEvent { event })
-            })
-            .await?;
+        let tcp_client = TcpClient::spawn(BROKER_CLIENT_NAME, myself.clone(), |event| {
+            Some(SupervisorMessage::ClientEvent { event })
+        })
+        .await?;
 
         let (healthcheck, _) = Actor::spawn_linked(
             Some("polar.healthcheck".to_string()),

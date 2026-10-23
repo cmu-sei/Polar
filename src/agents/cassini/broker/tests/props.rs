@@ -36,6 +36,6 @@ proptest! {
     fn empty_payload_arc(topic in "[a-z]{1,20}") {
         let payload: Arc<Vec<u8>> = Arc::new(vec![]);
         prop_assert_eq!(payload.len(), 0);
-        prop_assert!(topic.len() >= 1 && topic.len() <= 20);
+        prop_assert!(!topic.is_empty() && topic.len() <= 20);
     }
 }

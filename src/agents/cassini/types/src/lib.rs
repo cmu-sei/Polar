@@ -32,6 +32,9 @@ pub use trace::WireTraceCtx;
 
 pub type SessionMap = HashMap<String, SessionDetails>;
 
+/// What a held subscriber hands over: each message it kept, with who published it.
+pub type HeldMessages = Vec<(std::sync::Arc<Vec<u8>>, Option<String>)>;
+
 /// Our representation of a connected session, and how close it is to timing out
 /// TODO: Eventually, we might want to add metadata to the session struct to track additional information.
 /// Consider stuff like last_activity_time, last_message_received_time, etc.
@@ -300,7 +303,7 @@ pub enum BrokerMessage {
     },
     /// Internal: a held subscriber hands over what it holds, and ends.
     ClaimHeld {
-        reply: ractor::RpcReplyPort<Vec<(std::sync::Arc<Vec<u8>>, Option<String>)>>,
+        reply: ractor::RpcReplyPort<HeldMessages>,
     },
     DisconnectRequest {
         reason: DisconnectReason,

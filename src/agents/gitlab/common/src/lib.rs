@@ -42,7 +42,7 @@ pub fn get_file_as_byte_vec(filename: &String) -> Result<Vec<u8>, std::io::Error
     let metadata = std::fs::metadata(filename)?;
 
     let mut buffer = vec![0; metadata.len() as usize];
-    f.read(&mut buffer).expect("buffer overflow");
+    f.read_exact(&mut buffer)?;
 
     Ok(buffer)
 }
