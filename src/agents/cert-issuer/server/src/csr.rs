@@ -189,9 +189,9 @@ pub fn parse_csr(pem: &str) -> Result<ParsedCsr, CsrError> {
     // SubjectAlternativeName extension if present.
     let san_strings = extract_dns_sans(&csr)?;
 
-    match san_strings.len() {
-        0 => return Err(CsrError::NoSan),
-        _ => {} // one identity SAN + zero or more extras are valid
+    // One identity SAN and zero or more extras are valid.
+    if san_strings.is_empty() {
+        return Err(CsrError::NoSan);
     }
 
     // ---- Stage 4.5: subject DN fields ---------------------------------
@@ -513,15 +513,14 @@ fn extract_dns_sans(csr: &X509CertificationRequest) -> Result<Vec<String>, CsrEr
     for parsed in extensions {
         if let ParsedExtension::SubjectAlternativeName(san) = parsed {
             for name in &san.general_names {
-                match name {
-                    GeneralName::DNSName(dns) => dns_names.push(dns.to_string()),
-                    // Non-DNS GeneralNames are not expected from the
-                    // init container. We don't push them into the SAN
-                    // list, but we also don't error — a future
-                    // policy might allow URI SANs (e.g., SPIFFE IDs)
-                    // and we want that to be a deliberate addition,
-                    // not something silently rejected here.
-                    _ => {}
+                // Non-DNS GeneralNames are not expected from the
+                // init container. We don't push them into the SAN
+                // list, but we also don't error — a future
+                // policy might allow URI SANs (e.g., SPIFFE IDs)
+                // and we want that to be a deliberate addition,
+                // not something silently rejected here.
+                if let GeneralName::DNSName(dns) = name {
+                    dns_names.push(dns.to_string());
                 }
             }
             // Only consider the first SAN extension; see above.

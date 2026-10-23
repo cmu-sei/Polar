@@ -113,113 +113,106 @@ impl Actor for GitlabProjectObserver {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             GitlabObserverMessage::Tick(command) => {
-                match command {
-                    Command::GetProjects(op) => {
-                        debug!("{}", op.query);
-                        match state
-                            .web_client
-                            .post(graphql_endpoint(&state.gitlab_endpoint))
-                            .bearer_auth(state.token.clone().unwrap_or_default())
-                            .json(&op)
-                            .send()
-                            .await
-                        {
-                            Ok(response) => {
-                                match response.json::<GraphQlResponse<MultiProjectQuery>>().await {
-                                    Ok(deserialized) => {
-                                        if let Some(errors) = deserialized.errors {
-                                            let errors = errors
-                                                .iter()
-                                                .map(|error| error.to_string())
-                                                .collect::<Vec<_>>()
-                                                .join("\n");
+                if let Command::GetProjects(op) = command {
+                    debug!("{}", op.query);
+                    match state
+                        .web_client
+                        .post(graphql_endpoint(&state.gitlab_endpoint))
+                        .bearer_auth(state.token.clone().unwrap_or_default())
+                        .json(&op)
+                        .send()
+                        .await
+                    {
+                        Ok(response) => {
+                            match response.json::<GraphQlResponse<MultiProjectQuery>>().await {
+                                Ok(deserialized) => {
+                                    if let Some(errors) = deserialized.errors {
+                                        let errors = errors
+                                            .iter()
+                                            .map(|error| error.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
 
-                                            error!("Failed to query instance! {errors}");
+                                        error!("Failed to query instance! {errors}");
 
-                                            if let Err(e) =
-                                                myself.send_message(GitlabObserverMessage::Backoff(
-                                                    BackoffReason::GraphqlError(errors),
-                                                ))
-                                            {
-                                                error!("{e}");
-                                                myself.stop(Some(e.to_string()))
-                                            }
-                                        } else if let Some(query) = deserialized.data {
-                                            let connection = query.projects.unwrap();
-
-                                            debug!(
-                                                "Found {count} project(s)",
-                                                count = connection.count
-                                            );
-
-                                            let mut read_projects = Vec::new();
-
-                                            if let Some(projects) = connection.nodes {
-                                                // Append nodes to the result list.
-                                                read_projects.extend(projects.into_iter().map(|option| {
-                                                    let project = option.unwrap();
-
-                                                    // get this project's pipeline runs
-                                                    let command = Command::GetProjectPipelines(project.full_path.clone());
-                                                    if let Some(pipeline_observer) = where_is(GITLAB_PIPELINE_OBSERVER.to_string()) {
-                                                        pipeline_observer
-                                                            .send_message(GitlabObserverMessage::Tick(command))
-                                                            .expect("Expected to send message to pipeline observer");
-                                                    }
-
-                                                    // get jobs from this project's pipelines
-                                                    let command = Command::GetPipelineJobs(project.full_path.clone());
-                                                    if let Some(jobs_observer) = where_is(GITLAB_JOBS_OBSERVER.to_string()) {
-                                                        jobs_observer
-                                                            .send_message(GitlabObserverMessage::Tick(command))
-                                                            .expect("Expected to send message to pipeline observer");
-                                                    }
-
-
-                                                    if let Some(repository_observer) = where_is(GITLAB_REPOSITORY_OBSERVER.to_string()) {
-                                                        let command = Command::GetProjectContainerRepositories(project.full_path.clone());
-
-                                                        repository_observer
-                                                            .send_message(GitlabObserverMessage::Tick(command))
-                                                            .expect("Expected to send message to the registry observer");
-
-                                                        let command = Command::GetProjectPackages(project.full_path.clone());
-
-                                                        repository_observer
-                                                            .send_message(GitlabObserverMessage::Tick(command))
-                                                            .expect("Expected to send message to the registry observer");
-
-                                                    }
-
-                                                    //return the projects
-                                                    project
-                                                }));
-                                            }
-
-                                            let data = GitlabData::Projects(read_projects.clone());
-
-                                            if let Err(e) =
-                                                send_to_broker(state, data, PROJECTS_CONSUMER_TOPIC)
-                                            {
-                                                return Err(e);
-                                            }
+                                        if let Err(e) =
+                                            myself.send_message(GitlabObserverMessage::Backoff(
+                                                BackoffReason::GraphqlError(errors),
+                                            ))
+                                        {
+                                            error!("{e}");
+                                            myself.stop(Some(e.to_string()))
                                         }
+                                    } else if let Some(query) = deserialized.data {
+                                        let connection = query.projects.unwrap();
+
+                                        debug!(
+                                            "Found {count} project(s)",
+                                            count = connection.count
+                                        );
+
+                                        let mut read_projects = Vec::new();
+
+                                        if let Some(projects) = connection.nodes {
+                                            // Append nodes to the result list.
+                                            read_projects.extend(projects.into_iter().map(|option| {
+                                                let project = option.unwrap();
+
+                                                // get this project's pipeline runs
+                                                let command = Command::GetProjectPipelines(project.full_path.clone());
+                                                if let Some(pipeline_observer) = where_is(GITLAB_PIPELINE_OBSERVER.to_string()) {
+                                                    pipeline_observer
+                                                        .send_message(GitlabObserverMessage::Tick(command))
+                                                        .expect("Expected to send message to pipeline observer");
+                                                }
+
+                                                // get jobs from this project's pipelines
+                                                let command = Command::GetPipelineJobs(project.full_path.clone());
+                                                if let Some(jobs_observer) = where_is(GITLAB_JOBS_OBSERVER.to_string()) {
+                                                    jobs_observer
+                                                        .send_message(GitlabObserverMessage::Tick(command))
+                                                        .expect("Expected to send message to pipeline observer");
+                                                }
+
+
+                                                if let Some(repository_observer) = where_is(GITLAB_REPOSITORY_OBSERVER.to_string()) {
+                                                    let command = Command::GetProjectContainerRepositories(project.full_path.clone());
+
+                                                    repository_observer
+                                                        .send_message(GitlabObserverMessage::Tick(command))
+                                                        .expect("Expected to send message to the registry observer");
+
+                                                    let command = Command::GetProjectPackages(project.full_path.clone());
+
+                                                    repository_observer
+                                                        .send_message(GitlabObserverMessage::Tick(command))
+                                                        .expect("Expected to send message to the registry observer");
+
+                                                }
+
+                                                //return the projects
+                                                project
+                                            }));
+                                        }
+
+                                        let data = GitlabData::Projects(read_projects.clone());
+
+                                        send_to_broker(state, data, PROJECTS_CONSUMER_TOPIC)?;
                                     }
-                                    Err(e) => myself
-                                        .send_message(GitlabObserverMessage::Backoff(
-                                            BackoffReason::FatalError(e.to_string()),
-                                        ))
-                                        .expect(MESSAGE_FORWARDING_FAILED),
                                 }
+                                Err(e) => myself
+                                    .send_message(GitlabObserverMessage::Backoff(
+                                        BackoffReason::FatalError(e.to_string()),
+                                    ))
+                                    .expect(MESSAGE_FORWARDING_FAILED),
                             }
-                            Err(e) => myself
-                                .send_message(GitlabObserverMessage::Backoff(
-                                    BackoffReason::GitlabUnreachable(e.to_string()),
-                                ))
-                                .expect(MESSAGE_FORWARDING_FAILED),
                         }
+                        Err(e) => myself
+                            .send_message(GitlabObserverMessage::Backoff(
+                                BackoffReason::GitlabUnreachable(e.to_string()),
+                            ))
+                            .expect(MESSAGE_FORWARDING_FAILED),
                     }
-                    _ => (),
                 }
             }
             GitlabObserverMessage::Backoff(reason) => {

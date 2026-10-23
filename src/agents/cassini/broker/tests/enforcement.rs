@@ -39,6 +39,9 @@ const PRODUCER: &str = "harness-producer.polar.serviceaccount.cluster.local";
 const SINK: &str = "harness-sink.polar.serviceaccount.cluster.local";
 const CREDENTIALS: &str = "credentials-agent.polar.serviceaccount.cluster.local";
 
+/// What a test client was delivered: each message's topic and payload.
+type Delivered = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
 /// A broker with no policy yet, as on a fresh cluster: the floor decides. The producer may publish `news` and the
 /// sink subscribe to it; both are Cassini clients.
 async fn broker_with_two_workloads() -> TestBroker {
@@ -490,7 +493,7 @@ struct Agent {
     registrar: ractor::ActorRef<cassini_types::ClientEvent>,
     router: ractor::ActorRef<polar_router::RouterMessage>,
     authority: AuthorityHandle,
-    delivered: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+    delivered: Delivered,
     standing: Arc<Mutex<Vec<StandingRefusal>>>,
     unpredicted: Arc<AtomicUsize>,
 }
@@ -574,7 +577,7 @@ async fn agent(
     let (router, _) = Actor::spawn(None, polar_router::RouterActor, ())
         .await
         .unwrap();
-    let delivered: Arc<Mutex<Vec<(String, Vec<u8>)>>> = Arc::default();
+    let delivered: Delivered = Arc::default();
     let mut subscriptions = polar_agent_builder::authority::subscriptions(&authority);
     for topic in wants {
         let delivered = delivered.clone();

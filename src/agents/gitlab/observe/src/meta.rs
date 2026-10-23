@@ -76,23 +76,20 @@ impl MetaObserver {
                     Ok(deserialized) => {
                         if let Some(errors) = deserialized.errors {
                             handle_graphql_errors(errors, actor_ref.clone());
-                        } else if let Some(query_result) = deserialized.data {
-                            if let Some(metadata) = query_result.metadata {
-                                //package and send
+                        } else if let Some(query_result) = deserialized.data
+                            && let Some(metadata) = query_result.metadata
+                        {
+                            //package and send
 
-                                //TODO: Get base url w/o api
-                                let instance = GitlabInstance {
-                                    base_url: state.gitlab_endpoint.clone(),
-                                    metadata,
-                                };
+                            //TODO: Get base url w/o api
+                            let instance = GitlabInstance {
+                                base_url: state.gitlab_endpoint.clone(),
+                                metadata,
+                            };
 
-                                let data = GitlabData::Instance(instance);
+                            let data = GitlabData::Instance(instance);
 
-                                if let Err(e) = send_to_broker(state, data, METADATA_CONSUMER_TOPIC)
-                                {
-                                    return Err(e);
-                                }
-                            }
+                            send_to_broker(state, data, METADATA_CONSUMER_TOPIC)?;
                         }
                     }
                     Err(e) => actor_ref
@@ -135,22 +132,15 @@ impl MetaObserver {
                     Ok(deserialized) => {
                         if let Some(errors) = deserialized.errors {
                             handle_graphql_errors(errors, actor_ref.clone());
-                            return Ok(());
+                            Ok(())
                         } else if let Some(query_result) = deserialized.data {
                             query_result.license_history_entries.map(|connection| {
                                 //package and send
                                 let mut read_licenses: Vec<LicenseHistoryEntry> = Vec::new();
 
-                                connection.nodes.map(|licenses| {
-                                    read_licenses.extend(licenses.into_iter().filter_map(
-                                        |option| {
-                                            option.map(|license| {
-                                                //extract license information during iteration
-                                                license
-                                            })
-                                        },
-                                    ));
-                                });
+                                if let Some(licenses) = connection.nodes {
+                                    read_licenses.extend(licenses.into_iter().flatten());
+                                }
 
                                 let data = GitlabData::Licenses(read_licenses);
 
@@ -220,12 +210,12 @@ impl Actor for MetaObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            GitlabObserverMessage::Tick(command) => match command {
-                Command::GetMetadata => {
+            GitlabObserverMessage::Tick(command) => {
+                if matches!(command, Command::GetMetadata) {
                     MetaObserver::get_metadata(state, myself).await.unwrap();
                 }
-                _ => (), // ignore other messages
-            },
+                // other commands are ignored
+            }
             GitlabObserverMessage::Backoff(reason) => {
                 // cancel old event loop and start a new one with updated state, if observer hasn't stopped
                 if let Some(handle) = &state.task_handle {

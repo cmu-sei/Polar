@@ -1669,9 +1669,12 @@ mod issuance_wiring_tests {
         ledger.stop_and_wait(None, None).await.unwrap();
     }
 
+    /// Each message the consumer publishes: its topic and payload.
+    type Published = std::sync::Arc<tokio::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+
     /// Everything the consumer publishes, in order, for tests that follow a conversation.
     struct RecordingBrokerClient {
-        published: std::sync::Arc<tokio::sync::Mutex<Vec<(String, Vec<u8>)>>>,
+        published: Published,
     }
 
     #[ractor::async_trait]
@@ -1803,10 +1806,7 @@ mod issuance_wiring_tests {
                 bytes,
             );
         }
-        async fn reply_number(
-            published: &std::sync::Arc<tokio::sync::Mutex<Vec<(String, Vec<u8>)>>>,
-            n: usize,
-        ) -> Envelope<WorkloadIssuanceReply> {
+        async fn reply_number(published: &Published, n: usize) -> Envelope<WorkloadIssuanceReply> {
             for _ in 0..60 {
                 if let Some((topic, bytes)) = published.lock().await.get(n).cloned() {
                     assert_eq!(topic, CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC);

@@ -1300,6 +1300,7 @@ mod tests {
             .await
         }
 
+        #[allow(clippy::too_many_arguments)]
         async fn build(
             service: &str,
             budget: Duration,

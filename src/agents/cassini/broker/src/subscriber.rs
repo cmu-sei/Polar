@@ -57,6 +57,9 @@ pub struct SubscriberManagerState {
     /// spawned before TopicManager, so it can't be passed at construction
     /// time). Used to forward UnsubscribeRequest when a subscription ends,
     /// whether via explicit unsubscribe or the subscriber dying.
+    // Nothing reads it, though the comment above says it is used to forward UnsubscribeRequest: whether that
+    // forwarding happens elsewhere, or is missing, is for remaining-work.md, not a lint fix.
+    #[allow(dead_code)]
     topic_mgr: Option<ActorRef<BrokerMessage>>,
     is_shutting_down: bool,
 }
@@ -114,9 +117,9 @@ impl Actor for SubscriberManager {
                     .collect();
                 let _ = reply_to.send(topics);
             }
-            BrokerMessage::InitiateShutdownPhase { phase }
-                if phase == ShutdownPhase::TerminateSubscribers =>
-            {
+            BrokerMessage::InitiateShutdownPhase {
+                phase: ShutdownPhase::TerminateSubscribers,
+            } => {
                 self.handle_initiate_shutdown_phase(myself.clone(), state)
                     .await?;
             }

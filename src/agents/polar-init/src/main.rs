@@ -565,15 +565,14 @@ async fn issue_cert(
         req.extra_sans,
     );
 
-    let csr_output = loop {
-        match keypair::generate_csr(dns_identity, &req.key_algorithm, &req.extra_sans) {
-            Ok(c) => break c,
-            Err(e) => {
-                // CSR generation failure is almost certainly a bug or
-                // misconfiguration — log and exit rather than looping forever.
-                eprintln!("error: failed to generate CSR: {e}");
-                std::process::exit(1);
-            }
+    let csr_output = match keypair::generate_csr(dns_identity, &req.key_algorithm, &req.extra_sans)
+    {
+        Ok(c) => c,
+        Err(e) => {
+            // CSR generation failure is almost certainly a bug or
+            // misconfiguration — log and exit rather than looping forever.
+            eprintln!("error: failed to generate CSR: {e}");
+            std::process::exit(1);
         }
     };
 

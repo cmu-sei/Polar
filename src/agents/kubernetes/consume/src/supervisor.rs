@@ -262,34 +262,33 @@ impl ClusterConsumerSupervisor {
             }
             KUBERNETES_RESOLUTION_EVENTS => {
                 let ev = rkyv::from_bytes::<ProvenanceEvent, RkyvError>(&payload)?;
-                match ev {
-                    ProvenanceEvent::OCIArtifactResolved {
-                        digest, source_ref, ..
-                    } => {
-                        if let DiscoverySourceRef::KubernetesPodContainer {
+                // Only a pod container's resolution is projected; every other event is ignored.
+                if let ProvenanceEvent::OCIArtifactResolved {
+                    digest,
+                    source_ref:
+                        DiscoverySourceRef::KubernetesPodContainer {
                             pod_uid,
                             container_name,
                             ..
-                        } = source_ref
-                        {
-                            debug!(
-                                "pod {pod_uid} container {container_name} was resolved with digest {digest}, updating graph"
-                            );
-                            let container_k = KubeNodeKey::PodContainer {
-                                pod_uid,
-                                name: container_name,
-                            };
-                            let artifact_k = ArtifactNodeKey::OCIArtifact { digest };
-                            let op = GraphOp::EnsureEdge {
-                                from: container_k.into_key(),
-                                to: artifact_k.into_key(),
-                                rel_type: "USES_IMAGE".to_string(),
-                                props: vec![],
-                            };
-                            graph_controller.send_message(GraphControllerMsg::Op(op))?;
-                        }
-                    }
-                    _ => (), //ignore all other events
+                        },
+                    ..
+                } = ev
+                {
+                    debug!(
+                        "pod {pod_uid} container {container_name} was resolved with digest {digest}, updating graph"
+                    );
+                    let container_k = KubeNodeKey::PodContainer {
+                        pod_uid,
+                        name: container_name,
+                    };
+                    let artifact_k = ArtifactNodeKey::OCIArtifact { digest };
+                    let op = GraphOp::EnsureEdge {
+                        from: container_k.into_key(),
+                        to: artifact_k.into_key(),
+                        rel_type: "USES_IMAGE".to_string(),
+                        props: vec![],
+                    };
+                    graph_controller.send_message(GraphControllerMsg::Op(op))?;
                 }
             }
             _ => (), //ignore unhandled topics for now, we shouldn't see anything else
@@ -351,9 +350,11 @@ impl ClusterConsumerSupervisor {
     /// timer runs detached, so this supervisor keeps handling (and logging)
     /// messages while the window is open.
     fn schedule_drain_end(myself: &ActorRef<ConsumerSupervisorMessage>) {
-        let _ = myself.send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
-            ConsumerSupervisorMessage::DrainElapsed
-        });
+        drop(
+            myself.send_after(Duration::from_secs(DRAIN_WINDOW_SECS), || {
+                ConsumerSupervisorMessage::DrainElapsed
+            }),
+        );
     }
 
     /// Tells the broker this agent is going dark, so it stops routing

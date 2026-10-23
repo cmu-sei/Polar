@@ -77,6 +77,8 @@ pub struct ProjectionActorState {
     graph_controller: GraphController,
 }
 
+// An event is sent once, as it is appended, so its size beside a graph signal's is not worth boxing it.
+#[allow(clippy::large_enum_variant)]
 pub enum ProjectionMessage {
     /// Fire-and-forget: project one event's effect, best-effort --
     /// the steady-state path, sent by LedgerActor after each

@@ -825,6 +825,7 @@ impl Broker {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_request(
         &self,
         _myself: ActorRef<BrokerMessage>,
@@ -912,6 +913,7 @@ impl Broker {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_response(
         &self,
         _myself: ActorRef<BrokerMessage>,

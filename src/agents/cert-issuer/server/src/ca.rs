@@ -401,6 +401,7 @@ pub enum CaMaterialsError {
 ///   carry the same meaning).
 /// - The cert and key parse cleanly.
 /// - The key's public half matches the cert's embedded public key.
+///
 /// Any of these failing is an error that surfaces to the operator
 /// rather than triggering silent regeneration.
 ///

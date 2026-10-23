@@ -108,7 +108,7 @@ impl Drain {
         }
         self.draining = true;
         self.rejuvenating = rejuvenating;
-        let _ = supervisor.send_after(window, elapsed);
+        drop(supervisor.send_after(window, elapsed));
         true
     }
 

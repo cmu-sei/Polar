@@ -187,13 +187,16 @@ pub struct AgentBuilder<M: ractor::Message> {
     topics: Option<Arc<topics::TopicSet>>,
 }
 
+/// Each declared command with its handler.
+type CommandPairs = Vec<(CommandSpec, Arc<dyn CommandHandler>)>;
+
 /// Pairs each command an agent declared with its handler, and says what does not pair: a declared command
 /// with no handler can be sent and never run, and a handler for an undeclared command can never be reached,
 /// so either is a startup failure rather than a surprise later.
 fn resolve_commands(
     declared: &'static [CommandSpec],
     registered: Vec<(&'static str, Arc<dyn CommandHandler>)>,
-) -> Result<Vec<(CommandSpec, Arc<dyn CommandHandler>)>, String> {
+) -> Result<CommandPairs, String> {
     let mut problems = Vec::new();
     let mut handlers: std::collections::HashMap<&'static str, Arc<dyn CommandHandler>> =
         std::collections::HashMap::new();

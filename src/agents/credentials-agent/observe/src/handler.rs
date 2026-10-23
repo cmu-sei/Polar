@@ -125,6 +125,8 @@ pub struct ObserverState {
 /// above makes, written once. The failures it can end in are already the responses to send.
 /// `what` names the exchange in the log; only identifiers and outcomes are logged, never what the
 /// request or reply carries.
+// The error is the HTTP response the route returns, built once a request, so its size is not worth boxing it.
+#[allow(clippy::result_large_err)]
 async fn relay<Req, Rep>(
     broker: &BrokerHandle,
     router: &Arc<ReplyRouter<Rep>>,
@@ -518,7 +520,7 @@ fn compute_timeout(credential: &str) -> Duration {
         return Duration::from_secs(1);
     }
 
-    let computed_secs = (remaining / 3).min(MAX_TIMEOUT_SECS).max(1);
+    let computed_secs = (remaining / 3).clamp(1, MAX_TIMEOUT_SECS);
     Duration::from_secs(computed_secs as u64)
 }
 

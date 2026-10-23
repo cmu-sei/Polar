@@ -106,6 +106,8 @@ impl AuthorityCore {
         &self.state
     }
 
+    // Whether a message came from the credentials agent: a check, not a constructor.
+    #[allow(clippy::wrong_self_convention)]
     fn from_the_credentials_agent(&self, published_by: Option<&str>) -> Result<(), Refusal> {
         match published_by {
             Some(who) if who == self.publisher => Ok(()),

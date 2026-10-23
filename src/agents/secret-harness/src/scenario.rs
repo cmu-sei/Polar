@@ -174,7 +174,9 @@ pub async fn run<C: CryptoClient>(
     use crate::settings::Role;
     let role = settings.role.name();
     tokio::time::sleep(settings.start_delay).await;
-    for round in 0u64.. {
+    // Until the pod ends.
+    let mut round = 0u64;
+    loop {
         let checks = match settings.role {
             Role::Owner => owner_round(c, &settings.secret_name, round).await,
             Role::Intruder => intruder_round(c, &settings.secret_name).await,
@@ -183,6 +185,7 @@ pub async fn run<C: CryptoClient>(
             say(&report(role, round, check));
         }
         tokio::time::sleep(settings.period).await;
+        round += 1;
     }
 }
 

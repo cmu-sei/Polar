@@ -52,7 +52,7 @@ pub struct OciRepositorySpec {
     /// either or both of
     ///
     /// - a PEM-encoded client certificate (`tls.crt`) and private
-    /// key (`tls.key`);
+    ///   key (`tls.key`);
     /// - a PEM-encoded CA certificate (`ca.crt`)
     ///
     /// and whichever are supplied, will be used for connecting to the
@@ -136,7 +136,7 @@ pub struct OciRepositorySpec {
 /// either or both of
 ///
 /// - a PEM-encoded client certificate (`tls.crt`) and private
-/// key (`tls.key`);
+///   key (`tls.key`);
 /// - a PEM-encoded CA certificate (`ca.crt`)
 ///
 /// and whichever are supplied, will be used for connecting to the

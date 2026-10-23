@@ -109,7 +109,7 @@ impl GitlabRepositoryObserver {
 
             warn!("Received GraphQL errors:\n{combined}");
             // Return or propagate as needed, e.g.:
-            return Err(ActorProcessingErr::from(combined));
+            Err(ActorProcessingErr::from(combined))
         } else if let Some(data) = deserialized_response.data {
             if let Some(details) = data.container_repository {
                 match details.tags {
@@ -118,10 +118,8 @@ impl GitlabRepositoryObserver {
                             Some(tags) => {
                                 let mut read_tags = Vec::new();
 
-                                for option in tags {
-                                    if let Some(tag) = option {
-                                        read_tags.push(tag);
-                                    }
+                                for tag in tags.into_iter().flatten() {
+                                    read_tags.push(tag);
                                 }
 
                                 // return list
@@ -170,206 +168,177 @@ impl Actor for GitlabRepositoryObserver {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match message {
-            GitlabObserverMessage::Tick(command) => {
-                match command {
-                    Command::GetProjectContainerRepositories(full_path) => {
-                        let op =
-                            ProjectContainerRepositoriesQuery::build(SingleProjectQueryArguments {
-                                full_path: full_path.clone(),
-                            });
-
-                        match state
-                            .web_client
-                            .post(graphql_endpoint(&state.gitlab_endpoint))
-                            .bearer_auth(state.token.clone().unwrap_or_default())
-                            .json(&op)
-                            .send()
-                            .await
-                        {
-                            Ok(response) => {
-                                match response
-                                    .json::<GraphQlResponse<ProjectContainerRepositoriesQuery>>()
-                                    .await
-                                {
-                                    Ok(deserialized_response) => {
-                                        if let Some(errors) = deserialized_response.errors {
-                                            let errors = errors
-                                                .iter()
-                                                .map(|error| error.to_string())
-                                                .collect::<Vec<_>>()
-                                                .join("\n");
-
-                                            error!("Failed to query instance! {errors}");
-                                            myself.stop(Some(errors))
-                                        } else if let Some(data) = deserialized_response.data {
-                                            if let Some(project) = data.project {
-                                                if let Some(connection) =
-                                                    project.container_repositories
-                                                {
-                                                    match connection.nodes {
-                                                        Some(repositories) => {
-                                                            let mut read_repositories: Vec<
-                                                                ContainerRepository,
-                                                            > = Vec::new();
-
-                                                            for option in repositories {
-                                                                match option {
-                                                                    Some(repository) => {
-                                                                        // try to get image tags from that repo
-                                                                        let id =
-                                                                            ContainerRepositoryID(
-                                                                                repository
-                                                                                    .id
-                                                                                    .0
-                                                                                    .clone(),
-                                                                            );
-                                                                        let result = GitlabRepositoryObserver::get_repository_tags(
-                                                                            state.web_client.clone(),
-                                                                            id,
-                                                                            state.token.clone().unwrap_or_default(),
-                                                                            graphql_endpoint(&state.gitlab_endpoint))
-                                                                            .await;
-
-                                                                        match result {
-                                                                            Ok(tags) => {
-                                                                                //send tag data
-                                                                                if !tags.is_empty()
-                                                                                {
-                                                                                    let data = GitlabData::ContainerRepositoryTags {
-                                                                                        repository_id: repository.id.to_string(),
-                                                                                        project_id: project.id.to_string(),
-                                                                                        tags
-                                                                                    };
-                                                                                    if let Err(e) = send_to_broker(state, data, REPOSITORY_CONSUMER_TOPIC) { return Err(e) }
-                                                                                }
-                                                                            }
-                                                                            Err(e) => warn!("{e}"),
-                                                                        };
-
-                                                                        read_repositories
-                                                                            .push(repository);
-                                                                    }
-                                                                    None => (),
-                                                                }
-                                                            }
-
-                                                            // send off repository data
-                                                            if !read_repositories.is_empty() {
-                                                                let data = GitlabData::ProjectContainerRepositories {
-                                                                    project_id: project.id.to_string(),
-                                                                    repositories: read_repositories
-                                                                };
-
-                                                                if let Err(e) = send_to_broker(
-                                                                    state,
-                                                                    data,
-                                                                    REPOSITORY_CONSUMER_TOPIC,
-                                                                ) {
-                                                                    return Err(e);
-                                                                }
-                                                            }
-                                                        }
-                                                        None => (),
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to deserialize response from server: {e}")
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Error observing data: {e}")
-                            }
-                        }
-                    }
-                    Command::GetProjectPackages(full_path) => {
-                        let op = ProjectPackagesQuery::build(SingleProjectQueryArguments {
+        // This observer only acts when it is told to.
+        if let GitlabObserverMessage::Tick(command) = message {
+            match command {
+                Command::GetProjectContainerRepositories(full_path) => {
+                    let op =
+                        ProjectContainerRepositoriesQuery::build(SingleProjectQueryArguments {
                             full_path: full_path.clone(),
                         });
 
-                        debug!("{}", op.query);
+                    match state
+                        .web_client
+                        .post(graphql_endpoint(&state.gitlab_endpoint))
+                        .bearer_auth(state.token.clone().unwrap_or_default())
+                        .json(&op)
+                        .send()
+                        .await
+                    {
+                        Ok(response) => {
+                            match response
+                                .json::<GraphQlResponse<ProjectContainerRepositoriesQuery>>()
+                                .await
+                            {
+                                Ok(deserialized_response) => {
+                                    if let Some(errors) = deserialized_response.errors {
+                                        let errors = errors
+                                            .iter()
+                                            .map(|error| error.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
 
-                        match state
-                            .web_client
-                            .post(graphql_endpoint(&state.gitlab_endpoint))
-                            .bearer_auth(state.token.clone().unwrap_or_default())
-                            .json(&op)
-                            .send()
-                            .await
-                        {
-                            Ok(response) => {
-                                match response
-                                    .json::<GraphQlResponse<ProjectPackagesQuery>>()
-                                    .await
-                                {
-                                    Ok(deserialized_response) => {
-                                        if let Some(errors) = deserialized_response.errors {
-                                            let errors = errors
-                                                .iter()
-                                                .map(|error| error.to_string())
-                                                .collect::<Vec<_>>()
-                                                .join("\n");
+                                        error!("Failed to query instance! {errors}");
+                                        myself.stop(Some(errors))
+                                    } else if let Some(data) = deserialized_response.data
+                                        && let Some(project) = data.project
+                                        && let Some(connection) = project.container_repositories
+                                        && let Some(repositories) = connection.nodes
+                                    {
+                                        let mut read_repositories: Vec<ContainerRepository> =
+                                            Vec::new();
 
-                                            error!("Failed to query instance! {errors}");
-                                            myself.stop(Some(errors))
-                                        } else if let Some(data) = deserialized_response.data {
-                                            if let Some(project) = data.project {
-                                                if let Some(connection) = project.packages {
-                                                    match connection.nodes {
-                                                        Some(packages) => {
-                                                            if !packages.is_empty() {
-                                                                let mut read_packages: Vec<
-                                                                    Package,
-                                                                > = Vec::new();
+                                        for repository in repositories.into_iter().flatten() {
+                                            // try to get image tags from that repo
+                                            let id = ContainerRepositoryID(repository.id.0.clone());
+                                            let result =
+                                                GitlabRepositoryObserver::get_repository_tags(
+                                                    state.web_client.clone(),
+                                                    id,
+                                                    state.token.clone().unwrap_or_default(),
+                                                    graphql_endpoint(&state.gitlab_endpoint),
+                                                )
+                                                .await;
 
-                                                                for package in packages {
-                                                                    let pkg = package.unwrap();
-                                                                    // get package file metadtadta
-                                                                    GitlabRepositoryObserver::get_gitlab_package_files(state, &project.id.0, &pkg.id.0).await.unwrap();
-                                                                    read_packages.push(pkg);
-                                                                }
-
-                                                                let data =
-                                                                    GitlabData::ProjectPackages {
-                                                                        project_id: project
-                                                                            .id
-                                                                            .to_string(),
-                                                                        packages: read_packages,
-                                                                    };
-
-                                                                if let Err(e) = send_to_broker(
-                                                                    state,
-                                                                    data,
-                                                                    REPOSITORY_CONSUMER_TOPIC,
-                                                                ) {
-                                                                    return Err(e);
-                                                                }
-                                                            }
-                                                        }
-                                                        None => (),
+                                            match result {
+                                                Ok(tags) => {
+                                                    //send tag data
+                                                    if !tags.is_empty() {
+                                                        let data =
+                                                            GitlabData::ContainerRepositoryTags {
+                                                                repository_id: repository
+                                                                    .id
+                                                                    .to_string(),
+                                                                project_id: project.id.to_string(),
+                                                                tags,
+                                                            };
+                                                        send_to_broker(
+                                                            state,
+                                                            data,
+                                                            REPOSITORY_CONSUMER_TOPIC,
+                                                        )?;
                                                     }
                                                 }
-                                            }
+                                                Err(e) => warn!("{e}"),
+                                            };
+
+                                            read_repositories.push(repository);
+                                        }
+
+                                        // send off repository data
+                                        if !read_repositories.is_empty() {
+                                            let data = GitlabData::ProjectContainerRepositories {
+                                                project_id: project.id.to_string(),
+                                                repositories: read_repositories,
+                                            };
+
+                                            send_to_broker(state, data, REPOSITORY_CONSUMER_TOPIC)?;
                                         }
                                     }
-                                    Err(e) => myself
-                                        .send_message(GitlabObserverMessage::Backoff(
-                                            BackoffReason::GitlabUnreachable(e.to_string()),
-                                        ))
-                                        .expect(MESSAGE_FORWARDING_FAILED),
+                                }
+                                Err(e) => {
+                                    error!("Failed to deserialize response from server: {e}")
                                 }
                             }
-                            Err(e) => error!("{e}"),
+                        }
+                        Err(e) => {
+                            warn!("Error observing data: {e}")
                         }
                     }
-                    _ => (),
                 }
+                Command::GetProjectPackages(full_path) => {
+                    let op = ProjectPackagesQuery::build(SingleProjectQueryArguments {
+                        full_path: full_path.clone(),
+                    });
+
+                    debug!("{}", op.query);
+
+                    match state
+                        .web_client
+                        .post(graphql_endpoint(&state.gitlab_endpoint))
+                        .bearer_auth(state.token.clone().unwrap_or_default())
+                        .json(&op)
+                        .send()
+                        .await
+                    {
+                        Ok(response) => {
+                            match response
+                                .json::<GraphQlResponse<ProjectPackagesQuery>>()
+                                .await
+                            {
+                                Ok(deserialized_response) => {
+                                    if let Some(errors) = deserialized_response.errors {
+                                        let errors = errors
+                                            .iter()
+                                            .map(|error| error.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
+
+                                        error!("Failed to query instance! {errors}");
+                                        myself.stop(Some(errors))
+                                    } else if let Some(data) = deserialized_response.data
+                                        && let Some(project) = data.project
+                                        && let Some(connection) = project.packages
+                                    {
+                                        match connection.nodes {
+                                            Some(packages) if !packages.is_empty() => {
+                                                let mut read_packages: Vec<Package> = Vec::new();
+
+                                                for package in packages {
+                                                    let pkg = package.unwrap();
+                                                    // get package file metadtadta
+                                                    GitlabRepositoryObserver::get_gitlab_package_files(state, &project.id.0, &pkg.id.0).await.unwrap();
+                                                    read_packages.push(pkg);
+                                                }
+
+                                                let data = GitlabData::ProjectPackages {
+                                                    project_id: project.id.to_string(),
+                                                    packages: read_packages,
+                                                };
+
+                                                send_to_broker(
+                                                    state,
+                                                    data,
+                                                    REPOSITORY_CONSUMER_TOPIC,
+                                                )?;
+                                            }
+                                            // An empty page, or none: nothing to send.
+                                            _ => (),
+                                        }
+                                    }
+                                }
+                                Err(e) => myself
+                                    .send_message(GitlabObserverMessage::Backoff(
+                                        BackoffReason::GitlabUnreachable(e.to_string()),
+                                    ))
+                                    .expect(MESSAGE_FORWARDING_FAILED),
+                            }
+                        }
+                        Err(e) => error!("{e}"),
+                    }
+                }
+                _ => (),
             }
-            _ => (), // this observer only acts when it is told to, it has no need to
         }
         Ok(())
     }

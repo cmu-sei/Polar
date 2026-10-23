@@ -426,16 +426,16 @@ impl Actor for ListenerManager {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             // Phase 1: stop accepting new connections, but keep existing listeners alive
-            BrokerMessage::InitiateShutdownPhase { phase }
-                if phase == ShutdownPhase::StopAcceptingNewConnections =>
-            {
+            BrokerMessage::InitiateShutdownPhase {
+                phase: ShutdownPhase::StopAcceptingNewConnections,
+            } => {
                 self.handle_initiate_shutdown_phase_stop_accepting(myself.clone(), state)
                     .await?;
             }
             // Final phase: terminate all listener actors and then stop
-            BrokerMessage::InitiateShutdownPhase { phase }
-                if phase == ShutdownPhase::TerminateListeners =>
-            {
+            BrokerMessage::InitiateShutdownPhase {
+                phase: ShutdownPhase::TerminateListeners,
+            } => {
                 self.handle_initiate_shutdown_phase_terminate_listeners(myself.clone(), state)
                     .await?;
             }
@@ -1156,7 +1156,6 @@ impl Listener {
                 } else {
                     let session_mgr = state.session_mgr.clone();
                     let myself_clone = myself.clone();
-                    let reg_id_clone = reg_id_clone; // move into closure
                     tokio::spawn(async move {
                         let result = session_mgr
                             .call(
@@ -1264,6 +1263,7 @@ impl Listener {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_request(
         &self,
         _myself: ActorRef<BrokerMessage>,
@@ -1376,6 +1376,7 @@ impl Listener {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_response(
         &self,
         _myself: ActorRef<BrokerMessage>,

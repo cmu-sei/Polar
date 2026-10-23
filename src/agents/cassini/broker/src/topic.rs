@@ -231,9 +231,9 @@ impl Actor for TopicManager {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            BrokerMessage::InitiateShutdownPhase { phase }
-                if phase == ShutdownPhase::FlushTopicQueues =>
-            {
+            BrokerMessage::InitiateShutdownPhase {
+                phase: ShutdownPhase::FlushTopicQueues,
+            } => {
                 self.handle_initiate_shutdown_phase(myself.clone(), state)
                     .await?;
             }
@@ -359,6 +359,7 @@ impl TopicManager {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_request(
         &self,
         myself: ActorRef<BrokerMessage>,
@@ -554,9 +555,11 @@ impl Actor for TopicAgent {
         _state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!("{myself:?} Started");
-        let _ = myself.send_interval(std::time::Duration::from_secs(QUEUE_TICK_SECS), || {
-            BrokerMessage::QueueExpiryTick
-        });
+        drop(
+            myself.send_interval(std::time::Duration::from_secs(QUEUE_TICK_SECS), || {
+                BrokerMessage::QueueExpiryTick
+            }),
+        );
         Ok(())
     }
 
@@ -699,6 +702,7 @@ impl TopicAgent {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_request(
         &self,
         myself: ActorRef<BrokerMessage>,

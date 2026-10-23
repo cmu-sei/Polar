@@ -103,8 +103,8 @@ impl Actor for GitlabRunnerObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            GitlabObserverMessage::Tick(command) => match command {
-                Command::GetRunners(op) => {
+            GitlabObserverMessage::Tick(command) => {
+                if let Command::GetRunners(op) = command {
                     debug!("Sending query: {:?}", op.query);
 
                     match state
@@ -133,26 +133,22 @@ impl Actor for GitlabRunnerObserver {
                                             error!("{e}");
                                             myself.stop(Some(e.to_string()))
                                         }
-                                    } else if let Some(query) = deserialized.data {
-                                        if let Some(connection) = query.runners {
-                                            let mut read_runners = Vec::new();
+                                    } else if let Some(query) = deserialized.data
+                                        && let Some(connection) = query.runners
+                                    {
+                                        let mut read_runners = Vec::new();
 
-                                            if let Some(runners) = connection.nodes {
-                                                for option in runners {
-                                                    if let Some(runner) = option {
-                                                        read_runners.push(runner);
-                                                    }
-                                                }
-                                            }
-
-                                            if let Err(e) = send_to_broker(
-                                                state,
-                                                GitlabData::Runners(read_runners),
-                                                RUNNERS_CONSUMER_TOPIC,
-                                            ) {
-                                                return Err(e);
+                                        if let Some(runners) = connection.nodes {
+                                            for runner in runners.into_iter().flatten() {
+                                                read_runners.push(runner);
                                             }
                                         }
+
+                                        send_to_broker(
+                                            state,
+                                            GitlabData::Runners(read_runners),
+                                            RUNNERS_CONSUMER_TOPIC,
+                                        )?;
                                     }
                                 }
                                 Err(e) => {
@@ -179,8 +175,7 @@ impl Actor for GitlabRunnerObserver {
                         }
                     }
                 }
-                _ => (),
-            },
+            }
             GitlabObserverMessage::Backoff(reason) => {
                 // cancel old event loop and start a new one with updated state, if observer hasn't stopped
                 if let Some(handle) = &state.task_handle {

@@ -357,25 +357,25 @@ pub struct KustomizationKubeConfig {
     /// the following keys:
     ///
     /// - `provider`: the provider to use. One of `aws`, `azure`, `gcp`, or
-    ///    `generic`. Required.
+    ///   `generic`. Required.
     /// - `cluster`: the fully qualified resource name of the Kubernetes
-    ///    cluster in the cloud provider API. Not used by the `generic`
-    ///    provider. Required when one of `address` or `ca.crt` is not set.
+    ///   cluster in the cloud provider API. Not used by the `generic`
+    ///   provider. Required when one of `address` or `ca.crt` is not set.
     /// - `address`: the address of the Kubernetes API server. Required
-    ///    for `generic`. For the other providers, if not specified, the
-    ///    first address in the cluster resource will be used, and if
-    ///    specified, it must match one of the addresses in the cluster
-    ///    resource.
-    ///    If audiences is not set, will be used as the audience for the
-    ///    `generic` provider.
+    ///   for `generic`. For the other providers, if not specified, the
+    ///   first address in the cluster resource will be used, and if
+    ///   specified, it must match one of the addresses in the cluster
+    ///   resource.
+    ///   If audiences is not set, will be used as the audience for the
+    ///   `generic` provider.
     /// - `ca.crt`: the optional PEM-encoded CA certificate for the
-    ///    Kubernetes API server. If not set, the controller will use the
-    ///    CA certificate from the cluster resource.
+    ///   Kubernetes API server. If not set, the controller will use the
+    ///   CA certificate from the cluster resource.
     /// - `audiences`: the optional audiences as a list of
-    ///    line-break-separated strings for the Kubernetes ServiceAccount
-    ///    token. Defaults to the `address` for the `generic` provider, or
-    ///    to specific values for the other providers depending on the
-    ///    provider.
+    ///   line-break-separated strings for the Kubernetes ServiceAccount
+    ///   token. Defaults to the `address` for the `generic` provider, or
+    ///   to specific values for the other providers depending on the
+    ///   provider.
     /// -  `serviceAccountName`: the optional name of the Kubernetes
     ///    ServiceAccount in the same namespace that should be used
     ///    for authentication. If not specified, the controller
@@ -404,25 +404,25 @@ pub struct KustomizationKubeConfig {
 /// the following keys:
 ///
 /// - `provider`: the provider to use. One of `aws`, `azure`, `gcp`, or
-///    `generic`. Required.
+///   `generic`. Required.
 /// - `cluster`: the fully qualified resource name of the Kubernetes
-///    cluster in the cloud provider API. Not used by the `generic`
-///    provider. Required when one of `address` or `ca.crt` is not set.
+///   cluster in the cloud provider API. Not used by the `generic`
+///   provider. Required when one of `address` or `ca.crt` is not set.
 /// - `address`: the address of the Kubernetes API server. Required
-///    for `generic`. For the other providers, if not specified, the
-///    first address in the cluster resource will be used, and if
-///    specified, it must match one of the addresses in the cluster
-///    resource.
-///    If audiences is not set, will be used as the audience for the
-///    `generic` provider.
+///   for `generic`. For the other providers, if not specified, the
+///   first address in the cluster resource will be used, and if
+///   specified, it must match one of the addresses in the cluster
+///   resource.
+///   If audiences is not set, will be used as the audience for the
+///   `generic` provider.
 /// - `ca.crt`: the optional PEM-encoded CA certificate for the
-///    Kubernetes API server. If not set, the controller will use the
-///    CA certificate from the cluster resource.
+///   Kubernetes API server. If not set, the controller will use the
+///   CA certificate from the cluster resource.
 /// - `audiences`: the optional audiences as a list of
-///    line-break-separated strings for the Kubernetes ServiceAccount
-///    token. Defaults to the `address` for the `generic` provider, or
-///    to specific values for the other providers depending on the
-///    provider.
+///   line-break-separated strings for the Kubernetes ServiceAccount
+///   token. Defaults to the `address` for the `generic` provider, or
+///   to specific values for the other providers depending on the
+///   provider.
 /// -  `serviceAccountName`: the optional name of the Kubernetes
 ///    ServiceAccount in the same namespace that should be used
 ///    for authentication. If not specified, the controller

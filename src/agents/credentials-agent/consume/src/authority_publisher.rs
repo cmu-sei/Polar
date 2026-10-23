@@ -368,11 +368,14 @@ mod tests {
 
     const OWN: &str = "credentials-agent.polar.serviceaccount.cluster.local";
 
+    /// Each message the publisher publishes: its topic and payload.
+    type Published = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
     struct Rig {
         publisher: ActorRef<PublisherMessage>,
         ledger: ActorRef<LedgerMessage>,
         local: AuthorityHandle,
-        published: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        published: Published,
         acceptances: crate::authority_judge::Acceptances,
         path: String,
         _dir: tempfile::TempDir,

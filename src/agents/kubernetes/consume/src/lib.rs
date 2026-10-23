@@ -53,12 +53,12 @@
 //!
 //! Two property names, two meanings:
 //!   - `valid_from`   — when the fact became true according to the *source*
-//!                      (kubelet, controller condition). Falls back to
-//!                      observation time only when the source doesn't attest
-//!                      one, and that fallback is always commented at the
-//!                      call site.
+//!     (kubelet, controller condition). Falls back to
+//!     observation time only when the source doesn't attest
+//!     one, and that fallback is always commented at the
+//!     call site.
 //!   - `observed_at`  — when this consumer ingested the fact. The delta from
-//!                      `valid_from` is observer lag, a diagnostic.
+//!     `valid_from` is observer lag, a diagnostic.
 //!
 //! NOTE: `GraphController::UpdateState` previously injected `valid_from`
 //! into state instances from the state key. This consumer now writes
@@ -439,10 +439,10 @@ fn container_status_index(pod: &Pod) -> HashMap<String, ContainerStatus> {
 /// the point:
 ///
 ///   - Running:    `state.running.started_at` — kubelet-attested. This is
-///                 the timestamp lead-time queries anchor t_final on.
+///     the timestamp lead-time queries anchor t_final on.
 ///   - Terminated: `state.terminated.finished_at` — kubelet-attested.
 ///   - Waiting:    no attested transition time exists; observation time is
-///                 the honest fallback and the phase makes that legible.
+///     the honest fallback and the phase makes that legible.
 fn container_lifecycle_state(cs: &ContainerStatus) -> (&'static str, i64, Vec<Property>) {
     if let Some(waiting) = cs.state.as_ref().and_then(|s| s.waiting.as_ref()) {
         (

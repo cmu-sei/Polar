@@ -68,105 +68,89 @@ impl Actor for GitlabPipelineObserver {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match message {
-            GitlabObserverMessage::Tick(command) => {
-                match command {
-                    Command::GetProjectPipelines(full_path) => {
-                        debug!("Getting pipelines for project: {full_path:?}");
+        if let GitlabObserverMessage::Tick(command) = message {
+            match command {
+                Command::GetProjectPipelines(full_path) => {
+                    debug!("Getting pipelines for project: {full_path:?}");
 
-                        let op = ProjectPipelineQuery::build(SingleProjectQueryArguments {
-                            full_path: full_path.clone(),
-                        });
+                    let op = ProjectPipelineQuery::build(SingleProjectQueryArguments {
+                        full_path: full_path.clone(),
+                    });
 
-                        debug!("Sending query: {}", op.query);
+                    debug!("Sending query: {}", op.query);
 
-                        match state
-                            .web_client
-                            .post(graphql_endpoint(&state.gitlab_endpoint))
-                            .bearer_auth(state.token.clone().unwrap_or_default())
-                            .json(&op)
-                            .send()
-                            .await
-                        {
-                            Ok(response) => {
-                                match response
-                                    .json::<GraphQlResponse<ProjectPipelineQuery>>()
-                                    .await
-                                {
-                                    Ok(deserialized) => {
-                                        if let Some(errors) = deserialized.errors {
-                                            let errors = errors
-                                                .iter()
-                                                .map(|error| error.to_string())
-                                                .collect::<Vec<_>>()
-                                                .join("\n");
+                    match state
+                        .web_client
+                        .post(graphql_endpoint(&state.gitlab_endpoint))
+                        .bearer_auth(state.token.clone().unwrap_or_default())
+                        .json(&op)
+                        .send()
+                        .await
+                    {
+                        Ok(response) => {
+                            match response
+                                .json::<GraphQlResponse<ProjectPipelineQuery>>()
+                                .await
+                            {
+                                Ok(deserialized) => {
+                                    if let Some(errors) = deserialized.errors {
+                                        let errors = errors
+                                            .iter()
+                                            .map(|error| error.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
 
-                                            error!("Failed to query instance! {errors}");
-                                            myself.stop(Some(errors))
-                                        } else if let Some(resp) = deserialized.data {
-                                            let mut read_pipelines = Vec::new();
+                                        error!("Failed to query instance! {errors}");
+                                        myself.stop(Some(errors))
+                                    } else if let Some(resp) = deserialized.data {
+                                        let mut read_pipelines = Vec::new();
 
-                                            if let Some(project) = resp.project {
-                                                match project.pipelines {
-                                                    Some(connection) => {
-                                                        if let Some(pipelines) = connection.nodes {
-                                                            if !pipelines.is_empty() {
-                                                                // Append nodes to the result list.
-                                                                read_pipelines.extend(
-                                                                    pipelines.into_iter().map(
-                                                                        |option| {
-                                                                            let pipeline =
-                                                                                option.unwrap();
-                                                                            pipeline
-                                                                        },
-                                                                    ),
-                                                                );
+                                        if let Some(project) = resp.project
+                                            && let Some(connection) = project.pipelines
+                                            && let Some(pipelines) = connection.nodes
+                                            && !pipelines.is_empty()
+                                        {
+                                            // Append nodes to the result list.
+                                            read_pipelines.extend(
+                                                pipelines.into_iter().map(|option| option.unwrap()),
+                                            );
 
-                                                                debug!(
-                                                                    "Found {0} pipeline run(s) for project {1}",
-                                                                    read_pipelines.len(),
-                                                                    full_path
-                                                                );
+                                            debug!(
+                                                "Found {0} pipeline run(s) for project {1}",
+                                                read_pipelines.len(),
+                                                full_path
+                                            );
 
-                                                                let data = GitlabData::Pipelines {
-                                                                    project_id: project
-                                                                        .id
-                                                                        .to_string(),
-                                                                    pipelines: read_pipelines,
-                                                                };
+                                            let data = GitlabData::Pipelines {
+                                                project_id: project.id.to_string(),
+                                                pipelines: read_pipelines,
+                                            };
 
-                                                                return send_to_broker(
-                                                                    state,
-                                                                    data,
-                                                                    PIPELINE_CONSUMER_TOPIC,
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                    None => (),
-                                                }
-                                            }
+                                            return send_to_broker(
+                                                state,
+                                                data,
+                                                PIPELINE_CONSUMER_TOPIC,
+                                            );
                                         }
                                     }
-                                    Err(e) => {
-                                        warn!("Failed to deserialize response: {e}")
-                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Failed to deserialize response: {e}")
                                 }
                             }
-                            Err(e) => {
-                                warn!("Failed to fetch pipelines: {e}");
-                                myself
-                                    .send_message(GitlabObserverMessage::Backoff(
-                                        BackoffReason::GitlabUnreachable(e.to_string()),
-                                    ))
-                                    .expect(MESSAGE_FORWARDING_FAILED);
-                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to fetch pipelines: {e}");
+                            myself
+                                .send_message(GitlabObserverMessage::Backoff(
+                                    BackoffReason::GitlabUnreachable(e.to_string()),
+                                ))
+                                .expect(MESSAGE_FORWARDING_FAILED);
                         }
                     }
-                    _ => todo!(),
                 }
+                _ => todo!(),
             }
-            _ => (),
         }
         Ok(())
     }
@@ -205,125 +189,109 @@ impl Actor for GitlabJobObserver {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        match message {
-            GitlabObserverMessage::Tick(command) => {
-                match command {
-                    // So, this hanlder get's a little messy very quickly.
-                    // GitLab's GraphQL API enforces a complexity limit, so querying deeply nested structures (like project → pipelines → jobs → artifacts) often requires splitting into smaller queries.
-                    // This is simple, but keeping the code clean becomes cumbersome since cynic requires very explicit queries be made.
-                    // As a result, I've split the logic such that:
-                    // Our pipeline observer queries a project and returns its pipelines.
-                    // Our job observer performs a narrower query: given a project, only fetch pipelines with their jobs, not full pipeline objects.
-                    Command::GetPipelineJobs(full_path) => {
-                        debug!("Getting pipelines for project: {full_path:?}");
+        if let GitlabObserverMessage::Tick(command) = message {
+            match command {
+                // So, this hanlder get's a little messy very quickly.
+                // GitLab's GraphQL API enforces a complexity limit, so querying deeply nested structures (like project → pipelines → jobs → artifacts) often requires splitting into smaller queries.
+                // This is simple, but keeping the code clean becomes cumbersome since cynic requires very explicit queries be made.
+                // As a result, I've split the logic such that:
+                // Our pipeline observer queries a project and returns its pipelines.
+                // Our job observer performs a narrower query: given a project, only fetch pipelines with their jobs, not full pipeline objects.
+                Command::GetPipelineJobs(full_path) => {
+                    debug!("Getting pipelines for project: {full_path:?}");
 
-                        // Gitlab's Jobs API will only return empty results for non admin users, since it'ls unlikey people will give admin level tokens
-                        // we can instead rely on a project-level query and use a modified version of our pipelines query
-                        let op = ProjectPipelineJobsQuery::build(SingleProjectQueryArguments {
-                            full_path: full_path.clone(),
-                        });
+                    // Gitlab's Jobs API will only return empty results for non admin users, since it'ls unlikey people will give admin level tokens
+                    // we can instead rely on a project-level query and use a modified version of our pipelines query
+                    let op = ProjectPipelineJobsQuery::build(SingleProjectQueryArguments {
+                        full_path: full_path.clone(),
+                    });
 
-                        debug!("Sending query: {}", op.query);
+                    debug!("Sending query: {}", op.query);
 
-                        match state
-                            .web_client
-                            .post(graphql_endpoint(&state.gitlab_endpoint))
-                            .bearer_auth(state.token.clone().unwrap_or_default())
-                            .json(&op)
-                            .send()
-                            .await
-                        {
-                            Ok(response) => {
-                                match response
-                                    .json::<GraphQlResponse<ProjectPipelineJobsQuery>>()
-                                    .await
-                                {
-                                    // Handle successful data response
-                                    Ok(deserialized) => {
-                                        if let Some(errors) = deserialized.errors {
-                                            let errors = errors
-                                                .iter()
-                                                .map(|error| error.to_string())
-                                                .collect::<Vec<_>>()
-                                                .join("\n");
+                    match state
+                        .web_client
+                        .post(graphql_endpoint(&state.gitlab_endpoint))
+                        .bearer_auth(state.token.clone().unwrap_or_default())
+                        .json(&op)
+                        .send()
+                        .await
+                    {
+                        Ok(response) => {
+                            match response
+                                .json::<GraphQlResponse<ProjectPipelineJobsQuery>>()
+                                .await
+                            {
+                                // Handle successful data response
+                                Ok(deserialized) => {
+                                    if let Some(errors) = deserialized.errors {
+                                        let errors = errors
+                                            .iter()
+                                            .map(|error| error.to_string())
+                                            .collect::<Vec<_>>()
+                                            .join("\n");
 
-                                            error!("Failed to query instance! {errors}");
-                                        }
-                                        // sift through and dig down to find the jobs list.
-                                        else if let Some(resp) = deserialized.data {
-                                            if let Some(project) = resp.project {
-                                                match project.pipelines {
-                                                    Some(connection) => {
-                                                        if let Some(pipelines) = connection.nodes {
-                                                            if !pipelines.is_empty() {
-                                                                for p in pipelines {
-                                                                    match p {
-                                                                        Some(pipeline) => {
-                                                                            if let Some(conn) =
-                                                                                pipeline.jobs
-                                                                            {
-                                                                                // If pipeline has jobs, extract them
-                                                                                if let Some(jobs) =
-                                                                                    conn.nodes
-                                                                                {
-                                                                                    let mut read_jobs: Vec<GitlabCiJob> = Vec::new();
+                                        error!("Failed to query instance! {errors}");
+                                    }
+                                    // sift through and dig down to find the jobs list.
+                                    else if let Some(resp) = deserialized.data
+                                        && let Some(project) = resp.project
+                                        && let Some(connection) = project.pipelines
+                                        && let Some(pipelines) = connection.nodes
+                                        && !pipelines.is_empty()
+                                    {
+                                        for p in pipelines {
+                                            if let Some(pipeline) = p
+                                                && let Some(conn) = pipeline.jobs
+                                            {
+                                                // If pipeline has jobs, extract them
+                                                if let Some(jobs) = conn.nodes {
+                                                    let mut read_jobs: Vec<GitlabCiJob> =
+                                                        Vec::new();
 
-                                                                                    // the meat of everything happens here
-                                                                                    // wrap up job and add it to the vec
+                                                    // the meat of everything happens here
+                                                    // wrap up job and add it to the vec
 
-                                                                                    let j = jobs
-                                                                                        .into_iter()
-                                                                                        .flatten()
-                                                                                        .into_iter(
-                                                                                        );
+                                                    let j = jobs.into_iter().flatten();
 
-                                                                                    read_jobs
-                                                                                        .extend(j);
+                                                    read_jobs.extend(j);
 
-                                                                                    let data = GitlabData::Jobs {
-                                                                                        pipeline_id: pipeline.id.to_string(),
-                                                                                        jobs: read_jobs
-                                                                                    };
+                                                    let data = GitlabData::Jobs {
+                                                        pipeline_id: pipeline.id.to_string(),
+                                                        jobs: read_jobs,
+                                                    };
 
-                                                                                    if let Err(e) = send_to_broker(state, data, PIPELINE_CONSUMER_TOPIC) { return Err(e) }
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                        None => (),
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    None => (),
+                                                    send_to_broker(
+                                                        state,
+                                                        data,
+                                                        PIPELINE_CONSUMER_TOPIC,
+                                                    )?;
                                                 }
                                             }
                                         }
                                     }
-                                    Err(e) => {
-                                        warn!("Failed to deserialize response: {e}")
-                                    }
                                 }
-                            }
-                            Err(e) => {
-                                error!("{e}");
-                                match where_is(GITLAB_PROJECT_OBSERVER.to_string()) {
-                                    Some(observer) => {
-                                        observer
-                                            .send_message(GitlabObserverMessage::Backoff(
-                                                BackoffReason::GitlabUnreachable(e.to_string()),
-                                            ))
-                                            .unwrap();
-                                    }
-                                    None => myself.stop(None),
+                                Err(e) => {
+                                    warn!("Failed to deserialize response: {e}")
                                 }
                             }
                         }
+                        Err(e) => {
+                            error!("{e}");
+                            match where_is(GITLAB_PROJECT_OBSERVER.to_string()) {
+                                Some(observer) => {
+                                    observer
+                                        .send_message(GitlabObserverMessage::Backoff(
+                                            BackoffReason::GitlabUnreachable(e.to_string()),
+                                        ))
+                                        .unwrap();
+                                }
+                                None => myself.stop(None),
+                            }
+                        }
                     }
-                    _ => todo!(),
                 }
+                _ => todo!(),
             }
-            _ => (),
         }
         Ok(())
     }

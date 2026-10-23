@@ -603,10 +603,9 @@ impl GitRepoWorker {
             let _ = revwalk.hide(stop);
         }
 
-        let mut depth = 0;
         let mut newest_seen: Option<Oid> = None;
 
-        for oid in revwalk {
+        for (depth, oid) in revwalk.enumerate() {
             if depth >= max_depth {
                 break;
             }
@@ -616,7 +615,6 @@ impl GitRepoWorker {
             if newest_seen.is_none() {
                 newest_seen = Some(oid);
             }
-            depth += 1;
         }
 
         Ok(newest_seen)

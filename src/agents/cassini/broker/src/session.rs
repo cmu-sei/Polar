@@ -158,9 +158,9 @@ impl Actor for SessionManager {
                 self.handle_prepare_for_shutdown(myself.clone(), state)
                     .await?;
             }
-            BrokerMessage::InitiateShutdownPhase { phase }
-                if phase == ShutdownPhase::DrainExistingSessions =>
-            {
+            BrokerMessage::InitiateShutdownPhase {
+                phase: ShutdownPhase::DrainExistingSessions,
+            } => {
                 self.handle_initiate_drain_phase(myself.clone(), state)
                     .await?;
             }
@@ -211,18 +211,21 @@ impl Actor for SessionManager {
                 reason,
                 trace_ctx,
             } => {
-                if let Some(registration_id) = registration_id {
-                    match reason {
-                        // The client is not coming back for this session.
-                        DisconnectReason::Goodbye => {
-                            Self::end_session(state, &registration_id, client_id, reason, trace_ctx)
-                        }
-                        // The connection went away with no word: keep the session for the
-                        // retention window, in case the client returns.
-                        DisconnectReason::RemoteClosed | DisconnectReason::TransportError(_) => {
-                            Self::detach_session(state, &registration_id);
-                        }
+                match (registration_id, &reason) {
+                    // The client is not coming back for this session.
+                    (Some(registration_id), DisconnectReason::Goodbye) => {
+                        Self::end_session(state, &registration_id, client_id, reason, trace_ctx)
                     }
+                    // The connection went away with no word: keep the session for the
+                    // retention window, in case the client returns.
+                    (
+                        Some(registration_id),
+                        DisconnectReason::RemoteClosed | DisconnectReason::TransportError(_),
+                    ) => {
+                        Self::detach_session(state, &registration_id);
+                    }
+                    // Never registered: there is no session to end or keep.
+                    (None, _) => {}
                 }
             }
             // A write to the client failed: its connection is gone.
@@ -1075,6 +1078,7 @@ impl SessionAgent {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_request(
         &self,
         myself: ActorRef<BrokerMessage>,
