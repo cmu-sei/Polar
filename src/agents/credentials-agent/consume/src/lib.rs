@@ -55,6 +55,7 @@ pub mod ledger;
 pub mod ledger_call;
 pub mod projection;
 pub mod record_asker;
+pub mod request_gate;
 pub mod retrieve_secret;
 pub mod retrieve_secret_actor;
 pub mod sessions;

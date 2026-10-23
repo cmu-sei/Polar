@@ -25,6 +25,7 @@
 //! "Acceptance as a comparison").
 
 use crate::facts::{Model, Pair, Person};
+use crate::requests::{Action, admitted, facts_of, is_request};
 use crate::rules::{Node, Program};
 use credentials_agent_common::authority_update::{
     AUTHORITY_SNAPSHOT_REQUESTS_TOPIC, AUTHORITY_UPDATES_TOPIC,
@@ -36,8 +37,9 @@ use polar_policy::{Evaluator, Facts, Requester, TopicFacts};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-/// `(identity, topic, access)` a pair allows: Cedar first, then the floor.
-pub type Allowed = BTreeSet<(String, String, Access)>;
+/// `(identity, topic, action)` a pair allows: Cedar first, then the floor. A request is on one of the credentials agent's
+/// request topics, beside the publish it rides on.
+pub type Allowed = BTreeSet<(String, String, Action)>;
 
 /// The two invariants the authority's code names ("Decisions": two invariants refuse; renewal is derived as their
 /// dependency).
@@ -158,7 +160,7 @@ pub enum Broken {
     Forbidden {
         identity: String,
         topic: String,
-        access: Access,
+        action: Action,
     },
     /// `workload` would no longer be renewed, so within one certificate lifetime it would carry nothing.
     NotRenewed {
@@ -175,11 +177,11 @@ impl fmt::Display for Broken {
             Broken::Forbidden {
                 identity,
                 topic,
-                access,
+                action,
             } => write!(
                 f,
                 "{identity} may no longer {} on `{topic}`",
-                access.as_str()
+                action.as_str()
             ),
             Broken::NotRenewed { workload, because } => write!(
                 f,
@@ -222,15 +224,15 @@ impl fmt::Display for Loss {
 
 impl Loss {
     /// The request whose denial breaks the goal, under any renewal it breaks.
-    pub fn denied(&self) -> Option<(&str, &str, Access)> {
+    pub fn denied(&self) -> Option<(&str, &str, Action)> {
         let mut broken = &self.broken;
         loop {
             match broken {
                 Broken::Forbidden {
                     identity,
                     topic,
-                    access,
-                } => return Some((identity, topic, *access)),
+                    action,
+                } => return Some((identity, topic, *action)),
                 Broken::NotRenewed { because, .. } => broken = because,
                 Broken::Unexplained => return None,
             }
@@ -253,8 +255,8 @@ impl Loss {
 /// What a change does, whether or not it is refused.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Effect {
-    pub gained: Vec<(String, String, Access)>,
-    pub lost: Vec<(String, String, Access)>,
+    pub gained: Vec<(String, String, Action)>,
+    pub lost: Vec<(String, String, Action)>,
     pub began_closing: Vec<(String, CauseEntry, String)>,
     pub stopped_closing: Vec<(String, CauseEntry, String)>,
 }
@@ -277,9 +279,11 @@ impl Judgement {
 
 const ACCESSES: [Access; 2] = [Access::Publish, Access::Subscribe];
 
-/// What `pair` allows every workload and every person to do on every topic the model knows: the policy first, then
-/// the floor (a workload's own set), by the rule the topic gate and the broker apply (`topic_gate::rule`), so the
-/// judgement and the enforcement cannot disagree. A policy that would not load is an error.
+/// What `pair` allows every workload and every person to do on every topic the model knows, and to request on every one
+/// of the credentials agent's request topics: the policy first, then the floor (a workload's own set; for a request, the
+/// topic's publishers), by the rules the broker, the topic gate (`topic_gate::rule`) and the credentials agent's request
+/// gate (`requests::admitted`) apply, so the judgement and the enforcement cannot disagree. A policy that would not load
+/// is an error.
 pub fn allowed_under(model: &Model, pair: &Pair, persons: &[Person]) -> Result<Allowed, String> {
     let evaluator = match &pair.policy {
         Some(source) => Some(Evaluator::new(source, &pair.hierarchy).map_err(|e| e.to_string())?),
@@ -300,47 +304,49 @@ pub fn allowed_under(model: &Model, pair: &Pair, persons: &[Person]) -> Result<A
             .get(identity)
             .cloned()
             .unwrap_or_else(|| groups.to_vec());
+        let said = |action: Action, topic: &str, facts: TopicFacts| match &evaluator {
+            None => PolicySaid::NoPolicyLoaded,
+            Some(evaluator) => match (
+                entity("Action", action.as_str()),
+                entity(action.resource_type(), topic),
+            ) {
+                (Some(cedar_action), Some(resource)) => match evaluator.decide(
+                    &Requester {
+                        identity,
+                        groups: &groups,
+                        capabilities,
+                        permissions: &[],
+                    },
+                    &cedar_action,
+                    &resource,
+                    &Facts {
+                        topic: Some(facts),
+                        ..Facts::default()
+                    },
+                    now_secs,
+                ) {
+                    Ok(decision) => PolicySaid::Decided(decision),
+                    Err(e) => PolicySaid::Unavailable(e.to_string()),
+                },
+                _ => PolicySaid::Unavailable(format!(
+                    "`{topic}` is not a name policy can be asked about"
+                )),
+            },
+        };
         for topic in &topics {
             for access in ACCESSES {
                 let origin = set.get(&(topic.clone(), access));
-                let facts = TopicFacts {
-                    declared: matches!(
-                        origin,
-                        Some(Origin::Declared { .. } | Origin::Family { .. })
-                    ),
-                    implied: matches!(origin, Some(Origin::Implied { .. })),
-                };
-                let said = match &evaluator {
-                    None => PolicySaid::NoPolicyLoaded,
-                    Some(evaluator) => {
-                        match (entity("Action", access.as_str()), entity("Topic", topic)) {
-                            (Some(action), Some(resource)) => match evaluator.decide(
-                                &Requester {
-                                    identity,
-                                    groups: &groups,
-                                    capabilities,
-                                    permissions: &[],
-                                },
-                                &action,
-                                &resource,
-                                &Facts {
-                                    topic: Some(facts),
-                                    ..Facts::default()
-                                },
-                                now_secs,
-                            ) {
-                                Ok(decision) => PolicySaid::Decided(decision),
-                                Err(e) => PolicySaid::Unavailable(e.to_string()),
-                            },
-                            _ => PolicySaid::Unavailable(format!(
-                                "`{topic}` is not a name policy can be asked about"
-                            )),
-                        }
-                    }
-                };
+                let said = said(access.into(), topic, facts_of(origin));
                 if rule(&said, origin.is_some(), topic, access).is_ok() {
-                    allowed.insert((identity.to_string(), topic.clone(), access));
+                    allowed.insert((identity.to_string(), topic.clone(), access.into()));
                 }
+            }
+        }
+        for topic in credentials_agent_common::REQUEST_TOPICS {
+            let origin = set.get(&(topic.to_string(), Access::Publish));
+            let said = said(Action::Request, topic, facts_of(origin));
+            if admitted(&said, origin.is_some(), topic).is_ok() {
+                allowed.insert((identity.to_string(), topic.to_string(), Action::Request));
             }
         }
     };
@@ -678,18 +684,19 @@ fn forbidden_step(
         .map(|step| match (&step[0], &step[1]) {
             (Node::Out(a, t), Node::In(b, _)) => {
                 let publisher = identity(a);
-                if !proposed_allowed.contains(&(publisher.clone(), t.clone(), Access::Publish)) {
-                    Broken::Forbidden {
-                        identity: publisher,
-                        topic: t.clone(),
-                        access: Access::Publish,
-                    }
+                let forbidden = |identity: String, action| Broken::Forbidden {
+                    identity,
+                    topic: t.clone(),
+                    action,
+                };
+                if !proposed_allowed.contains(&(publisher.clone(), t.clone(), Action::Publish)) {
+                    forbidden(publisher, Action::Publish)
+                } else if is_request(t)
+                    && !proposed_allowed.contains(&(publisher.clone(), t.clone(), Action::Request))
+                {
+                    forbidden(publisher, Action::Request)
                 } else {
-                    Broken::Forbidden {
-                        identity: identity(b),
-                        topic: t.clone(),
-                        access: Access::Subscribe,
-                    }
+                    forbidden(identity(b), Action::Subscribe)
                 }
             }
             _ => Broken::Unexplained,
@@ -812,10 +819,10 @@ pub fn judge(
     if let Some(source) = &proposed.policy {
         let evaluator = Evaluator::new(source, &proposed.hierarchy).map_err(|e| e.to_string())?;
         for loss in &mut judgement.losses {
-            if let Some((identity, topic, access)) = loss.denied() {
+            if let Some((identity, topic, action)) = loss.denied() {
                 let (identity, topic) = (identity.to_string(), topic.to_string());
                 loss.rules = deciding_rules(
-                    model, proposed, persons, &evaluator, &identity, &topic, access,
+                    model, proposed, persons, &evaluator, &identity, &topic, action,
                 );
             }
         }
@@ -823,7 +830,7 @@ pub fn judge(
     Ok(judgement)
 }
 
-/// The rules of `evaluator` that deny `identity` using `topic` this way, under `pair`'s groups.
+/// The rules of `evaluator` that deny `identity` using `topic` this way (or requesting on it), under `pair`'s groups.
 fn deciding_rules(
     model: &Model,
     pair: &Pair,
@@ -831,8 +838,13 @@ fn deciding_rules(
     evaluator: &Evaluator,
     identity: &str,
     topic: &str,
-    access: Access,
+    action: Action,
 ) -> Vec<String> {
+    // A request's context is how the requester publishes the request's topic.
+    let in_set = match action {
+        Action::Subscribe => Action::Subscribe,
+        Action::Publish | Action::Request => Action::Publish,
+    };
     let (own_groups, capabilities, origin) =
         match model.workloads.iter().find(|w| w.identity == identity) {
             Some(w) => (
@@ -840,7 +852,7 @@ fn deciding_rules(
                 Vec::new(),
                 w.topics
                     .iter()
-                    .find(|t| t.name == topic && t.access == access)
+                    .find(|t| t.name == topic && Action::from(t.access) == in_set)
                     .map(|t| t.origin.clone()),
             ),
             None => match persons.iter().find(|p| p.identity == identity) {
@@ -853,16 +865,11 @@ fn deciding_rules(
         .get(identity)
         .cloned()
         .unwrap_or(own_groups);
-    let facts = TopicFacts {
-        declared: matches!(
-            origin,
-            Some(Origin::Declared { .. } | Origin::Family { .. })
-        ),
-        implied: matches!(origin, Some(Origin::Implied { .. })),
-    };
-    let (Some(action), Some(resource)) =
-        (entity("Action", access.as_str()), entity("Topic", topic))
-    else {
+    let facts = facts_of(origin.as_ref());
+    let (Some(cedar_action), Some(resource)) = (
+        entity("Action", action.as_str()),
+        entity(action.resource_type(), topic),
+    ) else {
         return Vec::new();
     };
     let now_secs = std::time::SystemTime::now()
@@ -876,7 +883,7 @@ fn deciding_rules(
             capabilities: &capabilities,
             permissions: &[],
         },
-        &action,
+        &cedar_action,
         &resource,
         &Facts {
             topic: Some(facts),

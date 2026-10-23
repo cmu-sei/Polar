@@ -771,6 +771,18 @@ impl CredentialsState {
         self.bootstrap_completed
     }
 
+    /// The certificate `identity` connects with, whose groups policy reads: its workload's current client certificate,
+    /// or else its account's, while that is not revoked. None for anyone else.
+    pub fn requester_certificate(&self, identity: &str) -> Option<&str> {
+        self.certificate_for(identity)
+            .map(|record| record.certificate_pem.as_str())
+            .or_else(|| {
+                self.account_certificate_for(identity)
+                    .filter(|record| !record.revoked)
+                    .map(|record| record.certificate_pem.as_str())
+            })
+    }
+
     /// The current account certificate record for `account_id`, if
     /// one has ever been issued.
     pub fn account_certificate_for(&self, account_id: &str) -> Option<&AccountCertificateRecord> {
@@ -1471,6 +1483,39 @@ pub(crate) mod tests {
         let record = state.account_certificate_by_serial("s1").unwrap();
         assert!(record.revoked);
         assert_eq!(record.revoked_by.as_deref(), Some("admin"));
+    }
+
+    /// The certificate a requester connects with, whose groups policy reads at the request gate
+    /// (docs/architecture/authority-model.md, slice 9): a workload's client certificate, or else an account's, while
+    /// it is not revoked.
+    #[test]
+    fn a_requester_s_certificate_is_its_workload_client_certificate_or_its_account_s_while_not_revoked()
+     {
+        let mut state = CredentialsState::new();
+        state.apply(&account_issued("dana", "acct-1", "s1"));
+        assert_eq!(
+            state.requester_certificate("acct-1"),
+            Some("-----BEGIN CERTIFICATE-----\nfake-account\n-----END CERTIFICATE-----\n")
+        );
+        state.apply(&revoked("s1"));
+        assert_eq!(state.requester_certificate("acct-1"), None);
+
+        let issued =
+            |identity: &str, serial: &str, cert_type| CredentialsEvent::IssuanceCompleted {
+                identity: identity.to_string(),
+                instance_binding: "pod-1".to_string(),
+                serial: serial.to_string(),
+                timestamp: 3000,
+                grant_key: None,
+                certificate_pem: format!("pem {serial}"),
+                cert_type,
+            };
+        state.apply(&issued("w", "w1", WorkloadCertType::Client));
+        assert_eq!(state.requester_certificate("w"), Some("pem w1"));
+        // A server certificate is the listener's, and says nothing of what the requester may do.
+        state.apply(&issued("srv", "srv1", WorkloadCertType::Server));
+        assert_eq!(state.requester_certificate("srv"), None);
+        assert_eq!(state.requester_certificate("nobody"), None);
     }
 
     #[test]

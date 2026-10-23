@@ -24,7 +24,9 @@
 //! The authority model's invariants, over the sandbox's real model and generated sets of allowed requests
 //! (docs/architecture/authority-model.md, slice 5).
 
-use credentials_agent_model::{Allowed, Broken, Model, Pair, allowed_under, compare, evaluate};
+use credentials_agent_model::{
+    Action, Allowed, Broken, Model, Pair, allowed_under, compare, evaluate,
+};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -35,7 +37,7 @@ fn model() -> Model {
 }
 
 /// Everything the floor allows when no policy speaks, in a fixed order, for the generators to take from.
-fn everything(m: &Model) -> Vec<(String, String, polar_agent_builder::Access)> {
+fn everything(m: &Model) -> Vec<(String, String, Action)> {
     let no_policy = Pair {
         policy: None,
         memberships: BTreeMap::new(),
@@ -56,11 +58,11 @@ struct Removed {
 }
 
 /// A subset of `all`: each kept unless taken away.
-fn without(all: &[(String, String, polar_agent_builder::Access)], removed: &Removed) -> Allowed {
+fn without(all: &[(String, String, Action)], removed: &Removed) -> Allowed {
     let renewal = (
         "credentials-agent-observer.polar.serviceaccount.cluster.local".to_string(),
         credentials_agent_common::CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC.to_string(),
-        polar_agent_builder::Access::Publish,
+        Action::Publish,
     );
     all.iter()
         .enumerate()
@@ -140,8 +142,8 @@ proptest! {
             while let Broken::NotRenewed { because, .. } = broken {
                 broken = because;
             }
-            if let Broken::Forbidden { identity, topic, access } = broken {
-                let request = (identity.clone(), topic.clone(), *access);
+            if let Broken::Forbidden { identity, topic, action } = broken {
+                let request = (identity.clone(), topic.clone(), *action);
                 prop_assert!(current.contains(&request) && !proposed.contains(&request), "{:?}", request);
             }
         }

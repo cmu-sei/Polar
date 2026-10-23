@@ -158,6 +158,12 @@ pub enum LedgerMessage {
         identity: String,
         reply: RpcReplyPort<Option<CertificateRecord>>,
     },
+    /// The certificate `identity` connects with, whose groups policy reads at the request gate: its workload's client
+    /// certificate, or else its account's, while that is not revoked (docs/architecture/authority-model.md, slice 9).
+    RequesterCertificate {
+        identity: String,
+        reply: RpcReplyPort<Option<String>>,
+    },
     /// Whether `identity` already holds a currently-issued agent
     /// escrow-identity (CertType::Service) certificate -- the
     /// identity-scoped analog of CheckRenewal's own
@@ -400,6 +406,13 @@ impl Actor for LedgerActor {
             LedgerMessage::CheckCertificate { identity, reply } => {
                 let record = state.credentials_state.certificate_for(&identity).cloned();
                 let _ = reply.send(record);
+            }
+            LedgerMessage::RequesterCertificate { identity, reply } => {
+                let pem = state
+                    .credentials_state
+                    .requester_certificate(&identity)
+                    .map(str::to_string);
+                let _ = reply.send(pem);
             }
             LedgerMessage::CheckAgentEscrowRenewal { identity, reply } => {
                 let has_one = state

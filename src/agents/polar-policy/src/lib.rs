@@ -243,7 +243,8 @@ pub struct Facts {
     /// The resource's labels, as its tags (`resource.hasTag("kind") && resource.getTag("kind") == "token"`). Tags
     /// are apart from attributes, so a label can never take the place of a fact above.
     pub labels: std::collections::BTreeMap<String, String>,
-    /// For a topic (`publish`, `subscribe`): whether it is in the requester's declared or implied set.
+    /// For a topic (`publish`, `subscribe`): whether it is in the requester's declared or implied set. For a request to
+    /// the credentials agent (`request`): whether the requester publishes the request's topic, and how.
     pub topic: Option<TopicFacts>,
 }
 
@@ -1164,6 +1165,51 @@ mod tests {
         assert_eq!(publish(true, false).await, Decision::Allow);
         assert_eq!(publish(false, false).await, Decision::NotDetermined);
         assert_eq!(publish(false, true).await, Decision::Deny);
+    }
+
+    #[tokio::test]
+    async fn a_request_to_the_credentials_agent_says_whether_the_requester_publishes_its_topic_and_how()
+     {
+        let actor = spawn_policy_actor().await;
+        load(
+            &actor,
+            r#"permit (principal, action == Action::"request", resource == Request::"credentials-issuance-requests")
+                 when { context.declared };
+               forbid (principal, action == Action::"request", resource) when { context.implied };"#,
+        )
+        .await;
+        let request = |topic: &'static str, declared, implied| {
+            let actor = actor.clone();
+            async move {
+                ask_with(
+                    &actor,
+                    "credentials-agent-observer.polar.serviceaccount.cluster.local",
+                    r#"Action::"request""#,
+                    &format!(r#"Request::"{topic}""#),
+                    Facts {
+                        topic: Some(TopicFacts { declared, implied }),
+                        ..Default::default()
+                    },
+                )
+                .await
+            }
+        };
+        assert_eq!(
+            request("credentials-issuance-requests", true, false).await,
+            Decision::Allow
+        );
+        assert_eq!(
+            request("credentials-account-requests", true, false).await,
+            Decision::NotDetermined
+        );
+        assert_eq!(
+            request("credentials-issuance-requests", false, false).await,
+            Decision::NotDetermined
+        );
+        assert_eq!(
+            request("credentials-store-secret-requests", false, true).await,
+            Decision::Deny
+        );
     }
 
     #[tokio::test]

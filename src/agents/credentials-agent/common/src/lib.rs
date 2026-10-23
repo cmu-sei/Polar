@@ -160,3 +160,22 @@ pub const CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC: &str =
     "credentials-decrypt-on-behalf-of-requests";
 pub const CREDENTIALS_DECRYPT_ON_BEHALF_OF_REPLIES_TOPIC: &str =
     "credentials-decrypt-on-behalf-of-replies";
+
+/// Every topic the credentials agent serves a request on: its consumer subscribes to each, and unsubscribes from each
+/// when shutdown begins; its request gate and the authority model judge `Action::"request"` on each
+/// (docs/architecture/authority-model.md, slice 9).
+pub const REQUEST_TOPICS: [&str; 13] = [
+    CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC,
+    CREDENTIALS_ACCOUNT_REQUESTS_TOPIC,
+    CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
+    CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
+    CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
+    CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC,
+    CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+    CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
+    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
+    CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
+    CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
+];

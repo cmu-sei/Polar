@@ -122,6 +122,12 @@ code today, and what stands between the two. The detail of each part is in the d
   implied set. A schema, carried in the code that evaluates, validates a policy when it arrives (the broker, every builder
   agent) and before it is signed (`polar-sign`). The builder's run-time check and the broker ask the same question
   through the same `PolicyLookup`, so an agent and the broker cannot disagree about a topic.
+- **The Cedar vocabulary for requests to the credentials agent (2026-10-23, `authority-model.md` slice 9).**
+  `Action::"request"` on `Request::"<the request topic's exact name>"` (`polar-policy/src/schema.rs`), with the context
+  a topic has: `declared` and `implied` say whether the requester publishes that topic, and by which origin. The
+  credentials agent's request gate asks it of every request, with the broker-verified publisher and the groups of the
+  certificate it connects with; where policy is silent, the topic's own publishers in the authority model are admitted.
+  For example, `forbid (principal in Group::"retired", action == Action::"request", resource);`.
 - **Applying the catalog is the administrator's sign-off (2026-10-21, gap 6).** The administrator applies the catalog:
   its render and apply (on a Flux target, its signed publish, with provenance) are the approval of every workload's
   declared topics. There is no separate grants document. The render writes each workload's declared topics into the

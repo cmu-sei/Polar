@@ -185,8 +185,11 @@ to the requester where it matters.
 | `credentials-issuance`, `-identity-normalization`, `-account`, `-admin-action` | the observer (HTTP gateway) | the request's credential or signature |
 | `credentials-certificate`, `-decrypt-on-behalf-of` | nobody publishes them today | |
 
-The consumer subscribes to all 13 request topics (`credentials-agent/consume/src/supervisor.rs`, `REQUEST_TOPICS`) and passes
-`published_by` through for store, retrieve, keypair retrieval and decrypt only (614-634).
+The consumer subscribes to all 13 request topics (`credentials_agent_common::REQUEST_TOPICS`). Every request passes its
+request gate first (`credentials-agent/consume/src/request_gate.rs`, `authority-model.md` slice 9): Cedar's
+`Action::"request"` on `Request::"<topic>"`, then, where policy is silent, the topic's publishers in the authority model,
+by any origin. Only then is it dispatched, and the handlers are given `published_by` for store, retrieve, keypair
+retrieval and decrypt, as before.
 
 ## The scheduler and the git server
 

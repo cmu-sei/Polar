@@ -33,10 +33,14 @@
 //! - [`judge`]: what is allowed under a pair (Cedar first, then the floor, by the topic gate's own rule), the
 //!   invariants' goals and whether each holds, and the comparison of two pairs: what would be lost, and why.
 //!
+//! - [`requests`]: the rule for a request to the credentials agent (Cedar first, then the topic's publishers), for its
+//!   request gate and for the judge alike.
+//!
 //! No actor and no Cassini: the credentials agent's consumer uses it where it accepts a section.
 
 pub mod facts;
 pub mod judge;
+pub mod requests;
 pub mod rules;
 
 pub use facts::{CertificateNames, Model, Pair, Person, Workload};
@@ -44,4 +48,5 @@ pub use judge::{
     Allowed, Broken, Effect, Evaluation, Goal, GoalOutcome, Invariant, Judgement, Loss,
     allowed_under, compare, evaluate, judge,
 };
+pub use requests::Action;
 pub use rules::Node;

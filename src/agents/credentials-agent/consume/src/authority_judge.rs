@@ -164,9 +164,10 @@ fn refusal_reasons(judgement: &Judgement) -> Vec<String> {
 
 /// What a judgement says a change does, as the ledger keeps it.
 fn effect_of(judgement: &Judgement) -> AuthorityEffect {
-    let request = |(identity, topic, access): &(String, String, polar_agent_builder::Access)| {
-        format!("{identity} {} {topic}", access.as_str())
-    };
+    let request =
+        |(identity, topic, action): &(String, String, credentials_agent_model::Action)| {
+            format!("{identity} {} {topic}", action.as_str())
+        };
     let round_trip =
         |(workload, entry, sent): &(String, polar_agent_builder::topics::CauseEntry, String)| {
             format!("{workload} {entry:?} {sent}")

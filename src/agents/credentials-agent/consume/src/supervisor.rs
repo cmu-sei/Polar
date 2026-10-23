@@ -52,6 +52,7 @@ use tracing::{debug, error, info, warn};
 use cassini_client::TcpClientMessage;
 
 // ---- credentials_agent_common: topics ----
+use credentials_agent_common::REQUEST_TOPICS;
 use credentials_agent_common::{
     CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC, CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
     CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC, CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
@@ -141,24 +142,6 @@ const DRAIN_WINDOW_SECS: u64 = 5;
 /// process exits 1 regardless.
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(50);
 
-/// Every topic this agent subscribes to. One subscription each; the same list
-/// is unsubscribed from when shutdown begins.
-pub const REQUEST_TOPICS: [&str; 13] = [
-    credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC,
-    credentials_agent_common::CREDENTIALS_ACCOUNT_REQUESTS_TOPIC,
-    CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
-    CREDENTIALS_IDENTITY_NORMALIZATION_REQUESTS_TOPIC,
-    CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
-    CREDENTIALS_CERTIFICATE_REQUESTS_TOPIC,
-    CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
-    CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
-    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
-    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
-    CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
-    CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
-    CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
-];
-
 const ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.issuance";
 const WORKLOAD_ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.workload-issuance";
 const IDENTITY_NORMALIZATION_ACTOR_NAME: &str = "polar.credentials-agent.identity-normalization";
@@ -233,6 +216,8 @@ pub struct ConsumerSupervisorState {
     draining: bool,
     /// Asks cert-issuer for its record; none with no authority model, or one with no cert-issuer.
     record_asker: Option<ActorRef<crate::record_asker::RecordAskerMessage>>,
+    /// Judges every request before its handler sees it (docs/architecture/authority-model.md, slice 9).
+    request_gate: ActorRef<crate::request_gate::RequestGateMessage>,
     /// The drain was started by `PrepareShutdown` (as opposed to a failure),
     /// so it ends by releasing the infrastructure and not by exiting.
     rejuvenating: bool,
@@ -583,6 +568,32 @@ impl ConsumerSupervisor {
         )
     }
 
+    /// A request as the broker delivered it. While the agent drains it is logged and dropped; otherwise the request gate
+    /// judges it before any handler sees it (docs/architecture/authority-model.md, slice 9).
+    fn on_request(
+        draining: bool,
+        gate: &ActorRef<crate::request_gate::RequestGateMessage>,
+        topic: String,
+        payload: Vec<u8>,
+        published_by: Option<String>,
+    ) {
+        if draining {
+            warn!(
+                "CONSUMER_SUPERVISOR: draining -- logging message on topic \
+                 '{topic}' ({} bytes) instead of dispatching; will be lost on \
+                 exit",
+                payload.len()
+            );
+            // TODO: publish to dead-letter queue once Cassini supports one.
+        } else if let Err(e) = gate.send_message(crate::request_gate::RequestGateMessage::Request {
+            topic,
+            payload,
+            published_by,
+        }) {
+            warn!("CONSUMER_SUPERVISOR: the request gate did not take a request: {e}");
+        }
+    }
+
     /// cert-issuer's answers to this agent's requests for its record, each with who the broker says published it: the
     /// asker takes an answer only from cert-issuer.
     fn record_reply_subscription(supervisor: &ActorRef<ConsumerSupervisorMessage>) -> Subscription {
@@ -706,7 +717,7 @@ impl Actor for ConsumerSupervisor {
         let authority_model = settings.authority_model.take().map(std::sync::Arc::new);
         if authority_model.is_none() {
             warn!(
-                "no authority model was given; a policy or groups document will be accepted without being judged, and a workload's certificates will carry no topics or groups"
+                "no authority model was given; a policy or groups document will be accepted without being judged, a workload's certificates will carry no topics or groups, and no request is admitted but by a policy's permit"
             );
         }
 
@@ -1025,6 +1036,7 @@ impl Actor for ConsumerSupervisor {
         // puts in force, and what it does is recorded when it is published.
         let acceptances = crate::authority_judge::Acceptances::default();
         let record_target = crate::record_asker::record_target(authority_model.as_deref());
+        let gate_model = authority_model.clone();
         let configured = configured.with_section_judge(std::sync::Arc::new(
             crate::authority_judge::AuthorityJudge {
                 model: authority_model,
@@ -1139,6 +1151,24 @@ impl Actor for ConsumerSupervisor {
             }
         };
 
+        // Every request is judged before its handler sees it: Cedar, then the topic's publishers in the model.
+        let (request_gate, _) = crate::request_gate::RequestGate::spawn_linked(
+            None,
+            crate::request_gate::RequestGate,
+            crate::request_gate::RequestGateArgs {
+                ledger: ledger.clone(),
+                policy: polar_agent_builder::PolicyLookup::for_service(SERVICE_NAME),
+                model: gate_model,
+                record_asker: record_asker.clone(),
+                dispatch: std::sync::Arc::new(|topic, payload, published_by| {
+                    ConsumerSupervisor::dispatch_request(topic, payload, published_by)
+                }),
+            },
+            myself.get_cell(),
+        )
+        .await
+        .map_err(ActorProcessingErr::from)?;
+
         Ok(ConsumerSupervisorState {
             projection_actor,
             ledger,
@@ -1150,6 +1180,7 @@ impl Actor for ConsumerSupervisor {
             activity: crate::activity::Activity::new(),
             draining: false,
             record_asker,
+            request_gate,
             rejuvenating: false,
         })
     }
@@ -1307,17 +1338,13 @@ impl Actor for ConsumerSupervisor {
                         draining = state.draining,
                         "CONSUMER_SUPERVISOR: request received"
                     );
-                    if state.draining {
-                        warn!(
-                            "CONSUMER_SUPERVISOR: draining -- logging message on topic \
-                             '{topic}' ({} bytes) instead of dispatching; will be lost on \
-                             exit",
-                            payload.len()
-                        );
-                        // TODO: publish to dead-letter queue once Cassini supports one.
-                    } else {
-                        Self::dispatch_request(topic, payload, published_by);
-                    }
+                    Self::on_request(
+                        state.draining,
+                        &state.request_gate,
+                        topic,
+                        payload,
+                        published_by,
+                    );
                 }
                 ClientEvent::TransportError { reason } => {
                     // Reported so the health check can fail and the Job restart
@@ -2880,6 +2907,68 @@ mod builder_wiring_tests {
             }
         }
         assert_eq!(forwarded, expected);
+    }
+
+    /// Every request goes to the request gate, publisher and all, before any handler sees it; while the agent drains,
+    /// none does (docs/architecture/authority-model.md, slice 9).
+    #[tokio::test]
+    async fn a_request_is_handed_to_the_request_gate_unless_the_agent_is_draining() {
+        use crate::request_gate::RequestGateMessage;
+        type Handed = Arc<Mutex<Vec<(String, Vec<u8>, Option<String>)>>>;
+        struct Gate(Handed);
+
+        #[async_trait]
+        impl Actor for Gate {
+            type Msg = RequestGateMessage;
+            type State = ();
+            type Arguments = ();
+
+            async fn pre_start(
+                &self,
+                _: ActorRef<Self::Msg>,
+                _: (),
+            ) -> Result<(), ActorProcessingErr> {
+                Ok(())
+            }
+
+            async fn handle(
+                &self,
+                _: ActorRef<Self::Msg>,
+                message: Self::Msg,
+                _: &mut (),
+            ) -> Result<(), ActorProcessingErr> {
+                let RequestGateMessage::Request {
+                    topic,
+                    payload,
+                    published_by,
+                } = message;
+                self.0.lock().unwrap().push((topic, payload, published_by));
+                Ok(())
+            }
+        }
+
+        let handed: Handed = Arc::new(Mutex::new(Vec::new()));
+        let (gate, _) = Actor::spawn(None, Gate(handed.clone()), ()).await.unwrap();
+        let by = Some("credentials-agent-observer.polar.serviceaccount.cluster.local".to_string());
+        ConsumerSupervisor::on_request(
+            true,
+            &gate,
+            CREDENTIALS_ISSUANCE_REQUESTS_TOPIC.to_string(),
+            vec![1],
+            by.clone(),
+        );
+        ConsumerSupervisor::on_request(
+            false,
+            &gate,
+            CREDENTIALS_ISSUANCE_REQUESTS_TOPIC.to_string(),
+            vec![2],
+            by.clone(),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            handed.lock().unwrap().clone(),
+            vec![(CREDENTIALS_ISSUANCE_REQUESTS_TOPIC.to_string(), vec![2], by)]
+        );
     }
 
     /// cert-issuer's answer reaches the asker with its broker-verified publisher intact: the asker takes an answer only

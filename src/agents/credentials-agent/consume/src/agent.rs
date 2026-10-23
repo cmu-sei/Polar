@@ -245,7 +245,7 @@ mod tests {
     fn every_topic_it_subscribes_to_is_in_its_declared_set() {
         use polar_agent_builder::Access;
         let set = polar_agent_builder::agent::topic_set::<CredentialsConsumer>();
-        for topic in crate::supervisor::REQUEST_TOPICS
+        for topic in credentials_agent_common::REQUEST_TOPICS
             .iter()
             .chain([&credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC])
         {

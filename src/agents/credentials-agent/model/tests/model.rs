@@ -32,7 +32,7 @@ use credentials_agent_common::{
     CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC, CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
 };
 use credentials_agent_model::{
-    Broken, Invariant, Model, Node, Pair, allowed_under, evaluate, judge,
+    Action, Broken, Invariant, Model, Node, Pair, Person, allowed_under, evaluate, judge,
 };
 use polar_agent_builder::Access;
 use std::collections::BTreeMap;
@@ -133,7 +133,7 @@ fn cutting_renewal_is_refused_as_breaking_correction_with_the_request_that_cuts_
                 Broken::Forbidden {
                     identity: id("credentials-agent-observer"),
                     topic: CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC.to_string(),
-                    access: Access::Publish,
+                    action: Action::Publish,
                 }
             );
         }
@@ -151,8 +151,151 @@ fn cutting_renewal_is_refused_as_breaking_correction_with_the_request_that_cuts_
     assert!(j.effect.lost.contains(&(
         id("credentials-agent-observer"),
         CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC.to_string(),
-        Access::Publish
+        Action::Publish
     )));
+}
+
+/// docs/architecture/authority-model.md, slice 9: the credentials agent's request gate is a step on the path as the
+/// broker is, so forbidding the observer's request cuts renewal as forbidding its publish does.
+#[test]
+fn forbidding_the_observer_s_issuance_request_is_refused_as_breaking_correction() {
+    let m = model();
+    let policy = format!(
+        r#"forbid (principal == Identity::"{}", action == Action::"request", resource == Request::"{CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC}");"#,
+        id("credentials-agent-observer")
+    );
+    let j = judge(&m, &pair(None), &pair(Some(&policy)), &[]).unwrap();
+    assert!(j.refuses());
+    let correction = j
+        .losses
+        .iter()
+        .find(|l| l.invariant == Invariant::Correction)
+        .expect("correction is lost");
+    match &correction.broken {
+        Broken::NotRenewed { because, .. } => assert_eq!(
+            **because,
+            Broken::Forbidden {
+                identity: id("credentials-agent-observer"),
+                topic: CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC.to_string(),
+                action: Action::Request,
+            }
+        ),
+        other => panic!("not lost to renewal: {other:?}"),
+    }
+    assert_eq!(correction.rules, ["policy0"]);
+    let said = correction.to_string();
+    assert!(said.contains("may no longer request"), "{said}");
+    // The publish itself is untouched: only the request is taken.
+    assert_eq!(
+        j.effect.lost,
+        [(
+            id("credentials-agent-observer"),
+            CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC.to_string(),
+            Action::Request
+        )]
+    );
+}
+
+/// The rules named as denying a lost request are found with the requester's own context, for a topic and for a request: a
+/// rule that applies only to what a workload is implied, or only to what it declares, is named.
+#[test]
+fn the_rules_named_for_a_loss_are_decided_with_the_requester_s_own_context() {
+    let m = model();
+    // kube-observer is implied its snapshot request, and declares its pods topic before it.
+    let snapshot = format!(
+        r#"forbid (principal == Identity::"{}", action == Action::"publish", resource == Topic::"{AUTHORITY_SNAPSHOT_REQUESTS_TOPIC}") when {{ context.implied }};"#,
+        id("kube-observer")
+    );
+    let j = judge(&m, &pair(None), &pair(Some(&snapshot)), &[]).unwrap();
+    let loss = j
+        .losses
+        .iter()
+        .find(|l| l.invariant == Invariant::HearingAuthority)
+        .expect("kube-observer's snapshot round trip is lost");
+    assert_eq!(loss.rules, ["policy0"], "{loss}");
+    // The observer declares its issuance request: a request's context is how it publishes the request's topic.
+    let request = format!(
+        r#"forbid (principal == Identity::"{}", action == Action::"request", resource == Request::"{CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC}") when {{ context.declared }};"#,
+        id("credentials-agent-observer")
+    );
+    let j = judge(&m, &pair(None), &pair(Some(&request)), &[]).unwrap();
+    let loss = j
+        .losses
+        .iter()
+        .find(|l| l.invariant == Invariant::Correction)
+        .expect("correction is lost");
+    assert_eq!(loss.rules, ["policy0"], "{loss}");
+}
+
+/// With no policy the floor admits a request on each of the credentials agent's topics from the workloads that publish
+/// it, by any origin, and from no one else: no person, and no other workload.
+#[test]
+fn with_no_policy_each_request_topic_s_own_publishers_and_no_one_else_may_request() {
+    let m = model();
+    let alice = Person {
+        identity: "4f0c1d7e-0000-4000-8000-000000000001".to_string(),
+        groups: vec!["operators".to_string()],
+        capabilities: Vec::new(),
+    };
+    let allowed = allowed_under(&m, &pair(None), &[alice]).unwrap();
+    let requests: Vec<(String, String)> = allowed
+        .iter()
+        .filter(|(_, _, a)| *a == Action::Request)
+        .map(|(i, t, _)| (i.clone(), t.clone()))
+        .collect();
+    let mut expected: Vec<(String, String)> = m
+        .workloads
+        .iter()
+        .flat_map(|w| {
+            w.topics
+                .iter()
+                .filter(|t| {
+                    t.access == Access::Publish
+                        && credentials_agent_common::REQUEST_TOPICS.contains(&t.name.as_str())
+                })
+                .map(|t| (w.identity.clone(), t.name.clone()))
+        })
+        .collect();
+    expected.sort();
+    expected.dedup();
+    assert_eq!(requests, expected);
+    // The observer's six relays and the encryption agents' escrow and secret requests are all among them.
+    assert!(requests.contains(&(
+        id("credentials-agent-observer"),
+        CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC.to_string()
+    )));
+    assert!(requests.contains(&(
+        id("kube-consumer"),
+        "credentials-store-secret-requests".to_string()
+    )));
+}
+
+/// A permit that lets a person request what no topic of theirs holds is accepted, and its effect says so.
+#[test]
+fn a_permit_opening_a_request_is_accepted_with_its_effect() {
+    let m = model();
+    let alice = Person {
+        identity: "4f0c1d7e-0000-4000-8000-000000000001".to_string(),
+        groups: vec!["operators".to_string()],
+        capabilities: Vec::new(),
+    };
+    let policy = r#"permit (principal in Group::"operators", action == Action::"request", resource == Request::"credentials-certificate-requests");"#;
+    let j = judge(
+        &m,
+        &pair(None),
+        &pair(Some(policy)),
+        std::slice::from_ref(&alice),
+    )
+    .unwrap();
+    assert!(!j.refuses(), "{:?}", j.losses);
+    assert_eq!(
+        j.effect.gained,
+        [(
+            alice.identity.clone(),
+            "credentials-certificate-requests".to_string(),
+            Action::Request
+        )]
+    );
 }
 
 #[test]
@@ -176,7 +319,7 @@ fn forbidding_the_scheduler_s_forward_breaks_correction_and_not_renewal() {
         Broken::Forbidden {
             identity: id("polar-scheduler"),
             topic: "agent.credentials-agent.configuration".to_string(),
-            access: Access::Publish,
+            action: Action::Publish,
         }
     );
 }
@@ -216,7 +359,7 @@ fn a_permit_that_takes_nothing_away_is_accepted_and_its_effect_said() {
         [(
             id("harness-sink"),
             CREDENTIALS_WORKLOAD_ISSUANCE_REPLIES_TOPIC.to_string(),
-            Access::Subscribe
+            Action::Subscribe
         )]
     );
     assert!(j.effect.lost.is_empty());

@@ -30,8 +30,9 @@
 // relations' types are long: both are the macro's, not this module's.
 #![allow(unused_variables, clippy::type_complexity)]
 
+use crate::requests::{Action, is_request};
 use ascent::{Dual, ascent};
-use polar_agent_builder::topics::{Access, CauseEntry};
+use polar_agent_builder::topics::CauseEntry;
 
 /// A point a message passes: an agent publishing on a topic, or an agent hearing one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -73,8 +74,8 @@ ascent! {
     /// `(workload, topic)` it publishes on, and hears.
     relation publishes(String, String);
     relation subscribes(String, String);
-    /// `(workload, topic, access)` the pair judged allows: Cedar first, then the floor.
-    relation allowed(String, String, Access);
+    /// `(workload, topic, action)` the pair judged allows: Cedar first, then the floor.
+    relation allowed(String, String, Action);
     /// `(workload, cause, topic)`: the workload publishes on the topic because of the cause.
     relation causes(String, CauseEntry, String);
     /// `(workload, entry, topic)`: the subscription to the topic answers the entry.
@@ -91,7 +92,12 @@ ascent! {
     /// arrives to what that causes it to publish.
     relation edge(Node, Node);
     edge(Node::Out(a.clone(), t.clone()), Node::In(b.clone(), t.clone())) <--
-        publishes(a, t), subscribes(b, t), allowed(a, t, Access::Publish), allowed(b, t, Access::Subscribe);
+        publishes(a, t), subscribes(b, t), if !is_request(t),
+        allowed(a, t, Action::Publish), allowed(b, t, Action::Subscribe);
+    // A request to the credentials agent passes its request gate too (docs/architecture/authority-model.md, slice 9).
+    edge(Node::Out(a.clone(), t.clone()), Node::In(b.clone(), t.clone())) <--
+        publishes(a, t), subscribes(b, t), if is_request(t),
+        allowed(a, t, Action::Publish), allowed(a, t, Action::Request), allowed(b, t, Action::Subscribe);
     edge(Node::In(a.clone(), i.clone()), Node::Out(a.clone(), o.clone())) <--
         causes(a, c, o), if let CauseEntry::Topic(i) = c;
     relation reach(Node, Node);

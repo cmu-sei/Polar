@@ -39,6 +39,9 @@
 //!   owner, namespace and `frozen` are attributes, each optional.
 //! - A topic request carries in its context whether the topic is in the requester's declared set (family topics
 //!   included) or its implied one.
+//! - A request to the credentials agent is `Action::"request"` on `Request::"<its topic's exact name>"`, and carries in
+//!   its context whether the requester publishes that topic and how, as a topic request does
+//!   (docs/architecture/authority-model.md, slice 9).
 
 use cedar_policy::{PolicySet, Schema, ValidationMode, Validator};
 use std::sync::OnceLock;
@@ -57,7 +60,7 @@ entity Secret = {
   "namespace"?: Identity,
   "frozen"?: Bool,
 } tags String;
-entity KubeSecret, Topic, Variable, Section, Agent, Command;
+entity KubeSecret, Topic, Request, Variable, Section, Agent, Command;
 
 action "retrieve", "store" appliesTo {
   principal: Identity,
@@ -72,6 +75,11 @@ action "decrypt" appliesTo {
 action "publish", "subscribe" appliesTo {
   principal: Identity,
   resource: Topic,
+  context: { "now_secs": Long, "declared": Bool, "implied": Bool },
+};
+action "request" appliesTo {
+  principal: Identity,
+  resource: Request,
   context: { "now_secs": Long, "declared": Bool, "implied": Bool },
 };
 action "update-configuration" appliesTo {
@@ -146,6 +154,14 @@ mod tests {
         .unwrap();
         check(r#"permit (principal, action == Action::"subscribe", resource) when { principal has workload && principal.workload == "kube-consumer" };"#)
             .unwrap();
+        // A request to the credentials agent, by its topic's exact name (docs/architecture/authority-model.md, slice 9).
+        check(r#"forbid (principal, action == Action::"request", resource == Request::"credentials-workload-issuance-requests")
+                 unless { context.declared || context.implied };"#)
+        .unwrap();
+        check(
+            r#"permit (principal in Group::"operators", action == Action::"request", resource);"#,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -174,6 +190,11 @@ mod tests {
             // an action on a resource it does not apply to
             (
                 r#"permit (principal, action == Action::"publish", resource == Secret::"x");"#,
+                "impossible",
+            ),
+            // a request is made of a request, not a topic
+            (
+                r#"permit (principal, action == Action::"request", resource == Topic::"credentials-issuance-requests");"#,
                 "impossible",
             ),
             // a context the action does not carry

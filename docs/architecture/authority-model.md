@@ -881,6 +881,129 @@ and no Cassini.
   refusing the declared publisher; the decision rule as the topic gate's (Cedar, then the floor; unavailable refuses),
   by a property.
 
+- *Planned in detail 2026-10-23, to be cleared.* Read from the code first:
+  - **Dispatch.** A request reaches the consumer as a `MessagePublished` with the broker's `published_by`. The supervisor
+    logs it, drops it while draining, and otherwise calls `dispatch_request` (`credentials-agent/consume/src/supervisor.rs`,
+    the `MessagePublished` arm). Only the four topics that need the publisher pass it to their handlers. Dispatch is a
+    synchronous function in the supervisor's `handle`.
+  - **The checks that exist.** `store_secret`, `retrieve_secret` and `decrypt_on_behalf_of` ask Cedar through the
+    agent's `PolicyLookup` with the requester's certificate from the ledger (`CheckCertificate`), so its groups count.
+    They refuse a requester the ledger has no certificate for (`store_secret.rs:90`, `RequesterCertificateNotFound`).
+  - **Who publishes each topic.** In the model (`credentials-agent/model/tests/fixtures/sandbox-model.json`): the
+    observer declares its six HTTP relays; the `encryption` agents (`git-repo-observer`, `kube-consumer`) are implied
+    the five escrow and secret topics. `credentials-certificate-requests` and `credentials-decrypt-on-behalf-of-requests`
+    have no publisher (`topics.md`). A floor read from the model admits exactly today's traffic.
+  - **The seed policy** (`infra/seeds/signed/policy.cedar`) has a `forbid (principal, action, resource)` on frozen
+    secrets. It must still validate once `Request` exists, and it says nothing about requests.
+  - **Since step 2 of `cert-issuer-isolation.md`** the ledger holds every certificate cert-issuer signs, the bootstrap
+    services' included. So the requester's certificate is in the ledger for every catalog workload: the gate reads its
+    groups from the ledger, as the existing checks do, and they are the groups the judge gives it from the model.
+
+  The plan, each part tests first:
+  1. **The schema** (`polar-policy/src/schema.rs`): an entity `Request`, and `action "request"` on it, with the context
+     `{ now_secs, declared, implied }`. `declared` and `implied` mean what they mean for a topic: whether the requester
+     publishes the request's topic, and by which origin (`TopicFacts`, the same struct). Tests: a rule on
+     `Request::"<topic>"` validates; `Action::"request"` on a `Topic` is refused; the seed policy and the documented
+     policies still validate.
+  2. **One list of request topics.** `REQUEST_TOPICS` moves from the consumer's supervisor into `credentials_agent_common`,
+     so the consumer, its gate and the model read one list.
+  3. **The rule, once** (`credentials-agent/model`, a new `requests.rs`): `admitted(said, publishes, topic)`. Cedar
+     decides when it speaks; where it is silent or no policy is loaded, the floor admits a requester whose model
+     workload publishes the topic, by any origin (declared, family or implied); a policy that cannot be consulted
+     refuses. The same shape as `topic_gate::rule`, with its own words. The gate and the judge both call it.
+  4. **The model judges requests** (`judge.rs`, `allowed_under`). Every workload and person is also judged for
+     `Action::"request"` on every request topic, and a publish on a request topic is an edge into the consumer only if
+     the request is admitted too. So a `forbid` on the observer's `request` of `credentials-workload-issuance-requests`
+     cuts renewal and is refused as breaking correction, as a `forbid` on its publish is. A request gained or lost is in
+     the effect report beside topics.
+  5. **The gate** (`credentials-agent/consume`, a new `request_gate.rs`): an actor the supervisor hands every request to
+     after its draining check, one at a time, so requests keep their order. For each:
+     - no publisher: refused;
+     - the publisher's certificate from the ledger; none: refused, and cert-issuer's record asked for at once
+       (`RecordAskerMessage::Ask`), so a certificate signed since the last ask is found on the next try;
+     - Cedar, through the agent's `PolicyLookup` (the policy in force, as the broker and every agent decide), with the
+       facts from the model, then `admitted`;
+     - admitted: `dispatch_request` as today. The handlers are unchanged, and the four that check Cedar on a secret
+       still do.
+     - refused: a warning naming the publisher, the topic and the reason, and no reply, so the requester's own timeout
+       applies. Not recorded in the ledger: anyone who can reach the topic can cause one, without bound. A refusal by
+       the broker already tells the publisher.
+     - no model: the floor admits no one, so only a `permit` lets a request in, as with slice 8's certificates; the
+       agent warns at start.
+  6. **Tests.**
+     - `admitted` by example, and a property that it is Cedar first, then the floor, for every answer and every origin.
+     - The gate: a declared publisher admitted; an implied one admitted; anyone else refused unless a `permit` admits
+       them; a `forbid` refusing a declared publisher; a group `forbid` applied through the ledger certificate's groups,
+       for a bootstrap service whose certificate came from cert-issuer's record; no publisher; no certificate (refused,
+       and the record asked for); policy unavailable; no model.
+     - A property that the gate and the judge agree: for generated policies, requesters and request topics, the gate
+       admits exactly what `allowed_under` allows.
+     - The model: the observer's `request` forbidden is refused as breaking correction; a `permit` opening a request
+       shows in the effect.
+     - The supervisor hands every request to the gate after the draining check (the hand-off as a function, tested as
+       the subscriptions are).
+     - Mutation-checked.
+  7. **Docs:** this note's "Built", `topics.md` (the consumer's requests are gated), `policy-enforcement.md` (`Request`
+     in the vocabulary).
+
+- *Built 2026-10-23:*
+  - **The schema** (`polar-policy/src/schema.rs`): `entity Request` and `action "request"`, with the context
+    `{ now_secs, declared, implied }`, given as a topic's are (`Facts::topic`, `TopicFacts`).
+  - **One list:** `credentials_agent_common::REQUEST_TOPICS`, read by the consumer's subscriptions, its gate and the
+    model.
+  - **The rule, once** (`credentials-agent/model/src/requests.rs`): `admitted`, the same shape as `topic_gate::rule`;
+    `publishes` (how a requester publishes a topic in the model) and `facts_of` (the context from an origin), which
+    the judge now uses for topics too. The model judges three Cedar actions, `requests::Action` (`Publish`,
+    `Subscribe`, `Request`), where it had the builder's two-valued `Access`: `Allowed`, `Broken::Forbidden` (its field
+    is now `action`) and the effect carry it, so a request lost or gained is reported as a request.
+  - **The model** (`judge.rs`, `rules.rs`): `allowed_under` judges every workload and person for `Action::"request"` on
+    every request topic. A publish on a request topic is an edge only if the request is admitted too (a second
+    `edge` rule, for `is_request` topics), and a broken step on one names the request when that is what was refused.
+  - **The gate** (`credentials-agent/consume/src/request_gate.rs`): an actor the supervisor hands every request to after
+    its draining check (`ConsumerSupervisor::on_request`); admitted requests go to `dispatch_request` as before, in the
+    order they came. It refuses a topic that is no request topic, a request with no verified publisher, and one whose
+    publisher has no certificate in the ledger, asking cert-issuer's record at once for the next try. Otherwise it
+    asks Cedar through the agent's `PolicyLookup`, with the certificate, and applies `admitted`. A refusal is a
+    warning, with no reply and nothing in the ledger.
+  - **Found building it:** the ledger's `certificate_for` finds only workload certificates, so the gate would have
+    refused every person while the judge allowed one a `permit` names. So the gate asks the ledger's new
+    `RequesterCertificate`: a workload's client certificate, or else an account's, while it is not revoked
+    (`CredentialsState::requester_certificate`). Those are the accounts the judge counts (`ActiveAccounts`).
+  - **To know at deployment (slice 10):** the gate finds a bootstrap service's certificate only in cert-issuer's record,
+    which holds what cert-issuer signed since step 2 was deployed. On a fresh bring-up that is every certificate. On an
+    upgrade, a bootstrap service still holding a certificate from before is refused at the gate until it has a new one
+    (within the hour, at its rejuvenation). So restart the bootstrap services once the new cert-issuer is up: the
+    observer's relays (issuance, workload issuance, accounts, admin actions) depend on it.
+
+  Tests:
+  - the schema: a request rule validates, a request on a `Topic` is refused, the seed policy still validates; Cedar
+    decides a request with its context;
+  - `admitted` for every answer policy can give, with the requester a publisher or not; its reasons; the actions'
+    names and resources; the request topics; `publishes` and `facts_of` over the real model;
+  - the model: a `forbid` on the observer's issuance request refused as breaking correction, naming the request and
+    the rule, with the publish untouched; with no policy, each request topic's publishers by any origin and no one
+    else; a `permit` opening a person's request accepted, with its effect; the rules named for a loss decided with the
+    requester's own context, for a topic and for a request;
+  - the requester's certificate: a workload's client certificate, an account's while not revoked, not a server
+    certificate;
+  - the gate: a topic's publishers admitted by declaration and by implication, and no one else; a `permit` and a
+    `forbid`; a group rule through a bootstrap service's certificate from cert-issuer's record; a person admitted by
+    a `permit` alone; no publisher; no certificate, and the record asked for; a policy that cannot be consulted, and
+    one not running; no model; a topic that is no request topic; dispatch in order, and nothing refused;
+  - a property that the gate admits exactly what the judge allows, for generated policies, every catalog workload and
+    a person, on every request topic (24 cases, 29 s in a debug build: the judge over the real model dominates);
+  - the supervisor hands a request to the gate with its publisher, and none while draining.
+
+  Mutation-checked:
+  - cargo-mutants on slice 9's changes: 52 mutants, 34 caught, 9 unviable, 9 missed, all in the model crate. Nothing
+    in its own tests depended on a requester's context or called `publishes`; the consumer's gate tests did, but a
+    mutant is tested by its own crate's tests. Two tests followed (`publishes` and `facts_of` over the real model; the
+    rules named for a loss decided with the requester's context), and the model crate again: 37 mutants, 30 caught, 7
+    unviable, none missed.
+  - By hand, each caught: the request edge rule (inside `ascent!`, which cargo-mutants does not reach) without its
+    request; the gate deciding without the requester's certificate, and without its context (the agreement property
+    fails on both).
+
 **10. Deploy and verify.** `sandbox-local`, the new images and render together.
 - Everything healthy, as after stage 5b; a policy that would cut renewal, signed and committed to the schedules
   repository, refused, with its reason in the graph's outcome and the ledger, and the policy in force unchanged; an
