@@ -40,8 +40,9 @@
 //!
 //! It also owns how the agent ends. Every reason to end goes through one
 //! funnel, `begin_shutdown`: a verdict from the health actor, a SIGTERM or SIGINT,
-//! or any child (other than a Cassini client that stopped cleanly, which is
-//! replaced) ending unexpectedly. The funnel is idempotent and logs the reason.
+//! or any child ending unexpectedly. The Cassini client is the front
+//! (`cassini_client::facade`), which replaces its own transports and does not end
+//! for the broker's absence, so its ending is a fault in the front itself. The funnel is idempotent and logs the reason.
 //! The domain supervisor's own, separate children (a graph controller, watcher
 //! trees) may still need the router and TCP client alive while they shut down
 //! cleanly, so the funnel runs a two-way handshake with it: see

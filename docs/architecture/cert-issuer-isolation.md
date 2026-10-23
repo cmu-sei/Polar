@@ -508,7 +508,13 @@ builder and then into the catalog (`configuration.md`, 9.8), so the precedent is
   where an agent that expects Cassini gets the deadline's verdict; it still rejuvenates; the real actor gives no
   verdict either way; the setting reaches the health from the trait, and an agent that says nothing counts its
   session. The property is stated as an equivalence: an agent that does not expect Cassini is judged as one that
-  expects it and always has it, for any sequence of events.
+  expects it and always has it, for any sequence of events. Read while building it: the health was the only way
+  Cassini's absence could end such an agent. The client is two actors. The transport (`TcpClientActor`) holds one
+  connection and ends when it cannot connect or reconnect (`cassini/client/src/lib.rs:1035`). The front
+  (`TcpClientFacade`, `cassini/client/src/facade.rs`) is what the builder spawns and supervises
+  (`lib/src/cassini.rs:215`); it brings a new transport up, with backoff, whenever one dies or cannot start, and never
+  ends for the broker's absence. The builder ends an agent when the front ends (`polar-agent-builder/src/shutdown.rs`,
+  `on_child_death`), which is a fault in the front, not an outage.
 - **1b, cert-issuer as a `PolarAgent`.** Its settings declared in a `polar_env` section, as Cassini's are, with the
   issuers and the floor as structured values, as the credentials agent's authority model is; its scaffold; its HTTP
   server run inside the builder's lifecycle (signals, shutdown budget). Its client certificate is signed by its own CA
@@ -518,6 +524,31 @@ builder and then into the catalog (`configuration.md`, 9.8), so the precedent is
   chart gives it the builder's environment until 1c. Tests: what each of today's main.rs steps does (the CA loaded or
   made, the TLS certificate, the floor and its warning, the routes served), now through `start`; it serves with no
   Cassini at all; `polar_agent_tests!`.
+  *1b in detail (2026-10-23), read from the code:*
+  - **Settings.** The JSON file (`config.rs`, `ServiceConfig`) becomes declared variables in a `polar_env` section,
+    as Cassini's are (`cassini/broker/src/settings.rs`): the scalars one each (the address, the CA's paths,
+    provisioning and lifetimes, the server identity, the internal callers), and the issuers, the floor and the
+    lifetime overrides each one JSON value, checked by the section when read, as the credentials agent's
+    `CREDENTIALS_AGENT_AUTHORITY_MODEL` is (`credentials-agent/consume/src/settings.rs:95`). `ServiceConfig::validate`
+    runs on what they give, unchanged, so every refusal it makes stays.
+  - **Its own client certificate,** with the names its own floor entry gives it, as every bootstrap service's
+    certificate has (`floor.rs`, `BootstrapIdentity`: `publish`, `subscribe`, `groups`): it is a bootstrap service
+    too, and its entry is rendered from its scaffold and the catalog like theirs. It is known by one identity,
+    `cert-issuer.<namespace>.serviceaccount.<domain>`, as every workload is. It signs it with its own CA at start,
+    writes it and its key where the client reads them, and the builder's check that the certificate names the agent
+    (`own_name::check_certificate`) applies.
+  - **The HTTP server inside the builder's lifecycle,** as the git server's is (`polar-git-server/server/src/supervisor.rs`).
+    axum is not an actor: cert-issuer's own supervisor, the one `AgentBuilder::new` is given, runs the listener as a
+    task with a stop signal and a count of connections in flight. On `PrepareShutdown` it stops accepting, lets the
+    requests in flight finish within a drain timeout, and answers `ProceedWithShutdown`; the infrastructure
+    supervisor's ending exits the process non-zero. Unlike the git server's, it also watches the listener task: one
+    that ends outside a shutdown begins one, so a CA front that serves nothing cannot look healthy.
+  - **The chart, until 1c,** gives it the builder's environment (the Cassini client's, the health file and probe) in
+    place of the JSON file, and a floor entry for cert-issuer itself.
+  - **Tests:** each step of today's `main.rs` (the CA loaded or made, by provisioning; the TLS certificate; the floor
+    and its warning; the routes served), now through `start`; the settings refused as `validate` refuses them; its
+    client certificate carries its floor entry's names and nothing more; it serves with no Cassini at all;
+    `polar_agent_tests!`.
 - **1c, cert-issuer in the catalog.** A workload entry, `kind: "service"`, `bootstrap: true`, its CA volume and its
   floor as the render writes them today, in place of the hand chart, as Cassini's and the credentials pair's entries
   replaced theirs. Tests: the render's, `infra/tests`, and the chart's checks of the floor carried over.
