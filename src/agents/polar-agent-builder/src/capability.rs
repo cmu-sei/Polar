@@ -250,7 +250,7 @@ mod tests {
     }
 
     /// Capabilities the catalog gives a deployment that no code ever requires: the shape of the
-    /// pod (a persistent volume, a pinned CA, a server certificate),
+    /// pod (a persistent volume, a pinned CA, a server certificate, the CA cert-issuer signs with),
     /// not something the agent's own health depends on. They are in `POLAR_CAPABILITIES`, which
     /// ignores names the code does not know.
     const DEPLOYMENT_ONLY: &[&str] = &[
@@ -259,6 +259,7 @@ mod tests {
         "oci-registry-auth",
         "persistent-data",
         "pinned-ca",
+        "provisioned-ca",
         "tracing",
         "working-checkout",
     ];
