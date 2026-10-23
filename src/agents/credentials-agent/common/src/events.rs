@@ -405,6 +405,35 @@ pub enum CredentialsEvent {
         /// action; None for every other action.
         account_id: Option<String>,
     },
+    /// A page of cert-issuer's record, as the credentials agent asked for it
+    /// (docs/architecture/cert-issuer-isolation.md, "Step 2"): the certificates in it that the ledger did not hold, and
+    /// where the record has been read to. Appended only when `through` moves, so a quiet record adds nothing.
+    CertificatesReported {
+        /// cert-issuer's log, and its last entry read.
+        log: String,
+        through: u64,
+        certificates: Vec<ReportedCertificate>,
+        timestamp: i64,
+    },
+}
+
+/// A certificate cert-issuer signed and reported, that the ledger did not already hold.
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
+pub struct ReportedCertificate {
+    pub seq: u64,
+    pub identity: String,
+    pub instance_binding: Option<String>,
+    pub cert_type: cert_issuer_common::CertType,
+    pub path: cert_issuer_common::record::IssuePath,
+    pub serial: String,
+    pub signed_at: i64,
+    pub not_after: i64,
+    pub certificate_pem: String,
+    /// Signed on a token alone for an identity the authority model does not call a bootstrap service: on a target that
+    /// enforces the floor it should not exist.
+    pub unexpected: bool,
 }
 
 impl CredentialsEvent {

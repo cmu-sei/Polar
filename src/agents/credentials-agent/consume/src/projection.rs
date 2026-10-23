@@ -309,6 +309,49 @@ fn graph_ops_for_event(event: &CredentialsEvent, grant_existed: bool) -> Vec<Gra
         CredentialsEvent::AuthorityPublished { .. } => vec![],
         // A refused document changes nothing; the ledger keeps the record of it.
         CredentialsEvent::AuthorityRefused { .. } => vec![],
+        // A certificate learned from cert-issuer's record is a Certificate node as an issued one is, saying how it was
+        // learned and whether it was unexpected (docs/architecture/cert-issuer-isolation.md, "Step 2"). Its PEM stays
+        // out of the graph, as an issued one's does.
+        CredentialsEvent::CertificatesReported { certificates, .. } => {
+            if certificates.is_empty() {
+                return vec![];
+            }
+            let items = certificates
+                .iter()
+                .map(|c| {
+                    (
+                        CredentialsNodeKey::Certificate {
+                            serial: c.serial.clone(),
+                        }
+                        .into_key(),
+                        vec![
+                            Property(
+                                "identity".to_string(),
+                                GraphValue::String(c.identity.clone()),
+                            ),
+                            Property(
+                                "instance_binding".to_string(),
+                                GraphValue::String(c.instance_binding.clone().unwrap_or_default()),
+                            ),
+                            Property("issued_at".to_string(), GraphValue::I64(c.signed_at)),
+                            Property("revoked".to_string(), GraphValue::Bool(false)),
+                            Property("reported".to_string(), GraphValue::Bool(true)),
+                            Property(
+                                "path".to_string(),
+                                GraphValue::String(
+                                    serde_json::to_value(c.path)
+                                        .ok()
+                                        .and_then(|v| v.as_str().map(str::to_string))
+                                        .unwrap_or_default(),
+                                ),
+                            ),
+                            Property("unexpected".to_string(), GraphValue::Bool(c.unexpected)),
+                        ],
+                    )
+                })
+                .collect();
+            vec![GraphOp::UpsertNodes { items }]
+        }
         // An admin action projects exactly what its derived effect
         // does: the same single derivation state folds.
         CredentialsEvent::AdminActionRecorded { .. } => match event.admin_effect() {
@@ -532,6 +575,7 @@ fn event_timestamp(event: &CredentialsEvent) -> i64 {
         | CredentialsEvent::AccountCertificateIssued { timestamp, .. }
         | CredentialsEvent::AuthorityPublished { timestamp, .. }
         | CredentialsEvent::AuthorityRefused { timestamp, .. }
+        | CredentialsEvent::CertificatesReported { timestamp, .. }
         | CredentialsEvent::AdminActionRecorded { timestamp, .. } => *timestamp,
     }
 }
@@ -744,6 +788,63 @@ pub(crate) mod tests {
             }
             other => panic!("expected UpsertNodes, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_reported_certificate_is_a_certificate_node_that_says_how_it_was_learned() {
+        let certificate = |serial: &str, unexpected: bool| {
+            credentials_agent_common::events::ReportedCertificate {
+                seq: 1,
+                identity: "cassini.polar.serviceaccount.cluster.local".to_string(),
+                instance_binding: Some("pod-1".to_string()),
+                cert_type: cert_issuer_common::CertType::Server,
+                path: cert_issuer_common::record::IssuePath::TokenOnly,
+                serial: serial.to_string(),
+                signed_at: 1500,
+                not_after: 5000,
+                certificate_pem: "pem".to_string(),
+                unexpected,
+            }
+        };
+        let event = CredentialsEvent::CertificatesReported {
+            log: "log-1".to_string(),
+            through: 2,
+            certificates: vec![certificate("r1", false), certificate("r2", true)],
+            timestamp: 3000,
+        };
+        let ops = graph_ops_for_event(&event, false);
+        let GraphOp::UpsertNodes { items } = &ops[0] else {
+            panic!("expected UpsertNodes, got {ops:?}");
+        };
+        assert_eq!(items.len(), 2, "one certificate node each");
+        let props = |i: usize| -> std::collections::BTreeMap<String, GraphValue> {
+            items[i]
+                .1
+                .iter()
+                .map(|Property(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        assert_eq!(
+            props(0)["identity"],
+            GraphValue::String("cassini.polar.serviceaccount.cluster.local".to_string())
+        );
+        assert_eq!(props(0)["issued_at"], GraphValue::I64(1500));
+        assert_eq!(props(0)["reported"], GraphValue::Bool(true));
+        assert_eq!(
+            props(0)["path"],
+            GraphValue::String("token_only".to_string())
+        );
+        assert_eq!(props(0)["unexpected"], GraphValue::Bool(false));
+        assert_eq!(props(1)["unexpected"], GraphValue::Bool(true));
+        // A page with nothing new writes nothing.
+        let quiet = CredentialsEvent::CertificatesReported {
+            log: "log-1".to_string(),
+            through: 3,
+            certificates: vec![],
+            timestamp: 3100,
+        };
+        assert!(graph_ops_for_event(&quiet, false).is_empty());
+        assert_eq!(event_timestamp(&event), 3000);
     }
 
     #[test]

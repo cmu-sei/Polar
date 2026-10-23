@@ -65,6 +65,7 @@ impl Pki {
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let cert = params.self_signed(&key).expect("a CA certificate");
         std::fs::write(dir.path().join("ca.pem"), cert.pem()).unwrap();
+        std::fs::write(dir.path().join("ca.key"), key.serialize_pem()).unwrap();
         let issuer = Issuer::new(params, key);
         let pki = Self { dir, issuer };
         pki.issue("server", "localhost", ExtendedKeyUsagePurpose::ServerAuth);
@@ -104,6 +105,11 @@ impl Pki {
 
     pub fn ca(&self) -> PathBuf {
         self.path("ca.pem")
+    }
+
+    /// The CA's key, for a test that runs cert-issuer as this CA.
+    pub fn ca_key(&self) -> PathBuf {
+        self.path("ca.key")
     }
 
     /// Issues the client certificate for `identity` carrying `uris` as URI names besides it, as cert-issuer writes
@@ -651,6 +657,24 @@ impl TestClient {
             .stop_and_wait(None, Some(Duration::from_secs(5)))
             .await
             .ok();
+    }
+
+    /// Payloads delivered on `topic` so far, in order, each with who the broker says published it.
+    pub fn received_from(&self, topic: &str) -> Vec<(Vec<u8>, Option<String>)> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                ClientEvent::MessagePublished {
+                    topic: t,
+                    payload,
+                    published_by,
+                    ..
+                } if t == topic => Some((payload.clone(), published_by.clone())),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Payloads delivered on `topic` so far, in order.

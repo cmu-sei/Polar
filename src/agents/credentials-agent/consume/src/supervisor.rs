@@ -193,6 +193,13 @@ pub enum ConsumerSupervisorMessage {
     RuntimeChanged { section: String },
     /// An agent asked for the current authority.
     AuthorityRequested,
+    /// Time to ask cert-issuer for its record again (docs/architecture/cert-issuer-isolation.md, "Step 2").
+    AskRecord,
+    /// cert-issuer's answer arrived, published (the broker says) by `published_by`.
+    RecordAnswered {
+        payload: Vec<u8>,
+        published_by: Option<String>,
+    },
 }
 
 /// How often the consumer says how many requests it has seen.
@@ -224,6 +231,8 @@ pub struct ConsumerSupervisorState {
     /// Requests seen, reported periodically so that silence can be told from idleness.
     activity: crate::activity::Activity,
     draining: bool,
+    /// Asks cert-issuer for its record; none with no authority model, or one with no cert-issuer.
+    record_asker: Option<ActorRef<crate::record_asker::RecordAskerMessage>>,
     /// The drain was started by `PrepareShutdown` (as opposed to a failure),
     /// so it ends by releasing the infrastructure and not by exiting.
     rejuvenating: bool,
@@ -574,6 +583,23 @@ impl ConsumerSupervisor {
         )
     }
 
+    /// cert-issuer's answers to this agent's requests for its record, each with who the broker says published it: the
+    /// asker takes an answer only from cert-issuer.
+    fn record_reply_subscription(supervisor: &ActorRef<ConsumerSupervisorMessage>) -> Subscription {
+        let supervisor = supervisor.clone();
+        Subscription::new(
+            cert_issuer_common::record::RECORD_REPLIES_TOPIC,
+            move |incoming| {
+                if let Err(e) = supervisor.send_message(ConsumerSupervisorMessage::RecordAnswered {
+                    payload: incoming.payload,
+                    published_by: incoming.published_by,
+                }) {
+                    warn!("could not pass on cert-issuer's answer for its record: {e}");
+                }
+            },
+        )
+    }
+
     /// Reads a replaced section and hands it to the publisher. A section that cannot be read says so and is
     /// left for the next republish; it is never published half-read.
     async fn pass_on_section(state: &ConsumerSupervisorState, section: &str) {
@@ -665,6 +691,7 @@ impl Actor for ConsumerSupervisor {
         let mut builder = AgentBuilder::new(myself.clone(), SERVICE_NAME)
             .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }));
         builder = builder.with_subscription(Self::authority_request_subscription(&myself));
+        builder = builder.with_subscription(Self::record_reply_subscription(&myself));
         for subscription in Self::request_subscriptions(&myself) {
             builder = builder.with_subscription(subscription);
         }
@@ -997,6 +1024,7 @@ impl Actor for ConsumerSupervisor {
         // converted to account IDs (docs/architecture/authority-model.md); what is accepted is what the publisher
         // puts in force, and what it does is recorded when it is published.
         let acceptances = crate::authority_judge::Acceptances::default();
+        let record_target = crate::record_asker::record_target(authority_model.as_deref());
         let configured = configured.with_section_judge(std::sync::Arc::new(
             crate::authority_judge::AuthorityJudge {
                 model: authority_model,
@@ -1081,6 +1109,36 @@ impl Actor for ConsumerSupervisor {
             ConsumerSupervisorMessage::ReportActivity
         }));
 
+        // cert-issuer's record of every certificate it signs, asked for when this agent registers and on an interval,
+        // so that no certificate it signs stays unknown here (docs/architecture/cert-issuer-isolation.md, "Step 2").
+        let record_asker = match record_target {
+            Some((cert_issuer, bootstrap)) => {
+                let (asker, _) = crate::record_asker::RecordAsker::spawn_linked(
+                    None,
+                    crate::record_asker::RecordAsker,
+                    crate::record_asker::RecordAskerArgs {
+                        client: resources.tcp_client.as_actor_ref(),
+                        ledger: ledger.clone(),
+                        cert_issuer,
+                        bootstrap: Some(bootstrap),
+                    },
+                    myself.get_cell(),
+                )
+                .await
+                .map_err(ActorProcessingErr::from)?;
+                drop(myself.send_interval(crate::record_asker::ASK_EVERY, || {
+                    ConsumerSupervisorMessage::AskRecord
+                }));
+                Some(asker)
+            }
+            None => {
+                warn!(
+                    "no authority model names cert-issuer, so its record of the certificates it signs is not asked for"
+                );
+                None
+            }
+        };
+
         Ok(ConsumerSupervisorState {
             projection_actor,
             ledger,
@@ -1091,6 +1149,7 @@ impl Actor for ConsumerSupervisor {
             infrastructure: resources.infrastructure,
             activity: crate::activity::Activity::new(),
             draining: false,
+            record_asker,
             rejuvenating: false,
         })
     }
@@ -1130,6 +1189,22 @@ impl Actor for ConsumerSupervisor {
                 let _ = state.publisher.cast(PublisherMessage::SnapshotRequested);
             }
 
+            ConsumerSupervisorMessage::AskRecord => {
+                if let Some(asker) = &state.record_asker {
+                    let _ = asker.send_message(crate::record_asker::RecordAskerMessage::Ask);
+                }
+            }
+            ConsumerSupervisorMessage::RecordAnswered {
+                payload,
+                published_by,
+            } => {
+                if let Some(asker) = &state.record_asker {
+                    let _ = asker.send_message(crate::record_asker::RecordAskerMessage::Answered {
+                        payload,
+                        published_by,
+                    });
+                }
+            }
             ConsumerSupervisorMessage::ReportActivity => {
                 let report = state.activity.take_report(std::time::Instant::now());
                 info!("CONSUMER_SUPERVISOR: {report}");
@@ -1213,6 +1288,10 @@ impl Actor for ConsumerSupervisor {
                         "CONSUMER_SUPERVISOR: registered; the builder subscribes to every request topic"
                     );
                     let _ = state.healthcheck.cassini_connected();
+                    // As soon as the two can talk: the bootstrap certificates were signed before this agent ran.
+                    if let Some(asker) = &state.record_asker {
+                        let _ = asker.send_message(crate::record_asker::RecordAskerMessage::Ask);
+                    }
                 }
                 ClientEvent::MessagePublished {
                     topic,
@@ -2801,5 +2880,77 @@ mod builder_wiring_tests {
             }
         }
         assert_eq!(forwarded, expected);
+    }
+
+    /// cert-issuer's answer reaches the asker with its broker-verified publisher intact: the asker takes an answer only
+    /// from cert-issuer, so losing or rewriting it would let anyone write the ledger's record.
+    #[tokio::test]
+    async fn cert_issuer_s_answer_is_forwarded_with_its_verified_publisher() {
+        /// Each answer's payload and publisher, as the supervisor was handed them.
+        type Handed = Arc<Mutex<Vec<(Vec<u8>, Option<String>)>>>;
+        struct Answers(Handed);
+
+        #[async_trait]
+        impl Actor for Answers {
+            type Msg = ConsumerSupervisorMessage;
+            type State = ();
+            type Arguments = ();
+
+            async fn pre_start(
+                &self,
+                _: ActorRef<Self::Msg>,
+                _: (),
+            ) -> Result<(), ActorProcessingErr> {
+                Ok(())
+            }
+
+            async fn handle(
+                &self,
+                _: ActorRef<Self::Msg>,
+                message: Self::Msg,
+                _: &mut (),
+            ) -> Result<(), ActorProcessingErr> {
+                if let ConsumerSupervisorMessage::RecordAnswered {
+                    payload,
+                    published_by,
+                } = message
+                {
+                    self.0.lock().unwrap().push((payload, published_by));
+                }
+                Ok(())
+            }
+        }
+
+        let answers = Arc::new(Mutex::new(Vec::new()));
+        let (supervisor, _) = Actor::spawn(None, Answers(answers.clone()), ())
+            .await
+            .unwrap();
+        let subscription = ConsumerSupervisor::record_reply_subscription(&supervisor);
+        assert_eq!(
+            subscription.topic,
+            cert_issuer_common::record::RECORD_REPLIES_TOPIC
+        );
+        for published_by in [
+            Some("cert-issuer.polar.serviceaccount.cluster.local".to_string()),
+            None,
+        ] {
+            (subscription.deliver)(polar_router::IncomingMessage {
+                topic: subscription.topic.clone(),
+                payload: vec![4, 5, 6],
+                published_by,
+                trace_ctx: None,
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            answers.lock().unwrap().clone(),
+            vec![
+                (
+                    vec![4, 5, 6],
+                    Some("cert-issuer.polar.serviceaccount.cluster.local".to_string())
+                ),
+                (vec![4, 5, 6], None),
+            ]
+        );
     }
 }

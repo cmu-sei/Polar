@@ -21,7 +21,9 @@
    DM26-0670
 */
 
-use credentials_agent_common::events::{CredentialsEvent, GrantReason, RevocationReason};
+use credentials_agent_common::events::{
+    CredentialsEvent, GrantReason, ReportedCertificate, RevocationReason,
+};
 use credentials_agent_common::issuance::WorkloadCertType;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -55,6 +57,9 @@ pub struct CertificateRecord {
     pub revoked_reason: Option<RevocationReason>,
     pub revoked_by: Option<String>,
     pub revoked_at: Option<i64>,
+    /// Learned from cert-issuer's record, not issued by the credentials agent itself: a bootstrap service's, or one
+    /// it asked for and lost (docs/architecture/cert-issuer-isolation.md, "Step 2").
+    pub reported: bool,
 }
 
 /// A currently-issued agent escrow-identity (CertType::Service)
@@ -206,6 +211,11 @@ pub struct CredentialsState {
     /// go on being refused for as long as it would otherwise be valid. Not a certificate replaced by a
     /// reissue: that is superseded, not revoked.
     revoked_serials: BTreeSet<String>,
+    /// The serial of every certificate the ledger has recorded, by any issuance or report: what a page of cert-issuer's
+    /// record is checked against, so nothing is recorded twice.
+    recorded_serials: BTreeSet<String>,
+    /// Where cert-issuer's record has been read to: its log, and its last entry read.
+    record_cursor: Option<(String, u64)>,
 
     /// The highest sequence number published to the agents (`AuthorityPublished`).
     last_authority_sequence: u64,
@@ -214,6 +224,163 @@ pub struct CredentialsState {
 impl CredentialsState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the ledger has recorded a certificate with this serial, by any issuance or report.
+    pub fn knows_serial(&self, serial: &str) -> bool {
+        self.recorded_serials.contains(serial)
+    }
+
+    /// Where cert-issuer's record has been read to: its log, and its last entry read. `None` before any page.
+    pub fn record_cursor(&self) -> Option<(String, u64)> {
+        self.record_cursor.clone()
+    }
+
+    /// Records a client or server certificate, issued or reported, and returns the serials it supersedes.
+    #[allow(clippy::too_many_arguments)]
+    fn record_workload_certificate(
+        &mut self,
+        identity: &str,
+        instance_binding: &str,
+        cert_type: WorkloadCertType,
+        serial: &str,
+        timestamp: i64,
+        certificate_pem: &str,
+        reported: bool,
+    ) -> Vec<String> {
+        let mut superseded = Vec::new();
+        self.recorded_serials.insert(serial.to_string());
+        // A reissue for the same identity supersedes any
+        // prior, still-valid certificate of the same type for it
+        // -- regardless of instance_binding, since a pod restart
+        // gets a fresh one. A client certificate and a server
+        // certificate are different things, and neither
+        // retires the other. Marked revoked in place, not
+        // removed, so the record survives. Done before
+        // inserting the new entry, so this can't mark the new
+        // one itself.
+        for record in self.valid_certificates.values_mut() {
+            if record.identity == identity && record.cert_type == cert_type && !record.revoked {
+                record.revoked = true;
+                record.revoked_reason = Some(RevocationReason::Superseded);
+                record.revoked_by = Some("system".to_string());
+                record.revoked_at = Some(timestamp);
+                superseded.push(record.serial.clone());
+            }
+        }
+
+        let key = (
+            identity.to_string(),
+            instance_binding.to_string(),
+            cert_type,
+        );
+        self.valid_certificates.insert(
+            key.clone(),
+            CertificateRecord {
+                identity: identity.to_string(),
+                instance_binding: instance_binding.to_string(),
+                cert_type,
+                serial: serial.to_string(),
+                timestamp,
+                certificate_pem: certificate_pem.to_string(),
+                revoked: false,
+                revoked_reason: None,
+                revoked_by: None,
+                revoked_at: None,
+                reported,
+            },
+        );
+        self.serial_index.insert(serial.to_string(), key);
+        superseded
+    }
+
+    /// The event a page of cert-issuer's record makes, or none: the certificates in it the ledger has not recorded, each
+    /// flagged unexpected when it was signed on a token alone for an identity not in `bootstrap` (the authority model's
+    /// bootstrap services; with no model, `None`, nothing can be called unexpected), and where the record was read to,
+    /// which in the same log never moves back (an answer to an older request can arrive after a newer one). None when
+    /// the page holds nothing new and moves nothing.
+    pub fn reported_page(
+        &self,
+        page: &cert_issuer_common::record::RecordReply,
+        bootstrap: Option<&BTreeSet<String>>,
+        now: i64,
+    ) -> Option<CredentialsEvent> {
+        use cert_issuer_common::record::IssuePath;
+        let last = page.entries.last()?.seq;
+        // In the same log the cursor never moves back: a page can arrive after a later one.
+        let read = match &self.record_cursor {
+            Some((log, read)) if *log == page.log => Some(*read),
+            _ => None,
+        };
+        let through = read.map_or(last, |read| read.max(last));
+        let certificates: Vec<ReportedCertificate> = page
+            .entries
+            .iter()
+            .filter(|e| !self.knows_serial(&e.serial))
+            .map(|e| ReportedCertificate {
+                seq: e.seq,
+                identity: e.identity.clone(),
+                instance_binding: e.instance_binding.clone(),
+                cert_type: e.cert_type.clone(),
+                path: e.path,
+                serial: e.serial.clone(),
+                signed_at: e.signed_at,
+                not_after: e.not_after,
+                certificate_pem: e.certificate_pem.clone(),
+                unexpected: e.path == IssuePath::TokenOnly
+                    && bootstrap.is_some_and(|b| !b.contains(&e.identity)),
+            })
+            .collect();
+        if certificates.is_empty() && read.is_some_and(|read| through <= read) {
+            return None;
+        }
+        Some(CredentialsEvent::CertificatesReported {
+            log: page.log.clone(),
+            through,
+            certificates,
+            timestamp: now,
+        })
+    }
+
+    /// Records a certificate cert-issuer reported: a client or server certificate as an issued one, an agent's escrow
+    /// certificate as its escrow certificate, and an account's by its serial alone, since which account it is cannot
+    /// be known from the record. Returns the serials it supersedes.
+    fn record_reported(&mut self, c: &ReportedCertificate) -> Vec<String> {
+        use cert_issuer_common::CertType;
+        use cert_issuer_common::record::IssuePath;
+        self.recorded_serials.insert(c.serial.clone());
+        let binding = c.instance_binding.clone().unwrap_or_default();
+        match (c.path, &c.cert_type) {
+            (IssuePath::Internal, _) => Vec::new(),
+            (_, CertType::Service) => {
+                self.agent_escrow_certificates.insert(
+                    c.identity.clone(),
+                    AgentEscrowCertificateRecord {
+                        instance_binding: binding,
+                        serial: c.serial.clone(),
+                        timestamp: c.signed_at,
+                        certificate_pem: c.certificate_pem.clone(),
+                    },
+                );
+                Vec::new()
+            }
+            (_, cert_type) => {
+                let cert_type = if *cert_type == CertType::Server {
+                    WorkloadCertType::Server
+                } else {
+                    WorkloadCertType::Client
+                };
+                self.record_workload_certificate(
+                    &c.identity,
+                    &binding,
+                    cert_type,
+                    &c.serial,
+                    c.signed_at,
+                    &c.certificate_pem,
+                    true,
+                )
+            }
+        }
     }
 
     /// The serial of every certificate that was explicitly revoked, in order.
@@ -305,45 +472,15 @@ impl CredentialsState {
                     self.active_grants.remove(key);
                 }
 
-                // A reissue for the same identity supersedes any
-                // prior, still-valid certificate of the same type for it
-                // -- regardless of instance_binding, since a pod restart
-                // gets a fresh one. A client certificate and a server
-                // certificate are different things, and neither
-                // retires the other. Marked revoked in place, not
-                // removed, so the record survives. Done before
-                // inserting the new entry, so this can't mark the new
-                // one itself.
-                for record in self.valid_certificates.values_mut() {
-                    if record.identity == *identity
-                        && record.cert_type == *cert_type
-                        && !record.revoked
-                    {
-                        record.revoked = true;
-                        record.revoked_reason = Some(RevocationReason::Superseded);
-                        record.revoked_by = Some("system".to_string());
-                        record.revoked_at = Some(*timestamp);
-                        superseded_serials.push(record.serial.clone());
-                    }
-                }
-
-                let key = (identity.clone(), instance_binding.clone(), *cert_type);
-                self.valid_certificates.insert(
-                    key.clone(),
-                    CertificateRecord {
-                        identity: identity.clone(),
-                        instance_binding: instance_binding.clone(),
-                        cert_type: *cert_type,
-                        serial: serial.clone(),
-                        timestamp: *timestamp,
-                        certificate_pem: certificate_pem.clone(),
-                        revoked: false,
-                        revoked_reason: None,
-                        revoked_by: None,
-                        revoked_at: None,
-                    },
-                );
-                self.serial_index.insert(serial.clone(), key);
+                superseded_serials.extend(self.record_workload_certificate(
+                    identity,
+                    instance_binding,
+                    *cert_type,
+                    serial,
+                    *timestamp,
+                    certificate_pem,
+                    false,
+                ));
             }
             CredentialsEvent::Revoke {
                 serial,
@@ -375,6 +512,18 @@ impl CredentialsState {
             }
             // A refused document changes nothing the state holds.
             CredentialsEvent::AuthorityRefused { .. } => {}
+            // A page of cert-issuer's record: each certificate as the kind it is, and where the record was read to.
+            CredentialsEvent::CertificatesReported {
+                log,
+                through,
+                certificates,
+                ..
+            } => {
+                for c in certificates {
+                    superseded_serials.extend(self.record_reported(c));
+                }
+                self.record_cursor = Some((log.clone(), *through));
+            }
             CredentialsEvent::SecretStored {
                 name,
                 secret,
@@ -402,6 +551,7 @@ impl CredentialsState {
                 timestamp,
                 certificate_pem,
             } => {
+                self.recorded_serials.insert(serial.clone());
                 self.agent_escrow_certificates.insert(
                     identity.clone(),
                     AgentEscrowCertificateRecord {
@@ -452,6 +602,7 @@ impl CredentialsState {
                 timestamp,
                 certificate_pem,
             } => {
+                self.recorded_serials.insert(serial.clone());
                 // Carry the provisioned permissions and capabilities
                 // across the claim. A missing pending record can't
                 // happen through the handlers, and if it ever did, none
@@ -1427,6 +1578,481 @@ pub(crate) mod tests {
         assert_eq!(state.grant_for("alice").unwrap().granted_by, "admin-acct");
         assert!(state.admin_action_seen(&hash));
         assert!(!state.admin_action_seen("some-other-hash"));
+    }
+    // -- cert-issuer's record (docs/architecture/cert-issuer-isolation.md, "Step 2") ----------------------------------
+
+    fn reported(
+        seq: u64,
+        identity: &str,
+        cert_type: cert_issuer_common::CertType,
+        serial: &str,
+    ) -> ReportedCertificate {
+        ReportedCertificate {
+            seq,
+            identity: identity.to_string(),
+            instance_binding: Some(format!("pod-{seq}")),
+            cert_type,
+            path: cert_issuer_common::record::IssuePath::TokenOnly,
+            serial: serial.to_string(),
+            signed_at: 1000 + seq as i64,
+            not_after: 5000,
+            certificate_pem: format!("pem {serial}"),
+            unexpected: false,
+        }
+    }
+
+    fn page(log: &str, through: u64, certificates: Vec<ReportedCertificate>) -> CredentialsEvent {
+        CredentialsEvent::CertificatesReported {
+            log: log.to_string(),
+            through,
+            certificates,
+            timestamp: 3000,
+        }
+    }
+
+    const CASSINI: &str = "cassini.polar.serviceaccount.cluster.local";
+
+    #[test]
+    fn a_reported_certificate_is_found_superseded_and_revoked_like_an_issued_one() {
+        let mut state = CredentialsState::default();
+        state.apply(&page(
+            "log-1",
+            1,
+            vec![reported(
+                1,
+                CASSINI,
+                cert_issuer_common::CertType::Client,
+                "r1",
+            )],
+        ));
+        let found = state
+            .certificate_for(CASSINI)
+            .expect("a reported certificate is found by its identity");
+        assert_eq!(found.serial, "r1");
+        assert!(found.reported, "and marked as reported by cert-issuer");
+
+        // A newer one for the same identity supersedes it.
+        let superseded = state.apply(&page(
+            "log-1",
+            2,
+            vec![reported(
+                2,
+                CASSINI,
+                cert_issuer_common::CertType::Client,
+                "r2",
+            )],
+        ));
+        assert_eq!(superseded, vec!["r1".to_string()]);
+        assert_eq!(state.certificate_for(CASSINI).unwrap().serial, "r2");
+
+        // And it can be revoked by its serial.
+        state.apply(&CredentialsEvent::Revoke {
+            serial: "r2".to_string(),
+            reason: RevocationReason::Compromised,
+            revoked_by: "an-admin".to_string(),
+            timestamp: 4000,
+        });
+        assert!(state.certificate_for(CASSINI).is_none());
+        assert!(state.revoked_serials().contains(&"r2".to_string()));
+    }
+
+    #[test]
+    fn a_reported_service_certificate_is_its_identity_s_escrow_certificate() {
+        let mut state = CredentialsState::default();
+        state.apply(&page(
+            "log-1",
+            1,
+            vec![reported(
+                1,
+                "kube-consumer.polar.serviceaccount.cluster.local",
+                cert_issuer_common::CertType::Service,
+                "e1",
+            )],
+        ));
+        let escrow = state
+            .agent_escrow_certificate_for("kube-consumer.polar.serviceaccount.cluster.local")
+            .expect("an escrow certificate");
+        assert_eq!(escrow.serial, "e1");
+        assert!(
+            state
+                .certificate_for("kube-consumer.polar.serviceaccount.cluster.local")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_reported_account_certificate_is_known_by_its_serial_alone() {
+        let mut state = CredentialsState::default();
+        let mut account = reported(1, "an-account", cert_issuer_common::CertType::Client, "a1");
+        account.path = cert_issuer_common::record::IssuePath::Internal;
+        state.apply(&page("log-1", 1, vec![account]));
+        assert!(state.knows_serial("a1"));
+        assert!(
+            state.certificate_for("an-account").is_none(),
+            "which account it is cannot be known from the record"
+        );
+    }
+
+    #[test]
+    fn every_serial_the_ledger_has_recorded_is_known_and_no_other() {
+        let mut state = CredentialsState::default();
+        state.apply(&issued(CASSINI, "pod-1", "w1"));
+        state.apply(&agent_escrow_issued(
+            "kube-consumer.polar.serviceaccount.cluster.local",
+            "pod-2",
+            "e1",
+        ));
+        // A second escrow certificate for the same identity replaces the first in its record; the first's serial is
+        // still one the ledger recorded.
+        state.apply(&agent_escrow_issued(
+            "kube-consumer.polar.serviceaccount.cluster.local",
+            "pod-3",
+            "e2",
+        ));
+        state.apply(&account_issued("alice", "alice-id", "a1"));
+        state.apply(&page(
+            "log-1",
+            1,
+            vec![reported(
+                1,
+                CASSINI,
+                cert_issuer_common::CertType::Client,
+                "r1",
+            )],
+        ));
+        for serial in ["w1", "e1", "e2", "a1", "r1"] {
+            assert!(state.knows_serial(serial), "{serial}");
+        }
+        assert!(!state.knows_serial("never"));
+    }
+
+    #[test]
+    fn the_cursor_is_the_last_page_s_and_comes_back_the_same_on_a_replay() {
+        let events = vec![
+            page(
+                "log-1",
+                3,
+                vec![reported(
+                    2,
+                    CASSINI,
+                    cert_issuer_common::CertType::Client,
+                    "r1",
+                )],
+            ),
+            page("log-1", 7, vec![]),
+        ];
+        let mut state = CredentialsState::default();
+        assert_eq!(state.record_cursor(), None, "nothing read yet");
+        for e in &events {
+            state.apply(e);
+        }
+        assert_eq!(state.record_cursor(), Some(("log-1".to_string(), 7)));
+        let mut replayed = CredentialsState::default();
+        for e in &events {
+            replayed.apply(e);
+        }
+        assert_eq!(replayed.record_cursor(), state.record_cursor());
+        assert_eq!(
+            replayed.certificate_for(CASSINI).map(|r| r.serial.clone()),
+            Some("r1".to_string())
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// Whatever the ledger records, by issuance or by report, it knows the serial of; and it knows no serial it
+        /// never recorded.
+        #[test]
+        fn the_ledger_knows_exactly_the_serials_it_recorded(
+            events in proptest::collection::vec((0u8..4, 0u32..40), 0..30),
+        ) {
+            let mut state = CredentialsState::default();
+            let mut recorded = std::collections::BTreeSet::new();
+            for (n, (kind, id)) in events.iter().enumerate() {
+                let serial = format!("s{n}-{id}");
+                let identity = format!("w{id}.polar.serviceaccount.cluster.local");
+                let event = match kind {
+                    0 => issued(&identity, "pod", &serial),
+                    1 => agent_escrow_issued(&identity, "pod", &serial),
+                    2 => account_issued(&format!("u{n}"), &format!("acct-{n}"), &serial),
+                    _ => page("log", n as u64 + 1, vec![reported(n as u64 + 1, &identity, cert_issuer_common::CertType::Client, &serial)]),
+                };
+                state.apply(&event);
+                recorded.insert(serial);
+            }
+            for serial in &recorded {
+                proptest::prop_assert!(state.knows_serial(serial), "{}", serial);
+            }
+            proptest::prop_assert!(!state.knows_serial("not-recorded"));
+        }
+    }
+
+    fn entry(
+        seq: u64,
+        identity: &str,
+        path: cert_issuer_common::record::IssuePath,
+        serial: &str,
+    ) -> cert_issuer_common::record::RecordEntry {
+        cert_issuer_common::record::RecordEntry {
+            log: "log-1".to_string(),
+            seq,
+            serial: serial.to_string(),
+            identity: identity.to_string(),
+            cert_type: cert_issuer_common::CertType::Client,
+            path,
+            instance_binding: Some("pod".to_string()),
+            signed_at: 1000,
+            not_after: 5000,
+            certificate_pem: format!("pem {serial}"),
+        }
+    }
+
+    fn reply(
+        log: &str,
+        entries: Vec<cert_issuer_common::record::RecordEntry>,
+    ) -> cert_issuer_common::record::RecordReply {
+        cert_issuer_common::record::RecordReply {
+            log: log.to_string(),
+            entries,
+            more: false,
+        }
+    }
+
+    fn bootstrap() -> BTreeSet<String> {
+        [CASSINI.to_string()].into_iter().collect()
+    }
+
+    fn reported_of(event: &CredentialsEvent) -> Vec<(String, bool)> {
+        match event {
+            CredentialsEvent::CertificatesReported { certificates, .. } => certificates
+                .iter()
+                .map(|c| (c.serial.clone(), c.unexpected))
+                .collect(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_page_s_certificates_the_ledger_does_not_hold_are_recorded_and_those_it_holds_are_not() {
+        use cert_issuer_common::record::IssuePath;
+        let mut state = CredentialsState::default();
+        state.apply(&issued(
+            "kube-observer.polar.serviceaccount.cluster.local",
+            "pod",
+            "issued-here",
+        ));
+        let page = reply(
+            "log-1",
+            vec![
+                entry(
+                    1,
+                    "kube-observer.polar.serviceaccount.cluster.local",
+                    IssuePath::Vouched,
+                    "issued-here",
+                ),
+                entry(2, CASSINI, IssuePath::TokenOnly, "cassini-1"),
+            ],
+        );
+        let event = state
+            .reported_page(&page, Some(&bootstrap()), 7)
+            .expect("an event");
+        assert_eq!(reported_of(&event), vec![("cassini-1".to_string(), false)]);
+        match &event {
+            CredentialsEvent::CertificatesReported {
+                log,
+                through,
+                timestamp,
+                ..
+            } => {
+                assert_eq!((log.as_str(), *through, *timestamp), ("log-1", 2, 7));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_token_only_certificate_for_anything_but_a_bootstrap_service_is_unexpected() {
+        use cert_issuer_common::record::IssuePath;
+        let state = CredentialsState::default();
+        let page = reply(
+            "log-1",
+            vec![
+                entry(1, CASSINI, IssuePath::TokenOnly, "bootstrap"),
+                entry(
+                    2,
+                    "kube-observer.polar.serviceaccount.cluster.local",
+                    IssuePath::TokenOnly,
+                    "not-bootstrap",
+                ),
+                entry(
+                    3,
+                    "kube-observer.polar.serviceaccount.cluster.local",
+                    IssuePath::Vouched,
+                    "vouched",
+                ),
+                entry(
+                    4,
+                    "cert-issuer.polar.svc.cluster.local",
+                    IssuePath::Own,
+                    "own",
+                ),
+            ],
+        );
+        let event = state.reported_page(&page, Some(&bootstrap()), 7).unwrap();
+        assert_eq!(
+            reported_of(&event),
+            vec![
+                ("bootstrap".to_string(), false),
+                ("not-bootstrap".to_string(), true),
+                ("vouched".to_string(), false),
+                ("own".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn with_no_model_no_certificate_can_be_called_unexpected() {
+        use cert_issuer_common::record::IssuePath;
+        let state = CredentialsState::default();
+        let page = reply(
+            "log-1",
+            vec![entry(
+                1,
+                "kube-observer.polar.serviceaccount.cluster.local",
+                IssuePath::TokenOnly,
+                "t",
+            )],
+        );
+        let event = state.reported_page(&page, None, 7).unwrap();
+        assert_eq!(reported_of(&event), vec![("t".to_string(), false)]);
+    }
+
+    #[test]
+    fn a_page_that_moves_nothing_makes_no_event_and_one_that_moves_the_cursor_does() {
+        use cert_issuer_common::record::IssuePath;
+        let mut state = CredentialsState::default();
+        let first = reply("log-1", vec![entry(1, CASSINI, IssuePath::TokenOnly, "c1")]);
+        state.apply(&state.reported_page(&first, Some(&bootstrap()), 7).unwrap());
+        assert!(
+            state.reported_page(&first, Some(&bootstrap()), 8).is_none(),
+            "the same page again moves nothing"
+        );
+        assert!(
+            state
+                .reported_page(&reply("log-1", vec![]), Some(&bootstrap()), 8)
+                .is_none(),
+            "an empty page moves nothing"
+        );
+        // Only known certificates, further on: the cursor moves, and nothing is recorded twice.
+        let known = reply("log-1", vec![entry(2, CASSINI, IssuePath::TokenOnly, "c1")]);
+        let event = state
+            .reported_page(&known, Some(&bootstrap()), 9)
+            .expect("the cursor moves");
+        assert!(reported_of(&event).is_empty());
+    }
+
+    #[test]
+    fn a_late_page_s_unknown_certificates_are_recorded_and_the_cursor_never_moves_back() {
+        use cert_issuer_common::record::IssuePath;
+        let mut state = CredentialsState::default();
+        state.apply(
+            &state
+                .reported_page(
+                    &reply(
+                        "log-1",
+                        vec![entry(10, CASSINI, IssuePath::TokenOnly, "c10")],
+                    ),
+                    Some(&bootstrap()),
+                    7,
+                )
+                .unwrap(),
+        );
+        // An answer to an older request, arriving after a newer one.
+        let late = reply("log-1", vec![entry(1, CASSINI, IssuePath::TokenOnly, "c1")]);
+        let event = state
+            .reported_page(&late, Some(&bootstrap()), 8)
+            .expect("its certificate is not lost");
+        assert_eq!(reported_of(&event), vec![("c1".to_string(), false)]);
+        state.apply(&event);
+        assert_eq!(
+            state.record_cursor(),
+            Some(("log-1".to_string(), 10)),
+            "not moved back"
+        );
+    }
+
+    #[test]
+    fn a_page_from_another_log_is_taken_from_its_start() {
+        use cert_issuer_common::record::IssuePath;
+        let mut state = CredentialsState::default();
+        state.apply(
+            &state
+                .reported_page(
+                    &reply("log-1", vec![entry(5, CASSINI, IssuePath::TokenOnly, "c5")]),
+                    Some(&bootstrap()),
+                    7,
+                )
+                .unwrap(),
+        );
+        // cert-issuer's log was replaced: its numbers start again.
+        let fresh = reply(
+            "log-2",
+            vec![entry(1, CASSINI, IssuePath::TokenOnly, "fresh")],
+        );
+        let event = state
+            .reported_page(&fresh, Some(&bootstrap()), 8)
+            .expect("another log's page is taken");
+        assert_eq!(reported_of(&event), vec![("fresh".to_string(), false)]);
+        state.apply(&event);
+        assert_eq!(state.record_cursor(), Some(("log-2".to_string(), 1)));
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// However the pages come (repeated, overlapping, out of order, from a replaced log), no certificate is
+        /// recorded twice, every certificate in any page ends up recorded, and the cursor never moves back in a log.
+        #[test]
+        fn no_certificate_is_recorded_twice_whatever_the_pages(
+            pages in proptest::collection::vec(
+                (0u8..2, proptest::collection::vec(0u64..12, 0..5)),
+                0..12,
+            ),
+        ) {
+            use cert_issuer_common::record::IssuePath;
+            let mut state = CredentialsState::default();
+            let mut recorded: Vec<String> = Vec::new();
+            let mut offered = std::collections::BTreeSet::new();
+            for (log, seqs) in &pages {
+                let log = format!("log-{log}");
+                let mut seqs = seqs.clone();
+                seqs.sort();
+                seqs.dedup();
+                let entries: Vec<_> = seqs.iter().map(|n| {
+                    let serial = format!("{log}-{n}");
+                    offered.insert(serial.clone());
+                    let mut e = entry(*n + 1, CASSINI, IssuePath::TokenOnly, &serial);
+                    e.log = log.clone();
+                    e
+                }).collect();
+                let before = state.record_cursor();
+                if let Some(event) = state.reported_page(&reply(&log, entries), Some(&bootstrap()), 7) {
+                    recorded.extend(reported_of(&event).into_iter().map(|(s, _)| s));
+                    state.apply(&event);
+                }
+                if let (Some((was_log, was)), Some((now_log, now))) = (before, state.record_cursor())
+                    && was_log == now_log
+                {
+                    proptest::prop_assert!(now >= was, "the cursor moved back: {} to {}", was, now);
+                }
+            }
+            let distinct: std::collections::BTreeSet<_> = recorded.iter().cloned().collect();
+            proptest::prop_assert_eq!(distinct.len(), recorded.len(), "recorded twice: {:?}", recorded);
+            for serial in &offered {
+                proptest::prop_assert!(state.knows_serial(serial), "{}", serial);
+            }
+        }
     }
 }
 

@@ -724,7 +724,7 @@ now a catalog workload, so its topics come from its scaffold into its floor entr
   answered; a reply from anyone else is not taken.
   *2b built, cert-issuer's side (2026-10-23).*
   - **Topics:** cert-issuer subscribes to `cert-issuer-record-requests` and publishes `cert-issuer-record-replies`
-    `because` of it, both marked `waiting` until 2c's side exists.
+    `because` of it. Both were marked `waiting` until 2c's side existed; 2c took the marks off.
   - **The supervisor** turns each request into a message, answers it with `RecordingCa::answer`, and publishes the
     reply.
   - **`answer`** replies only to a request whose broker-verified publisher is one of its internal callers (the
@@ -741,6 +741,79 @@ now a catalog workload, so its topics come from its scaffold into its floor entr
   as unexpected (a warning, and in the graph). Tests: a reported certificate is found and superseded like an issued
   one; one the ledger holds is not recorded twice; the cursor survives a replay; an unexpected entry is flagged;
   end to end, a bootstrap service's certificate signed by cert-issuer reaches the ledger.
+  *2c built (2026-10-23).*
+  - **One event per page,** `CredentialsEvent::CertificatesReported { log, through, certificates, timestamp }`
+    (`credentials-agent/common/src/events.rs`), not one per certificate: the cursor and the certificates it passed
+    over move together, in one append. Each certificate is a `ReportedCertificate`: the entry, and whether it is
+    `unexpected`.
+  - **The state** (`credentials-agent/consume/src/state.rs`):
+    - `recorded_serials` holds every serial the ledger has recorded, by issuance or report. `knows_serial` asks it.
+    - `reported_page` makes the event, or none, from a page. A certificate whose serial is known is left out. The
+      cursor never moves back in the same log, since an answer to an older request can arrive after a newer one (a
+      property found this). A page from another log is read from its start.
+    - `record_reported` folds a certificate by what it is. A client or server certificate becomes a
+      `CertificateRecord` with `reported: true`, through the same `record_workload_certificate` that
+      `IssuanceCompleted` uses, so it is found, superseded and revoked like an issued one. An agent's escrow
+      (`Service`) certificate becomes its escrow certificate. An account's (`Internal`) is recorded by its serial
+      alone, since the record cannot say which account it is.
+    - `unexpected`: signed on a token alone (`TokenOnly`) for an identity that is not one of the model's bootstrap
+      services. With no model, nothing is called unexpected.
+  - **The ledger** (`ledger.rs`) answers `RecordCursor` and takes `TakeRecordPage`, appending the event when there is
+    one and warning for each unexpected certificate. The projection writes reported certificates to the graph with
+    `reported`, `path` and `unexpected`.
+  - **The asker** (`record_asker.rs`):
+    - `record_target` reads from the authority model whom to ask: cert-issuer's identity, and the bootstrap
+      services' identities, for what is unexpected. With no model, or a model without cert-issuer, nothing is asked,
+      with a warning.
+    - On `Ask`, it publishes a `RecordRequest` after the ledger's cursor.
+    - On an answer, `accepted` takes it only if the broker says cert-issuer published it and it reads. The ledger
+      takes the page, and while the reply says there is more, it asks again at once.
+  - **The supervisor** (`supervisor.rs`) subscribes to the replies and spawns the asker. It sends `Ask` when the agent
+    registers with Cassini and every 30 seconds (`ASK_EVERY`), and forwards each reply to the asker.
+  - **The declarations:** the credentials agent publishes `cert-issuer-record-requests` because of `Registered` and
+    the timer `record`, and subscribes to `cert-issuer-record-replies`. cert-issuer's two `waiting` marks are gone.
+
+  Tests:
+  - a reported certificate is found, superseded and revoked like an issued one; an escrow certificate is its
+    identity's escrow certificate; an account's is known by its serial;
+  - in the graph, a reported certificate says how it was learned;
+  - one the ledger holds is not recorded twice;
+  - the cursor survives a replay and a restart of the ledger;
+  - an unexpected entry is flagged;
+  - a late page's unknown certificates are recorded, and the cursor does not move back;
+  - another log is read from its start;
+  - a property that no certificate is recorded twice, whatever the pages and their order;
+  - the asker asks after the cursor, asks again while there is more and not when there is none, and takes no answer
+    from anyone but cert-issuer;
+  - `record_target` from the model;
+  - the supervisor's reply subscription hands each answer on with its broker-verified publisher intact.
+  - **End to end** (`cert-issuer/server/tests/agent_record_test.rs`): cert-issuer is run whole as the CA of the
+    broker harness's real broker (`cassini/broker/tests/support`). The broker enforces, with no policy set. The
+    credentials agent's asker and ledger work over a harness client.
+    - Each side may use the record's topics because its certificate names them. cert-issuer writes its own from its
+      floor entry, as the catalog writes the entry from its scaffold.
+    - The ledger reads both of the certificates cert-issuer signs at start, and holds its client certificate as a
+      reported one. Every reply was published by cert-issuer, as the broker knows it.
+    - Anyone else is kept out twice. The broker refuses an agent whose certificate does not name the topics, both
+      its request and its subscription to the replies. An agent whose certificate names the requests topic (granted
+      in error) gets past the broker, and cert-issuer does not answer it.
+  - **`infra/tests/catalog-topics.nu`** now reads cert-issuer's scaffold. It had taken only kind `agent` since 1c made
+    cert-issuer kind `ca`, and the `waiting` marks hid that. With both sides in the catalog, every record topic has
+    its other side.
+
+  Mutation-checked:
+  - cargo-mutants on the 2c changes: 57 mutants, 50 caught, 5 unviable, 2 missed.
+    - The asker asking again when a reply said there was no more became a test.
+    - Deleting the supervisor's `Registered` arm (the health signal, and now the first ask) is not caught. No unit
+      test runs the whole supervisor; this arm's health signal was untested before 2c too.
+  - By hand, all caught:
+    - the reply subscription dropping the publisher;
+    - cert-issuer answering anyone (the end-to-end test counts one answer too many);
+    - cert-issuer leaving its publish names out of its own certificate (the enforcing broker refuses its replies,
+      and the ledger never reads the record).
+
+  Not tested here: the supervisor's ask on registering and its timer, plumbing with no decision in them. They are
+  seen at deployment (slice 10), where the ledger's cursor shows whether the record is being read.
 - **Not in step 2:** retention (dropping entries asked past and expired: the log grows about a megabyte a day at the
   sandbox's rate) and the narrowed Cassini route of `core-restarts.md`.
 

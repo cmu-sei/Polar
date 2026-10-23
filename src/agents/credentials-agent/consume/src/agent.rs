@@ -106,6 +106,16 @@ impl PolarAgent for CredentialsConsumer {
             credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC,
             "an agent asking for the current policy and permissions",
         ),
+        // cert-issuer's record of every certificate it signs (docs/architecture/cert-issuer-isolation.md, "Step 2").
+        TopicDecl::publish(
+            cert_issuer_common::record::RECORD_REQUESTS_TOPIC,
+            "asking cert-issuer for its record, after the last entry the ledger holds",
+        )
+        .because(&[Cause::Registered, Cause::Timer("record")]),
+        TopicDecl::subscribe(
+            cert_issuer_common::record::RECORD_REPLIES_TOPIC,
+            "a page of cert-issuer's record, from cert-issuer alone",
+        ),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC,
             "the answer to an administrator action",

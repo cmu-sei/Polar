@@ -50,16 +50,14 @@ impl PolarAgent for CertIssuer {
         TopicDecl::subscribe(
             cert_issuer_common::record::RECORD_REQUESTS_TOPIC,
             "the credentials agent asking for the record, after the last entry it holds",
-        )
-        .waiting("the credentials agent asks in step 2c"),
+        ),
         TopicDecl::publish(
             cert_issuer_common::record::RECORD_REPLIES_TOPIC,
             "a page of the record, in answer",
         )
         .because(&[Cause::Topic(
             cert_issuer_common::record::RECORD_REQUESTS_TOPIC,
-        )])
-        .waiting("the credentials agent asks in step 2c"),
+        )]),
     ];
     const HELP: Option<&'static str> = Some(
         "cert-issuer signs Polar's certificates. A caller with only a service account token is signed what the floor \

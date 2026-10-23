@@ -36,7 +36,19 @@ pub const RECORD_REPLIES_TOPIC: &str = "cert-issuer-record-replies";
 pub const RECORD_PAGE: usize = 100;
 
 /// How a certificate came to be signed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum IssuePath {
     /// On a token alone, by the floor: a bootstrap service's, cert-issuer's own client certificate among them.

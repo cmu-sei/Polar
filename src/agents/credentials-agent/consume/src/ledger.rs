@@ -136,6 +136,20 @@ pub enum LedgerMessage {
         cert_type: WorkloadCertType,
         reply: RpcReplyPort<bool>,
     },
+    /// Where cert-issuer's record has been read to (docs/architecture/cert-issuer-isolation.md, "Step 2"): its log and its
+    /// last entry read, or none before any page.
+    RecordCursor {
+        reply: RpcReplyPort<Option<(String, u64)>>,
+    },
+    /// Takes a page of cert-issuer's record: its certificates the ledger has not recorded are recorded, each flagged
+    /// unexpected when signed on a token alone for an identity not in `bootstrap` (none: no model, so nothing can be
+    /// called unexpected), and the cursor moves, in one
+    /// append. Nothing is appended for a page that holds nothing new and moves nothing. Replies with the cursor.
+    TakeRecordPage {
+        page: cert_issuer_common::record::RecordReply,
+        bootstrap: Option<std::collections::BTreeSet<String>>,
+        reply: RpcReplyPort<Result<Option<(String, u64)>, String>>,
+    },
     /// The current, non-revoked certificate for `identity`, if any --
     /// regardless of instance_binding. Backs the certificate-lookup
     /// query: one agent asking for another's public cert so it can
@@ -352,6 +366,37 @@ impl Actor for LedgerActor {
                 );
                 let _ = reply.send(has_valid);
             }
+            LedgerMessage::RecordCursor { reply } => {
+                let _ = reply.send(state.credentials_state.record_cursor());
+            }
+            LedgerMessage::TakeRecordPage {
+                page,
+                bootstrap,
+                reply,
+            } => {
+                let now = polar::time::now_millis();
+                let result = match state.credentials_state.reported_page(
+                    &page,
+                    bootstrap.as_ref(),
+                    now,
+                ) {
+                    None => Ok(()),
+                    Some(event) => {
+                        if let CredentialsEvent::CertificatesReported { certificates, .. } = &event
+                        {
+                            for c in certificates.iter().filter(|c| c.unexpected) {
+                                tracing::warn!(
+                                    identity = %c.identity,
+                                    serial = %c.serial,
+                                    "cert-issuer signed a certificate on a token alone for an identity that is not a bootstrap service"
+                                );
+                            }
+                        }
+                        append_and_project(state, &event)
+                    }
+                };
+                let _ = reply.send(result.map(|()| state.credentials_state.record_cursor()));
+            }
             LedgerMessage::CheckCertificate { identity, reply } => {
                 let record = state.credentials_state.certificate_for(&identity).cloned();
                 let _ = reply.send(record);
@@ -468,7 +513,7 @@ pub(crate) mod tests {
         .unwrap();
     }
 
-    async fn spawn_ledger(log_path: &str) -> ActorRef<LedgerMessage> {
+    pub(crate) async fn spawn_ledger(log_path: &str) -> ActorRef<LedgerMessage> {
         let (ledger, _) = Actor::spawn(
             None,
             LedgerActor,
@@ -729,6 +774,80 @@ pub(crate) mod tests {
             "one announcement per new serial"
         );
         ledger.stop(None);
+    }
+
+    async fn take_page(
+        ledger: &ActorRef<LedgerMessage>,
+        page: cert_issuer_common::record::RecordReply,
+    ) -> Result<Option<(String, u64)>, String> {
+        let bootstrap = Some(
+            ["cassini.polar.serviceaccount.cluster.local".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        ractor::call!(ledger, |reply| LedgerMessage::TakeRecordPage {
+            page,
+            bootstrap,
+            reply
+        })
+        .unwrap()
+    }
+
+    async fn record_cursor(ledger: &ActorRef<LedgerMessage>) -> Option<(String, u64)> {
+        ractor::call!(ledger, |reply| LedgerMessage::RecordCursor { reply }).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_page_of_cert_issuer_s_record_is_recorded_durably_and_found_after_a_restart() {
+        use cert_issuer_common::record::{IssuePath, RecordEntry, RecordReply};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let ledger = spawn_ledger(path.to_str().unwrap()).await;
+        assert_eq!(record_cursor(&ledger).await, None);
+        let page = RecordReply {
+            log: "log-1".to_string(),
+            entries: vec![RecordEntry {
+                log: "log-1".to_string(),
+                seq: 3,
+                serial: "c3".to_string(),
+                identity: "cassini.polar.serviceaccount.cluster.local".to_string(),
+                // A client certificate: the lookup is of a requester's (state.rs, certificate_for).
+                cert_type: cert_issuer_common::CertType::Client,
+                path: IssuePath::TokenOnly,
+                instance_binding: Some("pod".to_string()),
+                signed_at: 1000,
+                not_after: 5000,
+                certificate_pem: "pem".to_string(),
+            }],
+            more: false,
+        };
+        assert_eq!(
+            take_page(&ledger, page.clone()).await,
+            Ok(Some(("log-1".to_string(), 3)))
+        );
+        let lines = std::fs::read_to_string(&path).unwrap().lines().count();
+        // The same page again appends nothing.
+        assert_eq!(
+            take_page(&ledger, page).await,
+            Ok(Some(("log-1".to_string(), 3)))
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().lines().count(),
+            lines
+        );
+        ledger.stop(None);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let again = spawn_ledger(path.to_str().unwrap()).await;
+        assert_eq!(record_cursor(&again).await, Some(("log-1".to_string(), 3)));
+        let found = ractor::call!(again, |reply| LedgerMessage::CheckCertificate {
+            identity: "cassini.polar.serviceaccount.cluster.local".to_string(),
+            reply,
+        })
+        .unwrap()
+        .expect("a reported certificate is found after a restart");
+        assert_eq!(found.serial, "c3");
+        assert!(found.reported);
     }
 
     #[tokio::test]
