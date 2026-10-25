@@ -42,9 +42,10 @@ export def pick_registry [from_env: string, from_target: any, default: string] {
 }
 
 # What a target's own cluster settings say about the registry, or null. A target that keeps its registry in the cluster
-# (infra/cluster-registry.nu) says `registry_in_cluster: { node_port: N }`, and its nodes then name it `localhost:N`: a NodePort
-# answers on every node's localhost, and a node's container runtime pulls from a localhost registry over plain HTTP with no
-# configuration. Saying that and an address as well is an error, since the two would disagree. Pure.
+# (infra/cluster-registry.nu) says `registry_in_cluster: { node_port: N }`, and its nodes then name it `localhost:N`: a node's
+# container runtime pulls from a localhost registry over plain HTTP with no configuration, and the NodePort answers there
+# where kube-proxy serves NodePorts on 127.0.0.1 (elsewhere the node sends those pulls to its own address; cluster-registry.nu
+# says when). Saying that and an address as well is an error, since the two would disagree. Pure.
 export def target_registry [cluster: record] {
     let in_cluster = ($cluster.registry_in_cluster? | default null)
     if $in_cluster == null { return ($cluster.registry? | default null) }

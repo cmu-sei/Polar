@@ -442,9 +442,12 @@ cluster: { registry_in_cluster: { node_port: 30500 } }   # local_port (default 5
 
 `up.nu` applies it first (namespace `polar-registry`, a Deployment, a claim on the target's storage class, a NodePort
 Service), before anything that pulls an image, and starts a port-forward this machine (or the dev container) pushes
-through (`localhost:<local_port>`, set as `POLAR_REGISTRY` for the run). The nodes pull from `localhost:<node_port>`, which a
-NodePort answers on every node, over plain HTTP: a node's container runtime allows that for `localhost` with no
-configuration. The registry image and, when the target deploys the storage chart, the local-path provisioner come from
+through (`localhost:<local_port>`, set as `POLAR_REGISTRY` for the run). The nodes pull from `localhost:<node_port>` over
+plain HTTP: a node's container runtime allows that for `localhost` with no configuration. The NodePort answers on a
+node's localhost where kube-proxy serves NodePorts on 127.0.0.1, which its iptables mode does and its nftables mode does
+not. A nix-usernetes node runs kube-proxy in nftables mode and has containerd send pulls for `localhost:30500` to its own
+address, so keep `node_port: 30500` there; on another cluster in nftables mode, the nodes need the same for their port.
+The registry image and, when the target deploys the storage chart, the local-path provisioner come from
 Docker Hub, pinned by digest, since the registry cannot hold its own images before it exists. By hand: `nu
 infra/cluster-registry.nu up <target>`. **It has no authentication yet:** anyone who can reach a node at the NodePort can
 push and pull.
