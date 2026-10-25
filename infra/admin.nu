@@ -44,3 +44,12 @@ export def aside_path [dir: string, stamp: string, taken: list<string>] {
     while ($"($base)-($n)" in $taken) { $n = $n + 1 }
     $"($base)-($n)"
 }
+
+# Moves everything in `dir` into a new directory `aside`, leaving `dir` there and empty. It moves what is in it rather
+# than renaming it, because `dir` may be a mount point, which cannot be renamed (EBUSY): in the dev container in the
+# cluster, ~/.config/polar-admin is a subPath of the pod's state volume.
+export def move_aside [dir: string, aside: string] {
+    mkdir $aside
+    ls --all $dir | get name | each {|entry| mv $entry $aside }
+    null
+}
