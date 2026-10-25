@@ -551,12 +551,54 @@ async fn wait_for_dep_certs(endpoints: &[DepCertEndpoint]) {
 // Cert issuance
 // ---------------------------------------------------------------------------
 
+/// Whether this pod already holds a usable certificate for `req`, so nothing is requested.
+///
+/// It does when its init container ran before and the pod was not replaced: its sandbox recreated after a node
+/// restart, or a StatefulSet's pod restarted in place. Such a pod keeps its UID, and with it its instance binding, and
+/// the credentials agent refuses it a second certificate while the first is valid (`AlreadyHasValidCertificate`): the
+/// one in its own emptyDir is used again (2026-10-25: Neo4j's pod never started after its node restarted). Anything
+/// short of a complete, valid bundle for this identity, these names and this use is requested again, as before.
+fn keeps_existing_bundle(req: &CertRequest, dns_identity: &str) -> bool {
+    let usage = match req.cert_type {
+        CertType::Server => output::Usage::Server,
+        CertType::Client => output::Usage::Client,
+        CertType::Service => return false,
+    };
+    match output::existing_bundle(
+        std::path::Path::new(&req.cert_dir),
+        dns_identity,
+        &req.extra_sans,
+        usage,
+        std::time::SystemTime::now(),
+    ) {
+        output::ExistingBundle::Reusable { not_after } => {
+            tracing::info!(
+                "keeping the {:?} cert already in '{}', valid until {not_after}: this pod ran before and was not replaced",
+                req.cert_type,
+                req.cert_dir,
+            );
+            true
+        }
+        output::ExistingBundle::Unusable(why) => {
+            tracing::info!(
+                "not keeping the bundle in '{}' ({why}); requesting a new one",
+                req.cert_dir
+            );
+            false
+        }
+        output::ExistingBundle::Absent => false,
+    }
+}
+
 async fn issue_cert(
     client: &handshake::HandshakeClient,
     sa_token: &str,
     dns_identity: &str,
     req: &CertRequest,
 ) {
+    if keeps_existing_bundle(req, dns_identity) {
+        return;
+    }
     tracing::info!(
         "issuing {:?} cert into '{}' (algorithm: {:?}, extra-sans: {:?})",
         req.cert_type,
@@ -688,8 +730,8 @@ async fn obtain_via_observer(
                 tokio::time::sleep(delay).await;
             }
             // A refusal is final: misconfiguration, an identity mismatch, or a pod that was already issued
-            // this certificate. The pod is replaced (a new pod has a new instance binding), so exit and let
-            // the operator look.
+            // this certificate and no longer holds it (one that does keeps it: keeps_existing_bundle). Exit, and
+            // let the operator look; a replaced pod has a new instance binding.
             Err(RequestError::Refused(reason)) => {
                 return Err(format!(
                     "the credentials agent refused the request: {reason:?}"
@@ -706,6 +748,9 @@ async fn issue_cert_via_observer(
     dns_identity: &str,
     req: &CertRequest,
 ) {
+    if keeps_existing_bundle(req, dns_identity) {
+        return;
+    }
     tracing::info!(
         "requesting {:?} cert into '{}' from the credentials agent (algorithm: {:?}, names: {:?})",
         req.cert_type,

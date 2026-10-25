@@ -150,3 +150,215 @@ fn missing_directory_returns_dir_missing_error() {
         "expected DirMissing, got {err:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// existing_bundle: a pod's own bundle used again when its init container runs
+// again without the pod being replaced
+// ---------------------------------------------------------------------------
+
+mod existing {
+    use cert_client::output::{ExistingBundle, OutputBundle, Usage, existing_bundle, write_bundle};
+    use rcgen::{
+        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+        PKCS_ECDSA_P256_SHA256,
+    };
+    use std::time::{Duration, SystemTime};
+    use tempfile::TempDir;
+
+    const IDENTITY: &str = "graph.polar-graph.serviceaccount.cluster.local";
+
+    struct Ca {
+        params: CertificateParams,
+        key: KeyPair,
+        pem: String,
+    }
+
+    fn ca() -> Ca {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let pem = params.self_signed(&key).unwrap().pem();
+        Ca { params, key, pem }
+    }
+
+    /// A leaf signed by `ca` for `names`, with `usages`, valid until `days` from now (negative: already expired).
+    fn leaf(
+        ca: &Ca,
+        names: &[&str],
+        usages: Vec<ExtendedKeyUsagePurpose>,
+        days: i64,
+    ) -> (String, String) {
+        let mut params =
+            CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+                .unwrap();
+        params.extended_key_usages = usages;
+        let now = time::OffsetDateTime::now_utc();
+        params.not_before = now - time::Duration::days(400);
+        params.not_after = now + time::Duration::days(days);
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let issuer = Issuer::from_params(&ca.params, &ca.key);
+        let cert = params.signed_by(&key, &issuer).unwrap();
+        (cert.pem(), key.serialize_pem())
+    }
+
+    fn server_and_client() -> Vec<ExtendedKeyUsagePurpose> {
+        vec![
+            ExtendedKeyUsagePurpose::ServerAuth,
+            ExtendedKeyUsagePurpose::ClientAuth,
+        ]
+    }
+
+    fn written(cert_pem: &str, key_pem: &str, ca_pem: &str) -> TempDir {
+        let dir = TempDir::new().unwrap();
+        write_bundle(
+            dir.path(),
+            &OutputBundle {
+                cert_pem,
+                key_pem,
+                ca_pem,
+            },
+        )
+        .unwrap();
+        dir
+    }
+
+    fn judge(dir: &TempDir, names: &[&str], usage: Usage) -> ExistingBundle {
+        let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        existing_bundle(dir.path(), IDENTITY, &names, usage, SystemTime::now())
+    }
+
+    fn unusable_because(result: ExistingBundle, words: &str) {
+        match result {
+            ExistingBundle::Unusable(why) => {
+                assert!(why.contains(words), "expected '{words}' in: {why}")
+            }
+            other => panic!("expected Unusable ({words}), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_directory_has_nothing_to_use() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(judge(&dir, &[], Usage::Server), ExistingBundle::Absent);
+    }
+
+    #[test]
+    fn the_pods_own_valid_bundle_is_used_again() {
+        let ca = ca();
+        let (cert, key) = leaf(
+            &ca,
+            &[IDENTITY, "neo4j", "polar-db-svc"],
+            server_and_client(),
+            365,
+        );
+        let dir = written(&cert, &key, &ca.pem);
+        assert!(matches!(
+            judge(&dir, &["neo4j", "polar-db-svc"], Usage::Server),
+            ExistingBundle::Reusable { .. }
+        ));
+        assert!(matches!(
+            judge(&dir, &[], Usage::Client),
+            ExistingBundle::Reusable { .. }
+        ));
+    }
+
+    #[test]
+    fn an_expired_certificate_is_not_used() {
+        let ca = ca();
+        let (cert, key) = leaf(&ca, &[IDENTITY], server_and_client(), -1);
+        unusable_because(
+            judge(&written(&cert, &key, &ca.pem), &[], Usage::Server),
+            "not valid now",
+        );
+    }
+
+    #[test]
+    fn a_certificate_judged_after_its_expiry_is_not_used() {
+        let ca = ca();
+        let (cert, key) = leaf(&ca, &[IDENTITY], server_and_client(), 1);
+        let dir = written(&cert, &key, &ca.pem);
+        let later = SystemTime::now() + Duration::from_secs(2 * 24 * 3600);
+        unusable_because(
+            existing_bundle(dir.path(), IDENTITY, &[], Usage::Server, later),
+            "not valid now",
+        );
+    }
+
+    #[test]
+    fn a_certificate_from_another_ca_is_not_used() {
+        let (theirs, ours) = (ca(), ca());
+        let (cert, key) = leaf(&theirs, &[IDENTITY], server_and_client(), 365);
+        unusable_because(
+            judge(&written(&cert, &key, &ours.pem), &[], Usage::Server),
+            "not signed by ca.pem",
+        );
+    }
+
+    #[test]
+    fn a_key_that_is_not_the_certificates_is_not_used() {
+        let ca = ca();
+        let (cert, _) = leaf(&ca, &[IDENTITY], server_and_client(), 365);
+        let (_, other_key) = leaf(&ca, &[IDENTITY], server_and_client(), 365);
+        unusable_because(
+            judge(&written(&cert, &other_key, &ca.pem), &[], Usage::Server),
+            "not the certificate's key",
+        );
+    }
+
+    #[test]
+    fn a_certificate_for_another_identity_or_without_a_requested_name_is_not_used() {
+        let ca = ca();
+        let (cert, key) = leaf(
+            &ca,
+            &["someone-else.polar.serviceaccount.cluster.local"],
+            server_and_client(),
+            365,
+        );
+        unusable_because(
+            judge(&written(&cert, &key, &ca.pem), &[], Usage::Server),
+            IDENTITY,
+        );
+
+        let (cert, key) = leaf(&ca, &[IDENTITY, "neo4j"], server_and_client(), 365);
+        unusable_because(
+            judge(
+                &written(&cert, &key, &ca.pem),
+                &["neo4j", "polar-db-svc"],
+                Usage::Server,
+            ),
+            "polar-db-svc",
+        );
+    }
+
+    #[test]
+    fn a_certificate_without_the_requested_usage_is_not_used() {
+        let ca = ca();
+        let (cert, key) = leaf(
+            &ca,
+            &[IDENTITY],
+            vec![ExtendedKeyUsagePurpose::ClientAuth],
+            365,
+        );
+        unusable_because(
+            judge(&written(&cert, &key, &ca.pem), &[], Usage::Server),
+            "not for Server use",
+        );
+    }
+
+    #[test]
+    fn files_that_are_not_a_bundle_are_not_used() {
+        let dir = written(
+            "-----BEGIN CERTIFICATE-----\nfake-cert\n-----END CERTIFICATE-----\n",
+            "-----BEGIN PRIVATE KEY-----\nfake-key\n-----END PRIVATE KEY-----\n",
+            "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----\n",
+        );
+        assert!(matches!(
+            judge(&dir, &[], Usage::Server),
+            ExistingBundle::Unusable(_)
+        ));
+
+        let half = TempDir::new().unwrap();
+        std::fs::write(half.path().join("cert.pem"), "x").unwrap();
+        unusable_because(judge(&half, &[], Usage::Server), "key.pem cannot be read");
+    }
+}
