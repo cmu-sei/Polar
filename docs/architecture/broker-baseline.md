@@ -146,6 +146,55 @@ Read plainly:
 The local load test of slice 2 agrees: four publishers deciding every publish took 12.5 s, against 1 s before the broker
 decided and 1.5 s with the cache.
 
+## A second machine: whitey (2026-10-25)
+
+The same plans on another workstation and a newer node, three days later, as a reference for that machine. The broker
+now always decides (stage 5b), so there is no broker that decides nothing to measure: `baseline.nuon` measures it as
+deployed, with its default five-second decision cache, and `enforcement.nuon` again without the cache and with it. The
+baseline and "cache" columns below are therefore the same settings measured twice, which shows the run-to-run spread.
+
+- Host: AMD Ryzen 9 9950X3D (32 threads), 92 GB, Linux 7.3.0 (a hardened, clang-built kernel, FIPS mode, no IPv6);
+  `/home` is f2fs on LVM over a RAID 0 of two self-encrypting NVMe drives. podman 5.8.9, rootless.
+- Node: nix-usernetes `f7a3c49` (one node), Kubernetes 1.37.1, containerd 2.4.1, kube-proxy in nftables mode.
+- Target: `sandbox-local`, brought up fresh from `5a62a813` by `up.nu --dev` from the dev container in the cluster;
+  every catalog workload of it running (the Jira observer failing, as it has no Jira site), the load harness enabled.
+- Procedure as above, run from the dev container's clean checkout (`dirty: false`), with tracing off. Mullvad was
+  connected; the harness's traffic stays in the cluster.
+- Records: `~/.cache/polar/harness/baseline-20261025T213412.nuon` and `enforcement-20261025T214002.nuon`, broker
+  `cassini@sha256:fec1df50…`. Every pod reported, on one node; nothing was lost, refused or failed, in any run.
+
+| size | rate | baseline /s | no cache /s | cache /s | baseline p50 | no cache p50 | cache p50 | baseline p99 | no cache p99 | cache p99 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 256 B | 100 | 100 | 100 | 100 | 0.11 | 0.34 | 0.12 | 0.52 | 20.53 | 0.51 |
+| 256 B | 1000 | 998 | 998 | 998 | 1.38 | 1.62 | 1.29 | 4.6 | 5.03 | 4.59 |
+| 256 B | 10000 | 9999 | 9960 | 9960 | 0.61 | 1.62 | 0.62 | 2.04 | 3.81 | 2.12 |
+| 256 B | max | 20095 | 10914 | 20964 | 48.93 | 45.83 | 47.77 | 62.22 | 62.87 | 56.25 |
+| 4 KiB | 100 | 100 | 100 | 100 | 0.23 | 0.47 | 0.22 | 0.78 | 1.19 | 0.76 |
+| 4 KiB | 1000 | 1000 | 1000 | 1000 | 0.1 | 0.37 | 0.15 | 0.2 | 0.61 | 0.28 |
+| 4 KiB | 10000 | 10000 | 9999 | 10000 | 0.55 | 1.39 | 0.55 | 1.25 | 3.21 | 1.24 |
+| 4 KiB | max | 19842 | 10830 | 20099 | 50.11 | 47.22 | 49.45 | 67.2 | 62.19 | 73.04 |
+| 64 KiB | 100 | 100 | 100 | 100 | 10.54 | 10.73 | 10.54 | 19.75 | 19.89 | 20.33 |
+| 64 KiB | 1000 | 998 | 998 | 1000 | 1.38 | 0.59 | 0.38 | 2.62 | 2.97 | 2.62 |
+| 64 KiB | 10000 | 10001 | 9894 | 10001 | 0.73 | 3.46 | 0.7 | 1.73 | 19.9 | 1.74 |
+| 64 KiB | max | 16365 | 9612 | 16755 | 58.98 | 59.57 | 59.74 | 63.09 | 106.92 | 62.4 |
+| 1 MiB | 100 | 100 | 100 | 100 | 1.69 | 2.11 | 1.61 | 12.82 | 13.64 | 12.7 |
+| 1 MiB | 1000 | 1004 | 1002 | 1003 | 1.2 | 1.17 | 1.48 | 3.05 | 2.83 | 3.23 |
+| 1 MiB | 10000 | 2792 | 2391 | 2418 | 31.55 | 28.62 | 44.12 | 34.37 | 36.54 | 72.85 |
+| 1 MiB | max | 2455 | 2335 | 2207 | 64.48 | 32.76 | 72.76 | 107.69 | 38.75 | 89.76 |
+
+Read plainly:
+- **One connection carries about 20,000 small messages a second**, and about 2.9 GB/s of 1 MiB messages; at the set
+  rates up to 10,000 a second the p99 stays within a few milliseconds.
+- **Deciding every publish costs about 0.04 ms here.** Without the cache one connection carries at most about 10,900
+  small messages a second (9,600 of 64 KiB), about 92 µs a message against 50 µs with it. As before, below that rate
+  only a few tenths of a millisecond of p50 change, and at 1 MiB the bytes dominate.
+- **With the cache the broker is at its baseline**: the two columns with the same settings differ by less than the
+  saturated rows move between runs.
+- The 1 MiB rows at 10,000 a second and "max" are again the window over the rate, and move by tens of milliseconds
+  from one run to the next.
+- Against the 2026-10-22 figures, on a different CPU and node, every ceiling is higher (13,000 to 14,000 small messages
+  a second then, 5,300 without the cache, 1.4 GB/s at 1 MiB): a reference for this machine, not a comparison of code.
+
 ## What measuring it found
 
 Each fix was made test first, the test failing before it.
