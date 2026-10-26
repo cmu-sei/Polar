@@ -219,8 +219,15 @@ Each step tests first, with property tests where an invariant holds.
    check fails. Tests: `infra/tests/resolve.nu` (every workload with `polar-init` pins the CA, cert-issuer none),
    `infra/tests/charts.nu`, `cert-client`'s `output_tests.rs`, and `polar-init`'s, among them an observer that signs the
    CSR with another CA and is refused with nothing written. Mutations: all on the new code caught; `main` and
-   `issue_cert`, which this only passes the pinned CA through, have no tests of their own. Validation on the cluster
-   waits for the node's kube-proxy (`remaining-work.md`).
+   `issue_cert`, which this only passes the pinned CA through, have no tests of their own.
+
+   *Validated on sandbox-local, 2026-10-26* (a `up.nu --dev` run from `9998acbc`, the node's kube-proxy fixed): all
+   14 running pods with `polar-init` pin the CA (`POLAR_INIT_CA_CERT` and the `polar-ca` ConfigMap mounted), the 11
+   issued through the credentials agent (Neo4j and the ACE job among them) and the 3 bootstrap services alike;
+   each of the 11 logged an issuance whose expiry was read off the certificate as it was verified against the
+   pinned CA, with no refusal; and the `ca.pem` a workload holds is the pinned CA (fingerprint equal to the
+   ConfigMap's, checked in three pods). A refusal of a certificate from another CA is shown by the unit tests, not
+   on the cluster, which would need someone in the middle of the observer's HTTP.
 2. **cert-issuer's floor state.** A pure state machine over what cert-issuer hears (the record empty or not, its Cassini
    session, the credentials agent's presence with time), answering which bootstrap entries are open, by the table in
    question 2; `admit_token_only` asks it. Properties: no message opens an entry; for any sequence of events, what is
