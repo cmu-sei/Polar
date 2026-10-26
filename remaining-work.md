@@ -621,7 +621,19 @@ Principle: declare each environment variable once, with its type, default, docum
   change (`e75bbc42`) as well as after it, so it is not that change. Not investigated further: whether the broker is slow
   to close the old connection or the wait is too short.
 
-- [ ] No `just` recipe runs the catalog's Nushell tests. There are five files: `nu infra/tests/rules.nu` (11 tests: the grace period against the budget, Job replacement, the apply order), `nu infra/tests/resolve.nu` (15: what the resolver produces for the real catalog, including that `check` passes and that the image's scaffold equals the source tree's, skipped without podman and a pushed image), `nu infra/tests/apply.nu` (16: the decisions `up.nu` makes), `nu infra/tests/secrets.nu` (7: the secrets decision) and `nu infra/tests/document.nu` (12: how a scaffold is filled, and the image command). Add a recipe (for example `just infra-test`, running them and `nu infra/resolve.nu check`) and decide where it runs before a commit. Found 2026-10-07; counts brought up to date 2026-10-09
+- [ ] **A test runner for the Nushell tests, as `cargo test` is for the Rust ones (the maintainer, 2026-10-26).** It
+  finds the tests itself and runs the whole batch or any part of it: one file, or the tests whose names match a filter,
+  as `cargo test <filter>` does. Today there is no runner at all: `infra/tests/` holds 39 files, one per script
+  (`infra/INFRA.md`, "tests/"), each run by hand as `nu infra/tests/<name>.nu` and each printing its own summary, and
+  the files do not share one shape (most hold a `let tests = { "<name>": { ... } }` record their `main` walks; about a
+  dozen, `admin.nu`, `agent-pods.nu`, `browser.nu`, `cache.nu`, `deploy-objects.nu`, `deploy-repo.nu`,
+  `dhall-cache.nu`, `lock.nu`, `neo4j-certificate-size.nu`, `seed.nu` among them, do not). Some need what others do
+  not: `resolve.nu` needs the cluster, its registry forward and every image in that registry; `rules.nu` and
+  `charts.nu` need nothing (`INFRA.md`). So the runner should also know what a file needs and skip it, saying why,
+  when that is not there, as a Rust test that needs a container does. Then a `just` recipe, and where it runs before a
+  commit (the gate, `just static-analysis`, or its own). Found 2026-10-07 with five files; on 2026-10-26 step 1 of
+  closing the floor had to run all 39 by hand, and found one (`resolve.nu`, the floor-pending test) failing since
+  cert-issuer became a catalog workload, which a runner in the gate would have caught.
 - [ ] Workspace clippy cannot pass `-D warnings`, so the `AGENTS.md` rule (`cargo clippy --workspace -- -D warnings` before a commit) cannot be met as written. Found 2026-10-07; the choice was to leave it for now and handle it after the health work. About 19 findings in five crates, all from the toolchain in use (nightly 1.101). `cargo clippy -- -D warnings` applies to every workspace crate it compiles, so the first failing crate (`polar-router`) stops the run, which is why it looks like one problem. The list:
   - `polar-router/src/lib.rs:110`: `clippy::map_entry`, `contains_key` then `insert` on `state.registrations` (use the `Entry` API; keep the duplicate-registration error)
   - `polar-init/src/main.rs` (the CSR retry in `issue_cert`, about line 460): `clippy::never_loop`, a `loop` whose body always returns or breaks on the first pass, which is a deny-by-default lint, so clippy fails for the whole binary. Found 2026-10-07 when the lint was turned on there; not changed, since it is its own pass
@@ -635,6 +647,17 @@ Principle: declare each environment variable once, with its type, default, docum
   - External names: CoreDNS (`dnsPolicy: Default`, Corefile built in `flake.nix`) forwards only to slirp4netns's relay `10.0.2.3`, which times out. The host resolves through the `systemd-resolved` stub, which listens only on `127.0.0.53` and `127.0.0.54` (not `127.0.0.1`), so the relay cannot reach it even though the container is started with `allow_host_loopback=true` (`Justfile:41`). The host also routes all of the user's traffic through a Mullvad tunnel (`wg0-mullvad`), whose firewall refuses DNS to anything but its own resolver, so the campus servers `128.2.1.10/.11` also time out
   - Live workaround in place (not persisted, lost when the container is recreated, works only while Mullvad is connected): the running `/etc/coredns/Corefile` has `forward . 100.64.0.63`
   - Persistent options, all needing a host decision: let resolved also listen on `127.0.0.1` (`DNSStubListenerExtra`) and forward to `10.0.2.2`; move the container to the `pasta` network backend; or a literal upstream in the Corefile (brittle across networks)
+- [ ] **kube-proxy's nftables sync keeps failing on the new vigild node (lives in `~/Documents/projects/nix-usernetes`;
+  found 2026-10-26, on `b9dd4fb`, Kubernetes 1.37.1, nftables 1.1.7).** A sync tries to delete set elements that are
+  already gone (`delete element ip kube-proxy no-endpoint-services { 10.96.225.209 . tcp . 8443 }`, `service-ips`,
+  `hairpin-connections`: "Could not process rule: No such file or directory"), the whole transaction is refused, and
+  Services stop being programmed: the registry's NodePort (30500) vanished, so no pod could pull. Each time it followed
+  kube-proxy's own "Deleting stale nftables chains" within minutes (13:41 then 13:45; 15:49 then 15:51; and again at
+  16:05). Not caused by disk pressure: it failed at 16:05 with none. A restart (`vigil services restart kube-proxy`) is
+  not a fix either: after each one a different Service with a ready endpoint was in neither `service-ips` nor
+  `no-endpoint-services` (once cert-issuer's ClusterIP, the next time the registry's ClusterIP and NodePort), with no
+  error logged, and with one kube-proxy process on the node. So kube-proxy's own startup sync leaves Services out, not
+  only its later syncs; nothing else was found touching the table. Not diagnosed further.
 - [ ] `IfNotPresent` + `:latest`: mitigated by `images.nu` dropping the node's cached copy (u7s only); proper fix is hash-based tags
 - [ ] `my.env`: `GRAPH_PASSWORD` / `NEO4J_AUTH` after the password change; dev shell `BIND_ADDR`/`BROKER_ADDR` on 8080 collides with the Keycloak port-forward; `CASSINI_SHUTDOWN_TOKEN` is a dev constant
 - [ ] ace <-> Neo4j connectivity (parked; ace is running)
