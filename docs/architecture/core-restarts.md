@@ -152,6 +152,58 @@ record: the credentials agent learns of what it signed, and says so over Cassini
   not count the gap against its health. "It has crashed" needs a source with Kubernetes privileges (the attestation agent).
   Both work inside the 90-minute bound, not beyond it.
 
+## Closing the floor: where it stands (read 2026-10-26)
+
+The aim: the floor open only at bootstrap and when two or more of the core are down, and closed at nominal.
+- **Done.** The floor is enforced on `sandbox-local` and `local-minimal` (`floor_enforced: true`): only the three
+  bootstrap identities are signed on a token alone. Every signing is in cert-issuer's record and reaches the credentials
+  agent's ledger within 30 seconds (`cert-issuer-isolation.md`, step 2).
+- **Decided, not built.** The credentials agent's restart (question 1: B, C and the instance check); the observer's and
+  Cassini's (a held request, above); Cassini's route narrowed to while cert-issuer sees Cassini down ("What the HTTP
+  routes are still needed for").
+- **The keystone, open.** The floor has no state: `admit_token_only` (`cert-issuer/server/src/floor.rs:107`) admits a
+  bootstrap identity at any time. Closing it at nominal needs cert-issuer to tell bootstrap from nominal, and to tell
+  when two or more are down: question 2.
+- **`GET /ca` is still needed at nominal.** Only three workloads pin the CA (`pinned-ca`: the credentials agent, its
+  observer, the git server; `infra/config/workloads/credentials.nuon:38`, `:55`, `git-server.nuon:36`); every other
+  `polar-init`, Cassini's among them, fetches `/ca` unverified and pins it.
+- **Smaller, on record.** `floor_enforced` is `false` by default (`infra/config/cluster.nuon:55`), which the
+  maintainer's rule calls a gap, not an option. The `local` target cannot enforce it yet: it still deploys three
+  hand-written charts that ask cert-issuer directly (gitlab, build-processor, openapi; `infra/targets/local/target.nu:48`).
+  No NetworkPolicy (layer 4, "Network isolation, with a fallback"; the dev cluster runs on the fallback, decided
+  2026-10-13).
+- **`/validate` needs no decision of its own.** With the floor set, a token-only caller that is not a bootstrap identity
+  is refused on `/validate` as on `/issue` (`cert-issuer/server/src/handler.rs:91`); its user, the credentials agent,
+  calls it over mTLS. So it follows the floor's state (`cert-issuer-isolation.md`, open question 3, answered by the
+  floor).
+
+### The plan (cleared by the maintainer, 2026-10-26)
+
+Each step tests first, with property tests where an invariant holds.
+1. **Every workload pins the CA.** `pinned-ca` in the `agent` kind, and in the charts that run `polar-init` (Neo4j,
+   the ACE job); a `resolve.nu check` rule that nothing fetches `/ca` unpinned. `GET /ca` then serves only a cold start.
+2. **cert-issuer's floor state.** A pure state machine over what cert-issuer hears (the record empty or not, its Cassini
+   session, the credentials agent's presence with time), answering which bootstrap entries are open, by the table in
+   question 2; `admit_token_only` asks it. Properties: no message opens an entry; for any sequence of events, what is
+   open follows the table; after a restart with a record, nothing opens before the credentials agent is heard or the
+   bound passes.
+3. **Held requests.** A token-only request for a closed entry (the observer's, Cassini's) is held, not refused, and
+   `polar-init` waits on it. cert-issuer offers it to the credentials agent over Cassini, and over mTLS to the
+   credentials agent's poll while its Cassini session is lost (the poll is also its presence, question 2). The
+   credentials agent vouches by its own rules, and cert-issuer signs. Steps 2 and 3 deploy together: the state alone
+   would close the observer's and Cassini's entries with nothing to take their place.
+4. **The crash window (C)** falls out of steps 2 and 3: the credentials agent absent while the Cassini session holds
+   opens its entry alone. Until the ticket exists, a rejuvenating credentials agent's successor comes through it too,
+   after waiting out the bound.
+5. **The ticket (B), after the move to Deployments** (`runtime-attestation.md`, "Deployments, next"): a pod restarted
+   in place keeps its UID, so the ticket can name the successor's pod and not only its identity.
+6. **The attestation gate.** cert-issuer asks the attestation agent about the pod behind every token-only request
+   whenever it is reachable; until the attestation agent is built it is not, and the floor behaves as option A. The
+   attestation agent itself is built from `runtime-attestation.md`.
+7. **`floor_enforced` true by default,** once `local`'s three hand-written charts are catalog workloads.
+8. **On a fresh sandbox-local:** each core member killed in turn, and two at once, checking what opened against the
+   table, in cert-issuer's log, its record and the ledger.
+
 ## Open questions
 
 To be taken one at a time, after the certificate record (`cert-issuer-isolation.md`, 2026-10-23), which the rest
@@ -240,6 +292,60 @@ builds on.
    **Decided (the maintainer, 2026-10-26): both an instance check at issuance and runtime attestation of the process,
    by an attestation agent and a node sensor** (`runtime-attestation.md`). B and C decide when the credentials agent's
    floor entry is open; the attestation agent's instance check decides who gets through it.
+
+   **The observer's restart, decided (the maintainer, 2026-10-26): a held request.** The credentials agent's observer
+   is a bootstrap identity too (`infra/config/workloads/credentials.nuon:54`), and question 1 did not cover it. Its new
+   pod cannot go through the credentials agent, since the observer is the relay to it. So when its token-only request
+   comes, cert-issuer does not sign: it holds the request and asks the credentials agent over Cassini; the credentials
+   agent has the attestation agent check the pod and vouches for it, as for every workload, and cert-issuer signs. The
+   observer's floor entry is closed at nominal, with no window. The same mechanism serves Cassini's restart, with the
+   credentials agent taking the held request over mTLS, since Cassini is down. What is left of token-only signing at
+   nominal is the credentials agent's own successor, ticketed (B) or in its crash window (C), and attested.
 2. What tells "two or more down" (4) from one restarting (1 to 3), and who decides it?
+
+   *Prepared for the maintainer, 2026-10-26; not decided.* Read from the code:
+   - **What cert-issuer can hear.** Its Cassini session (`ClientEvent::Registered` and `TransportError`,
+     `cert-issuer/server/src/supervisor.rs:305`), and the credentials agent's record requests over Cassini, every 30
+     seconds. The credentials agent calls it over mTLS (`/internal/issue`) only when it signs for someone, not on a
+     schedule. Its record is durable, so after a restart it knows whether it has signed anything before, but nothing
+     says the system ever reached nominal.
+   - **While Cassini is down, cert-issuer hears nothing of the credentials agent,** since the record requests go over
+     Cassini. So "Cassini down" (2) and "Cassini and the credentials agent down" (4) look the same to it, unless the
+     credentials agent reaches it another way. The held request for Cassini's restart already needs one: the
+     credentials agent taking the request over mTLS while its own Cassini session is lost.
+   - **A long Cassini outage becomes 4 by itself.** The credentials agent gives up after 120 seconds without Cassini
+     (`POLAR_HEALTH_CASSINI_DEADLINE_SECS`, `polar-health/src/vars.rs:120`) and restarts; a Cassini restart was
+     measured at 27 to 29 seconds (the same place).
+   - **No message may open the floor.** A rule that opened it on being told would be a rule an attacker could tell.
+
+   A rule that follows from these, with cert-issuer deciding, since it holds the floor:
+   - *Presence.* The credentials agent is present while cert-issuer has heard it within a bound: a record request over
+     Cassini, or, while Cassini is down, its mTLS call for held requests. Two missed asks (60 seconds) is the bound.
+   - *Bootstrap:* the record is empty (a fresh cluster), or the credentials agent is absent and so is Cassini. Every
+     bootstrap identity's entry is open.
+   - *The credentials agent restarting (3):* absent, while cert-issuer's Cassini session holds. Its entry alone opens
+     (C), or earlier against a ticket (B).
+   - *Cassini restarting (2), or the observer:* the credentials agent present. No entry opens; held requests.
+   - *cert-issuer restarting (1):* on start with a record that is not empty, it holds token-only requests for up to the
+     bound, until it hears the credentials agent (nominal) or does not (bootstrap).
+
+   The ways the decision could go:
+   - **A. cert-issuer decides alone, from what it hears, as above.** Nothing can talk it into opening the floor; an
+     outage can. Whoever can delete both the credentials agent's and Cassini's pods can force the floor open.
+   - **B. A, and every token-only signing is attested whenever the attestation agent is reachable.** The attestation
+     agent reaches cert-issuer over mTLS, not only over Cassini (`runtime-attestation.md`, "Open"), so in situation 4
+     too each new core pod must pass the instance check. Only a cold start, with no attestation agent yet, signs on the
+     bare floor, and that is attested after the fact.
+   - **C. After the first bootstrap, situation 4 needs an admin.** cert-issuer keeps the floor shut and an admin
+     reopens it with a signed instruction, which cert-issuer verifies against the cluster CA. The strongest against a
+     forced outage, and the slowest: the system waits for a person.
+
+   Recommendation: B. It needs no person and no new trust, and a forced outage then gains the attacker nothing unless
+   it also takes down the attestation agent.
+
+   **Decided (the maintainer, 2026-10-26): B, the rule plus attestation** (this question's B, not question 1's ticket).
+   cert-issuer decides from what it hears, by the rule above, and every
+   token-only signing passes the attestation agent's instance check whenever the attestation agent is reachable over
+   mTLS. Only a cold start signs on the bare floor, and that is attested after the fact.
 3. The notice to dependents: a topic the credentials agent publishes before it ends, the attestation agent's report
    of a crash, or both; and what an agent does on each.
