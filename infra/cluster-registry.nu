@@ -25,8 +25,11 @@
 #
 # A registry in the target's own cluster, for a target whose cluster settings say `registry_in_cluster: { node_port: N }`: then
 # no registry, and no container runtime to run one, is needed on this machine. The nodes pull from it at `localhost:N`
-# (infra/registry.nu): a NodePort answers on every node's localhost, and a node's container runtime pulls from a localhost
-# registry over plain HTTP with no configuration (checked on u7s, containerd 2.2). This machine pushes to it through a
+# (infra/registry.nu): a node's container runtime pulls from a localhost registry over plain HTTP with no configuration
+# (checked on u7s, containerd 2.2). The NodePort answers on a node's localhost only where kube-proxy serves NodePorts on
+# 127.0.0.1, which its iptables mode does and its nftables mode does not. A node whose kube-proxy runs in nftables mode
+# needs its runtime to send pulls for `localhost:N` to the NodePort on its own address instead: nix-usernetes does that for
+# localhost:30500 (a containerd certs.d/localhost:30500/hosts.toml), so on it N is 30500. This machine pushes to it through a
 # port-forward (`just port-forwards-up registry`, to localhost:5000 or POLAR_REGISTRY_FORWARD_PORT).
 #
 # It has to exist before anything that pulls a Polar image, the render's scaffold pods and Flux's own controllers included, so

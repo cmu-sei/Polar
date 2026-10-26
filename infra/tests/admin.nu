@@ -24,8 +24,8 @@
 # infra/tests/admin.nu
 #
 # What up.nu does with ~/.config/polar-admin that belongs to another cluster: the CA stored there is not this
-# cluster's, so nothing in it can be used here, and it is moved aside under a name that cannot overwrite
-# an earlier one. Nothing is deleted.
+# cluster's, so nothing in it can be used here, and what is in it is moved aside under a name that cannot
+# overwrite an earlier one. Nothing is deleted.
 #
 #   nu infra/tests/admin.nu
 
@@ -57,6 +57,24 @@ def main [] {
                 assert (not (is_another_clusters "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n" "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----"))
                 # nothing stored says nothing: there is no stale material to move
                 assert (not (is_another_clusters null "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----"))
+            }
+        }
+        {
+            name: "moving aside moves what is in the directory, hidden files too, and leaves it there, empty"
+            body: {
+                let tmp = (^mktemp -d | str trim)
+                let dir = ($tmp | path join "polar-admin")
+                mkdir $dir
+                "ca" | save ($dir | path join "ca.pem")
+                "key" | save ($dir | path join "u.key")
+                "hidden" | save ($dir | path join ".hidden")
+                let aside = (aside_path $dir "20261025-045645" [])
+                move_aside $dir $aside
+                let left = (ls --all $dir | length)
+                let moved = (ls --all $aside | get name | path basename | sort)
+                rm -rf $tmp
+                assert equal $left 0
+                assert equal $moved [".hidden" "ca.pem" "u.key"]
             }
         }
     ]

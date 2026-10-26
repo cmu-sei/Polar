@@ -102,8 +102,12 @@ render() {
     [ -r "$SOPS_KEY" ] || die "no key for sops at $SOPS_KEY (set POLAR_DEV_SOPS_KEY)"
     # Beside the base, since kustomize takes a base only by a relative path; removed when done.
     local d="$HERE/infra/.dev-pod-$U"; rm -rf "$d"; mkdir -p "$d"; trap 'rm -rf "$d"' RETURN
-    local uid gid key; uid=$(id -u); gid=$(id -g)
+    local uid gid key class; uid=$(id -u); gid=$(id -g)
     key=$(pubkey) || exit 1
+    # A claim's class cannot change once it is bound. Without POLAR_DEV_STORAGE_CLASS, the claims that exist keep theirs:
+    # left out of the manifest, it would be cleared, and the apply of every claim fails (made with the variable set, then
+    # applied without it).
+    class=${POLAR_DEV_STORAGE_CLASS:-$(kubectl -n "$NS" get pvc "polar-dev-nix-$U" -o jsonpath='{.spec.storageClassName}' 2>/dev/null)}
     printf 'apiVersion: v1\nkind: Namespace\nmetadata: { name: %s }\n' "$NS" > "$d/namespace.yaml"
     cat > "$d/kustomization.yaml" <<K
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -119,7 +123,7 @@ patches:
   - target: { kind: ClusterRoleBinding }
     patch: '[{"op": "replace", "path": "/subjects/0", "value": {"kind": "ServiceAccount", "name": "polar-dev-$U", "namespace": "$NS"}}]'
   - target: { kind: PersistentVolumeClaim }
-    patch: '[{"op": "add", "path": "/spec/storageClassName", "value": "${POLAR_DEV_STORAGE_CLASS:-}"}]'
+    patch: '[{"op": "add", "path": "/spec/storageClassName", "value": "$class"}]'
   - patch: |
       apiVersion: apps/v1
       kind: Deployment
@@ -142,7 +146,7 @@ patches:
                   # The pod's SSH host keys live here, so they are the same after a restart and ssh keeps trusting them.
                   - { name: state, mountPath: $REMOTE_HOME/.ssh, subPath: ssh }
 K
-    [ -n "${POLAR_DEV_STORAGE_CLASS:-}" ] || sed -i.bak '/PersistentVolumeClaim/,+1d' "$d/kustomization.yaml"
+    [ -n "$class" ] || sed -i.bak '/PersistentVolumeClaim/,+1d' "$d/kustomization.yaml"
     kubectl kustomize --load-restrictor LoadRestrictionsNone "$d"
 }
 

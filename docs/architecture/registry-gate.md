@@ -34,10 +34,12 @@ on Docker Hub, and none carries a secret), so pulls stay anonymous for now.
 
 ## What constrains it
 
-- **Nodes pull from `localhost:<NodePort>` over plain HTTP.** That is what makes the registry work on any cluster: a node's
-  container runtime pulls from a `localhost` registry over HTTP with no configuration. TLS on the pull path, from Polar's
-  CA, would need every node's runtime to trust that CA, which is node configuration. So the pull path stays plain HTTP on
-  the node's localhost.
+- **Nodes pull from `localhost:<NodePort>` over plain HTTP.** A node's container runtime pulls from a `localhost` registry
+  over HTTP with no configuration. The NodePort answers on the node's localhost where kube-proxy serves NodePorts on
+  127.0.0.1 (its iptables mode does, its nftables mode does not); where it does not, the node's runtime sends pulls for
+  `localhost:<NodePort>` to the NodePort on the node's own address, which nix-usernetes configures for 30500. TLS on the
+  pull path, from Polar's CA, would need every node's runtime to trust that CA, which is node configuration. So the pull
+  path stays plain HTTP, named as the node's localhost.
 - **A gate must not be one that can be gone around.** The dev CNI does not enforce NetworkPolicy, so the upstream registry
   cannot rely on one to be unreachable.
 - **The registry comes before the cluster's CA and its first account.** `up.nu` applies it first (everything Polar runs is
