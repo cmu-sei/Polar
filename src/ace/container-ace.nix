@@ -58,8 +58,10 @@
       })
   ];
   pipeline = null;
+  services = [];
   shell = null;
   ssh = null;
+  startup = null;
   staticGid = 1000;
   staticUid = 1000;
   tls = null;

@@ -92,6 +92,7 @@
       })
   ];
   pipeline = null;
+  services = [];
   shell = u:
     u.Interactive {
       colorScheme = "gruvbox";
@@ -100,6 +101,7 @@
       viBindings = true;
     };
   ssh = { enable = true; port = 2223; };
+  startup = null;
   staticGid = null;
   staticUid = null;
   tls = null;
