@@ -200,6 +200,53 @@ async fn an_empty_asserted_identity_is_rejected() {
     }
 }
 
+// ---- a signing certificate: the caller's own, and nobody else's ----
+
+fn signing_request_for(identity: &str) -> InternalIssueRequest {
+    InternalIssueRequest {
+        cert_type: CertType::Signing,
+        ..request_for(identity, identity)
+    }
+}
+
+#[tokio::test]
+async fn an_internal_caller_is_signed_a_signing_certificate_for_itself_for_the_server_lifetime() {
+    let h = handler(real_ca(), vec![ALLOWED_CALLER]);
+    let response = h
+        .handle_internal_issue(Some(ALLOWED_CALLER), signing_request_for(ALLOWED_CALLER))
+        .await;
+
+    assert_eq!(response.status, 200);
+    match response.body {
+        HandlerBody::Success(issued) => {
+            let left = issued.expires_at - time::OffsetDateTime::now_utc();
+            assert!(
+                left > time::Duration::seconds(43200 - 60),
+                "the server lifetime, not the default: {left}"
+            );
+        }
+        other => panic!("expected success, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_signing_certificate_for_anyone_but_the_caller_is_refused_before_the_ca() {
+    let h = handler(Arc::new(PanicCa), vec![ALLOWED_CALLER, TARGET_IDENTITY]);
+    for identity in [
+        TARGET_IDENTITY,
+        "cassini.polar.serviceaccount.cluster.local",
+    ] {
+        let response = h
+            .handle_internal_issue(Some(ALLOWED_CALLER), signing_request_for(identity))
+            .await;
+        assert_eq!(response.status, 403, "{identity}");
+        match response.body {
+            HandlerBody::Error(e) => assert_eq!(e.outcome, IssueOutcome::CallerNotAuthorized),
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+}
+
 // ---- authoritative account subject (uid, mail) ----
 
 const OID_UID: &str = "0.9.2342.19200300.100.1.1";

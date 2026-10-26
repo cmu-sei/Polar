@@ -193,6 +193,18 @@ impl Handler {
             Err(e) => return error_response(map_validation_error(&e), &e.to_string()),
         };
 
+        // ---- Step 1.2: a signing certificate is not issued here ----
+        //
+        // It is the internal caller's own, asked for on /internal/issue: a token proves whose workload this is, and
+        // the credentials agent vouches for workloads, never for a key to sign as one with.
+        if request.cert_type == cert_issuer_common::CertType::Signing {
+            warn!(workload = %claims.workload_identity, "signing certificate requested on /issue: refused");
+            return error_response(
+                IssueOutcome::CallerNotAuthorized,
+                "a signing certificate is issued only to an internal caller, for itself",
+            );
+        }
+
         // ---- Step 1.5: who is asking ----
         //
         // The token says whose workload this is and nothing about whether it may ask for this. A caller
@@ -382,6 +394,8 @@ impl Handler {
                     // window, matching server_lifetime's own existing
                     // "not meant to expire in an hour" reasoning exactly.
                     cert_issuer_common::CertType::Service => self.server_lifetime,
+                    // The same: the agent's own, renewed by it.
+                    cert_issuer_common::CertType::Signing => self.server_lifetime,
                 }
             });
 
@@ -454,8 +468,8 @@ impl Handler {
         // allowlist, is refused before the CSR is even parsed. The
         // detail deliberately doesn't say which of the two it was, or
         // what the allowlist contains.
-        match peer_identity {
-            Some(peer) if self.internal_callers.iter().any(|c| c == peer) => {}
+        let caller = match peer_identity {
+            Some(peer) if self.internal_callers.iter().any(|c| c == peer) => peer,
             other => {
                 warn!(peer_identity = ?other, "internal issuance refused: caller not on allowlist");
                 return error_response(
@@ -463,6 +477,23 @@ impl Handler {
                     "caller is not authorized for internal issuance",
                 );
             }
+        };
+
+        // ---- Step 1.5: a signing certificate is the caller's own ----
+        //
+        // The caller asserts the identity of everything else it asks for here; a key to sign with it may have
+        // only for itself.
+        if request.cert_type == cert_issuer_common::CertType::Signing && request.identity != caller
+        {
+            warn!(
+                peer_identity = %caller,
+                identity = %request.identity,
+                "internal issuance refused: a signing certificate for another identity"
+            );
+            return error_response(
+                IssueOutcome::CallerNotAuthorized,
+                "a signing certificate is issued only for the caller's own identity",
+            );
         }
 
         // ---- Step 2: CSR parsing ----

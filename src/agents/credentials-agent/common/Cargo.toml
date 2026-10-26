@@ -58,8 +58,12 @@ x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
 hkdf = "0.12.4"
 rand.workspace = true
 x509-parser.workspace = true
+# The session offer is signed and checked as polar-signing's documents are (session_offer.rs).
+polar-signing.workspace = true
 ed25519-dalek.workspace = true
 p256.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
+polar-signing = { workspace = true, features = ["testing"] }
+proptest.workspace = true

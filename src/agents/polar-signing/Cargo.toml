@@ -44,3 +44,4 @@ testing = ["dep:rcgen"]
 [dev-dependencies]
 # The crate's own tests use its testing module.
 polar-signing = { path = ".", features = ["testing"] }
+proptest.workspace = true

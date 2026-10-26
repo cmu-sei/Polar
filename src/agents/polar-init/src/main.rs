@@ -349,16 +349,36 @@ async fn main() {
                 .await;
             }
         }
-        environment::Issuance::Observer { url, ca_cert_path } => {
+        environment::Issuance::Observer {
+            url,
+            ca_cert_path,
+            credentials_agent,
+        } => {
             // From the credentials agent, through its observer, with the token sealed to an ephemeral
-            // session so it is not on the pod network in the clear. Every other workload does this, and
-            // trusts what it is handed only once the CA it was given has signed it.
+            // session so it is not on the pod network in the clear. Every other workload does this, seals only
+            // to an offer the credentials agent signed, and trusts what it is handed only once the CA it was
+            // given has signed it.
             let pinned_ca = read_pinned_ca(ca_cert_path).unwrap_or_else(|why| stop(why));
+            let offers = credentials_agent_common::session_offer::OfferCheck::new(
+                &pinned_ca,
+                credentials_agent.clone(),
+            )
+            .unwrap_or_else(|e| {
+                stop(format!(
+                    "the CA certificate at '{ca_cert_path}' cannot be trusted as one: {e}"
+                ))
+            });
             let observer = credentials_agent_client::ObserverClient::new(url.clone());
             for req in &cert_requests {
-                if let Err(why) =
-                    issue_cert_via_observer(&observer, &sa_token, &dns_identity, req, &pinned_ca)
-                        .await
+                if let Err(why) = issue_cert_via_observer(
+                    &observer,
+                    &sa_token,
+                    &dns_identity,
+                    req,
+                    &pinned_ca,
+                    &offers,
+                )
+                .await
                 {
                     stop(why);
                 }
@@ -733,21 +753,22 @@ async fn write_bundle_patiently(
 }
 
 /// The certificate type the credentials agent knows for a `--cert` type. The escrow identity is not one: it is
-/// not requested here at all.
+/// not requested here at all. Nor is a signing certificate, which only an internal caller is issued, for itself.
 fn workload_cert_type(cert_type: &CertType) -> Option<WorkloadCertType> {
     match cert_type {
         CertType::Client => Some(WorkloadCertType::Client),
         CertType::Server => Some(WorkloadCertType::Server),
-        CertType::Service => None,
+        CertType::Service | CertType::Signing => None,
     }
 }
 
-/// What a requested certificate is judged for. The escrow identity is not a TLS certificate, and is not judged here.
+/// What a requested certificate is judged for. The escrow identity and a signing certificate are not TLS
+/// certificates, and are not judged here.
 fn usage_of(cert_type: &CertType) -> Option<output::Usage> {
     match cert_type {
         CertType::Server => Some(output::Usage::Server),
         CertType::Client => Some(output::Usage::Client),
-        CertType::Service => None,
+        CertType::Service | CertType::Signing => None,
     }
 }
 
@@ -781,11 +802,12 @@ async fn obtain_via_observer(
     token: &str,
     dns_identity: &str,
     request: &polar_crypto::workload_certificates::CertificateRequest,
+    offers: &credentials_agent_common::session_offer::OfferCheck,
     delay: Duration,
 ) -> Result<polar_crypto::workload_certificates::IssuedCertificate, String> {
     use polar_crypto::workload_certificates::{RequestError, request_certificate};
     loop {
-        match request_certificate(observer, token, dns_identity, request).await {
+        match request_certificate(observer, token, dns_identity, request, offers).await {
             Ok(issued) => return Ok(issued),
             Err(RequestError::Retry(why)) => {
                 tracing::warn!("the credentials agent cannot issue just yet: {why}, retrying...");
@@ -799,6 +821,9 @@ async fn obtain_via_observer(
                     "the credentials agent refused the request: {reason:?}"
                 ));
             }
+            // An offer the credentials agent did not sign: whoever is answering in its place would answer
+            // again, so stop, as for a certificate the pinned CA did not sign, and let the operator look.
+            Err(error @ RequestError::Untrusted(_)) => return Err(error.to_string()),
             Err(RequestError::Failed(why)) => return Err(why),
         }
     }
@@ -810,6 +835,7 @@ async fn issue_cert_via_observer(
     dns_identity: &str,
     req: &CertRequest,
     pinned_ca: &str,
+    offers: &credentials_agent_common::session_offer::OfferCheck,
 ) -> Result<(), String> {
     if keeps_existing_bundle(req, dns_identity, Some(pinned_ca.as_bytes())) {
         return Ok(());
@@ -837,6 +863,7 @@ async fn issue_cert_via_observer(
         sa_token,
         dns_identity,
         &request,
+        offers,
         Duration::from_secs(POLL_INTERVAL_SECS),
     )
     .await
@@ -985,6 +1012,7 @@ mod tests {
             Some(WorkloadCertType::Server)
         );
         assert_eq!(workload_cert_type(&CertType::Service), None);
+        assert_eq!(workload_cert_type(&CertType::Signing), None);
     }
 
     fn a_request() -> CertificateRequest {
@@ -995,12 +1023,47 @@ mod tests {
         }
     }
 
+    const CREDENTIALS_AGENT: &str = "credentials-agent.polar.serviceaccount.cluster.local";
+
+    /// An offer signed under `ca` by a signing certificate for `signer`, as the credentials agent signs one.
+    fn an_offer_signed_by(ca: &TestCa, signer: &str) -> SessionOffer {
+        let mut params = rcgen::CertificateParams::new(vec![signer.to_string()]).unwrap();
+        params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::Other(
+            cert_issuer_common::OID_DOCUMENT_SIGNING.to_vec(),
+        )];
+        let now = time::OffsetDateTime::now_utc();
+        params.not_before = now - time::Duration::hours(1);
+        params.not_after = now + time::Duration::hours(1);
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let cert = params
+            .signed_by(&key, &rcgen::Issuer::from_params(&ca.params, &ca.key))
+            .unwrap();
+        credentials_agent_common::session_offer::OfferSigner::new(
+            vec![cert.pem()],
+            key.serialize_pem(),
+        )
+        .unwrap()
+        .sign("s1".to_string(), EphemeralSession::open().public_key(), 60)
+        .unwrap()
+    }
+
+    fn offers_under(ca: &TestCa) -> credentials_agent_common::session_offer::OfferCheck {
+        credentials_agent_common::session_offer::OfferCheck::new(
+            &ca.pem,
+            CREDENTIALS_AGENT.to_string(),
+        )
+        .unwrap()
+    }
+
+    /// The CA of the tests that are not about trust: the offer and the check agree.
+    fn the_ca() -> &'static TestCa {
+        static CA: std::sync::OnceLock<TestCa> = std::sync::OnceLock::new();
+        CA.get_or_init(test_ca)
+    }
+
     fn an_offer() -> SessionOffer {
-        SessionOffer {
-            session_id: "s1".to_string(),
-            public_key: EphemeralSession::open().public_key(),
-            valid_for_secs: 60,
-        }
+        an_offer_signed_by(the_ca(), CREDENTIALS_AGENT)
     }
 
     fn issued() -> IssuanceReply {
@@ -1049,9 +1112,16 @@ mod tests {
             .mount(&server)
             .await;
         let observer = credentials_agent_client::ObserverClient::new(server.uri());
-        let got = obtain_via_observer(&observer, "token", "a.b", &a_request(), MILLISECOND)
-            .await
-            .expect("it comes in the end");
+        let got = obtain_via_observer(
+            &observer,
+            "token",
+            "a.b",
+            &a_request(),
+            &offers_under(the_ca()),
+            MILLISECOND,
+        )
+        .await
+        .expect("it comes in the end");
         assert_eq!(got.certificate_pem, "CERT");
         let asked_for_a_session = server
             .received_requests()
@@ -1093,11 +1163,16 @@ mod tests {
         }
     }
 
-    async fn an_observer_signing_with(ca: TestCa, chain: String) -> MockServer {
+    /// It offers `offer` for every session.
+    async fn an_observer_signing_with(
+        ca: TestCa,
+        chain: String,
+        offer: SessionOffer,
+    ) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/workload/session"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(an_offer()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(offer))
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -1119,12 +1194,21 @@ mod tests {
      {
         let ours = test_ca();
         let pinned = ours.pem.clone();
-        let server = an_observer_signing_with(ours, "NOT A CA".to_string()).await;
+        let offers = offers_under(&ours);
+        let offer = an_offer_signed_by(&ours, CREDENTIALS_AGENT);
+        let server = an_observer_signing_with(ours, "NOT A CA".to_string(), offer).await;
         let observer = credentials_agent_client::ObserverClient::new(server.uri());
         let dir = tempfile::TempDir::new().unwrap();
-        issue_cert_via_observer(&observer, "token", ME, &a_request_into(&dir), &pinned)
-            .await
-            .unwrap();
+        issue_cert_via_observer(
+            &observer,
+            "token",
+            ME,
+            &a_request_into(&dir),
+            &pinned,
+            &offers,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("ca.pem")).unwrap(),
             pinned
@@ -1140,14 +1224,69 @@ mod tests {
     async fn a_certificate_another_ca_signed_is_refused_and_nothing_is_written() {
         let (ours, theirs) = (test_ca(), test_ca());
         let chain = theirs.pem.clone();
-        let server = an_observer_signing_with(theirs, chain).await;
+        // The offer is the credentials agent's; the certificate is not the pinned CA's.
+        let offer = an_offer_signed_by(&ours, CREDENTIALS_AGENT);
+        let server = an_observer_signing_with(theirs, chain, offer).await;
         let observer = credentials_agent_client::ObserverClient::new(server.uri());
         let dir = tempfile::TempDir::new().unwrap();
-        let why = issue_cert_via_observer(&observer, "token", ME, &a_request_into(&dir), &ours.pem)
-            .await
-            .unwrap_err();
+        let why = issue_cert_via_observer(
+            &observer,
+            "token",
+            ME,
+            &a_request_into(&dir),
+            &ours.pem,
+            &offers_under(&ours),
+        )
+        .await
+        .unwrap_err();
         assert!(why.contains("not signed by the pinned CA"), "{why}");
         assert!(!dir.path().join("cert.pem").exists());
+    }
+
+    #[tokio::test]
+    async fn an_offer_the_credentials_agent_did_not_sign_stops_polar_init_and_nothing_is_sealed_to_it()
+     {
+        // Step 1c: someone between the pod and the credentials agent offers a key of their own, signed under
+        // another CA, or by another workload under this one.
+        let ours = test_ca();
+        for (case, offer) in [
+            (
+                "another CA",
+                an_offer_signed_by(&test_ca(), CREDENTIALS_AGENT),
+            ),
+            (
+                "another workload",
+                an_offer_signed_by(&ours, "cassini.polar.serviceaccount.cluster.local"),
+            ),
+        ] {
+            let server = an_observer_signing_with(test_ca(), String::new(), offer).await;
+            let observer = credentials_agent_client::ObserverClient::new(server.uri());
+            let dir = tempfile::TempDir::new().unwrap();
+            let why = issue_cert_via_observer(
+                &observer,
+                "token",
+                ME,
+                &a_request_into(&dir),
+                &ours.pem,
+                &offers_under(&ours),
+            )
+            .await
+            .unwrap_err();
+            assert!(why.contains("not the credentials agent's"), "{case}: {why}");
+            let paths: Vec<String> = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.url.path().to_string())
+                .collect();
+            assert_eq!(
+                paths,
+                vec!["/workload/session"],
+                "{case}: asked once, sealed nothing"
+            );
+            assert!(!dir.path().join("cert.pem").exists());
+        }
     }
 
     #[test]
@@ -1179,11 +1318,19 @@ mod tests {
             .mount(&server)
             .await;
         let observer = credentials_agent_client::ObserverClient::new(server.uri());
-        let err =
-            match obtain_via_observer(&observer, "token", "a.b", &a_request(), MILLISECOND).await {
-                Ok(_) => panic!("a refusal must not become a certificate"),
-                Err(why) => why,
-            };
+        let err = match obtain_via_observer(
+            &observer,
+            "token",
+            "a.b",
+            &a_request(),
+            &offers_under(the_ca()),
+            MILLISECOND,
+        )
+        .await
+        {
+            Ok(_) => panic!("a refusal must not become a certificate"),
+            Err(why) => why,
+        };
         assert!(err.contains("AlreadyHasValidCertificate"), "{err}");
         let attempts = server
             .received_requests()

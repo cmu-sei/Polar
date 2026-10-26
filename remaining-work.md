@@ -567,6 +567,12 @@ NOTHING IS OPEN for path 1 now: steps 4 to 6 wait for the go-ahead. Path 2 (prop
 - [ ] Bootstrap cert permission set: least privilege?
 - [ ] Configurable cluster domain: `cluster.domain` in `infra/config/cluster.nuon` now drives catalog addresses; still hardcoded in the Dhall charts and not passed to polar-init (see catalog section)
 - [ ] Rename `polar-admin-grant`
+- [ ] **An escrow certificate (`CertType::Service`) authenticates over mTLS.** It has no extended key usage
+  (`cert-issuer/server/src/ca.rs:283`), and rustls-webpki takes a certificate without one for client and server
+  authentication alike (`required_if_present`), so it connects to Cassini as its agent, with the agent's permissions.
+  Whoever holds an escrow private key (the agent, and the escrow it is kept in) can do so. A non-TLS extended key usage
+  would close it, as `CertType::Signing` has (`docs/architecture/core-restarts.md`, "1c in detail"); what the
+  escrow's other readers expect of the certificate needs reading first. Found 2026-10-26, building step 1c.
 
 ## Environment contract (`polar-env`), decided 2026-10-07
 

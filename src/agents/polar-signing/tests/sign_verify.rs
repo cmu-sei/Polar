@@ -24,11 +24,11 @@
 //! Signing and verifying, against real certificates.
 
 use cert_issuer_common::capability::Capability;
-use polar_signing::document::{Algorithm, signing_input};
+use polar_signing::document::{Algorithm, Domain, signing_input, signing_input_in};
 use polar_signing::testing::{self as support, Kind, Spec, now, root, signer};
 use polar_signing::{
     Authority, Document, LayoutError, RequireCapability, SignError, Trust, VerifyError, sign,
-    verify,
+    sign_in, verify, verify_in,
 };
 use rcgen::KeyUsagePurpose;
 use serde_json::{Value, json};
@@ -626,4 +626,67 @@ fn changing_configuration_and_changing_policy_are_separate_privileges() {
             .authorize(&who, &config_only.payload)
             .is_err()
     );
+}
+
+/// Another purpose's domain line, as a caller outside configuration names its own.
+const OTHER: Domain = Domain::new(b"polar-session-offer-v1\n");
+
+#[test]
+fn a_signature_under_one_domain_does_not_verify_under_another() {
+    let ca = root("Polar Internal CA");
+    for kind in [Kind::P256, Kind::Ed25519] {
+        let s = signer(
+            &ca,
+            Spec {
+                kind,
+                ..Spec::default()
+            },
+        );
+        let chain = std::slice::from_ref(&s.cert_pem);
+        let other = sign_in(OTHER, payload(), chain, &s.key_pem).unwrap();
+        assert!(verify_in(OTHER, &other, &trust(&ca.pem), now()).is_ok());
+        assert_eq!(
+            verify(&other, &trust(&ca.pem), now()),
+            Err(VerifyError::BadSignature),
+            "another purpose's signature is not a configuration document's"
+        );
+        let config = sign(payload(), chain, &s.key_pem).unwrap();
+        assert_eq!(
+            verify_in(OTHER, &config, &trust(&ca.pem), now()),
+            Err(VerifyError::BadSignature),
+            "nor is a configuration document's signature another purpose's"
+        );
+        assert_eq!(
+            verify_in(Domain::CONFIGURATION, &config, &trust(&ca.pem), now()),
+            verify(&config, &trust(&ca.pem), now()),
+            "sign and verify are the configuration domain's"
+        );
+    }
+}
+
+#[test]
+fn the_input_signed_under_a_domain_starts_with_its_line() {
+    assert!(
+        signing_input_in(OTHER, &payload())
+            .unwrap()
+            .starts_with(b"polar-session-offer-v1\n{")
+    );
+}
+
+#[test]
+#[should_panic(expected = "one line")]
+fn a_domain_without_its_newline_is_not_a_domain() {
+    let _ = Domain::new(b"polar-session-offer-v1");
+}
+
+#[test]
+#[should_panic(expected = "one line")]
+fn a_domain_of_two_lines_is_not_a_domain() {
+    let _ = Domain::new(b"polar\nsession-offer-v1\n");
+}
+
+#[test]
+#[should_panic(expected = "one line")]
+fn an_empty_domain_is_not_a_domain() {
+    let _ = Domain::new(b"\n");
 }

@@ -40,7 +40,38 @@ use serde_json::{Map, Value, json};
 
 /// Prepended to the canonical payload before signing, so a signature made for a configuration document
 /// cannot be presented as a signature over anything else, nor the reverse.
-pub const DOMAIN: &[u8] = b"polar-config-document-v1\n";
+pub const DOMAIN: &[u8] = Domain::CONFIGURATION.line();
+
+/// What a signature is for: one line, prepended to the canonical payload before signing. Configuration documents
+/// are signed under [`Domain::CONFIGURATION`]; anything else this system signs names its own, so a signature made
+/// for one purpose does not verify for another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Domain(&'static [u8]);
+
+impl Domain {
+    pub const CONFIGURATION: Domain = Domain::new(b"polar-config-document-v1\n");
+
+    /// `line` is one line: something, then a newline, and no other newline. Then no domain's input is a prefix of
+    /// another's, since a canonical payload starts with `{`. Checked when it is made, which for a constant is at
+    /// compile time.
+    pub const fn new(line: &'static [u8]) -> Self {
+        let last = line.len().wrapping_sub(1);
+        assert!(
+            line.len() > 1 && line[last] == b'\n',
+            "a domain is one line, ending in a newline"
+        );
+        let mut i = 0;
+        while i < last {
+            assert!(line[i] != b'\n', "a domain is one line, with one newline");
+            i += 1;
+        }
+        Domain(line)
+    }
+
+    pub const fn line(self) -> &'static [u8] {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Algorithm {
@@ -56,7 +87,7 @@ impl Algorithm {
         }
     }
 
-    fn parse(name: &str) -> Option<Self> {
+    pub fn parse(name: &str) -> Option<Self> {
         match name {
             "ed25519" => Some(Algorithm::Ed25519),
             "ecdsa-p256-sha256" => Some(Algorithm::EcdsaP256Sha256),
@@ -166,15 +197,20 @@ impl Document {
         })
     }
 
-    /// The bytes the signature covers.
+    /// The bytes the signature covers, as a configuration document.
     pub fn signing_input(&self) -> Result<Vec<u8>, CanonicalError> {
         signing_input(&self.payload)
     }
 }
 
-/// The bytes a signature over `payload` covers: the domain line, then the canonical encoding.
+/// The bytes a configuration document's signature over `payload` covers.
 pub fn signing_input(payload: &Value) -> Result<Vec<u8>, CanonicalError> {
-    let mut bytes = DOMAIN.to_vec();
+    signing_input_in(Domain::CONFIGURATION, payload)
+}
+
+/// The bytes a signature over `payload` for `domain` covers: the domain line, then the canonical encoding.
+pub fn signing_input_in(domain: Domain, payload: &Value) -> Result<Vec<u8>, CanonicalError> {
+    let mut bytes = domain.line().to_vec();
     bytes.extend(canonical::encode(payload)?);
     Ok(bytes)
 }

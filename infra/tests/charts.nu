@@ -36,6 +36,8 @@ use ../registry.nu [node_registry]
 
 const INFRA = (path self | path dirname | path dirname)
 const OBSERVER = "http://credentials-agent-observer.polar.svc.cluster.local:8080"
+# Not the default, so a chart that has it from anywhere but its context is found out.
+const CREDENTIALS_AGENT = "credentials-agent.polar-test.serviceaccount.cluster.local"
 
 def render [chart: string, extra: record] {
     let out = (mktemp --directory)
@@ -50,6 +52,7 @@ def render [chart: string, extra: record] {
         certIssuerUrl: "https://cert-issuer.polar.svc.cluster.local:8443"
         certIssuerAudience: "polar-cert-issuer-neo4j.local"
         credentialsObserverUrl: $OBSERVER
+        credentialsAgentIdentity: $CREDENTIALS_AGENT
     } | merge $extra)
     let r = (^nu ($INFRA | path join "layers/2-services" $chart "main.nu") ($context | to nuon) | complete)
     if $r.exit_code != 0 { error make { msg: $"rendering ($chart) failed: ($r.stderr)" } }
@@ -110,6 +113,8 @@ def main [] {
             let vars = (init_env ($out | path join "neo4j-statefulset.yaml"))
             assert equal (value_of $vars "POLAR_INIT_ISSUER") "credentials-agent"
             assert equal (value_of $vars "POLAR_INIT_OBSERVER_URL") $OBSERVER
+            # whose signature on a session offer it believes, as render.nu has it from the catalog
+            assert equal (value_of $vars "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY") $CREDENTIALS_AGENT
             # nothing in the pod is told where cert-issuer is
             assert (((value_of $vars "POLAR_INIT_CERT_ISSUER_URL") | default "") == "")
         }
@@ -190,6 +195,7 @@ def main [] {
             let vars = (init_env ($out | path join "ace.yaml"))
             assert equal (value_of $vars "POLAR_INIT_ISSUER") "credentials-agent"
             assert equal (value_of $vars "POLAR_INIT_OBSERVER_URL") $OBSERVER
+            assert equal (value_of $vars "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY") $CREDENTIALS_AGENT
             assert (((value_of $vars "POLAR_INIT_CERT_ISSUER_URL") | default "") == "")
         }
     }

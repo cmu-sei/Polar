@@ -30,7 +30,7 @@
 
 use crate::canonical::CanonicalError;
 use crate::cert;
-use crate::document::{Algorithm, Document};
+use crate::document::{Algorithm, Document, Domain, signing_input_in};
 use cert_issuer_common::capability::{Capability, extract_capabilities};
 use ed25519_dalek::Verifier as _;
 use x509_parser::certificate::X509Certificate;
@@ -231,7 +231,18 @@ fn pem_blocks(text: &str) -> Vec<String> {
     blocks
 }
 
+/// Checks a configuration document, and says who signed it.
 pub fn verify(document: &Document, trust: &Trust, now: i64) -> Result<SignerInfo, VerifyError> {
+    verify_in(Domain::CONFIGURATION, document, trust, now)
+}
+
+/// Checks a document signed for `domain`, as [`verify`] does for configuration.
+pub fn verify_in(
+    domain: Domain,
+    document: &Document,
+    trust: &Trust,
+    now: i64,
+) -> Result<SignerInfo, VerifyError> {
     let pems = &document.signature.certificate_chain;
     let mut ders = pems
         .iter()
@@ -280,7 +291,7 @@ pub fn verify(document: &Document, trust: &Trust, now: i64) -> Result<SignerInfo
     }
 
     // The signature itself.
-    let message = document.signing_input()?;
+    let message = signing_input_in(domain, &document.payload)?;
     match algorithm {
         Algorithm::Ed25519 => {
             let bytes: [u8; 32] = public_key

@@ -253,6 +253,13 @@ def spec_of [name: string, target: string, kinds: record] {
     { entry: $entry, ov: $ov, kind: $kind, spec: $spec }
 }
 
+# A workload's identity, `<service account>.<namespace>.serviceaccount.<domain>`: what cert-issuer normalises its token to,
+# the first name of its certificates, and how `model_facts` writes it.
+def identity_of [name: string, target: string, kinds: record, cluster: record] {
+    let spec = (spec_of $name $target $kinds).spec
+    $"($spec.service_account? | default $name).($spec.namespace).serviceaccount.($cluster.domain)"
+}
+
 # What the credentials agent's issuance floor needs of a workload, from its spec and its scaffold alone (a full resolve
 # of every workload, from inside the credentials agent's, would resolve the credentials agent again).
 def issuance_record [w: record, target: string, kinds: record] {
@@ -523,6 +530,8 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         $init_env
         | append { name: "POLAR_INIT_ISSUER", value: "credentials-agent", secret: null, key: null, from: "issuer" }
         | append { name: "POLAR_INIT_OBSERVER_URL", value: $obs.url, secret: null, key: null, from: "issuer" }
+        # Whose signature on a session offer it believes (docs/architecture/core-restarts.md, "1c in detail").
+        | append { name: "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY", value: (identity_of "credentials-agent" $target $kinds $cluster), secret: null, key: null, from: "issuer" }
     } else { $init_env })
 
     {
@@ -1051,6 +1060,12 @@ def "main service-url" [name: string, --target: string = $DEFAULT_TARGET] {
         error make { msg: $"service '($name)' is not in services.nuon, or has no scheme and so no URL" }
     }
     print $url
+}
+
+# A workload's identity (see identity_of), for a chart that names it.
+def "main identity" [name: string, --target: string = $DEFAULT_TARGET] {
+    let kinds = (open ($CONFIG | path join "kinds.nuon"))
+    print (identity_of $name $target $kinds (load_cluster $target))
 }
 
 # Whether cert-issuer enforces the floor on this target (cluster.nuon, `issuance.floor_enforced`).

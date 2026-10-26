@@ -59,7 +59,7 @@ pub enum ObserverClientError {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionOutcome {
     Offer(SessionOffer),
-    /// Too many sessions are open; try again shortly.
+    /// Too many sessions are open, or the credentials agent cannot sign an offer yet; try again shortly.
     Busy,
 }
 
@@ -130,7 +130,11 @@ impl ObserverClient {
         csr_pem: &str,
         credential: &str,
     ) -> Result<IssuanceReply, ObserverClientError> {
-        let url = format!("{}{}", self.base_url, credentials_agent_common::routes::ISSUE);
+        let url = format!(
+            "{}{}",
+            self.base_url,
+            credentials_agent_common::routes::ISSUE
+        );
         let body = IssuanceRequest {
             csr_pem: csr_pem.to_string(),
             credential: credential.to_string(),
@@ -368,6 +372,12 @@ mod tests {
             session_id: "s1".to_string(),
             public_key: EphemeralSession::open().public_key(),
             valid_for_secs: 60,
+            // Not checked on the way: carried, whole.
+            signature: credentials_agent_common::session_offer::OfferSignature {
+                algorithm: "ed25519".to_string(),
+                value: vec![1, 2, 3],
+                certificate_chain: vec!["the signer's certificate".to_string()],
+            },
         }
     }
 

@@ -103,6 +103,8 @@ def main [
     # Where a workload that is not a bootstrap identity asks for its certificate: the credentials agent's
     # observer, from services.nuon. The hand-written charts below that are not bootstrap identities get it.
     let credentials_observer_url = (^nu ($infra_root | path join "resolve.nu") service-url credentials-agent-observer --target $target | str trim)
+    # Whose signature on a session offer they believe (docs/architecture/core-restarts.md, "1c in detail").
+    let credentials_agent_identity = (^nu ($infra_root | path join "resolve.nu") identity credentials-agent --target $target | str trim)
 
     let identity_lifetime_overrides = $config.identity_lifetime_overrides
 
@@ -129,12 +131,12 @@ def main [
                     # Its own projected token is for this audience: it is signed its client certificate on it.
                     certIssuerAudience: $cert_issuer_audience
                 }
-                "neo4j" => { polarInitImage: $polar_init_image, credentialsObserverUrl: $credentials_observer_url }
+                "neo4j" => { polarInitImage: $polar_init_image, credentialsObserverUrl: $credentials_observer_url, credentialsAgentIdentity: $credentials_agent_identity }
                 "gitlab" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "git"         => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "build-processor" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "openapi"     => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
-                "ace"         => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image, credentialsObserverUrl: $credentials_observer_url }
+                "ace"         => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image, credentialsObserverUrl: $credentials_observer_url, credentialsAgentIdentity: $credentials_agent_identity }
                 _             => { _placeholder: "" }
             }
         ))

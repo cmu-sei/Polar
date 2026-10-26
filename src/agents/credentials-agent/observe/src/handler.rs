@@ -245,7 +245,7 @@ pub async fn workload_session(State(state): State<Arc<ObserverState>>) -> Respon
         Ok(WorkloadIssuanceReply::Offer(offer)) => (StatusCode::OK, Json(offer)).into_response(),
         Ok(WorkloadIssuanceReply::Busy) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            "too many sessions are open",
+            "no session can be offered just now: too many are open, or the offer cannot be signed yet",
         )
             .into_response(),
         Ok(_) => {
@@ -1492,6 +1492,12 @@ mod workload_tests {
             session_id: "session-1".to_string(),
             public_key: EphemeralSession::open().public_key(),
             valid_for_secs: 60,
+            // Not checked on the way: carried, whole.
+            signature: credentials_agent_common::session_offer::OfferSignature {
+                algorithm: "ed25519".to_string(),
+                value: vec![1, 2, 3],
+                certificate_chain: vec!["the signer's certificate".to_string()],
+            },
         }
     }
 

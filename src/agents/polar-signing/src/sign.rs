@@ -25,7 +25,7 @@
 
 use crate::canonical::CanonicalError;
 use crate::cert;
-use crate::document::{Algorithm, Document, SignatureBlock, signing_input};
+use crate::document::{Algorithm, Document, Domain, SignatureBlock, signing_input_in};
 use ed25519_dalek::Signer as _;
 use ed25519_dalek::pkcs8::DecodePrivateKey as _;
 use serde_json::Value;
@@ -48,10 +48,25 @@ pub enum SignError {
     Canonical(#[from] CanonicalError),
 }
 
-/// Signs `payload` with `key_pem`, which must be the key of the first certificate in
+/// Signs `payload` as a configuration document with `key_pem`, which must be the key of the first certificate in
 /// `certificate_chain_pem` (the signer's, then whatever links it to the CA). Both algorithms sign
 /// deterministically, so the same inputs give the same signature.
 pub fn sign(
+    payload: Value,
+    certificate_chain_pem: &[String],
+    key_pem: &str,
+) -> Result<Document, SignError> {
+    sign_in(
+        Domain::CONFIGURATION,
+        payload,
+        certificate_chain_pem,
+        key_pem,
+    )
+}
+
+/// Signs `payload` for `domain`, as [`sign`] does for configuration.
+pub fn sign_in(
+    domain: Domain,
     payload: Value,
     certificate_chain_pem: &[String],
     key_pem: &str,
@@ -67,7 +82,7 @@ pub fn sign(
     let key_der = x509_parser::pem::parse_x509_pem(key_pem.as_bytes())
         .map(|(_, block)| block.contents)
         .map_err(|e| SignError::BadKey(e.to_string()))?;
-    let message = signing_input(&payload)?;
+    let message = signing_input_in(domain, &payload)?;
 
     let value = match algorithm {
         Algorithm::Ed25519 => {

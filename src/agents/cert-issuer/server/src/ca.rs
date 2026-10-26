@@ -281,10 +281,17 @@ impl CaClient for RcgenCaClient {
             // "agent-to-agent payload encryption" -- left empty
             // rather than forcing a misleading fit.
             CertType::Service => vec![],
+            // Present, and not a TLS purpose: a certificate with no extended key usage at all is taken for any
+            // purpose, client and server authentication included.
+            CertType::Signing => vec![ExtendedKeyUsagePurpose::Other(
+                cert_issuer_common::OID_DOCUMENT_SIGNING.to_vec(),
+            )],
         };
         csr.params.extended_key_usages = eku;
         csr.params.key_usages = match req.cert_type {
-            CertType::Client | CertType::Server => vec![KeyUsagePurpose::DigitalSignature],
+            CertType::Client | CertType::Server | CertType::Signing => {
+                vec![KeyUsagePurpose::DigitalSignature]
+            }
             // This certificate's actual cryptographic purpose is
             // RSA-OAEP key-wrapping (this project's own hybrid
             // encryption scheme -- see credentials-agent-architecture.md's
@@ -974,6 +981,94 @@ mod tests {
 
         assert!(eku.server_auth, "server cert must have serverAuth EKU");
         assert!(eku.client_auth, "server cert must have clientAuth EKU");
+    }
+
+    fn signing_request(identity: &str) -> CaIssueRequest {
+        CaIssueRequest {
+            cert_type: CertType::Signing,
+            path: cert_issuer_common::record::IssuePath::Internal,
+            ..sample_request(identity)
+        }
+    }
+
+    fn parsed(pem: &str) -> Vec<u8> {
+        x509_parser::pem::parse_x509_pem(pem.as_bytes())
+            .expect("pem")
+            .1
+            .contents
+    }
+
+    #[tokio::test]
+    async fn a_signing_cert_permits_signatures_for_documents_and_nothing_else() {
+        let client = make_client();
+        let issued = client
+            .issue(signing_request(
+                "credentials-agent.polar.serviceaccount.cluster.local",
+            ))
+            .await
+            .expect("must succeed");
+        let der = parsed(&issued.certificate_pem);
+        let (_, cert) = x509_parser::parse_x509_certificate(&der).expect("x509");
+
+        let ku = cert.key_usage().expect("one").expect("KeyUsage present");
+        assert!(ku.value.digital_signature());
+        assert_eq!(ku.value.flags, 1, "digitalSignature and nothing else");
+
+        let eku = cert
+            .extended_key_usage()
+            .expect("one")
+            .expect("EKU present: one that is absent permits every use");
+        assert!(!eku.value.client_auth && !eku.value.server_auth);
+        assert!(!eku.value.any && !eku.value.code_signing && !eku.value.email_protection);
+        let oids: Vec<String> = eku.value.other.iter().map(|o| o.to_id_string()).collect();
+        assert_eq!(oids, vec!["1.3.6.1.5.5.7.3.36".to_string()]);
+    }
+
+    /// Whether rustls takes `pem` as a client certificate, and as a server certificate for `name`, under the test CA.
+    fn tls_takes(pem: &str, name: &str) -> (bool, bool) {
+        use rustls::client::danger::ServerCertVerifier as _;
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(parsed(&test_ca_materials().0)))
+            .expect("root");
+        let roots = std::sync::Arc::new(roots);
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let end_entity = CertificateDer::from(parsed(pem));
+        let client = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            roots.clone(),
+            provider.clone(),
+        )
+        .build()
+        .expect("client verifier")
+        .verify_client_cert(&end_entity, &[], UnixTime::now())
+        .is_ok();
+        let server = rustls::client::WebPkiServerVerifier::builder_with_provider(roots, provider)
+            .build()
+            .expect("server verifier")
+            .verify_server_cert(
+                &end_entity,
+                &[],
+                &ServerName::try_from(name.to_string()).expect("name"),
+                &[],
+                UnixTime::now(),
+            )
+            .is_ok();
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn tls_refuses_a_signing_cert_in_either_role() {
+        let identity = "credentials-agent.polar.serviceaccount.cluster.local";
+        let client = make_client();
+        let signing = client.issue(signing_request(identity)).await.unwrap();
+        assert_eq!(
+            tls_takes(&signing.certificate_pem, identity),
+            (false, false)
+        );
+        // The check itself can say yes: a server certificate is taken in both roles.
+        let server = client.issue(server_request(identity)).await.unwrap();
+        assert_eq!(tls_takes(&server.certificate_pem, identity), (true, true));
     }
 
     #[tokio::test]

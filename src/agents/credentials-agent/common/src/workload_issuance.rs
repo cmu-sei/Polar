@@ -39,11 +39,12 @@
 //! The observer relays both messages and understands neither: it never holds the token. The session ends at the
 //! credentials agent's consumer. Everything that is public stays outside the seal (the CSR, the type, the names),
 //! so the observer can still turn away a CSR that is not a CSR. This protects the token from anyone who can only
-//! watch the network; it does not authenticate the credentials agent to the workload, which is a separate
-//! question this does not claim to settle.
+//! watch the network. The offer is signed by the credentials agent, and the workload seals to it only once the
+//! signature holds ([`crate::session_offer`]), so one who can change the exchange cannot offer a key of their own.
 
 use crate::ephemeral_exchange::EphemeralEncryptedPayload;
 use crate::issuance::{IssuanceReply, WorkloadCertType};
+use crate::session_offer::OfferSignature;
 use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
@@ -74,7 +75,7 @@ pub struct SealedIssuanceRequest {
 }
 
 /// A session the credentials agent has opened: the public half of a fresh X25519 keypair, to seal to, and the
-/// name to send back with the sealed request.
+/// name to send back with the sealed request, signed by the credentials agent.
 #[derive(
     Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
 )]
@@ -83,6 +84,8 @@ pub struct SessionOffer {
     pub public_key: [u8; 32],
     /// How long the session is kept, in seconds. A request that arrives later is told the session is unknown.
     pub valid_for_secs: u64,
+    /// The credentials agent's signature over the three fields above ([`crate::session_offer`]).
+    pub signature: OfferSignature,
 }
 
 /// What comes back on `credentials-workload-issuance-replies`, inside an `Envelope`.
@@ -93,7 +96,8 @@ pub enum WorkloadIssuanceReply {
     Issuance(IssuanceReply),
     /// The session is not there: expired, already used, or never opened. The workload opens another.
     UnknownSession,
-    /// Too many sessions are open at once. The workload tries again shortly.
+    /// Too many sessions are open at once, or the credentials agent cannot sign an offer just now (it has no
+    /// signing certificate valid now). The workload tries again shortly.
     Busy,
 }
 
@@ -171,6 +175,7 @@ mod tests {
             session_id: "abc".to_string(),
             public_key: EphemeralSession::open().public_key(),
             valid_for_secs: 60,
+            signature: OfferSignature::default(),
         };
         let json = serde_json::to_string(&offer).unwrap();
         assert_eq!(serde_json::from_str::<SessionOffer>(&json).unwrap(), offer);
@@ -200,6 +205,7 @@ mod tests {
             session_id: "s1".to_string(),
             public_key: session.public_key(),
             valid_for_secs: 60,
+            signature: OfferSignature::default(),
         };
         let sealed = EphemeralEncryptedPayload::encrypt(b"the token", &offer.public_key).unwrap();
         assert_eq!(session.unseal(&sealed).unwrap().as_slice(), b"the token");

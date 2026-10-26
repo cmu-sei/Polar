@@ -47,6 +47,7 @@ pub mod observer;
 pub mod retrieve_secret;
 pub mod routes;
 pub mod secret;
+pub mod session_offer;
 pub mod workload_issuance;
 
 /// Signed admin actions (provision, grant, revoke, policy update) --

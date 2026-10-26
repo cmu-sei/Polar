@@ -29,7 +29,6 @@
 //! legitimate workload's session out from under it.
 
 use credentials_agent_common::ephemeral_exchange::EphemeralSession;
-use credentials_agent_common::workload_issuance::SessionOffer;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -42,6 +41,14 @@ pub const MAX_OPEN_SESSIONS: usize = 256;
 /// Too many sessions are open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Busy;
+
+/// A session just opened: what an offer says of it, before the offer is signed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Opened {
+    pub session_id: String,
+    pub public_key: [u8; 32],
+    pub valid_for_secs: u64,
+}
 
 pub struct Sessions {
     open: HashMap<String, (Instant, EphemeralSession)>,
@@ -65,13 +72,13 @@ impl Sessions {
     }
 
     /// Opens a session and returns what the workload needs to seal to it.
-    pub fn open(&mut self, now: Instant) -> Result<SessionOffer, Busy> {
+    pub fn open(&mut self, now: Instant) -> Result<Opened, Busy> {
         self.drop_expired(now);
         if self.open.len() >= self.cap {
             return Err(Busy);
         }
         let session = EphemeralSession::open();
-        let offer = SessionOffer {
+        let offer = Opened {
             session_id: uuid::Uuid::new_v4().to_string(),
             public_key: session.public_key(),
             valid_for_secs: self.ttl.as_secs(),

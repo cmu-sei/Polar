@@ -72,7 +72,15 @@ pub enum CertType {
     /// mechanism, described in the same document, that later escrows
     /// it alongside its private key).
     Service,
+    /// A key the holder signs its own statements with, never a TLS role: `digitalSignature` and the one extended key
+    /// usage `id-kp-documentSigning` ([`OID_DOCUMENT_SIGNING`]), which no TLS stack takes for a client or a server.
+    /// Signed only on `/internal/issue`, for the internal caller's own identity: the credentials agent's session
+    /// offers are signed with one (docs/architecture/core-restarts.md, "1c in detail").
+    Signing,
 }
+
+/// `id-kp-documentSigning` (RFC 9336): the extended key usage of a [`CertType::Signing`] certificate.
+pub const OID_DOCUMENT_SIGNING: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 3, 36];
 
 impl std::fmt::Display for CertType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -80,6 +88,7 @@ impl std::fmt::Display for CertType {
             Self::Client => "client",
             Self::Server => "server",
             Self::Service => "service",
+            Self::Signing => "signing",
         };
         write!(f, "{s}")
     }

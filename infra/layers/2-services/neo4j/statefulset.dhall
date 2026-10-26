@@ -52,6 +52,7 @@ let render =
           , serviceAccountName  : Text
           , configVolume        : Text
           , credentialsObserverUrl : Text
+          , credentialsAgentIdentity : Text
           , polarInitImage      : Text
           , nuInitImage          : Text
           , certIssuerAudience  : Text
@@ -179,7 +180,7 @@ let render =
                         -- Not told where cert-issuer is: its server certificate comes from the
                         -- credentials agent. Neo4j is not a bootstrap identity.
                         ""
-                        (Functions.credentialsAgentIssuerEnv v.credentialsObserverUrl)
+                        (Functions.credentialsAgentIssuerEnv v.credentialsObserverUrl v.credentialsAgentIdentity)
                         "/workspace/token"
                         [ kubernetes.VolumeMount::{ name = "neo4j-tls", mountPath = "/etc/neo4j-tls" }
                         , Constants.polarCaMount

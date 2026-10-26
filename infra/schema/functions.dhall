@@ -212,14 +212,21 @@ let noEnv = [] : List kubernetes.EnvVar.Type
 -- not from cert-issuer. The pod is not told where cert-issuer is, and pairs this with an empty
 -- certIssuerUrl. For a workload that is not a bootstrap identity (cert-issuer will not sign it on its token
 -- alone once the floor is enforced; docs/architecture/cert-issuer-isolation.md). It verifies what it is issued
--- against cert-issuer's CA, so the pod mounts Constants.polarCaVolume and polar-init Constants.polarCaMount.
+-- against cert-issuer's CA, so the pod mounts Constants.polarCaVolume and polar-init Constants.polarCaMount, and
+-- seals its token only to a session offer signed by the credentials agent, `credentialsAgentIdentity`
+-- (docs/architecture/core-restarts.md, "1c in detail"), which render.nu has from the catalog.
 let credentialsAgentIssuerEnv =
       \(observerUrl : Text) ->
+      \(credentialsAgentIdentity : Text) ->
         [ kubernetes.EnvVar::{ name = "POLAR_INIT_ISSUER", value = Some "credentials-agent" }
         , kubernetes.EnvVar::{ name = "POLAR_INIT_OBSERVER_URL", value = Some observerUrl }
         , kubernetes.EnvVar::{
           , name = "POLAR_INIT_CA_CERT"
           , value = Some "${Constants.polarCaPath}/ca.pem"
+          }
+        , kubernetes.EnvVar::{
+          , name = "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY"
+          , value = Some credentialsAgentIdentity
           }
         ]
 

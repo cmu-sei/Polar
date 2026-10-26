@@ -73,6 +73,11 @@ pub const CA_CERT: Optional<String> = Optional::text(
     "path to the Polar CA certificate: cert-issuer is verified against it from the first request, and on the observer path every certificate issued is; required when POLAR_INIT_ISSUER is `credentials-agent`, and on cert-issuer's path unset means the CA is fetched once and pinned",
 );
 
+pub const CREDENTIALS_AGENT_IDENTITY: Optional<String> = Optional::text(
+    "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY",
+    "the credentials agent's identity (`<name>.<namespace>.serviceaccount.<domain>`): a session offer is sealed to only if a signing certificate naming it, under the CA, signed the offer; required when POLAR_INIT_ISSUER is `credentials-agent`",
+);
+
 /// Runs the escrow-keypair bootstrap. Only an agent with a crypto actor reads the escrowed keypair, so the render
 /// sets it for a workload whose code needs encryption (the `encryption` capability), and for no other: the core
 /// services, which the bootstrap travels through or asks, never do (docs/architecture/policy-enforcement.md,
@@ -89,6 +94,7 @@ static VARIABLES: &[&dyn Described] = &[
     &OBSERVER_URL,
     &TOKEN_PATH,
     &CA_CERT,
+    &CREDENTIALS_AGENT_IDENTITY,
     &ESCROW_BOOTSTRAP,
 ];
 
@@ -99,9 +105,10 @@ pub static SECTION: Section = Section {
     relations: issuer_is_consistent,
 };
 
-/// The issuer must be one of the two, and its address must be given. The observer path also needs the CA: what it is
-/// issued comes over plain HTTP and is trusted only once it is checked against the CA the pod was given
-/// (docs/architecture/core-restarts.md, "The plan", step 1).
+/// The issuer must be one of the two, and its address must be given. The observer path also needs the CA and the
+/// credentials agent's identity: what it is offered and issued comes over plain HTTP, and is trusted only once it is
+/// checked against the CA the pod was given, the offer as the credentials agent's (docs/architecture/core-restarts.md,
+/// "The plan", step 1).
 fn issuer_is_consistent(env: &dyn Env) -> Vec<String> {
     let given = |read: Result<Option<String>, polar_env::EnvError>| {
         read.ok().flatten().is_some_and(|v| !v.trim().is_empty())
@@ -112,7 +119,7 @@ fn issuer_is_consistent(env: &dyn Env) -> Vec<String> {
             CERT_ISSUER_URL.name(),
             ISSUER.name()
         )],
-        Ok(ISSUER_CREDENTIALS_AGENT) => [OBSERVER_URL, CA_CERT]
+        Ok(ISSUER_CREDENTIALS_AGENT) => [OBSERVER_URL, CA_CERT, CREDENTIALS_AGENT_IDENTITY]
             .iter()
             .filter(|var| !given(var.read(env)))
             .map(|var| {
@@ -146,9 +153,14 @@ pub enum Issuance {
         url: String,
         ca_cert_path: Option<String>,
     },
-    /// From the credentials agent through its observer, with the token sealed to an ephemeral session, and every
-    /// certificate it hands over verified against the CA at `ca_cert_path`.
-    Observer { url: String, ca_cert_path: String },
+    /// From the credentials agent through its observer, with the token sealed to an ephemeral session only if
+    /// `credentials_agent` signed its offer, and every certificate it hands over verified against the CA at
+    /// `ca_cert_path`.
+    Observer {
+        url: String,
+        ca_cert_path: String,
+        credentials_agent: String,
+    },
 }
 
 /// Everything polar-init is configured with by its environment.
@@ -205,6 +217,7 @@ impl InitSettings {
         let ca_cert_path = optional(CA_CERT.read(env), &mut note);
         let cert_issuer_url = optional(CERT_ISSUER_URL.read(env), &mut note);
         let observer_url = optional(OBSERVER_URL.read(env), &mut note);
+        let credentials_agent = optional(CREDENTIALS_AGENT_IDENTITY.read(env), &mut note);
         // Said once, whatever else is wrong: which address a mode needs.
         for problem in issuer_is_consistent(env) {
             note(problem);
@@ -213,6 +226,7 @@ impl InitSettings {
             ISSUER_CREDENTIALS_AGENT => Issuance::Observer {
                 url: observer_url.unwrap_or_default(),
                 ca_cert_path: ca_cert_path.unwrap_or_default(),
+                credentials_agent: credentials_agent.unwrap_or_default(),
             },
             _ => Issuance::CertIssuer {
                 url: cert_issuer_url.unwrap_or_default(),
@@ -407,6 +421,10 @@ mod tests {
                 "http://credentials-agent-observer:8080",
             ),
             ("POLAR_INIT_CA_CERT", "/etc/polar-ca/ca.pem"),
+            (
+                "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY",
+                "credentials-agent.polar.serviceaccount.cluster.local",
+            ),
         ]]))
         .unwrap();
         assert_eq!(
@@ -414,6 +432,8 @@ mod tests {
             Issuance::Observer {
                 url: "http://credentials-agent-observer:8080".to_string(),
                 ca_cert_path: "/etc/polar-ca/ca.pem".to_string(),
+                credentials_agent: "credentials-agent.polar.serviceaccount.cluster.local"
+                    .to_string(),
             }
         );
     }
@@ -448,6 +468,39 @@ mod tests {
     }
 
     #[test]
+    fn the_observer_path_needs_the_credentials_agent_s_identity_to_check_the_offer_against() {
+        // Step 1c: the token is sealed only to an offer the credentials agent signed, and which identity that is
+        // comes from the catalog, never from the offer.
+        for identity in [None, Some(""), Some("  ")] {
+            let mut pairs = vec![
+                ("POLAR_INIT_ISSUER", "credentials-agent"),
+                ("POLAR_INIT_OBSERVER_URL", "http://obs:8080"),
+                ("POLAR_INIT_CA_CERT", "/etc/polar-ca/ca.pem"),
+            ];
+            if let Some(identity) = identity {
+                pairs.push(("POLAR_INIT_CREDENTIALS_AGENT_IDENTITY", identity));
+            }
+            let error = InitSettings::from_env(&with(&[&pairs])).unwrap_err();
+            assert!(
+                error.contains("POLAR_INIT_CREDENTIALS_AGENT_IDENTITY"),
+                "{identity:?}: {error}"
+            );
+            assert!(
+                !error.contains("POLAR_INIT_CA_CERT"),
+                "{identity:?}: {error}"
+            );
+        }
+        // cert-issuer's own path asks no offer of anyone.
+        assert!(
+            InitSettings::from_env(&with(&[&[
+                ("POLAR_INIT_ISSUER", "cert-issuer"),
+                ("POLAR_INIT_CERT_ISSUER_URL", "https://ci:8443"),
+            ]]))
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn the_rendered_observer_mode_has_a_blank_cert_issuer_address_and_that_is_fine() {
         // The catalog renders POLAR_INIT_CERT_ISSUER_URL as an empty string for a workload on the credentials
         // agent, so that nothing in its pod is told where cert-issuer is.
@@ -456,6 +509,10 @@ mod tests {
             ("POLAR_INIT_ISSUER", "credentials-agent"),
             ("POLAR_INIT_OBSERVER_URL", "http://obs:8080"),
             ("POLAR_INIT_CA_CERT", "/etc/polar-ca/ca.pem"),
+            (
+                "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY",
+                "credentials-agent.polar.serviceaccount.cluster.local",
+            ),
         ]]))
         .unwrap();
         assert_eq!(
@@ -463,6 +520,8 @@ mod tests {
             Issuance::Observer {
                 url: "http://obs:8080".to_string(),
                 ca_cert_path: "/etc/polar-ca/ca.pem".to_string(),
+                credentials_agent: "credentials-agent.polar.serviceaccount.cluster.local"
+                    .to_string(),
             }
         );
     }

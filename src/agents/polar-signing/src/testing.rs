@@ -81,6 +81,7 @@ pub struct Spec {
     pub identity: &'static str,
     pub capabilities: Vec<&'static str>,
     pub key_usages: Vec<KeyUsagePurpose>,
+    pub extended_key_usages: Vec<ExtendedKeyUsagePurpose>,
     pub not_before_year: i32,
     pub not_after_year: i32,
     pub is_ca: bool,
@@ -100,6 +101,7 @@ impl Default for Spec {
             identity: ALICE_ACCOUNT_ID,
             capabilities: vec!["c:update-configuration"],
             key_usages: vec![KeyUsagePurpose::DigitalSignature],
+            extended_key_usages: vec![ExtendedKeyUsagePurpose::ClientAuth],
             not_before_year: 2026,
             not_after_year: 2030,
             is_ca: false,
@@ -130,7 +132,7 @@ pub fn signer(issuer: &Authority, spec: Spec) -> Signer {
         )
         .collect();
     params.key_usages = spec.key_usages;
-    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    params.extended_key_usages = spec.extended_key_usages;
     params.not_before = date_time_ymd(spec.not_before_year, 1, 1);
     params.not_after = date_time_ymd(spec.not_after_year, 1, 1);
     if spec.is_ca {

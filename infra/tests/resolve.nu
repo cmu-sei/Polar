@@ -363,6 +363,10 @@ def main [] {
                     assert ($r.volumes | any {|v| $v.name == "polar-ca" and $v.config_map == "polar-ca" }) $n
                     assert ($r.init_env | any {|e| $e.name == "POLAR_INIT_CA_CERT" and $e.value == "/etc/polar-ca/ca.pem" }) $n
                     assert ($r.init_mounts | any {|m| $m.path == "/etc/polar-ca" }) $n
+                    # And on the observer path, whose offers it is to believe (step 1c).
+                    if (init_env_value $r "POLAR_INIT_ISSUER") == "credentials-agent" {
+                        assert equal (init_env_value $r "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY") "credentials-agent.polar.serviceaccount.cluster.local" $n
+                    }
                 }
             }
         }
@@ -510,8 +514,21 @@ def main [] {
                 assert equal (^nu $RESOLVER settings kube-consumer --target $t | from json | get issuer) "credentials-agent"
                 assert equal (init_env_value $r "POLAR_INIT_ISSUER") "credentials-agent"
                 assert equal (init_env_value $r "POLAR_INIT_OBSERVER_URL") "http://credentials-agent-observer.polar.svc.cluster.local:8080"
+                assert equal (init_env_value $r "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY") "credentials-agent.polar.serviceaccount.cluster.local"
                 assert equal $r.cert_issuer_url ""
             }
+        }
+
+        "the identity a workload checks the credentials agent's offers against is the catalog's credentials agent": {
+            # docs/architecture/core-restarts.md, "1c in detail": polar-init seals its token only to an offer signed by
+            # a signing certificate naming the credentials agent, as `model_facts` writes identities.
+            with_target { workloads: { kube-consumer: { issuer: "credentials-agent" }, credentials-agent: { namespace: "polar-creds" } } } {|t|
+                let r = (^nu $RESOLVER json kube-consumer --target $t | from json)
+                assert equal (init_env_value $r "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY") "credentials-agent.polar-creds.serviceaccount.cluster.local"
+                assert equal (^nu $RESOLVER identity credentials-agent --target $t | str trim) "credentials-agent.polar-creds.serviceaccount.cluster.local"
+            }
+            # A bootstrap service asks cert-issuer, and is offered nothing to check.
+            assert equal (init_env_value (resolve "cassini") "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY") null
         }
 
         "a bootstrap identity cannot be moved onto the credentials agent": {

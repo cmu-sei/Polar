@@ -57,6 +57,7 @@ def main [context_nuon: string] {
         + " serviceType = v.serviceType, port = v.port,"
         + " polarInitImage = \"" + $polar_init_image + "\","
         + " credentialsObserverUrl = \"" + $context.credentialsObserverUrl + "\","
+        + " credentialsAgentIdentity = \"" + $context.credentialsAgentIdentity + "\","
         + " saTokenAudience = \"" + $sa_audience + "\","
         + " neo4jBoltAddr = \"" + $neo4j_addr + "\""
         + " }"

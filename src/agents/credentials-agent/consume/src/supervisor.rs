@@ -287,7 +287,9 @@ impl Supervisor for ConsumerSupervisor {
             ) {
                 Ok(envelope) => {
                     if let Some(actor) = where_is(WORKLOAD_ISSUANCE_ACTOR_NAME.to_string()) {
-                        if let Err(e) = actor.send_message(envelope) {
+                        if let Err(e) = actor.send_message(
+                            crate::workload_issuance_actor::WorkloadIssuanceMsg::Request(envelope),
+                        ) {
                             warn!("Failed to forward workload issuance request to actor: {e}");
                         }
                     } else {
@@ -842,11 +844,20 @@ impl Actor for ConsumerSupervisor {
         .await
         .map_err(ActorProcessingErr::from)?;
 
+        // Its session offers are signed for the identity cert-issuer reads off this agent's connection, which is
+        // the first DNS name of its own certificate.
+        let own_identity = std::fs::read_to_string(&settings.own_cert_path)
+            .map_err(|e| format!("cannot read this agent's certificate: {e}"))
+            .and_then(|pem| {
+                cert_issuer_common::permission::extract_own_identity(&pem)
+                    .map_err(|e| format!("this agent's certificate names no identity: {e}"))
+            })
+            .map_err(ActorProcessingErr::from)?;
         let (_workload_issuance_actor, _) = WorkloadIssuanceActor::spawn_linked(
             Some(WORKLOAD_ISSUANCE_ACTOR_NAME.to_string()),
             WorkloadIssuanceActor,
             WorkloadIssuanceActorArgs {
-                handler: WorkloadIssuanceHandler::new(make_issuance_handler().await?),
+                handler: WorkloadIssuanceHandler::new(make_issuance_handler().await?, own_identity),
             },
             myself.get_cell(),
         )
@@ -1758,6 +1769,12 @@ mod issuance_wiring_tests {
             ))
             .mount(&cert_issuer)
             .await;
+        // The actor's signing certificate, which it asks for when it starts.
+        Mock::given(method("POST"))
+            .and(path("/internal/issue"))
+            .respond_with(crate::workload_issuance::tests::CertifiesSigning)
+            .mount(&cert_issuer)
+            .await;
 
         let dir = tempfile::tempdir().unwrap();
         let (ledger, _) = LedgerActor::spawn(
@@ -1779,16 +1796,19 @@ mod issuance_wiring_tests {
             Some(WORKLOAD_ISSUANCE_ACTOR_NAME.to_string()),
             WorkloadIssuanceActor,
             WorkloadIssuanceActorArgs {
-                handler: WorkloadIssuanceHandler::new(IssuanceHandler {
-                    ledger: ledger.clone(),
-                    cert_issuer: HandshakeClient::new(cert_issuer.uri()),
-                    introspection: None,
-                    known_kubernetes_issuers: vec![
-                        "https://kubernetes.default.svc.cluster.local".to_string(),
-                    ],
-                    escrow_keypair: crate::escrow::tests::test_keypair(),
-                    authority_model: None,
-                }),
+                handler: WorkloadIssuanceHandler::new(
+                    IssuanceHandler {
+                        ledger: ledger.clone(),
+                        cert_issuer: HandshakeClient::new(cert_issuer.uri()),
+                        introspection: None,
+                        known_kubernetes_issuers: vec![
+                            "https://kubernetes.default.svc.cluster.local".to_string(),
+                        ],
+                        escrow_keypair: crate::escrow::tests::test_keypair(),
+                        authority_model: None,
+                    },
+                    crate::workload_issuance::tests::OWN_IDENTITY.to_string(),
+                ),
             },
         )
         .await
@@ -1826,6 +1846,12 @@ mod issuance_wiring_tests {
         let WorkloadIssuanceReply::Offer(offer) = offered.payload else {
             panic!("expected an offer");
         };
+        // Signed with the certificate the actor was issued when it started.
+        assert_eq!(
+            crate::workload_issuance::tests::check()
+                .check(&offer, time::OffsetDateTime::now_utc().unix_timestamp()),
+            Ok(())
+        );
 
         let token = make_token("https://kubernetes.default.svc.cluster.local");
         send(

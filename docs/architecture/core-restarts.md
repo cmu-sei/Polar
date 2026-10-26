@@ -210,6 +210,54 @@ Each step tests first, with property tests where an invariant holds.
      (`POLAR_INIT_CREDENTIALS_AGENT_IDENTITY`, rendered from the catalog), and that the signature holds, before it
      seals. 1c's two sides deploy together.
 
+   *1c in detail (settled while building it, 2026-10-26).*
+   - *The signing type is kept from TLS by an extended key usage, not by having none.* rustls-webpki takes a
+     certificate with no extended key usage for client and server authentication alike (both are
+     `required_if_present`, rustls-webpki 0.103 `verify_cert.rs`), so a certificate made like `CertType::Service`'s,
+     with none (`cert-issuer/server/src/ca.rs:283`), would serve as an mTLS certificate naming the credentials agent.
+     `CertType::Signing` carries `digitalSignature` and the one extended key usage `id-kp-documentSigning`
+     (1.3.6.1.5.5.7.3.36, RFC 9336), which no TLS stack takes for either role; `polar-init` requires both, and no
+     TLS usage.
+   - *The offer has a domain of its own.* `polar-signing` signs and verifies under a domain line the caller names
+     (`sign_in`, `verify_in`); configuration documents keep `polar-config-document-v1`, and the offer is signed under
+     `polar-session-offer-v1`, so neither signature can be passed off as the other. What is signed is
+     `{session_id, public_key, valid_for_secs}` (the key as its 32 bytes, as the offer carries it) in `polar-signing`'s
+     canonical encoding; the offer carries the signature block (algorithm, value, chain) beside the three fields,
+     which travel as before.
+   - *Ed25519, in memory, renewed.* The workload issuance actor makes the keypair when it starts, and asks
+     `/internal/issue` for a signing certificate for its own identity, read off its own mTLS certificate
+     (`extract_own_identity`, the first DNS name, which is what cert-issuer reads off the connection). It renews at
+     half the certificate's life with a new keypair, and tries again every few seconds while cert-issuer cannot
+     answer. Until it holds a certificate valid now, it answers a session request with `Busy`, which a workload
+     already waits out.
+   - *cert-issuer.* `/issue` refuses `Signing` to every caller, vouched or not; `/internal/issue` signs it only for the
+     caller's own identity. It lives `server_lifetime`, as `Service` does: the agent's own, renewed by it.
+   - *polar-init stops on an offer that does not verify*, before it seals, as 1b stops on a certificate that does not:
+     a pod that crash-loops is seen, where one that waits quietly is not. It reads the credentials agent's identity
+     from `POLAR_INIT_CREDENTIALS_AGENT_IDENTITY`, required on the observer path, which the catalog renders from the
+     `credentials-agent` workload (`<name>.<namespace>.serviceaccount.<domain>`, as `model_facts` writes identities)
+     and the Neo4j and ACE charts take through `credentialsAgentIssuerEnv`.
+   - *Found on the way: an escrow certificate is an mTLS certificate too.* By the same rustls rule, a `Service`
+     certificate, which has no extended key usage and carries its agent's permissions, authenticates as that agent to
+     Cassini, so whoever holds an escrow private key (the agent, and the escrow it is kept in) can connect as the
+     agent. 1c does not change it; it is on record in `remaining-work.md`.
+
+   *Built (2026-10-26): 1c,* in code and tests, not yet on a cluster. `polar-signing` signs and verifies under a
+   named `Domain` (`document.rs`; one line, checked when it is made); cert-issuer has `CertType::Signing`
+   (`cert-issuer/common/src/lib.rs`, `OID_DOCUMENT_SIGNING`), refuses it on `/issue` and signs it on `/internal/issue`
+   only for the caller (`handler.rs`); `credentials-agent-common`'s `session_offer.rs` has the signer and the check;
+   the consumer's workload issuance handler signs each offer, and its actor gets the first signing certificate before
+   it takes a request and renews it (`renewal_delay`, at half its life, never sooner than `SIGNER_RETRY`); `polar-crypto`
+   checks the offer before it seals (`RequestError::Untrusted`), and `polar-init` stops on one. The catalog renders
+   `POLAR_INIT_CREDENTIALS_AGENT_IDENTITY` (`resolve.nu`, `identity_of` and `resolve.nu identity`), and `render.nu`
+   gives it to the Neo4j and ACE charts. Tests: a rustls check that a signing certificate is refused for TLS client
+   and server use (`ca.rs`); property tests for the domain (`polar-signing/tests/props.rs`), the offer
+   (`credentials-agent/common/tests/props.rs`: believed as offered, and no change to it believed) and the renewal
+   schedule; `infra/tests/resolve.nu` and `charts.nu`. Mutations: all on the new code caught but one, the consumer
+   dropping a session whose offer it could not sign, which no test can reach (a signer's key is checked against its
+   certificate when it is made). Its two sides deploy together: a new `polar-init` refuses an old consumer's unsigned
+   offers.
+
    *Built (2026-10-26): 1a and 1b,* in code and tests, not yet on a cluster. The catalog's `agent` and `service` kinds
    give `pinned-ca` and the `ca` kind does not (`infra/config/kinds.nuon`; the per-workload entries that said it are
    gone); the Neo4j and ACE charts mount `Constants.polarCaVolume` and set `POLAR_INIT_CA_CERT` through
