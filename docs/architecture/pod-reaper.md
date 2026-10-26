@@ -25,6 +25,13 @@
 
 Status, 2026-10-20: a design for review. Nothing here is built.
 
+**Update, 2026-10-26 (the maintainer):** the pod observer's role is taken by the attestation agent
+(`runtime-attestation.md`), which needs the same rights over pods; one agent holds them rather than two. What this
+document says of the pod observer (its inventory of Failed pods, its Role, its reports) is the attestation agent's.
+The Reaper stays a separate agent that only deletes. With the agents moving to Deployments that restart in place
+(`runtime-attestation.md`, "Deployments, next"), Failed pods mostly stop accumulating; the Reaper stays for clusters
+older than that.
+
 ## The problem
 
 Every agent ends a pod by exiting 1, so that its Job (`restartPolicy: Never`, `backoffLimit` 1000000) replaces it

@@ -124,9 +124,9 @@ record: the credentials agent learns of what it signed, and says so over Cassini
   check and restarts into init. The credentials agent is exempt (`policy-enforcement.md`, "Decisions").
 - **Nothing announces a restart.** At rejuvenation the credentials agent drains and unsubscribes from its request topics
   (`credentials-agent/consume/src/supervisor.rs`, `unsubscribe_from_topics`); nothing tells its dependents.
-- **The pod observer and the Reaper are designed, not built** (`pod-reaper.md`). The pod observer is the agent that sees
-  pods with Kubernetes privileges, apart from the one that acts on them, so it is where "the credentials agent has
-  crashed" would come from.
+- **The attestation agent and the Reaper are designed, not built** (`runtime-attestation.md`, `pod-reaper.md`). The
+  attestation agent, which takes over the pod observer's role (2026-10-26), is the agent that sees pods with Kubernetes
+  privileges, apart from the one that acts on them, so it is where "the credentials agent has crashed" would come from.
 - **Every certificate cert-issuer signs becomes known to the credentials agent** (`cert-issuer-isolation.md`, step 2,
   built 2026-10-23): cert-issuer records each signing before it returns the certificate, and the credentials agent asks
   for the record over Cassini (`cert-issuer-record-requests`, `-replies`) when it registers and every 30 seconds. That
@@ -149,7 +149,7 @@ record: the credentials agent learns of what it signed, and says so over Cassini
 - **4, two or more down.** Something must tell this apart from 1 to 3, from what cert-issuer and the survivor can see,
   without opening the floor on a guess.
 - **The rest, degraded.** A "restarting, back in a moment" notice is something an agent can act on: hold its requests,
-  not count the gap against its health. "It has crashed" needs a source with Kubernetes privileges (the pod observer).
+  not count the gap against its health. "It has crashed" needs a source with Kubernetes privileges (the attestation agent).
   Both work inside the 90-minute bound, not beyond it.
 
 ## Open questions
@@ -159,7 +159,15 @@ builds on.
 
 1. When the credentials agent restarts, who vouches for its new pod's certificate (situation 3)?
 
-   *Prepared for the maintainer, 2026-10-23; not decided.* Read from the code:
+   **Decided (the maintainer, 2026-10-26): B for rejuvenation and C for a crash, with A in force until they are built.**
+   Why it is needed at all: the floor is for bootstrap, but every restart of the credentials agent (each rejuvenation,
+   about hourly with one-hour certificates, and each crash) is a new pod signed by the floor, so the floor is in
+   practice open at nominal for the most trusted identity there is. Anyone who can produce a Kubernetes token for the
+   credentials agent's service account (by running a pod as it, or creating a token for it) could get that certificate
+   from cert-issuer directly; the record would show it within 30 seconds but not stop it. The maintainer chose to close
+   that even against someone with that Kubernetes access.
+
+   Prepared for the maintainer, 2026-10-23. Read from the code:
    - The credentials agent is a catalog `agent`: a Job with `restartPolicy: Never` (`infra/config/kinds.nuon:37`). So a
      restart, planned (rejuvenation) or not (a crash), is a new pod with a new UID, created after the old one has
      ended. The two never overlap, so the old pod cannot vouch for the new one while both run.
@@ -183,11 +191,55 @@ builds on.
      than a bound (two missed asks), while its own Cassini session holds. That is situation 3, not 4. It closes again at
      the first request from the new credentials agent.
    - **D. Something with Kubernetes privileges vouches.** The pod observer (`pod-reaper.md`, designed, not built) could
-     say which pod is the credentials agent's new one. It needs an agent that does not exist yet.
+     say which pod is the credentials agent's new one. It needs an agent that does not exist yet. (Taken up as the
+     attestation agent, 2026-10-26.)
 
    Recommendation: B for rejuvenation and C for a crash, with A in force until they are built. Both keep the entry
    closed at nominal except for one identity, briefly, for a reason cert-issuer can see, and every signing is in the
    record.
+
+   **Found after the decision (2026-10-26): B and C narrow the exposure, they do not close it.** Inside a ticket's
+   window or a crash's, cert-issuer still signs on a token alone, and nothing tells it which pod is the real successor:
+   the token names the service account and the pod's UID, but the Job makes the new pod only once the old one has
+   ended (`podReplacementPolicy: Failed`, read on sandbox-local), so the outgoing agent cannot name it in a ticket. Any
+   pod running as that service account could get there first, and whoever can delete pods can open C's window at will.
+   What B and C buy: the entry is shut outside those minutes, and a race is visible (two credentials-agent
+   certificates in the record for one restart, or the real pod refused). The maintainer (2026-10-26): what closes it is
+   runtime attestation.
+
+   **Runtime attestation: what Polar has on it (read 2026-10-26).**
+   - *The original design*, the Attestation Service (`docs/architecture/attestation_and_issuance.md`, deleted in
+     `1bbea735` when cert-issuer's spec replaced it; its sequence survives as
+     `sequences/general/attestation_and_issuance.mmd`). A service gets a short-lived certificate only by proving three
+     things: it comes from a trusted build (its build hash, looked up in the trusted build record and the registry), the
+     request is fresh (a one-use nonce, expiring in 60 s), and it comes from an actual running instance (an ephemeral
+     secret, `HMAC(master, instance + challenge)`, binding the request to one instance; then the attestation service
+     introspects the host, by SSH, to confirm that instance is running that image). Rate limits and logging besides.
+   - *What cert-issuer kept and set aside* (`cert-issuer-architecture.md`, sections 3 and 12). Kept: the host is not a
+     trust anchor; pod identity comes from signed assertions of the Kubernetes control plane (the projected token, with
+     the pod's UID as the instance binding, `instance_binding_claim`, `cert-issuer/server/src/config.rs:93`), which is
+     what ruled out SSH. Deferred to "v2", each with a trigger: cosign verification of the requester's image; workload-image
+     attestation (the init container passes the workload container's image digest from the downward API, and cert-issuer
+     verifies it); the challenge-response with HMAC binding; TPM or SPIRE node attestation for bare metal.
+   - *The other sense of it* (`credentials-agent-architecture.md`, "Protecting the escrowed private key"): runtime
+     attestation as the "already-named piece of this system's own architecture, not yet built" that would help operators
+     detect a live, compromised process misusing its key. That is attestation of a process while it runs, not at issuance.
+   - *What already attests runtime facts.* The Kubernetes consumer's "attestation ladder for container images"
+     (`kubernetes/consume/src/lib.rs`): only the kubelet's `imageID`, the digest actually running, is trusted for what a
+     container runs, never the spec's tag. The pipeline's `binding_digest` ties a binary to its source and SBOM
+     (`lib/src/events.rs`, `BinaryLinkedPayload`). Every image in a deployment is pinned by digest, and the signed
+     `provenance.json` records the image lock (`cluster-bootstrap.md`, step 9).
+   - *What the control plane can attest about the requester, read on sandbox-local.* The credentials agent's pod is owned
+     by `Job/credentials-agent`, runs as service account `credentials-agent`, and its spec and its status agree on the
+     digest it runs (`credentials-agent-consumer@sha256:03a5e274…`, the same in `spec.containers[].image` and
+     `status.containerStatuses[].imageID`). So "the pod this token was bound to exists, is the Job's own, and runs the
+     image the signed deployment names" is something the API server can say, not the host.
+   - *Not built:* any of it at issuance. cert-issuer verifies the token and the floor's names; it does not look at the
+     pod.
+
+   **Decided (the maintainer, 2026-10-26): both an instance check at issuance and runtime attestation of the process,
+   by an attestation agent and a node sensor** (`runtime-attestation.md`). B and C decide when the credentials agent's
+   floor entry is open; the attestation agent's instance check decides who gets through it.
 2. What tells "two or more down" (4) from one restarting (1 to 3), and who decides it?
-3. The notice to dependents: a topic the credentials agent publishes before it ends, the pod observer's report of a
-   crash, or both; and what an agent does on each.
+3. The notice to dependents: a topic the credentials agent publishes before it ends, the attestation agent's report
+   of a crash, or both; and what an agent does on each.
