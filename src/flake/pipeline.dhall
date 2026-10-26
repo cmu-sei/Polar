@@ -20,8 +20,8 @@
 -- DM26-0670
 
 let Lib =
-      https://raw.githubusercontent.com/daveman1010221/nix-container-lib/e2334448bd4bb6348a467244d474f907d3d0e36d/dhall/prelude.dhall
-        sha256:b81e69ef2fe811bc853a8a9a0202c0af802f7cd53c78f95f67083bf3dceee86b
+      https://raw.githubusercontent.com/daveman1010221/nix-container-lib/7db6e5d52c28f7bc487c549d204c7a37ce10d431/dhall/prelude.dhall
+        sha256:e88446f08eba97c5e8540743a4c0458d3bee5d7debd8e072f9b9ace610abf729
 
 let List/map = https://prelude.dhall-lang.org/List/map
 
@@ -46,7 +46,6 @@ let binaries =
       , "git-repo-processor"
       , "gitlab-consumer"
       , "gitlab-observer"
-      , "harness-controller"
       , "harness-producer"
       , "harness-sink"
       , "jira-consumer"
