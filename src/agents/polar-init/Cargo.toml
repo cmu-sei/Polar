@@ -51,6 +51,8 @@ wiremock.workspace = true
 serde_json.workspace = true
 rsa.workspace = true
 tempfile.workspace = true
+rcgen.workspace = true
+time.workspace = true
 
 [dependencies.cert-client]
 path = "../cert-issuer/client"

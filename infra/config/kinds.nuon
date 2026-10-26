@@ -25,8 +25,9 @@
 # of these by naming the field; `needs` is unioned with the kind's.
 {
   agent: {
-    # Every agent is a Cassini client, and sends its traces to Jaeger.
-    needs: ["cassini", "tracing"]
+    # Every agent is a Cassini client, and sends its traces to Jaeger. Its polar-init trusts cert-issuer's CA as a
+    # mounted file, and verifies what it is issued against it (docs/architecture/core-restarts.md, "The plan", step 1).
+    needs: ["cassini", "tracing", "pinned-ca"]
     namespace: "polar"
     # The registry is where an image comes from, and `latest` moves: a node that keeps the first copy it pulled never sees a rebuild
     # (infra/rules.nu checks that no tag that moves is left to IfNotPresent).
@@ -81,7 +82,7 @@
   # certificate arrangements as an agent, and none of the client's needs.
   service: {
     extends: "agent"
-    needs: ["tracing"]
+    needs: ["tracing", "pinned-ca"]
   }
 
   # The certificate authority's front, cert-issuer, alone (docs/architecture/cert-issuer-isolation.md, step 1c). Its own
@@ -90,6 +91,8 @@
   # is mounted, for fetching the API server's keys; and its files are readable by this group, as a Secret's are.
   ca: {
     extends: "service"
+    # Not pinned-ca: it is the CA, and has no polar-init.
+    needs: ["tracing"]
     fs_group: 1000
   }
 }

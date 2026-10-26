@@ -164,9 +164,15 @@ The aim: the floor open only at bootstrap and when two or more of the core are d
 - **The keystone, open.** The floor has no state: `admit_token_only` (`cert-issuer/server/src/floor.rs:107`) admits a
   bootstrap identity at any time. Closing it at nominal needs cert-issuer to tell bootstrap from nominal, and to tell
   when two or more are down: question 2.
-- **`GET /ca` is still needed at nominal.** Only three workloads pin the CA (`pinned-ca`: the credentials agent, its
-  observer, the git server; `infra/config/workloads/credentials.nuon:38`, `:55`, `git-server.nuon:36`); every other
-  `polar-init`, Cassini's among them, fetches `/ca` unverified and pins it.
+- **`GET /ca` is still needed at nominal, by Cassini alone.** Only the bootstrap services ask cert-issuer directly
+  (`Issuance::CertIssuer`, `polar-init/src/main.rs:305`), and of them the credentials agent and its observer pin the CA
+  (`pinned-ca`, `infra/config/workloads/credentials.nuon:38`, `:55`); Cassini's `polar-init` fetches `/ca` unverified.
+- **The observer path trusts what it is handed (found 2026-10-26).** Every other workload is issued through the
+  credentials agent's observer over plain HTTP (`issue_cert_via_observer`, `polar-init/src/main.rs:744`), and writes
+  the CA chain that comes back as its `ca.pem`, checked against nothing. Whoever can intercept that exchange could hand
+  a pod a CA of their own, or, since the session offer the token is sealed to is not authenticated, swap in their own
+  key and unseal the token ("how the requester authenticates the credentials agent in the negotiation", left open in
+  `cert-issuer-isolation.md`, "Settled, and what is left").
 - **Smaller, on record.** `floor_enforced` is `false` by default (`infra/config/cluster.nuon:55`), which the
   maintainer's rule calls a gap, not an option. The `local` target cannot enforce it yet: it still deploys three
   hand-written charts that ask cert-issuer directly (gitlab, build-processor, openapi; `infra/targets/local/target.nu:48`).
@@ -180,8 +186,41 @@ The aim: the floor open only at bootstrap and when two or more of the core are d
 ### The plan (cleared by the maintainer, 2026-10-26)
 
 Each step tests first, with property tests where an invariant holds.
-1. **Every workload pins the CA.** `pinned-ca` in the `agent` kind, and in the charts that run `polar-init` (Neo4j,
-   the ACE job); a `resolve.nu check` rule that nothing fetches `/ca` unpinned. `GET /ca` then serves only a cold start.
+1. **Every workload pins the CA, and the observer path is verified against it** (widened by the maintainer,
+   2026-10-26, from pinning alone). `pinned-ca` in the `agent` kind, and in the charts that run `polar-init` (Neo4j,
+   the ACE job); a `resolve.nu check` rule that nothing runs `polar-init` unpinned. `polar-init` verifies every
+   certificate it is issued against the pinned CA (signed by it, naming its identity), and the credentials agent signs
+   the session offer with its certificate's key, which `polar-init` verifies against the pinned CA, and the signer's
+   identity, before it seals its token to it. `GET /ca` then serves only a cold start. In three parts:
+   - *1a, pinned everywhere.* The `agent` and `service` kinds give `pinned-ca` (the `ca` kind, cert-issuer itself, does
+     not: it is the CA); the Neo4j and ACE charts mount `polar-ca`; `polar-init` on the observer path requires
+     `POLAR_INIT_CA_CERT`, and the check rule refuses a workload that runs `polar-init` without it.
+   - *1b, every issued certificate verified.* `polar-init` judges what it is issued against the pinned CA, as it already
+     judges a bundle it keeps (`cert-client`, `output::existing_bundle`: signed by the CA, valid now, naming its identity
+     and every requested name, the right key usage, its own key), and writes the pinned CA as `ca.pem`, never the chain
+     it was handed. A bundle that falls short is refused.
+   - *1c, the offer signed.* By the rule that the credentials agent never uses one keypair for two protocols
+     (`credentials-agent-architecture.md`, "Cryptographic material: two separate keypairs"), and the precedent of the
+     escrow key's own certificate type (`CertType::Service`, `cert-issuer/common/src/lib.rs:62`), the offer is signed
+     with a key of its own, not the mTLS key: a signing keypair the consumer makes in memory at start, certified by
+     cert-issuer as a new type (`CertType::Signing`: digital signature only, no TLS use), which cert-issuer signs only
+     for an internal caller's own identity, over `/internal/issue`. The offer carries that certificate and a signature
+     over a domain-separated encoding of the session id, the public key and the lifetime; `polar-init` checks the
+     certificate chains to the pinned CA, is of the signing type, names the credentials agent
+     (`POLAR_INIT_CREDENTIALS_AGENT_IDENTITY`, rendered from the catalog), and that the signature holds, before it
+     seals. 1c's two sides deploy together.
+
+   *Built (2026-10-26): 1a and 1b,* in code and tests, not yet on a cluster. The catalog's `agent` and `service` kinds
+   give `pinned-ca` and the `ca` kind does not (`infra/config/kinds.nuon`; the per-workload entries that said it are
+   gone); the Neo4j and ACE charts mount `Constants.polarCaVolume` and set `POLAR_INIT_CA_CERT` through
+   `credentialsAgentIssuerEnv` (`infra/schema/functions.dhall`); `polar-init` requires the CA on the observer path
+   (`environment.rs`), judges what it is handed with `cert-client`'s `judge_bundle` (`output.rs`, split out of
+   `existing_bundle`, which now takes the pinned CA too), writes the pinned CA as `ca.pem`, and stops when either
+   check fails. Tests: `infra/tests/resolve.nu` (every workload with `polar-init` pins the CA, cert-issuer none),
+   `infra/tests/charts.nu`, `cert-client`'s `output_tests.rs`, and `polar-init`'s, among them an observer that signs the
+   CSR with another CA and is refused with nothing written. Mutations: all on the new code caught; `main` and
+   `issue_cert`, which this only passes the pinned CA through, have no tests of their own. Validation on the cluster
+   waits for the node's kube-proxy (`remaining-work.md`).
 2. **cert-issuer's floor state.** A pure state machine over what cert-issuer hears (the record empty or not, its Cassini
    session, the credentials agent's presence with time), answering which bootstrap entries are open, by the table in
    question 2; `admit_token_only` asks it. Properties: no message opens an entry; for any sequence of events, what is

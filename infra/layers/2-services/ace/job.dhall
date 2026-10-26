@@ -76,6 +76,7 @@ let render =
                 , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
                 }
               , Constants.saTokenVolume v.saTokenAudience
+              , Constants.polarCaVolume
               , kubernetes.Volume::{
                 , name     = "polar-health"
                 , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
@@ -118,7 +119,9 @@ let render =
                     ""
                     (functions.credentialsAgentIssuerEnv v.credentialsObserverUrl)
                     Constants.saTokenPath
-                    [ kubernetes.VolumeMount::{ name = Constants.neo4jClientCertVolumeName, mountPath = Constants.neo4jClientCertPath } ]
+                    [ kubernetes.VolumeMount::{ name = Constants.neo4jClientCertVolumeName, mountPath = Constants.neo4jClientCertPath }
+                    , Constants.polarCaMount
+                    ]
                     ([] : List Text)
                     [ "client:${Constants.neo4jClientCertPath}:ecdsa-p256:" ]
                 ]

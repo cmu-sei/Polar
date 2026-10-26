@@ -334,16 +334,34 @@ async fn main() {
                     }
                 }
             };
+            // The same CA, when it was given, judges a bundle this pod already holds.
+            let pinned_ca = ca_cert_path
+                .as_deref()
+                .map(|path| read_pinned_ca(path).unwrap_or_else(|why| stop(why)));
             for req in &cert_requests {
-                issue_cert(&client, &sa_token, &dns_identity, req).await;
+                issue_cert(
+                    &client,
+                    &sa_token,
+                    &dns_identity,
+                    req,
+                    pinned_ca.as_deref().map(str::as_bytes),
+                )
+                .await;
             }
         }
-        environment::Issuance::Observer { url } => {
+        environment::Issuance::Observer { url, ca_cert_path } => {
             // From the credentials agent, through its observer, with the token sealed to an ephemeral
-            // session so it is not on the pod network in the clear. Every other workload does this.
+            // session so it is not on the pod network in the clear. Every other workload does this, and
+            // trusts what it is handed only once the CA it was given has signed it.
+            let pinned_ca = read_pinned_ca(ca_cert_path).unwrap_or_else(|why| stop(why));
             let observer = credentials_agent_client::ObserverClient::new(url.clone());
             for req in &cert_requests {
-                issue_cert_via_observer(&observer, &sa_token, &dns_identity, req).await;
+                if let Err(why) =
+                    issue_cert_via_observer(&observer, &sa_token, &dns_identity, req, &pinned_ca)
+                        .await
+                {
+                    stop(why);
+                }
             }
         }
     }
@@ -551,6 +569,19 @@ async fn wait_for_dep_certs(endpoints: &[DepCertEndpoint]) {
 // Cert issuance
 // ---------------------------------------------------------------------------
 
+/// The CA the pod was given, as text. One that is configured and cannot be read needs an operator: waiting cannot
+/// fix it, so the caller stops.
+fn read_pinned_ca(path: &str) -> Result<String, String> {
+    std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read the CA certificate at '{path}': {e}"))
+}
+
+/// Stops polar-init for what only an operator can fix, saying why.
+fn stop(why: String) -> ! {
+    eprintln!("error: {why}");
+    std::process::exit(1);
+}
+
 /// Whether this pod already holds a usable certificate for `req`, so nothing is requested.
 ///
 /// It does when its init container ran before and the pod was not replaced: its sandbox recreated after a node
@@ -558,14 +589,13 @@ async fn wait_for_dep_certs(endpoints: &[DepCertEndpoint]) {
 /// the credentials agent refuses it a second certificate while the first is valid (`AlreadyHasValidCertificate`): the
 /// one in its own emptyDir is used again (2026-10-25: Neo4j's pod never started after its node restarted). Anything
 /// short of a complete, valid bundle for this identity, these names and this use is requested again, as before.
-fn keeps_existing_bundle(req: &CertRequest, dns_identity: &str) -> bool {
-    let usage = match req.cert_type {
-        CertType::Server => output::Usage::Server,
-        CertType::Client => output::Usage::Client,
-        CertType::Service => return false,
+fn keeps_existing_bundle(req: &CertRequest, dns_identity: &str, pinned_ca: Option<&[u8]>) -> bool {
+    let Some(usage) = usage_of(&req.cert_type) else {
+        return false;
     };
     match output::existing_bundle(
         std::path::Path::new(&req.cert_dir),
+        pinned_ca,
         dns_identity,
         &req.extra_sans,
         usage,
@@ -595,8 +625,9 @@ async fn issue_cert(
     sa_token: &str,
     dns_identity: &str,
     req: &CertRequest,
+    pinned_ca: Option<&[u8]>,
 ) {
-    if keeps_existing_bundle(req, dns_identity) {
+    if keeps_existing_bundle(req, dns_identity, pinned_ca) {
         return;
     }
     tracing::info!(
@@ -711,6 +742,38 @@ fn workload_cert_type(cert_type: &CertType) -> Option<WorkloadCertType> {
     }
 }
 
+/// What a requested certificate is judged for. The escrow identity is not a TLS certificate, and is not judged here.
+fn usage_of(cert_type: &CertType) -> Option<output::Usage> {
+    match cert_type {
+        CertType::Server => Some(output::Usage::Server),
+        CertType::Client => Some(output::Usage::Client),
+        CertType::Service => None,
+    }
+}
+
+/// Whether a certificate handed over for `req` can be trusted: signed by the CA the pod was given, valid now,
+/// naming this workload and every name asked for, for the use asked for, with `key_pem` its key
+/// (docs/architecture/core-restarts.md, "The plan", step 1). `Ok` is when it expires.
+fn trusted_issuance(
+    req: &CertRequest,
+    dns_identity: &str,
+    cert_pem: &str,
+    key_pem: &str,
+    pinned_ca: &[u8],
+) -> Result<String, String> {
+    let usage = usage_of(&req.cert_type)
+        .ok_or_else(|| format!("a {:?} cert is not judged here", req.cert_type))?;
+    output::judge_bundle(
+        cert_pem.as_bytes(),
+        key_pem.as_bytes(),
+        pinned_ca,
+        dns_identity,
+        &req.extra_sans,
+        usage,
+        std::time::SystemTime::now(),
+    )
+}
+
 /// One certificate from the credentials agent through its observer, waiting out whatever is only unavailable and
 /// stopping at what is final. `Ok` is the certificate; `Err` says why it will not come.
 async fn obtain_via_observer(
@@ -746,9 +809,10 @@ async fn issue_cert_via_observer(
     sa_token: &str,
     dns_identity: &str,
     req: &CertRequest,
-) {
-    if keeps_existing_bundle(req, dns_identity) {
-        return;
+    pinned_ca: &str,
+) -> Result<(), String> {
+    if keeps_existing_bundle(req, dns_identity, Some(pinned_ca.as_bytes())) {
+        return Ok(());
     }
     tracing::info!(
         "requesting {:?} cert into '{}' from the credentials agent (algorithm: {:?}, names: {:?})",
@@ -758,11 +822,10 @@ async fn issue_cert_via_observer(
         req.extra_sans,
     );
     let Some(cert_type) = workload_cert_type(&req.cert_type) else {
-        eprintln!(
-            "error: the credentials agent does not issue a {:?} cert here",
+        return Err(format!(
+            "the credentials agent does not issue a {:?} cert here",
             req.cert_type
-        );
-        std::process::exit(1);
+        ));
     };
     let request = polar_crypto::workload_certificates::CertificateRequest {
         cert_type,
@@ -779,20 +842,33 @@ async fn issue_cert_via_observer(
     .await
     {
         Ok(issued) => {
+            // It came over plain HTTP, with a chain of its own that proves nothing: it is used only if the CA the
+            // pod was given signed it for this workload, and that CA, not the chain, is what the pod trusts after.
+            let expires_at = trusted_issuance(
+                req,
+                dns_identity,
+                &issued.certificate_pem,
+                &issued.private_key_pem,
+                pinned_ca.as_bytes(),
+            )
+            .map_err(|why| {
+                format!(
+                    "refusing the {:?} cert the credentials agent's observer handed over: {why}",
+                    req.cert_type
+                )
+            })?;
             write_bundle_patiently(
                 req,
                 dns_identity,
                 &issued.certificate_pem,
                 &issued.private_key_pem,
-                &issued.ca_chain_pem,
-                "(per the credentials agent)",
+                pinned_ca,
+                &expires_at,
             )
             .await;
+            Ok(())
         }
-        Err(why) => {
-            eprintln!("error: {why}");
-            std::process::exit(1);
-        }
+        Err(why) => Err(why),
     }
 }
 
@@ -805,6 +881,97 @@ mod tests {
     use polar_crypto::workload_certificates::CertificateRequest;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A CA, and certificates it signs, for the trust check below.
+    struct TestCa {
+        params: rcgen::CertificateParams,
+        key: rcgen::KeyPair,
+        pem: String,
+    }
+
+    fn test_ca() -> TestCa {
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let pem = params.self_signed(&key).unwrap().pem();
+        TestCa { params, key, pem }
+    }
+
+    /// A client certificate `ca` signs for `names`, and its key.
+    fn signed_by(ca: &TestCa, names: &[&str]) -> (String, String) {
+        let mut params =
+            rcgen::CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+                .unwrap();
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        let now = time::OffsetDateTime::now_utc();
+        params.not_before = now - time::Duration::hours(1);
+        params.not_after = now + time::Duration::hours(1);
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert = params
+            .signed_by(&key, &rcgen::Issuer::from_params(&ca.params, &ca.key))
+            .unwrap();
+        (cert.pem(), key.serialize_pem())
+    }
+
+    const ME: &str = "kube-observer.polar.serviceaccount.cluster.local";
+
+    fn a_client_request() -> CertRequest {
+        "client:/etc/tls:ecdsa-p256:".parse().unwrap()
+    }
+
+    // docs/architecture/core-restarts.md, "The plan", step 1: what the observer hands over plain HTTP is trusted
+    // only once the CA the pod was given has signed it.
+    #[test]
+    fn what_the_observer_hands_over_is_trusted_only_when_the_pinned_ca_signed_it() {
+        let (ours, theirs) = (test_ca(), test_ca());
+        let (cert, key) = signed_by(&ours, &[ME]);
+        assert!(
+            trusted_issuance(&a_client_request(), ME, &cert, &key, ours.pem.as_bytes()).is_ok()
+        );
+
+        let (forged, forged_key) = signed_by(&theirs, &[ME]);
+        let why = trusted_issuance(
+            &a_client_request(),
+            ME,
+            &forged,
+            &forged_key,
+            ours.pem.as_bytes(),
+        )
+        .unwrap_err();
+        assert!(why.contains("not signed by the pinned CA"), "{why}");
+    }
+
+    #[test]
+    fn what_the_observer_hands_over_must_name_this_workload() {
+        let ca = test_ca();
+        let (cert, key) = signed_by(&ca, &["someone-else.polar.serviceaccount.cluster.local"]);
+        let why =
+            trusted_issuance(&a_client_request(), ME, &cert, &key, ca.pem.as_bytes()).unwrap_err();
+        assert!(why.contains(ME), "{why}");
+    }
+
+    #[test]
+    fn a_kept_bundle_is_judged_against_the_pinned_ca_too() {
+        let (ours, theirs) = (test_ca(), test_ca());
+        let (cert, key) = signed_by(&theirs, &[ME]);
+        let dir = tempfile::TempDir::new().unwrap();
+        output::write_bundle(
+            dir.path(),
+            &output::OutputBundle {
+                cert_pem: &cert,
+                key_pem: &key,
+                ca_pem: &theirs.pem,
+            },
+        )
+        .unwrap();
+        let req: CertRequest = format!("client:{}:ecdsa-p256:", dir.path().display())
+            .parse()
+            .unwrap();
+        // Without a pinned CA the bundle agrees with itself,
+        assert!(keeps_existing_bundle(&req, ME, None));
+        // and the pinned CA did not sign it.
+        assert!(!keeps_existing_bundle(&req, ME, Some(ours.pem.as_bytes())));
+    }
 
     #[test]
     fn a_cert_argument_maps_to_the_type_the_credentials_agent_knows_and_the_escrow_identity_does_not()
@@ -897,6 +1064,101 @@ mod tests {
             asked_for_a_session, 3,
             "two refusals to wait out, then the one that worked"
         );
+    }
+
+    /// An observer that signs whatever CSR it is sent with `ca`, and hands back `chain` as the CA chain: a genuine
+    /// one when `ca` is the pod's pinned CA, a forger when it is not.
+    struct SignsTheCsr {
+        ca: TestCa,
+        chain: String,
+    }
+
+    impl wiremock::Respond for SignsTheCsr {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let csr = body["csr_pem"].as_str().unwrap();
+            let mut csr = rcgen::CertificateSigningRequestParams::from_pem(csr).unwrap();
+            csr.params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+            let now = time::OffsetDateTime::now_utc();
+            csr.params.not_before = now - time::Duration::hours(1);
+            csr.params.not_after = now + time::Duration::hours(1);
+            let cert = csr
+                .signed_by(&rcgen::Issuer::from_params(&self.ca.params, &self.ca.key))
+                .unwrap();
+            ResponseTemplate::new(200).set_body_json(IssuanceReply::Issued {
+                certificate_pem: cert.pem(),
+                ca_chain_pem: self.chain.clone(),
+                escrow_public_key_pem: "ESCROW".to_string(),
+            })
+        }
+    }
+
+    async fn an_observer_signing_with(ca: TestCa, chain: String) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/workload/session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(an_offer()))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/workload/issue"))
+            .respond_with(SignsTheCsr { ca, chain })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn a_request_into(dir: &tempfile::TempDir) -> CertRequest {
+        format!("client:{}:ecdsa-p256:", dir.path().display())
+            .parse()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_certificate_the_pinned_ca_signed_is_written_with_the_pinned_ca_and_not_the_chain_handed_over()
+     {
+        let ours = test_ca();
+        let pinned = ours.pem.clone();
+        let server = an_observer_signing_with(ours, "NOT A CA".to_string()).await;
+        let observer = credentials_agent_client::ObserverClient::new(server.uri());
+        let dir = tempfile::TempDir::new().unwrap();
+        issue_cert_via_observer(&observer, "token", ME, &a_request_into(&dir), &pinned)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ca.pem")).unwrap(),
+            pinned
+        );
+        assert!(keeps_existing_bundle(
+            &a_request_into(&dir),
+            ME,
+            Some(pinned.as_bytes())
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_certificate_another_ca_signed_is_refused_and_nothing_is_written() {
+        let (ours, theirs) = (test_ca(), test_ca());
+        let chain = theirs.pem.clone();
+        let server = an_observer_signing_with(theirs, chain).await;
+        let observer = credentials_agent_client::ObserverClient::new(server.uri());
+        let dir = tempfile::TempDir::new().unwrap();
+        let why = issue_cert_via_observer(&observer, "token", ME, &a_request_into(&dir), &ours.pem)
+            .await
+            .unwrap_err();
+        assert!(why.contains("not signed by the pinned CA"), "{why}");
+        assert!(!dir.path().join("cert.pem").exists());
+    }
+
+    #[test]
+    fn the_pinned_ca_is_read_from_its_file_and_a_missing_one_is_named() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ca.pem");
+        std::fs::write(&path, "PEM").unwrap();
+        assert_eq!(read_pinned_ca(path.to_str().unwrap()).unwrap(), "PEM");
+        let missing = dir.path().join("absent.pem");
+        let why = read_pinned_ca(missing.to_str().unwrap()).unwrap_err();
+        assert!(why.contains("absent.pem"), "{why}");
     }
 
     #[tokio::test]

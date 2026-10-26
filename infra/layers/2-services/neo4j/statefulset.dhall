@@ -181,7 +181,9 @@ let render =
                         ""
                         (Functions.credentialsAgentIssuerEnv v.credentialsObserverUrl)
                         "/workspace/token"
-                        [ kubernetes.VolumeMount::{ name = "neo4j-tls", mountPath = "/etc/neo4j-tls" } ]
+                        [ kubernetes.VolumeMount::{ name = "neo4j-tls", mountPath = "/etc/neo4j-tls" }
+                        , Constants.polarCaMount
+                        ]
                         ([] : List Text)
                         -- The credentials agent does not need Neo4j to answer, so
                         -- getting the server certificate from it is no startup deadlock.
@@ -233,7 +235,7 @@ let render =
                       , volumeMounts = Some (baseVolumeMounts)
                       }
                     ]
-                  , volumes = Some (baseVolumes # [ neo4jTlsVolume, neo4jSaTokenVolume ])
+                  , volumes = Some (baseVolumes # [ neo4jTlsVolume, neo4jSaTokenVolume, Constants.polarCaVolume ])
                   }
                 }
               }

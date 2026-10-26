@@ -96,6 +96,22 @@ let neo4jClientCertPath       = "/etc/neo4j-client-tls"
 
 let neo4jClientSaTokenVolName = "neo4j-client-sa-token"
 
+-- cert-issuer's CA, as `polar-admin-grant bootstrap-ca` publishes it (a ConfigMap in each Polar namespace), and where a
+-- pod mounts it: polar-init verifies cert-issuer, and on the observer path every certificate it is issued, against it
+-- (docs/architecture/core-restarts.md, "The plan", step 1). The catalog's `pinned-ca` capability says the same.
+let polarCaConfigMap = "polar-ca"
+
+let polarCaPath = "/etc/polar-ca"
+
+let polarCaVolume =
+      kubernetes.Volume::{
+      , name = polarCaConfigMap
+      , configMap = Some kubernetes.ConfigMapVolumeSource::{ name = Some polarCaConfigMap }
+      }
+
+let polarCaMount =
+      kubernetes.VolumeMount::{ name = polarCaConfigMap, mountPath = polarCaPath, readOnly = Some True }
+
 let graphSecretKeySelector =
       kubernetes.SecretKeySelector::{
       , name = Some "polar-graph-pw"
@@ -244,4 +260,8 @@ in  { PolarNamespace
     , neo4jClientCertVolumeName
     , neo4jClientCertPath
     , neo4jClientSaTokenVolName
+    , polarCaConfigMap
+    , polarCaPath
+    , polarCaVolume
+    , polarCaMount
     }

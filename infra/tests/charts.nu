@@ -73,6 +73,20 @@ def init_env [file: string] {
 
 def value_of [vars: list, name: string] { $vars | where name == $name | get -o 0.value }
 
+# The pod spec of the first document in a rendered file that has one.
+def pod_of [file: string] {
+    open --raw $file | split row "\n---\n" | each {|d| $d | from yaml | get -o spec.template.spec } | compact | first
+}
+
+# Whether polar-init in a rendered pod trusts cert-issuer's CA as the mounted polar-ca file, and the pod mounts it.
+def pins_the_ca [file: string] {
+    let pod = (pod_of $file)
+    let init = ($pod.initContainers | where name == "polar-init" | first)
+    assert equal (value_of $init.env "POLAR_INIT_CA_CERT") "/etc/polar-ca/ca.pem"
+    let mount = ($init.volumeMounts | where mountPath == "/etc/polar-ca" | first)
+    assert equal ($pod.volumes | where name == $mount.name | first | get configMap.name) "polar-ca"
+}
+
 # cert-issuer's chart, as render.nu renders it: the floor from the catalog (none here), whether it is enforced.
 def render_cert_issuer [enforced: bool] {
     render cert-issuer { floor: [], floorEnforced: $enforced, identityLifetimeOverrides: [] }
@@ -164,6 +178,11 @@ def main [] {
             let tls = ($container.volumeMounts | where mountPath == "/etc/tls/certs" | get 0.name)
             assert (($pod.volumes | where name == $tls | get 0 | get -o emptyDir) != null)
             assert equal (value_of $container.env "POLAR_CAPABILITIES") "cassini"
+        }
+
+        "Neo4j's and the ACE job's polar-init trust cert-issuer's CA as a mounted file": {
+            pins_the_ca ((render neo4j {}) | path join "neo4j-statefulset.yaml")
+            pins_the_ca ((render ace {}) | path join "ace.yaml")
         }
 
         "the ACE job's client certificate is requested from the credentials agent": {

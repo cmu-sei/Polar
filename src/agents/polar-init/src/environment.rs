@@ -70,7 +70,7 @@ pub const TOKEN_PATH: Defaulted<String> = Defaulted::text(
 
 pub const CA_CERT: Optional<String> = Optional::text(
     "POLAR_INIT_CA_CERT",
-    "path to the Polar CA certificate cert-issuer is verified against from the first request; unset means the CA is fetched once and pinned",
+    "path to the Polar CA certificate: cert-issuer is verified against it from the first request, and on the observer path every certificate issued is; required when POLAR_INIT_ISSUER is `credentials-agent`, and on cert-issuer's path unset means the CA is fetched once and pinned",
 );
 
 /// Runs the escrow-keypair bootstrap. Only an agent with a crypto actor reads the escrowed keypair, so the render
@@ -99,7 +99,9 @@ pub static SECTION: Section = Section {
     relations: issuer_is_consistent,
 };
 
-/// The issuer must be one of the two, and its address must be given.
+/// The issuer must be one of the two, and its address must be given. The observer path also needs the CA: what it is
+/// issued comes over plain HTTP and is trusted only once it is checked against the CA the pod was given
+/// (docs/architecture/core-restarts.md, "The plan", step 1).
 fn issuer_is_consistent(env: &dyn Env) -> Vec<String> {
     let given = |read: Result<Option<String>, polar_env::EnvError>| {
         read.ok().flatten().is_some_and(|v| !v.trim().is_empty())
@@ -110,12 +112,18 @@ fn issuer_is_consistent(env: &dyn Env) -> Vec<String> {
             CERT_ISSUER_URL.name(),
             ISSUER.name()
         )],
-        Ok(ISSUER_CREDENTIALS_AGENT) if !given(OBSERVER_URL.read(env)) => vec![format!(
-            "{} is required when {} is `{ISSUER_CREDENTIALS_AGENT}`",
-            OBSERVER_URL.name(),
-            ISSUER.name()
-        )],
-        Ok(ISSUER_CERT_ISSUER | ISSUER_CREDENTIALS_AGENT) | Err(_) => Vec::new(),
+        Ok(ISSUER_CREDENTIALS_AGENT) => [OBSERVER_URL, CA_CERT]
+            .iter()
+            .filter(|var| !given(var.read(env)))
+            .map(|var| {
+                format!(
+                    "{} is required when {} is `{ISSUER_CREDENTIALS_AGENT}`",
+                    var.name(),
+                    ISSUER.name()
+                )
+            })
+            .collect(),
+        Ok(ISSUER_CERT_ISSUER) | Err(_) => Vec::new(),
         Ok(other) => vec![format!(
             "{} `{other}` must be `{ISSUER_CERT_ISSUER}` or `{ISSUER_CREDENTIALS_AGENT}`",
             ISSUER.name()
@@ -138,8 +146,9 @@ pub enum Issuance {
         url: String,
         ca_cert_path: Option<String>,
     },
-    /// From the credentials agent through its observer, with the token sealed to an ephemeral session.
-    Observer { url: String },
+    /// From the credentials agent through its observer, with the token sealed to an ephemeral session, and every
+    /// certificate it hands over verified against the CA at `ca_cert_path`.
+    Observer { url: String, ca_cert_path: String },
 }
 
 /// Everything polar-init is configured with by its environment.
@@ -203,6 +212,7 @@ impl InitSettings {
         let issuance = match mode.as_str() {
             ISSUER_CREDENTIALS_AGENT => Issuance::Observer {
                 url: observer_url.unwrap_or_default(),
+                ca_cert_path: ca_cert_path.unwrap_or_default(),
             },
             _ => Issuance::CertIssuer {
                 url: cert_issuer_url.unwrap_or_default(),
@@ -396,13 +406,44 @@ mod tests {
                 "POLAR_INIT_OBSERVER_URL",
                 "http://credentials-agent-observer:8080",
             ),
+            ("POLAR_INIT_CA_CERT", "/etc/polar-ca/ca.pem"),
         ]]))
         .unwrap();
         assert_eq!(
             s.issuance,
             Issuance::Observer {
-                url: "http://credentials-agent-observer:8080".to_string()
+                url: "http://credentials-agent-observer:8080".to_string(),
+                ca_cert_path: "/etc/polar-ca/ca.pem".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn the_observer_path_needs_the_pinned_ca_since_what_it_is_issued_is_verified_against_it() {
+        // docs/architecture/core-restarts.md, "The plan", step 1: a certificate handed over plain HTTP is trusted
+        // only once it is checked against the CA the pod was given, never against the chain that came with it.
+        for ca in [None, Some(""), Some("   ")] {
+            let mut pairs = vec![
+                ("POLAR_INIT_ISSUER", "credentials-agent"),
+                ("POLAR_INIT_OBSERVER_URL", "http://obs:8080"),
+            ];
+            if let Some(ca) = ca {
+                pairs.push(("POLAR_INIT_CA_CERT", ca));
+            }
+            let error = InitSettings::from_env(&with(&[&pairs])).unwrap_err();
+            assert!(error.contains("POLAR_INIT_CA_CERT"), "{ca:?}: {error}");
+            assert!(
+                !error.contains("POLAR_INIT_OBSERVER_URL"),
+                "{ca:?}: {error}"
+            );
+        }
+        // cert-issuer's own path keeps its fetch mode, for a cold start with no CA published yet.
+        assert!(
+            InitSettings::from_env(&with(&[&[
+                ("POLAR_INIT_ISSUER", "cert-issuer"),
+                ("POLAR_INIT_CERT_ISSUER_URL", "https://ci:8443"),
+            ]]))
+            .is_ok()
         );
     }
 
@@ -414,12 +455,14 @@ mod tests {
             ("POLAR_INIT_CERT_ISSUER_URL", ""),
             ("POLAR_INIT_ISSUER", "credentials-agent"),
             ("POLAR_INIT_OBSERVER_URL", "http://obs:8080"),
+            ("POLAR_INIT_CA_CERT", "/etc/polar-ca/ca.pem"),
         ]]))
         .unwrap();
         assert_eq!(
             s.issuance,
             Issuance::Observer {
-                url: "http://obs:8080".to_string()
+                url: "http://obs:8080".to_string(),
+                ca_cert_path: "/etc/polar-ca/ca.pem".to_string(),
             }
         );
     }

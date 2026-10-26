@@ -352,6 +352,21 @@ def main [] {
             assert equal (env_value (resolve "credentials-agent") "CREDENTIALS_AGENT_CA_CERT") "/etc/polar-ca/ca.pem"
         }
 
+        "every workload that runs polar-init trusts cert-issuer's CA as a mounted file, and cert-issuer, the CA, mounts none": {
+            # The observer path verifies what it is issued against the pinned CA (docs/architecture/core-restarts.md,
+            # "The plan", step 1), so no workload is left to fetch it unverified.
+            for n in (^nu $RESOLVER names | from json) {
+                let r = (resolve $n)
+                if $r.kind == "ca" {
+                    assert (not ($r.volumes | any {|v| $v.name == "polar-ca" })) $n
+                } else {
+                    assert ($r.volumes | any {|v| $v.name == "polar-ca" and $v.config_map == "polar-ca" }) $n
+                    assert ($r.init_env | any {|e| $e.name == "POLAR_INIT_CA_CERT" and $e.value == "/etc/polar-ca/ca.pem" }) $n
+                    assert ($r.init_mounts | any {|m| $m.path == "/etc/polar-ca" }) $n
+                }
+            }
+        }
+
         "the consumer is told where cert-issuer is, from the catalog's facts": {
             let r = (resolve "credentials-agent")
             assert equal (env_value $r "CREDENTIALS_AGENT_CERT_ISSUER_URL") $r.cert_issuer_url
@@ -425,8 +440,11 @@ def main [] {
         "a kind can extend another and change only what differs": {
             let kinds = (open ($RESOLVER | path dirname | path join "config/kinds.nuon"))
             assert equal ($kinds.service.extends) "agent"
-            # not a client, but it still sends its traces
-            assert equal ($kinds.service | get -o needs) ["tracing"]
+            # not a client, but it still sends its traces, and its polar-init pins cert-issuer's CA
+            assert equal ($kinds.service | get -o needs) ["tracing" "pinned-ca"]
+            # cert-issuer is the CA: it extends the service and pins nothing
+            assert equal ($kinds.ca.extends) "service"
+            assert equal ($kinds.ca | get -o needs) ["tracing"]
         }
 
         "the resolver reads its registry credentials from a Secret, mounted read-only where it is told to look": {
@@ -513,12 +531,29 @@ def main [] {
         }
 
         "workloads still asking cert-issuer are listed as pending while the floor is off, and refused once it is enforced": {
-            # Everything on cert-issuer, as the catalog's defaults have it. The Jira observer needs the one
-            # setting a target gives it, or `check` would fail for that and not for what this is about.
-            let jira = { jira-observer: { env: [
-                { name: "JIRA_URL", value: "https://example.atlassian.net" }
-                { name: "JIRA_EMAIL", value: "someone@example.com" }
-            ] } }
+            # Everything on cert-issuer, as the catalog's defaults have it. The Jira observer and cert-issuer need the
+            # settings a target gives them (cert-issuer the token issuers it trusts), or `check` would fail for those and
+            # not for what this is about.
+            let jira = {
+                jira-observer: { env: [
+                    { name: "JIRA_URL", value: "https://example.atlassian.net" }
+                    { name: "JIRA_EMAIL", value: "someone@example.com" }
+                ] }
+                cert-issuer: { env: [
+                    { name: "CERT_ISSUER_ISSUERS", value: [{
+                        issuer: "https://kubernetes.default.svc.cluster.local"
+                        audience: ["polar-cert-issuer.local"]
+                        jwks_uri: "https://kubernetes.default.svc.cluster.local/openid/v1/jwks"
+                        workload_identity_claim: "sub"
+                        instance_binding_claim: "kubernetes.io/pod/uid"
+                        identity_normalization: { strategy: "kubernetes_service_account", cluster_domain: "cluster.local" }
+                        identity_scope_claim: null
+                        allowed_algorithms: ["RS256"]
+                        jwks_cache_ttl_min: { secs: 30, nanos: 0 }
+                        jwks_cache_ttl_max: { secs: 3600, nanos: 0 }
+                    }] }
+                ] }
+            }
             with_target { workloads: $jira } {|t|
                 let off = (^nu $RESOLVER check --target $t | complete)
                 assert equal $off.exit_code 0 $off.stderr

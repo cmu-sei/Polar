@@ -211,11 +211,16 @@ let noEnv = [] : List kubernetes.EnvVar.Type
 -- What polar-init is told when its certificates come from the credentials agent (through its observer) and
 -- not from cert-issuer. The pod is not told where cert-issuer is, and pairs this with an empty
 -- certIssuerUrl. For a workload that is not a bootstrap identity (cert-issuer will not sign it on its token
--- alone once the floor is enforced; docs/architecture/cert-issuer-isolation.md).
+-- alone once the floor is enforced; docs/architecture/cert-issuer-isolation.md). It verifies what it is issued
+-- against cert-issuer's CA, so the pod mounts Constants.polarCaVolume and polar-init Constants.polarCaMount.
 let credentialsAgentIssuerEnv =
       \(observerUrl : Text) ->
         [ kubernetes.EnvVar::{ name = "POLAR_INIT_ISSUER", value = Some "credentials-agent" }
         , kubernetes.EnvVar::{ name = "POLAR_INIT_OBSERVER_URL", value = Some observerUrl }
+        , kubernetes.EnvVar::{
+          , name = "POLAR_INIT_CA_CERT"
+          , value = Some "${Constants.polarCaPath}/ca.pem"
+          }
         ]
 
 -- The escrow bootstrap runs only when `extraEnv` asks for it (POLAR_INIT_ESCROW_BOOTSTRAP): the

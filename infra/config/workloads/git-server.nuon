@@ -33,7 +33,7 @@
     config: "document"
     # The repositories are history that must survive the pod (persistent-data); the rest is its
     # listener certificate and paths (git-server).
-    provides: ["git-server", "persistent-data", "pinned-ca"]
+    provides: ["git-server", "persistent-data"]
     # What the git CLI connects to. Reached by port-forward in development; never terminated.
     service: {
       name: "{polar-git-server.name}"

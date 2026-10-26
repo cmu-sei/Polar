@@ -94,60 +94,104 @@ pub enum ExistingBundle {
 /// The first one is still in the pod's own emptyDir, and it is the same certificate the agent would be refusing to
 /// duplicate, so using it again issues nothing new. Anything short of a complete, matching, valid bundle is
 /// `Unusable`, and the caller asks for a new certificate as before.
+///
+/// With `pinned_ca`, the CA the pod was given, the certificate is judged against it and not against the `ca.pem`
+/// beside it, which came with the certificate and so vouches for nothing.
 pub fn existing_bundle(
     dir: &Path,
+    pinned_ca: Option<&[u8]>,
     identity: &str,
     names: &[String],
     usage: Usage,
     now: std::time::SystemTime,
 ) -> ExistingBundle {
-    use x509_parser::prelude::{ASN1Time, GeneralName};
-
     let read = |name: &str| std::fs::read(dir.join(name));
     let cert_pem = match read("cert.pem") {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ExistingBundle::Absent,
         Err(e) => return ExistingBundle::Unusable(format!("cert.pem cannot be read: {e}")),
     };
-    let (key_pem, ca_pem) = match (read("key.pem"), read("ca.pem")) {
-        (Ok(key), Ok(ca)) => (key, ca),
-        (Err(e), _) => return ExistingBundle::Unusable(format!("key.pem cannot be read: {e}")),
-        (_, Err(e)) => return ExistingBundle::Unusable(format!("ca.pem cannot be read: {e}")),
+    let key_pem = match read("key.pem") {
+        Ok(key) => key,
+        Err(e) => return ExistingBundle::Unusable(format!("key.pem cannot be read: {e}")),
     };
-
-    let unusable = |why: String| ExistingBundle::Unusable(why);
-    let (_, cert_block) = match x509_parser::pem::parse_x509_pem(&cert_pem) {
-        Ok(parsed) => parsed,
-        Err(e) => return unusable(format!("cert.pem is not PEM: {e}")),
+    let (ca_pem, ca_name) = match pinned_ca {
+        Some(pinned) => (pinned.to_vec(), "the pinned CA"),
+        None => match read("ca.pem") {
+            Ok(ca) => (ca, "ca.pem"),
+            Err(e) => return ExistingBundle::Unusable(format!("ca.pem cannot be read: {e}")),
+        },
     };
-    let cert = match cert_block.parse_x509() {
-        Ok(cert) => cert,
-        Err(e) => return unusable(format!("cert.pem is not a certificate: {e}")),
-    };
-    let (_, ca_block) = match x509_parser::pem::parse_x509_pem(&ca_pem) {
-        Ok(parsed) => parsed,
-        Err(e) => return unusable(format!("ca.pem is not PEM: {e}")),
-    };
-    let ca = match ca_block.parse_x509() {
-        Ok(ca) => ca,
-        Err(e) => return unusable(format!("ca.pem is not a certificate: {e}")),
-    };
-
-    if let Err(e) = cert.verify_signature(Some(ca.public_key())) {
-        return unusable(format!("the certificate is not signed by ca.pem: {e}"));
+    match judge(
+        &cert_pem, &key_pem, &ca_pem, ca_name, identity, names, usage, now,
+    ) {
+        Ok(not_after) => ExistingBundle::Reusable { not_after },
+        Err(why) => ExistingBundle::Unusable(why),
     }
+}
+
+/// Whether a certificate and its key, as they were handed over, can be used: signed by `pinned_ca`, valid at `now`,
+/// naming `identity` and every one of `names`, for `usage`, and `key_pem` its key. `Ok` is when it expires; `Err`
+/// says why not. polar-init judges what the credentials agent's observer hands it this way, against the CA the pod
+/// was given, never the chain that came with it (docs/architecture/core-restarts.md, "The plan", step 1).
+pub fn judge_bundle(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    pinned_ca: &[u8],
+    identity: &str,
+    names: &[String],
+    usage: Usage,
+    now: std::time::SystemTime,
+) -> Result<String, String> {
+    judge(
+        cert_pem,
+        key_pem,
+        pinned_ca,
+        "the pinned CA",
+        identity,
+        names,
+        usage,
+        now,
+    )
+}
+
+/// The one judgement both callers make. `ca_name` names the CA in the reasons.
+#[allow(clippy::too_many_arguments)]
+fn judge(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    ca_pem: &[u8],
+    ca_name: &str,
+    identity: &str,
+    names: &[String],
+    usage: Usage,
+    now: std::time::SystemTime,
+) -> Result<String, String> {
+    use x509_parser::prelude::{ASN1Time, GeneralName};
+
+    let (_, cert_block) = x509_parser::pem::parse_x509_pem(cert_pem)
+        .map_err(|e| format!("cert.pem is not PEM: {e}"))?;
+    let cert = cert_block
+        .parse_x509()
+        .map_err(|e| format!("cert.pem is not a certificate: {e}"))?;
+    let (_, ca_block) = x509_parser::pem::parse_x509_pem(ca_pem)
+        .map_err(|e| format!("{ca_name} is not PEM: {e}"))?;
+    let ca = ca_block
+        .parse_x509()
+        .map_err(|e| format!("{ca_name} is not a certificate: {e}"))?;
+
+    cert.verify_signature(Some(ca.public_key()))
+        .map_err(|e| format!("the certificate is not signed by {ca_name}: {e}"))?;
 
     let secs = now
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let at = match ASN1Time::from_timestamp(secs) {
-        Ok(at) => at,
-        Err(e) => return unusable(format!("the time to judge it at is out of range: {e}")),
-    };
+    let at = ASN1Time::from_timestamp(secs)
+        .map_err(|e| format!("the time to judge it at is out of range: {e}"))?;
     let not_after = cert.validity().not_after;
     if !cert.validity().is_valid_at(at) {
-        return unusable(format!(
+        return Err(format!(
             "the certificate is not valid now (valid {} to {not_after})",
             cert.validity().not_before
         ));
@@ -164,13 +208,13 @@ pub fn existing_bundle(
             })
             .collect(),
         Ok(None) => vec![],
-        Err(e) => return unusable(format!("its subject alternative names cannot be read: {e}")),
+        Err(e) => return Err(format!("its subject alternative names cannot be read: {e}")),
     };
     if let Some(missing) = std::iter::once(identity)
         .chain(names.iter().map(String::as_str))
         .find(|wanted| !dns_names.contains(wanted))
     {
-        return unusable(format!("the certificate does not name '{missing}'"));
+        return Err(format!("the certificate does not name '{missing}'"));
     }
 
     let has_usage = match cert.extended_key_usage() {
@@ -179,26 +223,21 @@ pub fn existing_bundle(
             Usage::Client => eku.value.client_auth,
         },
         Ok(None) => false,
-        Err(e) => return unusable(format!("its extended key usage cannot be read: {e}")),
+        Err(e) => return Err(format!("its extended key usage cannot be read: {e}")),
     };
     if !has_usage {
-        return unusable(format!("the certificate is not for {usage:?} use"));
+        return Err(format!("the certificate is not for {usage:?} use"));
     }
 
-    let key = match std::str::from_utf8(&key_pem)
+    let key = std::str::from_utf8(key_pem)
         .map_err(|e| e.to_string())
         .and_then(|pem| rcgen::KeyPair::from_pem(pem).map_err(|e| e.to_string()))
-    {
-        Ok(key) => key,
-        Err(e) => return unusable(format!("key.pem is not a private key: {e}")),
-    };
+        .map_err(|e| format!("key.pem is not a private key: {e}"))?;
     if key.public_key_raw() != cert.public_key().subject_public_key.data.as_ref() {
-        return unusable("key.pem is not the certificate's key".to_string());
+        return Err("key.pem is not the certificate's key".to_string());
     }
 
-    ExistingBundle::Reusable {
-        not_after: not_after.to_string(),
-    }
+    Ok(not_after.to_string())
 }
 
 fn write_atomic(dir: &Path, filename: &str, contents: &[u8], mode: u32) -> Result<(), OutputError> {

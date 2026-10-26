@@ -157,7 +157,9 @@ fn missing_directory_returns_dir_missing_error() {
 // ---------------------------------------------------------------------------
 
 mod existing {
-    use cert_client::output::{ExistingBundle, OutputBundle, Usage, existing_bundle, write_bundle};
+    use cert_client::output::{
+        ExistingBundle, OutputBundle, Usage, existing_bundle, judge_bundle, write_bundle,
+    };
     use rcgen::{
         BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
         PKCS_ECDSA_P256_SHA256,
@@ -224,7 +226,7 @@ mod existing {
 
     fn judge(dir: &TempDir, names: &[&str], usage: Usage) -> ExistingBundle {
         let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
-        existing_bundle(dir.path(), IDENTITY, &names, usage, SystemTime::now())
+        existing_bundle(dir.path(), None, IDENTITY, &names, usage, SystemTime::now())
     }
 
     fn unusable_because(result: ExistingBundle, words: &str) {
@@ -279,7 +281,7 @@ mod existing {
         let dir = written(&cert, &key, &ca.pem);
         let later = SystemTime::now() + Duration::from_secs(2 * 24 * 3600);
         unusable_because(
-            existing_bundle(dir.path(), IDENTITY, &[], Usage::Server, later),
+            existing_bundle(dir.path(), None, IDENTITY, &[], Usage::Server, later),
             "not valid now",
         );
     }
@@ -291,6 +293,74 @@ mod existing {
         unusable_because(
             judge(&written(&cert, &key, &ours.pem), &[], Usage::Server),
             "not signed by ca.pem",
+        );
+    }
+
+    // What polar-init is handed over the observer's plain HTTP comes with a chain of its own, which proves nothing:
+    // it is judged against the CA the pod was given (docs/architecture/core-restarts.md, "The plan", step 1).
+    #[test]
+    fn an_issued_certificate_is_judged_against_the_pinned_ca_and_not_the_chain_that_came_with_it() {
+        let (theirs, ours) = (ca(), ca());
+        let (cert, key) = leaf(&theirs, &[IDENTITY], server_and_client(), 365);
+        let judged = |ca_pem: &str| {
+            judge_bundle(
+                cert.as_bytes(),
+                key.as_bytes(),
+                ca_pem.as_bytes(),
+                IDENTITY,
+                &[],
+                Usage::Client,
+                SystemTime::now(),
+            )
+        };
+        // The chain handed over would vouch for it,
+        assert!(judged(&theirs.pem).is_ok());
+        // but the pinned CA does not.
+        let why = judged(&ours.pem).unwrap_err();
+        assert!(why.contains("not signed by"), "{why}");
+    }
+
+    #[test]
+    fn an_issued_certificate_from_the_pinned_ca_is_accepted_with_its_expiry() {
+        let ca = ca();
+        let (cert, key) = leaf(&ca, &[IDENTITY, "neo4j"], server_and_client(), 30);
+        let not_after = judge_bundle(
+            cert.as_bytes(),
+            key.as_bytes(),
+            ca.pem.as_bytes(),
+            IDENTITY,
+            &["neo4j".to_string()],
+            Usage::Server,
+            SystemTime::now(),
+        )
+        .unwrap();
+        let (_, block) = x509_parser::pem::parse_x509_pem(cert.as_bytes()).unwrap();
+        assert_eq!(
+            not_after,
+            block.parse_x509().unwrap().validity().not_after.to_string()
+        );
+    }
+
+    #[test]
+    fn a_kept_bundle_is_judged_against_the_pinned_ca_and_not_the_ca_pem_beside_it() {
+        let (theirs, ours) = (ca(), ca());
+        let (cert, key) = leaf(&theirs, &[IDENTITY], server_and_client(), 365);
+        // A bundle that agrees with itself: its ca.pem signed its certificate.
+        let dir = written(&cert, &key, &theirs.pem);
+        assert!(matches!(
+            judge(&dir, &[], Usage::Client),
+            ExistingBundle::Reusable { .. }
+        ));
+        unusable_because(
+            existing_bundle(
+                dir.path(),
+                Some(ours.pem.as_bytes()),
+                IDENTITY,
+                &[],
+                Usage::Client,
+                SystemTime::now(),
+            ),
+            "not signed by the pinned CA",
         );
     }
 
