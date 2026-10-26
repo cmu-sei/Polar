@@ -647,7 +647,7 @@ Principle: declare each environment variable once, with its type, default, docum
   - External names: CoreDNS (`dnsPolicy: Default`, Corefile built in `flake.nix`) forwards only to slirp4netns's relay `10.0.2.3`, which times out. The host resolves through the `systemd-resolved` stub, which listens only on `127.0.0.53` and `127.0.0.54` (not `127.0.0.1`), so the relay cannot reach it even though the container is started with `allow_host_loopback=true` (`Justfile:41`). The host also routes all of the user's traffic through a Mullvad tunnel (`wg0-mullvad`), whose firewall refuses DNS to anything but its own resolver, so the campus servers `128.2.1.10/.11` also time out
   - Live workaround in place (not persisted, lost when the container is recreated, works only while Mullvad is connected): the running `/etc/coredns/Corefile` has `forward . 100.64.0.63`
   - Persistent options, all needing a host decision: let resolved also listen on `127.0.0.1` (`DNSStubListenerExtra`) and forward to `10.0.2.2`; move the container to the `pasta` network backend; or a literal upstream in the Corefile (brittle across networks)
-- [ ] **kube-proxy's nftables sync keeps failing on the new vigild node (lives in `~/Documents/projects/nix-usernetes`;
+- [x] **kube-proxy's nftables sync keeps failing on the new vigild node (lives in `~/Documents/projects/nix-usernetes`;
   found 2026-10-26, on `b9dd4fb`, Kubernetes 1.37.1, nftables 1.1.7).** A sync tries to delete set elements that are
   already gone (`delete element ip kube-proxy no-endpoint-services { 10.96.225.209 . tcp . 8443 }`, `service-ips`,
   `hairpin-connections`: "Could not process rule: No such file or directory"), the whole transaction is refused, and
@@ -657,7 +657,14 @@ Principle: declare each environment variable once, with its type, default, docum
   not a fix either: after each one a different Service with a ready endpoint was in neither `service-ips` nor
   `no-endpoint-services` (once cert-issuer's ClusterIP, the next time the registry's ClusterIP and NodePort), with no
   error logged, and with one kube-proxy process on the node. So kube-proxy's own startup sync leaves Services out, not
-  only its later syncs; nothing else was found touching the table. Not diagnosed further.
+  only its later syncs; nothing else was found touching the table. **Fixed 2026-10-26 in nix-usernetes `c7616cb`,**
+  by the session that built the node: the node image had no `/etc/protocols`, so `nft --json` listed map elements'
+  protocol as a number (`6`) where kube-proxy keys them by name (`tcp`); at every full sync over an existing table
+  (each restart, each retry, the periodic one) kube-proxy matched nothing it read back, deleted every element as a
+  leftover and believed them still there, and its next delete by its own key failed the whole sync. Not dual-stack
+  and not the kernel. Checked: three restarts keep every element; 30 rounds of deleting a NodePort Service's only
+  pod, with restarts, the ClusterIP and NodePort answer each time. nix-container-lib images have no
+  `/etc/protocols` or `/etc/services` either, which would expose any of them to the same class of bug.
 - [ ] `IfNotPresent` + `:latest`: mitigated by `images.nu` dropping the node's cached copy (u7s only); proper fix is hash-based tags
 - [ ] `my.env`: `GRAPH_PASSWORD` / `NEO4J_AUTH` after the password change; dev shell `BIND_ADDR`/`BROKER_ADDR` on 8080 collides with the Keycloak port-forward; `CASSINI_SHUTDOWN_TOKEN` is a dev constant
 - [ ] ace <-> Neo4j connectivity (parked; ace is running)
