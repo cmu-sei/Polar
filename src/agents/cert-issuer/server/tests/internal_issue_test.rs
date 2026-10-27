@@ -77,6 +77,7 @@ fn handler(ca: Arc<dyn CaClient>, internal_callers: Vec<&str>) -> Handler {
         default_lifetime: Duration::from_secs(3600),
         server_lifetime: Duration::from_secs(43200),
         user_lifetime: Duration::from_secs(43200),
+        service_lifetime: Duration::from_secs(31_536_000),
         identity_lifetime_overrides: HashMap::new(),
         internal_callers: internal_callers.into_iter().map(String::from).collect(),
         floor: None,
@@ -197,6 +198,36 @@ async fn an_empty_asserted_identity_is_rejected() {
     match response.body {
         HandlerBody::Error(e) => assert_eq!(e.outcome, IssueOutcome::InvalidCsr),
         other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+// ---- an escrow certificate lives as long as service_lifetime says ----
+
+#[tokio::test]
+async fn an_escrow_certificate_lives_the_service_lifetime_and_not_the_server_lifetime() {
+    // The agent's durable encryption identity (CertType::Service): things are encrypted to it long after the pod
+    // that asked has gone, so it is not held to a server certificate's lifetime.
+    let h = handler(real_ca(), vec![ALLOWED_CALLER]);
+    let response = h
+        .handle_internal_issue(
+            Some(ALLOWED_CALLER),
+            InternalIssueRequest {
+                cert_type: CertType::Service,
+                ..request_for(TARGET_IDENTITY, TARGET_IDENTITY)
+            },
+        )
+        .await;
+    assert_eq!(response.status, 200);
+    match response.body {
+        HandlerBody::Success(issued) => {
+            let left = issued.expires_at - time::OffsetDateTime::now_utc();
+            assert!(
+                left > time::Duration::seconds(31_536_000 - 60)
+                    && left <= time::Duration::seconds(31_536_000),
+                "the service lifetime, a year here: {left}"
+            );
+        }
+        other => panic!("expected success, got {other:?}"),
     }
 }
 

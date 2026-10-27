@@ -59,6 +59,7 @@ fn valid_ca() -> CaConfig {
         default_lifetime: Duration::from_secs(3600),
         server_lifetime: Duration::from_secs(3600),
         user_lifetime: Duration::from_secs(43200),
+        service_lifetime: Duration::from_secs(31_536_000),
         identity_lifetime_overrides: std::collections::HashMap::new(),
         provisioning: CaProvisioning::SelfBootstrap,
     }
@@ -214,7 +215,8 @@ fn ca_provisioning_defaults_to_self_bootstrap_when_omitted() {
     let json = r#"{"ca_cert_path":"/c","ca_key_path":"/k",
         "default_lifetime":{"secs":1,"nanos":0},
         "server_lifetime":{"secs":1,"nanos":0},
-        "user_lifetime":{"secs":1,"nanos":0}}"#;
+        "user_lifetime":{"secs":1,"nanos":0},
+        "service_lifetime":{"secs":1,"nanos":0}}"#;
     let ca: CaConfig = serde_json::from_str(json).expect("parse");
     assert_eq!(ca.provisioning, CaProvisioning::SelfBootstrap);
 }
@@ -225,6 +227,7 @@ fn ca_provisioning_accepts_provisioned() {
         "default_lifetime":{"secs":1,"nanos":0},
         "server_lifetime":{"secs":1,"nanos":0},
         "user_lifetime":{"secs":1,"nanos":0},
+        "service_lifetime":{"secs":1,"nanos":0},
         "provisioning":"provisioned"}"#;
     let ca: CaConfig = serde_json::from_str(json).expect("parse");
     assert_eq!(ca.provisioning, CaProvisioning::Provisioned);

@@ -51,6 +51,9 @@
       { name: "CERT_ISSUER_SERVER_LIFETIME_SECS",  value: "3600" }
       # An account's certificate, the one a person holds: a new one is an administrator's act.
       { name: "CERT_ISSUER_USER_LIFETIME_SECS",    value: "31536000" }
+      # An agent's escrow certificate: its durable encryption identity, which outlives its pods and is never issued
+      # twice for an identity. A year, until revocation is built and the lifetime is revisited.
+      { name: "CERT_ISSUER_SERVICE_LIFETIME_SECS", value: "31536000" }
       # Its own token, the kind's projected one, on which it signs itself its client certificate.
       { name: "CERT_ISSUER_OWN_TOKEN",       value: "/workspace/token" }
       # The record of every certificate it signs, which the credentials agent asks for (step 2), on its persistent

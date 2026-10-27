@@ -201,6 +201,7 @@ impl Actor for CertIssuerSupervisor {
             default_lifetime: config.ca.default_lifetime,
             server_lifetime: config.ca.server_lifetime,
             user_lifetime: config.ca.user_lifetime,
+            service_lifetime: config.ca.service_lifetime,
             identity_lifetime_overrides: config.ca.identity_lifetime_overrides.clone(),
             internal_callers: config.mtls.internal_callers.clone(),
             floor: config.mtls.bootstrap.clone(),

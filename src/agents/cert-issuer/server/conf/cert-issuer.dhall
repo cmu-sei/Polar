@@ -102,6 +102,7 @@ let CaConfig =
           , default_lifetime : Duration
           , server_lifetime : Duration
           , user_lifetime : Duration
+          , service_lifetime : Duration
           , identity_lifetime_overrides : List { mapKey : Text, mapValue : Duration }
           }
       , default =
@@ -119,6 +120,7 @@ let CaConfig =
             -- Override per-target for long-lived infrastructure certs.
           , server_lifetime = hours 1
           , user_lifetime = hours 8760
+          , service_lifetime = hours 8760
           , identity_lifetime_overrides = [] : List { mapKey : Text, mapValue : Duration }
           }
       }

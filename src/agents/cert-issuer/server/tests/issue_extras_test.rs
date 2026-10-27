@@ -105,6 +105,7 @@ fn rig(floor: Option<Vec<BootstrapIdentity>>) -> (Handler, Arc<RecordingCa>) {
         default_lifetime: Duration::from_secs(3600),
         server_lifetime: Duration::from_secs(43200),
         user_lifetime: Duration::from_secs(43200),
+        service_lifetime: Duration::from_secs(31_536_000),
         identity_lifetime_overrides: HashMap::new(),
         internal_callers: vec![CREDENTIALS_AGENT.to_string()],
         floor,

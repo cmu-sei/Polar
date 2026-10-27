@@ -56,6 +56,9 @@ in  { name             = "cert-issuer"
     -- One year: a new one is an admin action, not something the holder
     -- renews by themselves.
     , userLifetimeSecs    = 31536000
+    -- An agent's escrow certificate: its durable encryption identity, which outlives its pods and is never issued
+    -- twice for an identity. One year, until revocation is built and the lifetime is revisited.
+    , serviceLifetimeSecs = 31536000
     -- DNS name cert-issuer mints into its own TLS server cert. The
     -- ".svc.cluster.local" suffix is hardcoded, same as
     -- constants.dhall's certIssuerUrl; both are covered by the

@@ -81,6 +81,8 @@ pub struct Handler {
     /// Lifetime for account (user) certificates, issued with an
     /// `account_subject`. Long by design: it is what a person's browser holds.
     pub user_lifetime: Duration,
+    /// Lifetime for an agent's escrow certificate (`CertType::Service`): long, since it outlives the agent's pods.
+    pub service_lifetime: Duration,
     pub identity_lifetime_overrides: std::collections::HashMap<String, Duration>,
     /// Peer identities (the SAN of the connection's verified mTLS
     /// client certificate) allowed to call `handle_internal_issue`.
@@ -387,13 +389,10 @@ impl Handler {
                 match cert_type {
                     cert_issuer_common::CertType::Server => self.server_lifetime,
                     cert_issuer_common::CertType::Client => self.default_lifetime,
-                    // Not short-lived like Client -- the actual security
-                    // mechanism protecting a service's own durable
-                    // identity is scheduled rotation plus real
-                    // revocation (once implemented), not a tight expiry
-                    // window, matching server_lifetime's own existing
-                    // "not meant to expire in an hour" reasoning exactly.
-                    cert_issuer_common::CertType::Service => self.server_lifetime,
+                    // Not short-lived like Client: a service's durable identity, which senders encrypt to long after
+                    // the pod that asked has gone, and which is never issued twice for an identity. What protects it
+                    // is to be revocation, once built, not a tight expiry; the lifetime is to be revisited then.
+                    cert_issuer_common::CertType::Service => self.service_lifetime,
                     // The same: the agent's own, renewed by it.
                     cert_issuer_common::CertType::Signing => self.server_lifetime,
                 }

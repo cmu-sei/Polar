@@ -588,7 +588,10 @@ NOTHING IS OPEN for path 1 now: steps 4 to 6 wait for the go-ahead. Path 2 (prop
   can see it as well, but is not what keeps it out. Before building: what the escrow certificate's readers expect
   (`verify_escrow_certificate` requires `keyEncipherment`), and which non-TLS purpose to name (RFC 9336's document
   signing does not describe encryption).
-- [ ] **An agent's escrow certificate is issued once and never again, and most expire in an hour.** The consumer
+- [x] **An agent's escrow certificate is issued once and never again, and most expire in an hour.** Decided (the
+  maintainer, 2026-10-26): escrow certificates are meant to last a long time, so for now they get a lifetime of their
+  own, `CERT_ISSUER_SERVICE_LIFETIME_SECS`, a year in the catalog and the chart, in place of `server_lifetime`; whether
+  one is renewed, and on what lifetime, is revisited when revocation is built. Done the same day. What was found: The consumer
   refuses a second escrow certificate for an identity while any record of one exists (`has_agent_escrow_certificate`,
   `credentials-agent/consume/src/state.rs:748`, a bare `contains_key`, not a validity check), and cert-issuer gives a
   `Service` certificate `server_lifetime` (3600 s in `infra/config/workloads/cert-issuer.nuon`) unless the identity has

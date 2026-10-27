@@ -73,6 +73,7 @@ let render =
           , defaultLifetimeSecs : Natural
           , serverLifetimeSecs : Natural
           , userLifetimeSecs : Natural
+          , serviceLifetimeSecs : Natural
           , identityLifetimeOverrides : List { identity : Text, lifetimeSecs : Natural }
           -- DNS identity cert-issuer mints into its own TLS server
           -- certificate at startup. Must be the name callers actually
@@ -262,6 +263,8 @@ let render =
                         Natural/show v.serverLifetimeSecs
                     , CERT_ISSUER_USER_LIFETIME_SECS =
                         Natural/show v.userLifetimeSecs
+                    , CERT_ISSUER_SERVICE_LIFETIME_SECS =
+                        Natural/show v.serviceLifetimeSecs
                     , CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES = overridesJson
                     , CERT_ISSUER_SERVER_IDENTITY = v.mtlsServerIdentity
                     , CERT_ISSUER_INTERNAL_CALLERS =

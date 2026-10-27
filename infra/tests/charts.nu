@@ -147,8 +147,10 @@ def main [] {
                 CERT_ISSUER_BIND_ADDR CERT_ISSUER_BOOTSTRAP CERT_ISSUER_CA_CERT_PATH CERT_ISSUER_CA_KEY_PATH
                 CERT_ISSUER_CA_PROVISIONING CERT_ISSUER_DEFAULT_LIFETIME_SECS CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES
                 CERT_ISSUER_INTERNAL_CALLERS CERT_ISSUER_ISSUERS CERT_ISSUER_SERVER_IDENTITY
-                CERT_ISSUER_SERVER_LIFETIME_SECS CERT_ISSUER_USER_LIFETIME_SECS
+                CERT_ISSUER_SERVER_LIFETIME_SECS CERT_ISSUER_SERVICE_LIFETIME_SECS CERT_ISSUER_USER_LIFETIME_SECS
             ] | sort)
+            # An agent's escrow certificate outlives its pods: a year, as an account's certificate.
+            assert equal (cert_issuer_settings $out | get CERT_ISSUER_SERVICE_LIFETIME_SECS) "31536000"
             for key in [CERT_ISSUER_ISSUERS CERT_ISSUER_BOOTSTRAP CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES] {
                 cert_issuer_settings $out | get $key | from json
             }

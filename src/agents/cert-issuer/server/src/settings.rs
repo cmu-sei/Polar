@@ -78,6 +78,11 @@ pub static USER_LIFETIME_SECS: Required<u64> = Required::seconds(
     "how long an account's certificate lives, the one a person holds",
 );
 
+pub static SERVICE_LIFETIME_SECS: Required<u64> = Required::seconds(
+    "CERT_ISSUER_SERVICE_LIFETIME_SECS",
+    "how long an agent's escrow certificate lives, its durable encryption identity that outlives its pods",
+);
+
 pub static IDENTITY_LIFETIME_OVERRIDES: Optional<String> = Optional::text(
     "CERT_ISSUER_IDENTITY_LIFETIME_OVERRIDES",
     "lifetimes for particular identities, in seconds, as a JSON object {\"<identity>\": <seconds>}; they take \
@@ -137,6 +142,7 @@ static VARIABLES: &[&dyn Described] = &[
     &DEFAULT_LIFETIME_SECS,
     &SERVER_LIFETIME_SECS,
     &USER_LIFETIME_SECS,
+    &SERVICE_LIFETIME_SECS,
     &IDENTITY_LIFETIME_OVERRIDES,
     &SERVER_IDENTITY,
     &INTERNAL_CALLERS,
@@ -203,6 +209,7 @@ impl Settings {
         let default_lifetime = take!(DEFAULT_LIFETIME_SECS, 0);
         let server_lifetime = take!(SERVER_LIFETIME_SECS, 0);
         let user_lifetime = take!(USER_LIFETIME_SECS, 0);
+        let service_lifetime = take!(SERVICE_LIFETIME_SECS, 0);
         let overrides_text = take!(IDENTITY_LIFETIME_OVERRIDES, None);
         let server_identity = take!(SERVER_IDENTITY, String::new());
         let internal_callers = take!(INTERNAL_CALLERS, None);
@@ -243,6 +250,7 @@ impl Settings {
                 default_lifetime: Duration::from_secs(default_lifetime),
                 server_lifetime: Duration::from_secs(server_lifetime),
                 user_lifetime: Duration::from_secs(user_lifetime),
+                service_lifetime: Duration::from_secs(service_lifetime),
                 identity_lifetime_overrides: overrides
                     .into_iter()
                     .map(|(identity, secs)| (identity, Duration::from_secs(secs)))
@@ -302,6 +310,7 @@ mod tests {
             ("CERT_ISSUER_DEFAULT_LIFETIME_SECS", "3600"),
             ("CERT_ISSUER_SERVER_LIFETIME_SECS", "7200"),
             ("CERT_ISSUER_USER_LIFETIME_SECS", "31536000"),
+            ("CERT_ISSUER_SERVICE_LIFETIME_SECS", "15768000"),
             (
                 "CERT_ISSUER_SERVER_IDENTITY",
                 "cert-issuer.polar.svc.cluster.local",
@@ -358,6 +367,7 @@ mod tests {
         assert_eq!(c.ca.default_lifetime, Duration::from_secs(3600));
         assert_eq!(c.ca.server_lifetime, Duration::from_secs(7200));
         assert_eq!(c.ca.user_lifetime, Duration::from_secs(31_536_000));
+        assert_eq!(c.ca.service_lifetime, Duration::from_secs(15_768_000));
         assert_eq!(
             c.ca.identity_lifetime_overrides,
             HashMap::from([(

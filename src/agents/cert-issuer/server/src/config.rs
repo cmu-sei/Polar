@@ -131,6 +131,11 @@ pub struct CaConfig {
     /// built-in default: a missing value is a configuration error.
     pub user_lifetime: Duration,
 
+    /// Lifetime for an agent's escrow certificate (`CertType::Service`), its durable encryption identity: senders
+    /// encrypt to it long after the pod that asked for it has gone, so it lives long, like a server certificate's
+    /// infrastructure role and longer. To be revisited with revocation. Required, with no built-in default.
+    pub service_lifetime: Duration,
+
     /// Per-identity lifetime overrides, keyed by the exact workload
     /// identity string embedded in the CSR's SAN. Takes precedence over
     /// both default_lifetime and server_lifetime when the requesting

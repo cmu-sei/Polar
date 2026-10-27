@@ -175,6 +175,7 @@ impl Rig {
             ("CERT_ISSUER_DEFAULT_LIFETIME_SECS", "3600".to_string()),
             ("CERT_ISSUER_SERVER_LIFETIME_SECS", "3600".to_string()),
             ("CERT_ISSUER_USER_LIFETIME_SECS", "3600".to_string()),
+            ("CERT_ISSUER_SERVICE_LIFETIME_SECS", "3600".to_string()),
             ("CERT_ISSUER_SERVER_IDENTITY", SERVER_IDENTITY.to_string()),
             ("CERT_ISSUER_BOOTSTRAP", floor.to_string()),
             ("CERT_ISSUER_OWN_TOKEN", at("token")),
