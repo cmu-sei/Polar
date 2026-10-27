@@ -663,6 +663,53 @@ daemon keeps its installer apart from its workload, under one UID.
 - *(c) Both roles to UID 1000, nothing more.* A compromised workload could replace the key (`MakeCsr`), which is a
   denial of service and no more, since it cannot have a certificate signed. The weakest.
 
+## Step 6, the speed gate: the plan (2026-10-27, for review)
+
+What is there, read for this:
+- *Resumption, the question "Speed" left open, answered.* A client reconnecting with the configuration it connected with
+  resumes (TLS 1.3, a PSK): no signature on either side. This was checked with the daemon's own configuration, one full
+  handshake then two resumed (a scratch test against `server_config`, as the broker builds it). The Cassini client keeps
+  one configuration for its life (`cassini/client/src/lib.rs:1027`), and the broker keeps sessions in memory (rustls's
+  `ServerSessionMemoryCache`, 256 of them by default). So an agent's reconnects to a running broker cost no signature.
+  The storm is the case resumption cannot help: a broker that restarted, its cache empty, and new pods, new processes.
+  Past 256 clients the broker's cache evicts, which matters for a large cluster and not for ours.
+- *The harness* (`infra/load-harness.nu`, `src/agents/cassini/test`) measures messages: producers and sinks over one
+  broker, at sizes and rates (`broker-baseline.md`). It has no storm of connections.
+- *The first measurement is not like for like.* Step 1's bench set eight callers through the socket (p99 145 to 244 µs)
+  against one caller in process (p99 14 to 25 µs). Eight in-process signers at once would contend too.
+
+The plan:
+1. *The criteria, like for like.*
+   - *A signature:* at each concurrency of the storm (1, 8, 32 and 128 callers at once), the p99 of a signature through
+     the daemon less the p99 of one signed in process, at the same concurrency, is no more than 100 µs.
+   - *A broker:* taking C new connections at once (1, 16, 64, 256), each a full handshake with both sides signing, the
+     broker with the daemon's key, its clients with theirs, completes them at no less than 90% of the rate it does with
+     key files on both sides.
+   - Both are confirmed or revised by the first measurement, as "Speed" said, and a build that misses them does not
+     ship.
+2. *The storm bench, now, without a cluster.*
+   - `polar-custody/tests/bench.rs` gains the concurrent signature: in process and through the daemon, at each
+     concurrency.
+   - `cassini/broker/tests/storm.rs` is new: a real broker (`TestBroker`, its server key a file or the daemon's, the
+     daemon on its own thread and runtime), and C clients connecting at once, each a fresh configuration so that
+     nothing resumes, their keys files or a daemon's. It reports handshakes a second and the p50 and p99 time to a
+     finished handshake.
+   - Both are ignored by default, as `bench.rs` is, and run in release. The figures go in this document with the
+     machine and the commit.
+3. *The storm in the cluster, with step 7.*
+   - The harness producer gains a storm mode: C connections at once, for some rounds, each a fresh configuration, each
+     registering and saying goodbye, the time to a finished handshake and to registration recorded. A plan,
+     `infra/load-plans/storm.nuon`, sets C and the rounds, and a steady rate of reconnects.
+   - It runs on the fresh `sandbox-local` with the daemon, then with the target's custody off and the catalog
+     redeployed. The records are kept as the baseline's are, and the figures go in `broker-baseline.md`.
+4. *If a criterion is missed:* a finding, with what the figures point at, before any change. Where to look first: a
+   task spawned for each request in the daemon; its lock; the client's eight idle connections; the broker signing on
+   its Tokio workers.
+
+*Open, item 2 and 3: which is the gate of record.* (a) The storm bench now, repeatable and needing no cluster, with
+the cluster's storm at step 7 to confirm it (recommended); (b) the cluster's storm alone, so the gate waits for step 7;
+(c) the bench alone.
+
 ## Build order, each tests first
 
 1. The daemon: key generation (process keyring or memory), the CSR, taking the certificate and judging it, signing,
