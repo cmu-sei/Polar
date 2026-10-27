@@ -516,13 +516,21 @@ The plan:
    - The broker reads `TLS_SERVER_KEY` or the socket, exactly one, as the client does; so does the git server
      (`POLAR_GIT_SERVER_KEY`).
    - Every client of either is rustls and speaks TLS 1.3.
-6. *A daemon that restarts ends the pod.*
+6. *A daemon that restarts: the agent's health actor decides* (the maintainer, 2026-10-27).
    - A sidecar that fails is restarted by the kubelet, empty: no key and no certificate, and nobody installs one, since
-     polar-init has run. Sessions already up go on; new handshakes fail.
-   - So `polar-healthcheck`, the workload's liveness probe, asks the daemon for its certificate when
-     `POLAR_CUSTODY_SOCKET` is set, and fails without one. With `restartPolicy: Never` a failed probe fails the pod,
-     and the Job makes a new one, with a new daemon, polar-init and certificate (the renewal rule admits it).
-   - After the move to Deployments, the restart rule does the same in place.
+     polar-init has run. Sessions already up go on; no new handshake can be made, ever.
+   - The agent's health actor is the authority on whether the agent goes on, not the Kubernetes probe. The probe is
+     the fallback for a domain supervisor that has stopped answering, when the pod must be killed. This is not that:
+     the supervisor answers, and the agent can end in order.
+   - So `HealthCheckActor` (`polar-health`) watches the daemon. Each tick, with `POLAR_CUSTODY_SOCKET` set, it asks
+     for the slot's certificate and compares it with the one in its certificate path. An empty daemon, or a different
+     certificate, enters the rejuvenation path at once (decided: `Rejuvenate`, not `Unhealthy`): it waits until the
+     dependency certificates are healthy, so the replacement can be issued, jitters, and the agent ends in order,
+     serving on its existing sessions meanwhile.
+   - A daemon that cannot be reached is tolerated for a few ticks, as Cassini is ("3 times in a row"), then the same.
+   - The pod is replaced: by the Job now, in place after the move to Deployments. The renewal rule admits the new
+     certificate.
+   - `polar-healthcheck`, the probe, is unchanged: it reads the health file's freshness.
 7. *Tests first:*
    - the render with the switch off, byte for byte the same as before;
    - with it on:
@@ -534,7 +542,8 @@ The plan:
    - two certificates of one type under the daemon refused at render;
    - the broker and the git server: a TLS 1.3 handshake whose server signature the daemon made, with `TLS_SERVER_KEY`
      or the socket, exactly one;
-   - `polar-healthcheck` failing on a daemon with no certificate;
+   - the health actor: rejuvenating on an empty daemon and on a different certificate, tolerating an unreachable one
+     for its ticks and then rejuvenating, and nothing while the daemon holds the certificate;
    - `infra/tests/rules.nu` and `charts.nu` brought along.
 8. *After it:* the speed gate (step 6), then a fresh sandbox-local (step 7). Revocation (step 5) can come before or
    after; the renewal rule is in.
