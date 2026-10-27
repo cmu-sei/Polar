@@ -219,8 +219,10 @@ terms and recorded here:
   key files: they are run by people, not in pods.
 - *For step 3 to settle:* `polar-init`'s own Cassini session (the escrow bootstrap, `polar-init/src/main.rs`,
   `ensure_escrow_bootstrapped`) reads the same client variables (`TCPClientConfig::from_env`), so with the socket set
-  it signs through the daemon too, and the daemon lets `polar-init`'s UID make CSRs and install, not sign. The likely
-  answer, to be cleared with step 3: in a pod that runs the bootstrap, its UID is among the workload's as well.
+  it signs through the daemon too, and the daemon lets `polar-init`'s UID make CSRs and install, not sign. Decided (the
+  maintainer, 2026-10-27): in a pod that runs the bootstrap, the chart lists `polar-init`'s UID among the workload's
+  (`POLAR_CUSTODY_WORKLOAD_UIDS`) as well as the installer's. The daemon's roles stay as built; the catalog decides
+  per pod, so a `polar-init` whose pod does not bootstrap can install but never sign.
 - *Tests:* the daemon's key signing a handshake built by `client_config`; TLS 1.2 never offered with it; a key file as
   before; a silent daemon failing in time; every way of giving the two variables (unset, blank, a path), the section
   judging each as the client reads it; the credentials agent reading either; the HTTP identity presenting the daemon's
@@ -249,6 +251,56 @@ turning ECDSA back on would not change that:
   and its ECDSA signs. The escrow key, RSA-4096 and used to decrypt rarely, stays in the keyring, where the kernel can
   hold it.
 
+## Step 3, the plan (2026-10-27, cleared by the maintainer)
+
+What `polar-init` does today, read for this (`polar-init/src/main.rs`):
+- It makes the key itself on both paths. On cert-issuer's, `issue_cert` calls `keypair::generate_csr` and sends the
+  CSR. On the observer's, `polar_crypto::workload_certificates::request_certificate` makes the CSR in the pod and
+  sends only the CSR, sealed with the token. Either way the key never leaves the pod, and only the CSR's origin
+  changes.
+- It writes `cert.pem`, `key.pem` and `ca.pem` (`cert-issuer/client/src/output.rs`, `write_bundle`). It judges what the
+  observer hands over against the pinned CA, including that `key.pem` is the certificate's key (`judge_bundle`).
+- It keeps a valid bundle already in the emptyDir (`keeps_existing_bundle`).
+- It asks for P-256 everywhere: all 27 `--cert` flags in `infra` say `ecdsa-p256`.
+- Graph writers ask for two client certificates: Cassini's (`tlsPath`) and Neo4j's (`neo4jClientCertPath`,
+  `build-processor/processor.dhall:83`). Neo4j's server asks for one (`neo4j/statefulset.dhall:191`). neo4rs and
+  Neo4j read key files, so those keep files (`remaining-work.md` already records neo4rs).
+
+The plan:
+1. *A `--cert` says when its key is the daemon's.* Decided (the maintainer): the key-algorithm field reads `custody`
+   (`client:/etc/tls:custody:`). That field already says who makes which key, and the daemon makes a P-256 key in the
+   slot of the certificate's type (client or server). At most one such certificate per type, since there is one slot
+   each, and a second is refused at start. `POLAR_CUSTODY_SOCKET` must then be set for `polar-init`, or it stops at
+   start, naming both.
+2. *Per such certificate:*
+   - one `MakeCsr` for the identity and the names, waited for while the socket is not there yet (the sidecar
+     starting) and stopped at a refusal;
+   - that CSR through whichever path the pod uses, retried as now. On the observer's path,
+     `request_certificate_with_csr`, with `request_certificate` built on it;
+   - the certificate judged as now, but against the CSR's key, not a key file (`output::judge_certificate`, with
+     `judge_bundle` built on it);
+   - `Install` into the daemon, which judges it again;
+   - then `cert.pem` and `ca.pem` written, and any `key.pem` removed. The daemon holds the certificate before the
+     workload can read it.
+3. *No reuse of an old bundle for it.* The key is new at every start (`deployments.md`, item 4), so
+   `keeps_existing_bundle` is skipped for a daemon's certificate. It stays for the key files until the move.
+4. *The escrow bootstrap's session* signs through the daemon. Its UID is among the workload's (decided above), and with
+   the socket set and `TLS_CLIENT_KEY` unset it reads `ClientKey::Custody`.
+5. *Tests first:*
+   - the flag parsed, and one per type;
+   - against a daemon in a test and the observer and cert-issuer mocked, on both paths: no `key.pem`, `cert.pem` and
+     `ca.pem` written, and the daemon holding the certificate;
+   - a certificate for another key, or under another CA, refused before anything is written;
+   - a socket that appears late, waited for;
+   - a refusal, stopped at.
+
+*Open, beyond this step: the renewal rule before the charts.* With the daemon, a pod whose init container runs again
+under its UID (a node restart recreating its sandbox, the case of 2026-10-25) has a new key and must be issued again.
+The credentials agent refuses it while its first certificate is valid (`AlreadyHasValidCertificate`), until the
+renewal rule is built (`deployments.md`, items 1 and 2, its build step 2). Decided (the maintainer): the renewal rule
+is built after step 3 and before step 4 gives pods a daemon, so no pod runs with a daemon it cannot be issued for
+again after a restart.
+
 ## Build order, each tests first
 
 1. The daemon: key generation (process keyring or memory), the CSR, taking the certificate and judging it, signing,
@@ -259,6 +311,7 @@ turning ECDSA back on would not change that:
    `TLS_CLIENT_KEY`.
 3. `polar-init` taking the daemon's CSR and handing it the certificate; the bundle in the shared volume becomes the
    certificate and `ca.pem` alone.
+   Then the renewal rule (`deployments.md`, build step 2), before any pod has a daemon.
 4. The catalog and the charts: the sidecar in the `agent` and `service` kinds, its socket volume, its UID; Cassini's
    listener taking the signer.
 5. Revocation: the daemon on its own serial, its exit, and the broker ending revoked sessions.

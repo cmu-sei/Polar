@@ -103,7 +103,9 @@ Each with a recommendation; to be taken one at a time.
 ## Build order, each tests first
 
 1. The custody daemon (`key-custody.md`), which item 4 puts first.
-2. The renewal rule, in issuance and in the voucher, with the bound (items 1 and 2).
+2. The renewal rule, in issuance and in the voucher, with the bound (items 1 and 2). Built after the daemon's `polar-init` step and before
+   any pod is given a daemon (the maintainer, 2026-10-27; `key-custody.md`, "Step 3, the plan"): with the daemon, a pod
+   whose init container runs again has a new key and must be issued again.
 3. The Dhall schema at 1.35.
 4. The `agent` and `service` kinds as Deployments with the restart rule and `Recreate`; the hand charts after them.
 5. On a fresh sandbox-local: every agent restarts in place at rejuvenation, keeps its UID, is issued a new certificate,
