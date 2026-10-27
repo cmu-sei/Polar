@@ -926,6 +926,42 @@ holds against key files at every concurrency the bench could reach. So:
 - the broker breaking at 256 connections at once is carried as a finding of its own (`remaining-work.md`), apart from
   custody.
 
+## Step 7, a fresh sandbox-local: the plan (2026-10-27, for review)
+
+The first time any of steps 2 to 5 runs on a cluster. It goes onto nix-usernetes' multi-node `u7c` (branch
+`feat/multi-node`, commit `feaa20a`), which needs a real Polar bring-up before it merges, and the report goes back to
+that session.
+
+1. *The cluster.* In `~/Documents/projects/nix-usernetes`, inside `nix develop`: the `u7c` images
+   (`CP_IMAGE=localhost/nix-usernetes-node:dev`, `WORKER_IMAGE=localhost/nix-usernetes-worker:dev`), then
+   `just cluster-reset`, `cluster-up`, `cluster-init`, `cluster-kubeconfig`; Polar then with
+   `KUBECONFIG=~/Documents/projects/nix-usernetes/kubeconfig-u7c`. Its apiserver is on host port 7443, so `u7s` is left
+   alone, and the `:1.37.1` node image tag is not moved.
+2. *Polar.* `nu infra/up.nu sandbox-local --dev`, the tree clean and left alone until it has passed its publish step.
+   Mullvad: asked before it is disconnected for the run, and reconnected after. The browser import of the user's
+   certificate is the maintainer's, asked for when a test needs it.
+3. *What is seen, each recorded with the command that shows it:*
+   - *No key file:* no `key.pem` in any pod but cert-issuer's, Neo4j's and the `ace` job's, and every daemon holding
+     its pod's certificate (the health actor's watch quiet);
+   - *the listeners:* every agent registered with a broker whose key is the daemon's, and a push to the git server,
+     whose key is too;
+   - *Neo4j:* a graph writer's queries over a TLS 1.3 handshake its daemon signed, the first against a real Neo4j
+     (neo4rs, the fork);
+   - *the scheduler observer* on key files, as its entry says;
+   - *each daemon's watcher* registered beside its workload, and the broker's daemon not connecting;
+   - *revocation:* one agent's client certificate revoked with the admin tool (`revoke <serial>`), kube-observer's
+     unless something says otherwise; then its workload's session closed by the broker, its daemon logging the
+     revocation and exiting 3, the sidecar restarted empty, the health actor rejuvenating, the Job's new pod issued a
+     new certificate and registered, and the old serial refused at registration.
+4. *If something fails:* a finding, with what the logs point at, before any change; and nothing edited while `up.nu`
+   runs.
+5. *The report to nix-usernetes:* whether `up.nu` brought Polar up on `u7c`, what differed from `u7s`, and what changed in
+   Polar. Known before starting: Polar's image eviction (`infra/images.nu`) knows only the `u7s` container, so an image
+   rebuilt during the run would stay stale on `u7c`'s worker nodes. A fresh cluster has no cache, so it matters only if
+   something is rebuilt mid-run; the fix is Polar's to decide, and is reported, not made.
+6. *Not in it:* the Cassini load harness with the daemons (`remaining-work.md`, later), a run with custody off (the
+   render tests show it byte for byte), the pinning and the watcher cap (planned, to do).
+
 ## Build order, each tests first
 
 1. The daemon: key generation (process keyring or memory), the CSR, taking the certificate and judging it, signing,
