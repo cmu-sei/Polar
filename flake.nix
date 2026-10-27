@@ -240,6 +240,7 @@
           secretHarnessOwnerImage = polarPkgs.secretHarness.ownerImage;
           secretHarnessIntruderImage = polarPkgs.secretHarness.intruderImage;
           polarInitImage = polarPkgs.polarInit.image;
+          polarCustodyImage = polarPkgs.polarCustody.image;
 
           # ── ACE dashboard ────────────────────────────────────────────────────
           aceImage = acePkgs.image;

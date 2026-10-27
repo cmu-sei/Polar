@@ -555,6 +555,14 @@ refused certificate not sealing, and a property, that once installed nothing any
 certificate. The test that a new key drops the old certificate goes with the rule. The mutation that drops the seal
 is caught by both.
 
+*Built (2026-10-27): the image.* `src/agents/polar-custody/package.nix` and `container.nix`, as `polar-init`'s:
+- the daemon alone, without a CA bundle or OpenSSL, since the CA it trusts is the pod's, mounted;
+- built in UID 1001, group 1000; the pod's security context sets them too;
+- `polarCustodyImage` in the flake, `polar-custody` in `infra/images.nuon`.
+
+It builds (`nix build .#packages.x86_64-linux.polarCustodyImage`, `polar-custody:latest`). The binary in it, run with
+no environment, names its four variables and exits 2. `infra/tests/images.nu` passes.
+
 *Built (2026-10-27): the health actor watches the daemon* (`polar-health`).
 - *The reading* (`src/custody.rs`): each tick, with `POLAR_CUSTODY_SOCKET` set (`HealthConfig::custody_socket`), the
   actor asks the daemon for each slot's certificate, off its own thread: it `Holds` one, is `Empty`, or is
