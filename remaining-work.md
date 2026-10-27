@@ -553,6 +553,16 @@ NOTHING IS OPEN for path 1 now: steps 4 to 6 wait for the go-ahead. Path 2 (prop
 
 ## Credentials-agent and identity
 
+- [x] **Two credentials agents appended to one ledger and forked its chain (found 2026-10-26, on sandbox-local).** When
+  Flux replaces the credentials agent's Job, the old pod drains (up to 50 s, grace 60 s) while the new one starts on the
+  same volume; nothing kept a second process from appending to `events.jsonl`, so each chained from the last entry it
+  had read. The fork was made at 02:30:02-03 UTC during one redeploy (lines 49 and 51 both chain from line 48); the
+  pod that ran on had opened the log before it and never noticed, and the next one refused to start ("hash chain
+  broken at line 50"). FIXED the same day: `polar::event_log::EventLog::open` takes an exclusive lock on the log's file
+  before it replays and holds it while open (`EventLogError::Held` for a second opener; the operating system lets go
+  of it when the holder ends), and the ledger waits for it up to 90 s (`ledger::open_log`, `LEDGER_LOCK_WAIT`). The
+  broken ledger on sandbox-local was not repaired: the cluster was reset (the maintainer's choice).
+
 - [x] The two credentials charts carry their shutdown numbers by hand (`infra/layers/2-services/credentials-agent/deployment.dhall`: consumer budget 50 s, grace 60 s; `observer.dhall`: observer 40 s and 50 s), until they move to the catalog, where both numbers are derived from one place. Until then nothing ties them to what the Rust code declares (`SHUTDOWN_BUDGET` in each supervisor) except the builder's startup check, which fails the pod, not the render. The catalog entries in the credentials pair remove the problem; a preflight check (see the health-rules item under the hygiene section) would also catch it before then. Found 2026-10-07. DONE 2026-10-09: the charts are gone; both numbers come from the agents' scaffolds (consumer 50 s, observer 40 s) and the grace period is derived
 - [ ] Admin `reissue` action: revoke old cert, return account to pending with the same `account_id`, holder reruns `claim` (provisioning an existing username is refused today: `AccountAlreadyExists`)
 - [ ] Expiry check on admin actions (the consumer appears not to check the author cert's validity period; verify)

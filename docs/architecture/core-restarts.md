@@ -381,6 +381,17 @@ Each step tests first, with property tests where an invariant holds.
    stopping on a refusal; the voucher's rule, its publisher check, the ledger's renewal rule, and its polling only
    while the session is lost. Mutations: all on the new code caught.
 
+   *First run on sandbox-local, 2026-10-26* (a redeploy from `d5e9157a`, no reset): the gate did as the table says.
+   cert-issuer restarted with a record; Cassini's new pod was held and offered (03:22:38), but the credentials agent
+   still running was the one built before step 3, with no voucher, and fell silent when Cassini went down, so 60 s on,
+   with the credentials agent and Cassini both absent, the state opened everything and Cassini was admitted on its
+   token (03:23:33); Cassini back, the state closed again (`All` to `CredentialsAgentOnly`, then `Nothing` as the old
+   credentials agent was heard). The new observer was held and offered (03:24:08); the credentials agent's successor
+   was held, offered to no one, and admitted once the bound had passed since its predecessor fell silent (03:25:03),
+   which is step 4. That successor then could not start: its ledger had been forked by two writers during the redeploy
+   before (`remaining-work.md`, "Two credentials agents appended to one ledger"), so nothing vouched for the observer.
+   Vouching over Cassini and over mTLS is left to the next run, from a fresh cluster with both sides on step 3.
+
 4. **The crash window (C)** falls out of steps 2 and 3: the credentials agent absent while the Cassini session holds
    opens its entry alone. Until the ticket exists, a rejuvenating credentials agent's successor comes through it too,
    after waiting out the bound.

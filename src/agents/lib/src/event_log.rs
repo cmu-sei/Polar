@@ -53,6 +53,9 @@ use std::path::Path;
 pub enum EventLogError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// Another holder has the log open: two writers would fork its chain, so it is opened by one at a time.
+    #[error("the log at {path} is held open by another process")]
+    Held { path: String },
     #[error("failed to serialize event: {0}")]
     Serialize(#[source] serde_json::Error),
     #[error("failed to parse log entry at line {line}: {source}")]
@@ -197,11 +200,23 @@ where
         Ok((events, last_hash))
     }
 
+    /// Opens the log for this holder alone, and replays it. The log is locked (an exclusive lock on its file, which
+    /// the operating system lets go of when the holder ends, however it ends) before it is read, so what is replayed
+    /// is not being appended to; while it is held, another open is refused with [`EventLogError::Held`]. Two holders
+    /// would each chain from the last entry they read, and fork the log.
     pub fn open(path: impl AsRef<Path>) -> Result<(Self, Vec<E>), EventLogError> {
         let path = path.as_ref();
-        let (events, last_hash) = Self::replay_file(path)?;
-
         let file = OpenOptions::new().create(true).append(true).open(path)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(EventLogError::Held {
+                    path: path.display().to_string(),
+                });
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(EventLogError::Io(e)),
+        }
+        let (events, last_hash) = Self::replay_file(path)?;
 
         Ok((
             Self {
@@ -303,6 +318,29 @@ mod tests {
             serial: String,
             reason: String,
         },
+    }
+
+    #[test]
+    fn a_log_one_holder_has_open_cannot_be_opened_by_another_until_it_is_let_go() {
+        // Two writers on one log fork its chain (the credentials agent's ledger, 2026-10-26, when a replaced pod
+        // drained while its successor started): only one may have it open.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let (mut first, _) = EventLog::<TestEvent>::open(&path).unwrap();
+        first
+            .append(&TestEvent::Revoke {
+                serial: "s1".into(),
+                reason: "r".into(),
+            })
+            .unwrap();
+        match EventLog::<TestEvent>::open(&path) {
+            Err(EventLogError::Held { .. }) => {}
+            Err(other) => panic!("expected Held, got {other}"),
+            Ok(_) => panic!("a second holder opened a log the first has open"),
+        }
+        drop(first);
+        let (_, events) = EventLog::<TestEvent>::open(&path).unwrap();
+        assert_eq!(events.len(), 1, "the first holder's entry, and no fork");
     }
 
     #[test]

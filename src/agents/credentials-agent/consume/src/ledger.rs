@@ -56,8 +56,40 @@ use credentials_agent_common::issuance::WorkloadCertType;
 use polar::event_log::EventLog;
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort, async_trait};
 use std::sync::Arc;
+use std::time::Duration;
 
 pub struct LedgerActor;
+
+/// How long a starting ledger waits for the log to be let go of: longer than a replaced credentials agent's drain and
+/// grace period (50 s and 60 s), after which its process has ended and the operating system has let go of its lock.
+pub const LEDGER_LOCK_WAIT: Duration = Duration::from_secs(90);
+
+/// Opens the event log at `path`, waiting up to `wait` (asking again every `every`) while another holder has it: a
+/// replaced credentials agent still draining, whose appends would fork the log's chain if this one appended too.
+pub async fn open_log(
+    path: &str,
+    wait: Duration,
+    every: Duration,
+) -> Result<(EventLog<CredentialsEvent>, Vec<CredentialsEvent>), String> {
+    let since = std::time::Instant::now();
+    let mut said = false;
+    loop {
+        match EventLog::open(path) {
+            Ok(opened) => return Ok(opened),
+            Err(polar::event_log::EventLogError::Held { .. }) if since.elapsed() < wait => {
+                if !said {
+                    tracing::warn!(
+                        "the event log at {path} is held by another process (a credentials agent still draining?); \
+                         waiting up to {wait:?} for it to be let go of"
+                    );
+                    said = true;
+                }
+                tokio::time::sleep(every).await;
+            }
+            Err(e) => return Err(format!("Failed to open event log at {path}: {e}")),
+        }
+    }
+}
 
 pub struct LedgerActorArgs {
     pub log_path: String,
@@ -256,12 +288,10 @@ impl Actor for LedgerActor {
         _myself: ActorRef<Self::Msg>,
         args: LedgerActorArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
-        let (event_log, events) = EventLog::open(&args.log_path).map_err(|e| {
-            ActorProcessingErr::from(format!(
-                "Failed to open event log at {}: {e}",
-                args.log_path
-            ))
-        })?;
+        let (event_log, events) =
+            open_log(&args.log_path, LEDGER_LOCK_WAIT, Duration::from_secs(1))
+                .await
+                .map_err(ActorProcessingErr::from)?;
 
         let event_count = events.len();
         let credentials_state = CredentialsState::from_events(&events);
@@ -498,6 +528,46 @@ fn append_and_project(
 pub(crate) mod tests {
     use super::*;
     use credentials_agent_common::events::GrantReason;
+
+    #[tokio::test]
+    async fn a_starting_ledger_waits_for_the_log_to_be_let_go_of_and_then_opens_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("events.jsonl")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let (held, _) = EventLog::<CredentialsEvent>::open(&path).unwrap();
+        let letting_go = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(held);
+        });
+        let since = std::time::Instant::now();
+        open_log(&path, Duration::from_secs(5), Duration::from_millis(20))
+            .await
+            .unwrap();
+        assert!(since.elapsed() >= Duration::from_millis(300), "it waited");
+        letting_go.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_ledger_whose_log_is_never_let_go_of_does_not_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("events.jsonl")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let (_held, _) = EventLog::<CredentialsEvent>::open(&path).unwrap();
+        let why = match open_log(&path, Duration::from_millis(200), Duration::from_millis(20)).await
+        {
+            Err(why) => why,
+            Ok(_) => panic!("opened a log another holder has open"),
+        };
+        assert!(why.contains("held"), "{why}");
+    }
 
     /// The ledger records `username`'s account certificate, whose first DNS name is `account_id`: a person the
     /// authority knows, by both names.
