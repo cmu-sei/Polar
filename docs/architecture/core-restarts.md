@@ -324,6 +324,16 @@ Each step tests first, with property tests where an invariant holds.
    opens within the bound unless the credentials agent is heard); self-issuance (recorded as its own, refused to every
    HTTP caller after); the shadow line, captured from the log. Mutations: all on the state and the handler caught; the
    supervisor's feeding has no unit test (it needs the whole agent) and is checked on the cluster from its log.
+
+   *Seen on sandbox-local, 2026-10-26* (a redeploy from `16c4791a`, no reset): cert-issuer read its start as one with
+   a record (`fresh=false`). Flux replaced the core one member at a time (cert-issuer 02:28:31, Cassini 02:29:31, the
+   credentials agent and its observer 02:30:01 UTC), and the old credentials agent asked for the record until it was
+   replaced, so the state held `Nothing` throughout: the new Cassini (60 s after cert-issuer's start), the new observer
+   and the new credentials agent each asked on their tokens and would have been refused (`would_admit=false`), where
+   the floor admitted them. That is the table: once enforced, the first two are held requests the credentials agent
+   vouches for (step 3), and the credentials agent's successor waits out the bound after its predecessor falls silent
+   (step 4). Hearing the credentials agent is shown by this (`Nothing` past the bound); the Cassini session's events
+   changed nothing here to log, and are left to step 8.
 3. **Held requests.** A token-only request for a closed entry (the observer's, Cassini's) is held, not refused, and
    `polar-init` waits on it. cert-issuer offers it to the credentials agent over Cassini, and over mTLS to the
    credentials agent's poll while its Cassini session is lost (the poll is also its presence, question 2). The
