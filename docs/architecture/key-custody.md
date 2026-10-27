@@ -451,7 +451,7 @@ alone, and the setting is one Neo4j 2025.08 declares (`SslPolicyConfig`: `dbms.s
 - *Mutations caught:* no client certificate presented; both keys accepted.
 - *Not yet seen against a real Neo4j:* step 7.
 
-## Step 4, the plan (2026-10-27, for review)
+## Step 4, the plan (2026-10-27, its question decided)
 
 What is there, read for this:
 - *How a pod is made.* A workload's kind (`infra/config/kinds.nuon`: `agent`, `service`, `ca`) and its capabilities
@@ -483,7 +483,7 @@ What is there, read for this:
   They keep key files, so step 7's "no `key.pem` in any pod" reads "in any pod but these three".
 
 The plan:
-1. *The two roles, one UID: open, the question below.* The daemon tells polar-init (who makes CSRs and installs) from
+1. *The two roles, one UID: each slot sealed once installed* (decided, below). The daemon tells polar-init (who makes CSRs and installs) from
    the workload (who signs) by UID, and here they must be the same UID.
 2. *The daemon's image and its container.*
    - `polarPkgs.polarCustody.image` beside `polarInitImage`, listed in `images.nuon`.
@@ -539,7 +539,8 @@ The plan:
 8. *After it:* the speed gate (step 6), then a fresh sandbox-local (step 7). Revocation (step 5) can come before or
    after; the renewal rule is in.
 
-*The question for the maintainer, item 1: how the daemon keeps its installer apart from its workload, under one UID.*
+*Decided (the maintainer, 2026-10-27): (a), each slot sealed once installed.* The question, as it was put: how the
+daemon keeps its installer apart from its workload, under one UID.
 - *(a) Seal each slot once installed (recommended).* The daemon takes `MakeCsr` and `Install` for a slot until a
   certificate is installed in it, and then only `Certificate` and `Sign`. The workload starts after every init
   container has finished, so each slot it uses is sealed before it runs. A compromised workload cannot replace the key
