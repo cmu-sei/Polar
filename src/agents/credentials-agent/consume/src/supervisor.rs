@@ -183,6 +183,14 @@ pub enum ConsumerSupervisorMessage {
         payload: Vec<u8>,
         published_by: Option<String>,
     },
+    /// cert-issuer offered a held request, published (the broker says) by `published_by`
+    /// (docs/architecture/core-restarts.md, "3 in detail").
+    HeldOffered {
+        payload: Vec<u8>,
+        published_by: Option<String>,
+    },
+    /// Time to poll cert-issuer's held requests over mTLS, if the Cassini session is lost.
+    PollHeld,
 }
 
 /// How often the consumer says how many requests it has seen.
@@ -216,6 +224,8 @@ pub struct ConsumerSupervisorState {
     draining: bool,
     /// Asks cert-issuer for its record; none with no authority model, or one with no cert-issuer.
     record_asker: Option<ActorRef<crate::record_asker::RecordAskerMessage>>,
+    /// Vouches for the requests cert-issuer holds; none when the record asker is none.
+    held_voucher: Option<ActorRef<crate::held_voucher::HeldVoucherMessage>>,
     /// Judges every request before its handler sees it (docs/architecture/authority-model.md, slice 9).
     request_gate: ActorRef<crate::request_gate::RequestGateMessage>,
     /// The drain was started by `PrepareShutdown` (as opposed to a failure),
@@ -613,6 +623,23 @@ impl ConsumerSupervisor {
         )
     }
 
+    /// cert-issuer's held requests, each with who the broker says published it: the voucher takes one only from
+    /// cert-issuer.
+    fn held_offer_subscription(supervisor: &ActorRef<ConsumerSupervisorMessage>) -> Subscription {
+        let supervisor = supervisor.clone();
+        Subscription::new(
+            cert_issuer_common::held::HELD_REQUESTS_TOPIC,
+            move |incoming| {
+                if let Err(e) = supervisor.send_message(ConsumerSupervisorMessage::HeldOffered {
+                    payload: incoming.payload,
+                    published_by: incoming.published_by,
+                }) {
+                    warn!("could not pass on a request cert-issuer holds: {e}");
+                }
+            },
+        )
+    }
+
     /// Reads a replaced section and hands it to the publisher. A section that cannot be read says so and is
     /// left for the next republish; it is never published half-read.
     async fn pass_on_section(state: &ConsumerSupervisorState, section: &str) {
@@ -705,6 +732,7 @@ impl Actor for ConsumerSupervisor {
             .with_lifecycle_handler(|event| Some(ConsumerSupervisorMessage::ClientEvent { event }));
         builder = builder.with_subscription(Self::authority_request_subscription(&myself));
         builder = builder.with_subscription(Self::record_reply_subscription(&myself));
+        builder = builder.with_subscription(Self::held_offer_subscription(&myself));
         for subscription in Self::request_subscriptions(&myself) {
             builder = builder.with_subscription(subscription);
         }
@@ -846,7 +874,7 @@ impl Actor for ConsumerSupervisor {
 
         // Its session offers are signed for the identity cert-issuer reads off this agent's connection, which is
         // the first DNS name of its own certificate.
-        let own_identity = std::fs::read_to_string(&settings.own_cert_path)
+        let own_cert_identity = std::fs::read_to_string(&settings.own_cert_path)
             .map_err(|e| format!("cannot read this agent's certificate: {e}"))
             .and_then(|pem| {
                 cert_issuer_common::permission::extract_own_identity(&pem)
@@ -857,7 +885,10 @@ impl Actor for ConsumerSupervisor {
             Some(WORKLOAD_ISSUANCE_ACTOR_NAME.to_string()),
             WorkloadIssuanceActor,
             WorkloadIssuanceActorArgs {
-                handler: WorkloadIssuanceHandler::new(make_issuance_handler().await?, own_identity),
+                handler: WorkloadIssuanceHandler::new(
+                    make_issuance_handler().await?,
+                    own_cert_identity.clone(),
+                ),
             },
             myself.get_cell(),
         )
@@ -1134,6 +1165,7 @@ impl Actor for ConsumerSupervisor {
 
         // cert-issuer's record of every certificate it signs, asked for when this agent registers and on an interval,
         // so that no certificate it signs stays unknown here (docs/architecture/cert-issuer-isolation.md, "Step 2").
+        let held_target = record_target.clone();
         let record_asker = match record_target {
             Some((cert_issuer, bootstrap)) => {
                 let (asker, _) = crate::record_asker::RecordAsker::spawn_linked(
@@ -1160,6 +1192,35 @@ impl Actor for ConsumerSupervisor {
                 );
                 None
             }
+        };
+
+        // The requests cert-issuer holds for this agent to vouch for: offered over Cassini, and polled over mTLS while
+        // the Cassini session is lost (docs/architecture/core-restarts.md, "3 in detail").
+        let held_voucher = match held_target {
+            Some((cert_issuer, bootstrap)) => {
+                let (voucher, _) = crate::held_voucher::HeldVoucher::spawn_linked(
+                    None,
+                    crate::held_voucher::HeldVoucher,
+                    crate::held_voucher::HeldVoucherArgs {
+                        client: resources.tcp_client.as_actor_ref(),
+                        ledger: ledger.clone(),
+                        cert_issuer,
+                        bootstrap,
+                        own_identity: own_cert_identity.clone(),
+                        cert_issuer_http: make_cert_issuer_client().await?,
+                    },
+                    myself.get_cell(),
+                )
+                .await
+                .map_err(ActorProcessingErr::from)?;
+                drop(
+                    myself.send_interval(crate::held_voucher::HELD_POLL_EVERY, || {
+                        ConsumerSupervisorMessage::PollHeld
+                    }),
+                );
+                Some(voucher)
+            }
+            None => None,
         };
 
         // Every request is judged before its handler sees it: Cedar, then the topic's publishers in the model.
@@ -1191,6 +1252,7 @@ impl Actor for ConsumerSupervisor {
             activity: crate::activity::Activity::new(),
             draining: false,
             record_asker,
+            held_voucher,
             request_gate,
             rejuvenating: false,
         })
@@ -1245,6 +1307,23 @@ impl Actor for ConsumerSupervisor {
                         payload,
                         published_by,
                     });
+                }
+            }
+            ConsumerSupervisorMessage::HeldOffered {
+                payload,
+                published_by,
+            } => {
+                if let Some(voucher) = &state.held_voucher {
+                    let _ =
+                        voucher.send_message(crate::held_voucher::HeldVoucherMessage::Offered {
+                            payload,
+                            published_by,
+                        });
+                }
+            }
+            ConsumerSupervisorMessage::PollHeld => {
+                if let Some(voucher) = &state.held_voucher {
+                    let _ = voucher.send_message(crate::held_voucher::HeldVoucherMessage::Poll);
                 }
             }
             ConsumerSupervisorMessage::ReportActivity => {
@@ -1330,6 +1409,10 @@ impl Actor for ConsumerSupervisor {
                         "CONSUMER_SUPERVISOR: registered; the builder subscribes to every request topic"
                     );
                     let _ = state.healthcheck.cassini_connected();
+                    if let Some(voucher) = &state.held_voucher {
+                        let _ = voucher
+                            .send_message(crate::held_voucher::HeldVoucherMessage::CassiniUp);
+                    }
                     // As soon as the two can talk: the bootstrap certificates were signed before this agent ran.
                     if let Some(asker) = &state.record_asker {
                         let _ = asker.send_message(crate::record_asker::RecordAskerMessage::Ask);
@@ -1363,6 +1446,11 @@ impl Actor for ConsumerSupervisor {
                     // session stays up but subscribed to nothing.
                     warn!("Transport error (awaiting reconnect): {reason}");
                     let _ = state.healthcheck.cassini_disconnected();
+                    // Cassini gone: cert-issuer's held requests are polled over mTLS meanwhile.
+                    if let Some(voucher) = &state.held_voucher {
+                        let _ = voucher
+                            .send_message(crate::held_voucher::HeldVoucherMessage::CassiniLost);
+                    }
                 }
                 _ => {}
             },

@@ -62,11 +62,13 @@ const CREDENTIALS_AGENT: &str = "credentials-agent.polar.serviceaccount.cluster.
 #[derive(Default)]
 struct RecordingCa {
     asked: Mutex<Vec<(CertType, Vec<String>)>>,
+    paths: Mutex<Vec<cert_issuer_common::record::IssuePath>>,
 }
 
 #[async_trait::async_trait]
 impl CaClient for RecordingCa {
     async fn issue(&self, req: CaIssueRequest) -> Result<IssuedCert, CaError> {
+        self.paths.lock().unwrap().push(req.path);
         self.asked.lock().unwrap().push((req.cert_type, req.sans));
         Ok(IssuedCert {
             certificate_pem: "-----BEGIN CERTIFICATE-----\nrecorded\n-----END CERTIFICATE-----\n"
@@ -107,7 +109,7 @@ fn rig(floor: Option<Vec<BootstrapIdentity>>) -> (Handler, Arc<RecordingCa>) {
         user_lifetime: Duration::from_secs(43200),
         service_lifetime: Duration::from_secs(31_536_000),
         own_workload: Default::default(),
-        floor_state: None,
+        gate: None,
         identity_lifetime_overrides: HashMap::new(),
         internal_callers: vec![CREDENTIALS_AGENT.to_string()],
         floor,
@@ -537,117 +539,291 @@ async fn the_credentials_agent_states_a_workload_s_topics_and_groups_on_the_vouc
     );
 }
 
-// ---- the floor state, in shadow (docs/architecture/core-restarts.md, "2 in detail") ---------------------------
+// ---- the floor state and held requests (docs/architecture/core-restarts.md, "3 in detail") -----------------
 
-/// What the handler logs while `run` runs, as text.
-async fn logged<F: std::future::Future<Output = ()>>(run: F) -> String {
-    #[derive(Clone, Default)]
-    struct Buffer(Arc<Mutex<Vec<u8>>>);
-    impl std::io::Write for Buffer {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+use cert_issuer::floor_state::{FloorState, Heard, Open};
+use cert_issuer::gate::FloorGate;
+use cert_issuer::held::HeldRequests;
+use cert_issuer_common::held::{HeldDecision, HeldOffer, HeldReply};
+use cert_issuer_common::record::IssuePath;
+use std::time::Instant;
+
+/// The offers the gate made, as the supervisor would have published them.
+type Offers = Arc<Mutex<Vec<HeldOffer>>>;
+
+fn gate_with(
+    handler: &mut Handler,
+    state: FloorState,
+    held: HeldRequests,
+) -> (Arc<FloorGate>, Offers) {
+    let offers: Offers = Arc::default();
+    let seen = offers.clone();
+    let gate = Arc::new(FloorGate::with_held(
+        state,
+        held,
+        Box::new(move |held| seen.lock().unwrap().extend(held)),
+    ));
+    handler.gate = Some(gate.clone());
+    (gate, offers)
+}
+
+fn gated(handler: &mut Handler, state: FloorState) -> (Arc<FloorGate>, Offers) {
+    gate_with(handler, state, HeldRequests::default())
+}
+
+/// A cert-issuer restarted just now with a record, that has heard no one yet: nothing open.
+fn just_restarted() -> FloorState {
+    FloorState::new(false, Instant::now())
+}
+
+fn outcome(response: &cert_issuer::handler::HandlerResponse) -> Option<IssueOutcome> {
+    match &response.body {
+        HandlerBody::Error(e) => Some(e.outcome),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn a_request_the_state_does_not_admit_is_held_offered_once_and_signed_once_vouched_for() {
+    let (mut handler, ca) = rig(floor_with_this_workload());
+    let (gate, offers) = gated(&mut handler, just_restarted());
+    let csr = request(CertType::Client, &[]);
+
+    let first = handler
+        .handle(None, &mint_default_token(), csr.clone())
+        .await;
+    assert_eq!(
+        (first.status, outcome(&first)),
+        (202, Some(IssueOutcome::Held))
+    );
+    let again = handler
+        .handle(None, &mint_default_token(), csr.clone())
+        .await;
+    assert_eq!(again.status, 202, "asked again: still held");
+    let offered = offers.lock().unwrap().clone();
+    assert_eq!(offered.len(), 1, "offered once, not at every ask");
+    let offer = &offered[0];
+    assert_eq!(offer.workload, WORKLOAD);
+    assert_eq!(offer.identity, IDENTITY);
+    assert_eq!(offer.csr_pem, csr.csr_pem);
+    assert!(
+        offer.instance_binding.is_some(),
+        "the pod its token is bound to"
+    );
+    assert!(
+        ca.asked.lock().unwrap().is_empty(),
+        "nothing signed while held"
+    );
+
+    assert!(gate.answer(&HeldReply {
+        id: offer.id.clone(),
+        decision: HeldDecision::Vouch
+    }));
+    let signed = handler
+        .handle(None, &mint_default_token(), csr.clone())
+        .await;
+    assert_eq!(signed.status, 200);
+    assert_eq!(
+        *ca.paths.lock().unwrap(),
+        vec![IssuePath::Vouched],
+        "recorded as vouched for"
+    );
+
+    // Signed once: the same request after that is a new hold, not a second certificate on the old vouch.
+    let after = handler.handle(None, &mint_default_token(), csr).await;
+    assert_eq!(after.status, 202);
+    assert_eq!(ca.asked.lock().unwrap().len(), 1);
+    assert_eq!(offers.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_held_request_the_credentials_agent_refuses_is_refused_at_every_ask_after() {
+    let (mut handler, ca) = rig(floor_with_this_workload());
+    let (gate, offers) = gated(&mut handler, just_restarted());
+    let csr = request(CertType::Client, &[]);
+    handler
+        .handle(None, &mint_default_token(), csr.clone())
+        .await;
+    let id = offers.lock().unwrap()[0].id.clone();
+    let refuse = HeldDecision::Refuse {
+        reason: "it already holds one".to_string(),
+    };
+    assert!(gate.answer(&HeldReply {
+        id: id.clone(),
+        decision: refuse
+    }));
+    assert!(
+        !gate.answer(&HeldReply {
+            id,
+            decision: HeldDecision::Vouch
+        }),
+        "the first answer stands"
+    );
+    for _ in 0..2 {
+        let response = handler
+            .handle(None, &mint_default_token(), csr.clone())
+            .await;
+        assert!(refused_as_not_authorized(&response), "{response:?}");
+        match &response.body {
+            HandlerBody::Error(e) => {
+                assert!(e.detail.contains("it already holds one"), "{}", e.detail)
+            }
+            other => panic!("{other:?}"),
         }
     }
-    let buffer = Buffer::default();
-    let writer = buffer.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || writer.clone())
-        .with_ansi(false)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-    run.await;
-    String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap()
+    assert!(ca.asked.lock().unwrap().is_empty());
 }
 
-fn with_state(handler: &mut Handler, state: cert_issuer::floor_state::FloorState) {
-    handler.floor_state = Some(Arc::new(Mutex::new(state)));
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn a_token_only_request_for_a_bootstrap_identity_logs_what_the_floor_state_would_decide_and_nothing_obeys_it()
- {
-    use cert_issuer::floor_state::{FloorState, Heard};
-    // Restarted with a record and nothing heard yet: the state would hold everything closed. The floor still signs.
+#[tokio::test]
+async fn a_request_the_state_admits_is_signed_on_its_token_and_offered_to_no_one() {
     let (mut handler, ca) = rig(floor_with_this_workload());
-    with_state(
-        &mut handler,
-        FloorState::new(false, std::time::Instant::now()),
-    );
-    let log = logged(async {
-        let response = handler
-            .handle(None, &mint_default_token(), request(CertType::Client, &[]))
-            .await;
-        assert_eq!(response.status, 200, "shadow: nothing obeys it yet");
-    })
-    .await;
-    assert_eq!(ca.asked.lock().unwrap().len(), 1);
-    let line = log
-        .lines()
-        .find(|l| l.contains("floor state (shadow"))
-        .unwrap_or_else(|| panic!("no shadow line in {log}"));
-    assert!(line.contains("floor_state=Nothing"), "{line}");
-    assert!(line.contains("would_admit=false"), "{line}");
-    assert!(line.contains("floor_admitted=true"), "{line}");
-    assert!(line.contains(WORKLOAD), "{line}");
+    let (_, offers) = gated(&mut handler, FloorState::new(true, Instant::now()));
+    let response = handler
+        .handle(None, &mint_default_token(), request(CertType::Client, &[]))
+        .await;
+    assert_eq!(response.status, 200);
+    assert_eq!(*ca.paths.lock().unwrap(), vec![IssuePath::TokenOnly]);
+    assert!(offers.lock().unwrap().is_empty());
+}
 
-    // Where the floor refuses (a type its entry does not give it), the line says so.
-    let log = logged(async {
-        let response = handler
-            .handle(None, &mint_default_token(), request(CertType::Server, &[]))
-            .await;
-        assert_eq!(response.status, 403);
-    })
-    .await;
-    let line = log
-        .lines()
-        .find(|l| l.contains("floor state (shadow"))
-        .unwrap();
-    assert!(line.contains("floor_admitted=false"), "{line}");
-
-    // The same workload as the credentials agent, gone while Cassini holds: its entry alone, so it would be admitted.
-    let (mut handler, _) = rig(floor_with_this_workload());
+#[tokio::test]
+async fn the_credentials_agent_s_successor_is_held_but_offered_to_no_one_and_admitted_once_its_entry_opens()
+ {
+    // The token's workload playing the credentials agent: its identity is the internal caller.
+    let (mut handler, ca) = rig(floor_with_this_workload());
     handler.internal_callers.push(IDENTITY.to_string());
-    let past = std::time::Instant::now() - std::time::Duration::from_secs(120);
+    let (_, offers) = gated(&mut handler, just_restarted());
+    let response = handler
+        .handle(None, &mint_default_token(), request(CertType::Client, &[]))
+        .await;
+    assert_eq!(response.status, 202);
+    assert!(
+        offers.lock().unwrap().is_empty(),
+        "no one vouches for the credentials agent's successor"
+    );
+
+    // Its predecessor silent past the bound, with Cassini up: its entry alone is open.
+    let past = Instant::now() - std::time::Duration::from_secs(120);
     let mut state = FloorState::new(false, past);
     state.hear(Heard::CassiniRegistered, past);
-    with_state(&mut handler, state);
-    let log = logged(async {
-        handler
-            .handle(None, &mint_default_token(), request(CertType::Client, &[]))
-            .await;
-    })
-    .await;
-    let line = log
-        .lines()
-        .find(|l| l.contains("floor state (shadow"))
-        .unwrap();
-    assert!(line.contains("floor_state=CredentialsAgentOnly"), "{line}");
-    assert!(line.contains("would_admit=true"), "{line}");
+    state.hear(Heard::CredentialsAgent, past);
+    gated(&mut handler, state);
+    let response = handler
+        .handle(None, &mint_default_token(), request(CertType::Client, &[]))
+        .await;
+    assert_eq!(response.status, 200);
+    assert_eq!(*ca.paths.lock().unwrap(), vec![IssuePath::TokenOnly]);
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn the_floor_state_is_not_asked_of_a_vouched_request_nor_of_a_workload_that_is_not_a_bootstrap_identity()
- {
-    use cert_issuer::floor_state::FloorState;
-    for (floor, peer) in [
-        (floor_with_this_workload(), Some(CREDENTIALS_AGENT)),
-        (floor_without_this_workload(), None),
-    ] {
-        let (mut handler, _) = rig(floor);
-        with_state(
-            &mut handler,
-            FloorState::new(false, std::time::Instant::now()),
-        );
-        let log = logged(async {
-            handler
-                .handle(peer, &mint_default_token(), request(CertType::Client, &[]))
-                .await;
-        })
+#[tokio::test]
+async fn neither_a_request_the_credentials_agent_vouches_for_nor_one_with_no_floor_is_held() {
+    let (mut handler, _) = rig(floor_with_this_workload_vouched_only());
+    let (_, offers) = gated(&mut handler, just_restarted());
+    let response = handler
+        .handle(
+            Some(CREDENTIALS_AGENT),
+            &mint_default_token(),
+            request(
+                CertType::Server,
+                &["polar-git-server.polar.svc.cluster.local"],
+            ),
+        )
         .await;
-        assert!(!log.contains("floor state (shadow"), "{peer:?}: {log}");
+    assert_eq!(response.status, 200, "{response:?}");
+    let (mut open, _) = rig(None);
+    gated(&mut open, just_restarted());
+    let response = open
+        .handle(None, &mint_default_token(), request(CertType::Client, &[]))
+        .await;
+    assert_eq!(response.status, 200, "no floor: the open floor, as before");
+    assert!(offers.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_full_table_answers_held_and_offers_nothing_more() {
+    let (mut handler, _) = rig(floor_with_this_workload());
+    let (_, offers) = gate_with(
+        &mut handler,
+        just_restarted(),
+        HeldRequests::new(1, std::time::Duration::from_secs(600)),
+    );
+    for _ in 0..2 {
+        // A new CSR each time: two different requests.
+        let response = handler
+            .handle(None, &mint_default_token(), request(CertType::Client, &[]))
+            .await;
+        assert_eq!(response.status, 202);
     }
+    assert_eq!(offers.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn only_the_credentials_agent_lists_and_answers_held_requests_over_mtls_and_its_asking_is_its_presence()
+ {
+    // Restarted two minutes ago, nothing heard, Cassini down: everything open, until the credentials agent asks.
+    let (mut handler, _) = rig(floor_with_this_workload());
+    let (gate, _) = gated(
+        &mut handler,
+        FloorState::new(false, Instant::now() - std::time::Duration::from_secs(120)),
+    );
+    assert_eq!(gate.open(Instant::now()), Open::All);
+    for stranger in [None, Some("cassini.polar.serviceaccount.cluster.local")] {
+        assert!(handler.held_list(stranger).is_err());
+    }
+    assert_eq!(
+        gate.open(Instant::now()),
+        Open::All,
+        "a stranger's asking is no one's presence"
+    );
+    assert!(
+        handler
+            .held_list(Some(CREDENTIALS_AGENT))
+            .unwrap()
+            .held
+            .is_empty()
+    );
+    assert_eq!(
+        gate.open(Instant::now()),
+        Open::Nothing,
+        "its poll is its presence"
+    );
+
+    let csr = request(CertType::Client, &[]);
+    assert_eq!(
+        handler
+            .handle(None, &mint_default_token(), csr.clone())
+            .await
+            .status,
+        202
+    );
+    let listed = handler.held_list(Some(CREDENTIALS_AGENT)).unwrap().held;
+    assert_eq!(listed.len(), 1);
+    let reply = HeldReply {
+        id: listed[0].id.clone(),
+        decision: HeldDecision::Vouch,
+    };
+    assert!(handler.held_answer(None, &reply).is_err());
+    assert_eq!(
+        handler.held_answer(Some(CREDENTIALS_AGENT), &reply),
+        Ok(true)
+    );
+    assert_eq!(
+        handler.held_answer(Some(CREDENTIALS_AGENT), &reply),
+        Ok(false),
+        "answered once"
+    );
+    assert!(
+        handler
+            .held_list(Some(CREDENTIALS_AGENT))
+            .unwrap()
+            .held
+            .is_empty()
+    );
+    assert_eq!(
+        handler
+            .handle(None, &mint_default_token(), csr)
+            .await
+            .status,
+        200
+    );
 }

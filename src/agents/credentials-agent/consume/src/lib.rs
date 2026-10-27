@@ -46,6 +46,7 @@ pub mod decrypt_on_behalf_of_actor;
 pub mod escrow;
 pub mod escrow_key;
 pub mod escrow_key_actor;
+pub mod held_voucher;
 pub mod identity_normalization;
 pub mod identity_normalization_actor;
 pub mod introspection;

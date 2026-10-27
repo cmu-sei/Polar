@@ -31,6 +31,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum HandshakeError {
+    /// The request is held (202, `IssueOutcome::Held`): a bootstrap service's request the floor state does not admit,
+    /// waiting for the credentials agent to vouch for it. Send the same request again shortly.
+    #[error("held: {0}")]
+    Held(String),
+
     /// The cert issuer was not reachable at the network level.
     /// This is a transient infrastructure failure — Kubernetes
     /// restart policy will retry. Distinct from Rejected so the
@@ -304,6 +309,47 @@ impl HandshakeClient {
     }
 }
 
+impl HandshakeClient {
+    /// `GET /internal/held`: the held requests not yet answered, for the credentials agent while its Cassini session
+    /// is lost (docs/architecture/core-restarts.md, "3 in detail"). Only works on a client built with its identity.
+    pub async fn held_list(&self) -> Result<cert_issuer_common::held::HeldList, HandshakeError> {
+        let url = format!("{}{}", self.base_url, cert_issuer_common::held::HELD_ROUTE);
+        let response = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| HandshakeError::Unreachable(e.to_string()))?;
+        parse_response(response).await
+    }
+
+    /// `POST /internal/held/<id>`: the credentials agent's answer to a held request. `Ok(taken)` says whether
+    /// cert-issuer took it (a request it holds, not yet answered).
+    pub async fn held_answer(
+        &self,
+        id: &str,
+        decision: &cert_issuer_common::held::HeldDecision,
+    ) -> Result<bool, HandshakeError> {
+        #[derive(serde::Deserialize)]
+        struct Taken {
+            taken: bool,
+        }
+        let url = format!(
+            "{}{}/{id}",
+            self.base_url,
+            cert_issuer_common::held::HELD_ROUTE
+        );
+        let response = self
+            .http
+            .post(&url)
+            .json(decision)
+            .send()
+            .await
+            .map_err(|e| HandshakeError::Unreachable(e.to_string()))?;
+        parse_response::<Taken>(response).await.map(|t| t.taken)
+    }
+}
+
 /// Shared response-parsing tail for both `/issue` and `/validate`:
 /// a 2xx body deserializes as `T`, anything else deserializes as
 /// `IssueError` (both endpoints share the same error shape).
@@ -316,6 +362,13 @@ async fn parse_response<T: serde::de::DeserializeOwned>(
         .await
         .map_err(|e| HandshakeError::Malformed(format!("failed to read response body: {e}")))?;
 
+    // A held request is an answer, not a success: it carries no certificate.
+    if status == reqwest::StatusCode::ACCEPTED
+        && let Ok(held) = serde_json::from_slice::<IssueError>(&body_bytes)
+        && held.outcome == cert_issuer_common::IssueOutcome::Held
+    {
+        return Err(HandshakeError::Held(held.detail));
+    }
     if status.is_success() {
         serde_json::from_slice::<T>(&body_bytes)
             .map_err(|e| HandshakeError::Malformed(format!("invalid success body: {e}")))

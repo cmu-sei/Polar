@@ -39,6 +39,7 @@
 use crate::ca::{RcgenCaClient, load_or_bootstrap_ca, load_provisioned_ca};
 use crate::config::{CaConfig, CaProvisioning};
 use crate::floor_state::{FloorState, Heard};
+use crate::gate::FloorGate;
 use crate::handler::Handler;
 use crate::listener::{Listener, ListenerArgs, ListenerMessage};
 use crate::oidc::{HttpJwksSource, Validator};
@@ -48,6 +49,7 @@ use crate::server::build_router;
 use crate::settings::Settings;
 use crate::tls::build_server_config;
 use cassini_types::ClientEvent;
+use cert_issuer_common::held::{HELD_REPLIES_TOPIC, HELD_REQUESTS_TOPIC, HeldOffer, HeldReply};
 use polar_agent_builder::{
     AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
     InfrastructureSupervisorMessage,
@@ -76,23 +78,16 @@ pub enum CertIssuerSupervisorMessage {
         payload: Vec<u8>,
         published_by: Option<String>,
     },
+    /// Held requests to offer to the credentials agent over Cassini.
+    OfferHeld(Vec<HeldOffer>),
+    /// An answer to a held request arrived, published (the broker says) by `published_by`.
+    HeldAnswered {
+        payload: Vec<u8>,
+        published_by: Option<String>,
+    },
 }
 
 pub struct CertIssuerSupervisor;
-
-/// Tells the floor state what was heard now, and logs what is open when that changes.
-fn hear(floor_state: &std::sync::Mutex<FloorState>, heard: Heard) {
-    let Ok(mut state) = floor_state.lock() else {
-        return;
-    };
-    let now = std::time::Instant::now();
-    let before = state.open(now);
-    state.hear(heard, now);
-    let after = state.open(now);
-    if after != before {
-        info!(?heard, from = ?before, to = ?after, "floor state changed (shadow, not yet enforced)");
-    }
-}
 
 pub struct CertIssuerSupervisorState {
     healthcheck: HealthHandle,
@@ -106,8 +101,8 @@ pub struct CertIssuerSupervisorState {
     record: Arc<RecordingCa>,
     internal_callers: Vec<String>,
     client: polar::cassini::TcpClient,
-    /// What the floor has open, by what this supervisor hears (step 2: logged, not yet obeyed).
-    floor_state: Arc<std::sync::Mutex<FloorState>>,
+    /// The floor's gate, told what this supervisor hears and given the credentials agent's answers.
+    gate: Arc<FloorGate>,
 }
 
 /// What a child's ending means: the infrastructure's is the end of the shutdown; the listener's, outside a shutdown,
@@ -200,10 +195,13 @@ impl Actor for CertIssuerSupervisor {
             .entries()
             .iter()
             .all(|e| e.path == cert_issuer_common::record::IssuePath::Own);
-        let floor_state = Arc::new(std::sync::Mutex::new(FloorState::new(
-            fresh,
-            std::time::Instant::now(),
-        )));
+        let offers = myself.clone();
+        let gate = Arc::new(FloorGate::new(
+            FloorState::new(fresh, std::time::Instant::now()),
+            Box::new(move |held| {
+                let _ = offers.send_message(CertIssuerSupervisorMessage::OfferHeld(held));
+            }),
+        ));
         info!(
             fresh,
             "floor state: {}",
@@ -239,7 +237,7 @@ impl Actor for CertIssuerSupervisor {
             user_lifetime: config.ca.user_lifetime,
             service_lifetime: config.ca.service_lifetime,
             own_workload: Default::default(),
-            floor_state: Some(floor_state.clone()),
+            gate: Some(gate.clone()),
             identity_lifetime_overrides: config.ca.identity_lifetime_overrides.clone(),
             internal_callers: config.mtls.internal_callers.clone(),
             floor: config.mtls.bootstrap.clone(),
@@ -281,6 +279,7 @@ impl Actor for CertIssuerSupervisor {
         info!("signed its own client certificate through its floor");
 
         let asked = myself.clone();
+        let answered = myself.clone();
         let resources = AgentBuilder::new(myself.clone(), SERVICE_NAME)
             .with_lifecycle_handler(|event| {
                 Some(CertIssuerSupervisorMessage::ClientEvent { event })
@@ -289,6 +288,15 @@ impl Actor for CertIssuerSupervisor {
                 cert_issuer_common::record::RECORD_REQUESTS_TOPIC,
                 move |incoming| {
                     let _ = asked.send_message(CertIssuerSupervisorMessage::RecordRequested {
+                        payload: incoming.payload,
+                        published_by: incoming.published_by,
+                    });
+                },
+            ))
+            .with_subscription(polar_agent_builder::Subscription::new(
+                HELD_REPLIES_TOPIC,
+                move |incoming| {
+                    let _ = answered.send_message(CertIssuerSupervisorMessage::HeldAnswered {
                         payload: incoming.payload,
                         published_by: incoming.published_by,
                     });
@@ -331,7 +339,7 @@ impl Actor for CertIssuerSupervisor {
             record: ca,
             internal_callers: config.mtls.internal_callers.clone(),
             client: resources.tcp_client,
-            floor_state,
+            gate,
         })
     }
 
@@ -346,12 +354,16 @@ impl Actor for CertIssuerSupervisor {
             CertIssuerSupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     let _ = state.healthcheck.cassini_connected();
-                    hear(&state.floor_state, Heard::CassiniRegistered);
+                    state
+                        .gate
+                        .hear(Heard::CassiniRegistered, std::time::Instant::now());
                 }
                 ClientEvent::TransportError { reason } => {
                     warn!("Cassini is unreachable (cert-issuer does not depend on it): {reason}");
                     let _ = state.healthcheck.cassini_disconnected();
-                    hear(&state.floor_state, Heard::CassiniLost);
+                    state
+                        .gate
+                        .hear(Heard::CassiniLost, std::time::Instant::now());
                 }
                 _ => {}
             },
@@ -364,7 +376,10 @@ impl Actor for CertIssuerSupervisor {
                     .as_deref()
                     .is_some_and(|asker| state.internal_callers.iter().any(|c| c == asker))
                 {
-                    hear(&state.floor_state, Heard::CredentialsAgent);
+                    let now = std::time::Instant::now();
+                    state.gate.hear(Heard::CredentialsAgent, now);
+                    // Offered again, so a held request lost on the way is not lost for good.
+                    state.gate.offer_waiting(now);
                 }
                 match state
                     .record
@@ -383,6 +398,49 @@ impl Actor for CertIssuerSupervisor {
                         }
                     }
                     Err(why) => warn!("not answered: {why}"),
+                }
+            }
+            CertIssuerSupervisorMessage::OfferHeld(held) => {
+                for offer in held {
+                    let payload = match serde_json::to_vec(&offer) {
+                        Ok(payload) => payload,
+                        Err(e) => {
+                            warn!("a held request could not be written: {e}");
+                            continue;
+                        }
+                    };
+                    if let Err(e) = state.client.as_actor_ref().send_message(
+                        cassini_client::TcpClientMessage::publish(
+                            HELD_REQUESTS_TOPIC.to_string(),
+                            payload,
+                            None,
+                        ),
+                    ) {
+                        warn!("a held request could not be offered: {e}");
+                    }
+                }
+            }
+            CertIssuerSupervisorMessage::HeldAnswered {
+                payload,
+                published_by,
+            } => {
+                // An answer counts only from the credentials agent, as the broker verified it.
+                if !published_by
+                    .as_deref()
+                    .is_some_and(|by| state.internal_callers.iter().any(|c| c == by))
+                {
+                    warn!(published_by = ?published_by, "an answer to a held request from someone other than the credentials agent: ignored");
+                    return Ok(());
+                }
+                match serde_json::from_slice::<HeldReply>(&payload) {
+                    Ok(reply) => {
+                        state
+                            .gate
+                            .hear(Heard::CredentialsAgent, std::time::Instant::now());
+                        let taken = state.gate.answer(&reply);
+                        info!(held = %reply.id, decision = ?reply.decision, taken, "the credentials agent answered a held request");
+                    }
+                    Err(e) => warn!("an answer to a held request that does not read: {e}"),
                 }
             }
             CertIssuerSupervisorMessage::PrepareShutdown => {

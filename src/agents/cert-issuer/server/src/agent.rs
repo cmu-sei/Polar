@@ -58,13 +58,30 @@ impl PolarAgent for CertIssuer {
         .because(&[Cause::Topic(
             cert_issuer_common::record::RECORD_REQUESTS_TOPIC,
         )]),
+        // Held requests (docs/architecture/core-restarts.md, "3 in detail"): a bootstrap service's request the floor
+        // state does not admit, offered to the credentials agent, and its answers.
+        TopicDecl::publish(
+            cert_issuer_common::held::HELD_REQUESTS_TOPIC,
+            "a bootstrap service's request it holds, offered to the credentials agent to vouch for",
+        )
+        // Held when it is asked for on /issue, and offered again each time the credentials agent asks for the record.
+        .because(&[
+            Cause::Http("/issue"),
+            Cause::Topic(cert_issuer_common::record::RECORD_REQUESTS_TOPIC),
+        ]),
+        TopicDecl::subscribe(
+            cert_issuer_common::held::HELD_REPLIES_TOPIC,
+            "the credentials agent's answers to the requests it holds",
+        ),
     ];
     const HELP: Option<&'static str> = Some(
         "cert-issuer signs Polar's certificates. A caller with only a service account token is signed what the floor \
          (CERT_ISSUER_BOOTSTRAP) writes down for its workload; the credentials agent, by its verified mTLS \
          certificate, vouches for every other workload and for accounts (/internal/issue). It signs its own client \
-         certificate the same way, on its own token, through its own floor. It serves over TLS whether or not \
-         Cassini is up, and its health does not count the broker.",
+         certificate at its start, on its own token, and that identity to no one else. What the floor admits on a \
+         token alone, the floor state decides by what cert-issuer hears; a request it does not admit is held for the \
+         credentials agent to vouch for. It serves over TLS whether or not Cassini is up, and its health does not \
+         count the broker.",
     );
 
     async fn start(configured: Configured) -> Result<(), StartError> {
@@ -106,6 +123,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} ({access:?}) is not declared"))
         };
         topic(RECORD_REQUESTS_TOPIC, Access::Subscribe);
+        topic(
+            cert_issuer_common::held::HELD_REQUESTS_TOPIC,
+            Access::Publish,
+        );
+        topic(
+            cert_issuer_common::held::HELD_REPLIES_TOPIC,
+            Access::Subscribe,
+        );
         let reply = topic(RECORD_REPLIES_TOPIC, Access::Publish);
         assert_eq!(
             reply.causes,

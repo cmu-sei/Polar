@@ -86,9 +86,9 @@ pub struct Handler {
     /// cert-issuer's own workload, as its own token names it, once it has signed itself its client certificate
     /// (`handle_own`): signed in process at its start, and refused to every caller over HTTP.
     pub own_workload: std::sync::OnceLock<String>,
-    /// What the floor has open by what cert-issuer hears (`floor_state`), fed by the supervisor; none in a handler
-    /// that is not running as the agent. Step 2 only logs what it would decide; step 3 makes the floor obey it.
-    pub floor_state: Option<Arc<std::sync::Mutex<crate::floor_state::FloorState>>>,
+    /// The floor's gate on token-only requests: the floor state and the requests held (`gate`), fed by the
+    /// supervisor; none in a handler that is not running as the agent, and then the floor alone decides.
+    pub gate: Option<Arc<crate::gate::FloorGate>>,
     pub identity_lifetime_overrides: std::collections::HashMap<String, Duration>,
     /// Peer identities (the SAN of the connection's verified mTLS
     /// client certificate) allowed to call `handle_internal_issue`.
@@ -139,40 +139,125 @@ impl Handler {
         peer_identity.is_some_and(|peer| self.internal_callers.iter().any(|c| c == peer))
     }
 
-    /// Step 2's shadow: for a token-only request for a bootstrap identity, what the floor state would decide, beside
-    /// what the floor did. Nothing obeys it until step 3; the log is what it is checked against.
-    fn shadow_floor_state(
+    /// Whether a token-only request for a bootstrap identity, which the floor admits, goes through now: `Ok(None)` if
+    /// the floor state has its entry open (or the request is not one the state decides), `Ok(Some(key))` if it was
+    /// held and the credentials agent has vouched for it, and otherwise the answer to give (held, or refused).
+    fn gate_on_token(
         &self,
+        own: bool,
         peer_identity: Option<&str>,
         claims: &crate::oidc::ValidatedClaims,
-        floor_admitted: bool,
-    ) {
-        let (Some(state), Some(floor)) = (&self.floor_state, &self.floor) else {
-            return;
+        dns_identity: &str,
+        request: &IssueRequest,
+    ) -> Result<Option<crate::held::HeldKey>, HandlerResponse> {
+        use crate::held::{Asked, HeldKey};
+        let (false, false, Some(gate), Some(_)) = (
+            own,
+            self.vouched_for(peer_identity),
+            &self.gate,
+            &self.floor,
+        ) else {
+            return Ok(None);
         };
-        let bootstrap = floor
-            .iter()
-            .any(|b| b.workload == claims.workload_identity && !b.vouched_only);
-        if self.vouched_for(peer_identity) || !bootstrap {
-            return;
+        let now = std::time::Instant::now();
+        let workload = &claims.workload_identity;
+        let credentials_agent = self.internal_callers.iter().any(|c| c == dns_identity);
+        let open = gate.open(now);
+        if open.admits(credentials_agent) {
+            info!(workload = %workload, floor_state = ?open, "admitted on its token: the floor state has its entry open");
+            return Ok(None);
         }
-        let credentials_agent = normalize_identity(
-            &claims.workload_identity,
-            claims.identity_scope.as_deref(),
-            &claims.identity_normalization,
-        )
-        .is_ok_and(|identity| self.internal_callers.contains(&identity));
-        let open = match state.lock() {
-            Ok(state) => state.open(std::time::Instant::now()),
-            Err(_) => return,
+        if credentials_agent {
+            // Its successor is vouched for by no one: it waits until the state opens its entry.
+            info!(workload = %workload, floor_state = ?open, "held: the credentials agent's entry is not open yet");
+            return Err(error_response(
+                IssueOutcome::Held,
+                "the credentials agent's entry is not open yet; ask again shortly",
+            ));
+        }
+        let key = HeldKey {
+            workload: workload.clone(),
+            instance_binding: claims.instance_binding.clone(),
+            cert_type: request.cert_type.clone(),
+            csr_pem: request.csr_pem.clone(),
         };
-        info!(
-            workload = %claims.workload_identity,
-            floor_state = ?open,
-            would_admit = open.admits(credentials_agent),
-            floor_admitted,
-            "floor state (shadow, not yet enforced)"
+        let offer = cert_issuer_common::held::HeldOffer {
+            id: String::new(),
+            workload: workload.clone(),
+            identity: dns_identity.to_string(),
+            instance_binding: claims.instance_binding.clone(),
+            cert_type: request.cert_type.clone(),
+            names: request.extra_sans.clone(),
+            csr_pem: request.csr_pem.clone(),
+        };
+        match gate.ask(key.clone(), offer, now) {
+            Asked::Vouched(id) => {
+                info!(workload = %workload, held = %id, "signed: the credentials agent vouched for the held request");
+                Ok(Some(key))
+            }
+            Asked::Refused(reason) => {
+                warn!(workload = %workload, reason = %reason, "refused: the credentials agent refused the held request");
+                Err(error_response(
+                    IssueOutcome::CallerNotAuthorized,
+                    &format!("the credentials agent refused this request: {reason}"),
+                ))
+            }
+            Asked::New(offer) => {
+                info!(workload = %workload, held = %offer.id, floor_state = ?open, "held, and offered to the credentials agent");
+                Err(error_response(
+                    IssueOutcome::Held,
+                    "held until the credentials agent vouches for it; ask again shortly",
+                ))
+            }
+            Asked::Waiting(_) => Err(error_response(
+                IssueOutcome::Held,
+                "held until the credentials agent vouches for it; ask again shortly",
+            )),
+            Asked::Full => Err(error_response(
+                IssueOutcome::Held,
+                "too many requests are held; ask again shortly",
+            )),
+        }
+    }
+
+    /// `GET /internal/held`: the held requests not yet answered, for the credentials agent while its Cassini session
+    /// is lost. Only an internal caller is answered, and its asking is its presence. `Err` is why it is not answered.
+    pub fn held_list(
+        &self,
+        peer_identity: Option<&str>,
+    ) -> Result<cert_issuer_common::held::HeldList, &'static str> {
+        if !self.vouched_for(peer_identity) {
+            return Err("only the credentials agent may list the held requests");
+        }
+        let now = std::time::Instant::now();
+        let held = match &self.gate {
+            Some(gate) => {
+                gate.hear(crate::floor_state::Heard::CredentialsAgent, now);
+                gate.waiting(now)
+            }
+            None => Vec::new(),
+        };
+        Ok(cert_issuer_common::held::HeldList { held })
+    }
+
+    /// `POST /internal/held/<id>`: the credentials agent's answer to a held request, over mTLS. `Ok(taken)` says
+    /// whether it was taken (a request held and not yet answered).
+    pub fn held_answer(
+        &self,
+        peer_identity: Option<&str>,
+        reply: &cert_issuer_common::held::HeldReply,
+    ) -> Result<bool, &'static str> {
+        if !self.vouched_for(peer_identity) {
+            return Err("only the credentials agent may answer a held request");
+        }
+        let Some(gate) = &self.gate else {
+            return Ok(false);
+        };
+        gate.hear(
+            crate::floor_state::Heard::CredentialsAgent,
+            std::time::Instant::now(),
         );
+        Ok(gate.answer(reply))
     }
 
     /// Why a caller with this token may not have this request served, if it may not: the detail to send. Once a
@@ -290,15 +375,11 @@ impl Handler {
         // The token says whose workload this is and nothing about whether it may ask for this. A caller
         // vouched for by the credentials agent's mTLS identity states the certificate itself; a caller
         // with only a token is limited to the bootstrap identities and what is written down for them.
-        let refusal = self.caller_refusal(
+        if let Some(detail) = self.caller_refusal(
             peer_identity,
             &claims.workload_identity,
             Some((&request.cert_type, &request.extra_sans)),
-        );
-        if !own {
-            self.shadow_floor_state(peer_identity, &claims, refusal.is_none());
-        }
-        if let Some(detail) = refusal {
+        ) {
             return error_response(IssueOutcome::CallerNotAuthorized, &detail);
         }
 
@@ -361,29 +442,47 @@ impl Handler {
             _ => Vec::new(),
         };
 
+        // ---- Step 3.4: the floor's state ----
+        //
+        // A bootstrap service on its token alone is signed when the floor state has its entry open; otherwise its
+        // request is held, offered to the credentials agent, and signed once it vouches for it
+        // (docs/architecture/core-restarts.md, "3 in detail").
+        let held = match self.gate_on_token(own, peer_identity, &claims, &dns_identity, &request) {
+            Ok(held) => held,
+            Err(response) => return response,
+        };
+
         // ---- Steps 3.5-5: shared signing path ----
         //
         // Everything past identity verification is identical for
         // /issue and /internal/issue, so it lives in one place.
-        self.sign_verified(
-            &dns_identity,
-            &parsed_csr,
-            request.csr_pem,
-            request.cert_type,
-            request.extra_sans.into_iter().chain(floor_names).collect(),
-            request.subject_dn_defaults,
-            None,
-            // For the record: its own, vouched for by the credentials agent, or on the token alone.
-            if own {
-                cert_issuer_common::record::IssuePath::Own
-            } else if self.vouched_for(peer_identity) {
-                cert_issuer_common::record::IssuePath::Vouched
-            } else {
-                cert_issuer_common::record::IssuePath::TokenOnly
-            },
-            claims.instance_binding.clone(),
-        )
-        .await
+        let vouched = self.vouched_for(peer_identity) || held.is_some();
+        let response = self
+            .sign_verified(
+                &dns_identity,
+                &parsed_csr,
+                request.csr_pem,
+                request.cert_type,
+                request.extra_sans.into_iter().chain(floor_names).collect(),
+                request.subject_dn_defaults,
+                None,
+                // For the record: its own, vouched for by the credentials agent, or on the token alone.
+                if own {
+                    cert_issuer_common::record::IssuePath::Own
+                } else if vouched {
+                    cert_issuer_common::record::IssuePath::Vouched
+                } else {
+                    cert_issuer_common::record::IssuePath::TokenOnly
+                },
+                claims.instance_binding.clone(),
+            )
+            .await;
+        if response.status == 200
+            && let (Some(key), Some(gate)) = (held, &self.gate)
+        {
+            gate.signed(&key);
+        }
+        response
     }
 
     /// The signing tail shared by `handle` and `handle_internal_issue`:
@@ -850,5 +949,7 @@ pub fn status_for_outcome(outcome: IssueOutcome) -> u16 {
         // request to proceed," just checked via different mechanisms
         // (mTLS peer identity here, token-derived SAN there).
         IssueOutcome::CallerNotAuthorized => 403,
+        // Held, not refused: ask again shortly.
+        IssueOutcome::Held => 202,
     }
 }

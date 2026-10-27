@@ -517,3 +517,82 @@ async fn validate_malformed_success_body_maps_to_malformed_variant() {
         "expected Malformed, got {err:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Held requests (docs/architecture/core-restarts.md, "3 in detail")
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_held_request_is_held_and_not_a_success_nor_a_rejection() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/issue"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(IssueError {
+            outcome: IssueOutcome::Held,
+            detail: "held until the credentials agent vouches for it".to_string(),
+        }))
+        .mount(&server)
+        .await;
+    let err = issue(&make_client(server.uri()), "t", "csr", CertType::Client)
+        .await
+        .unwrap_err();
+    match err {
+        HandshakeError::Held(detail) => assert!(detail.contains("vouches"), "{detail}"),
+        other => panic!("expected Held, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_held_requests_are_listed_and_answered_on_their_routes() {
+    use cert_issuer_common::held::{HeldDecision, HeldList, HeldOffer};
+    use wiremock::matchers::body_json;
+    let server = MockServer::start().await;
+    let offer = HeldOffer {
+        id: "h1".to_string(),
+        workload: "system:serviceaccount:polar:cassini".to_string(),
+        identity: "cassini.polar.serviceaccount.cluster.local".to_string(),
+        instance_binding: Some("pod-1".to_string()),
+        cert_type: CertType::Server,
+        names: vec![],
+        csr_pem: "csr".to_string(),
+    };
+    Mock::given(method("GET"))
+        .and(path("/internal/held"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(HeldList {
+            held: vec![offer.clone()],
+        }))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/internal/held/h1"))
+        .and(body_json(HeldDecision::Vouch))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"taken": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = make_client(server.uri());
+    assert_eq!(client.held_list().await.unwrap().held, vec![offer]);
+    assert!(
+        client
+            .held_answer("h1", &HeldDecision::Vouch)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_held_list_refused_to_a_caller_is_a_rejection() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/internal/held"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(IssueError {
+            outcome: IssueOutcome::CallerNotAuthorized,
+            detail: "only the credentials agent may list the held requests".to_string(),
+        }))
+        .mount(&server)
+        .await;
+    assert!(matches!(
+        make_client(server.uri()).held_list().await,
+        Err(HandshakeError::Rejected(e)) if e.outcome == IssueOutcome::CallerNotAuthorized
+    ));
+}

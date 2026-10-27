@@ -669,38 +669,17 @@ async fn issue_cert(
         }
     };
 
-    let response = loop {
-        match client
-            .issue(
-                sa_token,
-                &csr_output.csr_pem,
-                req.cert_type.clone(),
-                req.extra_sans.clone(),
-                None,
-            )
-            .await
-        {
-            Ok(r) => break r,
-            Err(handshake::HandshakeError::Unreachable(e)) => {
-                tracing::warn!("cert issuer unreachable: {e}, retrying...");
-                tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
-            }
-            Err(handshake::HandshakeError::Rejected(e)) => {
-                // Rejection is unrecoverable — misconfiguration or
-                // identity mismatch. Exit so the operator can investigate.
-                eprintln!(
-                    "error: cert issuer rejected request: {:?} — {}",
-                    e.outcome, e.detail
-                );
-                std::process::exit(1);
-            }
-            Err(handshake::HandshakeError::Malformed(e)) => {
-                // Malformed response could be a transient proxy issue.
-                // Retry with a warning rather than exiting.
-                tracing::warn!("malformed cert issuer response: {e}, retrying...");
-                tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
-            }
-        }
+    let response = match obtain_from_cert_issuer(
+        client,
+        sa_token,
+        &csr_output.csr_pem,
+        req,
+        Duration::from_secs(POLL_INTERVAL_SECS),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(why) => stop(why),
     };
 
     write_bundle_patiently(
@@ -712,6 +691,54 @@ async fn issue_cert(
         &response.expires_at.to_string(),
     )
     .await;
+}
+
+/// One certificate from cert-issuer, for the same CSR however many times it is asked: what is only unavailable is
+/// waited out, and so is a request cert-issuer holds for the credentials agent to vouch for (a bootstrap service's,
+/// while the floor state does not admit it: docs/architecture/core-restarts.md, "3 in detail"). A refusal is final.
+async fn obtain_from_cert_issuer(
+    client: &handshake::HandshakeClient,
+    sa_token: &str,
+    csr_pem: &str,
+    req: &CertRequest,
+    delay: Duration,
+) -> Result<cert_issuer_common::IssueResponse, String> {
+    loop {
+        match client
+            .issue(
+                sa_token,
+                csr_pem,
+                req.cert_type.clone(),
+                req.extra_sans.clone(),
+                None,
+            )
+            .await
+        {
+            Ok(r) => return Ok(r),
+            Err(handshake::HandshakeError::Held(detail)) => {
+                tracing::info!("cert-issuer holds the request ({detail}); asking again...");
+                tokio::time::sleep(delay).await;
+            }
+            Err(handshake::HandshakeError::Unreachable(e)) => {
+                tracing::warn!("cert issuer unreachable: {e}, retrying...");
+                tokio::time::sleep(delay).await;
+            }
+            // Rejection is unrecoverable: misconfiguration, an identity mismatch, or a held request the credentials
+            // agent refused. Exit so the operator can investigate.
+            Err(handshake::HandshakeError::Rejected(e)) => {
+                return Err(format!(
+                    "cert issuer rejected request: {:?} — {}",
+                    e.outcome, e.detail
+                ));
+            }
+            Err(handshake::HandshakeError::Malformed(e)) => {
+                // Malformed response could be a transient proxy issue.
+                // Retry with a warning rather than exiting.
+                tracing::warn!("malformed cert issuer response: {e}, retrying...");
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
 }
 
 /// Writes the certificate, its key and the CA into the requested directory, and keeps trying until it can: a
@@ -1298,6 +1325,81 @@ mod tests {
         let missing = dir.path().join("absent.pem");
         let why = read_pinned_ca(missing.to_str().unwrap()).unwrap_err();
         assert!(why.contains("absent.pem"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn a_request_cert_issuer_holds_is_asked_again_with_the_same_csr_until_it_is_signed() {
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        let held = cert_issuer_common::IssueError {
+            outcome: cert_issuer_common::IssueOutcome::Held,
+            detail: "held until the credentials agent vouches for it".to_string(),
+        };
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .and(body_partial_json(serde_json::json!({"csr_pem": "the-csr"})))
+            .respond_with(ResponseTemplate::new(202).set_body_json(held))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .and(body_partial_json(serde_json::json!({"csr_pem": "the-csr"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                cert_issuer_common::IssueResponse {
+                    certificate_pem: "CERT".to_string(),
+                    ca_chain_pem: "CA".to_string(),
+                    serial_number: "01".to_string(),
+                    session_id: "s".to_string(),
+                    expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+                },
+            ))
+            .mount(&server)
+            .await;
+        let client = handshake::HandshakeClient::new(server.uri());
+        let got = obtain_from_cert_issuer(
+            &client,
+            "token",
+            "the-csr",
+            &a_client_request(),
+            MILLISECOND,
+        )
+        .await
+        .unwrap();
+        assert_eq!(got.certificate_pem, "CERT");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            3,
+            "held twice, then signed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_request_the_credentials_agent_refused_stops_polar_init() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(cert_issuer_common::IssueError {
+                    outcome: cert_issuer_common::IssueOutcome::CallerNotAuthorized,
+                    detail: "the credentials agent refused this request: it already holds one"
+                        .to_string(),
+                }),
+            )
+            .mount(&server)
+            .await;
+        let client = handshake::HandshakeClient::new(server.uri());
+        let why = obtain_from_cert_issuer(
+            &client,
+            "token",
+            "the-csr",
+            &a_client_request(),
+            MILLISECOND,
+        )
+        .await
+        .unwrap_err();
+        assert!(why.contains("already holds one"), "{why}");
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

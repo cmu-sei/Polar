@@ -33,6 +33,7 @@ pub mod ca_root;
 pub mod capability;
 pub mod csr_san;
 pub mod group;
+pub mod held;
 pub mod hierarchy;
 pub mod identity;
 pub mod key_match;
@@ -51,6 +52,7 @@ pub mod serial;
     Deserialize,
     PartialEq,
     Eq,
+    Hash,
     PartialOrd,
     Ord,
     clap::ValueEnum,
@@ -270,6 +272,10 @@ pub enum IssueOutcome {
     /// or no client certificate was presented at all. Distinct from
     /// InvalidToken, since no token is involved in this path.
     CallerNotAuthorized,
+    /// The request is held (202): a bootstrap service the floor admits and the floor state does not, offered to the
+    /// credentials agent to vouch for (docs/architecture/core-restarts.md, "3 in detail"). Send the same request again
+    /// shortly; it is signed once vouched for, or refused.
+    Held,
 }
 
 #[derive(Debug, Error)]

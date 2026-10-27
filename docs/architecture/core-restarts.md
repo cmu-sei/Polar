@@ -339,6 +339,48 @@ Each step tests first, with property tests where an invariant holds.
    credentials agent's poll while its Cassini session is lost (the poll is also its presence, question 2). The
    credentials agent vouches by its own rules, and cert-issuer signs. Steps 2 and 3 deploy together: the state alone
    would close the observer's and Cassini's entries with nothing to take their place.
+   *3 in detail (cleared by the maintainer, 2026-10-26).*
+   - *The gate.* A token-only request for a bootstrap identity is signed only when the floor admits it and the floor
+     state does; one the floor admits and the state does not is held. Anything the floor refuses is refused as before.
+     With no floor configured nothing changes.
+   - *Held, then asked again (the maintainer's choice).* `/issue` answers a held request at once with 202 and
+     `IssueOutcome::Held`; polar-init sends the same request again (the same CSR and key, its token validated again)
+     every few seconds, logging that it is held, until it is signed or refused. No connection is held open. A held
+     entry is keyed by workload, pod UID, type and the CSR's public key, so asking again finds it; at most 64 are held,
+     each forgotten 10 minutes after it was last asked for; only a bootstrap identity can be held at all.
+   - *What the credentials agent is told.* What cert-issuer validated (the identity, the pod UID, the type, the names,
+     the CSR), never the token.
+   - *Who vouches.* For the observer and Cassini, the credentials agent, by its own rules: a bootstrap service in its
+     authority model, one certificate per pod instance and type, and the attestation agent's instance check once it
+     exists (step 6); cert-issuer still checks the names against the floor and writes in the floor's topics and
+     groups, as for any bootstrap service, and records the signing as `Vouched`. A refusal is final. The credentials
+     agent's own successor is vouched for by no one: it waits until the state opens its entry (step 4), or a ticket
+     (step 5).
+   - *Two ways to the credentials agent.* Over Cassini, cert-issuer offers each held request on
+     `cert-issuer-held-requests` (again each time it hears the credentials agent, so a lost one is offered again), and
+     takes answers on `cert-issuer-held-replies` only when the broker says the credentials agent published them. While
+     the credentials agent's Cassini session is lost, it polls cert-issuer over mTLS (`GET /internal/held`) and answers
+     there (`POST /internal/held/<id>`); each poll counts as its presence, so a Cassini restart completes with nothing
+     but cert-issuer and the credentials agent up.
+
+   *Built (2026-10-26): 3, and with it the floor obeys step 2's state.* cert-issuer: `held.rs` (the table: keyed by
+   workload, pod, type and CSR, at most 64, kept 10 minutes from the last ask, the first answer final), `gate.rs`
+   (`FloorGate`: the state, the table, and the offer through the supervisor), the gate in `Handler::gate_on_token`, the
+   routes `GET /internal/held` and `POST /internal/held/<id>` (`server.rs`), and the supervisor offering on
+   `cert-issuer-held-requests`, offering again at each record request, and taking answers on
+   `cert-issuer-held-replies` from the credentials agent alone; both topics are in its `TOPICS`. `IssueOutcome::Held`
+   is 202. `cert-client` has `HandshakeError::Held`, `held_list` and `held_answer`; `polar-init` waits on a held
+   request with the same CSR (`obtain_from_cert_issuer`), and the `cert-client` binary exits 2 on one, as on
+   unreachable. The credentials agent: `held_voucher.rs` (the rule, and the actor that answers over Cassini, and
+   polls over mTLS every 10 s while its Cassini session is lost). Tests: the table in examples and as a property (bounded,
+   the same request the same entry, the first answer stands, only the unanswered offered again); the gate in the
+   handler (held, offered once, signed once vouched for and recorded `Vouched`; a refusal final; admitted by the
+   state on its token; the credentials agent's successor held, offered to no one, and admitted once its entry opens;
+   neither a vouched request nor an open floor held; a full table; the mTLS routes for the credentials agent alone,
+   and its poll as its presence); the client's parsing and routes; polar-init asking again with the same CSR, and
+   stopping on a refusal; the voucher's rule, its publisher check, the ledger's renewal rule, and its polling only
+   while the session is lost. Mutations: all on the new code caught.
+
 4. **The crash window (C)** falls out of steps 2 and 3: the credentials agent absent while the Cassini session holds
    opens its entry alone. Until the ticket exists, a rejuvenating credentials agent's successor comes through it too,
    after waiting out the bound.

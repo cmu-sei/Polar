@@ -116,6 +116,16 @@ impl PolarAgent for CredentialsConsumer {
             cert_issuer_common::record::RECORD_REPLIES_TOPIC,
             "a page of cert-issuer's record, from cert-issuer alone",
         ),
+        // The requests cert-issuer holds for this agent to vouch for (docs/architecture/core-restarts.md, "3 in detail").
+        TopicDecl::subscribe(
+            cert_issuer_common::held::HELD_REQUESTS_TOPIC,
+            "a bootstrap service's request cert-issuer holds, from cert-issuer alone",
+        ),
+        TopicDecl::publish(
+            cert_issuer_common::held::HELD_REPLIES_TOPIC,
+            "this agent's answer to a request cert-issuer holds: vouched for, or refused",
+        )
+        .because(&[Cause::Topic(cert_issuer_common::held::HELD_REQUESTS_TOPIC)]),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC,
             "the answer to an administrator action",

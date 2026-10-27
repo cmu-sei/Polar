@@ -65,6 +65,8 @@ pub fn build_router(handler: Arc<Handler>) -> Router {
         .route("/issue", post(issue))
         .route("/validate", post(validate))
         .route("/internal/issue", post(internal_issue))
+        .route(cert_issuer_common::held::HELD_ROUTE, get(held_list))
+        .route("/internal/held/:id", post(held_answer))
         .route("/ca", get(ca_certificate))
         .with_state(handler)
 }
@@ -147,6 +149,35 @@ async fn internal_issue(
     let peer_identity = peer.as_ref().map(|Extension(p)| p.0.as_str());
     let result = handler.handle_internal_issue(peer_identity, request).await;
     handler_response_to_axum(result)
+}
+
+/// Handler for `GET /internal/held`: the held requests the credentials agent has not answered, while its Cassini
+/// session is lost (docs/architecture/core-restarts.md, "3 in detail"). By its mTLS identity alone.
+async fn held_list(
+    State(handler): State<Arc<Handler>>,
+    peer: Option<Extension<PeerIdentity>>,
+) -> Response {
+    let peer_identity = peer.as_ref().map(|Extension(p)| p.0.as_str());
+    match handler.held_list(peer_identity) {
+        Ok(list) => (StatusCode::OK, Json(list)).into_response(),
+        Err(detail) => reject(IssueOutcome::CallerNotAuthorized, detail),
+    }
+}
+
+/// Handler for `POST /internal/held/<id>`: the credentials agent's answer to a held request, over mTLS. Answers 200
+/// with whether it was taken.
+async fn held_answer(
+    State(handler): State<Arc<Handler>>,
+    peer: Option<Extension<PeerIdentity>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(decision): Json<cert_issuer_common::held::HeldDecision>,
+) -> Response {
+    let peer_identity = peer.as_ref().map(|Extension(p)| p.0.as_str());
+    let reply = cert_issuer_common::held::HeldReply { id, decision };
+    match handler.held_answer(peer_identity, &reply) {
+        Ok(taken) => (StatusCode::OK, Json(serde_json::json!({ "taken": taken }))).into_response(),
+        Err(detail) => reject(IssueOutcome::CallerNotAuthorized, detail),
+    }
 }
 
 /// Handler for `POST /validate`.

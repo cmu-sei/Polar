@@ -133,6 +133,11 @@ async fn run(args: Args) -> i32 {
             eprintln!("error: cert issuer unreachable: {e}");
             return 2;
         }
+        // Not refused: held for the credentials agent to vouch for. One attempt here, so transient, as unreachable is.
+        Err(handshake::HandshakeError::Held(detail)) => {
+            eprintln!("error: the request is held ({detail}); send it again shortly");
+            return 2;
+        }
         Err(handshake::HandshakeError::Rejected(e)) => {
             eprintln!(
                 "error: cert issuer rejected: {:?} — {}",
