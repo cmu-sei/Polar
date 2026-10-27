@@ -23,6 +23,9 @@
 
 //! What the git server reads from its configuration, declared once.
 
+use polar_custody::client::ServerKey;
+// The custody socket is the Cassini client's declaration, which this agent registers: a variable is declared once.
+use polar_custody::environment::{KeyGiven, one_key};
 use polar_env::{Config, ConfigError, Defaulted, Described, Optional, Required, Section};
 
 pub const DEFAULT_PORT: &str = "8443";
@@ -64,10 +67,9 @@ pub static CERT: Required<String> = Required::text(
     "path to the server's own certificate chain (PEM), which it presents to every client",
 );
 
-pub static KEY: Required<String> = Required::text(
-    "POLAR_GIT_SERVER_KEY",
-    "path to the private key (PEM) for the server's certificate",
-);
+const KEY_DOC: &str = "path to the private key (PEM) for the server's certificate; this or POLAR_CUSTODY_SOCKET, the custody daemon holding it, not both";
+
+pub static KEY: Optional<String> = Optional::text("POLAR_GIT_SERVER_KEY", KEY_DOC);
 
 pub static CA_CERT: Required<String> = Required::text(
     "POLAR_GIT_SERVER_CA_CERT",
@@ -89,8 +91,23 @@ static VARIABLES: &[&dyn Described] = &[
 pub static SECTION: Section = Section {
     name: "polar-git-server",
     vars: VARIABLES,
-    relations: |_| Vec::new(),
+    relations: |env| {
+        read_key(env)
+            .err()
+            .map(|e| e.to_string())
+            .into_iter()
+            .collect()
+    },
 };
+
+/// The server's key: a file, or the custody daemon's server slot (docs/architecture/key-custody.md, step 4). Exactly
+/// one is given.
+pub fn read_key(env: &dyn polar_env::Env) -> Result<ServerKey, polar_env::EnvError> {
+    Ok(match one_key(env, &KEY, KEY_DOC)? {
+        KeyGiven::File(path) => ServerKey::File(path),
+        KeyGiven::Socket(socket) => ServerKey::Custody(socket),
+    })
+}
 
 pub struct GitServerSettings {
     pub port: u16,
@@ -99,7 +116,8 @@ pub struct GitServerSettings {
     pub repos: String,
     pub admins: Vec<String>,
     pub cert: String,
-    pub key: String,
+    /// The certificate's key: a file, or the custody daemon's.
+    pub key: ServerKey,
     pub ca_cert: String,
 }
 
@@ -112,7 +130,7 @@ impl GitServerSettings {
             repos: config.read(&REPOS)?,
             admins: config.read(&ADMINS)?.unwrap_or_default(),
             cert: config.read(&CERT)?,
-            key: config.read(&KEY)?,
+            key: read_key(config).map_err(ConfigError::Env)?,
             ca_cert: config.read(&CA_CERT)?,
         })
     }
@@ -123,12 +141,28 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    /// The Cassini client's variables, as the pod gives them: its key a file, or with the custody socket the daemon's.
+    const CLIENT: [(&str, &str); 4] = [
+        ("TLS_CLIENT_CERT", "/c/client-cert.pem"),
+        ("TLS_CA_CERT", "/c/ca.pem"),
+        ("BROKER_ADDR", "cassini:8080"),
+        ("CASSINI_SERVER_NAME", "cassini"),
+    ];
+
     fn config(pairs: &[(&str, &str)]) -> Config {
-        let env: HashMap<String, String> = pairs
+        let custody = pairs.iter().any(|(k, _)| *k == "POLAR_CUSTODY_SOCKET");
+        let client_key = (!custody).then_some(("TLS_CLIENT_KEY", "/c/client-key.pem"));
+        let env: HashMap<String, String> = CLIENT
             .iter()
+            .chain(client_key.iter())
+            .chain(pairs.iter())
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        Config::builder(&env).register(&SECTION).build()
+        // As the agent registers them: its own section, and the Cassini client's, which declares the custody socket.
+        Config::builder(&env)
+            .register(&SECTION)
+            .register(&cassini_client::environment::SECTION)
+            .build()
     }
 
     const ALL: [(&str, &str); 5] = [
@@ -173,7 +207,6 @@ mod tests {
             "POLAR_GIT_SERVER_REPO_ROOT",
             "POLAR_GIT_SERVER_REPOS",
             "POLAR_GIT_SERVER_CERT",
-            "POLAR_GIT_SERVER_KEY",
             "POLAR_GIT_SERVER_CA_CERT",
         ] {
             assert!(
@@ -182,5 +215,33 @@ mod tests {
             );
         }
         assert!(config(&ALL).check().is_empty());
+        // The key is judged with the custody socket, once the variables it is judged with are given.
+        let mut keyless = ALL.to_vec();
+        keyless.retain(|(k, _)| *k != "POLAR_GIT_SERVER_KEY");
+        let problems = config(&keyless).check().join(" | ");
+        assert!(
+            problems.contains("POLAR_GIT_SERVER_KEY") && problems.contains("POLAR_CUSTODY_SOCKET"),
+            "{problems}"
+        );
+    }
+
+    // docs/architecture/key-custody.md, step 4: the server's key may be the custody daemon's server slot.
+    #[test]
+    fn the_key_may_be_the_custody_daemon_s_and_is_one_or_the_other() {
+        let mut custody = ALL.to_vec();
+        custody.retain(|(k, _)| *k != "POLAR_GIT_SERVER_KEY");
+        custody.push(("POLAR_CUSTODY_SOCKET", "/run/polar-custody/custody.sock"));
+        assert!(config(&custody).check().is_empty());
+        assert_eq!(
+            GitServerSettings::read(&config(&custody)).unwrap().key,
+            ServerKey::Custody("/run/polar-custody/custody.sock".into())
+        );
+        let mut both = ALL.to_vec();
+        both.push(("POLAR_CUSTODY_SOCKET", "/run/polar-custody/custody.sock"));
+        assert!(config(&both).check().join(" | ").contains("set one"));
+        assert_eq!(
+            GitServerSettings::read(&config(&ALL)).unwrap().key,
+            ServerKey::File("/c/key.pem".into())
+        );
     }
 }

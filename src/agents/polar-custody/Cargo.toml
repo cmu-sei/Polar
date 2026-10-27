@@ -36,6 +36,7 @@ path = "src/main.rs"
 [dependencies]
 cert-issuer-common = { version = "1.0.0", path = "../cert-issuer/common" }
 libc.workspace = true
+polar-env.workspace = true
 rcgen.workspace = true
 ring = "0.17.14"
 rkyv.workspace = true

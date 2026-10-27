@@ -33,6 +33,7 @@
 
 pub mod client;
 pub mod custody;
+pub mod environment;
 pub mod key;
 pub mod protocol;
 pub mod server;

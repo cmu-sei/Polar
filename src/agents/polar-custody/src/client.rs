@@ -263,3 +263,54 @@ pub fn client_config(
         }
     }
 }
+
+/// Where a server's key is: a file it reads, or the custody daemon's socket, through which the daemon signs its
+/// handshakes with the key of its server slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerKey {
+    File(String),
+    Custody(String),
+}
+
+/// A server configuration presenting `chain` with `key`, verifying clients with `verifier`. With the daemon's key it
+/// offers TLS 1.3 alone, the only handshakes the daemon signs; with a key file, what rustls offers by default, as before.
+/// The caller may still set what else it needs (its ALPN protocols).
+pub fn server_config(
+    verifier: Arc<dyn rustls::server::danger::ClientCertVerifier>,
+    chain: Vec<CertificateDer<'static>>,
+    key: &ServerKey,
+) -> Result<rustls::ServerConfig, String> {
+    match key {
+        ServerKey::File(path) => {
+            use rustls::pki_types::PrivateKeyDer;
+            use rustls::pki_types::pem::PemObject as _;
+            let private_key = PrivateKeyDer::from_pem_file(path)
+                .map_err(|e| format!("Failed to read server private key from {path}: {e}"))?;
+            rustls::ServerConfig::builder()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(chain, private_key)
+                .map_err(|e| format!("Failed to build Rustls server config: {e}"))
+        }
+        ServerKey::Custody(socket) => {
+            let signer = CustodySigningKey::new(Arc::new(CustodyClient::new(socket)), Slot::Server);
+            Ok(
+                rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                    .with_client_cert_verifier(verifier)
+                    .with_cert_resolver(Arc::new(CustodyServerCert(Arc::new(CertifiedKey::new(
+                        chain,
+                        Arc::new(signer),
+                    ))))),
+            )
+        }
+    }
+}
+
+/// Hands rustls the daemon's server certificate and key for every client.
+#[derive(Debug)]
+pub struct CustodyServerCert(pub Arc<CertifiedKey>);
+
+impl rustls::server::ResolvesServerCert for CustodyServerCert {
+    fn resolve(&self, _: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(self.0.clone())
+    }
+}

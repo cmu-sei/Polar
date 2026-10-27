@@ -92,7 +92,8 @@ export TLS_CA_CERT=""
 # The absolute file path to the certificate chain containing the server certificate,followed by the root ca certificate used to sign it
 # optionally, followed by the server key, if one was set - MUST BE IN PEM FORMAT
 export TLS_SERVER_CERT_CHAIN=""
-# The server key file
+# The server key file, or leave it unset and set POLAR_CUSTODY_SOCKET to the custody daemon's socket, which then holds
+# the key and signs the broker's TLS 1.3 handshakes (docs/architecture/key-custody.md): one or the other
 export TLS_SERVER_KEY=""
 
 ### These must also be set anywhere the TcpClient actor is in use, for example, the cassini integration tests the TLS_CA_CERT must also be provided.

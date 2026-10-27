@@ -30,7 +30,7 @@
 //! startup, the render-time checker for the pod a workload will get) judge these too.
 
 use crate::ClientKey;
-use polar_env::{Described, Env, EnvError, Optional, Problem, Required, Section};
+use polar_env::{Described, Env, EnvError, Optional, Required, Section};
 
 pub const TLS_CLIENT_CERT: Required<String> = Required::text(
     "TLS_CLIENT_CERT",
@@ -41,12 +41,9 @@ const TLS_CLIENT_KEY_DOC: &str = "path to the private key for this agent's clien
 
 pub const TLS_CLIENT_KEY: Optional<String> = Optional::text("TLS_CLIENT_KEY", TLS_CLIENT_KEY_DOC);
 
-/// The custody daemon's socket (docs/architecture/key-custody.md): the daemon in the pod signs this agent's handshakes
-/// with a key the agent never holds. The daemon binds the same variable.
-pub const CUSTODY_SOCKET: Optional<String> = Optional::text(
-    "POLAR_CUSTODY_SOCKET",
-    "path to the custody daemon's socket, through which the daemon signs this agent's TLS 1.3 handshakes with a key the agent never holds; this or TLS_CLIENT_KEY, not both",
-);
+/// The custody daemon's socket (docs/architecture/key-custody.md), declared once in `polar-custody` for every component
+/// that may be given the daemon's key.
+pub use polar_custody::environment::CUSTODY_SOCKET;
 
 pub const TLS_CA_CERT: Required<String> = Required::text(
     "TLS_CA_CERT",
@@ -91,20 +88,11 @@ pub static SECTION: Section = Section {
 
 /// Where the client key is: a file, or the custody daemon. Exactly one of the two is given.
 pub fn read_client_key(env: &dyn Env) -> Result<ClientKey, EnvError> {
-    let problem = |problem| EnvError {
-        name: TLS_CLIENT_KEY.name(),
-        doc: TLS_CLIENT_KEY_DOC,
-        problem,
-    };
-    match (TLS_CLIENT_KEY.read(env)?, CUSTODY_SOCKET.read(env)?) {
-        (Some(path), None) => Ok(ClientKey::File(path)),
-        (None, Some(socket)) => Ok(ClientKey::Custody(socket)),
-        (None, None) => Err(problem(Problem::Missing)),
-        (Some(path), Some(_)) => Err(problem(Problem::Malformed {
-            shown: path,
-            reason: format!("is set as well as {}; set one", CUSTODY_SOCKET.name()),
-        })),
-    }
+    use polar_custody::environment::{KeyGiven, one_key};
+    Ok(match one_key(env, &TLS_CLIENT_KEY, TLS_CLIENT_KEY_DOC)? {
+        KeyGiven::File(path) => ClientKey::File(path),
+        KeyGiven::Socket(socket) => ClientKey::Custody(socket),
+    })
 }
 
 #[cfg(test)]

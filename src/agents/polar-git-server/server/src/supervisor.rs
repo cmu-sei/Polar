@@ -175,7 +175,7 @@ impl Actor for GitServerSupervisor {
 
         let tls = server_config(
             Path::new(&settings.cert),
-            Path::new(&settings.key),
+            &settings.key,
             Path::new(&settings.ca_cert),
         )?;
         let tcp = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", settings.port))

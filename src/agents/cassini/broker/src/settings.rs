@@ -28,7 +28,9 @@
 //! scaffold and judged with everything else (the builder's, the health actor's, how it logs). The broker is
 //! not a Cassini client, so none of the client's variables are asked of it.
 
-use polar_env::{Config, ConfigError, Defaulted, Described, Required, Section};
+use polar_custody::client::ServerKey;
+use polar_custody::environment::{CUSTODY_SOCKET, KeyGiven, one_key};
+use polar_env::{Config, ConfigError, Defaulted, Described, Env, Optional, Required, Section};
 
 pub const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
 
@@ -37,10 +39,9 @@ pub static SERVER_CERT_CHAIN: Required<String> = Required::text(
     "path to the broker's own certificate (PEM), which it presents to every client",
 );
 
-pub static SERVER_KEY: Required<String> = Required::text(
-    "TLS_SERVER_KEY",
-    "path to the private key for the broker's certificate",
-);
+const SERVER_KEY_DOC: &str = "path to the private key for the broker's certificate; this or POLAR_CUSTODY_SOCKET, the custody daemon holding it, not both";
+
+pub static SERVER_KEY: Optional<String> = Optional::text("TLS_SERVER_KEY", SERVER_KEY_DOC);
 
 pub static CA_CERT: Required<String> = Required::text(
     "TLS_CA_CERT",
@@ -73,6 +74,7 @@ pub static DECISION_CACHE_SECS: Defaulted<u64> = Defaulted::seconds(
 static VARIABLES: &[&dyn Described] = &[
     &SERVER_CERT_CHAIN,
     &SERVER_KEY,
+    &CUSTODY_SOCKET,
     &CA_CERT,
     &BIND_ADDR,
     &SHUTDOWN_TOKEN,
@@ -83,12 +85,28 @@ static VARIABLES: &[&dyn Described] = &[
 pub static SECTION: Section = Section {
     name: "cassini-broker",
     vars: VARIABLES,
-    relations: |_| Vec::new(),
+    relations: |env| {
+        read_server_key(env)
+            .err()
+            .map(|e| e.to_string())
+            .into_iter()
+            .collect()
+    },
 };
+
+/// The broker's key: a file, or the custody daemon's server slot (docs/architecture/key-custody.md, step 4). Exactly
+/// one is given.
+pub fn read_server_key(env: &dyn Env) -> Result<ServerKey, polar_env::EnvError> {
+    Ok(match one_key(env, &SERVER_KEY, SERVER_KEY_DOC)? {
+        KeyGiven::File(path) => ServerKey::File(path),
+        KeyGiven::Socket(socket) => ServerKey::Custody(socket),
+    })
+}
 
 pub struct BrokerSettings {
     pub server_cert_file: String,
-    pub private_key_file: String,
+    /// The certificate's key: a file, or the custody daemon's.
+    pub server_key: ServerKey,
     pub ca_cert_file: String,
     pub bind_addr: String,
     pub shutdown_auth_token: String,
@@ -99,7 +117,7 @@ impl BrokerSettings {
     pub fn read(config: &Config) -> Result<Self, ConfigError> {
         Ok(Self {
             server_cert_file: config.read(&SERVER_CERT_CHAIN)?,
-            private_key_file: config.read(&SERVER_KEY)?,
+            server_key: read_server_key(config).map_err(ConfigError::Env)?,
             ca_cert_file: config.read(&CA_CERT)?,
             bind_addr: config.read(&BIND_ADDR)?,
             shutdown_auth_token: config.read(&SHUTDOWN_TOKEN)?,
@@ -137,7 +155,7 @@ mod tests {
     fn the_certificate_the_key_the_ca_and_the_token_are_enough() {
         let settings = BrokerSettings::read(&config(MINIMUM)).unwrap();
         assert_eq!(settings.server_cert_file, "/tls/cert.pem");
-        assert_eq!(settings.private_key_file, "/tls/key.pem");
+        assert_eq!(settings.server_key, ServerKey::File("/tls/key.pem".into()));
         assert_eq!(settings.ca_cert_file, "/tls/ca.pem");
         assert_eq!(settings.bind_addr, DEFAULT_BIND_ADDR);
         assert_eq!(settings.shutdown_auth_token, "t0ken");
@@ -161,7 +179,6 @@ mod tests {
         let problems = config(&[]).check().join(" | ");
         for (name, what) in [
             ("TLS_SERVER_CERT_CHAIN", "presents to every client"),
-            ("TLS_SERVER_KEY", "private key"),
             ("TLS_CA_CERT", "clients' certificates"),
             ("CASSINI_SHUTDOWN_TOKEN", "shut down over the wire"),
         ] {
@@ -170,6 +187,34 @@ mod tests {
                 "{name}: {problems}"
             );
         }
+        // The key is judged with the custody socket, once the variables it is judged with are given.
+        let mut keyless = MINIMUM.to_vec();
+        keyless.retain(|(k, _)| *k != "TLS_SERVER_KEY");
+        let problems = config(&keyless).check().join(" | ");
+        assert!(
+            problems.contains("TLS_SERVER_KEY")
+                && problems.contains("private key")
+                && problems.contains("POLAR_CUSTODY_SOCKET"),
+            "{problems}"
+        );
+    }
+
+    // docs/architecture/key-custody.md, step 4: the broker's key may be the custody daemon's server slot.
+    #[test]
+    fn the_key_may_be_the_custody_daemon_s_and_is_one_or_the_other() {
+        let mut custody = MINIMUM.to_vec();
+        custody.retain(|(k, _)| *k != "TLS_SERVER_KEY");
+        custody.push(("POLAR_CUSTODY_SOCKET", "/run/polar-custody/custody.sock"));
+        assert!(config(&custody).check().is_empty());
+        assert_eq!(
+            BrokerSettings::read(&config(&custody)).unwrap().server_key,
+            ServerKey::Custody("/run/polar-custody/custody.sock".into())
+        );
+        let mut both = MINIMUM.to_vec();
+        both.push(("POLAR_CUSTODY_SOCKET", "/run/polar-custody/custody.sock"));
+        let problems = config(&both).check().join(" | ");
+        assert!(problems.contains("set one"), "{problems}");
+        assert!(BrokerSettings::read(&config(&both)).is_err());
     }
 
     #[test]

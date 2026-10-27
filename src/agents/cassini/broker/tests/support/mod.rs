@@ -54,6 +54,8 @@ pub async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
 pub struct Pki {
     dir: tempfile::TempDir,
     issuer: Issuer<'static, KeyPair>,
+    /// The broker's key: its key file, unless [`Pki::use_custody`] gave it the custody daemon's server slot.
+    server_key: Option<polar_custody::client::ServerKey>,
 }
 
 impl Pki {
@@ -67,7 +69,11 @@ impl Pki {
         std::fs::write(dir.path().join("ca.pem"), cert.pem()).unwrap();
         std::fs::write(dir.path().join("ca.key"), key.serialize_pem()).unwrap();
         let issuer = Issuer::new(params, key);
-        let pki = Self { dir, issuer };
+        let pki = Self {
+            dir,
+            issuer,
+            server_key: None,
+        };
         pki.issue("server", "localhost", ExtendedKeyUsagePurpose::ServerAuth);
         pki
     }
@@ -89,6 +95,37 @@ impl Pki {
 
     fn path(&self, file: &str) -> PathBuf {
         self.dir.path().join(file)
+    }
+
+    /// The broker's key from now on is the custody daemon's at `socket` (docs/architecture/key-custody.md, step 4):
+    /// polar-init's part done here, the daemon's CSR for its server slot certified and installed, and the certificate
+    /// written where the broker reads its own.
+    pub fn use_custody(&mut self, socket: &Path) {
+        use polar_custody::client::CustodyClient;
+        use polar_custody::protocol::Slot;
+        let daemon = CustodyClient::new(socket);
+        let csr = daemon
+            .make_csr(Slot::Server, "localhost", &[])
+            .expect("the daemon's CSR");
+        let mut request = rcgen::CertificateSigningRequestParams::from_pem(&csr).unwrap();
+        request.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let certificate = request.signed_by(&self.issuer).unwrap().pem();
+        daemon
+            .install(Slot::Server, vec![certificate.clone()])
+            .expect("installed");
+        std::fs::write(self.path("server.pem"), certificate).unwrap();
+        std::fs::remove_file(self.path("server.key")).unwrap();
+        self.server_key = Some(polar_custody::client::ServerKey::Custody(
+            socket.display().to_string(),
+        ));
+    }
+
+    fn server_key(&self) -> polar_custody::client::ServerKey {
+        self.server_key.clone().unwrap_or_else(|| {
+            polar_custody::client::ServerKey::File(
+                self.path("server.key").to_string_lossy().into_owned(),
+            )
+        })
     }
 
     /// Files for a client whose certificate names `identity`, as the broker reads it.
@@ -235,6 +272,7 @@ impl TestBroker {
             shutdown_token,
             true,
             DEFAULT_CACHE,
+            None,
         )
         .await
     }
@@ -247,7 +285,20 @@ impl TestBroker {
 
     /// As `start_enforcing`, each connection keeping a decision for `cache` (none when zero).
     pub async fn start_enforcing_caching(cache: Duration) -> Self {
-        Self::start_full(None, Duration::from_secs(20), None, false, cache).await
+        Self::start_full(None, Duration::from_secs(20), None, false, cache, None).await
+    }
+
+    /// As `start`, with the certificates `pki` holds: the custody daemon's server key, say.
+    pub async fn start_on(pki: Pki) -> Self {
+        Self::start_full(
+            None,
+            Duration::from_secs(20),
+            None,
+            true,
+            DEFAULT_CACHE,
+            Some(pki),
+        )
+        .await
     }
 
     async fn start_full(
@@ -256,11 +307,12 @@ impl TestBroker {
         shutdown_token: Option<&str>,
         open: bool,
         cache: Duration,
+        pki: Option<Pki>,
     ) -> Self {
         init_logging();
         clear_names().await;
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let pki = Pki::new();
+        let pki = pki.unwrap_or_else(Pki::new);
         let port = {
             let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             probe.local_addr().unwrap().port()
@@ -329,7 +381,7 @@ impl TestBroker {
                 bind_addr: addr.to_string(),
                 session_timeout: retention_secs,
                 server_cert_file: pki.path("server.pem").to_string_lossy().into_owned(),
-                private_key_file: pki.path("server.key").to_string_lossy().into_owned(),
+                server_key: pki.server_key(),
                 ca_cert_file: pki.ca().to_string_lossy().into_owned(),
                 shutdown_auth_token,
                 decision_cache,

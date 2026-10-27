@@ -555,6 +555,33 @@ refused certificate not sealing, and a property, that once installed nothing any
 certificate. The test that a new key drops the old certificate goes with the rule. The mutation that drops the seal
 is caught by both.
 
+*Built (2026-10-27): the listeners.*
+- *`polar_custody::client::server_config`* and `ServerKey`: a server configuration with a key file as before, or the
+  daemon's server slot, offering TLS 1.3 alone (`CustodyServerCert` resolves every client to the slot's certificate).
+- *One declaration:* `polar_custody::environment` declares `POLAR_CUSTODY_SOCKET` and the rule `one_key`, a key file
+  or the socket, exactly one, which the Cassini client (re-exporting it), the broker and the git server use. The agent
+  builder refuses a variable declared twice, so the git server reads the socket through the Cassini client's section,
+  which it registers; the broker, which is not a Cassini client, declares it in its own.
+- *The broker* (`cassini/broker/src/settings.rs`, `read_server_key`; `listener.rs`) and *the git server*
+  (`polar-git-server/server/src/settings.rs`, `read_key`; `tls.rs`, which still sets its ALPN) take
+  `TLS_SERVER_KEY` / `POLAR_GIT_SERVER_KEY` or the socket.
+- *The git server's clients include the git CLI* through libcurl, not rustls alone, as item 5 first said. TLS 1.3 alone
+  still holds: current OpenSSL and GnuTLS speak it.
+- *Tests:*
+  - a server whose key is the daemon's verified by a TLS 1.3 client with the certificate installed;
+  - such a server refusing TLS 1.2, by its own reason;
+  - a key-file server as before;
+  - the one-key rule's every combination;
+  - the broker's and the git server's settings;
+  - the git server speaking HTTP/1.1 either way;
+  - a real Cassini client registering with a broker whose key is the daemon's.
+- *Mutations caught:* the daemon's server offering TLS 1.2, a resolver giving no certificate, the broker ignoring the
+  daemon's key.
+- *Found on the way:* a server that signs in its handshake blocks the Tokio worker it runs on for the round trip. A
+  daemon run as a task on the same runtime, as a test first did, can be left waiting behind it, and the handshake times
+  out. In a pod the daemon is a process of its own, and the tests now run it on a thread and runtime of its own
+  (`daemon_apart`).
+
 *Decided (the maintainer, 2026-10-27): (a), each slot sealed once installed.* The question, as it was put: how the
 daemon keeps its installer apart from its workload, under one UID.
 - *(a) Seal each slot once installed (recommended).* The daemon takes `MakeCsr` and `Install` for a slot until a

@@ -31,6 +31,7 @@ use crate::http::PeerIdentity;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder;
 use hyper_util::service::TowerToHyperService;
+use polar_custody::client::ServerKey;
 use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
@@ -43,9 +44,10 @@ use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 use tracing::{debug, warn};
 
-/// Builds the server configuration from PEM files: the server's certificate chain and key, and
-/// the CA that client certificates must chain to.
-pub fn server_config(cert: &Path, key: &Path, ca: &Path) -> Result<Arc<ServerConfig>, String> {
+/// Builds the server configuration: the server's certificate chain (PEM), its key (a PEM file, or the custody
+/// daemon's server slot, which offers TLS 1.3 alone: docs/architecture/key-custody.md, step 4), and the CA that client
+/// certificates must chain to.
+pub fn server_config(cert: &Path, key: &ServerKey, ca: &Path) -> Result<Arc<ServerConfig>, String> {
     // Another component may have installed it already.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -53,9 +55,6 @@ pub fn server_config(cert: &Path, key: &Path, ca: &Path) -> Result<Arc<ServerCon
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut read(cert)?.as_slice())
         .collect::<Result<_, _>>()
         .map_err(|e| format!("bad server certificate: {e}"))?;
-    let key = rustls_pemfile::private_key(&mut read(key)?.as_slice())
-        .map_err(|e| format!("bad server key: {e}"))?
-        .ok_or("no private key in the server key file")?;
 
     let mut roots = RootCertStore::empty();
     for ca in rustls_pemfile::certs(&mut read(ca)?.as_slice()) {
@@ -67,10 +66,7 @@ pub fn server_config(cert: &Path, key: &Path, ca: &Path) -> Result<Arc<ServerCon
         .build()
         .map_err(|e| format!("cannot build the client verifier: {e}"))?;
 
-    let mut config = ServerConfig::builder()
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(certs, key)
-        .map_err(|e| format!("bad server certificate or key: {e}"))?;
+    let mut config = polar_custody::client::server_config(verifier, certs, key)?;
     // Smart HTTP over HTTP/1.1 is all git needs.
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(Arc::new(config))
@@ -159,5 +155,37 @@ impl Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Smart HTTP over HTTP/1.1, whichever holds the key (docs/architecture/key-custody.md, step 4).
+    #[test]
+    fn the_server_speaks_http_1_1_with_a_key_file_or_the_daemon_s() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let (cert_path, key_path, ca_path) = (
+            dir.path().join("cert.pem"),
+            dir.path().join("key.pem"),
+            dir.path().join("ca.pem"),
+        );
+        std::fs::write(&cert_path, cert.pem()).unwrap();
+        std::fs::write(&key_path, key.serialize_pem()).unwrap();
+        std::fs::write(&ca_path, cert.pem()).unwrap();
+        for key in [
+            ServerKey::File(key_path.display().to_string()),
+            // Built without asking the daemon: it is asked in each handshake.
+            ServerKey::Custody(dir.path().join("custody.sock").display().to_string()),
+        ] {
+            let config = server_config(&cert_path, &key, &ca_path).unwrap();
+            assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()], "{key:?}");
+        }
     }
 }

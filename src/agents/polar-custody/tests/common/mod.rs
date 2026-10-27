@@ -89,6 +89,30 @@ pub async fn daemon(ca: &TestCa, callers: Callers) -> Daemon {
     Daemon { socket, _dir: dir }
 }
 
+/// A daemon serving `callers`, trusting `ca`, on a thread and runtime of its own, as it is a process of its own in a pod:
+/// a server that signs in its handshake blocks the worker it runs on, and a daemon sharing its runtime may be waiting
+/// for that worker.
+pub fn daemon_apart(ca: &TestCa, callers: Callers) -> Daemon {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("custody.sock");
+    let (ready, bound) = std::sync::mpsc::channel();
+    let (path, ca_pem) = (socket.clone(), ca.pem.clone());
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let listener = bind(&path).unwrap();
+            let custody = Arc::new(RwLock::new(Custody::new(&ca_pem).unwrap()));
+            ready.send(()).unwrap();
+            let _ = serve(listener, custody, Arc::new(callers)).await;
+        });
+    });
+    bound.recv().unwrap();
+    Daemon { socket, _dir: dir }
+}
+
 /// This process as both the installer and the workload.
 pub fn both() -> Callers {
     Callers {

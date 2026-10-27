@@ -32,6 +32,7 @@ polar-health = { workspace = true }
 polar-agent-builder.workspace = true
 # The authority topics' types: the broker keeps the credentials agent's authority to decide by.
 credentials_agent_common.workspace = true
+polar-custody.workspace = true
 polar-env.workspace = true
 async-trait.workspace = true
 ractor.workspace = true

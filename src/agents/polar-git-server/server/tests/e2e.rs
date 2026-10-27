@@ -156,7 +156,14 @@ impl Harness {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let acceptor = TlsAcceptor::from(server_config(&cert, &key, &ca_file).unwrap());
+        let acceptor = TlsAcceptor::from(
+            server_config(
+                &cert,
+                &polar_custody::client::ServerKey::File(key.display().to_string()),
+                &ca_file,
+            )
+            .unwrap(),
+        );
         let stop = Arc::new(Notify::new());
         tokio::spawn(serve_tls(
             listener,

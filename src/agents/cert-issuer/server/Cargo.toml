@@ -62,6 +62,8 @@ cassini-client.workspace = true
 cassini-types.workspace = true
 
 [dev-dependencies]
+# The broker's test support, which these tests include, can give the broker the custody daemon's key.
+polar-custody.workspace = true
 proptest.workspace = true
 wiremock.workspace = true
 tempfile.workspace = true

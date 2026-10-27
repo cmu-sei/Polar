@@ -42,7 +42,7 @@ use rkyv::{
 };
 use rustls::{
     RootCertStore, ServerConfig,
-    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    pki_types::{CertificateDer, pem::PemObject},
     server::WebPkiClientVerifier,
 };
 use std::sync::Arc;
@@ -152,7 +152,7 @@ pub struct ListenerManagerState {
 pub struct ListenerManagerArgs {
     pub bind_addr: String,
     pub server_cert_file: String,
-    pub private_key_file: String,
+    pub server_key: polar_custody::client::ServerKey,
     pub ca_cert_file: String,
     pub session_mgr: ActorRef<BrokerMessage>,
     pub shutdown_auth_token: Option<String>,
@@ -205,17 +205,15 @@ impl Actor for ListenerManager {
             .build()
             .map_err(ActorProcessingErr::from)?;
 
-        let private_key = PrivateKeyDer::from_pem_file(&args.private_key_file).map_err(|e| {
-            error!(error = ?e, private_key_file = %args.private_key_file, "Failed reading server key PEM");
-            ActorProcessingErr::from(e)
-        })?;
-
         debug!("Building ServerConfig for mTLS");
 
-        let server_config = ServerConfig::builder()
-            .with_client_cert_verifier(verifier)
-            .with_single_cert(certs, private_key)
-            .map_err(ActorProcessingErr::from)?;
+        // A key file as before, or the custody daemon's server slot, which offers TLS 1.3 alone
+        // (docs/architecture/key-custody.md, step 4).
+        let server_config = polar_custody::client::server_config(verifier, certs, &args.server_key)
+            .map_err(|e| {
+                error!(error = %e, "Failed building the server configuration");
+                ActorProcessingErr::from(e)
+            })?;
 
         Ok(ListenerManagerState {
             bind_addr: args.bind_addr,

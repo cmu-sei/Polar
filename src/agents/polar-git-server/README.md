@@ -70,7 +70,7 @@ make_cert alice  alice           clientAuth     # alice's identity is "alice"
 
 | Variable | Meaning |
 |---|---|
-| `POLAR_GIT_SERVER_CERT`, `POLAR_GIT_SERVER_KEY` | the server's certificate and key |
+| `POLAR_GIT_SERVER_CERT`, `POLAR_GIT_SERVER_KEY` | the server's certificate and key; the key a file, or, with `POLAR_CUSTODY_SOCKET` and no `POLAR_GIT_SERVER_KEY`, the custody daemon's (`docs/architecture/key-custody.md`) |
 | `POLAR_GIT_SERVER_CA_CERT` | the CA that client certificates must chain to |
 | `POLAR_GIT_SERVER_REPO_ROOT` | where the repositories live; created if missing |
 | `POLAR_GIT_SERVER_REPOS` | what it hosts, as JSON (below) |
