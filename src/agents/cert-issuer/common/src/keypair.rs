@@ -123,6 +123,30 @@ pub fn generate_csr(
         }
     };
 
+    let csr_pem = csr_for_key(identity, extra_sans, &key_pair)?;
+
+    // PKCS#8 PEM. The "BEGIN PRIVATE KEY" label (not "BEGIN ED25519
+    // PRIVATE KEY") is what the cert issuer's parser expects and what
+    // standard tooling produces.
+    let private_key_pem = key_pair.serialize_pem();
+
+    Ok(CsrOutput {
+        csr_pem,
+        private_key_pem,
+    })
+}
+
+/// A CSR for `identity` and `extra_sans`, signed by `key`, which need not be a key this process can see: a key held
+/// by the custody daemon (`docs/architecture/key-custody.md`) signs its own CSR, and `generate_csr` signs with the key
+/// it makes. The identity is the first SAN, then the extra names, each checked as `generate_csr` checks them.
+pub fn csr_for_key(
+    identity: &str,
+    extra_sans: &[String],
+    key: &impl rcgen::SigningKey,
+) -> Result<String, KeypairError> {
+    if identity.is_empty() {
+        return Err(KeypairError::EmptyIdentity);
+    }
     // Identity SAN is always first and always present.
     let mut sans = vec![identity.to_string()];
 
@@ -161,20 +185,12 @@ pub fn generate_csr(
     params.distinguished_name = DistinguishedName::new();
 
     let csr = params
-        .serialize_request(&key_pair)
+        .serialize_request(key)
         .map_err(|e| KeypairError::CsrFailed(e.to_string()))?;
 
     let csr_pem = csr
         .pem()
         .map_err(|e| KeypairError::CsrFailed(e.to_string()))?;
 
-    // PKCS#8 PEM. The "BEGIN PRIVATE KEY" label (not "BEGIN ED25519
-    // PRIVATE KEY") is what the cert issuer's parser expects and what
-    // standard tooling produces.
-    let private_key_pem = key_pair.serialize_pem();
-
-    Ok(CsrOutput {
-        csr_pem,
-        private_key_pem,
-    })
+    Ok(csr_pem)
 }

@@ -132,6 +132,49 @@ dropped session. What that asks of the design:
   measurement: the daemon adds no more than 100 µs to a signature at p99 under the storm, and Cassini's handshakes per
   second fall by no more than 10%. A build that misses it does not ship.
 
+## Step 1 in detail (the maintainer, 2026-10-27)
+
+- *A crate, `polar-custody`* (`src/agents/polar-custody`): the daemon binary and its library, the client side included.
+- *Slots.* One key per slot, `client` and `server`, since a pod can hold both (Cassini, Neo4j). P-256, today's type.
+  First in the daemon's locked memory; the process keyring next, through a load-and-sign path in `polar-kernel-keyring`
+  where the kernel takes P-256, and memory where it does not (rcgen builds a CSR from a key it cannot see, so nothing
+  else changes).
+- *The protocol.* rkyv frames on a Unix socket, each request with an id so many are in flight: `MakeCsr { slot, identity,
+  names }`, `Install { slot, chain }` (the certificate must be for the slot's key and signed by the pinned CA, as
+  `judge_bundle` judges a bundle), `Certificate { slot }`, `Sign { slot, message }`.
+- *Who may ask what,* by `SO_PEERCRED` on each connection: `polar-init`'s UID makes CSRs and installs certificates; the
+  workload's UIDs sign and read certificates; anyone else is refused.
+- *TLS 1.3 handshakes only (the maintainer).* The daemon signs a message only if it is a TLS 1.3 CertificateVerify input:
+  64 spaces, `TLS 1.3, client CertificateVerify` or `TLS 1.3, server CertificateVerify`, a zero byte, and a transcript
+  hash of 32 or 48 bytes. A compromised workload can have it sign handshakes and nothing else, nothing in the agent's
+  name; the rustls configurations that use it offer TLS 1.3 alone.
+- *Hardening at start:* not dumpable (`PR_SET_DUMPABLE`), its memory locked, both logged where they cannot be had.
+- *The workload side:* a blocking client with a few connections, and a rustls `SigningKey` that signs through it;
+  wiring the Cassini client to it is step 2.
+- *Not yet:* the Cassini client and revocation (step 5): the daemon starts before it has a certificate, so it is not a
+  builder agent at first.
+
+*Built (2026-10-27): step 1,* in `src/agents/polar-custody`. `tls.rs` (the TLS 1.3 CertificateVerify check), `key.rs`
+(a P-256 key made through rcgen and held as a `p256` signing key, its CSR built by `cert_issuer_common::keypair::
+csr_for_key`, split out of `generate_csr` for a key the caller cannot see), `custody.rs` (the slots, the roles, and the
+judgement of a certificate installed: its key, its first name, valid now, no CA, signed by the pinned CA),
+`protocol.rs` (rkyv frames, a request id each), `server.rs` (the socket at 0660, `SO_PEERCRED`, every request on its
+own task, signatures under a shared lock), `client.rs` (a blocking client keeping up to eight connections, and the
+rustls `CustodySigningKey` and `CustodyClientCert`), and the binary (`POLAR_CUSTODY_SOCKET`, `POLAR_CUSTODY_CA_CERT`,
+`POLAR_CUSTODY_INSTALLER_UID`, `POLAR_CUSTODY_WORKLOAD_UIDS`; not dumpable and its memory locked, or logged).
+Tests: the check, the key and its CSR, the roles, each refusal of a certificate, nothing signed before one is installed
+or after a new key; through the socket, the whole flow, a caller turned away, each role alone, 400 signatures from 16
+callers at once, and a real TLS 1.3 handshake with client authentication whose signature the daemon made; properties
+(every handshake signed verifies; nothing else is ever signed; no request from any caller gets a key out). Mutations:
+all on the rules caught. Not yet: the process keyring, and the workload, `polar-init` and the charts using it (steps 2
+to 4).
+
+*First measurement (2026-10-27, precisionws, release build, `tests/bench.rs`):* in process p50 102 µs, p99 113 µs;
+through the socket, one caller, p50 108 µs, p99 208 µs (96 µs added at p99, inside the proposed 100 µs); eight callers
+at once, p50 232 µs, p99 473 µs, 32,800 signatures a second. The socket costs little at the median; the arithmetic
+costs most of it: the pure-Rust `p256` signs in about 100 µs, where `ring`, which rustls uses already, is several times
+faster. A step to take before the speed gate.
+
 ## Build order, each tests first
 
 1. The daemon: key generation (process keyring or memory), the CSR, taking the certificate and judging it, signing,

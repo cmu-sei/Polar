@@ -1,0 +1,159 @@
+/*
+   ACE Tool
+
+   Copyright 2026 Carnegie Mellon University.
+
+   NO WARRANTY. THIS CARNEGIE MELLON UNIVERSITY AND SOFTWARE ENGINEERING INSTITUTE MATERIAL IS
+   FURNISHED ON AN "AS-IS" BASIS. CARNEGIE MELLON UNIVERSITY MAKES NO WARRANTIES OF ANY KIND, EITHER
+   EXPRESSED OR IMPLIED, AS TO ANY MATTER INCLUDING, BUT NOT LIMITED TO, WARRANTY OF FITNESS FOR
+   PURPOSE OR MERCHANTABILITY, EXCLUSIVITY, OR RESULTS OBTAINED FROM USE OF THE MATERIAL. CARNEGIE
+   MELLON UNIVERSITY DOES NOT MAKE ANY WARRANTY OF ANY KIND WITH RESPECT TO FREEDOM FROM PATENT,
+   TRADEMARK, OR COPYRIGHT INFRINGEMENT.
+
+   Licensed under a MIT (SEI)-style license, please see license.txt or contact
+   permission@sei.cmu.edu for full terms.
+
+   [DISTRIBUTION STATEMENT A] This material has been approved for public release and unlimited
+   distribution.  Please see Copyright notice for non-US Government use and distribution.
+
+   This Software includes and/or makes use of Third-Party Software each subject to its own license.
+
+   DM26-0670
+*/
+
+//! The custody daemon (docs/architecture/key-custody.md): a native sidecar in every pod, started before `polar-init`,
+//! holding the pod's mTLS keys and signing for the workload over a socket.
+//!
+//! Its environment, every problem named together:
+//! - `POLAR_CUSTODY_SOCKET`: where the socket is, on a volume only the pod's containers share;
+//! - `POLAR_CUSTODY_CA_CERT`: the CA the pod was given, which every certificate installed must come from;
+//! - `POLAR_CUSTODY_INSTALLER_UID`: `polar-init`'s UID;
+//! - `POLAR_CUSTODY_WORKLOAD_UIDS`: the workload containers' UIDs, comma-separated.
+
+use polar_custody::custody::Custody;
+use polar_custody::server::{Callers, bind, serve};
+use std::sync::{Arc, RwLock};
+use tracing::{error, info, warn};
+
+struct Settings {
+    socket: String,
+    ca_pem: String,
+    callers: Callers,
+}
+
+fn settings() -> Result<Settings, Vec<String>> {
+    let mut problems = Vec::new();
+    let mut var = |name: &str| match std::env::var(name) {
+        Ok(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
+        _ => {
+            problems.push(format!("{name} is required"));
+            None
+        }
+    };
+    let socket = var("POLAR_CUSTODY_SOCKET");
+    let ca_path = var("POLAR_CUSTODY_CA_CERT");
+    let installer = var("POLAR_CUSTODY_INSTALLER_UID");
+    let workload = var("POLAR_CUSTODY_WORKLOAD_UIDS");
+    let ca_pem = ca_path
+        .as_ref()
+        .and_then(|path| match std::fs::read_to_string(path) {
+            Ok(pem) => Some(pem),
+            Err(e) => {
+                problems.push(format!("POLAR_CUSTODY_CA_CERT: cannot read {path}: {e}"));
+                None
+            }
+        });
+    let installer_uid = installer.and_then(|uid| match uid.parse::<u32>() {
+        Ok(uid) => Some(uid),
+        Err(_) => {
+            problems.push(format!("POLAR_CUSTODY_INSTALLER_UID: `{uid}` is not a UID"));
+            None
+        }
+    });
+    let workload_uids = workload.and_then(|uids| {
+        match uids
+            .split(',')
+            .map(|u| u.trim().parse::<u32>())
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(uids) => Some(uids),
+            Err(_) => {
+                problems.push(format!(
+                    "POLAR_CUSTODY_WORKLOAD_UIDS: `{uids}` is not a list of UIDs"
+                ));
+                None
+            }
+        }
+    });
+    match (socket, ca_pem, installer_uid, workload_uids) {
+        (Some(socket), Some(ca_pem), Some(installer_uid), Some(workload_uids))
+            if problems.is_empty() =>
+        {
+            Ok(Settings {
+                socket,
+                ca_pem,
+                callers: Callers {
+                    installer_uid,
+                    workload_uids,
+                },
+            })
+        }
+        _ => Err(problems),
+    }
+}
+
+/// Not dumpable, so no core file and no ptrace by its own UID; its memory locked, so no key reaches swap. Each is
+/// logged where it cannot be had: the daemon still runs, with less.
+fn harden() {
+    // SAFETY: prctl and mlockall take no pointers here; they change only this process.
+    let dumpable = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+    if dumpable != 0 {
+        warn!(
+            "cannot make the process undumpable: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    let locked = unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) };
+    if locked != 0 {
+        warn!(
+            "cannot lock the process's memory: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+    let settings = match settings() {
+        Ok(settings) => settings,
+        Err(problems) => {
+            for problem in &problems {
+                error!("{problem}");
+            }
+            std::process::exit(2);
+        }
+    };
+    harden();
+    let custody = match Custody::new(&settings.ca_pem) {
+        Ok(custody) => Arc::new(RwLock::new(custody)),
+        Err(e) => {
+            error!("the pinned CA: {e}");
+            std::process::exit(2);
+        }
+    };
+    let listener = match bind(std::path::Path::new(&settings.socket)) {
+        Ok(listener) => listener,
+        Err(e) => {
+            error!("cannot listen on {}: {e}", settings.socket);
+            std::process::exit(1);
+        }
+    };
+    info!(socket = %settings.socket, installer = settings.callers.installer_uid, workload = ?settings.callers.workload_uids, "custody daemon serving");
+    if let Err(e) = serve(listener, custody, Arc::new(settings.callers)).await {
+        error!("the socket failed: {e}");
+        std::process::exit(1);
+    }
+}

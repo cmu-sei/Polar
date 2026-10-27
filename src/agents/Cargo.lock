@@ -5719,6 +5719,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "polar-custody"
+version = "1.0.0"
+dependencies = [
+ "cert-issuer-common",
+ "libc",
+ "p256",
+ "proptest",
+ "rcgen",
+ "rkyv",
+ "rustls",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "tracing-subscriber",
+ "x509-parser",
+ "zeroize",
+]
+
+[[package]]
 name = "polar-env"
 version = "1.0.0"
 dependencies = [
