@@ -145,5 +145,6 @@ exercised: the server rejecting an unsigned push (open item 4), `local` and `loc
 podman node. The deployment git server in the cluster, which replaced the host container and its `--host`, ran on a fresh cluster on 2026-10-19 with the registry in the cluster too: all six layers Ready at both of the bring-up's commits. For the steps that existed before Flux, I did not confirm which of the
 `data` workloads get their certificate from `cert-issuer` directly and which from the credentials agent (the diagram says only that their init
 containers run `polar-init`), nor where the port-forward logs are written. The node's image cache is dropped by
-`podman exec u7s ctr images rm` on the host, only when `POLAR_CLUSTER_RUNTIME` is `u7s`; images that move are pulled `Always`, so another
-cluster needs no such step.
+`podman exec <node> ctr images rm` on the host for each of the cluster's node containers (`u7s`, or each `<cluster>-<node>` of a
+multi-node `u7c`; since 2026-10-27), only when `POLAR_CLUSTER_RUNTIME` is `u7s`; images that move are pulled `Always`, so it frees disk and
+nothing more, and another cluster needs no such step.

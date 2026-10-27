@@ -24,7 +24,7 @@
 # How images are named when they are published and imported, and which ones.
 
 use std/assert
-use ../images.nu [arch_of, external_source, import_rows, unprepared, ours, published_ref, published_rows, split_ref, system_of]
+use ../images.nu [arch_of, external_source, import_rows, node_containers_of, unprepared, ours, published_ref, published_rows, split_ref, system_of]
 
 def sample [] {
     [
@@ -37,6 +37,18 @@ def sample [] {
 
 def main [] {
     let tests = [
+        {
+            name: "the nodes whose image caches are evicted are the containers named for the cluster's nodes, the hub not among them"
+            body: {
+                # u7c (nix-usernetes, multi-node): <cluster>-<node>, beside a hub that runs no node.
+                assert equal (node_containers_of ["cp" "core"] ["u7c-hub" "u7c-cp" "u7c-core" "polar-registry"]) ["u7c-cp" "u7c-core"]
+                # u7s: the one node is its container.
+                assert equal (node_containers_of ["u7s"] ["u7s" "polar-registry"]) ["u7s"]
+                # Another cluster's containers are not this one's.
+                assert equal (node_containers_of ["cp" "core"] ["u7s" "u8c-cpx"]) []
+                assert equal (node_containers_of [] ["u7c-cp"]) []
+            }
+        }
         {
             name: "a render may name only the images prepared before it"
             body: {

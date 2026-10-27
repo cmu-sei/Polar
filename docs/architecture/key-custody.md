@@ -1005,8 +1005,11 @@ step not waited at.* *Done (2026-10-27), on `u7c` (nodes `cp` and `core`), from 
   5. *jira-observer* fails on the target's placeholder Jira (`example.atlassian.net`), after registering through its
      daemon: the target's, not custody's.
 - *For nix-usernetes:* Polar came up on `u7c` with no change to Polar for it. What differed from `u7s`: the nodes are
-  `cp` and `core`, not `u7s`; and the image eviction (`infra/images.nu`) knows only the `u7s` container, which did not
-  matter on a fresh cluster since nothing was rebuilt mid-run.
+  `cp` and `core`, not `u7s`; and the image eviction (`infra/images.nu`) knew only the `u7s` container, which did not
+  matter on a fresh cluster since nothing was rebuilt mid-run. *Corrected 2026-10-27:* the pods pull Polar's images
+  `Always` (`render.nu` checks it), so a cached copy is never what runs, and the gap cost disk only, not stale code as
+  this report and the one to nix-usernetes said. It is closed: eviction now reaches every node container of the cluster
+  `KUBECONFIG` reaches (`node_containers`).
 
 ## Build order, each tests first
 

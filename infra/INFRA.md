@@ -171,7 +171,10 @@ nu infra/flux.nu wait sandbox-local                 # until every layer is Ready
 The `build`, `push` and `mirror` recipes take no names to mean every image. A
 failing image does not stop the stage: the rest are attempted and the stage ends
 with a summary and a non-zero exit. The node cache step of `image` and
-`images-all` is skipped unless `POLAR_CLUSTER_RUNTIME` is `u7s` (the default) and that dev node exists.
+`images-all` is skipped unless `POLAR_CLUSTER_RUNTIME` is `u7s` (the default) and a nix-usernetes node runs here: it drops
+the rebuilt image from every node of the cluster `KUBECONFIG` reaches, the one `u7s` container or each `<cluster>-<node>`
+of a multi-node cluster such as `u7c` (not its hub). The pods pull Polar's images `Always`, so this frees disk and
+nothing more.
 
 `up.nu` prints its plan first and skips what the target does not need. Its steps:
 preflight, images (`--dev` or `--import-from`: every image the target runs, before the render), render, namespaces, cluster CA, secrets and

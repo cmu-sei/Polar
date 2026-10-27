@@ -52,8 +52,9 @@
 #   POLAR_REGISTRY         where this machine pushes     (default localhost:5000;
 #                          --target <target> sets it to that target's, and starts
 #                          the forward to a registry in its cluster)
-#   POLAR_CLUSTER_RUNTIME  "u7s" drops the node's cached copy of a rebuilt
-#                          image so the next pull is fresh (default u7s;
+#   POLAR_CLUSTER_RUNTIME  "u7s" drops each nix-usernetes node's cached copy of a
+#                          rebuilt image, to free its disk: u7s, or every node of
+#                          a multi-node cluster such as u7c (default u7s;
 #                          anything else skips that)
 #   POLAR_NEO4J_IMAGE      path to the Neo4j docker-archive (overrides the table)
 
@@ -298,19 +299,20 @@ def mirror_row [row: record] {
     }
 }
 
-# Nodes keep a pulled :latest and never re-pull it (IfNotPresent), so drop their
-# copy of what was just rebuilt. The name is the one the node knows the image by,
-# built from the row, so every path (by name, --all, from manifests) evicts. A
-# failure is reported: a stale cache here looks exactly like running the new code.
-def evict_row [row: record] {
+# Drops each node's copy of what was just rebuilt, on every node container in `nodes`: each keeps a cache of its own. The
+# name is the one the nodes know the image by, built from the row, so every path (by name, --all, from manifests) evicts.
+# A failure is reported.
+def evict_row [row: record, nodes: list<string>] {
     let node_ref = $"(node_registry)/(dest $row)"
-    try {
-        let r = (do { ^podman exec u7s ctr -n k8s.io images rm $node_ref } | complete)
-        if $r.exit_code != 0 and not ($r.stderr | str contains "not found") {
-            print $"      could not evict ($node_ref) from the node: ($r.stderr | str trim)"
+    for node in $nodes {
+        try {
+            let r = (do { ^podman exec $node ctr -n k8s.io images rm $node_ref } | complete)
+            if $r.exit_code != 0 and not ($r.stderr | str contains "not found") {
+                print $"      could not evict ($node_ref) from ($node): ($r.stderr | str trim)"
+            }
+        } catch {|e|
+            print $"      could not evict ($node_ref) from ($node): ($e.msg)"
         }
-    } catch {|e|
-        print $"      could not evict ($node_ref) from the node: ($e.msg)"
     }
 }
 
@@ -327,9 +329,25 @@ def applies [stage: string, kind: string] {
     }
 }
 
-# Is there a u7s node whose image cache could be stale?
-def node_present [] {
-    try { (do { ^podman container exists u7s } | complete).exit_code == 0 } catch { false }
+# Of the podman `containers`, those that are the cluster's `nodes`: a node's own container (u7s), or one named
+# `<cluster>-<node>` (u7c-cp, u7c-core), and so never the hub, which is no node.
+export def node_containers_of [nodes: list<string>, containers: list<string>]: nothing -> list<string> {
+    $containers | where {|c| $nodes | any {|n| $c == $n or ($c | str ends-with $"-($n)") } }
+}
+
+# The node containers of the cluster this shell's KUBECONFIG reaches, whose image caches are evicted: none when it cannot
+# be asked, or runs no nix-usernetes node here; u7s when it alone runs and the cluster does not answer.
+def node_containers [] {
+    let nodes = (try {
+        let r = (do { ^kubectl get nodes -o jsonpath={.items[*].metadata.name} } | complete)
+        if $r.exit_code == 0 { $r.stdout | split row " " | where {|n| $n | is-not-empty } } else { [] }
+    } catch { [] })
+    let containers = (try {
+        let r = (do { ^podman ps --format "{{.Names}}" } | complete)
+        if $r.exit_code == 0 { $r.stdout | lines | where {|c| $c | is-not-empty } } else { [] }
+    } catch { [] })
+    let found = (node_containers_of $nodes $containers)
+    if ($found | is-empty) and ("u7s" in $containers) and ($nodes | is-empty) { ["u7s"] } else { $found }
 }
 
 def require_registry [] {
@@ -339,7 +357,7 @@ def require_registry [] {
     }
 }
 
-def do_row [stage: string, row: record, evict: bool] {
+def do_row [stage: string, row: record, evict: list<string>] {
     if $row.kind == "mirror" {
         mirror_row $row
     } else {
@@ -349,7 +367,7 @@ def do_row [stage: string, row: record, evict: bool] {
                 print $"      built: ($a)"
             } else {
                 push_archive $row $a
-                if $stage == "sync" and $evict { evict_row $row }
+                if $stage == "sync" and ($evict | is-not-empty) { evict_row $row $evict }
             }
         } else if $stage != "build" and (in_registry $row) {
             # Nothing to push because the registry already has it (an external archive): its digest is still the lock's.
@@ -371,8 +389,8 @@ def run_stage [stage: string, rows: list] {
     }
 
     # The pods pull this repository's images Always (render.nu checks it), so a node's cached copy is never what runs; dropping
-    # it from a u7s node, when there is one, only frees its disk. Nothing to say when there is none.
-    let evict = ($stage == "sync") and ((runtime) == "u7s") and (node_present)
+    # it from each node, when there are any here, only frees their disks. Nothing to say when there are none.
+    let evict = if ($stage == "sync") and ((runtime) == "u7s") { node_containers } else { [] }
 
     let total = ($todo | length)
     if ($todo | any {|r| $r.kind == "nix" }) and $stage != "mirror" { print "  (a build's log is shown only if it fails; a first build of an image takes a while)" }
@@ -532,7 +550,7 @@ def "main import" [
     require_registry
     let want = if ($arch | is-empty) { arch } else { arch_of $arch }
     let rows = (import_rows (load_table) $names)
-    let evict = (runtime) == "u7s" and (node_present)
+    let evict = if (runtime) == "u7s" { node_containers } else { [] }
     print $"importing ($rows | length) image\(s\) for ($want) from ($from) into (registry)"
     let auth = (if ($src_authfile | is-empty) { [] } else { ["--src-authfile" $src_authfile] }) ++ (if $src_insecure { ["--src-tls-verify=false"] } else { [] })
     mut failures = []
@@ -547,7 +565,7 @@ def "main import" [
             $failures = ($failures | append { image: $row.image, error: $why })
         } else {
             record_digest $row
-            if $evict { evict_row $row }
+            if ($evict | is-not-empty) { evict_row $row $evict }
         }
     }
     if not $skip_mirrors and ($names | is-empty) {

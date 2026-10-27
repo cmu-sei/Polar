@@ -682,6 +682,11 @@ Principle: declare each environment variable once, with its type, default, docum
   `job_for` copies the pod untouched apart from its name, labels and ConfigMap; never run so. To check: the Jobs
   complete with a native sidecar running, the log reading (`-c` for each container) skips the daemon's container, and
   the renewal rule's five minutes per pod do not slow a plan's runs.
+- [x] Image eviction on a multi-node cluster (found 2026-10-27, custody step 7; done 2026-10-27): `infra/images.nu`
+  dropped rebuilt images only from the `u7s` container, so on `u7c` each node kept its cached copies. Not stale code,
+  since the pods pull Polar's images `Always`, but disk. Now it evicts from every node container of the cluster
+  `KUBECONFIG` reaches: the containers named for its nodes, `<node>` or `<cluster>-<node>`, never the hub
+  (`node_containers_of`, tested in `infra/tests/images.nu`).
 - [x] `up.nu` trusted a port-forward that was already running (found 2026-10-27, custody step 7; done 2026-10-27): it did
   not ask which cluster the forward reached, so loops left from another cluster's run, pointing at a kubeconfig since
   removed, made a service look down ("the deployment git server did not answer"). `infra/forwards.nu` now finds a
