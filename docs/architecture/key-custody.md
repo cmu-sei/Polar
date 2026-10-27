@@ -663,6 +663,92 @@ daemon keeps its installer apart from its workload, under one UID.
 - *(c) Both roles to UID 1000, nothing more.* A compromised workload could replace the key (`MakeCsr`), which is a
   denial of service and no more, since it cannot have a certificate signed. The weakest.
 
+## Step 5, revocation: the plan (2026-10-27, for review)
+
+What is there, read for this:
+- *What is revoked.* The credentials agent's ledger puts a serial in `revoked_serials`
+  (`credentials-agent/consume/src/state.rs`) for an administrator's `Revoke` (the admin CLI's `revoke`) and for every
+  certificate superseded (the renewal rule, `deployments.md`). The whole set is published, signed, on
+  `polar-authority-updates` (`AuthorityBody::Revoked`). Every builder agent holds it (`RevokedSerials`,
+  `polar-agent-builder/src/authority.rs`), and so does the broker, through an `AuthorityHandle` of its own
+  (`cassini/broker/src/authority.rs`, `BrokerAuthority`). Today it is consulted only for the signer of a signed
+  document (`polar-agent-builder/src/signed.rs`).
+- *A serial's text* is the lowercase hex of the certificate's raw serial (`cert_issuer_common::serial::serial_from_cert`),
+  the form the ledger keys by. The broker and the daemon read it the same way.
+- *The broker admits a revoked certificate.* The listener reads the identity and the floor from the leaf after the
+  handshake (`listener.rs`, `extract_peer_identity`, `extract_peer_floor`), not the serial, and nothing consults the
+  set at accept or afterwards. A session whose certificate is revoked runs on.
+- *The precedent for ending what is no longer admitted.* Every change of authority makes every listener judge its
+  subscriptions again (`authority.rs`, `ChangeCounter`, `JudgeSubscriptions`), and one no longer admitted is dropped.
+- *One live session per identity.* A new session supersedes every older session of its identity and closes its
+  connection (`cassini/broker/src/session.rs`, `supersede_older`). So a daemon that registered as the pod, as "The
+  design" has it, would close the workload's connection, and the workload's reconnection would close the daemon's:
+  the two would take turns. This is the question below.
+- *A crate cycle.* `cassini-client` depends on `polar-custody` (`ClientKey`), so the daemon cannot use the Cassini
+  client from inside the `polar-custody` package. A daemon with a session of its own moves to a crate of its own.
+- *The broker's pod has no client slot.* It holds a server certificate alone (`cassini-server`), so its daemon has no
+  identity to connect as.
+- *Lifetimes.* A client certificate lives an hour (`CERT_ISSUER_DEFAULT_LIFETIME_SECS`, 3600), a server certificate
+  12 hours on the three local targets (`CERT_ISSUER_SERVER_LIFETIME_SECS`).
+- *No other verifier checks revocation.* The git server, cert-issuer and Neo4j trust the CA alone.
+- *A revoke does not keep the identity out.* `Revoke` names a serial. The pod's next request is admitted by the
+  renewal rule after its five minutes, so revocation ends a key and its sessions, and the credentials agent decides
+  whether the pod is issued again (decided item 1), by its rules as they are.
+
+The plan:
+1. *The broker refuses and ends a revoked certificate's sessions* (decided item 2; needs no answer below).
+   - The listener reads the leaf's serial beside the identity. `RevokedSerials` gains a lookup by serial.
+   - At accept, a revoked serial is refused before any listener is made: the connection is closed and logged.
+   - On a change of authority, every listener whose serial is now revoked closes its connection and ends its session.
+     The session ends as a connection closed without a goodbye, kept for the retention window: revocation is of a
+     certificate, not of the identity, so the identity's next pod, under a new certificate, claims what was held, as
+     after any restart. The revoked certificate cannot resume it, since it is refused at accept.
+2. *The daemon watches for its own serial* (the shape depends on the question below; as recommended):
+   - The daemon's binary moves to a crate of its own, `polar-custody/daemon`, the library staying where it is. The
+     image is the same.
+   - Once its client slot holds a certificate, it connects to Cassini as the pod, its own handshake signed in process
+     by the slot's key (a third `ClientKey` kind, made only in code, never from the environment), and registers as a
+     *watcher* (below). It subscribes to the two authority topics and asks for a snapshot, and pins the credentials
+     agent's key from the first snapshot that agent publishes, by the rules every agent keeps (`AuthorityCore`).
+   - When a set it believes holds a slot's serial, it destroys that key (the slot removed, so `SlotKey` zeroes it),
+     logs it, drops every slot, and exits non-zero (decided item 1). The kubelet restarts the sidecar empty; the
+     health actor sees an empty daemon and rejuvenates (step 4, item 6); the pod is replaced and asks again.
+   - It signs while it has no authority yet, and while Cassini is away. Otherwise the credentials agent's own pod could
+     not start, its daemon waiting on the credentials agent. A revocation published while its session is down is seen
+     in the snapshot it asks for on its return.
+   - The broker's daemon does not watch (no client slot): the broker's server key ends with its certificate, 12 hours
+     at most. A limit, recorded.
+3. *A watcher session, in the broker* (as recommended below): declared at registration (a flag on the wire's
+   `RegistrationRequest`). It never supersedes and is never superseded, nothing is held for it (its close is a
+   goodbye), and it may subscribe to the two authority topics and publish snapshot requests, nothing else, whatever
+   its certificate's floor or policy say. It is self-declared, and harmless so: a watcher can do less than the
+   identity's own session, so declaring one gains a compromised workload nothing.
+4. *Tests first:*
+   - the broker: a revoked certificate refused at accept; a connected session closed and ended when its serial is
+     revoked, another identity's untouched; a property, that after any sequence of revoked sets and connections no
+     open connection's serial is in the set the broker holds;
+   - the watcher: beside its identity's session, neither closes the other; refused outside the authority topics;
+     nothing held after it goes;
+   - the daemon: its serial revoked, its key destroyed, nothing signed after, and it exits; another serial, nothing; a
+     set signed by another key, or published by another identity, nothing; a property, that for any sequence of sets
+     it signs exactly while no set it believed has held its serial;
+   - end to end, in the broker's tests: a broker, a daemon, a workload's session and a credentials agent stand-in
+     publishing signed sets; the serial revoked, the workload's session ended and the daemon's key gone.
+   - Mutations on every rule.
+5. *Docs:* `signed.rs` says "nothing revokes yet" twice, stale since the ledger revokes; the comments follow.
+
+*The question: how does the daemon hear of its revocation?*
+- *(a) A watcher session of its own,* as above. The daemon hears it whatever the workload does. The cost: the broker's
+  session rules gain a kind, the wire a flag, and the daemon a Cassini client and a crate of its own.
+- *(b) The workload relays it.* The workload's agent already holds the signed sets and hands each to the daemon over
+  the socket, which verifies the credentials agent's signature itself. No change to the broker's sessions. But a
+  compromised workload withholds its own revocation, which is the case revocation is for, and the key the daemon
+  pins comes through the workload too.
+- *(c) The broker alone.* Only item 1. A revoked key goes on signing until its certificate ends (an hour), useful
+  against the verifiers that do not check revocation (Neo4j, the git server, cert-issuer).
+
+Recommended: (a).
+
 ## Step 6, the speed gate: the plan (2026-10-27, closed)
 
 What is there, read for this:
