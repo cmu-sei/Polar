@@ -117,7 +117,11 @@ k8s-openapi = { version = "0.27", features = ["v1_35", "schemars"] }
 kube = { version = "3.1.0", default-features = false, features = ["client", "rustls-tls", "runtime", "derive"] }
 log = "0.4.29"                                            # used in jira/observe
 notify = "7"
-neo4rs = { version = "0.9.0-rc.8", git = "https://github.com/neo4j-labs/neo4rs", tag = "v0.9.0-rc.8" }
+# Our own fork, v0.9.0-rc.10 (the latest release) and one commit (branch `polar-v0.9.0-rc.10`): a connection can
+# take a rustls client configuration the caller made (`ConfigBuilder::with_rustls_config`), so a graph writer shows
+# Neo4j the custody daemon's key, which is in no file (docs/architecture/key-custody.md, "The neo4rs patch"). Pinned
+# to a specific commit, as the other forks are.
+neo4rs = { version = "0.9.0-rc.10", git = "https://github.com/daveman1010221/neo4rs", rev = "4117f5a" }
 oci-client = "0.15.0"                                     # used in resolver
 opentelemetry = "0.32.0"
 opentelemetry-otlp = "0.32.0"

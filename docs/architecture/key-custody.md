@@ -355,10 +355,18 @@ What is there, read for this:
   workspace `Cargo.toml` saying why (`rsa`, `keyutils-raw`).
 
 The plan:
-1. *The fork.* `daveman1010221/neo4rs`, forked from `neo4j-labs/neo4rs`, a branch `polar` from tag `v0.9.0-rc.8`,
+1. *The fork.* `daveman1010221/neo4rs`, forked from `neo4j-labs/neo4rs`, a branch `polar` from tag `v0.9.0-rc.8`
+   (since moved to `v0.9.0-rc.10`, below),
    one commit. The patch is shaped so it could go upstream as it is. *Done (2026-10-27):* forked with `gh` (the
    maintainer's choice), the commit `a038df3` on `polar`, pushed. The neo4rs library's 286 tests pass, four of them
    new. Clippy reports the same four lints at the tag as with the patch: none added.
+   *Moved to the latest release (the maintainer, 2026-10-27):* the fork is to follow neo4rs's latest version, not the
+   tag Polar happened to pin. The patch is carried onto `v0.9.0-rc.10` (2026-06-11), branch `polar-v0.9.0-rc.10`,
+   commit `4117f5a`, pushed. `rc.10` reworked the connector, so the change was made again on its code, the same
+   change. Its 294 library tests pass, the four new ones among them, and clippy reports the same three lints as at
+   `rc.10` itself. Polar compiles against it unchanged. `main` is nine commits past `rc.10`, unreleased (among them
+   fixes to Bolt chunking and pooled connections, and rustls-platform-verifier in place of rustls-native-certs); the
+   fork moves when a release does. The first branch, `polar` (`a038df3`), is left as it was and is not used.
 2. *The patch:*
    - a fifth variant, `ConnectionTLSConfig::Rustls(RustlsConfig)`, a newtype over `Arc<rustls::ClientConfig>` that
      compares by pointer, since the enum is `PartialEq` and a rustls configuration is not;
@@ -387,7 +395,7 @@ The plan:
 5. *Not changed:* the charts (step 4 points `GRAPH_CLIENT_KEY` at the daemon), `polar-test-graph`, and the `ace`
    job's own certificate.
 
-## Degraded operation, the plan (2026-10-27, for review)
+## Degraded operation, the plan (2026-10-27, items 1 to 3 cleared by the maintainer)
 
 The maintainer: Polar may use its own builds of Neo4j and neo4rs, but there must be a degraded way to run for a
 deployment that cannot use what we build. What the daemon's whole path rests on, and what each piece's absence costs:
@@ -416,9 +424,32 @@ The plan:
    on the pod's loopback, and it connects to Neo4j with the daemon's key. No key file, any driver. The cost: loopback
    has no peer check, so any container in the pod can use it, where the daemon's socket admits only the pod's own
    UIDs. Not built now.
+*Done (2026-10-27).* Item 1 holds as built in steps 2 and 3, and now for the graph too. Item 2 is built with step 4,
+since until a chart has the sidecar every target renders as "off". Item 3: the Bolt policy of `local`,
+`local-minimal` and `sandbox-local` names `TLSv1.2,TLSv1.3`. The render diff is that line in Neo4j's configmap
+alone, and the setting is one Neo4j 2025.08 declares (`SslPolicyConfig`: `dbms.ssl.policy`, the Bolt scope,
+`tls_versions`), since Neo4j refuses to start on a key it does not know. Item 4 is not built.
+
 5. *Not degraded, not planned:* a second, Neo4j-only client certificate with its own key file. It is one client
    certificate per pod (`infra/config/capabilities.nuon`), and a second for the same identity and type supersedes the
    first (`deployments.md`, "The renewal rule").
+
+*Built (2026-10-27): the Polar side of the neo4rs patch.*
+- *The pin:* the workspace's neo4rs is the fork at `4117f5a`, with the comment.
+- *The graph's key:* `GraphTls::Mutual`'s key is `ClientKey` (`lib/src/graph/environment.rs`): `GRAPH_CLIENT_KEY`, or
+  `POLAR_CUSTODY_SOCKET` read through the Cassini client's declaration, exactly one when `GRAPH_CLIENT_CERT` is set.
+  Without a client certificate the socket says nothing to the graph.
+- *The controller* (`lib/src/graph/controller.rs`, `neo_config_for`, `custody_tls`) builds the daemon's configuration
+  with `polar_custody::client::client_config` and hands it to neo4rs with `with_rustls_config`. A key file goes as
+  before.
+- *Tests:*
+  - the custody key, and both refused;
+  - the socket without a client certificate;
+  - every combination of the four variables, the section judging each as the controller reads it;
+  - end to end: neo4rs, configured for the daemon, connects to a TLS 1.3 stand-in that demands a client certificate
+    under the CA, which sees the daemon's certificate.
+- *Mutations caught:* no client certificate presented; both keys accepted.
+- *Not yet seen against a real Neo4j:* step 7.
 
 ## Build order, each tests first
 
@@ -433,8 +464,8 @@ The plan:
    Then the renewal rule (`deployments.md`, build step 2), before any pod has a daemon.
    *Found for step 4 (2026-10-27):* a graph writer presents its one client certificate to Neo4j through neo4rs
    (`GRAPH_CLIENT_KEY=/etc/tls/certs/key.pem`, `infra/config/capabilities.nuon`). neo4rs reads the key from a file
-   only (its `MutualTLS`, `lib/src/connection.rs`), and with the daemon there is none. To settle before step 4: a
-   patch to neo4rs that takes a rustls configuration (as Polar carries its own `rsa`), or another way.
+   only (its `MutualTLS`, `lib/src/connection.rs`), and with the daemon there is none. Settled 2026-10-27: our neo4rs
+   takes a rustls configuration ("The neo4rs patch").
 4. The catalog and the charts: the sidecar in the `agent` and `service` kinds, its socket volume, its UID; Cassini's
    listener taking the signer.
 5. Revocation: the daemon on its own serial, its exit, and the broker ending revoked sessions.

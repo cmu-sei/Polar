@@ -220,7 +220,7 @@ dependencies = [
  "dashmap 5.5.3",
  "hashbrown 0.14.5",
  "once_cell",
- "pastey 0.2.3",
+ "pastey",
  "rayon",
  "rustc-hash",
  "web-time",
@@ -232,7 +232,7 @@ version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "792af0babe403e49368d8717763605fe978b3a1eb7d51b52e3d0a5cb97e6eb74"
 dependencies = [
- "pastey 0.2.3",
+ "pastey",
 ]
 
 [[package]]
@@ -748,7 +748,7 @@ dependencies = [
  "pin-project-lite",
  "rand 0.9.5",
  "rustls",
- "rustls-native-certs 0.8.4",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_derive",
@@ -2017,6 +2017,9 @@ name = "deadpool-runtime"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "defmt"
@@ -3354,7 +3357,7 @@ dependencies = [
  "hyper-util",
  "log",
  "rustls",
- "rustls-native-certs 0.8.4",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -4590,6 +4593,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mutants"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc0287524726960e07b119cebd01678f852f147742ae0d925e6a520dca956126"
+
+[[package]]
 name = "native-tls"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4614,26 +4623,27 @@ checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
 name = "neo4rs"
-version = "0.9.0-rc.8"
-source = "git+https://github.com/neo4j-labs/neo4rs?tag=v0.9.0-rc.8#1b92c9b822327330e0c46927f02aafbc7cb212a9"
+version = "0.9.0-rc.10"
+source = "git+https://github.com/daveman1010221/neo4rs?rev=4117f5a#4117f5aac44a5e70b1a232fd1ae0d842454e12a8"
 dependencies = [
  "backon",
  "bytes",
  "chrono",
  "chrono-tz",
- "dashmap 6.2.1",
  "deadpool",
  "delegate",
  "futures",
  "log",
  "neo4rs-macros",
- "pastey 0.1.1",
+ "neo4rs_include_snippet",
+ "pastey",
  "pin-project-lite",
  "rustls",
- "rustls-native-certs 0.7.3",
- "rustls-pemfile",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "serde",
- "thiserror 1.0.69",
+ "socket2 0.5.10",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
  "url",
@@ -4642,10 +4652,18 @@ dependencies = [
 [[package]]
 name = "neo4rs-macros"
 version = "0.3.0"
-source = "git+https://github.com/neo4j-labs/neo4rs?tag=v0.9.0-rc.8#1b92c9b822327330e0c46927f02aafbc7cb212a9"
+source = "git+https://github.com/daveman1010221/neo4rs?rev=4117f5a#4117f5aac44a5e70b1a232fd1ae0d842454e12a8"
 dependencies = [
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "neo4rs_include_snippet"
+version = "0.9.0-rc.10"
+source = "git+https://github.com/daveman1010221/neo4rs?rev=4117f5a#4117f5aac44a5e70b1a232fd1ae0d842454e12a8"
+dependencies = [
+ "unsynn",
 ]
 
 [[package]]
@@ -5304,12 +5322,6 @@ dependencies = [
 
 [[package]]
 name = "pastey"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
-
-[[package]]
-name = "pastey"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
@@ -5618,11 +5630,13 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "polar",
+ "polar-custody",
  "polar-env",
  "polar-health",
  "polar-router",
  "polar-test-graph",
  "ractor",
+ "rcgen",
  "reqwest 0.12.28",
  "rkyv",
  "rustls",
@@ -5634,6 +5648,7 @@ dependencies = [
  "testcontainers-modules",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -6868,19 +6883,6 @@ dependencies = [
 
 [[package]]
 name = "rustls-native-certs"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5bfb394eeed242e909609f56089eecfe5fda225042e8b171791b9c95f5931e5"
-dependencies = [
- "openssl-probe 0.1.6",
- "rustls-pemfile",
- "rustls-pki-types",
- "schannel",
- "security-framework 2.11.1",
-]
-
-[[package]]
-name = "rustls-native-certs"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
@@ -6922,7 +6924,7 @@ dependencies = [
  "log",
  "once_cell",
  "rustls",
- "rustls-native-certs 0.8.4",
+ "rustls-native-certs",
  "rustls-platform-verifier-android",
  "rustls-webpki",
  "security-framework 3.7.0",
@@ -7347,6 +7349,12 @@ dependencies = [
  "digest 0.10.7",
  "keccak",
 ]
+
+[[package]]
+name = "shadow_counted"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65da48d447333cebe1aadbdd3662f3ba56e76e67f53bc46f3dd5f67c74629d6b"
 
 [[package]]
 name = "sharded-slab"
@@ -8327,6 +8335,17 @@ name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
+name = "unsynn"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd574186a61b234717745ee569f9323def8ac863c2e4b512a25d3b0ec39322fc"
+dependencies = [
+ "mutants",
+ "proc-macro2",
+ "shadow_counted",
+]
 
 [[package]]
 name = "untrusted"

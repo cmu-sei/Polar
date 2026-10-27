@@ -22,11 +22,13 @@
 */
 
 use super::environment::{GraphSettings, GraphTls};
+use cassini_client::ClientKey;
 use neo4rs::{BoltNull, BoltType, Graph, Query};
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, async_trait};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
+use std::sync::Arc;
 use tracing::{debug, error, info, instrument, trace};
 
 // ── Public type alias ──────────────────────────────────────────────────────────
@@ -883,10 +885,30 @@ impl GraphControllerActor {
             .max_connections(10);
 
         let config = match settings.tls {
-            GraphTls::Mutual { ca, cert, key } => {
+            GraphTls::Mutual {
+                ca,
+                cert,
+                key: ClientKey::File(key),
+            } => {
                 info!("Configuring Neo4j mTLS with cert={cert} key={key} ca={ca}");
                 builder
                     .with_mutual_tls_validation(Some(ca), cert, key)
+                    .build()?
+            }
+            GraphTls::Mutual {
+                ca,
+                cert,
+                key: custody @ ClientKey::Custody(_),
+            } => {
+                // The key is the custody daemon's, in no file: rustls is configured here, TLS 1.3 alone, and handed
+                // to neo4rs whole (docs/architecture/key-custody.md, "The neo4rs patch").
+                info!(
+                    "Configuring Neo4j mTLS with cert={cert} ca={ca}, its key the custody daemon's"
+                );
+                builder
+                    .with_rustls_config(Arc::new(
+                        custody_tls(&ca, &cert, &custody).map_err(ActorProcessingErr::from)?,
+                    ))
                     .build()?
             }
             GraphTls::ServerOnly { ca } => {
@@ -1042,6 +1064,28 @@ impl Actor for GraphControllerActor {
     }
 }
 
+/// The rustls configuration for a client certificate whose key the custody daemon holds: the server verified against
+/// the CA at `ca`, the certificate at `cert` presented, and every handshake signed through the daemon.
+fn custody_tls(ca: &str, cert: &str, key: &ClientKey) -> Result<rustls::ClientConfig, String> {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject as _;
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in CertificateDer::pem_file_iter(ca)
+        .map_err(|e| format!("reading the Neo4j CA from {ca}: {e}"))?
+    {
+        roots
+            .add(certificate.map_err(|e| format!("the Neo4j CA at {ca}: {e}"))?)
+            .map_err(|e| format!("the Neo4j CA at {ca}: {e}"))?;
+    }
+    let verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
+        .build()
+        .map_err(|e| format!("the Neo4j server verifier: {e}"))?;
+    let chain = CertificateDer::pem_file_iter(cert)
+        .and_then(|certificates| certificates.collect::<Result<Vec<_>, _>>())
+        .map_err(|e| format!("reading the client certificate from {cert}: {e}"))?;
+    polar_custody::client::client_config(verifier, chain, key)
+}
+
 #[cfg(test)]
 mod environment_tests {
     use super::*;
@@ -1085,5 +1129,127 @@ mod environment_tests {
             let error = GraphControllerActor::neo_config_for_args(&args()).unwrap_err();
             assert!(error.to_string().contains("GRAPH_ENDPOINT"), "{error}");
         }
+    }
+}
+
+// docs/architecture/key-custody.md, "The neo4rs patch": a graph writer whose key is the custody daemon's shows Neo4j the
+// daemon's certificate, through the rustls configuration neo4rs takes. A stand-in for Neo4j that speaks TLS 1.3 and
+// demands a client certificate, since container tests cannot publish ports on every host.
+#[cfg(test)]
+mod custody_tests {
+    use super::*;
+    use crate::graph::environment::{GraphSettings, GraphTls};
+    use cassini_client::ClientKey;
+    use polar_custody::client::CustodyClient;
+    use polar_custody::custody::Custody;
+    use polar_custody::protocol::Slot;
+    use polar_custody::server::{Callers, bind, serve};
+    use rustls::pki_types::pem::PemObject as _;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use std::os::unix::fs::MetadataExt as _;
+    use std::sync::{Arc, RwLock};
+
+    const IDENTITY: &str = "kube-consumer.polar.serviceaccount.cluster.local";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_graph_writer_shows_neo4j_the_custody_daemon_s_certificate() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca_pem = ca_params.self_signed(&ca_key).unwrap().pem();
+        let issuer = rcgen::Issuer::new(ca_params, ca_key);
+
+        // The daemon, and polar-init's part: its CSR certified and installed, the certificate and the CA as files.
+        let dir = tempfile::tempdir().unwrap();
+        let uid = std::fs::metadata(dir.path()).unwrap().uid();
+        let socket = dir.path().join("custody.sock");
+        tokio::spawn(serve(
+            bind(&socket).unwrap(),
+            Arc::new(RwLock::new(Custody::new(&ca_pem).unwrap())),
+            Arc::new(Callers {
+                installer_uid: uid,
+                workload_uids: vec![uid],
+            }),
+        ));
+        let daemon = CustodyClient::new(&socket);
+        let csr =
+            tokio::task::block_in_place(|| daemon.make_csr(Slot::Client, IDENTITY, &[])).unwrap();
+        let mut request = rcgen::CertificateSigningRequestParams::from_pem(&csr).unwrap();
+        request.params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        let cert_pem = request.signed_by(&issuer).unwrap().pem();
+        tokio::task::block_in_place(|| daemon.install(Slot::Client, vec![cert_pem.clone()]))
+            .unwrap();
+        let (cert_path, ca_path) = (dir.path().join("cert.pem"), dir.path().join("ca.pem"));
+        std::fs::write(&cert_path, &cert_pem).unwrap();
+        std::fs::write(&ca_path, &ca_pem).unwrap();
+
+        // The stand-in: TLS 1.3, a client certificate under the CA demanded, and the one shown kept.
+        let server_key = rcgen::KeyPair::generate().unwrap();
+        let mut server_params =
+            rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        server_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        let server_cert = server_params.signed_by(&server_key, &issuer).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from_pem_slice(ca_pem.as_bytes()).unwrap())
+            .unwrap();
+        let server_config =
+            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                .with_client_cert_verifier(
+                    rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+                        .build()
+                        .unwrap(),
+                )
+                .with_single_cert(
+                    vec![server_cert.der().clone()],
+                    PrivateKeyDer::from_pem_slice(server_key.serialize_pem().as_bytes()).unwrap(),
+                )
+                .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        let seen = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let tls = acceptor.accept(tcp).await.map_err(|e| e.to_string())?;
+            let peer = tls
+                .get_ref()
+                .1
+                .peer_certificates()
+                .ok_or("no client certificate")?;
+            Ok::<_, String>(peer[0].clone())
+        });
+
+        let settings = GraphSettings {
+            database: "neo4j".to_string(),
+            user: "neo4j".to_string(),
+            password: "pw".to_string(),
+            endpoint: format!("bolt+s://localhost:{port}"),
+            tls: GraphTls::Mutual {
+                ca: ca_path.display().to_string(),
+                cert: cert_path.display().to_string(),
+                key: ClientKey::Custody(socket.display().to_string()),
+            },
+        };
+        let graph =
+            Graph::connect(GraphControllerActor::neo_config_for(settings).unwrap()).unwrap();
+        // The connection is made on first use. The stand-in speaks no Bolt, so the query fails after the handshake.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            graph.run(neo4rs::query("RETURN 1")),
+        )
+        .await;
+        let shown = tokio::time::timeout(std::time::Duration::from_secs(10), seen)
+            .await
+            .expect("a handshake")
+            .unwrap()
+            .expect("the handshake, signed through the daemon");
+        assert_eq!(
+            shown.as_ref(),
+            CertificateDer::from_pem_slice(cert_pem.as_bytes())
+                .unwrap()
+                .as_ref(),
+            "the stand-in saw the daemon's certificate"
+        );
     }
 }

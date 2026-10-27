@@ -35,6 +35,8 @@ neo4rs.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry.workspace = true
+polar-custody.workspace = true
+rustls.workspace = true
 polar-env.workspace = true
 polar-health.workspace = true
 polar-router.workspace = true
@@ -55,9 +57,10 @@ serde_json = { workspace = true, features = ["raw_value"] }
 url.workspace = true
 [dev-dependencies]
 polar.workspace = true
+rcgen.workspace = true
+tokio-rustls.workspace = true
 polar-test-graph.workspace = true
 testcontainers.workspace = true
 testcontainers-modules.workspace = true
 tokio.workspace = true
 tempfile.workspace = true
-rustls.workspace = true
