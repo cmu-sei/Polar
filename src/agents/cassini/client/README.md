@@ -82,7 +82,8 @@ These must be set for both the CLI and the broker subprocess in tests.
 | `CASSINI_SERVER_NAME` | Yes | TLS SNI name for the broker |
 | `TLS_CA_CERT` | Yes | Path to CA certificate PEM |
 | `TLS_CLIENT_CERT` | Yes | Path to client certificate PEM |
-| `TLS_CLIENT_KEY` | Yes | Path to client private key PEM |
+| `TLS_CLIENT_KEY` | One of the two | Path to client private key PEM |
+| `POLAR_CUSTODY_SOCKET` | One of the two | The custody daemon's socket: the daemon signs the client's TLS 1.3 handshakes with a key the client never holds (`docs/architecture/key-custody.md`). Set this or `TLS_CLIENT_KEY`, not both |
 | `CASSINI_DAEMON_SOCK` | No | Override Unix socket path for daemon IPC |
 | `CASSINI_REGISTER_TIMEOUT_SECS` | No | Registration timeout override (default: 30) |
 | `CASSINI_LOG` | No | Log filter for the client (default: `warn`) |

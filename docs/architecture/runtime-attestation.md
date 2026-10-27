@@ -98,7 +98,7 @@ not control, or the process submits to restrictions that are verified from outsi
 | What the attacker does | What stops it or shows it | Seen by |
 |---|---|---|
 | An impostor pod with a stolen token | The instance check: owner, service account, `imageID` against the signed deployment | the API |
-| Copies the certificate key out, to use elsewhere | The private key lives in the kernel keyring, usable but not readable (as the escrow key already does, `CryptoActor`, `credentials-agent-architecture.md`); Cassini binds each session to the attested pod's address | the kernel, Cassini |
+| Copies the certificate key out, to use elsewhere | The private key is held by the pod's custody daemon, usable through its socket but not readable (`key-custody.md`). Not in the kernel keyring as first written here: no kernel holds or signs with a P-256 key (`key-custody.md`, "The process keyring, probed"), so it is in the daemon's locked memory, which root on the node could read. Cassini binds each session to the attested pod's address | the custody daemon, Cassini |
 | Replaces the binary, or drops a new one | `readOnlyRootFilesystem` and digest pinning, verified in the pod spec | the API |
 | `kubectl debug` | An ephemeral container in the pod's status | the API |
 | `kubectl exec`, or a spawned shell | A process in the container's cgroup that is not the agent | the node sensor |
@@ -147,7 +147,9 @@ to be settled before the move:
 - *The renewal rule meets the same UID.* The credentials agent refuses a second certificate of a type to a pod
   instance while the first is valid (`AlreadyHasValidCertificate`), and so does the held-request voucher; a pod restarted
   in place is the same instance, asking again before its certificate expires, which is why it rejuvenates. That rule is
-  what makes rejuvenation need a new pod today, so changing it is a decision, not a detail.
+  what makes rejuvenation need a new pod today, so changing it is a decision, not a detail. *Settled and built
+  2026-10-27* (`deployments.md`, "The renewal rule"): a pod restarted in place is issued again, at most one certificate
+  of a type in five minutes, and `AlreadyHasValidCertificate` is no longer given.
 - *Kept bundles.* The `emptyDir` survives, so `polar-init` finds the last bundle (`keeps_existing_bundle`) and would keep
   it while it is valid, which at rejuvenation it still is.
 - *Rollouts.* A Deployment's rolling update starts the new pod before the old one ends; a credentials agent (one ledger)

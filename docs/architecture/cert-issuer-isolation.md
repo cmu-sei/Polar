@@ -272,7 +272,9 @@ over Cassini with the certificate it just obtained, for an agent that needs encr
    `(identity, instance_binding)` already has a valid certificate (`AlreadyHasValidCertificate`, 403), and a second
    `IssuanceCompleted` for the same identity marks the earlier record revoked as `Superseded`. That is the
    "a pod cannot renew itself" property, and it is right; but a pod that legitimately needs two certificates would be
-   refused on the second and, if it were not, would revoke its own first. The request carries one CSR.
+   refused on the second and, if it were not, would revoke its own first. The request carries one CSR. (Since
+   2026-10-27 the rule is the renewal bound instead, and a superseded certificate is published as revoked:
+   `deployments.md`, "The renewal rule".)
 2. **Client certificates only.** The handler always signs `CertType::Client`, with `p:` extras taken from a grant
    (a Kubernetes credential needs no grant). `IssuanceRequest` is `{csr_pem, credential}`: no certificate type, no
    names. Cassini, Neo4j and the git server cannot be issued this way.
