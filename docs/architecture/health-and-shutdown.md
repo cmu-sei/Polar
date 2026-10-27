@@ -289,7 +289,7 @@ hard floor.
 
 | Agent | Budget | Grace period | What it is made of |
 |---|---|---|---|
-| credentials consumer | 50 s | 60 s | 5 s drain window, ledger stop, projection stop (up to 30 s) |
+| credentials consumer | 50 s | 60 s | at the start, every subscription let go of and its own actors (record asker, held-request voucher) stopped; 5 s drain window, ledger stop, projection stop (up to 30 s) |
 | credentials observer | 40 s | 50 s | HTTP drain, up to 30 s |
 | kube consumer | 45 s | 55 s | 5 s drain window, graph controller stop (up to 30 s) |
 | kube observer | 40 s | 50 s | three watchers stopped in turn, 10 s each |

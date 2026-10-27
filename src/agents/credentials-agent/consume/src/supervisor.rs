@@ -198,6 +198,37 @@ const ACTIVITY_REPORT_EVERY: Duration = Duration::from_secs(60);
 
 pub struct ConsumerSupervisor;
 
+/// Every topic this agent's own subscriptions take: its requests, the authority snapshots it answers, cert-issuer's
+/// record answers and its held requests. A draining agent lets go of them all (docs/architecture/health-and-shutdown.md,
+/// section 4).
+pub(crate) fn drain_topics() -> Vec<&'static str> {
+    REQUEST_TOPICS
+        .iter()
+        .copied()
+        .chain([
+            credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC,
+            cert_issuer_common::record::RECORD_REPLIES_TOPIC,
+            cert_issuer_common::held::HELD_REQUESTS_TOPIC,
+        ])
+        .collect()
+}
+
+/// Whether `message` is something a draining agent no longer does: work of its own (asking for the record, polling
+/// held requests, publishing a changed section) or answering what arrives (an authority request, a record answer, a
+/// held offer). The ledger is not written by an agent on its way out; its successor carries on from what is there.
+pub(crate) fn dropped_while_draining(message: &ConsumerSupervisorMessage) -> bool {
+    use ConsumerSupervisorMessage as M;
+    matches!(
+        message,
+        M::AuthorityRequested
+            | M::AskRecord
+            | M::RecordAnswered { .. }
+            | M::HeldOffered { .. }
+            | M::PollHeld
+            | M::RuntimeChanged { .. }
+    )
+}
+
 pub struct ConsumerSupervisorState {
     /// Owns the graph projection, and its own GraphControllerActor as
     /// a direct child -- see projection.rs's own module doc. The other
@@ -681,6 +712,20 @@ impl ConsumerSupervisor {
 
     /// Schedules `DrainElapsed`. Not awaited: the timer runs detached, so this
     /// supervisor keeps handling (and logging) messages while the window is open.
+    /// The start of a controlled shutdown: nothing new is taken (every subscription let go of, and what arrives
+    /// anyway dropped), and the actors that act on their own (the record asker, the held-request voucher) are
+    /// stopped, so in the drain window only work already under way finishes and nothing new reaches the ledger.
+    fn begin_drain(state: &mut ConsumerSupervisorState) {
+        state.draining = true;
+        Self::unsubscribe_from_topics(&state.broker_client);
+        if let Some(asker) = state.record_asker.take() {
+            asker.stop(Some("draining".to_string()));
+        }
+        if let Some(voucher) = state.held_voucher.take() {
+            voucher.stop(Some("draining".to_string()));
+        }
+    }
+
     fn schedule_drain_end(myself: &ActorRef<ConsumerSupervisorMessage>) {
         // Dropping the handle detaches the timer; it still fires.
         drop(
@@ -690,10 +735,10 @@ impl ConsumerSupervisor {
         );
     }
 
-    /// Tells the broker this agent is going dark, so it stops routing requests
+    /// Tells the broker this agent is going dark, so it stops routing anything
     /// here. Failures are logged and do not stop the shutdown.
     fn unsubscribe_from_topics(client: &TcpClient) {
-        for topic in REQUEST_TOPICS {
+        for topic in drain_topics() {
             if let Err(e) = client.unsubscribe(UnsubscribeRequest {
                 topic: topic.to_string(),
                 trace_ctx: None,
@@ -1264,6 +1309,10 @@ impl Actor for ConsumerSupervisor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
+        if state.draining && dropped_while_draining(&message) {
+            debug!("CONSUMER_SUPERVISOR: draining: not taken");
+            return Ok(());
+        }
         match message {
             ConsumerSupervisorMessage::PrepareShutdown => {
                 if state.draining {
@@ -1274,13 +1323,12 @@ impl Actor for ConsumerSupervisor {
                          the pending exit will end the process"
                     );
                 } else {
-                    state.draining = true;
                     state.rejuvenating = true;
                     info!(
                         "CONSUMER_SUPERVISOR: PrepareShutdown received (rejuvenation), \
                          unsubscribing from Cassini and entering drain window"
                     );
-                    Self::unsubscribe_from_topics(&state.broker_client);
+                    Self::begin_drain(state);
                     Self::schedule_drain_end(&myself);
                 }
             }
@@ -1498,17 +1546,64 @@ impl Actor for ConsumerSupervisor {
                 // while draining), then DrainElapsed stops the ledger and
                 // projection and exits.
                 if !state.draining {
-                    state.draining = true;
                     warn!(
                         "CONSUMER_SUPERVISOR: entering drain window before exit; any \
                          requests that arrive will be logged, not processed"
                     );
+                    Self::begin_drain(state);
                     Self::schedule_drain_end(&myself);
                 }
             }
             _ => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+
+    #[test]
+    fn a_draining_agent_lets_go_of_every_topic_it_subscribes_to() {
+        // docs/architecture/health-and-shutdown.md, section 4: a draining agent takes nothing new. Every subscription it
+        // declares is let go of, so a new one cannot be forgotten here.
+        use polar_agent_builder::{Access, PolarAgent};
+        let declared: std::collections::BTreeSet<&str> =
+            <crate::agent::CredentialsConsumer as PolarAgent>::TOPICS
+                .iter()
+                .filter(|t| t.access == Access::Subscribe)
+                .map(|t| t.name)
+                .collect();
+        let let_go: std::collections::BTreeSet<&str> = drain_topics().into_iter().collect();
+        assert_eq!(let_go, declared);
+    }
+
+    #[test]
+    fn what_the_agent_would_do_on_its_own_or_answer_is_dropped_while_draining_and_the_shutdown_is_not()
+     {
+        use ConsumerSupervisorMessage as M;
+        for dropped in [
+            M::AuthorityRequested,
+            M::AskRecord,
+            M::RecordAnswered {
+                payload: vec![],
+                published_by: None,
+            },
+            M::HeldOffered {
+                payload: vec![],
+                published_by: None,
+            },
+            M::PollHeld,
+            M::RuntimeChanged {
+                section: "policy".to_string(),
+            },
+        ] {
+            assert!(dropped_while_draining(&dropped));
+        }
+        for kept in [M::PrepareShutdown, M::DrainElapsed, M::ReportActivity] {
+            assert!(!dropped_while_draining(&kept));
+        }
     }
 }
 

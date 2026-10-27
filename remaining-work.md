@@ -561,7 +561,17 @@ NOTHING IS OPEN for path 1 now: steps 4 to 6 wait for the go-ahead. Path 2 (prop
   broken at line 50"). FIXED the same day: `polar::event_log::EventLog::open` takes an exclusive lock on the log's file
   before it replays and holds it while open (`EventLogError::Held` for a second opener; the operating system lets go
   of it when the holder ends), and the ledger waits for it up to 90 s (`ledger::open_log`, `LEDGER_LOCK_WAIT`). The
-  broken ledger on sandbox-local was not repaired: the cluster was reset (the maintainer's choice).
+  broken ledger on sandbox-local was not repaired: the cluster was reset (the maintainer's choice). And the drain itself
+  (the maintainer: a draining agent stops taking anything and shuts down under control): it let go only of the 13
+  request topics, so cert-issuer's record answers, the held offers, the authority snapshot requests and its own timers
+  went on, and wrote the ledger, until the window ended. Now `begin_drain` lets go of every topic it subscribes to (a
+  test ties the list to its declared `TOPICS`), stops the record asker and the held-request voucher, and the
+  supervisor drops what it would otherwise do or answer (`dropped_while_draining`), on both ways a drain starts.
+- [ ] **A flaky test: `authority_judge::tests::through_the_configuration_actor_a_refused_policy_leaves_the_one_in_force`.**
+  It fails about one full `cargo test -p credentials-agent-consumer` in three, never alone (5 of 5): the second
+  `submit` returns an error, which is the configuration handle's 5 s call timeout (`CALL_TIMEOUT`,
+  `polar-agent-builder/src/configuration.rs:65`) running out while the suite's property tests load the machine. Seen
+  2026-10-27, and as often at `1b00dfa1`, before that day's changes, so it is not theirs. Not fixed, and not weakened.
 
 - [x] The two credentials charts carry their shutdown numbers by hand (`infra/layers/2-services/credentials-agent/deployment.dhall`: consumer budget 50 s, grace 60 s; `observer.dhall`: observer 40 s and 50 s), until they move to the catalog, where both numbers are derived from one place. Until then nothing ties them to what the Rust code declares (`SHUTDOWN_BUDGET` in each supervisor) except the builder's startup check, which fails the pod, not the render. The catalog entries in the credentials pair remove the problem; a preflight check (see the health-rules item under the hygiene section) would also catch it before then. Found 2026-10-07. DONE 2026-10-09: the charts are gone; both numbers come from the agents' scaffolds (consumer 50 s, observer 40 s) and the grace period is derived
 - [ ] Admin `reissue` action: revoke old cert, return account to pending with the same `account_id`, holder reruns `claim` (provisioning an existing username is refused today: `AccountAlreadyExists`)
