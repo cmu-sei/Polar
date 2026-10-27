@@ -671,6 +671,13 @@ Principle: declare each environment variable once, with its type, default, docum
   closed 2026-10-27: the daemon signs once for a connection, at about 320,000 a second, and the broker's handshake rate
   holds with it; the benches stay as measures (`key-custody.md`, "Step 6"). Next: a fresh sandbox-local (step 7);
   revocation (step 5) before or after.
+- [ ] The Cassini load harness with the custody daemons (wanted by the maintainer, 2026-10-27; not yet): run
+  `infra/load-harness.nu` (`src/agents/cassini/test`) on a target with custody on, its producers and sinks signing
+  through their pods' daemons, and compare with the key-file baseline (`broker-baseline.md`). The harness workloads are
+  the `agent` kind (`infra/config/workloads/cassini-harness.nuon`), so their rendered Jobs carry the sidecar, and
+  `job_for` copies the pod untouched apart from its name, labels and ConfigMap; never run so. To check: the Jobs
+  complete with a native sidecar running, the log reading (`-c` for each container) skips the daemon's container, and
+  the renewal rule's five minutes per pod do not slow a plan's runs.
 - [ ] The broker at 256 connections at once (found 2026-10-27, by the storm bench, `cassini/broker/tests/storm.rs`):
   with key files and with the daemon alike, a p99 handshake of 1.0 to 1.1 s, a TCP connection retried after its SYN
   went unanswered, some rounds at 250 a second, the host's `somaxconn` and SYN backlog at 4,096. At 64 at once the p99
