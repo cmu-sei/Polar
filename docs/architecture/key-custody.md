@@ -706,6 +706,38 @@ The plan:
    task spawned for each request in the daemon; its lock; the client's eight idle connections; the broker signing on
    its Tokio workers.
 
+*Built (2026-10-27): the storm bench, and its first figures* (precisionws, i9-13950HX, 24 threads; release builds;
+`polar-custody/tests/bench.rs`, `the_daemon_s_cost_at_each_concurrency_of_the_storm`, and
+`cassini/broker/tests/storm.rs`; both ignored by default, each asserting its criterion after printing its table).
+
+- *The first criterion is missed, as it was put.* Added at p99 over in-process signing at the same concurrency, over
+  four runs:
+  - 1 caller: 0 to 21 µs;
+  - 8 callers: 154 to 275 µs;
+  - 32 callers: 216 to 305 µs;
+  - 128 callers: 1.1 to 7.5 ms.
+
+  The daemon's rate rises the while, to about 320,000 signatures a second at 32 and 128 callers.
+- *What the figures point at.* The bench is closed-loop: each caller asks again the moment it is answered, so it holds
+  the daemon at its capacity, and the time is queueing. At 8 callers and 165,000 a second, Little's law gives 48 µs a
+  signature, and the median measured is 45 µs. In process the same threads sign in parallel on 24 cores with no queue
+  between them, so "the same concurrency" is not the same load. Two checks, put back afterwards:
+  - *The client's pool* of eight idle connections raised to 256: much the same (190 µs at 8 callers, 1.4 ms at 128),
+    so it is not the cause.
+  - *The daemon on one thread* in place of a worker for each core: worse (capacity about 55,000 a second, 780 µs at
+    32), so its multithreaded runtime is what gives the capacity, and the hops between threads cost less than they
+    give.
+- *The second criterion holds, within the bench's noise.* The broker's rate with the daemon's key, as a share of its
+  rate with a key file:
+  - 1 at once: 102 to 172%;
+  - 16 at once: 80 to 101%, two rounds of about 1.5 ms where one slow round moves the median;
+  - 64 at once: 100 to 111%.
+
+  The p99 of a handshake is no worse with the daemon (3.2 to 3.4 ms at 64, against 7 to 31 ms with key files).
+- *At 256 at once both break alike,* the daemon nothing to do with it: a p99 of 1.0 to 1.1 s, a TCP connection retried
+  after its SYN went unanswered, and some rounds at 250 a second, with the host's `somaxconn` and SYN backlog at 4,096.
+  The broker's accepting at that rate is a finding of its own, apart from custody.
+
 *Decided (the maintainer, 2026-10-27): (a), the storm bench is the gate of record,* run in release before a custody
 release; the cluster's storm at step 7 confirms it under real pods and cgroups. The question, as it was put: (a) the
 bench now, the cluster confirming; (b) the cluster's storm alone, the gate waiting for step 7; (c) the bench alone.

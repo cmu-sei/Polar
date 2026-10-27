@@ -91,14 +91,14 @@ pub async fn daemon(ca: &TestCa, callers: Callers) -> Daemon {
 
 /// A daemon serving `callers`, trusting `ca`, on a thread and runtime of its own, as it is a process of its own in a pod:
 /// a server that signs in its handshake blocks the worker it runs on, and a daemon sharing its runtime may be waiting
-/// for that worker.
+/// for that worker. Its runtime is the binary's (`#[tokio::main]`: a worker for each core).
 pub fn daemon_apart(ca: &TestCa, callers: Callers) -> Daemon {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("custody.sock");
     let (ready, bound) = std::sync::mpsc::channel();
     let (path, ca_pem) = (socket.clone(), ca.pem.clone());
     std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap();
