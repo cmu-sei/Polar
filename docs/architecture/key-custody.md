@@ -395,7 +395,7 @@ The plan:
 5. *Not changed:* the charts (step 4 points `GRAPH_CLIENT_KEY` at the daemon), `polar-test-graph`, and the `ace`
    job's own certificate.
 
-## Degraded operation, the plan (2026-10-27, items 1 to 3 cleared by the maintainer)
+## Degraded operation, the plan (2026-10-27, items 1 to 3 cleared by the maintainer, and built)
 
 The maintainer: Polar may use its own builds of Neo4j and neo4rs, but there must be a degraded way to run for a
 deployment that cannot use what we build. What the daemon's whole path rests on, and what each piece's absence costs:
@@ -554,6 +554,46 @@ role is still `NotPermitted`. A refused certificate does not seal. Tests: an ins
 refused certificate not sealing, and a property, that once installed nothing any caller asks changes the slot's key or
 certificate. The test that a new key drops the old certificate goes with the rule. The mutation that drops the seal
 is caught by both.
+
+*Built (2026-10-27): the catalog and the switch* (degraded operation, item 2).
+- *The switch:* `cluster.nuon` `custody: { enabled: true }`, a target's `cluster` overriding it; the kind's and entry's
+  `custody`, true for `agent` and `service`, false for `ca`.
+- *The resolver* (`infra/resolve.nu`, `custody_of`):
+  - custody `--cert`s;
+  - the key variables left out (`key_of` in `capabilities.nuon`);
+  - the socket's volume in the three containers, and `POLAR_CUSTODY_SOCKET` in the document and in polar-init;
+  - two certificates of one type refused (`rules.nu`, `custody_cert_problems`);
+  - the record's `custody`;
+  - the daemon's image listed by `resolve.nu images`.
+- *The template* (`schema/agent.dhall`, `agent-spec.dhall`): the daemon as a native sidecar before polar-init, UID
+  1001, group 1000, `IPC_LOCK` alone, with the socket and the pinned CA mounted; polar-init with
+  `Constants.custodyClientEnv`, no `TLS_CLIENT_KEY` (`functions.makePolarInitContainerWith`).
+- *Off is as before:* with the switch off, `sandbox-local`, `local` and `local-minimal` render byte for byte what they
+  rendered before the change, checked against a render taken first. On, all three render.
+- *Found on the way:*
+  - *The scheduler observer clones with the `git` command,* whose libcurl reads `POLAR_SCHEDULER_GIT_CLIENT_KEY` from
+    a file, so its entry says `custody: false` until an in-pod tunnel signs for it ("Degraded operation", item 4). It
+    is the one pod of the catalog on key files. `polar-sign`, which also runs `git`, is run by people.
+  - *The images step would have refused the render.* `up.nu` prepares the images `resolve.nu images` lists and refuses
+    a render naming another, and the list did not have the daemon's: it does now.
+  - *`render-catalog.nu --only`* takes a comma-separated string. A list cannot be given to a script from a shell, as
+    `remaining-work.md` had recorded.
+  - *`infra/tests/resolve.nu` takes a scaffold directory already given,* so it can run without a cluster, from the
+    workspace's own binaries' `--scaffold`. The four tests that run the agents' own `--check` still need one.
+- *Tests (`infra/tests/resolve.nu`, `rules.nu`):*
+  - a pod's certificates, variables and volumes under the daemon;
+  - the rendered pod: the sidecar first, its user, group and capability, the socket shared, and polar-init without the
+    key;
+  - the broker's and the git server's keys;
+  - cert-issuer and the scheduler observer without the daemon;
+  - a target with it off;
+  - the daemon's image listed;
+  - one certificate of each type.
+  
+  The broker's and the graph agents' tests now check both modes. 52 of 56 pass offline; the 4 that need a cluster are
+  as before.
+- *Mutations caught:* the key variables kept, the certificates left `ecdsa-p256`, the sidecar not a sidecar, the
+  daemon's image unlisted.
 
 *Built (2026-10-27): the image.* `src/agents/polar-custody/package.nix` and `container.nix`, as `polar-init`'s:
 - the daemon alone, without a CA bundle or OpenSSL, since the CA it trusts is the pod's, mounted;

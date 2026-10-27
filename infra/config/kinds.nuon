@@ -76,6 +76,10 @@
 
     # The projected token polar-init presents to cert-issuer.
     sa_token: { volume: "sa-token", path: "/workspace/token", expiration_secs: 3600 }
+
+    # Whether the pod's keys are the custody daemon's, when the cluster has it on (cluster.nuon, `custody`). A workload
+    # whose code can only read a key file sets it false.
+    custody: true
   }
 
   # A service that is not a Cassini client: the broker itself. The same pod, health, shutdown and
@@ -94,5 +98,7 @@
     # Not pinned-ca: it is the CA, and has no polar-init.
     needs: ["tracing"]
     fs_group: 1000
+    # It makes its own key and signs itself its client certificate: the daemon is not its (key-custody.md, step 2).
+    custody: false
   }
 }

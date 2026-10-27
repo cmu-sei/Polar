@@ -56,6 +56,23 @@ const CONFIG = ($INFRA | path join "config")
 
 const DEFAULT_TARGET = "local-minimal"
 
+# The custody daemon's place in a pod (docs/architecture/key-custody.md, step 4): its socket, on a volume the pod's
+# containers share; the CA it judges certificates by (the pinned-ca capability's, which every agent and service has);
+# its own UID, and the group it shares the socket with; and polar-init's and the workload's UID, which is one
+# (`Constants.DropAllCapSecurityContext`), since the escrow key's hand-off through the user keyring needs it.
+const CUSTODY = {
+    volume: "polar-custody"
+    dir: "/run/polar-custody"
+    socket: "/run/polar-custody/custody.sock"
+    ca_cert: "/etc/polar-ca/ca.pem"
+    ca_dir: "/etc/polar-ca"
+    ca_volume: "polar-ca"
+    daemon_uid: 1001
+    group: 1000
+    installer_uid: 1000
+    workload_uids: "1000"
+}
+
 # ── Loading ──────────────────────────────────────────────────────────────────
 
 def target_config [target: string] {
@@ -277,6 +294,12 @@ def issuance_record [w: record, target: string, kinds: record] {
 }
 
 # The images a workload's pod runs, as the resolved spec names them: its own, and its init container's.
+# Whether a pod's keys are the custody daemon's: the cluster has it on, and the workload's kind and entry allow it
+# (docs/architecture/key-custody.md, step 4).
+def custody_of [cluster: record, spec: record] {
+    ($cluster.custody?.enabled? | default false) and ($spec.custody? | default false)
+}
+
 def images_of [images: list, cluster: record, spec: record, name: string] {
     {
         image: (image_ref $images $cluster $spec.image $name)
@@ -319,6 +342,8 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     # scaffold and the entry says what else it is provided.
     let provided = (($entry.provides? | default []) ++ ($ov.provides? | default []))
     let needs = ($kind.needs ++ (requires_of $scaffold) ++ $provided | uniq)
+
+    let custody = (custody_of $cluster $spec)
 
     # Services whose certificates the health check still watches but that polar-init does not wait
     # for before the workload starts: one that must be able to start, and serve, while they are down.
@@ -366,7 +391,9 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
             $init_mounts = ($init_mounts | append { name: $c.volume, path: $c.dir, from: $n })
             let cert_kind = ($c.kind? | default "client")
             let san = (if ($c.san? | is-empty) { "" } else { subst $c.san $vars $name })
-            $certs = ($certs | append { spec: $"($cert_kind):($c.dir):ecdsa-p256:($san)", from: $n })
+            # The daemon makes the key in the slot of the certificate's type, and keeps it; otherwise polar-init makes it.
+            let algorithm = (if $custody { "custody" } else { "ecdsa-p256" })
+            $certs = ($certs | append { spec: $"($cert_kind):($c.dir):($algorithm):($san)", from: $n })
             # The files the health check watches for expiry: the certificate, and whatever else the
             # capability says (the broker watches the CA's as well).
             for file in ($c.watch? | default ["cert.pem"]) {
@@ -382,8 +409,9 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
             $init_mounts = ($init_mounts | append { name: (subst $m.name $vars $name), path: (subst $m.path $vars $name), from: $n })
         }
 
-        # pod: what the agent container gets.
+        # pod: what the agent container gets. A key's variable (`key_of`) is left out when the daemon holds the key.
         for e in ($cap.pod.env? | default []) {
+            if $custody and ($e.key_of? | is-not-empty) { continue }
             $env_list = ($env_list | append (env_entry $e $vars $n $name))
         }
         for v in ($cap.pod.volumes? | default []) {
@@ -407,6 +435,19 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         for r in ($cap.resources.cluster_roles? | default []) {
             $cluster_roles = ($cluster_roles | append { name: (subst $r.name $vars $name), rules: $r.rules, from: $n })
         }
+    }
+
+    # The daemon's socket, shared by it, polar-init and the workload; the workload and polar-init are told where it is.
+    if $custody {
+        let problems = (custody_cert_problems ($certs | get spec))
+        if ($problems | is-not-empty) {
+            error make { msg: $"($name): ($problems | str join '; ')" }
+        }
+        $volumes = ($volumes | append { name: $CUSTODY.volume, secret: null, audience: null, from: "custody" })
+        $mounts = ($mounts | append { name: $CUSTODY.volume, path: $CUSTODY.dir, read_only: false, from: "custody" })
+        $init_mounts = ($init_mounts | append { name: $CUSTODY.volume, path: $CUSTODY.dir, from: "custody" })
+        $env_list = ($env_list | append (env_entry { name: "POLAR_CUSTODY_SOCKET", value: $CUSTODY.socket } $vars "custody" $name))
+        $init_env = ($init_env | append (env_entry { name: "POLAR_CUSTODY_SOCKET", value: $CUSTODY.socket } $vars "custody" $name))
     }
 
     # What the cluster supplies (its administrators, once the admin flow has made them) replaces a same-named entry of the
@@ -567,6 +608,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         ports: $ports
         dep_checks: ($deps | where {|d| not ($d.service in $no_start_wait) } | get endpoint)
         certs: ($certs | get spec)
+        custody: (if $custody { $CUSTODY | insert image (image_ref $images $cluster "polar-custody" $name) } else { null })
         resources: { cluster_roles: ($cluster_roles | reject from), sa_token_secrets: (if $sa_secret == null { [] } else { [$sa_secret] }), pvcs: $pvcs, services: $exposed }
         config_map: $config_map
         config_problems: $config_problems
@@ -590,7 +632,7 @@ def for_template [r: record] {
         | update init_env { reject from }
     )
     if $r.kind == "ca" {
-        $common | reject polar_init_image cert_issuer_url init_mounts init_env dep_checks certs
+        $common | reject polar_init_image cert_issuer_url init_mounts init_env dep_checks certs custody
     } else {
         $common | reject fs_group | update volumes { reject mode }
     }
@@ -860,7 +902,11 @@ def "main images" [--target: string = $DEFAULT_TARGET] {
     let kinds = (open ($CONFIG | path join "kinds.nuon"))
     let images = (open ($INFRA | path join "images.nuon"))
     all_workloads $target
-    | each {|w| images_of $images $cluster (spec_of $w.name $target $kinds).spec $w.name | values }
+    | each {|w|
+        let spec = (spec_of $w.name $target $kinds).spec
+        let daemon = (if (custody_of $cluster $spec) { [(image_ref $images $cluster "polar-custody" $w.name)] } else { [] })
+        (images_of $images $cluster $spec $w.name | values) ++ $daemon
+    }
     | flatten | uniq | sort | to json --raw | print
 }
 

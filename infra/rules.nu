@@ -150,6 +150,18 @@ export def issuer_problems [records: list, enforced: bool]: nothing -> record {
 
 # What a workload's certificates carry of its scaffold: the declared and family topics (`topics`), not the implied
 # ones, which follow from its identity and its groups; and its `groups`, which decide those. Sorted, each once.
+# What is wrong with a pod's certificates when its keys are the custody daemon's: it holds one key of each type, client
+# and server, so two certificates of one type cannot both be its (docs/architecture/key-custody.md, step 4). `specs` are
+# polar-init's `--cert` values, `type:dir:algorithm:names`; only those whose algorithm is `custody` count.
+export def custody_cert_problems [specs: list<string>]: nothing -> list<string> {
+    let custody = ($specs | each {|c| $c | split row ":" } | where {|p| ($p | get -o 2) == "custody" })
+    $custody | group-by {|p| $p.0 } | items {|kind, certs|
+        if ($certs | length) > 1 {
+            $"two ($kind) certificates under the custody daemon \(($certs | each {|p| $p.1 } | str join ', ')\): it holds one key of each type"
+        }
+    } | compact
+}
+
 def own_topics [r: record]: nothing -> record {
     let own = ($r.topics? | default [] | where {|t| $t.from != "implied" })
     {

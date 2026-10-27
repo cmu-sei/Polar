@@ -44,6 +44,18 @@ def has [problems: list<string>, needle: string] {
 
 def main [] {
     let tests = {
+        # docs/architecture/key-custody.md, step 4: the daemon holds one key of each type, so a pod given it has at most one
+        # certificate of each.
+        "a pod given the custody daemon has at most one certificate of each type": {
+            assert equal (custody_cert_problems ["client:/etc/tls/certs:custody:" "server:/etc/tls/git-server:custody:git.svc"]) []
+            let two = (custody_cert_problems ["client:/etc/tls/certs:custody:" "client:/etc/neo4j-client-tls:custody:"])
+            assert equal ($two | length) 1
+            assert ($two.0 | str contains "/etc/tls/certs") $two.0
+            assert ($two.0 | str contains "/etc/neo4j-client-tls") $two.0
+            # Key files are not the daemon's: as many as the pod asks for.
+            assert equal (custody_cert_problems ["client:/a:ecdsa-p256:" "client:/b:ecdsa-p256:"]) []
+        }
+
         "a Job that replaces pods only after they are gone passes": {
             let docs = [{ kind: "Job", metadata: { name: "kube-consumer" }, spec: { podReplacementPolicy: "Failed" } }]
             assert equal (job_replacement_problems $docs) []

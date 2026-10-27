@@ -43,6 +43,10 @@
     scaffold_package: "polar-scheduler-observer"
     config: "document"
     provides: ["working-checkout"]
+    # It clones with the git command, whose libcurl reads the client key from a file
+    # (POLAR_SCHEDULER_GIT_CLIENT_KEY, below), so its keys stay files until an in-pod tunnel signs for it
+    # (docs/architecture/key-custody.md, "Degraded operation", item 4).
+    custody: false
     env: [
       # The schedules repository on the Polar git server, read with the observer's own workload
       # certificate (the same one it presents to Cassini). The server's access list names this

@@ -162,6 +162,71 @@ let render =
                 Prelude.List.map T.MountEntry kubernetes.VolumeMount.Type toMount v.mounts
               # functions.ProxyMount v.proxy_ca_cert
 
+        -- The custody daemon, when the pod's keys are its (docs/architecture/key-custody.md, step 4): a native sidecar,
+        -- an init container that runs for the pod's whole life, declared before polar-init so it starts first. Its own
+        -- UID; the pod's group, which it shares its socket with; every capability dropped but IPC_LOCK, so its memory
+        -- locks.
+        let custodySidecar =
+              merge
+                { None = [] : List kubernetes.Container.Type
+                , Some =
+                    λ(c : T.Custody) →
+                      [ kubernetes.Container::{
+                        , name = "polar-custody"
+                        , image = Some c.image
+                        , imagePullPolicy = Some v.pull_policy
+                        , restartPolicy = Some "Always"
+                        , securityContext = Some kubernetes.SecurityContext::{
+                          , runAsUser = Some c.daemon_uid
+                          , runAsGroup = Some c.group
+                          , runAsNonRoot = Some True
+                          , capabilities = Some kubernetes.Capabilities::{
+                            , drop = Some [ "ALL" ]
+                            , add = Some [ "IPC_LOCK" ]
+                            }
+                          }
+                        , env = Some
+                          [ kubernetes.EnvVar::{
+                            , name = "POLAR_CUSTODY_SOCKET"
+                            , value = Some c.socket
+                            }
+                          , kubernetes.EnvVar::{
+                            , name = "POLAR_CUSTODY_CA_CERT"
+                            , value = Some c.ca_cert
+                            }
+                          , kubernetes.EnvVar::{
+                            , name = "POLAR_CUSTODY_INSTALLER_UID"
+                            , value = Some (Natural/show c.installer_uid)
+                            }
+                          , kubernetes.EnvVar::{
+                            , name = "POLAR_CUSTODY_WORKLOAD_UIDS"
+                            , value = Some c.workload_uids
+                            }
+                          ]
+                        , volumeMounts = Some
+                          [ kubernetes.VolumeMount::{
+                            , name = c.volume
+                            , mountPath = c.dir
+                            }
+                          , kubernetes.VolumeMount::{
+                            , name = c.ca_volume
+                            , mountPath = c.ca_dir
+                            , readOnly = Some True
+                            }
+                          ]
+                        }
+                      ]
+                }
+                v.custody
+
+        -- polar-init's client environment: with the daemon, no key file.
+        let clientEnv =
+              merge
+                { None = Constants.commonClientEnv
+                , Some = λ(_ : T.Custody) → Constants.custodyClientEnv
+                }
+                v.custody
+
         let podSpec =
               kubernetes.PodSpec::{
               , imagePullSecrets = Some v.pull_secrets
@@ -171,8 +236,10 @@ let render =
               , restartPolicy = Some v.restart_policy
               , terminationGracePeriodSeconds = Some v.termination_grace_secs
               , initContainers = Some
-                [ functions.makePolarInitContainer
-                    v.polar_init_image
+                (   custodySidecar
+                  # [ functions.makePolarInitContainerWith
+                        clientEnv
+                        v.polar_init_image
                     v.pull_policy
                     v.sa_token_volume
                     v.cert_issuer_url
@@ -191,7 +258,8 @@ let render =
                     )
                     v.dep_checks
                     v.certs
-                ]
+                    ]
+                )
               , containers =
                 [ kubernetes.Container::{
                   , name = v.name

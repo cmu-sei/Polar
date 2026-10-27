@@ -29,7 +29,9 @@
 # Each capability answers every facet in facets.nuon (checked by
 # `nu infra/resolve.nu check`):
 #
-#   pod         env: [{ name, value | secret+key }]
+#   pod         env: [{ name, value | secret+key, key_of? }]
+#                 key_of: "client" or "server", for a key's file: left out when the
+#                 custody daemon holds the pod's keys (cluster.nuon, `custody`)
 #               volumes: [{ name, secret? | claim? | config_map? }]   (none of them = emptyDir)
 #                 a secret volume may list items: [{ key, path }], the keys it holds and their files
 #               mounts: [{ name, path, read_only }]
@@ -57,7 +59,8 @@
       env: [
         { name: "TLS_CA_CERT",         value: "/etc/tls/certs/ca.pem" }
         { name: "TLS_CLIENT_CERT",     value: "/etc/tls/certs/cert.pem" }
-        { name: "TLS_CLIENT_KEY",      value: "/etc/tls/certs/key.pem" }
+        # The key of the client certificate: left out when the custody daemon holds it.
+        { name: "TLS_CLIENT_KEY",      value: "/etc/tls/certs/key.pem", key_of: "client" }
         { name: "BROKER_ADDR",         value: "{cassini.addr}" }
         { name: "CASSINI_SERVER_NAME", value: "{cassini.dns}" }
       ]
@@ -79,7 +82,7 @@
         { name: "GRAPH_USER",        value: "neo4j" }
         { name: "GRAPH_PASSWORD",    secret: "polar-graph-pw", key: "secret" }
         { name: "GRAPH_CLIENT_CERT", value: "/etc/tls/certs/cert.pem" }
-        { name: "GRAPH_CLIENT_KEY",  value: "/etc/tls/certs/key.pem" }
+        { name: "GRAPH_CLIENT_KEY",  value: "/etc/tls/certs/key.pem", key_of: "client" }
         { name: "GRAPH_CA_CERT",     value: "/etc/tls/certs/ca.pem" }
       ]
     }
@@ -191,7 +194,7 @@
     pod: {
       env: [
         { name: "TLS_SERVER_CERT_CHAIN",   value: "/etc/tls/certs/cert.pem" }
-        { name: "TLS_SERVER_KEY",          value: "/etc/tls/certs/key.pem" }
+        { name: "TLS_SERVER_KEY",          value: "/etc/tls/certs/key.pem", key_of: "server" }
         { name: "TLS_CA_CERT",             value: "/etc/tls/certs/ca.pem" }
         { name: "CASSINI_BIND_ADDR",       value: "0.0.0.0:{cassini.port}" }
         { name: "CASSINI_SHUTDOWN_TOKEN",  secret: "cassini-shutdown-token", key: "token" }
@@ -212,7 +215,7 @@
     pod: {
       env: [
         { name: "POLAR_GIT_SERVER_CERT",      value: "/etc/tls/git-server/cert.pem" }
-        { name: "POLAR_GIT_SERVER_KEY",       value: "/etc/tls/git-server/key.pem" }
+        { name: "POLAR_GIT_SERVER_KEY",       value: "/etc/tls/git-server/key.pem", key_of: "server" }
         { name: "POLAR_GIT_SERVER_CA_CERT",   value: "/etc/tls/git-server/ca.pem" }
         { name: "POLAR_GIT_SERVER_PORT",      value: "{polar-git-server.port}" }
         { name: "POLAR_GIT_SERVER_REPO_ROOT", value: "/var/lib/{workload}/repos" }

@@ -236,7 +236,10 @@ let credentialsAgentIssuerEnv =
 
 -- The escrow bootstrap runs only when `extraEnv` asks for it (POLAR_INIT_ESCROW_BOOTSTRAP): the
 -- catalog's `encryption` capability does, for an agent that needs encryption, and no hand chart does.
-let makePolarInitContainer =
+-- As `makePolarInitContainer`, the client's environment given: `Constants.commonClientEnv` with a key file, or
+-- `Constants.custodyClientEnv` when the key is the custody daemon's (docs/architecture/key-custody.md, step 4).
+let makePolarInitContainerWith =
+      \(clientEnv : List kubernetes.EnvVar.Type) ->
       \(polarInitImage : Text) ->
       \(imagePullPolicy : Text) ->
       \(saTokenVolName : Text) ->
@@ -261,7 +264,7 @@ let makePolarInitContainer =
               -- server's, not cert-issuer's.
               , kubernetes.EnvVar::{ name = "KUBERNETES_SA_TOKEN",        value = Some tokenPath      }
               ]
-            # Constants.commonClientEnv
+            # clientEnv
             # extraEnv
           )
         , args = Some
@@ -274,6 +277,9 @@ let makePolarInitContainer =
           )
         }
 
+
+let makePolarInitContainer = makePolarInitContainerWith Constants.commonClientEnv
+
 in  { makeGraphEnv
     , makeOpaqueSecret
     , makeDeployment
@@ -284,6 +290,7 @@ in  { makeGraphEnv
     , ProxyEnv
     , GraphProxyEnv
     , makePolarInitContainer
+    , makePolarInitContainerWith
     , noEnv
     , credentialsAgentIssuerEnv
     }

@@ -54,6 +54,12 @@
   # list is an error. The cert-issuer chart's `mtlsEnforceBootstrap` is rendered from this.
   issuance: { floor_enforced: false }
 
+  # The custody daemon (docs/architecture/key-custody.md): in every pod whose kind and workload allow it, a native
+  # sidecar holds the pod's keys and signs its TLS 1.3 handshakes, so no key is ever a file in the pod. A target that
+  # cannot run it (our image, our neo4rs, a Neo4j that offers TLS 1.3) sets it off and runs on key files, as before
+  # custody: the key then lies in the pod's volume, where a compromised workload can copy it ("Degraded operation").
+  custody: { enabled: true }
+
   # Persistent volume claims a workload's capabilities ask for: the storage class the cluster
   # provides and how much each claim asks for.
   storage: { class: "managed-csi", size: "1Gi" }

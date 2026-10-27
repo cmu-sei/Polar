@@ -102,6 +102,19 @@ def with_target [config: record, body: closure] {
     }
 }
 
+# The pod `render-catalog.nu` renders for `name` under `target`, read back from its output.
+def pod_of [name: string, target: string] {
+    let out = (mktemp --directory)
+    let r = (do { ^nu ($INFRA | path join "render-catalog.nu") $target $out --only $name } | complete)
+    if $r.exit_code != 0 {
+        rm -rf $out
+        error make { msg: $"the render of ($name) failed: ($r.stderr | lines | last 5 | str join '; ')" }
+    }
+    let docs = (open --raw ($out | path join $"($name).yaml") | split row "\n---\n" | each {|d| $d | from yaml })
+    rm -rf $out
+    $docs | where {|d| ($d.kind? | default "") in ["Job" "Deployment"] } | first | get spec.template.spec
+}
+
 def init_env_value [r: record, name: string] {
     $r.init_env | where name == $name | get -o 0.value
 }
@@ -112,21 +125,103 @@ def main [] {
     # The images are asked of a registry the cluster has: the one in the cluster of POLAR_TEST_REGISTRY_TARGET (default
     # local-minimal), through its forward, as up.nu does; `local` names a registry on the host. An address already in the
     # environment wins.
-    let registry_target = ($env.POLAR_TEST_REGISTRY_TARGET? | default "local-minimal")
-    if (cluster-registry settings_of (cluster-registry cluster_of $registry_target)) != null {
-        if ($env.POLAR_REGISTRY? | default "" | is-empty) { $env.POLAR_REGISTRY = (cluster-registry ensure $registry_target) }
-        if ($env.POLAR_NODE_REGISTRY? | default "" | is-empty) { $env.POLAR_NODE_REGISTRY = (node_registry $registry_target) }
-    }
-    let scaffolds = (mktemp --directory)
-    let collected = (do { ^nu $RESOLVER collect-scaffolds $scaffolds --target local } | complete)
-    if $collected.exit_code != 0 {
-        rm -rf $scaffolds
-        print -e $"cannot run: the agents could not be asked for their scaffolds \(this needs a cluster, KUBECONFIG, and their images in the registry\):\n($collected.stderr | lines | last 8 | str join "\n")"
-        exit 1
+    # Scaffolds already given (POLAR_SCAFFOLD_DIR set, say from the workspace's own binaries' `--scaffold`) are used as
+    # they are, and left in place.
+    let preset = ($env.POLAR_SCAFFOLD_DIR? | default "")
+    let scaffolds = if ($preset | is-not-empty) { $preset } else {
+        let registry_target = ($env.POLAR_TEST_REGISTRY_TARGET? | default "local-minimal")
+        if (cluster-registry settings_of (cluster-registry cluster_of $registry_target)) != null {
+            if ($env.POLAR_REGISTRY? | default "" | is-empty) { $env.POLAR_REGISTRY = (cluster-registry ensure $registry_target) }
+            if ($env.POLAR_NODE_REGISTRY? | default "" | is-empty) { $env.POLAR_NODE_REGISTRY = (node_registry $registry_target) }
+        }
+        let collecting = (mktemp --directory)
+        let collected = (do { ^nu $RESOLVER collect-scaffolds $collecting --target local } | complete)
+        if $collected.exit_code != 0 {
+            rm -rf $collecting
+            print -e $"cannot run: the agents could not be asked for their scaffolds \(this needs a cluster, KUBECONFIG, and their images in the registry\):\n($collected.stderr | lines | last 8 | str join "\n")"
+            exit 1
+        }
+        $collecting
     }
     $env.POLAR_SCAFFOLD_DIR = $scaffolds
 
     let tests = {
+        # docs/architecture/key-custody.md, step 4: with the daemon, a pod's keys are the daemon's, and none is a file.
+        "with the custody daemon a pod's certificates are the daemon's and no key variable is given": {
+            let r = (resolve "kube-observer")
+            assert ($r.custody != null) "the daemon is in the pod"
+            assert ($r.certs | all {|c| $c | str contains ":custody:" }) $"($r.certs)"
+            assert equal (env_value $r "TLS_CLIENT_KEY") null
+            assert equal (env_value $r "POLAR_CUSTODY_SOCKET") "/run/polar-custody/custody.sock"
+            assert equal (init_env_value $r "POLAR_CUSTODY_SOCKET") "/run/polar-custody/custody.sock"
+            assert ($r.volumes | any {|v| $v.name == "polar-custody" })
+            assert ($r.mounts | any {|m| $m.path == "/run/polar-custody" })
+            assert ($r.init_mounts | any {|m| $m.path == "/run/polar-custody" })
+        }
+
+        "the custody daemon is a native sidecar before polar-init, apart, with IPC_LOCK alone": {
+            let pod = (pod_of "kube-observer" "local-minimal")
+            let init = ($pod.initContainers | get name)
+            assert equal $init ["polar-custody" "polar-init"]
+            let daemon = ($pod.initContainers | first)
+            assert equal $daemon.restartPolicy "Always"
+            assert equal $daemon.securityContext.runAsUser 1001
+            assert equal $daemon.securityContext.runAsGroup 1000
+            assert equal $daemon.securityContext.capabilities.drop ["ALL"]
+            assert equal $daemon.securityContext.capabilities.add ["IPC_LOCK"]
+            let daemon_env = ($daemon.env | reduce --fold {} {|e, acc| $acc | insert $e.name ($e.value? | default "") })
+            assert equal $daemon_env.POLAR_CUSTODY_SOCKET "/run/polar-custody/custody.sock"
+            assert equal $daemon_env.POLAR_CUSTODY_CA_CERT "/etc/polar-ca/ca.pem"
+            assert equal $daemon_env.POLAR_CUSTODY_INSTALLER_UID "1000"
+            assert equal $daemon_env.POLAR_CUSTODY_WORKLOAD_UIDS "1000"
+            let polar_init = ($pod.initContainers | get 1)
+            assert ($polar_init.env | where name == "TLS_CLIENT_KEY" | is-empty) "polar-init has no key file either"
+            for c in [$daemon $polar_init ($pod.containers | first)] {
+                assert ($c.volumeMounts | any {|m| $m.mountPath == "/run/polar-custody" }) $"($c.name) shares the socket"
+            }
+        }
+
+        "the broker's server key and the git server's two keys are the daemon's": {
+            let cassini = (resolve "cassini")
+            assert equal $cassini.certs ["server:/etc/tls/certs:custody:cassini-ip-svc.polar.svc.cluster.local"]
+            assert equal (env_value $cassini "TLS_SERVER_KEY") null
+            assert equal (env_value $cassini "POLAR_CUSTODY_SOCKET") "/run/polar-custody/custody.sock"
+            let git = (resolve_for "local" "polar-git-server")
+            assert equal ($git.certs | length) 2
+            assert ($git.certs | all {|c| $c | str contains ":custody:" }) $"($git.certs)"
+            assert equal (env_value $git "POLAR_GIT_SERVER_KEY" "local") null
+        }
+
+        "cert-issuer has no daemon, and a workload that says custody false keeps its key files": {
+            let ci = (resolve "cert-issuer")
+            assert equal ($ci.custody? | default null) null
+            # The scheduler observer clones with the git command, which reads its key from a file.
+            let s = (resolve "polar-scheduler-observer")
+            assert equal $s.custody null
+            assert ($s.certs | all {|c| $c | str contains ":ecdsa-p256:" })
+            assert equal (env_value $s "TLS_CLIENT_KEY") "/etc/tls/certs/key.pem"
+        }
+
+        # up.nu prepares the images `resolve.nu images` lists, and refuses a render naming one it did not.
+        "the images a target's catalog runs include the custody daemon's when its pods have one": {
+            let on = (^nu $RESOLVER images | from json)
+            assert ($on | any {|i| $i | str contains "/polar-custody:" }) $"($on)"
+            with_target { cluster: { custody: { enabled: false } }, workloads: {} } {|t|
+                let off = (^nu $RESOLVER images --target $t | from json)
+                assert ($off | all {|i| not ($i | str contains "/polar-custody:") }) $"($off)"
+            }
+        }
+
+        "a target with custody off renders every pod with key files, as before": {
+            with_target { cluster: { custody: { enabled: false } }, workloads: {} } {|t|
+                let r = (resolve_for $t "kube-observer")
+                assert equal $r.custody null
+                assert ($r.certs | all {|c| $c | str contains ":ecdsa-p256:" })
+                assert equal (env_value $r "TLS_CLIENT_KEY" $t) "/etc/tls/certs/key.pem"
+                assert equal (env_value $r "POLAR_CUSTODY_SOCKET" $t) null
+            }
+        }
+
         "the credentials agent is given the authority model: every workload of the target, by its one identity": {
             # The credentials agent as this workspace builds it (the images on the cluster may predate the model), and
             # every other agent as its image has it.
@@ -389,11 +484,20 @@ def main [] {
         }
 
         "the broker is given a server certificate for the Cassini service's name, read-only": {
+            # With the custody daemon (the default), its key the daemon's; on key files, its key a file beside it.
             let r = (resolve "cassini")
-            assert equal $r.certs ["server:/etc/tls/certs:ecdsa-p256:cassini-ip-svc.polar.svc.cluster.local"]
+            assert equal $r.certs ["server:/etc/tls/certs:custody:cassini-ip-svc.polar.svc.cluster.local"]
             assert ($r.mounts | any {|m| $m.name == "polar-certs" and $m.read_only })
             assert equal (env_value $r "TLS_SERVER_CERT_CHAIN") "/etc/tls/certs/cert.pem"
             assert equal (env_value $r "CASSINI_BIND_ADDR") "0.0.0.0:8080"
+            with_target { cluster: { custody: { enabled: false } }, workloads: {} } {|t|
+                let r = (resolve_for $t "cassini")
+                assert equal $r.certs ["server:/etc/tls/certs:ecdsa-p256:cassini-ip-svc.polar.svc.cluster.local"]
+                assert ($r.mounts | any {|m| $m.name == "polar-certs" and $m.read_only })
+                assert equal (env_value $r "TLS_SERVER_CERT_CHAIN" $t) "/etc/tls/certs/cert.pem"
+                assert equal (env_value $r "TLS_SERVER_KEY" $t) "/etc/tls/certs/key.pem"
+                assert equal (env_value $r "CASSINI_BIND_ADDR" $t) "0.0.0.0:8080"
+            }
         }
 
         "the broker's shutdown token is a secret the pod is given from a Secret": {
@@ -639,15 +743,30 @@ def main [] {
             # Two client certificates for one pod instance is what the credentials agent refuses (and a second
             # would revoke the first), and the second was the same identity and type with no extra names, so
             # Neo4j is shown the certificate the pod already has.
+            # With the custody daemon (the default), the key is the daemon's and neo4rs is handed its configuration; on
+            # key files, the key is the file beside the certificate.
             for n in [kube-consumer jira-processor polar-scheduler git-repo-processor credentials-agent] {
                 let r = (resolve $n)
-                assert equal $r.certs ["client:/etc/tls/certs:ecdsa-p256:"] $n
+                assert equal $r.certs ["client:/etc/tls/certs:custody:"] $n
                 assert ($r.volumes | where name == "neo4j-client-tls" | is-empty) $n
                 assert ($r.mounts | where name == "neo4j-client-tls" | is-empty) $n
                 assert ($r.init_mounts | where name == "neo4j-client-tls" | is-empty) $n
                 assert equal (env_value $r "GRAPH_CLIENT_CERT") "/etc/tls/certs/cert.pem" $n
-                assert equal (env_value $r "GRAPH_CLIENT_KEY") "/etc/tls/certs/key.pem" $n
+                assert equal (env_value $r "GRAPH_CLIENT_KEY") null $n
+                assert equal (env_value $r "POLAR_CUSTODY_SOCKET") "/run/polar-custody/custody.sock" $n
                 assert equal (env_value $r "GRAPH_CA_CERT") "/etc/tls/certs/ca.pem" $n
+            }
+            with_target { cluster: { custody: { enabled: false } }, workloads: {} } {|t|
+                for n in [kube-consumer jira-processor polar-scheduler git-repo-processor credentials-agent] {
+                    let r = (resolve_for $t $n)
+                    assert equal $r.certs ["client:/etc/tls/certs:ecdsa-p256:"] $n
+                    assert ($r.volumes | where name == "neo4j-client-tls" | is-empty) $n
+                    assert ($r.mounts | where name == "neo4j-client-tls" | is-empty) $n
+                    assert ($r.init_mounts | where name == "neo4j-client-tls" | is-empty) $n
+                    assert equal (env_value $r "GRAPH_CLIENT_CERT" $t) "/etc/tls/certs/cert.pem" $n
+                    assert equal (env_value $r "GRAPH_CLIENT_KEY" $t) "/etc/tls/certs/key.pem" $n
+                    assert equal (env_value $r "GRAPH_CA_CERT" $t) "/etc/tls/certs/ca.pem" $n
+                }
             }
         }
 
@@ -684,7 +803,7 @@ def main [] {
             { name: $t.name, error: $e.msg }
         }
     })
-    rm -rf $scaffolds
+    if ($preset | is-empty) { rm -rf $scaffolds }
 
     for r in $results {
         if $r.error == null {

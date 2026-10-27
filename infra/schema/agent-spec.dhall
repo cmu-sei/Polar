@@ -66,6 +66,23 @@ let Probe =
       , timeout_secs : Natural
       }
 
+-- The custody daemon's place in the pod (docs/architecture/key-custody.md, step 4): its image, its socket's volume
+-- and path, the CA it judges certificates by and that CA's volume, its UID and the group it shares the socket in, and
+-- the UIDs it serves.
+let Custody =
+      { image : Text
+      , volume : Text
+      , dir : Text
+      , socket : Text
+      , ca_cert : Text
+      , ca_dir : Text
+      , ca_volume : Text
+      , daemon_uid : Natural
+      , group : Natural
+      , installer_uid : Natural
+      , workload_uids : Text
+      }
+
 let Spec =
       { name : Text
       , kind : Text
@@ -97,6 +114,7 @@ let Spec =
       , ports : List Natural
       , dep_checks : List Text
       , certs : List Text
+      , custody : Optional Custody
       }
 
-in  { Spec, EnvEntry, VolumeEntry, MountEntry, InitMountEntry, Probe }
+in  { Spec, EnvEntry, VolumeEntry, MountEntry, InitMountEntry, Probe, Custody }

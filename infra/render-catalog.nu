@@ -27,7 +27,7 @@
 # <output_dir>/<name>.yaml. render.nu calls this after the charts.
 #
 #   nu infra/render-catalog.nu local-minimal manifests
-#   nu infra/render-catalog.nu local-minimal manifests --only [kube-observer]
+#   nu infra/render-catalog.nu local-minimal manifests --only kube-observer,kube-consumer
 #
 # Per workload:
 #   resolve.nu json <name>     the resolved record (pure; touches nothing)
@@ -73,7 +73,7 @@ def render_yaml [name: string, expr: string, schema_key: string, what: string] {
 def main [
     target: string
     output_dir: string
-    --only: list<string> = []
+    --only: string = ""  # comma-separated workload names: a list cannot be given to a script from a shell
 ] {
     for tool in [json-to-dhall dhall-to-yaml] {
         if (which $tool | is-empty) { fail $"($tool) is not on PATH \(it comes with the dhall-json package\)" }
@@ -81,6 +81,7 @@ def main [
 
     let resolver = ($INFRA | path join "resolve.nu")
     let names = (nu $resolver names --target $target | from json)
+    let only = ($only | split row "," | each {|n| $n | str trim } | where {|n| $n | is-not-empty })
     let selected = if ($only | is-empty) { $names } else { $names | where {|n| $n in $only } }
 
     mkdir $output_dir

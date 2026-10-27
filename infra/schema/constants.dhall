@@ -213,6 +213,24 @@ let commonClientEnv =
         }
       ]
 
+-- The client's environment when its key is the custody daemon's (docs/architecture/key-custody.md, step 4): all but
+-- TLS_CLIENT_KEY. The socket comes with the rest of the pod's custody settings.
+let custodyClientEnv =
+      [ kubernetes.EnvVar::{
+        , name = "TLS_CA_CERT"
+        , value = Some mtls.caCertPath
+        }
+      , kubernetes.EnvVar::{
+        , name = "TLS_CLIENT_CERT"
+        , value = Some mtls.certPath
+        }
+      , kubernetes.EnvVar::{ name = "BROKER_ADDR", value = Some cassiniAddr }
+      , kubernetes.EnvVar::{
+        , name = "CASSINI_SERVER_NAME"
+        , value = Some cassiniDNSName
+        }
+      ]
+
 -- When a Job replaces a pod. `Failed` waits until the old pod is fully gone. The default
 -- (`TerminatingOrFailed`) creates the replacement the moment the old pod starts terminating,
 -- so a deleted or evicted pod overlaps with its replacement for the whole drain. Every agent
@@ -257,6 +275,7 @@ in  { PolarNamespace
     , saTokenVolume
     , certVolumeMount
     , commonClientEnv
+    , custodyClientEnv
     , neo4jClientCertVolumeName
     , neo4jClientCertPath
     , neo4jClientSaTokenVolName

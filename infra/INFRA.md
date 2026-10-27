@@ -383,7 +383,10 @@ Read while planning cert-issuer's move into the catalog (`docs/architecture/cert
   image's digest, and on a cache miss runs `<image> --scaffold` in a pod on the cluster. `resolve.nu check` also runs
   each agent's `--check --config` there (`:211-221`). With the cluster down, `render.nu <target> --charts-into <dir>`
   renders the charts alone, and a full render works only when `POLAR_SCAFFOLD_DIR` already holds every scaffold.
-  `infra/tests/resolve.nu` needs the cluster; `rules.nu` and `charts.nu` need nothing.
+  `infra/tests/resolve.nu` collects them on the cluster, unless `POLAR_SCAFFOLD_DIR` is already set: then it uses that
+  directory and leaves it in place. The four tests that run the agents' own `--check` still need the cluster.
+  `rules.nu` and `charts.nu` need nothing. *Since 2026-10-27:* each agent binary prints its own scaffold
+  (`<binary> --scaffold`), so the workspace's builds give a scaffold directory without a cluster.
 - **Volumes.** A capability's `pod.volumes` entry is a Secret (with `items`), a claim, a ConfigMap or, with none of
   them, an emptyDir (`capabilities.nuon:32-50`). There is no `defaultMode`, and the pod has no `securityContext`
   (`agent.dhall:166-224`). `persistent-data` is a claim named `{workload}-data` at `/var/lib/{workload}`
@@ -397,6 +400,15 @@ Read while planning cert-issuer's move into the catalog (`docs/architecture/cert
 - **Health dependencies** come from `needs`: every dependency's endpoint is in `POLAR_HEALTH_DEP_ENDPOINTS`
   (`resolve.nu:436`, `:447`), which a rejuvenation waits on; `no_start_wait` only drops it from polar-init's checks
   (`:312`, `:532`).
+- **The custody daemon (2026-10-27; `docs/architecture/key-custody.md`, step 4).** With `cluster.nuon`'s
+  `custody.enabled` on, which is the default, and the kind's and entry's `custody` true (the `ca` kind's is false), the
+  resolver (`custody_of`) makes every `--cert` `custody`, leaves out each capability env entry marked `key_of`, adds the
+  socket's emptyDir in all three containers and `POLAR_CUSTODY_SOCKET` to the document and polar-init, refuses two
+  certificates of one type (`rules.nu`, `custody_cert_problems`), and gives the template the record `custody`. The
+  template renders the daemon as a native sidecar before polar-init, and polar-init's client environment without
+  `TLS_CLIENT_KEY` (`Constants.custodyClientEnv`, `functions.makePolarInitContainerWith`). `resolve.nu images` lists
+  the daemon's image for every pod that has one. A target with it off renders byte for byte what rendered before. A
+  workload whose code can only read a key file sets `custody: false` (the scheduler observer, whose `git` reads one).
 - **The floor** (`resolve.nu floor`) builds each workload's record from its spec and scaffold alone (`floor_record`,
   since 2026-10-23; it fully resolved every workload before, which cert-issuer's own resolve could not do without
   recursing) and writes, for a
