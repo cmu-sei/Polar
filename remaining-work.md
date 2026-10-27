@@ -665,6 +665,9 @@ Principle: declare each environment variable once, with its type, default, docum
   keyring, probed"). Step 3 built: `polar-init` takes the daemon's CSR on either path, judges the certificate against
   it, installs it and writes no `key.pem` (`--cert type:dir:custody:`). The renewal rule built 2026-10-27 (`deployments.md`,
   "The renewal rule"). Next: the catalog and the charts (step 4), after settling neo4rs and its key file.
+- [ ] The Neo4j image's label (found 2026-10-27): `infra/images.nuon` gives the external `neo4j` image the tag `5.26.2`,
+  but the image it points at (`~/Documents/projects/nix-neo4j/result-neo4j-image`) is Neo4j 2025.08.0 built from source
+  (`nix-neo4j/pkgs/neo4j-from-source.nix`). What is pinned and what is run should say the same.
 - [ ] Prune the revoked set (2026-10-27): `revoked_serials` (`credentials-agent/consume/src/state.rs`) is only
   inserted into, and once superseded certificates are published as revoked (`deployments.md`, "The renewal rule") it
   grows by one serial every time a pod restarts. A serial whose certificate has expired can no longer be presented,

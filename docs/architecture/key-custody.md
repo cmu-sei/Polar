@@ -326,6 +326,65 @@ again after a restart.
   - the CSR judgement's cases and the keyless writer.
 - *Mutations caught:* an old bundle kept, an unreachable daemon taken as final, two of a type let through.
 
+## The neo4rs patch, the plan (2026-10-27, for review)
+
+A graph writer presents its one client certificate to Neo4j through neo4rs, which reads the key from a file. With the
+daemon there is none. The maintainer: patch neo4rs, carried on our own fork for the time being.
+
+What is there, read for this:
+- *Polar's neo4rs:* `neo4rs = { git = "https://github.com/neo4j-labs/neo4rs", tag = "v0.9.0-rc.8" }` (workspace
+  `Cargo.toml`), commit `1b92c9b`, used by `lib` and eight agent crates. Polar builds its connection in one place
+  (`lib/src/graph/controller.rs`, `neo_config_for`), from `GraphSettings` (`lib/src/graph/environment.rs`): with
+  `GRAPH_CLIENT_CERT`, `GRAPH_CLIENT_KEY` and `GRAPH_CA_CERT` it calls `with_mutual_tls_validation(ca, cert, key)`.
+- *neo4rs's TLS:*
+  - `ConnectionTLSConfig` (`lib/src/auth/mod.rs`: `None`, `ClientCACertificate`, `NoSSLValidation`, `MutualTLS`, all
+    file paths) is turned into a rustls `ClientConfig` in `ConnectionInfo::tls_connector`
+    (`lib/src/connection.rs`), which opens the key file;
+  - there is no way to hand it a configuration;
+  - the `+ssc` schemes replace whatever was given with a no-validation one.
+  - Its rustls is 0.23 with `ring`, the one rustls in Polar's tree, so a `ClientConfig` Polar builds is the type
+    neo4rs uses.
+- *Neo4j's side:*
+  - Bolt requires TLS and a client certificate (`targets/*/conf/neo4j-ssl.conf`: `server.bolt.tls_level=REQUIRED`,
+    `dbms.ssl.policy.bolt.client_auth=REQUIRE`), and sets no `tls_versions`;
+  - the image is Neo4j 2025.08.0 built from source (`nix-neo4j`, though `images.nuon` labels it `5.26.2`), whose
+    policy defaults to TLS 1.2 and 1.3 (`SslPolicyConfig` in its `neo4j-configuration` jar), so the daemon's TLS 1.3
+    handshake fits;
+  - Polar connects with `bolt+s` (`infra/config/capabilities.nuon`).
+- *The precedent:* forks live under `github.com/daveman1010221` and are pinned by commit, each with a comment in the
+  workspace `Cargo.toml` saying why (`rsa`, `keyutils-raw`).
+
+The plan:
+1. *The fork.* `daveman1010221/neo4rs`, forked from `neo4j-labs/neo4rs`, a branch `polar` from tag `v0.9.0-rc.8`,
+   one commit. The patch is shaped so it could go upstream as it is.
+2. *The patch:*
+   - a fifth variant, `ConnectionTLSConfig::Rustls(RustlsConfig)`, a newtype over `Arc<rustls::ClientConfig>` that
+     compares by pointer, since the enum is `PartialEq` and a rustls configuration is not;
+   - `ConfigBuilder::with_rustls_config(Arc<ClientConfig>)`;
+   - `tls_connector` uses it as given;
+   - under the `+ssc` schemes it is also used as given: the caller's configuration already says how the server is
+     verified, and the downgrade exists because the built-in variants know nothing else. Plain `bolt://` has no TLS,
+     as now.
+   - Tests in neo4rs: the builder sets it; for `bolt+s`, `neo4j+s` and `+ssc` the configuration the connector uses
+     is the very one given; plain `bolt` takes none.
+3. *Polar:*
+   - the workspace's neo4rs moves to the fork, pinned by commit, with the comment;
+   - `GraphTls::Mutual`'s key becomes `ClientKey`: `GRAPH_CLIENT_KEY`, or the custody socket, which the graph reads
+     through the Cassini client's declaration (`cassini_client::environment::CUSTODY_SOCKET`), as `polar-crypto` reads
+     `TLS_CLIENT_CERT`;
+   - with `GRAPH_CLIENT_CERT` and `GRAPH_CA_CERT` set, exactly one of the two keys, as for Cassini; without
+     `GRAPH_CLIENT_CERT`, the socket says nothing to the graph;
+   - `neo_config_for` builds the daemon's configuration with `polar_custody::client::client_config` (TLS 1.3 alone)
+     and hands it over with `with_rustls_config`. A key file goes the way it goes now.
+4. *Tests first, in Polar:*
+   - the graph environment's every combination, the section judging each as the controller reads it;
+   - end to end: neo4rs, configured for the daemon, connecting to a TLS 1.3 server that demands a client certificate,
+     which sees the daemon's certificate. The connection is lazy, so a query forces it; the server is a stand-in, not
+     Neo4j, since container tests cannot publish ports on this host.
+   - A real Neo4j is seen with step 7, on a fresh cluster.
+5. *Not changed:* the charts (step 4 points `GRAPH_CLIENT_KEY` at the daemon), `polar-test-graph`, and the `ace`
+   job's own certificate.
+
 ## Build order, each tests first
 
 1. The daemon: key generation (process keyring or memory), the CSR, taking the certificate and judging it, signing,
