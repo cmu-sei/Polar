@@ -326,7 +326,7 @@ again after a restart.
   - the CSR judgement's cases and the keyless writer.
 - *Mutations caught:* an old bundle kept, an unreachable daemon taken as final, two of a type let through.
 
-## The neo4rs patch, the plan (2026-10-27, for review)
+## The neo4rs patch, the plan (2026-10-27, cleared by the maintainer)
 
 A graph writer presents its one client certificate to Neo4j through neo4rs, which reads the key from a file. With the
 daemon there is none. The maintainer: patch neo4rs, carried on our own fork for the time being.
@@ -356,7 +356,9 @@ What is there, read for this:
 
 The plan:
 1. *The fork.* `daveman1010221/neo4rs`, forked from `neo4j-labs/neo4rs`, a branch `polar` from tag `v0.9.0-rc.8`,
-   one commit. The patch is shaped so it could go upstream as it is.
+   one commit. The patch is shaped so it could go upstream as it is. *Done (2026-10-27):* forked with `gh` (the
+   maintainer's choice), the commit `a038df3` on `polar`, pushed. The neo4rs library's 286 tests pass, four of them
+   new. Clippy reports the same four lints at the tag as with the patch: none added.
 2. *The patch:*
    - a fifth variant, `ConnectionTLSConfig::Rustls(RustlsConfig)`, a newtype over `Arc<rustls::ClientConfig>` that
      compares by pointer, since the enum is `PartialEq` and a rustls configuration is not;
@@ -384,6 +386,39 @@ The plan:
    - A real Neo4j is seen with step 7, on a fresh cluster.
 5. *Not changed:* the charts (step 4 points `GRAPH_CLIENT_KEY` at the daemon), `polar-test-graph`, and the `ace`
    job's own certificate.
+
+## Degraded operation, the plan (2026-10-27, for review)
+
+The maintainer: Polar may use its own builds of Neo4j and neo4rs, but there must be a degraded way to run for a
+deployment that cannot use what we build. What the daemon's whole path rests on, and what each piece's absence costs:
+
+| Piece | Ours | Without it |
+|---|---|---|
+| The custody daemon (`polar-custody`, a native sidecar) | the key never in a file | key files, as before custody: `TLS_CLIENT_KEY`, the key readable in the pod's volume |
+| neo4rs taking a rustls configuration (`daveman1010221/neo4rs`, branch `polar`) | a graph writer shows Neo4j the daemon's key | that pod on key files, or the tunnel below |
+| Neo4j's Bolt offering TLS 1.3 (our 2025.08 build does by default) | the daemon signs TLS 1.3 handshakes only | set it in the policy (below); a Neo4j that cannot is reached with key files |
+
+The plan:
+1. *Key files stay a whole, supported mode, chosen per pod.* Every client already takes either `TLS_CLIENT_KEY` or
+   `POLAR_CUSTODY_SOCKET` (step 2), and `polar-init` writes a key for any `--cert` that is not `custody` (step 3), so a
+   pod without the daemon runs exactly as Polar ran before custody. What it gives up is stated where it is chosen: the
+   key is in the pod's volume, readable by the workload, so a compromised workload can copy it and be the agent
+   elsewhere until its certificate expires or is revoked (the table in "What it protects").
+2. *The choice is the target's, rendered.* Step 4 gives the target a `custody` setting, on by default. Off renders
+   every pod without the sidecar, its `--cert` as `ecdsa-p256`, and its key variables as files. A deployment that
+   cannot run our daemon image, or uses stock neo4rs, sets it off. It can be per workload as well, so that only the
+   graph writers fall back if only neo4rs is the problem.
+3. *Neo4j's TLS versions said, not assumed.* The Bolt policy in `targets/*/conf/neo4j-ssl.conf` names
+   `dbms.ssl.policy.bolt.tls_versions=TLSv1.2,TLSv1.3`, so a stock Neo4j offers TLS 1.3 whatever its default (Neo4j 5
+   and 2025 have the setting; their JVMs speak TLS 1.3). A Neo4j that cannot is the key-file case.
+4. *Later, if wanted: a tunnel in the pod.* For a driver that can only read key files (stock neo4rs, or another
+   client in another language), a small TLS client in the daemon's image: the workload connects to it in plain text
+   on the pod's loopback, and it connects to Neo4j with the daemon's key. No key file, any driver. The cost: loopback
+   has no peer check, so any container in the pod can use it, where the daemon's socket admits only the pod's own
+   UIDs. Not built now.
+5. *Not degraded, not planned:* a second, Neo4j-only client certificate with its own key file. It is one client
+   certificate per pod (`infra/config/capabilities.nuon`), and a second for the same identity and type supersedes the
+   first (`deployments.md`, "The renewal rule").
 
 ## Build order, each tests first
 
