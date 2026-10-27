@@ -23,7 +23,7 @@
 
 # Agents as Deployments that restart in place
 
-Status, 2026-10-27: a plan for the maintainer to clear, one question at a time. Nothing here is built.
+Status, 2026-10-27: cleared by the maintainer, its five questions decided as written below. Nothing here is built.
 
 ## Why, and what Kubernetes gives
 
@@ -48,6 +48,7 @@ Each with a recommendation; to be taken one at a time.
    refuse it. *Recommendation:* both allow a new certificate to a pod that holds one, with a bound (below), and the
    ledger supersedes the old one, as it already does for a new pod (`state.rs:265`: a new certificate of a type revokes
    the identity's earlier ones, whatever their pod).
+   **Decided (the maintainer, 2026-10-27): yes, and supersede.**
 2. **Telling a restart from a second ask.** The credentials agent cannot see Kubernetes, so it cannot see a restart.
    What makes a second ask safe today is that only `polar-init` can ask: the workload never holds the service-account
    token. *Options:* (a) trust that, with a bound so no pod is issued more than one certificate of a type in, say, five
@@ -56,19 +57,26 @@ Each with a recommendation; to be taken one at a time.
    (c) allow a renewal only near the certificate's end, which refuses a crash restarted early in its certificate's life,
    and with the custody daemon (`key-custody.md`) such a pod has no key to go on with. *Recommendation:* (a) now, (b)
    when the attestation agent exists.
+   **Decided (the maintainer, 2026-10-27): (a), trust that only `polar-init` asks, with the five-minute bound; (b) when
+   the attestation agent exists.**
 3. **What superseding does to the running certificate.** The old certificate is revoked in the ledger and its serial
    published (`polar-authority-updates`). With the custody daemon its key dies with the restart; without it, the old
    `key.pem` stays in the shared volume until `polar-init` overwrites it, moments later. *Recommendation:* the daemon
    first (item 4), so nothing of the old key outlives the restart.
+   **Decided (the maintainer, 2026-10-27), with item 4: the daemon first.**
 4. **The order: the custody daemon, then the move.** Without the daemon, `polar-init` finds its old bundle valid
    (`keeps_existing_bundle`, `polar-init/src/main.rs`) and keeps it, so a rejuvenating pod restarts into the certificate
    it is rejuvenating away from, and ends again at once. With the daemon the key is new at every start, so no old bundle
    matches it and `polar-init` asks. *Recommendation:* build the daemon first; `keeps_existing_bundle` then goes (the
    case it was made for, a pod restarted with its certificate still good, is a fresh key now). The other way round
    would mean teaching it to tell rejuvenation from a crash.
+   **Decided (the maintainer, 2026-10-27): the custody daemon first, then the move.**
 5. **The ticket (`core-restarts.md`, step 5).** A credentials agent restarted in place is its own successor, under the
    same UID, so the outgoing one can name it: a one-use ticket for its identity and its UID, published before it exits.
    *Recommendation:* step 5 is built on this, after the move; the crash window (step 4) stays for a pod really replaced.
+   **Decided (the maintainer, 2026-10-27): yes, after the move, and the credentials agent is subject to runtime
+   attestation too:** the ticket says which pod may be its successor, and the attestation agent checks that pod and its
+   process, as it does every other (`runtime-attestation.md`); neither stands in for the other.
 
 ## How the move is done (no decisions in it, only care)
 

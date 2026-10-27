@@ -411,7 +411,9 @@ Each step tests first, with property tests where an invariant holds.
    opens its entry alone. Until the ticket exists, a rejuvenating credentials agent's successor comes through it too,
    after waiting out the bound.
 5. **The ticket (B), after the move to Deployments** (`runtime-attestation.md`, "Deployments, next"): a pod restarted
-   in place keeps its UID, so the ticket can name the successor's pod and not only its identity.
+   in place keeps its UID, so the ticket can name the successor's pod and not only its identity. Decided with the move's
+   plan (`deployments.md`, question 5, the maintainer, 2026-10-27): built after the move, and the credentials agent's
+   successor is attested at runtime as every pod is.
 6. **The attestation gate.** cert-issuer asks the attestation agent about the pod behind every token-only request
    whenever it is reachable; until the attestation agent is built it is not, and the floor behaves as option A. The
    attestation agent itself is built from `runtime-attestation.md`.
