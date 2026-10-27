@@ -76,6 +76,14 @@ impl Custody {
     /// The answer to `request` from a caller with `roles`, at `now` (Unix seconds).
     pub fn handle(&mut self, roles: Roles, request: Request, now: i64) -> Reply {
         match request {
+            // A slot is sealed once a certificate is installed in it. In a pod polar-init and the workload are one
+            // UID, so the roles are kept apart in time: the workload runs after polar-init has installed every
+            // certificate it uses (docs/architecture/key-custody.md, step 4, item 1).
+            Request::MakeCsr { slot, .. } | Request::Install { slot, .. }
+                if roles.installer && self.is_sealed(slot) =>
+            {
+                Reply::Refused(Refusal::Sealed)
+            }
             Request::MakeCsr {
                 slot,
                 identity,
@@ -86,6 +94,12 @@ impl Custody {
             }
             read_only => self.handle_read(roles, read_only),
         }
+    }
+
+    fn is_sealed(&self, slot: Slot) -> bool {
+        self.slots
+            .get(&slot)
+            .is_some_and(|held| held.chain.is_some())
     }
 
     /// The answer to a request that changes nothing (a signature, a certificate), which callers may have answered at
@@ -377,8 +391,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn nothing_is_signed_before_a_certificate_is_installed_and_a_new_key_drops_the_old_certificate()
-    {
+    fn nothing_is_signed_before_a_certificate_is_installed() {
         let ca = test_ca();
         let mut custody = Custody::new(&ca.pem).unwrap();
         let message = certificate_verify_input(CLIENT_CONTEXT, &[9; 32]);
@@ -388,23 +401,78 @@ pub(crate) mod tests {
         );
         csr(&mut custody, Slot::Client);
         assert_eq!(
-            sign(&custody, WORKLOAD, message.clone()),
-            Reply::Refused(Refusal::NoCertificate)
-        );
-        let (mut custody, certificate) = installed(&ca);
-        csr(&mut custody, Slot::Client);
-        assert_eq!(
             sign(&custody, WORKLOAD, message),
             Reply::Refused(Refusal::NoCertificate)
         );
-        let reinstall = Request::Install {
+    }
+
+    /// In a pod polar-init and the workload are one UID, so one caller holds both roles
+    /// (docs/architecture/key-custody.md, step 4, item 1).
+    const ONE_UID: Roles = Roles {
+        installer: true,
+        workload: true,
+    };
+
+    // A slot is sealed once a certificate is installed in it: the workload, which runs after polar-init, cannot
+    // replace the key or the certificate. The other slot is not sealed.
+    #[test]
+    fn an_installed_slot_is_sealed_and_the_other_is_not() {
+        let ca = test_ca();
+        let (mut custody, certificate) = installed(&ca);
+        let held = custody.handle_read(ONE_UID, Request::Certificate { slot: Slot::Client });
+        let make = |slot| Request::MakeCsr {
+            slot,
+            identity: IDENTITY.to_string(),
+            names: vec![],
+        };
+        let install = Request::Install {
             slot: Slot::Client,
-            chain_pem: vec![certificate],
+            chain_pem: vec![certificate.clone()],
+        };
+        for request in [make(Slot::Client), install] {
+            assert_eq!(
+                custody.handle(ONE_UID, request, time_now()),
+                Reply::Refused(Refusal::Sealed)
+            );
+        }
+        assert_eq!(
+            custody.handle_read(ONE_UID, Request::Certificate { slot: Slot::Client }),
+            held,
+            "the certificate is the one installed"
+        );
+        let message = certificate_verify_input(CLIENT_CONTEXT, &[9; 32]);
+        let Reply::Signature(der) = sign(&custody, WORKLOAD, message.clone()) else {
+            panic!("it still signs");
+        };
+        assert!(
+            verifying_key_of(&certificate)
+                .verify(&message, &Signature::from_der(&der).unwrap())
+                .is_ok(),
+            "with the key it was installed for"
+        );
+        assert!(matches!(
+            custody.handle(ONE_UID, make(Slot::Server), time_now()),
+            Reply::Csr(_)
+        ));
+    }
+
+    #[test]
+    fn a_refused_certificate_does_not_seal_the_slot() {
+        let (ca, other) = (test_ca(), test_ca());
+        let mut custody = Custody::new(&ca.pem).unwrap();
+        let csr_pem = csr(&mut custody, Slot::Client);
+        let install = |chain| Request::Install {
+            slot: Slot::Client,
+            chain_pem: vec![chain],
         };
         assert!(matches!(
-            custody.handle(INSTALLER, reinstall, time_now()),
-            Reply::Refused(Refusal::BadCertificate(why)) if why.contains("not for this slot's key")
+            custody.handle(INSTALLER, install(certify(&other, &csr_pem)), time_now()),
+            Reply::Refused(Refusal::BadCertificate(_))
         ));
+        assert_eq!(
+            custody.handle(INSTALLER, install(certify(&ca, &csr_pem)), time_now()),
+            Reply::Installed
+        );
     }
 
     #[test]
@@ -542,6 +610,19 @@ pub(crate) mod tests {
                 prop_assume!(!is_tls13_certificate_verify(&message));
                 let (custody, _) = installed(ca());
                 prop_assert_eq!(sign(&custody, WORKLOAD, message), Reply::Refused(Refusal::NotTls13Handshake));
+            }
+
+            /// Once a slot is installed, nothing any caller asks changes its key or its certificate.
+            #[test]
+            fn an_installed_slot_never_changes(requests in prop::collection::vec((request(), any::<bool>(), any::<bool>()), 0..12)) {
+                let (mut custody, certificate) = installed(ca());
+                let key = custody.slots[&Slot::Client].key.spki_der();
+                for (request, installer, workload) in requests {
+                    custody.handle(Roles { installer, workload }, request, time_now());
+                }
+                let held = &custody.slots[&Slot::Client];
+                prop_assert_eq!(held.key.spki_der(), key);
+                prop_assert_eq!(held.chain.clone(), Some(vec![certificate.clone()]));
             }
 
             #[test]

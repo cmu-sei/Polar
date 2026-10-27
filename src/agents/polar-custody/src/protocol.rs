@@ -78,6 +78,10 @@ pub enum Refusal {
     BadCertificate(String),
     #[error("the request is refused: {0}")]
     BadRequest(String),
+    /// The slot holds an installed certificate: no new key, no other certificate, for the life of the daemon
+    /// (docs/architecture/key-custody.md, step 4, item 1).
+    #[error("the slot is sealed: a certificate is installed in it")]
+    Sealed,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]

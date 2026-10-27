@@ -548,6 +548,13 @@ The plan:
 8. *After it:* the speed gate (step 6), then a fresh sandbox-local (step 7). Revocation (step 5) can come before or
    after; the renewal rule is in.
 
+*Built (2026-10-27): the sealing.* `Custody::handle` (`polar-custody/src/custody.rs`) refuses `MakeCsr` and `Install`
+on a slot holding a certificate, with `Refusal::Sealed`; the role check comes first, so a caller without the installer
+role is still `NotPermitted`. A refused certificate does not seal. Tests: an installed slot sealed and the other not, a
+refused certificate not sealing, and a property, that once installed nothing any caller asks changes the slot's key or
+certificate. The test that a new key drops the old certificate goes with the rule. The mutation that drops the seal
+is caught by both.
+
 *Decided (the maintainer, 2026-10-27): (a), each slot sealed once installed.* The question, as it was put: how the
 daemon keeps its installer apart from its workload, under one UID.
 - *(a) Seal each slot once installed (recommended).* The daemon takes `MakeCsr` and `Install` for a slot until a
