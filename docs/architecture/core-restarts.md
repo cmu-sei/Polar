@@ -392,6 +392,21 @@ Each step tests first, with property tests where an invariant holds.
    before (`remaining-work.md`, "Two credentials agents appended to one ledger"), so nothing vouched for the observer.
    Vouching over Cassini and over mTLS is left to the next run, from a fresh cluster with both sides on step 3.
 
+   *Validated on sandbox-local, 2026-10-27* (a fresh cluster from `bbf35777`, each core Job then replaced the way Flux
+   replaces one, `kubectl replace --force`, with both sides on step 3):
+   - *The observer, vouched for over Cassini.* Its new pod's request was held and offered (10:16:34.102), the credentials
+     agent vouched 1 ms later, and polar-init's next ask, 5 s on, was signed.
+   - *Cassini, vouched for over mTLS.* The credentials agent lost its Cassini session (10:17:18.7); Cassini's new pod was
+     held (10:17:19.1) with no broker to offer it on; the credentials agent's mTLS poll listed it and vouched
+     (10:17:27.4), and Cassini was signed at its next ask (10:17:29.1). Its offer, published while the broker was down,
+     reached the credentials agent once the client was back (10:17:30.4) and was answered again; the request was signed
+     by then, so the answer was not taken.
+   - *The credentials agent, its own successor.* The old pod drained in 5 s (SIGTERM 10:18:20.1, its ledger stopped and
+     the process gone at 10:18:25.1) and wrote nothing after the signal. The new pod's request was held, offered to no
+     one, twelve times, and admitted once the bound had passed since the old one was last heard (10:19:20); the ledger,
+     opened at 10:19:21, replayed whole (372 entries, one chain), and the floor state closed again as it was heard.
+     That is step 4 as well. The ledger lock was not waited on: the old process had long gone.
+
 4. **The crash window (C)** falls out of steps 2 and 3: the credentials agent absent while the Cassini session holds
    opens its entry alone. Until the ticket exists, a rejuvenating credentials agent's successor comes through it too,
    after waiting out the bound.

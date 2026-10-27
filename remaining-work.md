@@ -567,6 +567,12 @@ NOTHING IS OPEN for path 1 now: steps 4 to 6 wait for the go-ahead. Path 2 (prop
   went on, and wrote the ledger, until the window ended. Now `begin_drain` lets go of every topic it subscribes to (a
   test ties the list to its declared `TOPICS`), stops the record asker and the held-request voucher, and the
   supervisor drops what it would otherwise do or answer (`dropped_while_draining`), on both ways a drain starts.
+  Seen on sandbox-local 2026-10-27: a replaced credentials agent drained in 5 s, wrote nothing to the ledger after its
+  SIGTERM, and its successor's ledger replayed whole (`docs/architecture/core-restarts.md`, step 3, "Validated").
+- [ ] **The node flapped in and out of disk pressure for hours (2026-10-26/27), evicting 252 pods.** `/home` at 86%
+  sat under the kubelet's 15% image-filesystem threshold; freed by pruning podman's unused images and volumes,
+  `nix-store --gc` and `cargo clean` (Polar's `target`, 139 GiB). Nothing warns before the threshold is crossed; see
+  "Host storage to fix" in the maintainer's notes.
 - [ ] **A flaky test: `authority_judge::tests::through_the_configuration_actor_a_refused_policy_leaves_the_one_in_force`.**
   It fails about one full `cargo test -p credentials-agent-consumer` in three, never alone (5 of 5): the second
   `submit` returns an error, which is the configuration handle's 5 s call timeout (`CALL_TIMEOUT`,
