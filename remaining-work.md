@@ -688,8 +688,9 @@ Principle: declare each environment variable once, with its type, default, docum
 - [x] The custody daemon logs nothing at info (found 2026-10-27, step 7; done 2026-10-27): with no `RUST_LOG` its filter
   was errors only (`polar-custody/daemon/src/main.rs`), where every other agent logs at info. `console_filter` now gives
   `RUST_LOG`, or `info` when it is unset or does not parse, as `polar::logging` does.
-- [ ] No admin can revoke (found 2026-10-27, step 7): `just admin-provision` grants no `c:revoke`, so no account the
-  documented flow makes can revoke a certificate. Whether the first admin should hold it is the maintainer's to say.
+- [x] No admin can revoke (found 2026-10-27, step 7; done 2026-10-27): `just admin-provision` granted no `c:revoke`, so
+  no account the documented flow made could revoke a certificate. Decided (the maintainer): the first admin holds it;
+  the recipe grants it. An account provisioned before needs another provisioned, or a reissue.
 - [ ] Pin the credentials agent's authority key to the CA (planned 2026-10-27, `authority-distribution.md`, "Pinning
   the key to the CA"): the leaves learn the key that signs authority from the first snapshot, on the broker's word, so a
   forged first snapshot could pin a key of someone else's. The escrow key gets a `CertType::Signing` certificate, the

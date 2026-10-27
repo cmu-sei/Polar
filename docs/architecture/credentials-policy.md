@@ -224,8 +224,8 @@ The step needs a signer, and signing is the same as for any author: a user certi
 for the document type. Two consequences:
 
 - The first admin that `admin-provision` creates holds `c:provision-account`, `c:grant`,
-  `c:update-configuration`, `c:run-command`, `c:update-policy`, `c:update-runtime` and `c:update-groups` (the
-  recipe grants them now; an account provisioned before it did needs another provisioned, or a reissue). The
+  `c:update-configuration`, `c:run-command`, `c:update-policy`, `c:update-runtime`, `c:update-groups` and, since
+  2026-10-27 (the maintainer), `c:revoke` (the recipe grants them now; an account provisioned before it did needs another provisioned, or a reissue). The
   seeding signer is
   the operator account, made after the stack is up, so the step runs after the admin steps and the git server
   and before anything that needs a secret.
