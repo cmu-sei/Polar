@@ -140,8 +140,9 @@ supersede each other in turn.
   hears anyway, until the certificate ends (an hour for a client's). With the daemon nobody holds the key once it is
   revoked; with key files a stolen key could listen that long.
 - *Its weak points:*
-  - nothing bounds how many watchers an identity opens: a compromised workload could open hundreds, each holding the
-    broker's memory and a connection and each able to ask for snapshots (the plan below);
+  - nothing bounded how many watchers an identity opened: a compromised workload could have opened hundreds, each
+    holding the broker's memory and a connection and each able to ask for snapshots. Since 2026-10-27 one per
+    certificate (below);
   - it proves nothing about who opened it; nothing needs that today;
   - the broker's own pod has no client slot, so its daemon has no watcher, and the broker's server key ends only with
     its certificate (12 hours on the local targets);
@@ -149,7 +150,7 @@ supersede each other in turn.
     not.
 - *Tests:* `broker/tests/watcher.rs`, `revocation.rs`, `custody_revocation.rs`.
 
-### Capping watchers: the plan (2026-10-27, on the to-do list)
+### Capping watchers (planned 2026-10-27; built 2026-10-27, with a tenure the plan did not have)
 
 1. *One watcher per certificate, the newest winning.* A watcher registering under the same identity and certificate
    serial as a watcher already there ends the older: its connection closed and its session ended, nothing held.
@@ -168,6 +169,33 @@ supersede each other in turn.
    sequence of registrations and disconnections at most one watcher is live for each serial and it is the newest; end
    to end, a second watcher under the pod's certificate opened against the daemon's, and the daemon still hearing its
    revocation. Mutations on each rule.
+
+*Built (2026-10-27), and changed in building.* "Newest wins" as planned was a hole: the end-to-end test of a
+compromised workload opening a watcher under its pod's certificate (signing through its own daemon, as it can) showed
+the workload's watcher reconnecting about 2 ms after each replacement, so the daemon's session lived 2 ms in every
+second, never long enough to hear the snapshot it asked for, and the daemon never heard its revocation: worse than no
+cap. So a watcher holds its place for a *tenure*:
+- a watcher registering under a certificate whose watcher registered less than the tenure ago is refused
+  (`session::WATCHER_PLACE_HELD`) and its connection closed, so it comes again (the daemon's on its next tick);
+- one registering after the tenure replaces the older (`replace_older_watchers`): its connection closed (drained, as a
+  superseded session is), its subscriptions ended, nothing held;
+- a watcher whose connection has gone holds no place (`place_held` asks `detached_at`), and the tenure counts from
+  registration, so a daemon reconnecting past a half-open connection the broker has not noticed replaces it at once;
+- the tenure is `BrokerArgs::watcher_tenure`, by default `DEFAULT_WATCHER_TENURE`, 30 seconds: longer than the credentials
+  agent takes to answer a request (five seconds), so whoever holds the place hears the authority in it. A compromised
+  workload can hold the daemon off for at most a tenure, and never keep it out.
+- *The serial* travels with the registration (`BrokerMessage::RegistrationRequest { peer_serial }`), filled in by the
+  listener from the handshake; what a client's message carries is ignored.
+- *Tests:* within the tenure a second watcher refused and closed, after it the newest replacing the first, its session
+  gone, the identity's session untouched; two certificates of one identity, both kept; two properties over sequences of
+  watchers registering and going, with no tenure (the newest under each certificate its only one) and with one longer
+  than the test (a watcher registered exactly when none under its certificate is live, that one kept); end to end
+  (`custody_revocation.rs`), a compromised workload's watcher, opened before the daemon's and coming back whenever closed,
+  and the daemon still hearing its revocation. Mutations caught: no place ever held, no older watcher replaced, a
+  refused watcher left open, any watcher of the identity replaced, a gone watcher holding its place, a tenure that never
+  ends.
+- *Found in building:* the test clients reconnect by themselves (`ReconnectMode::InPlace`) and so behaved like the
+  compromised workload; the tests' watchers reconnect as the daemon's do, by their supervisor.
 
 ## What is refused, and what the client learns
 

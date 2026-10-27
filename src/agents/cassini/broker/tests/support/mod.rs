@@ -144,6 +144,18 @@ impl Pki {
         self.path("ca.pem")
     }
 
+    /// Another client certificate for `identity`, its files apart from `client`'s under `name`, as a second pod of one
+    /// workload holds: the certificate and key paths, and its serial.
+    pub fn another_client(&self, name: &str, identity: &str) -> (PathBuf, PathBuf, String) {
+        let file = format!("other-{name}");
+        self.issue(&file, identity, ExtendedKeyUsagePurpose::ClientAuth);
+        let cert = self.path(&format!("{file}.pem"));
+        let serial =
+            cert_issuer_common::serial::serial_from_pem(&std::fs::read_to_string(&cert).unwrap())
+                .expect("a certificate");
+        (cert, self.path(&format!("{file}.key")), serial)
+    }
+
     /// What cert-issuer gives a pod's CSR: a client certificate under this CA, as polar-init has it certified.
     pub fn certify_client_csr(&self, csr_pem: &str) -> String {
         let mut request = rcgen::CertificateSigningRequestParams::from_pem(csr_pem).unwrap();
@@ -206,6 +218,8 @@ pub struct TestBroker {
     open: bool,
     /// How long a connection keeps a decision.
     cache: Duration,
+    /// How long a watcher holds its place; the broker's default when `None`.
+    tenure: Option<Duration>,
     /// The exit codes the broker asked the process to exit with.
     pub exits: Arc<Mutex<Vec<i32>>>,
 }
@@ -287,6 +301,7 @@ impl TestBroker {
             true,
             DEFAULT_CACHE,
             None,
+            None,
         )
         .await
     }
@@ -299,7 +314,16 @@ impl TestBroker {
 
     /// As `start_enforcing`, each connection keeping a decision for `cache` (none when zero).
     pub async fn start_enforcing_caching(cache: Duration) -> Self {
-        Self::start_full(None, Duration::from_secs(20), None, false, cache, None).await
+        Self::start_full(
+            None,
+            Duration::from_secs(20),
+            None,
+            false,
+            cache,
+            None,
+            None,
+        )
+        .await
     }
 
     /// As `start`, with the certificates `pki` holds: the custody daemon's server key, say.
@@ -311,6 +335,21 @@ impl TestBroker {
             true,
             DEFAULT_CACHE,
             Some(pki),
+            None,
+        )
+        .await
+    }
+
+    /// As `start`, a watcher holding its place for `tenure` (docs/architecture/cassini-broker.md, "Capping watchers").
+    pub async fn start_with_tenure(tenure: Duration) -> Self {
+        Self::start_full(
+            None,
+            Duration::from_secs(20),
+            None,
+            true,
+            DEFAULT_CACHE,
+            None,
+            Some(tenure),
         )
         .await
     }
@@ -322,6 +361,7 @@ impl TestBroker {
         open: bool,
         cache: Duration,
         pki: Option<Pki>,
+        tenure: Option<Duration>,
     ) -> Self {
         init_logging();
         clear_names().await;
@@ -342,6 +382,7 @@ impl TestBroker {
             &exits,
             token.clone(),
             cache,
+            tenure,
         )
         .await;
 
@@ -356,6 +397,7 @@ impl TestBroker {
                     retention_secs,
                     open,
                     cache,
+                    tenure,
                     exits,
                 };
                 if open {
@@ -368,6 +410,7 @@ impl TestBroker {
         panic!("the broker never began listening on {addr}");
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_broker(
         addr: &str,
         pki: &Pki,
@@ -376,6 +419,7 @@ impl TestBroker {
         exits: &Arc<Mutex<Vec<i32>>>,
         shutdown_auth_token: Option<String>,
         decision_cache: Duration,
+        watcher_tenure: Option<Duration>,
     ) -> (ActorRef<BrokerMessage>, Infrastructure) {
         // The builder's infrastructure as the broker gets it in the pod, except that the process
         // is not ended (the code it would have exited with is recorded in `exits`) and the
@@ -399,6 +443,7 @@ impl TestBroker {
                 ca_cert_file: pki.ca().to_string_lossy().into_owned(),
                 shutdown_auth_token,
                 decision_cache,
+                watcher_tenure,
                 configured,
             },
         )
@@ -422,6 +467,7 @@ impl TestBroker {
             &self.exits,
             self.shutdown_token.clone(),
             self.cache,
+            self.tenure,
         )
         .await;
         *self.broker.lock().unwrap() = broker;
@@ -616,6 +662,21 @@ impl TestClient {
         client
     }
 
+    /// Starts a watcher under the certificate and key at these paths, and returns at once. Like the custody daemon's,
+    /// it does not reconnect by itself: one replaced or refused stays gone.
+    pub async fn start_watching_with(broker: &TestBroker, cert: &Path, key: &Path) -> Self {
+        let config = TCPClientConfig::from_values(
+            broker.addr.clone(),
+            "localhost".to_string(),
+            broker.pki.ca().to_string_lossy().into_owned(),
+            cert.to_string_lossy().into_owned(),
+            key.to_string_lossy().into_owned(),
+        )
+        .as_watcher()
+        .with_reconnect(cassini_client::ReconnectMode::LeaveToSupervisor);
+        Self::spawn(config, None).await
+    }
+
     /// Connects as `identity`'s watcher session (docs/architecture/key-custody.md, step 5), as the custody daemon
     /// does, and waits until the broker has registered it.
     pub async fn connect_watching(broker: &TestBroker, identity: &str) -> Self {
@@ -654,7 +715,14 @@ impl TestClient {
             cert.to_string_lossy().into_owned(),
             key.to_string_lossy().into_owned(),
         );
-        let config = if watcher { config.as_watcher() } else { config };
+        // A watcher does not reconnect by itself, like the custody daemon's: one replaced or refused stays gone.
+        let config = if watcher {
+            config
+                .as_watcher()
+                .with_reconnect(cassini_client::ReconnectMode::LeaveToSupervisor)
+        } else {
+            config
+        };
         Self::spawn(config, registration_id).await
     }
 

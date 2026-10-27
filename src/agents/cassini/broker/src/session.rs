@@ -60,6 +60,10 @@ struct Session {
     /// A watcher session (docs/architecture/key-custody.md, step 5): it neither supersedes nor is superseded, is never
     /// resumed, ends with its connection, and claims nothing held for its identity.
     watcher: bool,
+    /// The serial of the certificate it registered under: a newer watcher of the same one replaces it.
+    serial: Option<String>,
+    /// When it registered: a watcher holds its place for the tenure from then.
+    registered_at: tokio::time::Instant,
 }
 
 /// What a superseded session left behind: its subscribers, holding what they receive for a new
@@ -85,6 +89,7 @@ pub struct SessionManagerState {
     /// forever with no reachable cleanup path.
     subscriber_mgr: Option<ActorRef<BrokerMessage>>,
     retention: std::time::Duration,
+    watcher_tenure: std::time::Duration,
     /// Superseded sessions, oldest first.
     held: Vec<HeldSession>,
     /// Questions about an identity with a takeover still in progress, answered when it is done.
@@ -102,7 +107,12 @@ pub struct SessionManagerArgs {
     pub listener_mgr: Option<ActorRef<BrokerMessage>>,
     /// How long a session whose client went away without a goodbye is kept.
     pub retention: std::time::Duration,
+    /// How long a watcher holds its place before a newer one under its certificate may replace it.
+    pub watcher_tenure: std::time::Duration,
 }
+
+/// What a watcher is told when another under its certificate holds the place: it may come again.
+pub const WATCHER_PLACE_HELD: &str = "the broker refused: a watcher under this certificate holds its place for a while yet; come again";
 
 // ============================== SessionManager Actor ============================== //
 
@@ -131,6 +141,7 @@ impl Actor for SessionManager {
             subscriber_mgr: None,
             sessions: HashMap::new(),
             retention: args.retention,
+            watcher_tenure: args.watcher_tenure,
             held: Vec::new(),
             parked: Vec::new(),
             is_shutting_down: false,
@@ -179,6 +190,7 @@ impl Actor for SessionManager {
                 client_id,
                 trace_ctx,
                 peer_identity,
+                peer_serial,
                 watcher,
             } => {
                 self.handle_registration_request(
@@ -188,6 +200,7 @@ impl Actor for SessionManager {
                     client_id,
                     trace_ctx,
                     peer_identity,
+                    peer_serial,
                     watcher,
                 )
                 .await?;
@@ -317,6 +330,10 @@ impl SessionManager {
             .is_some_and(|session| session.watcher)
         {
             info!(%registration_id, "a watcher went: its session ends");
+            // Gone, it holds no place while its session ends (`place_held`).
+            if let Some(session) = state.sessions.get_mut(registration_id) {
+                session.detached_at = Some(tokio::time::Instant::now());
+            }
             Self::end_session(
                 state,
                 registration_id,
@@ -410,6 +427,70 @@ impl SessionManager {
                         .send_message(BrokerMessage::SessionSuperseded { registration_id });
                 }
                 None => warn!("SessionManager: subscriber_mgr not set, cannot hold subscriptions"),
+            }
+        }
+    }
+
+    /// Whether a watcher of `identity` under the certificate whose serial is `serial` registered less than the tenure ago.
+    fn place_held(state: &SessionManagerState, identity: &str, serial: &str) -> bool {
+        state.sessions.values().any(|session| {
+            session.watcher
+                && !session.superseded
+                && session.detached_at.is_none()
+                && session.identity.as_deref() == Some(identity)
+                && session.serial.as_deref() == Some(serial)
+                && session.registered_at.elapsed() < state.watcher_tenure
+        })
+    }
+
+    /// A new watcher of `identity` has registered under the certificate whose serial is `serial`: an older watcher under
+    /// the same certificate ends (docs/architecture/cassini-broker.md, "Capping watchers"). One watcher per certificate,
+    /// the newest replacing one past its tenure (`place_held`), so a holder of a certificate holds one watcher, and the
+    /// custody daemon, which comes back each tick, is never kept out for longer than a tenure, and holds the place for
+    /// one when it has it. Nothing is held for a watcher replaced: its connection is closed and its subscriptions go.
+    fn replace_older_watchers(
+        state: &mut SessionManagerState,
+        identity: &str,
+        serial: &str,
+        new_id: &str,
+        new_client_id: &str,
+    ) {
+        let older: Vec<String> = state
+            .sessions
+            .iter()
+            .filter(|(id, session)| {
+                id.as_str() != new_id
+                    && session.watcher
+                    && !session.superseded
+                    && session.identity.as_deref() == Some(identity)
+                    && session.serial.as_deref() == Some(serial)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for registration_id in older {
+            info!(%registration_id, %identity, new_session = %new_id, "a watcher replaced by a newer one under the same certificate");
+            if let Some(session) = state.sessions.get_mut(&registration_id) {
+                session.superseded = true;
+                // Drained, so the connection is closed before the session ends (as in `complete_takeover`).
+                let _ = session
+                    .agent_ref
+                    .send_message(BrokerMessage::CloseConnection {
+                        except: new_client_id.to_string(),
+                    });
+                let _ = session.agent_ref.drain();
+            }
+            match &state.subscriber_mgr {
+                Some(subscriber_mgr) => {
+                    let _ = subscriber_mgr.send_message(BrokerMessage::DisconnectRequest {
+                        client_id: "watcher replaced".to_string(),
+                        registration_id: Some(registration_id),
+                        reason: DisconnectReason::Goodbye,
+                        trace_ctx: None,
+                    });
+                }
+                None => warn!(
+                    "SessionManager: subscriber_mgr not set, cannot end a watcher's subscriptions"
+                ),
             }
         }
     }
@@ -594,6 +675,7 @@ impl SessionManager {
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
         peer_identity: Option<String>,
+        peer_serial: Option<String>,
         watcher: bool,
     ) -> Result<(), ActorProcessingErr> {
         let span =
@@ -677,6 +759,7 @@ impl SessionManager {
                             client_id,
                             trace_ctx: Some(span.context()),
                             peer_identity: None,
+                            peer_serial: None,
                             watcher: false,
                         });
                     } else {
@@ -689,6 +772,21 @@ impl SessionManager {
             } else {
                 warn!(registration_id = %existing_id, "requested session not found, creating new one");
             }
+        }
+
+        // A watcher under a certificate whose watcher still holds its place is refused, and its connection closed by
+        // its listener, so it comes again (docs/architecture/cassini-broker.md, "Capping watchers").
+        if watcher
+            && let (Some(identity), Some(serial)) = (&peer_identity, &peer_serial)
+            && Self::place_held(state, identity, serial)
+        {
+            info!(%identity, "a watcher refused: another under its certificate holds its place");
+            listener_ref.send_message(BrokerMessage::RegistrationResponse {
+                client_id,
+                result: Err(WATCHER_PLACE_HELD.to_string()),
+                trace_ctx: Some(span.context()),
+            })?;
+            return Ok(());
         }
 
         // Create new session
@@ -715,6 +813,8 @@ impl SessionManager {
                         identity: peer_identity.clone(),
                         superseded: false,
                         watcher,
+                        serial: peer_serial.clone(),
+                        registered_at: tokio::time::Instant::now(),
                     },
                 );
                 // A client asking to resume a session that was superseded is the instance that
@@ -724,6 +824,11 @@ impl SessionManager {
                 let is_the_loser = registration_id
                     .as_ref()
                     .is_some_and(|id| state.held.iter().any(|held| &held.registration_id == id));
+                if let (true, Some(identity), Some(serial)) =
+                    (watcher, &peer_identity, &peer_serial)
+                {
+                    Self::replace_older_watchers(state, identity, serial, &new_id, &client_id);
+                }
                 if let Some(identity) = &peer_identity
                     && !is_the_loser
                     && !watcher

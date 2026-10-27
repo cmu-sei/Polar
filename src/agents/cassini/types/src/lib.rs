@@ -140,6 +140,10 @@ pub enum BrokerMessage {
         /// ClientMessage::RegistrationRequest never carries this at
         /// all, since the client has no way to send it.
         peer_identity: Option<String>,
+        /// The serial of the connecting client's verified certificate, read by the broker as `peer_identity` is and
+        /// never client-supplied: a watcher replaces the older watcher of the same certificate
+        /// (docs/architecture/cassini-broker.md, "Capping watchers"). The listener fills it in.
+        peer_serial: Option<String>,
         /// The client asked for a watcher session (`ClientMessage::RegistrationRequest`).
         watcher: bool,
     },
@@ -395,6 +399,7 @@ impl BrokerMessage {
                 client_id,
                 trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
                 peer_identity,
+                peer_serial: None,
                 watcher,
             },
             ClientMessage::PublishRequest {

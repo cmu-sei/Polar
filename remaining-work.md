@@ -695,9 +695,10 @@ Principle: declare each environment variable once, with its type, default, docum
   forged first snapshot could pin a key of someone else's. The escrow key gets a `CertType::Signing` certificate, the
   snapshot carries it, and a leaf believes a snapshot only under a certificate that chains to its pinned CA and names
   the credentials agent.
-- [ ] Cap watcher sessions (planned 2026-10-27, `cassini-broker.md`, "Capping watchers"): nothing bounds how many
-  watchers an identity opens. One per certificate serial, the newest winning, so a holder of a certificate has one and
-  the daemon always gets back in.
+- [x] Cap watcher sessions (planned and built 2026-10-27, `cassini-broker.md`, "Capping watchers"): one per certificate
+  serial, holding its place for a tenure (30 s) before the newest replaces it. Plain "newest wins", as planned, let a
+  compromised workload's watcher keep its daemon from ever hearing its revocation; the tenure gives whoever holds the
+  place time to hear it.
 - [ ] The control plane's `ListSessions` always fails (found 2026-10-27, building custody step 5): the control
   manager asks the session manager for `GetSessions` (`cassini/broker/src/control.rs`), and the session manager has no
   arm for it (`session.rs`), so the call's reply port is dropped and the answer is `InternalError("Operation failed")`.

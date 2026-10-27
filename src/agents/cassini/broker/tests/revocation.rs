@@ -174,7 +174,9 @@ proptest! {
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             let _serial = serial().await;
-            let broker = TestBroker::start().await;
+            // The late watchers below replace the first of each identity at once: the watchers' tenure is not what is
+            // tested here.
+            let broker = TestBroker::start_with_tenure(Duration::ZERO).await;
             let credentials = CredentialsAgent::connect(&broker).await;
             let mut agents = Vec::new();
             let mut watchers = Vec::new();

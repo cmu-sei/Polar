@@ -989,6 +989,8 @@ impl Actor for Listener {
                 trace_ctx,
                 peer_identity,
                 watcher,
+                // What the client's message carried is nothing: the serial is this connection's own, filled in below.
+                peer_serial: _,
             } => {
                 state.watcher = watcher;
                 if !watcher && Self::is_revoked(state) {
@@ -1168,6 +1170,7 @@ impl Listener {
             client_id: client_id.clone(),
             trace_ctx: Some(span.context()),
             peer_identity,
+            peer_serial: state.peer_serial.clone(),
             watcher,
         }) {
             let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {e}");
@@ -1283,6 +1286,11 @@ impl Listener {
                     Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await
                 {
                     error!(error = ?e, "Failed to write RegistrationResponse");
+                }
+                // A watcher refused is closed, so its client ends and comes again: the custody daemon's makes a new
+                // connection on its next tick.
+                if state.watcher {
+                    myself.stop(Some("WATCHER_REFUSED".to_string()));
                 }
             }
         }

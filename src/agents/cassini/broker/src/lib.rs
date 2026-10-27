@@ -39,6 +39,11 @@ pub mod topic;
 /// missed.
 pub const DEFAULT_SESSION_RETENTION: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// How long a watcher holds its place before a newer one under the same certificate may replace it
+/// (docs/architecture/cassini-broker.md, "Capping watchers"): longer than the credentials agent takes to answer a
+/// request for a snapshot (five seconds), so whoever holds the place hears the authority in it.
+pub const DEFAULT_WATCHER_TENURE: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub const BROKER_NAME: &str = "BROKER_SUPERVISOR";
 pub const LISTENER_MANAGER_NAME: &str = "LISTENER_MANAGER";
 pub const SESSION_MANAGER_NAME: &str = "SESSION_MANAGER";
