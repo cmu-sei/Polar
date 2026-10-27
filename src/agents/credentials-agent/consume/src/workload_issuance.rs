@@ -409,8 +409,8 @@ pub(crate) mod tests {
             proptest::prop_assert!(delay >= retry);
             // Never later than half its life, unless that is within the retry interval.
             proptest::prop_assert!(now + delay <= half_life.max(now + retry));
-            // And with time to spare, exactly at half its life.
-            if half_life - now >= retry {
+            // And for a certificate valid now or later, with time to spare, exactly at half its life.
+            if life > 0 && now < not_after && half_life - now >= retry {
                 proptest::prop_assert_eq!(now + delay, half_life);
             }
         }

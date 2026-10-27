@@ -69,6 +69,8 @@ pub enum VerifyError {
     NotForEncryption,
     #[error("the certificate to encrypt to is a CA certificate")]
     LeafIsCa,
+    #[error("the certificate to encrypt to is not an escrow certificate: {0}")]
+    NotAnEscrowCertificate(&'static str),
     #[error("the certificate does not name `{expected}`")]
     WrongIdentity { expected: String },
     #[error("the certificate's public key cannot be read: {0}")]
@@ -141,8 +143,8 @@ fn issued_by(
 }
 
 /// The public key of the agent `identity`, from its escrow certificate, if the certificate can be believed:
-/// valid at `now`, chaining to one of `trust`'s anchors, not a CA, made for key encipherment, and carrying
-/// `identity` as a DNS name exactly. `chain_pem` is the certificate first and then, if there are any, the
+/// valid at `now`, chaining to one of `trust`'s anchors, not a CA, made for key encipherment, an escrow certificate
+/// by its extended key usage (`emailProtection`, and no TLS purpose), and carrying `identity` as a DNS name exactly. `chain_pem` is the certificate first and then, if there are any, the
 /// certificates that lead to the anchor (the anchor itself may be the last).
 ///
 /// This is what lets an author outside the cluster encrypt a credential to an agent on the word of a
@@ -195,6 +197,25 @@ pub fn verify_escrow_certificate(
     match leaf.key_usage() {
         Ok(Some(usage)) if usage.value.key_encipherment() => {}
         _ => return Err(VerifyError::NotForEncryption),
+    }
+    // The application layer's certificate, not one the transport layer would take.
+    match leaf.extended_key_usage() {
+        Ok(Some(eku)) if eku.value.any || eku.value.client_auth || eku.value.server_auth => {
+            return Err(VerifyError::NotAnEscrowCertificate(
+                "it may be used for TLS",
+            ));
+        }
+        Ok(Some(eku)) if eku.value.email_protection => {}
+        Ok(Some(_)) => {
+            return Err(VerifyError::NotAnEscrowCertificate(
+                "its extended key usage is not emailProtection",
+            ));
+        }
+        _ => {
+            return Err(VerifyError::NotAnEscrowCertificate(
+                "it has no extended key usage, so it is taken for any use",
+            ));
+        }
     }
     let names_it = leaf
         .subject_alternative_name()

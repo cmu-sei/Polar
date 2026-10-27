@@ -27,7 +27,7 @@ use polar_signing::testing::{
     ESCROW_PUBLIC_KEY_PEM, EscrowSpec, escrow_certificate, intermediate, now, root,
 };
 use polar_signing::{Trust, VerifyError, verify_escrow_certificate};
-use rcgen::KeyUsagePurpose;
+use rcgen::{ExtendedKeyUsagePurpose, KeyUsagePurpose};
 
 const OBSERVER: &str = "git-repo-observer.polar.serviceaccount.cluster.local";
 
@@ -253,4 +253,44 @@ fn the_anchor_at_the_end_does_not_count_against_the_length_limit() {
         verify_escrow_certificate(&too_long, &anchors, now(), OBSERVER),
         Err(VerifyError::ChainTooLong(_))
     ));
+}
+
+#[test]
+fn a_certificate_that_is_not_an_escrow_certificate_by_its_purpose_is_refused() {
+    // The escrow certificate is the application layer's; a certificate the transport layer would take, or one with
+    // no stated purpose (taken for every use), is not one, whatever its key usage says.
+    let ca = root("Polar Internal CA");
+    for ekus in [
+        vec![],
+        vec![ExtendedKeyUsagePurpose::ClientAuth],
+        vec![ExtendedKeyUsagePurpose::ServerAuth],
+        vec![
+            ExtendedKeyUsagePurpose::EmailProtection,
+            ExtendedKeyUsagePurpose::ClientAuth,
+        ],
+        vec![
+            ExtendedKeyUsagePurpose::EmailProtection,
+            ExtendedKeyUsagePurpose::ServerAuth,
+        ],
+        vec![
+            ExtendedKeyUsagePurpose::EmailProtection,
+            ExtendedKeyUsagePurpose::Any,
+        ],
+        vec![ExtendedKeyUsagePurpose::CodeSigning],
+    ] {
+        let cert = escrow_certificate(
+            &ca,
+            EscrowSpec {
+                extended_key_usages: ekus.clone(),
+                ..EscrowSpec::default()
+            },
+        );
+        assert!(
+            matches!(
+                verify_escrow_certificate(&cert, &trust(&ca.pem), now(), OBSERVER),
+                Err(VerifyError::NotAnEscrowCertificate(_))
+            ),
+            "{ekus:?}"
+        );
+    }
 }

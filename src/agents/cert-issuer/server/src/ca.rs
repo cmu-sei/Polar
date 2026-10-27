@@ -276,11 +276,11 @@ impl CaClient for RcgenCaClient {
                 ExtendedKeyUsagePurpose::ServerAuth,
                 ExtendedKeyUsagePurpose::ClientAuth, // keep both — Cassini connects to peers too
             ],
-            // No standard ExtendedKeyUsage purpose (ClientAuth,
-            // ServerAuth, EmailProtection, etc.) accurately describes
-            // "agent-to-agent payload encryption" -- left empty
-            // rather than forcing a misleading fit.
-            CertType::Service => vec![],
+            // The application layer's certificate (whom a secret is encrypted to), never the transport layer's
+            // (who may hold a connection): emailProtection, the purpose of a certificate messages are encrypted to,
+            // which no TLS stack takes for a client or a server. With no extended key usage at all it would be taken
+            // for every purpose, client and server authentication included.
+            CertType::Service => vec![ExtendedKeyUsagePurpose::EmailProtection],
             // Present, and not a TLS purpose: a certificate with no extended key usage at all is taken for any
             // purpose, client and server authentication included.
             CertType::Signing => vec![ExtendedKeyUsagePurpose::Other(
@@ -1069,6 +1069,44 @@ mod tests {
         // The check itself can say yes: a server certificate is taken in both roles.
         let server = client.issue(server_request(identity)).await.unwrap();
         assert_eq!(tls_takes(&server.certificate_pem, identity), (true, true));
+    }
+
+    fn escrow_request(identity: &str) -> CaIssueRequest {
+        CaIssueRequest {
+            cert_type: CertType::Service,
+            ..sample_request(identity)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_escrow_cert_is_for_encrypting_to_and_nothing_else() {
+        let issued = make_client()
+            .issue(escrow_request(
+                "git-observer.polar.serviceaccount.cluster.local",
+            ))
+            .await
+            .unwrap();
+        let der = parsed(&issued.certificate_pem);
+        let (_, cert) = x509_parser::parse_x509_certificate(&der).expect("x509");
+        let ku = cert.key_usage().expect("one").expect("KeyUsage present");
+        assert!(ku.value.key_encipherment());
+        assert_eq!(ku.value.flags, 1 << 2, "keyEncipherment and nothing else");
+        let eku = cert
+            .extended_key_usage()
+            .expect("one")
+            .expect("EKU present: one that is absent permits every use");
+        assert!(eku.value.email_protection);
+        assert!(!eku.value.client_auth && !eku.value.server_auth && !eku.value.any);
+        assert!(!eku.value.code_signing && eku.value.other.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tls_refuses_an_escrow_cert_in_either_role() {
+        // The escrow certificate is the application layer's (whom a secret is encrypted to); the transport layer
+        // (who may hold a connection) must not take it.
+        let identity = "git-observer.polar.serviceaccount.cluster.local";
+        let escrow = make_client().issue(escrow_request(identity)).await.unwrap();
+        assert_eq!(tls_takes(&escrow.certificate_pem, identity), (false, false));
     }
 
     #[tokio::test]

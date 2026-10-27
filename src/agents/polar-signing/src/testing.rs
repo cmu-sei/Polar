@@ -157,6 +157,7 @@ pub struct EscrowSpec {
     /// The DNS name the certificate carries: the agent's normalized identity.
     pub identity: &'static str,
     pub key_usages: Vec<KeyUsagePurpose>,
+    pub extended_key_usages: Vec<ExtendedKeyUsagePurpose>,
     pub not_before_year: i32,
     pub not_after_year: i32,
     pub is_ca: bool,
@@ -167,6 +168,7 @@ impl Default for EscrowSpec {
         EscrowSpec {
             identity: "git-repo-observer.polar.serviceaccount.cluster.local",
             key_usages: vec![KeyUsagePurpose::KeyEncipherment],
+            extended_key_usages: vec![ExtendedKeyUsagePurpose::EmailProtection],
             not_before_year: 2026,
             not_after_year: 2030,
             is_ca: false,
@@ -175,7 +177,7 @@ impl Default for EscrowSpec {
 }
 
 /// An agent's escrow certificate as cert-issuer makes one (`CertType::Service`): the agent's identity as the DNS
-/// name, `keyEncipherment` and nothing else, over an RSA key, signed by `issuer`.
+/// name, `keyEncipherment` and the one extended key usage `emailProtection`, over an RSA key, signed by `issuer`.
 pub fn escrow_certificate(issuer: &Authority, spec: EscrowSpec) -> String {
     escrow_certificate_for(issuer, spec, ESCROW_PUBLIC_KEY_PEM)
 }
@@ -189,6 +191,7 @@ pub fn escrow_certificate_for(
     let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
     params.subject_alt_names = vec![SanType::DnsName(spec.identity.try_into().unwrap())];
     params.key_usages = spec.key_usages;
+    params.extended_key_usages = spec.extended_key_usages;
     params.not_before = date_time_ymd(spec.not_before_year, 1, 1);
     params.not_after = date_time_ymd(spec.not_after_year, 1, 1);
     if spec.is_ca {

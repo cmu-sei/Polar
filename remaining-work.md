@@ -567,12 +567,31 @@ NOTHING IS OPEN for path 1 now: steps 4 to 6 wait for the go-ahead. Path 2 (prop
 - [ ] Bootstrap cert permission set: least privilege?
 - [ ] Configurable cluster domain: `cluster.domain` in `infra/config/cluster.nuon` now drives catalog addresses; still hardcoded in the Dhall charts and not passed to polar-init (see catalog section)
 - [ ] Rename `polar-admin-grant`
-- [ ] **An escrow certificate (`CertType::Service`) authenticates over mTLS.** It has no extended key usage
+- [x] **An escrow certificate (`CertType::Service`) authenticates over mTLS.** FIXED 2026-10-26 (shown, then
+  fixed: `emailProtection`, and `verify_escrow_certificate` requires it; credentials-agent-architecture.md, "Each
+  certificate makes its own layer's decision"). An escrow certificate already issued keeps the old form, since one
+  is never issued again for the same identity (below), so a cluster carries the fix once its ledger is fresh. It has no extended key usage
   (`cert-issuer/server/src/ca.rs:283`), and rustls-webpki takes a certificate without one for client and server
   authentication alike (`required_if_present`), so it connects to Cassini as its agent, with the agent's permissions.
-  Whoever holds an escrow private key (the agent, and the escrow it is kept in) can do so. A non-TLS extended key usage
-  would close it, as `CertType::Signing` has (`docs/architecture/core-restarts.md`, "1c in detail"); what the
-  escrow's other readers expect of the certificate needs reading first. Found 2026-10-26, building step 1c.
+  Whoever holds an escrow private key (the agent, and the escrow it is kept in) can do so. Found 2026-10-26, building
+  step 1c; not yet shown at runtime (the rustls check `tls_takes` in `cert-issuer/server/src/ca.rs` would show it).
+  **Why it matters (the maintainer, 2026-10-26):** the two certificates are for different layers and their decisions.
+  The mTLS certificate is the transport layer's (who may hold a connection: ephemeral, one per pod instance); the
+  escrow certificate is the application layer's (to whom a secret is encrypted: a service identity that outlives the
+  pod). That is why they were separated, and a certificate of one layer must not be able to make the other layer's
+  decision. **Decided: the EKU fix.** `Service` gets a non-TLS extended key usage, so the transport layer refuses it in
+  the handshake, as `CertType::Signing` is (`docs/architecture/core-restarts.md`, "1c in detail"); Cedar at the broker
+  can see it as well, but is not what keeps it out. Before building: what the escrow certificate's readers expect
+  (`verify_escrow_certificate` requires `keyEncipherment`), and which non-TLS purpose to name (RFC 9336's document
+  signing does not describe encryption).
+- [ ] **An agent's escrow certificate is issued once and never again, and most expire in an hour.** The consumer
+  refuses a second escrow certificate for an identity while any record of one exists (`has_agent_escrow_certificate`,
+  `credentials-agent/consume/src/state.rs:748`, a bare `contains_key`, not a validity check), and cert-issuer gives a
+  `Service` certificate `server_lifetime` (3600 s in `infra/config/workloads/cert-issuer.nuon`) unless the identity has
+  an override (graph and ace on sandbox-local: a year, for every certificate type). So an hour after an agent's first
+  start its published escrow certificate has expired and is not replaced, and `polar-sign fetch` refuses it
+  (`NotValidNow`). Read from the code 2026-10-26, not yet seen on a cluster; the escrow key outlives the pod by design,
+  so the question is whether its certificate should be renewed for the same key, and on what lifetime.
 
 ## Environment contract (`polar-env`), decided 2026-10-07
 

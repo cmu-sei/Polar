@@ -257,6 +257,19 @@ the recipient's escrow certificate against the root CA directly — not
 merely trust the Credentials Agent's own bookkeeping that a given key
 belongs to a given identity.
 
+**Each certificate makes its own layer's decision, and only that one (2026-10-26).** The mTLS certificate is the
+transport layer's: who may hold a connection. The escrow certificate is the application layer's: whom a secret is
+encrypted to. That is the reason they are separate certificates, so neither may be able to make the other's decision.
+Until 2026-10-26 the escrow certificate had no extended key usage, and rustls-webpki takes a certificate without one
+for client and server authentication alike (both are `required_if_present`), so an escrow certificate, which names its
+agent and carries its `p:` permissions, was a working mTLS certificate for that agent (shown by
+`tls_refuses_an_escrow_cert_in_either_role`, `cert-issuer/server/src/ca.rs`, which failed before the fix). cert-issuer
+now gives `CertType::Service` the one extended key usage `emailProtection` (the purpose of a certificate messages are
+encrypted to, as in S/MIME), which the transport layer refuses in the handshake; and the application layer's reader,
+`polar_signing::verify_escrow_certificate` (used by `polar-sign fetch`), requires it and refuses any TLS purpose, so a
+transport certificate cannot pass for an escrow one either. The signing certificate that signs session offers keeps to
+its own purpose the same way (`CertType::Signing`, `docs/architecture/core-restarts.md`, "1c in detail").
+
 **Issuance is automated, not admin-mediated — for now.** Unlike human
 certificate issuance, which requires a real admin's prior `Grant`
 before a user's tool can obtain a certificate, an agent's escrow

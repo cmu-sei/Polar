@@ -70,7 +70,9 @@ pub enum CertType {
     /// "escrow keypair" -- named Service here specifically to avoid
     /// conflating the certificate's own type with the separate
     /// mechanism, described in the same document, that later escrows
-    /// it alongside its private key).
+    /// it alongside its private key). It is the application layer's certificate (whom a secret is encrypted to) and
+    /// the mTLS certificate the transport layer's (who may hold a connection), so it carries the one extended key
+    /// usage `emailProtection`, which no TLS stack takes for a client or a server.
     Service,
     /// A key the holder signs its own statements with, never a TLS role: `digitalSignature` and the one extended key
     /// usage `id-kp-documentSigning` ([`OID_DOCUMENT_SIGNING`]), which no TLS stack takes for a client or a server.
