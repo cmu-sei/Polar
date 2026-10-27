@@ -649,9 +649,21 @@ impl Actor for InfrastructureSupervisor {
                 .config
                 .read(&crate::environment::AUTHORITY_PUBLISHER)
                 .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
+            // The credentials agent's key is believed only under a certificate from the CA this agent pins. Without a
+            // readable one nothing is: the agent believes no authority, as it verifies no signed document.
+            let trust = match crate::signed::pinned_trust(&args.config) {
+                Ok(trust) => trust,
+                Err(why) => {
+                    tracing::warn!(
+                        "no authority from the credentials agent will be believed: {why}"
+                    );
+                    polar_signing::Trust::from_pem(&[]).expect("no anchors is a trust")
+                }
+            };
             let authority = crate::authority::AuthorityHandle::spawn(
                 &args.service_name,
                 publisher,
+                trust,
                 myself_cell.clone(),
             )
             .await?;
@@ -1404,6 +1416,24 @@ mod tests {
             Self::new(service, Duration::from_secs(20), &[], false).await
         }
 
+        /// As `standard`, pinning a CA of the test's, which it returns with the directory its file is in.
+        async fn pinning(
+            service: &str,
+        ) -> (Self, polar_signing::testing::Authority, tempfile::TempDir) {
+            let ca = polar_signing::testing::root("Polar Internal CA");
+            let dir = tempfile::tempdir().unwrap();
+            let ca_file = dir.path().join("ca.pem");
+            std::fs::write(&ca_file, &ca.pem).unwrap();
+            let rig = Self::new(
+                service,
+                Duration::from_secs(20),
+                &[("TLS_CA_CERT", ca_file.to_str().unwrap())],
+                false,
+            )
+            .await;
+            (rig, ca, dir)
+        }
+
         fn events(&self) -> Vec<String> {
             self.events.lock().unwrap().clone()
         }
@@ -1450,17 +1480,24 @@ mod tests {
 
     const CREDENTIALS: &str = "credentials-agent.polar.serviceaccount.cluster.local";
 
-    /// The credentials agent's key and a snapshot it signed.
+    /// A snapshot the credentials agent signed with `key`, under its signing certificate from `ca`.
     fn authority_snapshot(
+        ca: &polar_signing::testing::Authority,
         key: &rsa::RsaPrivateKey,
         payloads: &[credentials_agent_common::authority_update::AuthorityPayload],
     ) -> credentials_agent_common::authority_update::AuthoritySnapshot {
         use rsa::pkcs8::EncodePublicKey;
+        let public_key_pem = key
+            .to_public_key()
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
         credentials_agent_common::authority_update::AuthoritySnapshot {
-            public_key_pem: key
-                .to_public_key()
-                .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-                .unwrap(),
+            certificate_chain_pem: vec![polar_signing::testing::escrow_certificate_for(
+                ca,
+                polar_signing::testing::authority_spec(CREDENTIALS),
+                &public_key_pem,
+            )],
+            public_key_pem,
             updates: payloads
                 .iter()
                 .map(|p| credentials_agent_common::authority_update::sign(p, key).unwrap())
@@ -1573,10 +1610,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_change_of_authority_has_the_client_judge_what_it_was_refused_again() {
         use credentials_agent_common::authority_update::{AuthorityBody, AuthorityPayload};
-        let rig = Rig::standard("infra-refusal-judge").await;
+        let (rig, ca, _dir) = Rig::pinning("infra-refusal-judge").await;
         assert_eq!(rig.spawner.judged.load(Ordering::SeqCst), 0);
         let key = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
         let snapshot = authority_snapshot(
+            &ca,
             &key,
             &[AuthorityPayload {
                 sequence: 1,
@@ -1597,9 +1635,10 @@ mod tests {
         use credentials_agent_common::authority_update::{
             AuthorityBody, AuthorityKind, AuthorityPayload,
         };
-        let rig = Rig::standard("infra-authority-snapshot").await;
+        let (rig, ca, _dir) = Rig::pinning("infra-authority-snapshot").await;
         let key = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
         let snapshot = authority_snapshot(
+            &ca,
             &key,
             &[AuthorityPayload {
                 sequence: 1,
@@ -1701,6 +1740,7 @@ mod tests {
         deliver_snapshot(
             &rig,
             &authority_snapshot(
+                &ca,
                 &key,
                 &[AuthorityPayload {
                     sequence: 1,
@@ -1787,6 +1827,7 @@ mod tests {
         deliver_snapshot(
             &rig,
             &authority_snapshot(
+                &ca,
                 &key,
                 &[AuthorityPayload {
                     sequence: 1,
@@ -2362,6 +2403,7 @@ mod tests {
         deliver_snapshot(
             &rig,
             &authority_snapshot(
+                &ca,
                 &key,
                 &[AuthorityPayload {
                     sequence: 1,

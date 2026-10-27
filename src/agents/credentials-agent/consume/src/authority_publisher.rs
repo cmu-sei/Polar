@@ -35,7 +35,7 @@
 //! so this has no dependency on where the sections come from.
 
 use crate::ledger::LedgerMessage;
-use credentials_agent_common::authority_book::AuthorityBook;
+use credentials_agent_common::authority_book::{AuthorityBook, BookError};
 use credentials_agent_common::authority_update::{
     AUTHORITY_SNAPSHOT_REPLIES_TOPIC, AUTHORITY_UPDATES_TOPIC, AuthorityBody, AuthorityKind,
 };
@@ -72,6 +72,11 @@ pub enum PublisherMessage {
     RevocationsChanged,
     /// Someone asked for the current authority.
     SnapshotRequested,
+    /// The quiet moment after a snapshot is over, and someone asked during it (internal).
+    SnapshotDue,
+    /// cert-issuer certified the signing key: its certificate and what leads to the CA, which every snapshot carries
+    /// from now on (docs/architecture/authority-distribution.md, "Pinning the key to the CA").
+    Certified(Vec<String>),
     /// The quiet period may be over (internal; ignored if an update went out since it was set).
     Republish { generation: u64 },
 }
@@ -95,6 +100,8 @@ pub struct PublisherState {
     args: PublisherArgs,
     book: AuthorityBook,
     last_snapshot: Option<Instant>,
+    /// Someone asked while a snapshot had just gone out: one more goes out when the quiet moment ends.
+    snapshot_due: bool,
     generation: u64,
 }
 
@@ -103,13 +110,31 @@ impl PublisherState {
         (self.args.publish)(topic, bytes);
     }
 
-    /// The key and the latest update of each kind, to everyone who is listening.
+    /// The key, its certificate and the latest update of each kind, to everyone who is listening.
     fn publish_snapshot(&mut self) {
         match self.book.snapshot() {
             Ok(snapshot) => match rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot) {
                 Ok(bytes) => self.publish_bytes(AUTHORITY_SNAPSHOT_REPLIES_TOPIC, bytes.to_vec()),
                 Err(e) => error!("cannot encode the authority snapshot: {e}"),
             },
+            // No agent would pin the key without its certificate; the first snapshot goes out when it comes.
+            Err(BookError::NotCertified) => {
+                debug!("no snapshot yet: the signing key is not certified")
+            }
+            Err(e) => error!("cannot build the authority snapshot: {e}"),
+        }
+    }
+
+    /// This agent's own authority actor listens to its own identity: give it the key, under its certificate.
+    fn give_the_local_actor_the_key(&self) {
+        match self.book.snapshot() {
+            Ok(snapshot) => self
+                .args
+                .local
+                .snapshot(snapshot, Some(self.args.own_identity.clone())),
+            Err(BookError::NotCertified) => {
+                info!("this agent's authority waits for its signing key to be certified")
+            }
             Err(e) => error!("cannot build the authority snapshot: {e}"),
         }
     }
@@ -232,6 +257,7 @@ impl Actor for AuthorityPublisher {
             book: AuthorityBook::new(args.key.clone(), last_sequence),
             args,
             last_snapshot: None,
+            snapshot_due: false,
             generation: 0,
         })
     }
@@ -246,13 +272,7 @@ impl Actor for AuthorityPublisher {
             PublisherMessage::Start => {
                 // This agent's own authority actor listens to its own identity: give it the key, then say
                 // what is known (the revoked serials the ledger holds; the sections arrive as they replay).
-                match state.book.snapshot() {
-                    Ok(snapshot) => state
-                        .args
-                        .local
-                        .snapshot(snapshot, Some(state.args.own_identity.clone())),
-                    Err(e) => error!("cannot build the authority snapshot: {e}"),
-                }
+                state.give_the_local_actor_the_key();
                 state.publish_snapshot();
                 state.restart_the_wait(&myself);
                 myself.cast(PublisherMessage::RevocationsChanged)?;
@@ -304,14 +324,44 @@ impl Actor for AuthorityPublisher {
             }
             PublisherMessage::SnapshotRequested => {
                 let now = Instant::now();
-                if state
-                    .last_snapshot
-                    .is_some_and(|at| now.duration_since(at) < SNAPSHOT_COALESCE)
-                {
-                    debug!("a snapshot went out a moment ago and serves this request too");
-                } else {
-                    state.last_snapshot = Some(now);
-                    state.publish_snapshot();
+                match state.last_snapshot {
+                    // One went out a moment ago, perhaps before this asker was listening: one more goes out when
+                    // the moment ends, for every asker in it. None is dropped.
+                    Some(at) if now.duration_since(at) < SNAPSHOT_COALESCE => {
+                        if !state.snapshot_due {
+                            state.snapshot_due = true;
+                            let wait = SNAPSHOT_COALESCE - now.duration_since(at);
+                            drop(myself.send_after(wait, || PublisherMessage::SnapshotDue));
+                        }
+                        debug!(
+                            "a snapshot went out a moment ago: this request is answered when it ends"
+                        );
+                    }
+                    _ => {
+                        state.last_snapshot = Some(now);
+                        state.publish_snapshot();
+                    }
+                }
+            }
+            PublisherMessage::SnapshotDue => {
+                state.snapshot_due = false;
+                state.last_snapshot = Some(Instant::now());
+                state.publish_snapshot();
+            }
+            PublisherMessage::Certified(chain) => {
+                let first = !state.book.is_certified();
+                match state.book.certify(chain) {
+                    Ok(()) if first => {
+                        info!("the signing key is certified: its authority is published");
+                        state.give_the_local_actor_the_key();
+                        state.last_snapshot = Some(Instant::now());
+                        state.publish_snapshot();
+                        state.restart_the_wait(&myself);
+                    }
+                    Ok(()) => debug!("the signing key's certificate is renewed"),
+                    Err(e) => {
+                        error!("cert-issuer's certificate for the signing key is not taken: {e}")
+                    }
                 }
             }
             PublisherMessage::Republish { generation } => {
@@ -412,13 +462,44 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string();
-        let rig = rig_at(&path).await;
+        let rig = rig_at(&path, true).await;
         // alice, whom the tests' documents name, has an account.
         crate::ledger::tests::holds_account(&rig.ledger, "alice", ALICE).await;
         Rig { _dir: dir, ..rig }
     }
 
-    async fn rig_at(path: &str) -> Rig {
+    /// The CA the tests' credentials agent is certified under, which its own authority actor pins.
+    fn trust() -> polar_signing::Trust {
+        polar_signing::Trust::from_pem(&[crate::workload_issuance::tests::the_ca().pem.clone()])
+            .unwrap()
+    }
+
+    /// The signing certificate cert-issuer issues for `key`, as the credentials agent's.
+    fn certificate_for(key: &rsa::RsaPrivateKey) -> Vec<String> {
+        use rsa::pkcs8::EncodePrivateKey;
+        let pem = key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap();
+        let csr = cert_issuer_common::keypair::csr_for_private_key_pem(OWN, &[], &pem).unwrap();
+        vec![crate::workload_issuance::tests::certify(
+            crate::workload_issuance::tests::the_ca(),
+            &csr,
+            time::Duration::hours(1),
+        )]
+    }
+
+    /// The time the certificates `certify` makes are valid at: they run from a minute ago.
+    fn real_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    fn the_key() -> rsa::RsaPrivateKey {
+        crate::escrow::tests::test_keypair().private_key().clone()
+    }
+
+    /// A publisher started, its signing key certified when `certified` says.
+    async fn rig_at(path: &str, certified: bool) -> Rig {
         struct Parent;
         #[ractor::async_trait]
         impl Actor for Parent {
@@ -431,7 +512,7 @@ mod tests {
         }
         let ledger = ledger_at(path).await;
         let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
-        let local = AuthorityHandle::spawn(&unique_service(), OWN, parent.get_cell())
+        let local = AuthorityHandle::spawn(&unique_service(), OWN, trust(), parent.get_cell())
             .await
             .unwrap();
         let published = Arc::new(Mutex::new(Vec::new()));
@@ -454,6 +535,11 @@ mod tests {
         .await
         .unwrap();
         publisher.cast(PublisherMessage::Start).unwrap();
+        if certified {
+            publisher
+                .cast(PublisherMessage::Certified(certificate_for(&the_key())))
+                .unwrap();
+        }
         Rig {
             publisher,
             ledger,
@@ -722,10 +808,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_request_for_the_current_authority_is_answered_once_for_everyone_in_five_seconds() {
+    async fn every_request_is_answered_within_five_seconds_and_once_for_all_who_ask_in_them() {
         let rig = rig().await;
         rig.change("policy", 1, policy_body("// v1"));
         settle().await;
+        // Past the moment the certification's snapshot made.
+        tokio::time::sleep(SNAPSHOT_COALESCE + Duration::from_secs(1)).await;
         let before = rig.snapshots().len();
 
         for _ in 0..3 {
@@ -735,17 +823,71 @@ mod tests {
         }
         settle().await;
         let snapshots = rig.snapshots();
-        assert_eq!(snapshots.len(), before + 1, "three askers, one answer");
+        assert_eq!(snapshots.len(), before + 1, "answered at once");
         let last = snapshots.last().unwrap();
         assert_eq!(last.public_key().unwrap(), rig.public_key());
         assert_eq!(last.updates.len(), 1);
 
-        tokio::time::sleep(SNAPSHOT_COALESCE + Duration::from_secs(1)).await;
+        // The two who asked in the moment after it may not have been listening when it went out: one more answers
+        // them both when the moment ends, and none is dropped.
+        tokio::time::sleep(SNAPSHOT_COALESCE).await;
+        settle().await;
+        assert_eq!(rig.snapshots().len(), before + 2, "one more, for both");
+        tokio::time::sleep(SNAPSHOT_COALESCE * 2).await;
+        assert_eq!(rig.snapshots().len(), before + 2, "and no more unasked");
+
         rig.publisher
             .cast(PublisherMessage::SnapshotRequested)
             .unwrap();
         settle().await;
-        assert_eq!(rig.snapshots().len(), before + 2);
+        assert_eq!(rig.snapshots().len(), before + 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_snapshot_goes_out_until_the_key_is_certified_and_one_goes_out_when_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("events.jsonl")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let rig = rig_at(&path, false).await;
+        settle().await;
+        rig.publisher
+            .cast(PublisherMessage::SnapshotRequested)
+            .unwrap();
+        settle().await;
+        assert!(
+            rig.snapshots().is_empty(),
+            "no agent would pin the key without its certificate"
+        );
+        assert!(rig.local.versions().await.unwrap().is_empty());
+
+        // A certificate for another key is not taken.
+        let other = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        rig.publisher
+            .cast(PublisherMessage::Certified(certificate_for(&other)))
+            .unwrap();
+        settle().await;
+        assert!(rig.snapshots().is_empty());
+
+        rig.publisher
+            .cast(PublisherMessage::Certified(certificate_for(&the_key())))
+            .unwrap();
+        settle().await;
+        let snapshots = rig.snapshots();
+        assert_eq!(snapshots.len(), 1, "at once, for whoever is waiting");
+        assert_eq!(
+            snapshots[0].certified_key(&trust(), OWN, real_now()),
+            Ok(rig.public_key())
+        );
+        // A renewal says nothing new.
+        rig.publisher
+            .cast(PublisherMessage::Certified(certificate_for(&the_key())))
+            .unwrap();
+        settle().await;
+        assert_eq!(rig.snapshots().len(), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -786,7 +928,7 @@ mod tests {
         rig.publisher.stop(None);
         rig.ledger.stop_and_wait(None, None).await.unwrap();
 
-        let again = rig_at(&path).await;
+        let again = rig_at(&path, true).await;
         again.change("policy", 2, policy_body("// v2"));
         settle().await;
         let payload = verify(&again.updates()[0], &again.public_key()).unwrap();
@@ -806,12 +948,14 @@ mod tests {
         rig.publisher
             .cast(PublisherMessage::SnapshotRequested)
             .unwrap();
+        // Asked within the moment after the certification's snapshot: answered when it ends.
+        tokio::time::sleep(SNAPSHOT_COALESCE).await;
         settle().await;
 
         // A leaf that has heard nothing takes the snapshot...
-        let mut leaf = AuthorityCore::new(OWN);
+        let mut leaf = AuthorityCore::new(OWN, trust());
         let snapshot = rig.snapshots().pop().unwrap();
-        let handled = leaf.on_snapshot(&snapshot, Some(OWN)).unwrap();
+        let handled = leaf.on_snapshot(&snapshot, Some(OWN), real_now()).unwrap();
         assert!(handled.refused.is_empty());
         assert!(
             handled

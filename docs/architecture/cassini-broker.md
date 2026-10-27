@@ -182,7 +182,9 @@ cap. So a watcher holds its place for a *tenure*:
 - a watcher whose connection has gone holds no place (`place_held` asks `detached_at`), and the tenure counts from
   registration, so a daemon reconnecting past a half-open connection the broker has not noticed replaces it at once;
 - the tenure is `BrokerArgs::watcher_tenure`, by default `DEFAULT_WATCHER_TENURE`, 30 seconds: longer than the credentials
-  agent takes to answer a request (five seconds), so whoever holds the place hears the authority in it. A compromised
+  agent takes to answer a request, which is at most five seconds since every request is answered (before 2026-10-27 one
+  in the five seconds after a snapshot was dropped: `authority-distribution.md`, "Snapshots"), so whoever holds the place
+  hears the authority in it. A compromised
   workload can hold the daemon off for at most a tenure, and never keep it out.
 - *The serial* travels with the registration (`BrokerMessage::RegistrationRequest { peer_serial }`), filled in by the
   listener from the handshake; what a client's message carries is ignored.

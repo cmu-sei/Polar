@@ -52,4 +52,7 @@ pub mod verify;
 pub use authority::{Authority, AuthorityRefusal, RequireCapability};
 pub use document::{Algorithm, Document, Domain, LayoutError, SignatureBlock};
 pub use sign::{SignError, sign, sign_in};
-pub use verify::{SignerInfo, Trust, VerifyError, verify, verify_escrow_certificate, verify_in};
+pub use verify::{
+    SignerInfo, Trust, VerifyError, verify, verify_authority_certificate,
+    verify_escrow_certificate, verify_in,
+};

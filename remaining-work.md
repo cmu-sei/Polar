@@ -691,11 +691,11 @@ Principle: declare each environment variable once, with its type, default, docum
 - [x] No admin can revoke (found 2026-10-27, step 7; done 2026-10-27): `just admin-provision` granted no `c:revoke`, so
   no account the documented flow made could revoke a certificate. Decided (the maintainer): the first admin holds it;
   the recipe grants it. An account provisioned before needs another provisioned, or a reissue.
-- [ ] Pin the credentials agent's authority key to the CA (planned 2026-10-27, `authority-distribution.md`, "Pinning
-  the key to the CA"): the leaves learn the key that signs authority from the first snapshot, on the broker's word, so a
-  forged first snapshot could pin a key of someone else's. The escrow key gets a `CertType::Signing` certificate, the
-  snapshot carries it, and a leaf believes a snapshot only under a certificate that chains to its pinned CA and names
-  the credentials agent.
+- [x] Pin the credentials agent's authority key to the CA (planned and built 2026-10-27, `authority-distribution.md`,
+  "Pinning the key to the CA"): the escrow key has a `CertType::Signing` certificate, every snapshot carries it, and a
+  leaf pins the key only under a certificate that chains to its pinned CA and names the credentials agent. Found on the
+  way and fixed: a snapshot request within five seconds of the last snapshot was dropped; each is now answered. Not yet
+  seen on a cluster.
 - [x] Cap watcher sessions (planned and built 2026-10-27, `cassini-broker.md`, "Capping watchers"): one per certificate
   serial, holding its place for a tenure (30 s) before the newest replaces it. Plain "newest wins", as planned, let a
   compromised workload's watcher keep its daemon from ever hearing its revocation; the tenure gives whoever holds the

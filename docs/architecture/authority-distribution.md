@@ -145,8 +145,9 @@ A snapshot is the credentials agent's whole current authority in one message. Li
 (`polar-authority-updates`); a snapshot is how an agent that has just started, or has fallen behind, catches up.
 
 - *What it carries* (`AuthoritySnapshot`, `credentials-agent/common/src/authority_update.rs`): the public half of the
-  key the credentials agent signs with (its escrow key, decision 4), and the latest signed update of each kind (policy,
-  groups, revoked serials), oldest sequence first. Each update keeps its own signature: a snapshot is a bundle of
+  key the credentials agent signs with (its escrow key, decision 4), the key's certificate (since 2026-10-27, below,
+  "Pinning the key to the CA"), and the latest signed update of each kind (policy, groups, revoked serials), oldest
+  sequence first. Each update keeps its own signature: a snapshot is a bundle of
   signed updates, not a document signed whole.
 - *Its topics:* a request (`AuthoritySnapshotRequest`, empty) on `polar-authority-snapshot-requests`, and the snapshot on
   `polar-authority-snapshot-replies`. They are topics of their own because the router allows one handler per topic and
@@ -158,15 +159,21 @@ A snapshot is the credentials agent's whole current authority in one message. Li
   - when the broker refuses what its own gate admitted (`Behind`), its authority perhaps older than the broker's.
   The broker asks once when it starts, since it never registers (`cassini/broker/src/authority.rs`), and the custody
   daemon's watcher asks each time it registers (`key-custody.md`, step 5).
-- *How the credentials agent answers* (`credentials-agent/consume/src/authority_publisher.rs`): requests are coalesced
-  into one snapshot every five seconds at most (`SNAPSHOT_COALESCE`), however many agents ask; the snapshot goes to every
-  subscriber of the replies topic, so one answers all; and after half an hour with no update it republishes unasked
-  (`REPUBLISH_AFTER`, decision 8), the backstop for an agent that missed one.
+- *How the credentials agent answers* (`credentials-agent/consume/src/authority_publisher.rs`): at most one snapshot
+  every five seconds (`SNAPSHOT_COALESCE`), however many agents ask, and every request answered within them: a request
+  in the five seconds after a snapshot has one more sent when they end (`SnapshotDue`), for everyone who asked in them.
+  The snapshot goes to every subscriber of the replies topic, so one answers all; and after half an hour with no update
+  it republishes unasked (`REPUBLISH_AFTER`, decision 8), the backstop for an agent that missed one.
+  *Until 2026-10-27* a request in those five seconds was dropped, on the reasoning that the snapshot just sent served it.
+  It did not serve an asker that registered after it went out: such an agent heard nothing until the next update or
+  the half-hourly republish, and a compromised workload could make its custody daemon miss a revocation that way, by
+  asking just before the daemon registered. Found building the pinning below.
 - *How a receiver believes it* (`AuthorityCore`, `credentials_agent_common::authority_leaf`):
   - only from the identity the broker gives the credentials agent (`POLAR_AUTHORITY_PUBLISHER`), checked first and
     cheaply, so nobody else can make an agent do signature work;
-  - the first snapshot from that identity pins its key for good, and a snapshot naming another key is refused and
-    reported, a key that changes under a running system being an incident and never an update;
+  - the first snapshot from that identity whose key is certified (below) pins it for good, and a snapshot naming another
+    key is refused and reported, certified or not, a key that changes under a running system being an incident and
+    never an update;
   - each update in it is verified on its own, one that fails is skipped and reported, and the rest are applied;
   - versions decide what replaces what is held, and a jump in a snapshot is not a miss, so a snapshot republished
     unchanged changes nothing.
@@ -174,14 +181,14 @@ A snapshot is the credentials agent's whole current authority in one message. Li
   broker's request at its start waits on the requests topic until the credentials agent subscribes, and is answered
   then. Harmless: a late answer is a right one.
 - *Its weak points:*
-  - *The key is trusted on first use.* It is learnt from the first snapshot, on the broker's word about who published
-    it, and nothing pins it beforehand. A compromised broker could give a freshly started agent a forged first snapshot
-    under a key of its own: the broker's word is the only thing that says who published it. The plan below.
+  - *The key was trusted on first use* until 2026-10-27: learnt from the first snapshot, on the broker's word about who
+    published it, so a compromised broker could have given a freshly started agent a forged first snapshot under a key
+    of its own. It is now pinned under the CA (below).
   - *Every snapshot reaches every subscriber,* the policy's whole text with it, and since step 5 a pod with the custody
     daemon has two (its workload and its daemon's watcher). Coalescing bounds the rate cluster-wide, not per asker;
     capping watchers bounds the subscribers (`cassini-broker.md`, "Capping watchers").
 
-## Pinning the key to the CA: the plan (2026-10-27, on the to-do list)
+## Pinning the key to the CA (planned 2026-10-27; built 2026-10-27)
 
 The credentials agent's escrow key is made in its own pod at its first start (`EscrowKeypair::load_or_generate`, on its
 volume) and nothing certifies it, so the catalog cannot carry its fingerprint before that start, and the leaves learn
@@ -211,6 +218,36 @@ certificate.
 6. *Considered and set aside:* the key's fingerprint in the catalog (the key would have to exist before the render,
    outside the pod that keeps it, which the escrow key's custody forbids); signing authority with the session offers'
    Ed25519 key (it is renewed, so it could not be pinned, and decision 4 gives the work to the escrow key).
+
+*Built (2026-10-27), as planned.*
+- *The check* (`polar-signing/src/verify.rs`): `verify_authority_certificate`, beside `verify_escrow_certificate`, the two
+  sharing the chain, the time, not-a-CA and the identity (`believed_leaf`); the authority certificate must permit
+  digital signatures and carry `id-kp-documentSigning` and no TLS purpose. `polar_signing::testing::authority_spec`.
+- *The snapshot* (`credentials-agent/common/src/authority_update.rs`): `certificate_chain_pem`, and
+  `AuthoritySnapshot::certified_key(trust, publisher, now)`: the key, only if the certificate is believed and is for the
+  very key the snapshot names. `AuthorityCore::new(publisher, trust)` and `on_snapshot(.., now)` pin nothing else
+  (`Refusal::Uncertified`).
+- *The book* (`authority_book.rs`): `certify(chain)`, refused when the certificate is for another key; no snapshot
+  until it holds one (`BookError::NotCertified`).
+- *The credentials agent* (`credentials-agent/consume/src/authority_certificate.rs`): `AuthorityCertifier` makes a CSR
+  with the escrow key (`cert_issuer_common::keypair::csr_for_private_key_pem`, the key's PEM held only for it), asks
+  `/internal/issue` for a `Signing` certificate for its own identity, hands it to the publisher (`Certified`), renews it
+  at half its life, and tries again every five seconds while cert-issuer cannot answer. The publisher publishes no
+  snapshot before it, and one at once when it comes. Certificates from `/internal/issue` are not recorded as workload
+  certificates (`state.rs`, `record_reported`), so this one and the session offers' signing certificate do not supersede
+  each other.
+- *The leaves:* the builder gives each agent's authority the CA it pins for Cassini (`signed::pinned_trust`, shared with
+  the signed documents' verifier), and an agent without a readable one believes no authority, as it verifies no signed
+  document; the broker, its client CA (`signed::trust_from_file`); the custody daemon, `POLAR_CUSTODY_CA_CERT`.
+- *Tests:* the check's cases and a property over its six conditions (`polar-signing/tests/authority_certificate.rs`);
+  the snapshot uncertified, another identity's, another key's, under another CA, out of date, none pinning anything;
+  the book before and after its certificate, and one for another key refused; the CSR made with a key held; the
+  certifier asking for the right certificate, a leaf believing it, and retrying while cert-issuer is down; the
+  publisher waiting for its certificate, refusing one for another key, and answering every request within five
+  seconds. The builder, broker and daemon tests pin a CA and are certified under it. Mutations caught: each check of
+  the certificate, the key comparison, an uncertified snapshot believed, the core pinning without the certificate, the
+  book's two rules, a request dropped, no snapshot on certification, the certifier handing over nothing.
+- *Not yet seen on a cluster.*
 
 ## Where things are decided
 

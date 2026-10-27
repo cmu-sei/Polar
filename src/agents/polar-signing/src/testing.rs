@@ -176,6 +176,19 @@ impl Default for EscrowSpec {
     }
 }
 
+/// The credentials agent's authority certificate as cert-issuer makes one (`CertType::Signing`), for `identity`:
+/// `digitalSignature` and the one extended key usage `id-kp-documentSigning`. Over any key, by `escrow_certificate_for`.
+pub fn authority_spec(identity: &'static str) -> EscrowSpec {
+    EscrowSpec {
+        identity,
+        key_usages: vec![KeyUsagePurpose::DigitalSignature],
+        extended_key_usages: vec![ExtendedKeyUsagePurpose::Other(
+            cert_issuer_common::OID_DOCUMENT_SIGNING.to_vec(),
+        )],
+        ..EscrowSpec::default()
+    }
+}
+
 /// An agent's escrow certificate as cert-issuer makes one (`CertType::Service`): the agent's identity as the DNS
 /// name, `keyEncipherment` and the one extended key usage `emailProtection`, over an RSA key, signed by `issuer`.
 pub fn escrow_certificate(issuer: &Authority, spec: EscrowSpec) -> String {

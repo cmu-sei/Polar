@@ -31,9 +31,10 @@
 //! identity (cheap, and it keeps anyone else from making a leaf do signature work); the key must be one this
 //! leaf has pinned, or be pinned now from a snapshot; then each update is verified and applied.
 //!
-//! The key is pinned from the first snapshot that comes from the credentials agent, and never replaced: a
-//! snapshot that names another key is refused and reported, because a key that changes under a running system is
-//! an incident and not an update.
+//! The key is pinned from the first snapshot that comes from the credentials agent and carries a certificate for it,
+//! believed under the CA the leaf pins (docs/architecture/authority-distribution.md, "Pinning the key to the CA"), and
+//! never replaced: a snapshot that names another key is refused and reported, certified or not, because a key that
+//! changes under a running system is an incident and not an update.
 
 use crate::authority_state::{Applied, AuthorityState};
 use crate::authority_update::{
@@ -72,6 +73,8 @@ pub enum Refusal {
     KeyChanged { pinned: String, got: String },
     /// The snapshot's key is not a key.
     BadKey(String),
+    /// The snapshot's key is not certified as the credentials agent's: nothing in it is believed, nothing is pinned.
+    Uncertified(String),
     /// An update did not verify.
     Update(AuthorityUpdateError),
 }
@@ -86,15 +89,18 @@ pub struct Handled {
 
 pub struct AuthorityCore {
     publisher: String,
+    /// The CA the leaf pins, under which the credentials agent's key is certified.
+    trust: polar_signing::Trust,
     key: Option<RsaPublicKey>,
     state: AuthorityState,
 }
 
 impl AuthorityCore {
-    /// `publisher` is the identity the broker gives the credentials agent.
-    pub fn new(publisher: impl Into<String>) -> Self {
+    /// `publisher` is the identity the broker gives the credentials agent; `trust`, the CA the leaf pins.
+    pub fn new(publisher: impl Into<String>, trust: polar_signing::Trust) -> Self {
         Self {
             publisher: publisher.into(),
+            trust,
             key: None,
             state: AuthorityState::default(),
         }
@@ -139,16 +145,20 @@ impl AuthorityCore {
         Ok(handled)
     }
 
-    /// The current authority, whether asked for or republished.
+    /// The current authority, whether asked for or republished, at `now` (Unix seconds).
     pub fn on_snapshot(
         &mut self,
         snapshot: &AuthoritySnapshot,
         published_by: Option<&str>,
+        now: i64,
     ) -> Result<Handled, Refusal> {
         self.from_the_credentials_agent(published_by)?;
-        let carried = snapshot
+        snapshot
             .public_key()
             .map_err(|e| Refusal::BadKey(e.to_string()))?;
+        let carried = snapshot
+            .certified_key(&self.trust, &self.publisher, now)
+            .map_err(|e| Refusal::Uncertified(e.to_string()))?;
         match &self.key {
             Some(pinned) if pinned != &carried => {
                 return Err(Refusal::KeyChanged {
@@ -244,21 +254,50 @@ mod tests {
         }
     }
 
+    fn ca() -> &'static polar_signing::testing::Authority {
+        static CA: std::sync::OnceLock<polar_signing::testing::Authority> =
+            std::sync::OnceLock::new();
+        CA.get_or_init(|| polar_signing::testing::root("Polar Internal CA"))
+    }
+
+    fn now() -> i64 {
+        polar_signing::testing::now()
+    }
+
+    /// A leaf of the cluster: it believes the credentials agent, under the CA it pins.
+    fn core() -> AuthorityCore {
+        AuthorityCore::new(
+            CREDENTIALS,
+            polar_signing::Trust::from_pem(&[ca().pem.clone()]).unwrap(),
+        )
+    }
+
+    /// A signing certificate for `key`, naming `identity`, as cert-issuer issues the credentials agent's.
+    fn certificate_for(key: &RsaPrivateKey, identity: &'static str) -> Vec<String> {
+        vec![polar_signing::testing::escrow_certificate_for(
+            ca(),
+            polar_signing::testing::authority_spec(identity),
+            &pem(key),
+        )]
+    }
+
+    /// A snapshot signed by `signer`, under its certificate as the credentials agent's.
     fn snapshot(signer: &RsaPrivateKey, payloads: &[AuthorityPayload]) -> AuthoritySnapshot {
         AuthoritySnapshot {
             public_key_pem: pem(signer),
+            certificate_chain_pem: certificate_for(signer, CREDENTIALS),
             updates: payloads.iter().map(|p| sign(p, signer).unwrap()).collect(),
         }
     }
 
     fn pinned(core: &mut AuthorityCore) {
-        core.on_snapshot(&snapshot(&key(0), &[]), Some(CREDENTIALS))
+        core.on_snapshot(&snapshot(&key(0), &[]), Some(CREDENTIALS), now())
             .unwrap();
     }
 
     #[test]
     fn only_the_credentials_agent_is_listened_to() {
-        let mut core = AuthorityCore::new(CREDENTIALS);
+        let mut core = core();
         let snap = snapshot(&key(0), &[policy(1, 1)]);
         for who in [
             None,
@@ -267,7 +306,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    core.on_snapshot(&snap, who),
+                    core.on_snapshot(&snap, who, now()),
                     Err(Refusal::WrongPublisher { .. })
                 ),
                 "{who:?}"
@@ -285,7 +324,7 @@ mod tests {
 
     #[test]
     fn an_update_cannot_be_checked_before_a_key_is_pinned() {
-        let mut core = AuthorityCore::new(CREDENTIALS);
+        let mut core = core();
         let update = sign(&policy(1, 1), &key(0)).unwrap();
         assert_eq!(
             core.on_update(&update, Some(CREDENTIALS)),
@@ -295,11 +334,12 @@ mod tests {
 
     #[test]
     fn a_snapshot_pins_the_key_and_applies_what_it_carries() {
-        let mut core = AuthorityCore::new(CREDENTIALS);
+        let mut core = core();
         let handled = core
             .on_snapshot(
                 &snapshot(&key(0), &[policy(1, 2), groups(3, 1)]),
                 Some(CREDENTIALS),
+                now(),
             )
             .unwrap();
         assert!(core.has_key());
@@ -328,10 +368,10 @@ mod tests {
 
     #[test]
     fn a_snapshot_republished_changes_nothing() {
-        let mut core = AuthorityCore::new(CREDENTIALS);
+        let mut core = core();
         let snap = snapshot(&key(0), &[policy(1, 2)]);
-        core.on_snapshot(&snap, Some(CREDENTIALS)).unwrap();
-        let again = core.on_snapshot(&snap, Some(CREDENTIALS)).unwrap();
+        core.on_snapshot(&snap, Some(CREDENTIALS), now()).unwrap();
+        let again = core.on_snapshot(&snap, Some(CREDENTIALS), now()).unwrap();
         assert!(
             again.effects.is_empty() && again.refused.is_empty(),
             "{again:?}"
@@ -340,7 +380,7 @@ mod tests {
 
     #[test]
     fn a_live_update_is_applied_once_and_an_old_one_not_at_all() {
-        let mut core = AuthorityCore::new(CREDENTIALS);
+        let mut core = core();
         pinned(&mut core);
         let v1 = sign(&policy(1, 1), &key(0)).unwrap();
         let v2 = sign(&policy(2, 2), &key(0)).unwrap();
@@ -369,7 +409,7 @@ mod tests {
 
     #[test]
     fn a_jump_in_the_sequence_applies_the_update_and_asks_for_the_rest() {
-        let mut core = AuthorityCore::new(CREDENTIALS);
+        let mut core = core();
         pinned(&mut core);
         core.on_update(&sign(&policy(1, 1), &key(0)).unwrap(), Some(CREDENTIALS))
             .unwrap();
@@ -391,7 +431,7 @@ mod tests {
 
     #[test]
     fn revoked_serials_are_a_kind_of_their_own() {
-        let mut core = AuthorityCore::new(CREDENTIALS);
+        let mut core = core();
         pinned(&mut core);
         let revoked = AuthorityPayload {
             sequence: 1,
@@ -409,7 +449,7 @@ mod tests {
 
     #[test]
     fn an_update_signed_by_another_key_is_refused() {
-        let mut core = AuthorityCore::new(CREDENTIALS);
+        let mut core = core();
         pinned(&mut core);
         let forged = sign(&policy(1, 1), &key(1)).unwrap();
         assert!(matches!(
@@ -420,10 +460,10 @@ mod tests {
 
     #[test]
     fn a_snapshot_that_names_a_different_key_is_refused_and_nothing_in_it_is_applied() {
-        let mut core = AuthorityCore::new(CREDENTIALS);
+        let mut core = core();
         pinned(&mut core);
         let other = snapshot(&key(1), &[policy(1, 9)]);
-        match core.on_snapshot(&other, Some(CREDENTIALS)) {
+        match core.on_snapshot(&other, Some(CREDENTIALS), now()) {
             Err(Refusal::KeyChanged { pinned, got }) => {
                 assert_eq!(pinned, fingerprint(&key(0).to_public_key()).unwrap());
                 assert_eq!(got, fingerprint(&key(1).to_public_key()).unwrap());
@@ -435,10 +475,10 @@ mod tests {
 
     #[test]
     fn one_bad_update_in_a_snapshot_does_not_stop_the_good_ones() {
-        let mut core = AuthorityCore::new(CREDENTIALS);
+        let mut core = core();
         let mut snap = snapshot(&key(0), &[policy(1, 1), groups(2, 1)]);
         snap.updates[0].signature[0] ^= 1;
-        let handled = core.on_snapshot(&snap, Some(CREDENTIALS)).unwrap();
+        let handled = core.on_snapshot(&snap, Some(CREDENTIALS), now()).unwrap();
         assert_eq!(handled.refused, vec![AuthorityUpdateError::BadSignature]);
         assert!(
             handled
@@ -456,14 +496,69 @@ mod tests {
 
     #[test]
     fn a_snapshot_with_a_key_that_is_not_a_key_is_refused() {
-        let mut core = AuthorityCore::new(CREDENTIALS);
+        let mut core = core();
         let snap = AuthoritySnapshot {
             public_key_pem: "nope".into(),
+            certificate_chain_pem: certificate_for(&key(0), CREDENTIALS),
             updates: vec![],
         };
         assert!(matches!(
-            core.on_snapshot(&snap, Some(CREDENTIALS)),
+            core.on_snapshot(&snap, Some(CREDENTIALS), now()),
             Err(Refusal::BadKey(_))
+        ));
+        assert!(!core.has_key());
+    }
+
+    #[test]
+    fn a_snapshot_whose_key_is_not_certified_as_the_credentials_agent_s_pins_nothing() {
+        let other_ca = polar_signing::testing::root("Polar Internal CA");
+        let mut cases = vec![
+            ("no certificate", {
+                let mut s = snapshot(&key(0), &[policy(1, 1)]);
+                s.certificate_chain_pem = vec![];
+                s
+            }),
+            ("another identity's", {
+                let mut s = snapshot(&key(0), &[policy(1, 1)]);
+                s.certificate_chain_pem = certificate_for(
+                    &key(0),
+                    "git-repo-observer.polar.serviceaccount.cluster.local",
+                );
+                s
+            }),
+            ("another key's", {
+                let mut s = snapshot(&key(0), &[policy(1, 1)]);
+                s.certificate_chain_pem = certificate_for(&key(1), CREDENTIALS);
+                s
+            }),
+        ];
+        cases.push(("under a CA the leaf does not pin", {
+            let mut s = snapshot(&key(0), &[policy(1, 1)]);
+            s.certificate_chain_pem = vec![polar_signing::testing::escrow_certificate_for(
+                &other_ca,
+                polar_signing::testing::authority_spec(CREDENTIALS),
+                &pem(&key(0)),
+            )];
+            s
+        }));
+        for (what, snap) in cases {
+            let mut core = core();
+            assert!(
+                matches!(
+                    core.on_snapshot(&snap, Some(CREDENTIALS), now()),
+                    Err(Refusal::Uncertified(_))
+                ),
+                "{what}"
+            );
+            assert!(!core.has_key(), "{what}: nothing pinned");
+            assert!(core.state().held(AuthorityKind::Policy).is_none());
+        }
+        // Out of date: the same certificate, at a time it does not cover.
+        let mut core = core();
+        let in_2101 = 4_134_000_000;
+        assert!(matches!(
+            core.on_snapshot(&snapshot(&key(0), &[]), Some(CREDENTIALS), in_2101),
+            Err(Refusal::Uncertified(_))
         ));
         assert!(!core.has_key());
     }

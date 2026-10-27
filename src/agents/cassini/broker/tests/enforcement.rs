@@ -162,8 +162,9 @@ async fn cedar_forbids_a_declared_topic_and_permits_an_undeclared_one() {
     broker.stop().await;
 }
 
-fn snapshot_forbidding_the_producer_news(signer: &RsaPrivateKey) -> Vec<u8> {
+fn snapshot_forbidding_the_producer_news(pki: &support::Pki, signer: &RsaPrivateKey) -> Vec<u8> {
     snapshot_of_policy(
+        pki,
         signer,
         &format!(
             r#"forbid (principal == Identity::"{PRODUCER}", action == Action::"publish", resource == Topic::"news");"#
@@ -171,8 +172,9 @@ fn snapshot_forbidding_the_producer_news(signer: &RsaPrivateKey) -> Vec<u8> {
     )
 }
 
-/// The credentials agent's snapshot carrying `source` as the policy, signed by `signer`.
-fn snapshot_of_policy(signer: &RsaPrivateKey, source: &str) -> Vec<u8> {
+/// The credentials agent's snapshot carrying `source` as the policy, signed by `signer`, under its signing certificate
+/// from `pki`'s CA.
+fn snapshot_of_policy(pki: &support::Pki, signer: &RsaPrivateKey, source: &str) -> Vec<u8> {
     let policy = AuthorityPayload {
         sequence: 1,
         version: 1,
@@ -181,11 +183,13 @@ fn snapshot_of_policy(signer: &RsaPrivateKey, source: &str) -> Vec<u8> {
         },
         authored_by: None,
     };
+    let public_key_pem = signer
+        .to_public_key()
+        .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+        .unwrap();
     let snapshot = AuthoritySnapshot {
-        public_key_pem: signer
-            .to_public_key()
-            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-            .unwrap(),
+        certificate_chain_pem: vec![pki.certify_authority(CREDENTIALS, &public_key_pem)],
+        public_key_pem,
         updates: vec![sign(&policy, signer).unwrap()],
     };
     rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
@@ -208,7 +212,7 @@ async fn the_broker_keeps_the_credentials_agent_s_authority_and_no_one_else_s() 
         .pki
         .issue_client_carrying(impostor, &[replies, "g:cassini-client".to_string()]);
     let signer = RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
-    let snapshot = snapshot_forbidding_the_producer_news(&signer);
+    let snapshot = snapshot_forbidding_the_producer_news(&broker.pki, &signer);
     let producer = TestClient::connect(&broker, PRODUCER).await;
     let sink = TestClient::connect(&broker, SINK).await;
     sink.subscribe("news");
@@ -300,7 +304,7 @@ async fn a_change_of_authority_ends_every_kept_decision_at_once() {
     let credentials = TestClient::connect(&broker, CREDENTIALS).await;
     credentials.publish(
         AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
-        &snapshot_forbidding_the_producer_news(&signer),
+        &snapshot_forbidding_the_producer_news(&broker.pki, &signer),
     );
     producer
         .wait_for("the forbid to apply", Duration::from_secs(10), |c| {
@@ -356,6 +360,7 @@ async fn a_held_subscription_a_new_forbid_refuses_is_dropped_and_the_client_told
     credentials.publish(
         AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
         &snapshot_of_policy(
+            &broker.pki,
             &signer,
             &format!(
                 r#"forbid (principal == Identity::"{SINK}", action == Action::"subscribe", resource == Topic::"news");"#
@@ -389,6 +394,7 @@ async fn a_held_subscription_the_new_authority_still_admits_is_kept() {
     credentials.publish(
         AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
         &snapshot_of_policy(
+            &broker.pki,
             &signer,
             &format!(
                 r#"forbid (principal == Identity::"{SINK}", action == Action::"subscribe", resource == Topic::"weather");"#
@@ -571,7 +577,9 @@ async fn agent(
     use ractor::Actor;
     let service = format!("{name}-{}", uuid::Uuid::new_v4());
     let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
-    let authority = AuthorityHandle::spawn(&service, CREDENTIALS, parent.get_cell())
+    let trust =
+        polar_agent_builder::signed::trust_from_file(broker.pki.ca().to_str().unwrap()).unwrap();
+    let authority = AuthorityHandle::spawn(&service, CREDENTIALS, trust, parent.get_cell())
         .await
         .unwrap();
     let (router, _) = Actor::spawn(None, polar_router::RouterActor, ())
@@ -749,6 +757,7 @@ async fn an_agent_sends_a_refused_subscription_again_once_a_permit_arrives() {
     let credentials = TestClient::connect(&broker, CREDENTIALS).await;
     let signer = RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
     let permit = snapshot_of_policy(
+        &broker.pki,
         &signer,
         &format!(
             r#"permit (principal == Identity::"{SINK}", action == Action::"subscribe", resource == Topic::"weather");"#

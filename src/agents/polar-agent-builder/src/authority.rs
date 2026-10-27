@@ -231,17 +231,18 @@ impl AuthorityActorState {
 impl Actor for AuthorityActor {
     type Msg = AuthorityMessage;
     type State = AuthorityActorState;
-    type Arguments = AuthorityArgs;
+    /// What it is wired to, and the CA the agent pins, under which the credentials agent's key is certified.
+    type Arguments = (AuthorityArgs, polar_signing::Trust);
 
     async fn pre_start(
         &self,
         myself: ActorRef<Self::Msg>,
-        args: AuthorityArgs,
+        (args, trust): (AuthorityArgs, polar_signing::Trust),
     ) -> Result<Self::State, ActorProcessingErr> {
         // While there is no key it asks again from time to time; with one the tick does nothing.
         drop(myself.send_interval(TICK, || AuthorityMessage::Tick));
         Ok(AuthorityActorState {
-            core: AuthorityCore::new(args.publisher.clone()),
+            core: AuthorityCore::new(args.publisher.clone(), trust),
             args,
             last_ask: None,
         })
@@ -265,7 +266,9 @@ impl Actor for AuthorityActor {
                 snapshot,
                 published_by,
             } => {
-                let result = state.core.on_snapshot(&snapshot, published_by.as_deref());
+                let result = state
+                    .core
+                    .on_snapshot(&snapshot, published_by.as_deref(), unix_now());
                 state.handled(result).await;
             }
             AuthorityMessage::Registered | AuthorityMessage::Behind => state.ask(),
@@ -280,6 +283,13 @@ impl Actor for AuthorityActor {
         }
         Ok(())
     }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// The registry name of an agent's policy actor, the way the Cassini client is "<service>.tcp".
@@ -426,6 +436,7 @@ impl AuthorityHandle {
     pub async fn spawn(
         service: &str,
         publisher: impl Into<String>,
+        trust: polar_signing::Trust,
         supervisor: ActorCell,
     ) -> Result<Self, ActorProcessingErr> {
         let (permissions, _) = Actor::spawn_linked(
@@ -450,14 +461,17 @@ impl AuthorityHandle {
         let (actor, _) = Actor::spawn_linked(
             None,
             AuthorityActor,
-            AuthorityArgs {
-                publisher: publisher.into(),
-                permissions: permissions.clone(),
-                policy: policy.clone(),
-                revoked: revoked.clone(),
-                changes: changes.clone(),
-                asks: asks.clone(),
-            },
+            (
+                AuthorityArgs {
+                    publisher: publisher.into(),
+                    permissions: permissions.clone(),
+                    policy: policy.clone(),
+                    revoked: revoked.clone(),
+                    changes: changes.clone(),
+                    asks: asks.clone(),
+                },
+                trust,
+            ),
             supervisor,
         )
         .await?;
@@ -555,8 +569,28 @@ mod actor_tests {
             .clone()
     }
 
+    fn ca() -> &'static polar_signing::testing::Authority {
+        static CA: std::sync::OnceLock<polar_signing::testing::Authority> =
+            std::sync::OnceLock::new();
+        CA.get_or_init(|| polar_signing::testing::root("Polar Internal CA"))
+    }
+
+    /// What the agent pins: the CA its tests' credentials agent is certified under.
+    fn trust() -> polar_signing::Trust {
+        polar_signing::Trust::from_pem(&[ca().pem.clone()]).unwrap()
+    }
+
     fn snapshot(payloads: &[AuthorityPayload]) -> AuthoritySnapshot {
+        let public_key_pem = key()
+            .to_public_key()
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
         AuthoritySnapshot {
+            certificate_chain_pem: vec![polar_signing::testing::escrow_certificate_for(
+                ca(),
+                polar_signing::testing::authority_spec(CREDENTIALS),
+                &public_key_pem,
+            )],
             public_key_pem: key()
                 .to_public_key()
                 .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
@@ -630,7 +664,7 @@ mod actor_tests {
         }
         let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
         let service = unique_service();
-        let handle = AuthorityHandle::spawn(&service, CREDENTIALS, parent.get_cell())
+        let handle = AuthorityHandle::spawn(&service, CREDENTIALS, trust(), parent.get_cell())
             .await
             .unwrap();
         let changes = Arc::new(Mutex::new(Vec::new()));
@@ -680,7 +714,7 @@ mod actor_tests {
         let service = unique_service();
         let lookup = PolicyLookup::for_service(&service);
         assert!(lookup.actor().is_none());
-        let handle = AuthorityHandle::spawn(&service, CREDENTIALS, parent.get_cell())
+        let handle = AuthorityHandle::spawn(&service, CREDENTIALS, trust(), parent.get_cell())
             .await
             .unwrap();
         assert_eq!(lookup.actor().unwrap().get_id(), handle.policy().get_id());

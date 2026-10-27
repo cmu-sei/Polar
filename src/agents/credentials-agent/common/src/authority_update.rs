@@ -65,6 +65,10 @@ pub enum AuthorityUpdateError {
     Malformed(String),
     #[error("could not make the update: {0}")]
     Encoding(String),
+    /// A snapshot's key is not certified as the credentials agent's: its certificate is missing, is not believed under
+    /// the pinned CA, or is for another key (docs/architecture/authority-distribution.md, "Pinning the key to the CA").
+    #[error("the snapshot's key is not certified as the credentials agent's: {0}")]
+    Uncertified(String),
 }
 
 /// What a payload replaces, in full.
@@ -147,6 +151,10 @@ pub struct AuthoritySnapshotRequest;
 pub struct AuthoritySnapshot {
     /// The signing key's public half, PEM.
     pub public_key_pem: String,
+    /// The key's certificate, then whatever leads to the CA: a `CertType::Signing` certificate for the credentials
+    /// agent's identity, over this key, from the CA every pod pins. A leaf pins the key only under it.
+    #[serde(default)]
+    pub certificate_chain_pem: Vec<String>,
     /// The latest signed update of each kind, oldest sequence first.
     pub updates: Vec<AuthorityUpdate>,
 }
@@ -157,6 +165,40 @@ impl AuthoritySnapshot {
         use rsa::pkcs8::DecodePublicKey;
         RsaPublicKey::from_public_key_pem(&self.public_key_pem)
             .map_err(|e| AuthorityUpdateError::Encoding(format!("the snapshot's key: {e}")))
+    }
+
+    /// The key it carries, if its certificate makes it `publisher`'s at `now` (Unix seconds) under `trust`, the CA the
+    /// leaf pins: the certificate believed (`polar_signing::verify_authority_certificate`), and for this very key.
+    pub fn certified_key(
+        &self,
+        trust: &polar_signing::Trust,
+        publisher: &str,
+        now: i64,
+    ) -> Result<RsaPublicKey, AuthorityUpdateError> {
+        use rsa::pkcs8::DecodePublicKey;
+        if self.certificate_chain_pem.is_empty() {
+            return Err(AuthorityUpdateError::Uncertified(
+                "it carries no certificate".to_string(),
+            ));
+        }
+        let certified = polar_signing::verify_authority_certificate(
+            &self.certificate_chain_pem.concat(),
+            trust,
+            now,
+            publisher,
+        )
+        .map_err(|e| AuthorityUpdateError::Uncertified(e.to_string()))?;
+        let certified = RsaPublicKey::from_public_key_pem(&certified).map_err(|e| {
+            AuthorityUpdateError::Uncertified(format!(
+                "the certificate's key is not an RSA key: {e}"
+            ))
+        })?;
+        if certified != self.public_key()? {
+            return Err(AuthorityUpdateError::Uncertified(
+                "the certificate is for another key than the snapshot names".to_string(),
+            ));
+        }
+        Ok(certified)
     }
 }
 
@@ -417,6 +459,7 @@ mod tests {
     fn a_snapshot_and_a_request_for_one_survive_the_wire() {
         let key = key();
         let snapshot = AuthoritySnapshot {
+            certificate_chain_pem: vec![],
             public_key_pem: rsa::pkcs8::EncodePublicKey::to_public_key_pem(
                 &key.to_public_key(),
                 rsa::pkcs8::LineEnding::LF,
@@ -439,6 +482,7 @@ mod tests {
     #[test]
     fn a_snapshot_whose_key_is_not_a_key_says_so() {
         let snapshot = AuthoritySnapshot {
+            certificate_chain_pem: vec![],
             public_key_pem: "not a key".into(),
             updates: vec![],
         };

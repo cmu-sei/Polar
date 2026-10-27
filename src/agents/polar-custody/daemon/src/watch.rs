@@ -70,10 +70,11 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// `publisher` is the identity the broker gives the credentials agent.
-    pub fn new(publisher: impl Into<String>) -> Self {
+    /// `publisher` is the identity the broker gives the credentials agent; `trust`, the CA the pod pins, under which its
+    /// key is certified (docs/architecture/authority-distribution.md, "Pinning the key to the CA").
+    pub fn new(publisher: impl Into<String>, trust: polar_signing::Trust) -> Self {
         Self {
-            core: AuthorityCore::new(publisher),
+            core: AuthorityCore::new(publisher, trust),
         }
     }
 
@@ -82,14 +83,15 @@ impl Watch {
         self.core.has_key()
     }
 
-    /// What `payload`, published on `topic` by `published_by`, means for `custody`; a revoked certificate's keys are
-    /// destroyed here.
+    /// What `payload`, published on `topic` by `published_by`, means for `custody` at `now` (Unix seconds); a revoked
+    /// certificate's keys are destroyed here.
     pub fn hear(
         &mut self,
         topic: &str,
         payload: &[u8],
         published_by: Option<&str>,
         custody: &RwLock<Custody>,
+        now: i64,
     ) -> Heard {
         let handled = match topic {
             AUTHORITY_UPDATES_TOPIC => {
@@ -103,7 +105,7 @@ impl Watch {
             }
             AUTHORITY_SNAPSHOT_REPLIES_TOPIC => {
                 match rkyv::from_bytes::<AuthoritySnapshot, rkyv::rancor::Error>(payload) {
-                    Ok(snapshot) => self.core.on_snapshot(&snapshot, published_by),
+                    Ok(snapshot) => self.core.on_snapshot(&snapshot, published_by, now),
                     Err(e) => {
                         warn!("a message on the authority snapshot topic is not a snapshot: {e}");
                         return Heard::Nothing;
@@ -154,6 +156,13 @@ impl Watch {
 /// (`polar_agent_builder::environment::AUTHORITY_PUBLISHER`; a test holds the two together).
 pub const PUBLISHER_VARIABLE: &str = "POLAR_AUTHORITY_PUBLISHER";
 pub const DEFAULT_PUBLISHER: &str = "credentials-agent.polar.serviceaccount.cluster.local";
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 /// How often the actor looks whether its client slot holds a certificate yet, and whether its connection is up.
 const TICK: Duration = Duration::from_secs(1);
@@ -268,8 +277,10 @@ impl Actor for Watcher {
         args: WatcherArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         drop(myself.send_interval(TICK, || WatcherMessage::Tick));
+        let trust = polar_signing::Trust::from_pem(std::slice::from_ref(&args.ca_pem))
+            .map_err(|e| ActorProcessingErr::from(format!("the pinned CA: {e}")))?;
         Ok(WatcherState {
-            watch: Watch::new(args.publisher.clone()),
+            watch: Watch::new(args.publisher.clone(), trust),
             args,
             client: None,
             last_ask: None,
@@ -318,6 +329,7 @@ impl Actor for Watcher {
                 &payload,
                 published_by.as_deref(),
                 &state.args.custody,
+                unix_now(),
             ) {
                 Heard::Nothing => {}
                 Heard::Ask => state.ask(ASK_INTERVAL),
@@ -395,12 +407,22 @@ mod tests {
         }
     }
 
+    /// A snapshot signed by `signer`, under the signing certificate the pod's CA issued it as the credentials agent's.
     fn snapshot(signer: &RsaPrivateKey, payloads: &[AuthorityPayload]) -> Vec<u8> {
+        let public_key_pem = signer
+            .to_public_key()
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
+        let mut params = rcgen::CertificateParams::new(vec![CREDENTIALS.to_string()]).unwrap();
+        params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::Other(
+            cert_issuer_common::OID_DOCUMENT_SIGNING.to_vec(),
+        )];
+        let subject = rcgen::SubjectPublicKeyInfo::from_pem(&public_key_pem).unwrap();
+        let certificate = params.signed_by(&subject, &ca().0).unwrap().pem();
         let snapshot = AuthoritySnapshot {
-            public_key_pem: signer
-                .to_public_key()
-                .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-                .unwrap(),
+            certificate_chain_pem: vec![certificate],
+            public_key_pem,
             updates: payloads.iter().map(|p| sign(p, signer).unwrap()).collect(),
         };
         rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
@@ -421,17 +443,30 @@ mod tests {
             .as_secs() as i64
     }
 
-    /// A custody whose client slot holds a certificate, and that certificate's serial.
-    fn installed() -> (RwLock<Custody>, String) {
+    /// The CA the pod pins, which issued both its own certificate and the credentials agent's.
+    fn ca() -> &'static (rcgen::Issuer<'static, rcgen::KeyPair>, String) {
         static CA: std::sync::OnceLock<(rcgen::Issuer<'static, rcgen::KeyPair>, String)> =
             std::sync::OnceLock::new();
-        let (issuer, ca_pem) = CA.get_or_init(|| {
+        CA.get_or_init(|| {
             let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
             params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
             let key = rcgen::KeyPair::generate().unwrap();
             let pem = params.self_signed(&key).unwrap().pem();
             (rcgen::Issuer::new(params, key), pem)
-        });
+        })
+    }
+
+    /// A watch as the daemon keeps one, believing the credentials agent under the pod's CA.
+    fn watch() -> Watch {
+        Watch::new(
+            CREDENTIALS,
+            polar_signing::Trust::from_pem(&[ca().1.clone()]).unwrap(),
+        )
+    }
+
+    /// A custody whose client slot holds a certificate, and that certificate's serial.
+    fn installed() -> (RwLock<Custody>, String) {
+        let (issuer, ca_pem) = ca();
         let installer = Roles {
             installer: true,
             workload: false,
@@ -492,12 +527,13 @@ mod tests {
     #[test]
     fn its_own_serial_in_the_credentials_agent_s_snapshot_destroys_its_keys() {
         let (custody, own) = installed();
-        let mut watch = Watch::new(CREDENTIALS);
+        let mut watch = watch();
         let heard = watch.hear(
             AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
             &snapshot(&key(0), &[revoked(1, &["00ff".to_string(), own])]),
             Some(CREDENTIALS),
             &custody,
+            now(),
         );
         assert_eq!(heard, Heard::Revoked(vec![Slot::Client]));
         assert!(custody.read().unwrap().is_revoked());
@@ -507,13 +543,14 @@ mod tests {
     #[test]
     fn its_own_serial_in_a_later_update_destroys_its_keys() {
         let (custody, own) = installed();
-        let mut watch = Watch::new(CREDENTIALS);
+        let mut watch = watch();
         assert_eq!(
             watch.hear(
                 AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
                 &snapshot(&key(0), &[revoked(1, &[])]),
                 Some(CREDENTIALS),
-                &custody
+                &custody,
+                now()
             ),
             Heard::Nothing
         );
@@ -523,7 +560,8 @@ mod tests {
                 AUTHORITY_UPDATES_TOPIC,
                 &update(&key(0), &revoked(2, &[own])),
                 Some(CREDENTIALS),
-                &custody
+                &custody,
+                now()
             ),
             Heard::Revoked(vec![Slot::Client])
         );
@@ -533,12 +571,13 @@ mod tests {
     #[test]
     fn other_serials_change_nothing() {
         let (custody, _) = installed();
-        let mut watch = Watch::new(CREDENTIALS);
+        let mut watch = watch();
         let heard = watch.hear(
             AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
             &snapshot(&key(0), &[revoked(1, &["00ff".to_string()])]),
             Some(CREDENTIALS),
             &custody,
+            now(),
         );
         assert_eq!(heard, Heard::Nothing);
         assert!(signs(&custody));
@@ -547,14 +586,15 @@ mod tests {
     #[test]
     fn a_set_from_anyone_but_the_credentials_agent_or_under_another_key_is_not_believed() {
         let (custody, own) = installed();
-        let mut watch = Watch::new(CREDENTIALS);
+        let mut watch = watch();
         let forged = snapshot(&key(1), &[revoked(1, std::slice::from_ref(&own))]);
         assert_eq!(
             watch.hear(
                 AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
                 &forged,
                 Some("impostor.polar.serviceaccount.cluster.local"),
-                &custody
+                &custody,
+                now()
             ),
             Heard::Nothing
         );
@@ -565,6 +605,7 @@ mod tests {
             &snapshot(&key(0), &[revoked(1, &[])]),
             Some(CREDENTIALS),
             &custody,
+            now(),
         );
         let forged = snapshot(&key(1), &[revoked(2, std::slice::from_ref(&own))]);
         assert_eq!(
@@ -572,7 +613,8 @@ mod tests {
                 AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
                 &forged,
                 Some(CREDENTIALS),
-                &custody
+                &custody,
+                now()
             ),
             Heard::Nothing
         );
@@ -582,7 +624,8 @@ mod tests {
                 AUTHORITY_UPDATES_TOPIC,
                 &forged,
                 Some(CREDENTIALS),
-                &custody
+                &custody,
+                now()
             ),
             Heard::Nothing
         );
@@ -592,13 +635,14 @@ mod tests {
     #[test]
     fn an_update_before_any_snapshot_asks_for_one() {
         let (custody, own) = installed();
-        let mut watch = Watch::new(CREDENTIALS);
+        let mut watch = watch();
         assert_eq!(
             watch.hear(
                 AUTHORITY_UPDATES_TOPIC,
                 &update(&key(0), &revoked(1, &[own])),
                 Some(CREDENTIALS),
-                &custody
+                &custody,
+                now()
             ),
             Heard::Ask
         );
@@ -656,7 +700,7 @@ mod tests {
             #[test]
             fn it_signs_exactly_until_a_believed_set_names_it(events in prop::collection::vec(event(), 0..10)) {
                 let (custody, own) = installed();
-                let mut watch = Watch::new(CREDENTIALS);
+                let mut watch = watch();
                 let mut pinned = false;
                 let mut revoked_seen = false;
                 for (n, e) in events.iter().enumerate() {
@@ -671,7 +715,7 @@ mod tests {
                         (AUTHORITY_UPDATES_TOPIC, update(&signer, &payload))
                     };
                     let publisher = if e.from_the_credentials_agent { CREDENTIALS } else { "impostor.polar.serviceaccount.cluster.local" };
-                    watch.hear(topic, &bytes, Some(publisher), &custody);
+                    watch.hear(topic, &bytes, Some(publisher), &custody, now());
                     let believed = e.from_the_credentials_agent && (e.snapshot || pinned);
                     pinned |= e.from_the_credentials_agent && e.snapshot;
                     revoked_seen |= believed && e.own;

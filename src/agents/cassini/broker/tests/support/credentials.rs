@@ -36,6 +36,8 @@ pub const CREDENTIALS: &str = "credentials-agent.polar.serviceaccount.cluster.lo
 pub struct CredentialsAgent {
     pub client: TestClient,
     signer: rsa::RsaPrivateKey,
+    /// Its signing certificate for `signer`, from the broker's CA, as cert-issuer issues it.
+    chain: Vec<String>,
     /// The last snapshot it published: what it answers a request for the current authority with.
     current: std::sync::Mutex<Option<Vec<u8>>>,
 }
@@ -60,11 +62,18 @@ impl CredentialsAgent {
         );
         // One key for the whole test binary: each broker pins it afresh, and an RSA key is slow to make.
         static SIGNER: std::sync::OnceLock<rsa::RsaPrivateKey> = std::sync::OnceLock::new();
+        let signer = SIGNER
+            .get_or_init(|| rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap())
+            .clone();
+        let public_key_pem = rsa::pkcs8::EncodePublicKey::to_public_key_pem(
+            &signer.to_public_key(),
+            rsa::pkcs8::LineEnding::LF,
+        )
+        .unwrap();
         Self {
             client: TestClient::connect(broker, CREDENTIALS).await,
-            signer: SIGNER
-                .get_or_init(|| rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap())
-                .clone(),
+            chain: vec![broker.pki.certify_authority(CREDENTIALS, &public_key_pem)],
+            signer,
             current: std::sync::Mutex::new(None),
         }
     }
@@ -140,6 +149,7 @@ impl CredentialsAgent {
             authored_by: None,
         };
         let snapshot = AuthoritySnapshot {
+            certificate_chain_pem: self.chain.clone(),
             public_key_pem: signer
                 .to_public_key()
                 .to_public_key_pem(rsa::pkcs8::LineEnding::LF)

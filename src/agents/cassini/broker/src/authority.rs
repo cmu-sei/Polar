@@ -63,13 +63,24 @@ pub struct BrokerAuthority {
 impl BrokerAuthority {
     /// Starts the broker's authority under `supervisor`, believing only `publisher` (the credentials agent's
     /// identity). What it wants to ask for is published on the requests topic through `topic_mgr`.
+    /// The credentials agent's key is believed under a certificate from `pinned_ca_file`, the CA the broker verifies its
+    /// clients under (docs/architecture/authority-distribution.md, "Pinning the key to the CA"); without a readable one,
+    /// nothing is believed.
     pub async fn spawn(
         publisher: String,
+        pinned_ca_file: &str,
         supervisor: ActorCell,
         topic_mgr: ActorRef<BrokerMessage>,
         cache_for: Duration,
     ) -> Result<Self, ActorProcessingErr> {
-        let handle = AuthorityHandle::spawn(SERVICE, publisher, supervisor.clone()).await?;
+        let trust = match polar_agent_builder::signed::trust_from_file(pinned_ca_file) {
+            Ok(trust) => trust,
+            Err(why) => {
+                warn!("no authority from the credentials agent will be believed: {why}");
+                polar_signing::Trust::from_pem(&[]).expect("no anchors is a trust")
+            }
+        };
+        let handle = AuthorityHandle::spawn(SERVICE, publisher, trust, supervisor.clone()).await?;
         let changes = Arc::new(AtomicU64::new(0));
         let (counter, _) =
             Actor::spawn_linked(None, ChangeCounter, changes.clone(), supervisor).await?;

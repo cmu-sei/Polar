@@ -47,10 +47,19 @@ pub enum BookError {
     SequenceDidNotRise { offered: u64, last: u64 },
     #[error(transparent)]
     Update(#[from] AuthorityUpdateError),
+    /// No certificate for the key is held yet, so no snapshot is made: a leaf would not pin its key without one.
+    #[error("the signing key has no certificate yet")]
+    NotCertified,
+    /// The certificate offered is not for the key the book signs with.
+    #[error("the certificate is not for the signing key: {0}")]
+    NotForTheKey(String),
 }
 
 pub struct AuthorityBook {
     key: RsaPrivateKey,
+    /// The key's certificate and what leads to the CA, once cert-issuer has issued one
+    /// (docs/architecture/authority-distribution.md, "Pinning the key to the CA").
+    certificate_chain_pem: Option<Vec<String>>,
     last_sequence: u64,
     latest: HashMap<AuthorityKind, (u64, AuthorityUpdate)>,
 }
@@ -60,9 +69,33 @@ impl AuthorityBook {
     pub fn new(key: RsaPrivateKey, last_sequence: u64) -> Self {
         Self {
             key,
+            certificate_chain_pem: None,
             last_sequence,
             latest: HashMap::new(),
         }
+    }
+
+    /// Holds `chain` as the signing key's certificate from now on, in place of any before it: refused, and the one
+    /// held kept, if its first certificate is not for the key.
+    pub fn certify(&mut self, chain: Vec<String>) -> Result<(), BookError> {
+        use rsa::pkcs8::DecodePublicKey;
+        let leaf = chain
+            .first()
+            .ok_or_else(|| BookError::NotForTheKey("no certificate".to_string()))?;
+        let certified = cert_issuer_common::public_key::extract_public_key_pem(leaf)
+            .map_err(|e| BookError::NotForTheKey(e.to_string()))?;
+        let certified = rsa::RsaPublicKey::from_public_key_pem(&certified)
+            .map_err(|e| BookError::NotForTheKey(format!("not an RSA key: {e}")))?;
+        if certified != self.key.to_public_key() {
+            return Err(BookError::NotForTheKey("it is for another key".to_string()));
+        }
+        self.certificate_chain_pem = Some(chain);
+        Ok(())
+    }
+
+    /// Whether a certificate for the key is held.
+    pub fn is_certified(&self) -> bool {
+        self.certificate_chain_pem.is_some()
     }
 
     /// Whether `version` of `kind` would replace what is held. Asked before a sequence is assigned, so that
@@ -118,6 +151,10 @@ impl AuthorityBook {
     /// The signing key and the latest signed update of each kind, oldest sequence first: what an agent is
     /// answered with, and what is republished.
     pub fn snapshot(&self) -> Result<AuthoritySnapshot, BookError> {
+        let certificate_chain_pem = self
+            .certificate_chain_pem
+            .clone()
+            .ok_or(BookError::NotCertified)?;
         let public_key_pem = self
             .key
             .to_public_key()
@@ -128,6 +165,7 @@ impl AuthorityBook {
         held.sort_by_key(|(_, update)| sequence_of(update));
         Ok(AuthoritySnapshot {
             public_key_pem,
+            certificate_chain_pem,
             updates: held.into_iter().map(|(_, u)| u.clone()).collect(),
         })
     }
@@ -150,6 +188,33 @@ mod tests {
         static KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
         KEY.get_or_init(|| RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap())
             .clone()
+    }
+
+    const CREDENTIALS: &str = "credentials-agent.polar.serviceaccount.cluster.local";
+
+    fn ca() -> &'static polar_signing::testing::Authority {
+        static CA: std::sync::OnceLock<polar_signing::testing::Authority> =
+            std::sync::OnceLock::new();
+        CA.get_or_init(|| polar_signing::testing::root("Polar Internal CA"))
+    }
+
+    /// What cert-issuer issues the credentials agent for `key`: its signing certificate.
+    fn certificate_for(key: &RsaPrivateKey) -> Vec<String> {
+        let public = key
+            .to_public_key()
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
+        vec![polar_signing::testing::escrow_certificate_for(
+            ca(),
+            polar_signing::testing::authority_spec(CREDENTIALS),
+            &public,
+        )]
+    }
+
+    fn certified_book(last_sequence: u64) -> AuthorityBook {
+        let mut book = AuthorityBook::new(key(), last_sequence);
+        book.certify(certificate_for(&key())).unwrap();
+        book
     }
 
     fn policy(source: &str) -> AuthorityBody {
@@ -215,8 +280,39 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_has_the_key_and_the_latest_of_each_kind_oldest_first() {
+    fn no_snapshot_is_made_before_the_key_is_certified_and_one_a_leaf_believes_after() {
         let mut book = AuthorityBook::new(key(), 0);
+        assert!(!book.is_certified());
+        assert_eq!(book.snapshot(), Err(BookError::NotCertified));
+        book.certify(certificate_for(&key())).unwrap();
+        assert!(book.is_certified());
+        let snapshot = book.snapshot().unwrap();
+        let trust = polar_signing::Trust::from_pem(&[ca().pem.clone()]).unwrap();
+        assert_eq!(
+            snapshot.certified_key(&trust, CREDENTIALS, polar_signing::testing::now()),
+            Ok(key().to_public_key())
+        );
+    }
+
+    #[test]
+    fn a_certificate_for_another_key_is_refused_and_the_one_held_kept() {
+        let mut book = certified_book(0);
+        let held = book.snapshot().unwrap().certificate_chain_pem;
+        let other = RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        assert!(matches!(
+            book.certify(certificate_for(&other)),
+            Err(BookError::NotForTheKey(_))
+        ));
+        assert!(matches!(
+            book.certify(vec![]),
+            Err(BookError::NotForTheKey(_))
+        ));
+        assert_eq!(book.snapshot().unwrap().certificate_chain_pem, held);
+    }
+
+    #[test]
+    fn a_snapshot_has_the_key_and_the_latest_of_each_kind_oldest_first() {
+        let mut book = certified_book(0);
         let empty = book.snapshot().unwrap();
         assert!(empty.updates.is_empty());
         assert_eq!(empty.public_key().unwrap(), key().to_public_key());
@@ -242,7 +338,7 @@ mod tests {
 
     #[test]
     fn a_holder_that_takes_the_snapshot_ends_up_with_what_the_book_holds() {
-        let mut book = AuthorityBook::new(key(), 0);
+        let mut book = certified_book(0);
         book.publish(policy("// v1"), 1, 1, None).unwrap();
         book.publish(groups(), 1, 2, None).unwrap();
         let snapshot = book.snapshot().unwrap();

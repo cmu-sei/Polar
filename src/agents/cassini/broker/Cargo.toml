@@ -32,6 +32,8 @@ polar-health = { workspace = true }
 polar-agent-builder.workspace = true
 # The authority topics' types: the broker keeps the credentials agent's authority to decide by.
 credentials_agent_common.workspace = true
+# The CA the credentials agent's authority key is believed under.
+polar-signing.workspace = true
 # A certificate's serial, written as the ledger writes it: the broker refuses and ends a revoked one's sessions.
 cert-issuer-common = { path = "../../cert-issuer/common" }
 polar-custody.workspace = true

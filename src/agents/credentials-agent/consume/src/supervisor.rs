@@ -1179,6 +1179,22 @@ impl Actor for ConsumerSupervisor {
         )
         .await
         .map_err(ActorProcessingErr::from)?;
+        // The signing key certified, so that leaves pin it under the CA they pin (docs/architecture/
+        // authority-distribution.md, "Pinning the key to the CA"): the publisher publishes no snapshot until then.
+        let (_authority_certifier, _) =
+            crate::authority_certificate::AuthorityCertifier::spawn_linked(
+                None,
+                crate::authority_certificate::AuthorityCertifier,
+                crate::authority_certificate::AuthorityCertifierArgs {
+                    cert_issuer: make_cert_issuer_client().await?,
+                    identity: own_cert_identity.clone(),
+                    key: escrow_keypair.private_key().clone(),
+                    publisher: publisher.clone(),
+                },
+                myself.get_cell(),
+            )
+            .await
+            .map_err(ActorProcessingErr::from)?;
         match ractor::call!(ledger, LedgerMessage::RevocationChanges) {
             Ok(port) => port.subscribe(publisher.clone(), |_| {
                 Some(PublisherMessage::RevocationsChanged)

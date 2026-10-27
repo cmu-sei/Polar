@@ -310,16 +310,7 @@ impl UpdateVerifier {
     /// to Cassini (`TLS_CA_CERT`), which is the Polar CA. Without a readable CA there is nothing to
     /// verify against, and the agent accepts nothing.
     pub fn from_config(config: &Config, agent: &str) -> Result<Self, String> {
-        let settings = TCPClientConfig::from_env(config).map_err(|e| e.to_string())?;
-        let path = settings.ca_certificate_path;
-        let bundle = std::fs::read_to_string(&path)
-            .map_err(|e| format!("cannot read the CA certificate {path}: {e}"))?;
-        let anchors = split_pem_bundle(&bundle);
-        if anchors.is_empty() {
-            return Err(format!("{path} holds no certificate"));
-        }
-        let trust = Trust::from_pem(&anchors).map_err(|e| format!("{path}: {e}"))?;
-        Ok(Self::new(trust, agent))
+        Ok(Self::new(pinned_trust(config)?, agent))
     }
 
     /// A configuration document only: anything else is refused as the wrong type.
@@ -485,6 +476,24 @@ impl Opened {
             resources,
         }
     }
+}
+
+/// The CA this agent pins for Cassini (`TLS_CA_CERT`), every certificate in the file an anchor: what signed documents
+/// and the credentials agent's authority key are believed under.
+pub fn pinned_trust(config: &Config) -> Result<Trust, String> {
+    let settings = TCPClientConfig::from_env(config).map_err(|e| e.to_string())?;
+    trust_from_file(&settings.ca_certificate_path)
+}
+
+/// Every certificate in the PEM file at `path` an anchor.
+pub fn trust_from_file(path: &str) -> Result<Trust, String> {
+    let bundle = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read the CA certificate {path}: {e}"))?;
+    let anchors = split_pem_bundle(&bundle);
+    if anchors.is_empty() {
+        return Err(format!("{path} holds no certificate"));
+    }
+    Trust::from_pem(&anchors).map_err(|e| format!("{path}: {e}"))
 }
 
 /// The certificates in a PEM file, each as its own PEM string.

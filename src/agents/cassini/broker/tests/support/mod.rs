@@ -156,6 +156,21 @@ impl Pki {
         (cert, self.path(&format!("{file}.key")), serial)
     }
 
+    /// What cert-issuer gives the credentials agent for its authority key (`CertType::Signing`): `identity` as the DNS
+    /// name, `digitalSignature` and `id-kp-documentSigning`, over `public_key_pem`, under this CA.
+    pub fn certify_authority(&self, identity: &str, public_key_pem: &str) -> String {
+        let mut params = CertificateParams::new(vec![identity.to_string()]).expect("parameters");
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::Other(
+            cert_issuer_common::OID_DOCUMENT_SIGNING.to_vec(),
+        )];
+        let subject = rcgen::SubjectPublicKeyInfo::from_pem(public_key_pem).expect("a public key");
+        params
+            .signed_by(&subject, &self.issuer)
+            .expect("a signed certificate")
+            .pem()
+    }
+
     /// What cert-issuer gives a pod's CSR: a client certificate under this CA, as polar-init has it certified.
     pub fn certify_client_csr(&self, csr_pem: &str) -> String {
         let mut request = rcgen::CertificateSigningRequestParams::from_pem(csr_pem).unwrap();

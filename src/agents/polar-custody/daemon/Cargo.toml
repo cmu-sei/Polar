@@ -42,6 +42,8 @@ cassini-types.workspace = true
 credentials_agent_common.workspace = true
 libc.workspace = true
 polar-custody.workspace = true
+# The CA the credentials agent's key is believed under (`authority_leaf`).
+polar-signing.workspace = true
 ractor.workspace = true
 rkyv.workspace = true
 rustls.workspace = true
@@ -50,6 +52,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+# The OID of the credentials agent's signing certificate.
+cert-issuer-common = { path = "../../cert-issuer/common" }
 # The publisher's default is the agents' own (`POLAR_AUTHORITY_PUBLISHER`): a test holds the two together.
 polar-agent-builder.workspace = true
 polar-env.workspace = true

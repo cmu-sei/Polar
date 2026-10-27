@@ -136,6 +136,19 @@ pub fn generate_csr(
     })
 }
 
+/// A CSR for `identity` and `extra_sans`, signed by the key whose PKCS#8 PEM is `private_key_pem`: a key the caller
+/// already holds and keeps, such as the credentials agent's escrow key, whose authority certificate this asks for
+/// (docs/architecture/authority-distribution.md, "Pinning the key to the CA").
+pub fn csr_for_private_key_pem(
+    identity: &str,
+    extra_sans: &[String],
+    private_key_pem: &str,
+) -> Result<String, KeypairError> {
+    let key_pair =
+        KeyPair::from_pem(private_key_pem).map_err(|e| KeypairError::CsrFailed(e.to_string()))?;
+    csr_for_key(identity, extra_sans, &key_pair)
+}
+
 /// A CSR for `identity` and `extra_sans`, signed by `key`, which need not be a key this process can see: a key held
 /// by the custody daemon (`docs/architecture/key-custody.md`) signs its own CSR, and `generate_csr` signs with the key
 /// it makes. The identity is the first SAN, then the extra names, each checked as `generate_csr` checks them.
@@ -193,4 +206,44 @@ pub fn csr_for_key(
         .map_err(|e| KeypairError::CsrFailed(e.to_string()))?;
 
     Ok(csr_pem)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_csr_for_a_key_held_is_signed_by_it_and_names_the_identity_first() {
+        use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        let key = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        let pem = key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap();
+        let identity = "credentials-agent.polar.serviceaccount.cluster.local";
+        let csr = csr_for_private_key_pem(identity, &[], &pem).unwrap();
+
+        let (_, block) = x509_parser::pem::parse_x509_pem(csr.as_bytes()).unwrap();
+        use x509_parser::prelude::FromDer;
+        let (_, request) =
+            x509_parser::certification_request::X509CertificationRequest::from_der(&block.contents)
+                .unwrap();
+        request
+            .verify_signature()
+            .expect("signed by the key it carries");
+        let carried = request.certification_request_info.subject_pki.raw;
+        assert_eq!(
+            carried,
+            key.to_public_key().to_public_key_der().unwrap().as_bytes(),
+            "the key held, not a new one"
+        );
+        let first_name = rcgen::CertificateSigningRequestParams::from_pem(&csr)
+            .unwrap()
+            .params
+            .subject_alt_names
+            .first()
+            .cloned();
+        assert_eq!(
+            first_name,
+            Some(rcgen::SanType::DnsName(identity.try_into().unwrap()))
+        );
+        assert!(csr_for_private_key_pem(identity, &[], "not a key").is_err());
+    }
 }

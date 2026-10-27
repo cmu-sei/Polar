@@ -246,7 +246,7 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    fn the_ca() -> &'static polar_signing::testing::Authority {
+    pub(crate) fn the_ca() -> &'static polar_signing::testing::Authority {
         static CA: std::sync::OnceLock<polar_signing::testing::Authority> =
             std::sync::OnceLock::new();
         CA.get_or_init(|| polar_signing::testing::root("Polar Internal CA"))

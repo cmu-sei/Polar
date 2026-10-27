@@ -319,6 +319,7 @@ impl Actor for Broker {
         // and asked for through the topic manager. It exists before the first connection is accepted.
         let authority = crate::authority::BrokerAuthority::spawn(
             publisher,
+            &args.ca_cert_file,
             myself.get_cell(),
             topic_mgr.clone(),
             args.decision_cache,

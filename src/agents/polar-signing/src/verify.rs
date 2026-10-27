@@ -71,6 +71,8 @@ pub enum VerifyError {
     LeafIsCa,
     #[error("the certificate to encrypt to is not an escrow certificate: {0}")]
     NotAnEscrowCertificate(&'static str),
+    #[error("the authority's certificate is not a signing certificate: {0}")]
+    NotASigningCertificate(&'static str),
     #[error("the certificate does not name `{expected}`")]
     WrongIdentity { expected: String },
     #[error("the certificate's public key cannot be read: {0}")]
@@ -155,6 +157,74 @@ pub fn verify_escrow_certificate(
     now: i64,
     identity: &str,
 ) -> Result<String, VerifyError> {
+    believed_leaf(chain_pem, trust, now, identity, |leaf| {
+        match leaf.key_usage() {
+            Ok(Some(usage)) if usage.value.key_encipherment() => {}
+            _ => return Err(VerifyError::NotForEncryption),
+        }
+        // The application layer's certificate, not one the transport layer would take.
+        match leaf.extended_key_usage() {
+            Ok(Some(eku)) if eku.value.any || eku.value.client_auth || eku.value.server_auth => {
+                Err(VerifyError::NotAnEscrowCertificate(
+                    "it may be used for TLS",
+                ))
+            }
+            Ok(Some(eku)) if eku.value.email_protection => Ok(()),
+            Ok(Some(_)) => Err(VerifyError::NotAnEscrowCertificate(
+                "its extended key usage is not emailProtection",
+            )),
+            _ => Err(VerifyError::NotAnEscrowCertificate(
+                "it has no extended key usage, so it is taken for any use",
+            )),
+        }
+    })
+}
+
+/// The public key of the credentials agent `identity`'s authority key, from the certificate a snapshot of its authority
+/// carries (docs/architecture/authority-distribution.md, "Pinning the key to the CA"), if the certificate can be
+/// believed: valid at `now`, chaining to one of `trust`'s anchors, not a CA, permitting digital signatures, a signing
+/// certificate by its extended key usage (`id-kp-documentSigning`, and no TLS purpose), and carrying `identity` as a DNS
+/// name exactly. Then the key is the credentials agent's, and not merely whatever key the snapshot names.
+pub fn verify_authority_certificate(
+    chain_pem: &str,
+    trust: &Trust,
+    now: i64,
+    identity: &str,
+) -> Result<String, VerifyError> {
+    believed_leaf(chain_pem, trust, now, identity, |leaf| {
+        match leaf.key_usage() {
+            Ok(Some(usage)) if usage.value.digital_signature() => {}
+            _ => return Err(VerifyError::KeyUsage),
+        }
+        let document_signing =
+            x509_parser::der_parser::oid::Oid::from(cert_issuer_common::OID_DOCUMENT_SIGNING)
+                .map_err(|_| VerifyError::NotASigningCertificate("the document-signing OID"))?;
+        match leaf.extended_key_usage() {
+            Ok(Some(eku)) if eku.value.any || eku.value.client_auth || eku.value.server_auth => {
+                Err(VerifyError::NotASigningCertificate(
+                    "it may be used for TLS",
+                ))
+            }
+            Ok(Some(eku)) if eku.value.other.contains(&document_signing) => Ok(()),
+            Ok(Some(_)) => Err(VerifyError::NotASigningCertificate(
+                "it is not for signing documents",
+            )),
+            _ => Err(VerifyError::NotASigningCertificate(
+                "it has no extended key usage, so it is taken for any use",
+            )),
+        }
+    })
+}
+
+/// The public key of the leaf of `chain_pem` if it chains to `trust`, is valid at `now`, is no CA, passes `purpose`, and
+/// carries `identity` as a DNS name exactly: what the escrow and the authority certificates share.
+fn believed_leaf(
+    chain_pem: &str,
+    trust: &Trust,
+    now: i64,
+    identity: &str,
+    purpose: impl Fn(&X509Certificate<'_>) -> Result<(), VerifyError>,
+) -> Result<String, VerifyError> {
     let blocks = pem_blocks(chain_pem);
     if blocks.is_empty() {
         return Err(VerifyError::BadCertificate(
@@ -194,29 +264,7 @@ pub fn verify_escrow_certificate(
     if matches!(leaf.basic_constraints(), Ok(Some(bc)) if bc.value.ca) {
         return Err(VerifyError::LeafIsCa);
     }
-    match leaf.key_usage() {
-        Ok(Some(usage)) if usage.value.key_encipherment() => {}
-        _ => return Err(VerifyError::NotForEncryption),
-    }
-    // The application layer's certificate, not one the transport layer would take.
-    match leaf.extended_key_usage() {
-        Ok(Some(eku)) if eku.value.any || eku.value.client_auth || eku.value.server_auth => {
-            return Err(VerifyError::NotAnEscrowCertificate(
-                "it may be used for TLS",
-            ));
-        }
-        Ok(Some(eku)) if eku.value.email_protection => {}
-        Ok(Some(_)) => {
-            return Err(VerifyError::NotAnEscrowCertificate(
-                "its extended key usage is not emailProtection",
-            ));
-        }
-        _ => {
-            return Err(VerifyError::NotAnEscrowCertificate(
-                "it has no extended key usage, so it is taken for any use",
-            ));
-        }
-    }
+    purpose(leaf)?;
     let names_it = leaf
         .subject_alternative_name()
         .ok()
