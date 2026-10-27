@@ -24,7 +24,8 @@
 # Key custody: a daemon per pod that holds the mTLS key
 
 Status, 2026-10-27: cleared by the maintainer, with the four recommendations below. Built: steps 1 to 5, each recorded
-in its section below; step 6, the speed gate, closed; step 7, a fresh sandbox-local, to come.
+in its section below; step 6, the speed gate, closed; step 7 done on a fresh sandbox-local (`u7c`), revocation seen end
+to end.
 
 ## Why
 
@@ -926,7 +927,7 @@ holds against key files at every concurrency the bench could reach. So:
 - the broker breaking at 256 connections at once is carried as a finding of its own (`remaining-work.md`), apart from
   custody.
 
-## Step 7, a fresh sandbox-local: the plan (2026-10-27, for review)
+## Step 7, a fresh sandbox-local: the plan (2026-10-27, cleared and done)
 
 The first time any of steps 2 to 5 runs on a cluster. It goes onto nix-usernetes' multi-node `u7c` (branch
 `feat/multi-node`, commit `feaa20a`), which needs a real Polar bring-up before it merges, and the report goes back to
@@ -961,6 +962,51 @@ that session.
    something is rebuilt mid-run; the fix is Polar's to decide, and is reported, not made.
 6. *Not in it:* the Cassini load harness with the daemons (`remaining-work.md`, later), a run with custody off (the
    render tests show it byte for byte), the pinning and the watcher cap (planned, to do).
+
+*Cleared (the maintainer, 2026-10-27), kube-observer the one revoked; Mullvad disconnected for the run; the browser
+step not waited at.* *Done (2026-10-27), on `u7c` (nodes `cp` and `core`), from `d0df015c`:*
+- *The bring-up:* `up.nu sandbox-local --dev` brought all six layers Ready, signed and published the policy, and stopped
+  at the browser step, as asked. Its first run stopped at step 8 (below, finding 1).
+- *No key file:* no mTLS key in any pod with the daemon (the key variables in every pod's spec, and `ls` of every
+  directory mounted in every running container). What remains is what was meant to: cert-issuer's, Neo4j's server key
+  (its polar-init), the `ace` job's, the scheduler observer's (`custody: false`); and two the plan did not list, the
+  deployment git server's `/pki/server.key` (`polar-deploy`, `up.nu`'s own, not a catalog workload) and the credentials
+  agent's escrow key on its volume (not an mTLS key: "Credentials agent key custody", `remaining-work.md`).
+- *Every pod with the daemon 2/2,* no daemon restarted; every agent registered with the broker, whose key is its
+  daemon's; `up.nu` pushed the policy to the git server, whose key is too.
+- *Neo4j:* the three graph writers configure Neo4j's mTLS with "its key the custody daemon's", and kube-consumer writes
+  (210 `PodContainerState` nodes and the rest, read back through Neo4j's HTTPS API): TLS 1.3 against a real Neo4j
+  2025.08, through the neo4rs fork, for the first time.
+- *Watchers* registered beside their workloads (the broker's "a watcher went" as pods ended); every supersession was a
+  pod's replacement (four jira-observer pods failing on the target's placeholder Jira, one of the git server's below).
+- *Revocation,* kube-observer's client certificate (`3159b578…`), revoked with the admin tool at 21:20:26:
+  - 21:20:26.5778, the broker applies the new set (version 8); .5790, it closes kube-observer's connection, naming the
+    serial; .5802, the daemon destroys its key (`slots=[Client]`); .5803, it logs "revoked: exiting" and exits 3;
+    .5838, the broker ends its watcher session;
+  - the kubelet restarts the sidecar empty; the workload's reconnects fail at the handshake, which nothing can sign;
+  - 21:20:45, the health actor enters rejuvenation ("the custody daemon holds no certificate"); 21:21:15, its
+    dependencies healthy, a jitter of 65 s; at the tick of 21:22:45 the Cassini deadline (120 s) is due as well and comes
+    first, as a hard deadline does, and the agent shuts down in order (exit 1);
+  - 21:23:56, the Job's new pod: polar-init issued a new client certificate (`0519e3dc…`), its key the daemon's, no
+    `key.pem`, and the workload registered; its session superseded the revoked one, kept for the retention window, and
+    inherited what it held. Three and a half minutes from the revocation to a replacement at work.
+  - *Not seen, and cannot be:* the old serial refused at registration. Its key is gone, so nothing can present it.
+- *Findings:*
+  1. *Stale port-forwards.* `up.nu` takes a forward that is "already running" as good without asking which cluster it
+     reaches: four loops from the `u7s` run of 2026-10-26 still pointed at its removed kubeconfig, and the deployment git
+     server "did not answer". Stopped by PID, and the run passed.
+  2. *The daemon logs nothing at info.* With no `RUST_LOG` its filter is errors only, so "serving" and "watching" never
+     appear; the other agents log at info. Its errors appear, so the revocation did.
+  3. *No admin can revoke.* `just admin-provision` gives no `c:revoke`, so no account made by the documented flow can
+     revoke. For this run an account `revoker` was provisioned (signed by the maintainer's), holding `c:revoke` and the
+     one permission the tool requires (`p:u2s:credentials-agent-observer…`).
+  4. *A git server supersession at its start* (21:12:02), of a session that had subscriptions: by its look, its
+     polar-init's escrow session not having said goodbye in time. Not a watcher, which cannot supersede; not chased.
+  5. *jira-observer* fails on the target's placeholder Jira (`example.atlassian.net`), after registering through its
+     daemon: the target's, not custody's.
+- *For nix-usernetes:* Polar came up on `u7c` with no change to Polar for it. What differed from `u7s`: the nodes are
+  `cp` and `core`, not `u7s`; and the image eviction (`infra/images.nu`) knows only the `u7s` container, which did not
+  matter on a fresh cluster since nothing was rebuilt mid-run.
 
 ## Build order, each tests first
 

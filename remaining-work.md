@@ -672,7 +672,9 @@ Principle: declare each environment variable once, with its type, default, docum
   holds with it; the benches stay as measures (`key-custody.md`, "Step 6"). Step 5, revocation, built 2026-10-27: the
   broker refuses a revoked certificate at registration and closes its connections on a change, a watcher session apart;
   each pod's daemon watches as a watcher session and destroys its keys and exits when its own serial is revoked
-  (`key-custody.md`, "Step 5"). Next: a fresh sandbox-local (step 7).
+  (`key-custody.md`, "Step 5"). Step 7 done 2026-10-27 on a fresh sandbox-local (`u7c`): no mTLS key in any pod with
+  the daemon, Neo4j over the daemon's key, and kube-observer revoked end to end, its replacement at work three and a
+  half minutes later (`key-custody.md`, "Step 7"). The mTLS key's custody is done; what follows is the to-do below.
 - [ ] The Cassini load harness with the custody daemons (wanted by the maintainer, 2026-10-27; not yet): run
   `infra/load-harness.nu` (`src/agents/cassini/test`) on a target with custody on, its producers and sinks signing
   through their pods' daemons, and compare with the key-file baseline (`broker-baseline.md`). The harness workloads are
@@ -680,6 +682,13 @@ Principle: declare each environment variable once, with its type, default, docum
   `job_for` copies the pod untouched apart from its name, labels and ConfigMap; never run so. To check: the Jobs
   complete with a native sidecar running, the log reading (`-c` for each container) skips the daemon's container, and
   the renewal rule's five minutes per pod do not slow a plan's runs.
+- [ ] `up.nu` trusts a port-forward that is already running (found 2026-10-27, custody step 7): it does not ask which
+  cluster the forward reaches, so loops left from another cluster's run, pointing at a kubeconfig since removed, make a
+  service look down ("the deployment git server did not answer"). Check each forward's cluster, or restart them.
+- [ ] The custody daemon logs nothing at info (found 2026-10-27, step 7): with no `RUST_LOG` its filter is errors only
+  (`polar-custody/daemon/src/main.rs`), where every other agent logs at info. Default it to info.
+- [ ] No admin can revoke (found 2026-10-27, step 7): `just admin-provision` grants no `c:revoke`, so no account the
+  documented flow makes can revoke a certificate. Whether the first admin should hold it is the maintainer's to say.
 - [ ] Pin the credentials agent's authority key to the CA (planned 2026-10-27, `authority-distribution.md`, "Pinning
   the key to the CA"): the leaves learn the key that signs authority from the first snapshot, on the broker's word, so a
   forged first snapshot could pin a key of someone else's. The escrow key gets a `CertType::Signing` certificate, the
