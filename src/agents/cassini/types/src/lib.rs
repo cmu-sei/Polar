@@ -140,6 +140,8 @@ pub enum BrokerMessage {
         /// ClientMessage::RegistrationRequest never carries this at
         /// all, since the client has no way to send it.
         peer_identity: Option<String>,
+        /// The client asked for a watcher session (`ClientMessage::RegistrationRequest`).
+        watcher: bool,
     },
     /// Reassign a session to a new client listener (used during reconnection)
     ReassignClient {
@@ -387,11 +389,13 @@ impl BrokerMessage {
             ClientMessage::RegistrationRequest {
                 registration_id,
                 trace_ctx,
+                watcher,
             } => BrokerMessage::RegistrationRequest {
                 registration_id,
                 client_id,
                 trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
                 peer_identity,
+                watcher,
             },
             ClientMessage::PublishRequest {
                 topic,
@@ -579,6 +583,11 @@ pub enum ClientMessage {
     RegistrationRequest {
         registration_id: Option<String>,
         trace_ctx: Option<WireTraceCtx>,
+        /// A watcher session (docs/architecture/key-custody.md, step 5): one kept beside its identity's session, which
+        /// neither supersedes nor is superseded by it, holds nothing when it goes, and may hear the credentials agent's
+        /// authority and ask for it, nothing else. The custody daemon's, so it hears of its own revocation whatever
+        /// the workload does.
+        watcher: bool,
     },
     /// Response to an attempt to register.
     /// Ok contains the value of the registration id,

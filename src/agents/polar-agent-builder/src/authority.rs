@@ -230,14 +230,19 @@ impl RevokedSerials {
             .write()
             .expect("the revoked set is never held across a panic") = serials.into_iter().collect();
     }
+
+    /// Whether the certificate whose serial is `serial` (as `cert_issuer_common::serial` writes it) is revoked.
+    pub fn contains(&self, serial: &str) -> bool {
+        self.0
+            .read()
+            .expect("the revoked set is never held across a panic")
+            .contains(serial)
+    }
 }
 
 impl Revocation for RevokedSerials {
     fn is_revoked(&self, signer: &polar_signing::SignerInfo) -> bool {
-        self.0
-            .read()
-            .expect("the revoked set is never held across a panic")
-            .contains(&signer.serial)
+        self.contains(&signer.serial)
     }
 }
 

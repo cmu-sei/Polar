@@ -57,6 +57,9 @@ struct Session {
     /// A new session of the same identity has taken over: this one cannot be resumed, and is
     /// only waiting for its subscribers to hold, then stops.
     superseded: bool,
+    /// A watcher session (docs/architecture/key-custody.md, step 5): it neither supersedes nor is superseded, is never
+    /// resumed, ends with its connection, and claims nothing held for its identity.
+    watcher: bool,
 }
 
 /// What a superseded session left behind: its subscribers, holding what they receive for a new
@@ -176,6 +179,7 @@ impl Actor for SessionManager {
                 client_id,
                 trace_ctx,
                 peer_identity,
+                watcher,
             } => {
                 self.handle_registration_request(
                     myself.clone(),
@@ -184,6 +188,7 @@ impl Actor for SessionManager {
                     client_id,
                     trace_ctx,
                     peer_identity,
+                    watcher,
                 )
                 .await?;
             }
@@ -244,9 +249,11 @@ impl Actor for SessionManager {
                 registration_id,
                 reply_to,
             } => {
+                // A watcher claims nothing held for its identity: that is the identity's next session's.
                 let identity = state
                     .sessions
                     .get(&registration_id)
+                    .filter(|session| !session.watcher)
                     .and_then(|session| session.identity.clone());
                 match identity {
                     None => {
@@ -303,6 +310,22 @@ impl SessionManager {
     /// The client's connection is gone and it did not say goodbye: keep the session, with its
     /// subscribers and what they hold, until the retention window passes.
     fn detach_session(state: &mut SessionManagerState, registration_id: &str) {
+        // Nothing is held for a watcher: it asks afresh when it comes back.
+        if state
+            .sessions
+            .get(registration_id)
+            .is_some_and(|session| session.watcher)
+        {
+            info!(%registration_id, "a watcher went: its session ends");
+            Self::end_session(
+                state,
+                registration_id,
+                "watcher".to_string(),
+                DisconnectReason::RemoteClosed,
+                None,
+            );
+            return;
+        }
         if let Some(session) = state.sessions.get_mut(registration_id)
             && session.detached_at.is_none()
         {
@@ -358,6 +381,7 @@ impl SessionManager {
             .filter(|(id, session)| {
                 id.as_str() != new_id
                     && !session.superseded
+                    && !session.watcher
                     && session.identity.as_deref() == Some(identity)
             })
             .map(|(id, _)| id.clone())
@@ -399,8 +423,11 @@ impl SessionManager {
         {
             held.ready = true;
         }
+        // Drained, not stopped: a stop is a signal, ahead of the queue, and a session with no subscribers is held at once,
+        // so it would end before closing its connection (`CloseConnection`, sent as it was superseded), and the old
+        // instance would stay connected with no session.
         if let Some(session) = state.sessions.get(registration_id) {
-            session.agent_ref.stop(Some("SUPERSEDED".to_string()));
+            let _ = session.agent_ref.drain();
         }
         Self::answer_parked(state);
     }
@@ -558,6 +585,7 @@ impl SessionManager {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_registration_request(
         &self,
         myself: ActorRef<BrokerMessage>,
@@ -566,6 +594,7 @@ impl SessionManager {
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
         peer_identity: Option<String>,
+        watcher: bool,
     ) -> Result<(), ActorProcessingErr> {
         let span =
             trace_span!("session_manager.registration_request", %client_id, ?registration_id);
@@ -594,6 +623,9 @@ impl SessionManager {
             return Ok(());
         };
 
+        // A watcher's session ended with its connection, so a watcher never resumes one, and no session is resumed as a
+        // watcher's.
+        let registration_id = registration_id.filter(|_| !watcher);
         // Try to reuse an existing session. Only the identity that owns it may: a registration id is not a bearer token.
         if let Some(existing_id) = &registration_id {
             if let Some(session) = state.sessions.get(existing_id)
@@ -609,6 +641,7 @@ impl SessionManager {
             }
             if let Some(session) = state.sessions.get_mut(existing_id).filter(|session| {
                 !session.superseded
+                    && !session.watcher
                     && may_resume(session.identity.as_deref(), peer_identity.as_deref())
             }) {
                 info!(registration_id = %existing_id, "reusing existing session");
@@ -644,6 +677,7 @@ impl SessionManager {
                             client_id,
                             trace_ctx: Some(span.context()),
                             peer_identity: None,
+                            watcher: false,
                         });
                     } else {
                         warn!(
@@ -680,6 +714,7 @@ impl SessionManager {
                         detached_at: None,
                         identity: peer_identity.clone(),
                         superseded: false,
+                        watcher,
                     },
                 );
                 // A client asking to resume a session that was superseded is the instance that
@@ -691,6 +726,7 @@ impl SessionManager {
                     .is_some_and(|id| state.held.iter().any(|held| &held.registration_id == id));
                 if let Some(identity) = &peer_identity
                     && !is_the_loser
+                    && !watcher
                 {
                     Self::supersede_older(state, identity, &new_id, &client_id);
                 }

@@ -119,6 +119,17 @@ fn extract_peer_identity(stream: &TlsStream<TcpStream>) -> Option<String> {
     None
 }
 
+/// The serial of the connecting client's verified certificate, as the credentials agent's ledger writes it, read once
+/// right after the handshake, as the identity is: the broker refuses and ends a revoked certificate's sessions
+/// (docs/architecture/key-custody.md, step 5). None if the certificate cannot be read, which the floor reports.
+fn extract_peer_serial(stream: &TlsStream<TcpStream>) -> Option<String> {
+    use x509_parser::prelude::FromDer;
+    let (_, connection) = stream.get_ref();
+    let leaf = connection.peer_certificates()?.first()?;
+    let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(leaf.as_ref()).ok()?;
+    Some(cert_issuer_common::serial::serial_from_cert(&parsed))
+}
+
 /// What the connecting client's verified certificate admits where no policy speaks (its declared topics, and those
 /// its workload and groups imply), read once, right after the handshake, as the identity is. A certificate that cannot
 /// be read gives the reason, and every publish and subscribe on the connection is refused with it.
@@ -304,6 +315,7 @@ impl Actor for ListenerManager {
                         // is only reachable through the still-unified
                         // TlsStream.
                         let peer_identity = extract_peer_identity(&stream);
+                        let peer_serial = extract_peer_serial(&stream);
                         let floor = extract_peer_floor(&stream);
                         if let Err(why) = &floor {
                             warn!(%why, "every publish and subscribe on this connection will be refused");
@@ -322,6 +334,7 @@ impl Actor for ListenerManager {
                                 .expect("ListenerManager must have a supervisor (the broker)")
                                 .into(),
                             peer_identity,
+                            peer_serial,
                             floor,
                             authority,
                         };
@@ -638,6 +651,11 @@ struct ListenerState {
     task_handle: Option<JoinHandle<()>>,
     broker: ActorRef<BrokerMessage>,
     peer_identity: Option<String>,
+    /// The serial of this connection's certificate, checked against the revoked set.
+    peer_serial: Option<String>,
+    /// Whether the client registered a watcher session: one that may hear authority and ask for it, nothing else, and
+    /// that stays open under a revoked certificate so the custody daemon hears of its own revocation.
+    watcher: bool,
     /// What this connection's certificate admits where no policy speaks, or why it cannot be read.
     floor: Result<Arc<Floor>, String>,
     authority: BrokerAuthority,
@@ -659,15 +677,27 @@ struct ListenerArguments {
     registration_id: Option<String>,
     broker: ActorRef<BrokerMessage>,
     peer_identity: Option<String>,
+    peer_serial: Option<String>,
     floor: Result<Arc<Floor>, String>,
     authority: BrokerAuthority,
 }
 
 impl Listener {
+    /// Whether this connection's certificate is among those the credentials agent says are revoked.
+    fn is_revoked(state: &ListenerState) -> bool {
+        state
+            .peer_serial
+            .as_deref()
+            .is_some_and(|serial| state.authority.handle().revoked().contains(serial))
+    }
+
     /// Whether this connection may use `topic` this way: the broker's policy first, then the certificate's floor,
     /// refused by default. `Err` is the reason, which the client is told.
     /// A decision this connection made a moment ago, under the same authority, is not made again.
     async fn decide(state: &mut ListenerState, topic: &str, access: Access) -> Result<(), String> {
+        if state.watcher && !crate::authority::watcher_may(topic, access) {
+            return Err(crate::authority::WATCHER_REFUSAL.to_string());
+        }
         let floor = match &state.floor {
             Ok(floor) => floor.clone(),
             Err(why) => return Err(format!("the broker refused: {why}")),
@@ -784,6 +814,8 @@ impl Actor for Listener {
             task_handle: None,
             broker: args.broker,
             peer_identity: args.peer_identity,
+            peer_serial: args.peer_serial,
+            watcher: false,
             floor: args.floor,
             decisions: args.authority.cache(),
             authority: args.authority,
@@ -921,6 +953,23 @@ impl Actor for Listener {
                 state.session_ref = Some(session_ref);
             }
             BrokerMessage::JudgeSubscriptions { topics } => {
+                // Sent on every change of authority: a certificate revoked since is closed, a watcher's apart. Its
+                // session is kept for the retention window, as after any lost connection, for the identity's next
+                // certificate to claim; this one cannot resume it, refused at registration.
+                if !state.watcher && Self::is_revoked(state) {
+                    warn!(identity = ?state.peer_identity, serial = ?state.peer_serial, "the connection's certificate is revoked: closing it");
+                    let client_id = state.client_id.clone();
+                    return self
+                        .handle_disconnect_request(
+                            myself,
+                            state,
+                            DisconnectReason::RemoteClosed,
+                            client_id,
+                            None,
+                            None,
+                        )
+                        .await;
+                }
                 let topics: Vec<String> = match topics {
                     Some(resumed) => {
                         state.subscribed.extend(resumed.iter().cloned());
@@ -939,7 +988,23 @@ impl Actor for Listener {
                 client_id,
                 trace_ctx,
                 peer_identity,
+                watcher,
             } => {
+                state.watcher = watcher;
+                if !watcher && Self::is_revoked(state) {
+                    warn!(identity = ?state.peer_identity, serial = ?state.peer_serial, "a revoked certificate asked to register: refused, and closed");
+                    let msg = ClientMessage::RegistrationResponse {
+                        result: Err(crate::authority::REVOKED_REFUSAL.to_string()),
+                        trace_ctx: WireTraceCtx::from_current_span(),
+                    };
+                    if let Err(e) =
+                        Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await
+                    {
+                        error!(error = ?e, "Failed to tell a revoked certificate it is refused");
+                    }
+                    myself.stop(Some("REVOKED".to_string()));
+                    return Ok(());
+                }
                 self.handle_registration_request(
                     myself,
                     state,
@@ -947,6 +1012,7 @@ impl Actor for Listener {
                     client_id,
                     trace_ctx,
                     peer_identity,
+                    watcher,
                 )
                 .await?;
             }
@@ -1081,6 +1147,7 @@ impl Actor for Listener {
 
 impl Listener {
     // ===== Handler methods for Listener =====
+    #[allow(clippy::too_many_arguments)]
     async fn handle_registration_request(
         &self,
         myself: ActorRef<BrokerMessage>,
@@ -1089,6 +1156,7 @@ impl Listener {
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
         peer_identity: Option<String>,
+        watcher: bool,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.request.registration", %client_id, registration_id = ?registration_id);
         try_set_parent_otel(&span, trace_ctx);
@@ -1100,6 +1168,7 @@ impl Listener {
             client_id: client_id.clone(),
             trace_ctx: Some(span.context()),
             peer_identity,
+            watcher,
         }) {
             let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {e}");
             error!("{err_msg}");

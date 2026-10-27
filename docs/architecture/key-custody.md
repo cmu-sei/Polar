@@ -663,7 +663,7 @@ daemon keeps its installer apart from its workload, under one UID.
 - *(c) Both roles to UID 1000, nothing more.* A compromised workload could replace the key (`MakeCsr`), which is a
   denial of service and no more, since it cannot have a certificate signed. The weakest.
 
-## Step 5, revocation: the plan (2026-10-27, for review)
+## Step 5, revocation: the plan (2026-10-27, its question decided)
 
 What is there, read for this:
 - *What is revoked.* The credentials agent's ledger puts a serial in `revoked_serials`
@@ -699,6 +699,7 @@ The plan:
 1. *The broker refuses and ends a revoked certificate's sessions* (decided item 2; needs no answer below).
    - The listener reads the leaf's serial beside the identity. `RevokedSerials` gains a lookup by serial.
    - At accept, a revoked serial is refused before any listener is made: the connection is closed and logged.
+     (Built at registration instead, a watcher admitted: "Changed in building it", below.)
    - On a change of authority, every listener whose serial is now revoked closes its connection and ends its session.
      The session ends as a connection closed without a goodbye, kept for the retention window: revocation is of a
      certificate, not of the identity, so the identity's next pod, under a new certificate, claims what was held, as
@@ -748,6 +749,44 @@ The plan:
   against the verifiers that do not check revocation (Neo4j, the git server, cert-issuer).
 
 Recommended: (a).
+
+*Decided (the maintainer, 2026-10-27): (a), a watcher session of the daemon's own.*
+
+*Changed in building it (2026-10-27): refused at registration, not at accept.* Item 1 as planned closed every
+connection under a revoked certificate. But the daemon's watcher presents the pod's certificate, so the broker would
+close it too, perhaps before the update reached it, and refuse it ever after, and the daemon could then never hear of
+its own revocation. So a revoked certificate is refused at registration unless it registers a watcher, and on a change
+of authority every connection whose certificate is now revoked is closed, a watcher's apart. A watcher that comes back
+asks for a snapshot, which carries the set. The cost is that a revoked certificate's holder can still hear the
+authority topics as a watcher until the certificate ends, which every agent hears anyway; with the daemon nobody holds
+the key once it is revoked.
+
+*Built (2026-10-27): the broker's part* (items 1 and 3).
+- *The wire:* `ClientMessage::RegistrationRequest` and `BrokerMessage::RegistrationRequest` carry `watcher`;
+  `TCPClientConfig::as_watcher` asks for one, and a watcher's client never asks to resume
+  (`cassini/client/src/lib.rs`).
+- *The listener* (`cassini/broker/src/listener.rs`): the leaf's serial read at accept (`extract_peer_serial`,
+  `cert_issuer_common::serial::serial_from_cert`); a revoked certificate refused at registration
+  (`authority::REVOKED_REFUSAL`) and closed, unless it registers a watcher; on each change of authority
+  (`JudgeSubscriptions`) a revoked agent's connection closed, its session kept for the retention window; a watcher held
+  to the three authority uses (`authority::watcher_may`, `WATCHER_REFUSAL`), and within them decided as its identity's
+  session is.
+- *Sessions* (`cassini/broker/src/session.rs`): a watcher neither supersedes nor is superseded, is never resumed nor
+  resumes another, ends when its connection goes, and claims nothing held for its identity (`GetHeldSessions`).
+- *`RevokedSerials::contains`* (`polar-agent-builder/src/authority.rs`).
+- *Found, and fixed, on the way:* a superseded session with no subscriptions was held at once and stopped
+  (`complete_takeover`) before it had closed its connection: a stop is a signal, ahead of the queued
+  `CloseConnection`. The old instance stayed connected with no session about one time in five. It is drained now.
+  Also found, not fixed: the control plane's `ListSessions` always answers `InternalError`, since the session manager
+  has no arm for `GetSessions` (`remaining-work.md`).
+- *Tests:* `tests/revocation.rs` (a session ended on revocation and another identity's not; a revoked certificate
+  refused registration and admitted as a watcher; a watcher left to hear its own revocation; the identity's next
+  certificate claiming what the revoked one's session held; a property over clusters of agents and watchers, any of
+  them revoked, eight cases, each a broker of its own); `tests/watcher.rs` (side by side with its identity's session,
+  either first; nothing but authority; its session ended when it goes, and nothing held claimed by it);
+  `tests/supersede.rs` (the race above, six rounds); the wire's round trip of the flag
+  (`cassini/types/tests/props/lib.rs`). Mutations caught: each of the listener's and the session manager's rules
+  dropped or widened, and the drain put back to a stop.
 
 ## Step 6, the speed gate: the plan (2026-10-27, closed)
 

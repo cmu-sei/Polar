@@ -464,6 +464,7 @@ impl Actor for Broker {
                 client_id,
                 trace_ctx,
                 peer_identity,
+                watcher,
             } => {
                 self.handle_registration_request(
                     myself,
@@ -472,6 +473,7 @@ impl Actor for Broker {
                     client_id,
                     trace_ctx,
                     peer_identity,
+                    watcher,
                 )
                 .await?;
             }
@@ -702,6 +704,7 @@ impl Broker {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_registration_request(
         &self,
         _myself: ActorRef<BrokerMessage>,
@@ -710,6 +713,7 @@ impl Broker {
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
         peer_identity: Option<String>,
+        watcher: bool,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.broker.registration_request", %client_id, registration_id = ?registration_id);
         try_set_parent_otel(&span, trace_ctx);
@@ -735,6 +739,7 @@ impl Broker {
                 client_id: client_id.clone(),
                 trace_ctx: Some(span.context()),
                 peer_identity: peer_identity.clone(),
+                watcher,
             }) {
                 error!(error = %e, "Failed to forward RegistrationRequest to SessionManager");
             }

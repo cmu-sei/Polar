@@ -225,3 +225,21 @@ async fn an_instance_that_lost_its_session_does_not_take_it_back_by_force() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_superseded_session_with_no_subscriptions_has_its_connection_closed_too() {
+    with_broker(|broker| async move {
+        // Held at once, having nothing to hold: it used to end before closing its connection, about one time in
+        // five, leaving the old instance connected with no session. Done a few times over to meet the race.
+        for round in 0..6 {
+            let identity = format!("agent-{round}.test");
+            let old = TestClient::connect(&broker, &identity).await;
+            let _new = TestClient::connect(&broker, &identity).await;
+            old.wait_for("its connection to be closed", Duration::from_secs(5), |c| {
+                c.lost_its_connection()
+            })
+            .await;
+        }
+    })
+    .await;
+}

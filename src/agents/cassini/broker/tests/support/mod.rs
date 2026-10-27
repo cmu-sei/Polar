@@ -144,6 +144,13 @@ impl Pki {
         self.path("ca.pem")
     }
 
+    /// The serial of `identity`'s client certificate, written as the credentials agent's ledger writes it.
+    pub fn serial_of(&self, identity: &str) -> String {
+        let (cert, _) = self.client(identity);
+        cert_issuer_common::serial::serial_from_pem(&std::fs::read_to_string(cert).unwrap())
+            .expect("a certificate")
+    }
+
     /// The CA's key, for a test that runs cert-issuer as this CA.
     pub fn ca_key(&self) -> PathBuf {
         self.path("ca.key")
@@ -432,6 +439,20 @@ impl TestBroker {
         .expect("the policy is taken");
     }
 
+    /// Whether the broker still has the session `registration_id`, connected or kept for its client's return.
+    pub async fn has_session(&self, registration_id: &str) -> bool {
+        let sessions: ActorRef<BrokerMessage> =
+            ractor::registry::where_is(cassini_broker::SESSION_MANAGER_NAME.to_string())
+                .expect("the session manager is running")
+                .into();
+        ractor::call!(sessions, |reply_to| BrokerMessage::GetSessionRef {
+            registration_id: registration_id.to_string(),
+            reply_to,
+        })
+        .expect("the session manager answers")
+        .is_some()
+    }
+
     /// The health actor the builder gave the broker, to end it as it would end itself.
     pub fn health_actor(&self) -> ActorRef<polar_health::HealthCheckMessage> {
         let infrastructure = self.infrastructure.lock().unwrap().clone();
@@ -579,6 +600,34 @@ impl TestClient {
         identity: &str,
         registration_id: Option<String>,
     ) -> Self {
+        let client = Self::start_connecting(broker, identity, registration_id, false).await;
+        client
+            .wait_for("a registration", Duration::from_secs(10), |c| {
+                c.registration_id().is_some()
+            })
+            .await;
+        client
+    }
+
+    /// Connects as `identity`'s watcher session (docs/architecture/key-custody.md, step 5), as the custody daemon
+    /// does, and waits until the broker has registered it.
+    pub async fn connect_watching(broker: &TestBroker, identity: &str) -> Self {
+        let client = Self::start_connecting(broker, identity, None, true).await;
+        client
+            .wait_for("a watcher's registration", Duration::from_secs(10), |c| {
+                c.registration_id().is_some()
+            })
+            .await;
+        client
+    }
+
+    /// Starts connecting as `identity`, a watcher or not, and returns at once: for a client the broker may turn away.
+    pub async fn start_connecting(
+        broker: &TestBroker,
+        identity: &str,
+        registration_id: Option<String>,
+        watcher: bool,
+    ) -> Self {
         let (cert, key) = broker.pki.client(identity);
         let events = Arc::new(Mutex::new(Vec::new()));
         let port = Arc::new(OutputPort::default());
@@ -592,17 +641,19 @@ impl TestClient {
         .await
         .unwrap();
         port.subscribe(collector, Some);
+        let config = TCPClientConfig::from_values(
+            broker.addr.clone(),
+            "localhost".to_string(),
+            broker.pki.ca().to_string_lossy().into_owned(),
+            cert.to_string_lossy().into_owned(),
+            key.to_string_lossy().into_owned(),
+        );
+        let config = if watcher { config.as_watcher() } else { config };
         let (transport, _) = Actor::spawn(
             None,
             TcpClientActor,
             TcpClientArgs {
-                config: TCPClientConfig::from_values(
-                    broker.addr.clone(),
-                    "localhost".to_string(),
-                    broker.pki.ca().to_string_lossy().into_owned(),
-                    cert.to_string_lossy().into_owned(),
-                    key.to_string_lossy().into_owned(),
-                ),
+                config,
                 registration_id,
                 delivery: DeliveryMode::Broadcast(port),
                 answers: None,
@@ -610,13 +661,7 @@ impl TestClient {
         )
         .await
         .expect("the client starts");
-        let client = Self { transport, events };
-        client
-            .wait_for("a registration", Duration::from_secs(10), |c| {
-                c.registration_id().is_some()
-            })
-            .await;
-        client
+        Self { transport, events }
     }
 
     /// The connection to the broker was lost, as the client itself reports it.

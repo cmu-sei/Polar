@@ -678,6 +678,10 @@ Principle: declare each environment variable once, with its type, default, docum
   `job_for` copies the pod untouched apart from its name, labels and ConfigMap; never run so. To check: the Jobs
   complete with a native sidecar running, the log reading (`-c` for each container) skips the daemon's container, and
   the renewal rule's five minutes per pod do not slow a plan's runs.
+- [ ] The control plane's `ListSessions` always fails (found 2026-10-27, building custody step 5): the control
+  manager asks the session manager for `GetSessions` (`cassini/broker/src/control.rs`), and the session manager has no
+  arm for it (`session.rs`), so the call's reply port is dropped and the answer is `InternalError("Operation failed")`.
+  Nothing in the repository's tests lists sessions through it.
 - [ ] The broker at 256 connections at once (found 2026-10-27, by the storm bench, `cassini/broker/tests/storm.rs`):
   with key files and with the daemon alike, a p99 handshake of 1.0 to 1.1 s, a TCP connection retried after its SYN
   went unanswered, some rounds at 250 a second, the host's `somaxconn` and SYN backlog at 4,096. At 64 at once the p99

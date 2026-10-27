@@ -926,6 +926,7 @@ dependencies = [
  "cassini-client",
  "cassini-tracing",
  "cassini-types",
+ "cert-issuer-common",
  "credentials_agent_common",
  "libc",
  "opentelemetry",

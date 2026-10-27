@@ -128,6 +128,7 @@ impl Actor for SubscriberManager {
                 client_id,
                 trace_ctx,
                 peer_identity,
+                ..
             } => {
                 self.handle_registration_request(
                     myself.clone(),
@@ -380,6 +381,7 @@ impl SubscriberManager {
                         client_id: client_id.clone(),
                         trace_ctx: Some(span.context()),
                         peer_identity: None,
+                        watcher: false,
                     }) {
                         warn!(error = %e, "{REGISTRATION_REQ_FAILED_TXT}: {SUBSCRIBER_NOT_FOUND_TXT}");
                     }
@@ -704,6 +706,7 @@ impl Actor for SubscriberAgent {
                 client_id,
                 trace_ctx,
                 peer_identity,
+                ..
             } => {
                 self.handle_registration_request(
                     myself.clone(),

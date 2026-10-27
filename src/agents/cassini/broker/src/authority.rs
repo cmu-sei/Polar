@@ -160,6 +160,24 @@ impl BrokerAuthority {
     }
 }
 
+/// What a watcher session is told when it asks for anything but authority (docs/architecture/key-custody.md, step 5).
+pub const WATCHER_REFUSAL: &str = "the broker refused: a watcher session may hear the credentials agent's authority and ask for it, nothing else";
+
+/// What a revoked certificate is told when it asks to register as anything but a watcher.
+pub const REVOKED_REFUSAL: &str =
+    "the broker refused: this certificate is revoked, and may register only a watcher session";
+
+/// Whether a watcher session may use `topic` this way: hear the credentials agent's updates and snapshots, and ask for
+/// a snapshot. Within these it is decided as its identity's session is, so a watcher never may more. Pure.
+pub fn watcher_may(topic: &str, access: Access) -> bool {
+    matches!(
+        (topic, access),
+        (AUTHORITY_UPDATES_TOPIC, Access::Subscribe)
+            | (AUTHORITY_SNAPSHOT_REPLIES_TOPIC, Access::Subscribe)
+            | (AUTHORITY_SNAPSHOT_REQUESTS_TOPIC, Access::Publish)
+    )
+}
+
 /// Counts the changes of authority, so that every Listener's cached decisions go stale at once without a lock or a
 /// message to each (docs/architecture/policy-enforcement.md, "Decisions": the cache is emptied on a change).
 struct ChangeCounter;

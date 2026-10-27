@@ -144,6 +144,7 @@ mod tests {
             client_id: "test-client".to_string(),
             trace_ctx: None,
             peer_identity: None,
+            watcher: false,
         };
 
         // This should not panic or error
