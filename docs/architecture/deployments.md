@@ -100,6 +100,75 @@ Each with a recommendation; to be taken one at a time.
 - **To read when built.** Whether in-place restarts back off like a crash-looping container (none was seen in the
   test, restarts every 8 s), and how a pod restarting in place shows in `up.nu`'s waits and the health checks.
 
+## The renewal rule, the plan (2026-10-27, its question decided)
+
+What is there, read for this:
+- *Issuance* (`credentials-agent/consume/src/issuance.rs`):
+  - step 4 asks the ledger `CheckRenewal { identity, instance_binding, cert_type }`, which is
+    `has_valid_certificate` (`state.rs`), and refuses `AlreadyHasValidCertificate`;
+  - step 7 appends `IssuanceCompleted` after cert-issuer has signed;
+  - the check and the record are two steps around a network call, so two requests at once from one pod can both
+    pass. That race is there today.
+- *The voucher* (`held_voucher.rs`, `rule`): "already holds one" comes from the same `CheckRenewal`. A vouched
+  certificate is signed by cert-issuer, so the ledger learns of it only from cert-issuer's record. The record is read
+  every 30 s (`record_asker::ASK_EVERY`), so the check can lag that much.
+- *Superseding is already there.* `record_workload_certificate` (`state.rs`) marks every earlier certificate of the
+  identity and type `Superseded`, whatever its pod. `valid_certificates` is keyed by identity, pod and type, so it
+  holds each pod's newest.
+- *Superseded is not published.* `revoked_serials` takes explicit `Revoke`s only, and a test pins it
+  (`a_certificate_replaced_by_a_reissue_is_not_an_explicit_revocation`). No reason is recorded. The architecture
+  document gives superseding's purpose as one current certificate per identity for the lookup
+  (`credentials-agent-architecture.md`, "A reissue for the same identity supersedes"). Item 3 above assumed the
+  serial is published.
+- *Two units in one field.* `IssuanceCompleted`'s timestamp is in milliseconds (`polar::time::now_millis`). A reported
+  certificate's `signed_at` is in seconds (`cert-issuer/server/src/record.rs`). Both become
+  `CertificateRecord.timestamp`.
+
+The plan:
+1. *One rule, in the ledger, for both callers.*
+   - `LedgerMessage::Admit { identity, instance_binding, cert_type, now }` replaces `CheckRenewal`. A request is
+     admitted unless that pod was issued, or admitted, a certificate of that type within the bound (five minutes).
+   - Admitting records the time. The ledger actor answers one message at a time, so two requests at once cannot both
+     pass, and the race closes.
+   - The last issuance comes from the record, which is persisted and replayed. An admission not yet followed by a
+     record is held in memory; losing it at a restart only lifts a bound.
+2. *Issuance:* `Admit` in place of `CheckRenewal`.
+   - Too soon is a new reason, `TooSoon`, which `polar-crypto` counts as temporary (`is_temporary`). `polar-init`
+     waits it out rather than exiting, as it does everything that is not final.
+   - `AlreadyHasValidCertificate` is no longer given; it stays in the enum for the wire.
+3. *The voucher:* `rule` takes "too soon" in place of "already holds one", from the same `Admit`. On that path the
+   refusal is final, as every held answer is (`core-restarts.md`, "3 in detail"): `polar-init` exits, and the pod
+   asks again when it restarts.
+4. *One unit:* `record_reported` stores `signed_at` in milliseconds, so the bound compares like with like. Replay
+   gives the same, since the state is folded from the events.
+5. *A superseded certificate is published as revoked* (decided below). Superseding puts the serial in
+   `revoked_serials`, which makes the publisher send the set (`ledger.rs`, `revocation_changes`), and the test that
+   pinned the opposite changes with it.
+6. *One client certificate per pod, in the `local` target too.* The hand charts there (`layers/3-workloads/agents`:
+   gitlab's consumer, build-processor, openapi's processor) still ask for a second client certificate for Neo4j
+   (`neo4jClientCertPath`), for the same identity on the same pod. The second supersedes the first, and published,
+   that would revoke the Cassini certificate in use. The catalog already settled this: one client certificate,
+   presented to Cassini and Neo4j alike (`infra/config/capabilities.nuon`, `graph-write`). The hand charts follow it,
+   their graph variables pointing at `/etc/tls/certs`. The `ace` job keeps its one.
+7. *Tests first:*
+   - a property: for any sequence of asks (pod, type, time) and issuances, each ask is admitted exactly when that pod
+     had no issuance or admission of that type in the five minutes before. A log replayed gives the same answers;
+   - examples:
+     - a restarted pod admitted after the bound, its old certificate superseded;
+     - one within the bound refused `TooSoon`, and `polar-init` waiting it out;
+     - two at once, one admitted;
+     - the voucher refusing too soon;
+     - a reported certificate's time in milliseconds;
+     - a superseded serial among the revoked, and published.
+   - The tests that pin `AlreadyHasValidCertificate` (`issuance.rs`, two) and superseded-not-revoked (`state.rs`)
+     change with the rule (items 1 and 3, decided).
+
+*Decided (the maintainer, 2026-10-27): a superseded certificate is published as revoked.* The question, as it was put: Item 3 assumed it is, and today it is not. Publishing it
+puts the old serial on `polar-authority-updates`. Agents then refuse the old certificate at once, the daemon of an old
+pod still running destroys its key (`key-custody.md`, step 5), and the broker ends its sessions. The cost: the revoked
+set grows by one serial for every restart, and the set is never pruned, so it keeps growing. Pruning a serial once
+its certificate has expired is a follow-up (`remaining-work.md`).
+
 ## Build order, each tests first
 
 1. The custody daemon (`key-custody.md`), which item 4 puts first.

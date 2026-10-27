@@ -337,6 +337,10 @@ again after a restart.
 3. `polar-init` taking the daemon's CSR and handing it the certificate; the bundle in the shared volume becomes the
    certificate and `ca.pem` alone.
    Then the renewal rule (`deployments.md`, build step 2), before any pod has a daemon.
+   *Found for step 4 (2026-10-27):* a graph writer presents its one client certificate to Neo4j through neo4rs
+   (`GRAPH_CLIENT_KEY=/etc/tls/certs/key.pem`, `infra/config/capabilities.nuon`). neo4rs reads the key from a file
+   only (its `MutualTLS`, `lib/src/connection.rs`), and with the daemon there is none. To settle before step 4: a
+   patch to neo4rs that takes a rustls configuration (as Polar carries its own `rsa`), or another way.
 4. The catalog and the charts: the sidecar in the `agent` and `service` kinds, its socket volume, its UID; Cassini's
    listener taking the signer.
 5. Revocation: the daemon on its own serial, its exit, and the broker ending revoked sessions.
