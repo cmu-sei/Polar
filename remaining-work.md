@@ -675,13 +675,10 @@ Principle: declare each environment variable once, with its type, default, docum
   (`key-custody.md`, "Step 5"). Step 7 done 2026-10-27 on a fresh sandbox-local (`u7c`): no mTLS key in any pod with
   the daemon, Neo4j over the daemon's key, and kube-observer revoked end to end, its replacement at work three and a
   half minutes later (`key-custody.md`, "Step 7"). The mTLS key's custody is done; what follows is the to-do below.
-- [ ] The Cassini load harness with the custody daemons (wanted by the maintainer, 2026-10-27; not yet): run
-  `infra/load-harness.nu` (`src/agents/cassini/test`) on a target with custody on, its producers and sinks signing
-  through their pods' daemons, and compare with the key-file baseline (`broker-baseline.md`). The harness workloads are
-  the `agent` kind (`infra/config/workloads/cassini-harness.nuon`), so their rendered Jobs carry the sidecar, and
-  `job_for` copies the pod untouched apart from its name, labels and ConfigMap; never run so. To check: the Jobs
-  complete with a native sidecar running, the log reading (`-c` for each container) skips the daemon's container, and
-  the renewal rule's five minutes per pod do not slow a plan's runs.
+- [x] The Cassini load harness with the custody daemons (wanted by the maintainer, 2026-10-27; done 2026-10-27): the
+  baseline plan on `u7c` with every harness pod's key in its daemon, from `cce2438e`. Every Job ran to its end beside its
+  native sidecar, the results were read past the daemon's container, and the figures are those of the key-file baseline
+  within a run's spread, nothing lost (`broker-baseline.md`, "With the custody daemons").
 - [x] Image eviction on a multi-node cluster (found 2026-10-27, custody step 7; done 2026-10-27): `infra/images.nu`
   dropped rebuilt images only from the `u7s` container, so on `u7c` each node kept its cached copies. Not stale code,
   since the pods pull Polar's images `Always`, but disk. Now it evicts from every node container of the cluster

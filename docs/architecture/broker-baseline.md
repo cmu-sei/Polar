@@ -195,6 +195,44 @@ Read plainly:
 - Against the 2026-10-22 figures, on a different CPU and node, every ceiling is higher (13,000 to 14,000 small messages
   a second then, 5,300 without the cache, 1.4 GB/s at 1 MiB): a reference for this machine, not a comparison of code.
 
+## With the custody daemons (2026-10-27, u7c)
+
+The same plan with every harness pod's key in its custody daemon (`key-custody.md`), as the catalog now deploys it,
+on precisionws, to compare with its key-file baseline of 2026-10-21 above.
+
+- Host: precisionws as above, Linux 7.3.0, FIPS on.
+- Cluster: nix-usernetes `feaa20a`, multi-node `u7c` (`cp`, `core`), Kubernetes 1.37.1; every harness pod and the
+  broker on `cp`, so one clock (`one_node: true`).
+- Target: `sandbox-local` from `cce2438e` (clean), by `up.nu --dev`; tracing off for the run, as the procedure says.
+  Record `~/.cache/polar/harness/baseline-20261027T194643.nuon`, broker `cassini@sha256:0931a806…`.
+- Every Job ran to its end with the daemon as a native sidecar beside it, and the harness read its result past the
+  daemon's container; each run's pod is new, so the renewal rule's five minutes never held one back.
+
+| size | rate | key files /s | daemon /s | key files p50 | daemon p50 | key files p99 | daemon p99 | lost |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 256 B | 100 | 100 | 100 | 0.39 | 0.51 | 1.0 | 10.12 | 0 |
+| 256 B | 1000 | 1000 | 998 | 2.06 | 2.1 | 4.78 | 5.02 | 0 |
+| 256 B | 10000 | 9999 | 9960 | 1.97 | 1.7 | 9.97 | 11.49 | 0 |
+| 256 B | max | 13138 | 11416 | 76.69 | 86.85 | 105.5 | 105.16 | 0 |
+| 4 KiB | 100 | 100 | 100 | 0.51 | 0.53 | 0.83 | 0.88 | 0 |
+| 4 KiB | 1000 | 1000 | 1000 | 0.48 | 0.46 | 0.88 | 0.83 | 0 |
+| 4 KiB | 10000 | 9998 | 9998 | 2.19 | 1.74 | 13.26 | 10.94 | 0 |
+| 4 KiB | max | 11957 | 11940 | 85.45 | 84.83 | 106.76 | 104.77 | 0 |
+| 64 KiB | 100 | 100 | 100 | 10.57 | 10.51 | 11.65 | 11.85 | 0 |
+| 64 KiB | 1000 | 1000 | 1000 | 0.6 | 0.77 | 2.26 | 3.39 | 0 |
+| 64 KiB | 10000 | 9981 | 9995 | 3.05 | 2.94 | 8.07 | 7.83 | 0 |
+| 64 KiB | max | 9741 | 10893 | 100.08 | 89.37 | 129.6 | 113.12 | 0 |
+| 1 MiB | 100 | 100 | 100 | 3.26 | 3.11 | 14.59 | 14.47 | 0 |
+| 1 MiB | 1000 | 997 | 967 | 4.85 | 6.36 | 13.91 | 14.33 | 0 |
+| 1 MiB | 10000 | 1456 | 1231 | 97.88 | 143.27 | 170.29 | 212.51 | 0 |
+| 1 MiB | max | 1353 | 1502 | 160.67 | 138.0 | 226.9 | 163.75 | 0 |
+
+Read plainly: the same, within one run's spread. The daemon signs once for a connection, and a run is one long
+connection, so nothing it does is in these figures, as expected (`key-custody.md`, "Step 6"). What differs is the cluster
+(two nodes, Kubernetes 1.37 against 1.33, six days of other changes), seen most at 1 MiB, where one run is either side of
+the other. One p99 stands out, 10 ms at 256 B and 100 a second: one slow message in 1,900, a p99 that is nearly the
+maximum. No duplicates, no messages out of order, in any run.
+
 ## What measuring it found
 
 Each fix was made test first, the test failing before it.
