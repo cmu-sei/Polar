@@ -134,6 +134,26 @@ its UID, and the race in `core-restarts.md`, question 1, is left only for a pod 
 evicted, or lost with its node). With in-place restarts the Reaper is mostly obsolete; it stays for older clusters. To be
 taken up after this document.
 
+**Checked (2026-10-27).** The feature is KEP-5532, "restart all containers on container exits": a container restart
+rule whose action is `RestartAllContainers` restarts the whole pod in place, init containers (which must be reentrant)
+and sidecars included, keeping its sandbox, UID, network namespace, IP and every volume, `emptyDir` included; restart
+counts rise, and the pod carries an `AllContainersRestarting` condition while it restarts. Alpha in 1.35 (gate
+`RestartAllContainersOnContainerExits`, on the API server and the kubelet), beta and on by default in 1.36, on top of
+container restart rules (KEP-5307, beta in 1.35). On sandbox-local (v1.37.1) the API server accepted the action although
+`kubectl explain` still describes `Restart` as the only one, and a pod (`restartPolicy: Always`, its container
+`restartPolicy: Always` with a rule `RestartAllContainers` on exit code 1) whose workload exited every 8 s ran its init
+container again each time (four runs, appended to one `emptyDir` file), under one UID and one IP. What it means here,
+to be settled before the move:
+- *The renewal rule meets the same UID.* The credentials agent refuses a second certificate of a type to a pod
+  instance while the first is valid (`AlreadyHasValidCertificate`), and so does the held-request voucher; a pod restarted
+  in place is the same instance, asking again before its certificate expires, which is why it rejuvenates. That rule is
+  what makes rejuvenation need a new pod today, so changing it is a decision, not a detail.
+- *Kept bundles.* The `emptyDir` survives, so `polar-init` finds the last bundle (`keeps_existing_bundle`) and would keep
+  it while it is valid, which at rejuvenation it still is.
+- *Rollouts.* A Deployment's rolling update starts the new pod before the old one ends; a credentials agent (one ledger)
+  wants `Recreate`, and the ledger lock is the backstop either way.
+- *Init containers must be reentrant*: `polar-init` and the escrow bootstrap, run again in the same pod.
+
 ## Open, to be settled when it is built
 
 - The two workloads' names in the catalog, their capabilities (`Capability` in `polar-agent-builder`), the
