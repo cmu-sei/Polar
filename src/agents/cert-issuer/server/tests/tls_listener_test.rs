@@ -88,6 +88,8 @@ async fn start_with(
         server_lifetime: Duration::from_secs(43200),
         user_lifetime: Duration::from_secs(43200),
         service_lifetime: Duration::from_secs(31_536_000),
+        own_workload: Default::default(),
+        floor_state: None,
         identity_lifetime_overrides: HashMap::new(),
         internal_callers: vec![ALLOWED.to_string()],
         floor,

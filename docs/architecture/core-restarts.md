@@ -290,6 +290,40 @@ Each step tests first, with property tests where an invariant holds.
    question 2; `admit_token_only` asks it. Properties: no message opens an entry; for any sequence of events, what is
    open follows the table; after a restart with a record, nothing opens before the credentials agent is heard or the
    bound passes.
+
+   *2 in detail (settled with the maintainer, 2026-10-26).*
+   - *What "the record is empty" means.* cert-issuer signs its own TLS certificate and its own client certificate at
+     every start, before it serves anyone, so the record is never literally empty. A fresh cluster is a record with
+     nothing in it but cert-issuer's own (the `Own` path; its client certificate is now recorded there too, below),
+     read when it starts.
+   - *A fresh cluster is bootstrap until the credentials agent is first heard.* The record stops being empty at
+     Cassini's first certificate, long before nominal; were that the end of bootstrap, the observer's entry would close
+     in the middle of it. So on a fresh start every entry is open until the credentials agent is first heard, and from
+     then the table applies. On a start with a record, nothing opens until the credentials agent is heard or the bound
+     (60 s) passes; then the table applies.
+   - *Shadow mode first.* Step 2 feeds the state (its Cassini session, the credentials agent's record requests, time)
+     and logs, at every token-only request, what it would decide beside what the floor did; `admit_token_only` obeys it
+     from step 3, with the held requests, since the state alone would close the observer's and Cassini's entries with
+     nothing to take their place. The log is also what step 8 checks the state against.
+   - *cert-issuer's own entry: self-issuance only (the maintainer, 2026-10-26).* The table covers the credentials
+     agent, its observer and Cassini; cert-issuer's own entry was open over HTTP at all times, so whoever held a token
+     for its service account could be signed a client certificate as cert-issuer. cert-issuer now signs its own client
+     certificate in process at start (recorded as `Own`, as its TLS certificate is), learns its own workload from its
+     own token as it does, and refuses that workload to every HTTP caller, on a token or vouched. This is in force now,
+     not shadowed: nothing but cert-issuer itself ever used the entry.
+
+   *Built (2026-10-26): 2, in shadow.* `cert-issuer/server/src/floor_state.rs`: `FloorState` hears
+   `CassiniRegistered`, `CassiniLost` and `CredentialsAgent`, and says what is `Open` (`Nothing`,
+   `CredentialsAgentOnly`, `All`) at a given instant; `Open::admits` says whether a request for a bootstrap identity
+   gets through. The supervisor reads "fresh" when it opens the record, feeds the state from its Cassini session and
+   from each record request the broker says the credentials agent published, and logs every change; the handler logs,
+   at each token-only request for a bootstrap identity, `floor_state`, `would_admit` and `floor_admitted`.
+   `Handler::handle_own` signs cert-issuer's own client certificate (path `Own`), and `handle` refuses its workload.
+   Tests: the table in examples, and three properties (`cert-issuer/server/tests/floor_state.rs`: what is open
+   follows the table for any history; no message opens an entry, now or later; after a restart with a record nothing
+   opens within the bound unless the credentials agent is heard); self-issuance (recorded as its own, refused to every
+   HTTP caller after); the shadow line, captured from the log. Mutations: all on the state and the handler caught; the
+   supervisor's feeding has no unit test (it needs the whole agent) and is checked on the cluster from its log.
 3. **Held requests.** A token-only request for a closed entry (the observer's, Cassini's) is held, not refused, and
    `polar-init` waits on it. cert-issuer offers it to the credentials agent over Cassini, and over mTLS to the
    credentials agent's poll while its Cassini session is lost (the poll is also its presence, question 2). The

@@ -38,6 +38,7 @@
 
 use crate::ca::{RcgenCaClient, load_or_bootstrap_ca, load_provisioned_ca};
 use crate::config::{CaConfig, CaProvisioning};
+use crate::floor_state::{FloorState, Heard};
 use crate::handler::Handler;
 use crate::listener::{Listener, ListenerArgs, ListenerMessage};
 use crate::oidc::{HttpJwksSource, Validator};
@@ -79,6 +80,20 @@ pub enum CertIssuerSupervisorMessage {
 
 pub struct CertIssuerSupervisor;
 
+/// Tells the floor state what was heard now, and logs what is open when that changes.
+fn hear(floor_state: &std::sync::Mutex<FloorState>, heard: Heard) {
+    let Ok(mut state) = floor_state.lock() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    let before = state.open(now);
+    state.hear(heard, now);
+    let after = state.open(now);
+    if after != before {
+        info!(?heard, from = ?before, to = ?after, "floor state changed (shadow, not yet enforced)");
+    }
+}
+
 pub struct CertIssuerSupervisorState {
     healthcheck: HealthHandle,
     infrastructure: ActorRef<InfrastructureSupervisorMessage>,
@@ -91,6 +106,8 @@ pub struct CertIssuerSupervisorState {
     record: Arc<RecordingCa>,
     internal_callers: Vec<String>,
     client: polar::cassini::TcpClient,
+    /// What the floor has open, by what this supervisor hears (step 2: logged, not yet obeyed).
+    floor_state: Arc<std::sync::Mutex<FloorState>>,
 }
 
 /// What a child's ending means: the infrastructure's is the end of the shutdown; the listener's, outside a shutdown,
@@ -177,6 +194,25 @@ impl Actor for CertIssuerSupervisor {
         // Every certificate it signs is recorded before it is returned, its own among them, so that no certificate
         // it signs stays unknown to the credentials agent (docs/architecture/cert-issuer-isolation.md, "Step 2").
         let record = Record::open(std::path::Path::new(&settings.record_path))?;
+        // A fresh cluster is a record with nothing in it but cert-issuer's own certificates, read before it signs any
+        // of its own now (docs/architecture/core-restarts.md, "2 in detail").
+        let fresh = record
+            .entries()
+            .iter()
+            .all(|e| e.path == cert_issuer_common::record::IssuePath::Own);
+        let floor_state = Arc::new(std::sync::Mutex::new(FloorState::new(
+            fresh,
+            std::time::Instant::now(),
+        )));
+        info!(
+            fresh,
+            "floor state: {}",
+            if fresh {
+                "a fresh cluster, bootstrap until the credentials agent is first heard"
+            } else {
+                "a start with a record: nothing opens until the credentials agent is heard or the bound passes"
+            }
+        );
         let ca = Arc::new(RecordingCa::new(
             Arc::new(
                 RcgenCaClient::new(&ca_cert_pem, &ca_key_pem)
@@ -202,6 +238,8 @@ impl Actor for CertIssuerSupervisor {
             server_lifetime: config.ca.server_lifetime,
             user_lifetime: config.ca.user_lifetime,
             service_lifetime: config.ca.service_lifetime,
+            own_workload: Default::default(),
+            floor_state: Some(floor_state.clone()),
             identity_lifetime_overrides: config.ca.identity_lifetime_overrides.clone(),
             internal_callers: config.mtls.internal_callers.clone(),
             floor: config.mtls.bootstrap.clone(),
@@ -293,6 +331,7 @@ impl Actor for CertIssuerSupervisor {
             record: ca,
             internal_callers: config.mtls.internal_callers.clone(),
             client: resources.tcp_client,
+            floor_state,
         })
     }
 
@@ -307,34 +346,45 @@ impl Actor for CertIssuerSupervisor {
             CertIssuerSupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     let _ = state.healthcheck.cassini_connected();
+                    hear(&state.floor_state, Heard::CassiniRegistered);
                 }
                 ClientEvent::TransportError { reason } => {
                     warn!("Cassini is unreachable (cert-issuer does not depend on it): {reason}");
                     let _ = state.healthcheck.cassini_disconnected();
+                    hear(&state.floor_state, Heard::CassiniLost);
                 }
                 _ => {}
             },
             CertIssuerSupervisorMessage::RecordRequested {
                 payload,
                 published_by,
-            } => match state
-                .record
-                .answer(&payload, published_by.as_deref(), &state.internal_callers)
-                .await
-            {
-                Ok(reply) => {
-                    if let Err(e) = state.client.as_actor_ref().send_message(
-                        cassini_client::TcpClientMessage::publish(
-                            cert_issuer_common::record::RECORD_REPLIES_TOPIC.to_string(),
-                            reply,
-                            None,
-                        ),
-                    ) {
-                        warn!("the record could not be sent: {e}");
-                    }
+            } => {
+                // The credentials agent asking, as the broker verified it: that is its presence.
+                if published_by
+                    .as_deref()
+                    .is_some_and(|asker| state.internal_callers.iter().any(|c| c == asker))
+                {
+                    hear(&state.floor_state, Heard::CredentialsAgent);
                 }
-                Err(why) => warn!("not answered: {why}"),
-            },
+                match state
+                    .record
+                    .answer(&payload, published_by.as_deref(), &state.internal_callers)
+                    .await
+                {
+                    Ok(reply) => {
+                        if let Err(e) = state.client.as_actor_ref().send_message(
+                            cassini_client::TcpClientMessage::publish(
+                                cert_issuer_common::record::RECORD_REPLIES_TOPIC.to_string(),
+                                reply,
+                                None,
+                            ),
+                        ) {
+                            warn!("the record could not be sent: {e}");
+                        }
+                    }
+                    Err(why) => warn!("not answered: {why}"),
+                }
+            }
             CertIssuerSupervisorMessage::PrepareShutdown => {
                 info!("PrepareShutdown received: draining the listener before infrastructure");
                 state.shutting_down = true;

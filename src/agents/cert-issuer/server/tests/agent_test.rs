@@ -53,8 +53,8 @@ fn cert_issuer_signs_its_own_certificate_and_serves_with_no_broker_long_past_the
         std::fs::read_to_string(rig.ca()).unwrap(),
         "and the CA it signs under, where its Cassini client reads the broker's CA"
     );
-    // Both its own certificates are in its record: its TLS server certificate, and its client certificate, signed on
-    // its token through its floor.
+    // Both its own certificates are in its record as its own: its TLS server certificate, and its client
+    // certificate, signed in process on its token at its start (docs/architecture/core-restarts.md, "2 in detail").
     let record =
         cert_issuer::record::Record::open(&rig.dir.path().join("record/issued.jsonl")).unwrap();
     let paths: Vec<(String, cert_issuer_common::record::IssuePath)> = record
@@ -71,7 +71,7 @@ fn cert_issuer_signs_its_own_certificate_and_serves_with_no_broker_long_past_the
             ),
             (
                 IDENTITY.to_string(),
-                cert_issuer_common::record::IssuePath::TokenOnly
+                cert_issuer_common::record::IssuePath::Own
             ),
         ]
     );

@@ -68,7 +68,7 @@ use cert_issuer_common::{
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, instrument, warn};
+use tracing::{error, info, instrument, warn};
 
 pub struct Handler {
     pub validator: Arc<Validator>,
@@ -83,6 +83,12 @@ pub struct Handler {
     pub user_lifetime: Duration,
     /// Lifetime for an agent's escrow certificate (`CertType::Service`): long, since it outlives the agent's pods.
     pub service_lifetime: Duration,
+    /// cert-issuer's own workload, as its own token names it, once it has signed itself its client certificate
+    /// (`handle_own`): signed in process at its start, and refused to every caller over HTTP.
+    pub own_workload: std::sync::OnceLock<String>,
+    /// What the floor has open by what cert-issuer hears (`floor_state`), fed by the supervisor; none in a handler
+    /// that is not running as the agent. Step 2 only logs what it would decide; step 3 makes the floor obey it.
+    pub floor_state: Option<Arc<std::sync::Mutex<crate::floor_state::FloorState>>>,
     pub identity_lifetime_overrides: std::collections::HashMap<String, Duration>,
     /// Peer identities (the SAN of the connection's verified mTLS
     /// client certificate) allowed to call `handle_internal_issue`.
@@ -131,6 +137,42 @@ impl Handler {
     /// (the credentials agent), which has applied its own controls and states the certificate itself.
     fn vouched_for(&self, peer_identity: Option<&str>) -> bool {
         peer_identity.is_some_and(|peer| self.internal_callers.iter().any(|c| c == peer))
+    }
+
+    /// Step 2's shadow: for a token-only request for a bootstrap identity, what the floor state would decide, beside
+    /// what the floor did. Nothing obeys it until step 3; the log is what it is checked against.
+    fn shadow_floor_state(
+        &self,
+        peer_identity: Option<&str>,
+        claims: &crate::oidc::ValidatedClaims,
+        floor_admitted: bool,
+    ) {
+        let (Some(state), Some(floor)) = (&self.floor_state, &self.floor) else {
+            return;
+        };
+        let bootstrap = floor
+            .iter()
+            .any(|b| b.workload == claims.workload_identity && !b.vouched_only);
+        if self.vouched_for(peer_identity) || !bootstrap {
+            return;
+        }
+        let credentials_agent = normalize_identity(
+            &claims.workload_identity,
+            claims.identity_scope.as_deref(),
+            &claims.identity_normalization,
+        )
+        .is_ok_and(|identity| self.internal_callers.contains(&identity));
+        let open = match state.lock() {
+            Ok(state) => state.open(std::time::Instant::now()),
+            Err(_) => return,
+        };
+        info!(
+            workload = %claims.workload_identity,
+            floor_state = ?open,
+            would_admit = open.admits(credentials_agent),
+            floor_admitted,
+            "floor state (shadow, not yet enforced)"
+        );
     }
 
     /// Why a caller with this token may not have this request served, if it may not: the detail to send. Once a
@@ -189,11 +231,47 @@ impl Handler {
         bearer_token: &str,
         request: IssueRequest,
     ) -> HandlerResponse {
+        self.issue_on_token(peer_identity, bearer_token, request, false)
+            .await
+    }
+
+    /// cert-issuer's own client certificate, on its own token, signed in process at its start (never asked for over
+    /// HTTP): its floor entry decides the type and the names, as anyone's does, and from then its workload is its own,
+    /// refused to every caller of `handle` (docs/architecture/core-restarts.md, "2 in detail").
+    #[instrument(skip_all)]
+    pub async fn handle_own(&self, own_token: &str, request: IssueRequest) -> HandlerResponse {
+        self.issue_on_token(None, own_token, request, true).await
+    }
+
+    async fn issue_on_token(
+        &self,
+        peer_identity: Option<&str>,
+        bearer_token: &str,
+        request: IssueRequest,
+        own: bool,
+    ) -> HandlerResponse {
         // ---- Step 1: OIDC validation ----
         let claims = match self.validator.validate(bearer_token).await {
             Ok(claims) => claims,
             Err(e) => return error_response(map_validation_error(&e), &e.to_string()),
         };
+
+        // ---- Step 1.1: cert-issuer's own identity is its own ----
+        if own {
+            let _ = self.own_workload.set(claims.workload_identity.clone());
+            if self.own_workload.get() != Some(&claims.workload_identity) {
+                return error_response(
+                    IssueOutcome::CallerNotAuthorized,
+                    "cert-issuer has signed itself as another workload already",
+                );
+            }
+        } else if self.own_workload.get() == Some(&claims.workload_identity) {
+            warn!(workload = %claims.workload_identity, peer_identity = ?peer_identity, "a certificate as cert-issuer was asked for over HTTP: refused");
+            return error_response(
+                IssueOutcome::CallerNotAuthorized,
+                "cert-issuer's own identity is signed only by cert-issuer itself, at its start",
+            );
+        }
 
         // ---- Step 1.2: a signing certificate is not issued here ----
         //
@@ -212,11 +290,15 @@ impl Handler {
         // The token says whose workload this is and nothing about whether it may ask for this. A caller
         // vouched for by the credentials agent's mTLS identity states the certificate itself; a caller
         // with only a token is limited to the bootstrap identities and what is written down for them.
-        if let Some(detail) = self.caller_refusal(
+        let refusal = self.caller_refusal(
             peer_identity,
             &claims.workload_identity,
             Some((&request.cert_type, &request.extra_sans)),
-        ) {
+        );
+        if !own {
+            self.shadow_floor_state(peer_identity, &claims, refusal.is_none());
+        }
+        if let Some(detail) = refusal {
             return error_response(IssueOutcome::CallerNotAuthorized, &detail);
         }
 
@@ -291,8 +373,10 @@ impl Handler {
             request.extra_sans.into_iter().chain(floor_names).collect(),
             request.subject_dn_defaults,
             None,
-            // For the record: vouched for by the credentials agent, or on the token alone.
-            if self.vouched_for(peer_identity) {
+            // For the record: its own, vouched for by the credentials agent, or on the token alone.
+            if own {
+                cert_issuer_common::record::IssuePath::Own
+            } else if self.vouched_for(peer_identity) {
                 cert_issuer_common::record::IssuePath::Vouched
             } else {
                 cert_issuer_common::record::IssuePath::TokenOnly

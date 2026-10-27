@@ -106,6 +106,8 @@ fn rig(floor: Option<Vec<BootstrapIdentity>>) -> (Handler, Arc<RecordingCa>) {
         server_lifetime: Duration::from_secs(43200),
         user_lifetime: Duration::from_secs(43200),
         service_lifetime: Duration::from_secs(31_536_000),
+        own_workload: Default::default(),
+        floor_state: None,
         identity_lifetime_overrides: HashMap::new(),
         internal_callers: vec![CREDENTIALS_AGENT.to_string()],
         floor,
@@ -533,4 +535,119 @@ async fn the_credentials_agent_states_a_workload_s_topics_and_groups_on_the_vouc
             && asked.contains("g:cassini-client"),
         "{asked}"
     );
+}
+
+// ---- the floor state, in shadow (docs/architecture/core-restarts.md, "2 in detail") ---------------------------
+
+/// What the handler logs while `run` runs, as text.
+async fn logged<F: std::future::Future<Output = ()>>(run: F) -> String {
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buffer = Buffer::default();
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    run.await;
+    String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap()
+}
+
+fn with_state(handler: &mut Handler, state: cert_issuer::floor_state::FloorState) {
+    handler.floor_state = Some(Arc::new(Mutex::new(state)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_token_only_request_for_a_bootstrap_identity_logs_what_the_floor_state_would_decide_and_nothing_obeys_it()
+ {
+    use cert_issuer::floor_state::{FloorState, Heard};
+    // Restarted with a record and nothing heard yet: the state would hold everything closed. The floor still signs.
+    let (mut handler, ca) = rig(floor_with_this_workload());
+    with_state(
+        &mut handler,
+        FloorState::new(false, std::time::Instant::now()),
+    );
+    let log = logged(async {
+        let response = handler
+            .handle(None, &mint_default_token(), request(CertType::Client, &[]))
+            .await;
+        assert_eq!(response.status, 200, "shadow: nothing obeys it yet");
+    })
+    .await;
+    assert_eq!(ca.asked.lock().unwrap().len(), 1);
+    let line = log
+        .lines()
+        .find(|l| l.contains("floor state (shadow"))
+        .unwrap_or_else(|| panic!("no shadow line in {log}"));
+    assert!(line.contains("floor_state=Nothing"), "{line}");
+    assert!(line.contains("would_admit=false"), "{line}");
+    assert!(line.contains("floor_admitted=true"), "{line}");
+    assert!(line.contains(WORKLOAD), "{line}");
+
+    // Where the floor refuses (a type its entry does not give it), the line says so.
+    let log = logged(async {
+        let response = handler
+            .handle(None, &mint_default_token(), request(CertType::Server, &[]))
+            .await;
+        assert_eq!(response.status, 403);
+    })
+    .await;
+    let line = log
+        .lines()
+        .find(|l| l.contains("floor state (shadow"))
+        .unwrap();
+    assert!(line.contains("floor_admitted=false"), "{line}");
+
+    // The same workload as the credentials agent, gone while Cassini holds: its entry alone, so it would be admitted.
+    let (mut handler, _) = rig(floor_with_this_workload());
+    handler.internal_callers.push(IDENTITY.to_string());
+    let past = std::time::Instant::now() - std::time::Duration::from_secs(120);
+    let mut state = FloorState::new(false, past);
+    state.hear(Heard::CassiniRegistered, past);
+    with_state(&mut handler, state);
+    let log = logged(async {
+        handler
+            .handle(None, &mint_default_token(), request(CertType::Client, &[]))
+            .await;
+    })
+    .await;
+    let line = log
+        .lines()
+        .find(|l| l.contains("floor state (shadow"))
+        .unwrap();
+    assert!(line.contains("floor_state=CredentialsAgentOnly"), "{line}");
+    assert!(line.contains("would_admit=true"), "{line}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_floor_state_is_not_asked_of_a_vouched_request_nor_of_a_workload_that_is_not_a_bootstrap_identity()
+ {
+    use cert_issuer::floor_state::FloorState;
+    for (floor, peer) in [
+        (floor_with_this_workload(), Some(CREDENTIALS_AGENT)),
+        (floor_without_this_workload(), None),
+    ] {
+        let (mut handler, _) = rig(floor);
+        with_state(
+            &mut handler,
+            FloorState::new(false, std::time::Instant::now()),
+        );
+        let log = logged(async {
+            handler
+                .handle(peer, &mint_default_token(), request(CertType::Client, &[]))
+                .await;
+        })
+        .await;
+        assert!(!log.contains("floor state (shadow"), "{peer:?}: {log}");
+    }
 }

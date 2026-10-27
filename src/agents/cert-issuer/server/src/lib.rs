@@ -38,6 +38,7 @@ pub mod ca;
 pub mod config;
 pub mod csr;
 pub mod floor;
+pub mod floor_state;
 pub mod handler;
 pub mod listener;
 pub mod oidc;

@@ -25,14 +25,19 @@
 //! token, through its own handler and floor, as every bootstrap service's is, so its certificate carries what its floor
 //! entry gives it and nothing more, and nothing about it goes around the floor.
 
-use cert_issuer::ca::{RcgenCaClient, load_or_bootstrap_ca};
+use cert_issuer::ca::{
+    CaClient, CaError, CaIssueRequest, IssuedCert, RcgenCaClient, load_or_bootstrap_ca,
+};
 use cert_issuer::config::IssuerConfig;
 use cert_issuer::floor::BootstrapIdentity;
 use cert_issuer::handler::Handler;
+use cert_issuer::handler::HandlerBody;
 use cert_issuer::oidc::Validator;
 use cert_issuer::own_certificate::issue_own;
 use cert_issuer_common::CertType;
 use cert_issuer_common::identity::IdentityNormalization;
+use cert_issuer_common::record::IssuePath;
+use cert_issuer_common::{IssueOutcome, IssueRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,7 +65,17 @@ fn issuer_config() -> IssuerConfig {
     }
 }
 
+const CREDENTIALS_AGENT: &str = "credentials-agent.polar.serviceaccount.cluster.local";
+
 fn handler(floor: Option<Vec<BootstrapIdentity>>) -> Handler {
+    handler_with(floor, None)
+}
+
+/// Wraps the handler's CA, to see what it is asked.
+type WrapCa = Arc<dyn Fn(Arc<dyn CaClient>) -> Arc<dyn CaClient>>;
+
+/// The handler, its CA wrapped by `ca` when one is given.
+fn handler_with(floor: Option<Vec<BootstrapIdentity>>, ca: Option<WrapCa>) -> Handler {
     ensure_crypto_provider();
     let dir = tempfile::tempdir().unwrap();
     let (ca_cert_pem, ca_key_pem) = load_or_bootstrap_ca(
@@ -75,13 +90,19 @@ fn handler(floor: Option<Vec<BootstrapIdentity>>) -> Handler {
             vec![issuer_config()],
             Arc::new(FakeJwksSource::new(jwks)),
         )),
-        ca: Arc::new(RcgenCaClient::new(&ca_cert_pem, &ca_key_pem).unwrap()),
+        ca: {
+            let inner: Arc<dyn CaClient> =
+                Arc::new(RcgenCaClient::new(&ca_cert_pem, &ca_key_pem).unwrap());
+            ca.map_or(inner.clone(), |wrap| wrap(inner))
+        },
         default_lifetime: Duration::from_secs(3600),
         server_lifetime: Duration::from_secs(3600),
         user_lifetime: Duration::from_secs(3600),
         service_lifetime: Duration::from_secs(31_536_000),
+        own_workload: Default::default(),
+        floor_state: None,
         identity_lifetime_overrides: HashMap::new(),
-        internal_callers: vec![],
+        internal_callers: vec![CREDENTIALS_AGENT.to_string()],
         floor,
         ca_cert_pem,
     }
@@ -213,4 +234,74 @@ async fn its_certificate_key_and_ca_are_written_where_its_client_reads_them_with
     );
     let mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "{mode:o}");
+}
+
+/// A CA that remembers the path each certificate was signed on.
+struct PathsOf {
+    inner: Arc<dyn CaClient>,
+    paths: Arc<std::sync::Mutex<Vec<IssuePath>>>,
+}
+
+#[async_trait::async_trait]
+impl CaClient for PathsOf {
+    async fn issue(&self, req: CaIssueRequest) -> Result<IssuedCert, CaError> {
+        self.paths.lock().unwrap().push(req.path);
+        self.inner.issue(req).await
+    }
+}
+
+#[tokio::test]
+async fn its_own_certificate_is_recorded_as_its_own_and_not_as_a_token_only_signing() {
+    let paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = paths.clone();
+    let h = handler_with(
+        Some(vec![own_entry()]),
+        Some(Arc::new(move |inner| {
+            Arc::new(PathsOf {
+                inner,
+                paths: seen.clone(),
+            }) as Arc<dyn CaClient>
+        })),
+    );
+    issue_own(&h, &own_token()).await.unwrap();
+    assert_eq!(*paths.lock().unwrap(), vec![IssuePath::Own]);
+}
+
+#[tokio::test]
+async fn once_it_has_signed_itself_no_caller_over_http_is_signed_as_cert_issuer() {
+    // docs/architecture/core-restarts.md, "2 in detail": its entry is for its own start, in process, and nobody else's.
+    for floor in [Some(vec![own_entry()]), None] {
+        let h = handler(floor.clone());
+        issue_own(&h, &own_token()).await.unwrap();
+        for peer in [None, Some(CREDENTIALS_AGENT)] {
+            let csr = cert_issuer_common::keypair::generate_csr(
+                IDENTITY,
+                &cert_issuer_common::keypair::KeyAlgorithm::Ed25519,
+                &[],
+            )
+            .unwrap();
+            let response = h
+                .handle(
+                    peer,
+                    &own_token(),
+                    IssueRequest {
+                        csr_pem: csr.csr_pem,
+                        cert_type: CertType::Client,
+                        extra_sans: vec![],
+                        subject_dn_defaults: None,
+                    },
+                )
+                .await;
+            assert_eq!(
+                response.status,
+                403,
+                "{peer:?}, floor {:?}",
+                floor.is_some()
+            );
+            match response.body {
+                HandlerBody::Error(e) => assert_eq!(e.outcome, IssueOutcome::CallerNotAuthorized),
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+    }
 }

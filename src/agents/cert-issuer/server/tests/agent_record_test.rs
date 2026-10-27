@@ -205,9 +205,11 @@ fn the_credentials_agent_asks_over_cassini_and_its_ledger_learns_what_cert_issue
         .collect();
     assert_eq!(
         signed,
+        // Both its own: its client certificate is signed in process at its start, not on its token over the floor
+        // (docs/architecture/core-restarts.md, "2 in detail").
         vec![
             (SERVER_IDENTITY, IssuePath::Own),
-            (IDENTITY, IssuePath::TokenOnly),
+            (IDENTITY, IssuePath::Own)
         ],
         "{reply:?}"
     );
@@ -221,7 +223,7 @@ fn the_credentials_agent_asks_over_cassini_and_its_ledger_learns_what_cert_issue
     let client = reply
         .entries
         .iter()
-        .find(|e| e.path == IssuePath::TokenOnly)
+        .find(|e| e.identity == IDENTITY)
         .unwrap();
     let held = runtime
         .block_on(async {

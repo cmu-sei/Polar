@@ -69,8 +69,7 @@ pub async fn issue_own(handler: &Handler, token: &str) -> Result<OwnCertificate,
     let csr = generate_csr(&identity, &KeyAlgorithm::Ed25519, &[])
         .map_err(|e| format!("its own key and request could not be made: {e}"))?;
     let issued = handler
-        .handle(
-            None,
+        .handle_own(
             token,
             IssueRequest {
                 csr_pem: csr.csr_pem,
