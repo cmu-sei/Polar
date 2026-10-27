@@ -36,15 +36,19 @@ let Prelude =
       https://prelude.dhall-lang.org/package.dhall
         sha256:931cbfae9d746c4611b07633ab1e547637ab4ba138b16bf65ef1b9ad66a60b7f
 
+-- `certDir` is where the client certificate Neo4j is shown lives: a pod's one client certificate, presented to Cassini
+-- and Neo4j alike (infra/config/capabilities.nuon, graph-write), or a job's own.
 let makeGraphEnv
     : Text →
       GraphConfig →
       kubernetes.SecretKeySelector.Type →
+      Text →
       Optional Text →
         List kubernetes.EnvVar.Type
     = λ(addr : Text) →
       λ(g : GraphConfig) →
       λ(passwordSecret : kubernetes.SecretKeySelector.Type) →
+      λ(certDir : Text) →
       λ(caCertPath : Optional Text) →
           [ kubernetes.EnvVar::{ name = "GRAPH_ENDPOINT", value = Some addr }
           , kubernetes.EnvVar::{ name = "GRAPH_DB", value = Some g.graphDB }
@@ -60,11 +64,11 @@ let makeGraphEnv
             }
           , kubernetes.EnvVar::{
             , name = "GRAPH_CLIENT_CERT"
-            , value = Some "/etc/neo4j-client-tls/cert.pem"
+            , value = Some "${certDir}/cert.pem"
             }
           , kubernetes.EnvVar::{
             , name = "GRAPH_CLIENT_KEY"
-            , value = Some "/etc/neo4j-client-tls/key.pem"
+            , value = Some "${certDir}/key.pem"
             }
           ]
         # merge

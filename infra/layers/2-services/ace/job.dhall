@@ -89,6 +89,7 @@ let render =
                 v.neo4jBoltAddr
                 Constants.graphConfig
                 Constants.graphSecretKeySelector
+                Constants.neo4jClientCertPath
                 (Some "/etc/neo4j-client-tls/ca.pem")
               # [ kubernetes.EnvVar::{ name = "DASH_HOST", value = Some "0.0.0.0" }
                 , kubernetes.EnvVar::{ name = "DASH_PORT", value = Some (Natural/show v.port) }

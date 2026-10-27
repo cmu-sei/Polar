@@ -124,7 +124,8 @@ another's current public cert needs a real answer). When a new
 `IssuanceCompleted` event is folded, any prior, non-revoked certificate
 for the same identity -- regardless of `instance_binding`, since a pod
 restart gets a fresh one -- is marked revoked in place, with a
-synthetic `Superseded` reason, not a real `Revoke` event. This is what
+synthetic `Superseded` reason, not a real `Revoke` event (since 2026-10-27 its serial is published as revoked all
+the same: `deployments.md`, "The renewal rule"). This is what
 makes the certificate-lookup query well-defined: at most one
 non-revoked certificate can exist per identity at any time, so a
 lookup never has to guess between candidates or apply an arbitrary
@@ -929,7 +930,8 @@ identity alone, is what makes this safe rather than disruptive:
   same mechanism as a rolling restart, with no special-casing required.
 - **A pod requesting its own renewal**: same identity, same UID, cert
   already valid — correctly refused. This is the actual defensive
-  case the rule exists for.
+  case the rule exists for. (Changed 2026-10-27, below: a pod restarted
+  in place asks the same way, and is issued again within a bound.)
 
 **Per certificate type (2026-10-13).** A pod instance may need two certificates at start: a client
 certificate, and for a listener a server certificate. The rule is therefore keyed on
@@ -943,6 +945,19 @@ client certificate and no server certificate could ask for a server one. It has 
 container never holds it), and cert-issuer's per-workload name allowlist decides what any server certificate may
 carry. The service-identity (escrow) certificate is a different thing with its own flow and record, and is not
 requestable here.
+
+**Restarted in place (2026-10-27; `deployments.md`, "The renewal rule").** An agent becomes a Deployment that restarts
+in place, so its pod keeps its UID, and with the custody daemon its key is new at every start (`key-custody.md`). A
+pod asking again under its UID is therefore a restart, and it is issued again, but not more than one certificate of a
+type within five minutes. The rule is `crate::renewal::Admissions`, applied by the ledger actor (`LedgerMessage::Admit`)
+for issuance and for the held-request voucher alike. It is measured from the ledger's last issuance to that pod and
+from any admission not yet recorded, and asks are answered one at a time, so two at once are never both admitted. An
+ask within the bound is refused `TooSoon`, which `polar-init` waits out. A signing that fails gives its admission back.
+What makes a second ask safe is what made the first one safe: only `polar-init` can ask, since the workload never
+holds the token (`deployments.md`, item 2, option (a)). The attestation agent's word that the pod restarted is to
+tighten this once it exists (option (b)). A reissue still supersedes the earlier certificate of its identity and
+type, and a superseded certificate is now published as revoked, like an explicit `Revoke`
+(`CredentialsState::revoked_serials`). `has_valid_certificate` (`CheckRenewal`) stays a read and is no longer the rule.
 
 ## What is deferred
 

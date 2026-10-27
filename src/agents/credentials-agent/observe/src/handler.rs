@@ -534,6 +534,7 @@ fn reply_to_response(reply: IssuanceReply) -> Response {
             IssuanceRefusalReason::AlreadyHasValidCertificate => StatusCode::FORBIDDEN,
             IssuanceRefusalReason::SigningFailed => StatusCode::SERVICE_UNAVAILABLE,
             IssuanceRefusalReason::RequestNotPermitted => StatusCode::FORBIDDEN,
+            IssuanceRefusalReason::TooSoon => StatusCode::TOO_MANY_REQUESTS,
         },
     };
     (status, Json(reply)).into_response()
@@ -543,6 +544,25 @@ fn reply_to_response(reply: IssuanceReply) -> Response {
 mod tests {
     use super::*;
     use axum::extract::{Json, State};
+
+    // docs/architecture/deployments.md, "The renewal rule": too soon is an answer to wait out, said as one, and the
+    // reply goes with it, since the client reads the reply whatever the status.
+    #[tokio::test]
+    async fn too_soon_is_too_many_requests_and_carries_the_reply() {
+        let response = reply_to_response(IssuanceReply::Refused {
+            reason: IssuanceRefusalReason::TooSoon,
+        });
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<IssuanceReply>(&body).unwrap(),
+            IssuanceReply::Refused {
+                reason: IssuanceRefusalReason::TooSoon
+            }
+        ));
+    }
     use ractor::{Actor, ActorProcessingErr, async_trait};
 
     /// Simulates a broker connection for testing: on receiving a

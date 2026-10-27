@@ -206,10 +206,11 @@ pub struct CredentialsState {
     /// what refuses a replayed signed action. Rebuilt by replay.
     admin_action_hashes: HashSet<String>,
 
-    /// The serial of every certificate an explicit `Revoke` named, whether or not a current record matches
-    /// it. Kept apart from the records because a reissue replaces a record, and a revoked certificate must
-    /// go on being refused for as long as it would otherwise be valid. Not a certificate replaced by a
-    /// reissue: that is superseded, not revoked.
+    /// The serial of every certificate revoked, whether or not a current record matches it: by an explicit
+    /// `Revoke`, or superseded by a reissue for its identity and type, which is published as revoked too
+    /// (docs/architecture/deployments.md, "The renewal rule"). Kept apart from the records because a reissue
+    /// replaces a record, and a revoked certificate must go on being refused for as long as it would otherwise
+    /// be valid.
     revoked_serials: BTreeSet<String>,
     /// The serial of every certificate the ledger has recorded, by any issuance or report: what a page of cert-issuer's
     /// record is checked against, so nothing is recorded twice.
@@ -266,6 +267,7 @@ impl CredentialsState {
                 record.revoked_by = Some("system".to_string());
                 record.revoked_at = Some(timestamp);
                 superseded.push(record.serial.clone());
+                self.revoked_serials.insert(record.serial.clone());
             }
         }
 
@@ -274,6 +276,10 @@ impl CredentialsState {
             instance_binding.to_string(),
             cert_type,
         );
+        // The same pod issued again (restarted in place): its old serial no longer names this record.
+        if let Some(old) = self.valid_certificates.get(&key) {
+            self.serial_index.remove(&old.serial);
+        }
         self.valid_certificates.insert(
             key.clone(),
             CertificateRecord {
@@ -370,12 +376,13 @@ impl CredentialsState {
                 } else {
                     WorkloadCertType::Client
                 };
+                // cert-issuer's record says when in seconds; the ledger's times are milliseconds.
                 self.record_workload_certificate(
                     &c.identity,
                     &binding,
                     cert_type,
                     &c.serial,
-                    c.signed_at,
+                    c.signed_at.saturating_mul(1000),
                     &c.certificate_pem,
                     true,
                 )
@@ -680,9 +687,27 @@ impl CredentialsState {
         self.active_grants.get(identity)
     }
 
+    /// When `identity`'s pod `instance_binding` was last issued a certificate of `cert_type`, in milliseconds,
+    /// revoked or not: what the renewal bound is measured from.
+    pub fn last_issued(
+        &self,
+        identity: &str,
+        instance_binding: &str,
+        cert_type: WorkloadCertType,
+    ) -> Option<i64> {
+        self.valid_certificates
+            .get(&(
+                identity.to_string(),
+                instance_binding.to_string(),
+                cert_type,
+            ))
+            .map(|record| record.timestamp)
+    }
+
     /// True if this exact `(identity, instance_binding)` pair
-    /// currently holds a valid, unrevoked certificate -- the
-    /// renewal-prevention check itself.
+    /// currently holds a valid, unrevoked certificate. Not the renewal
+    /// rule, which is [`crate::renewal::Admissions`]: a pod restarted in
+    /// place holds one and is issued again.
     pub fn has_valid_certificate(
         &self,
         identity: &str,
@@ -1122,14 +1147,48 @@ pub(crate) mod tests {
         assert_eq!(state.revoked_serials().len(), 2);
     }
 
+    // docs/architecture/deployments.md, "The renewal rule": a superseded certificate is published as revoked, so the
+    // agents refuse it, the old pod's custody daemon destroys its key, and the broker ends its sessions.
     #[test]
-    fn a_certificate_replaced_by_a_reissue_is_not_an_explicit_revocation() {
+    fn a_certificate_replaced_by_a_reissue_is_revoked() {
         let mut state = CredentialsState::new();
         state.apply(&issued("alice", "pod-1", "0b"));
         state.apply(&issued("alice", "pod-2", "0c"));
-        assert!(
-            state.revoked_serials().is_empty(),
-            "superseded is not revoked"
+        assert_eq!(state.revoked_serials(), ["0b"], "superseded is revoked");
+    }
+
+    // A pod restarted in place is issued again under its own UID: the new certificate takes the old one's place, and
+    // the old serial, revoked, no longer names the new record.
+    #[test]
+    fn a_pod_reissued_in_place_is_not_revoked_by_its_old_serial() {
+        let mut state = CredentialsState::new();
+        state.apply(&issued("alice", "pod-1", "0b"));
+        state.apply(&issued("alice", "pod-1", "0c"));
+        assert_eq!(state.revoked_serials(), ["0b"]);
+        state.apply(&revoked("0b"));
+        assert!(state.has_valid_certificate("alice", "pod-1", WorkloadCertType::Client));
+        assert_eq!(state.certificate_for("alice").unwrap().serial, "0c");
+    }
+
+    #[test]
+    fn the_last_issuance_to_a_pod_is_its_newest_by_type() {
+        let mut state = CredentialsState::new();
+        assert_eq!(
+            state.last_issued("alice", "pod-1", WorkloadCertType::Client),
+            None
+        );
+        state.apply(&issued("alice", "pod-1", "0b"));
+        assert_eq!(
+            state.last_issued("alice", "pod-1", WorkloadCertType::Client),
+            Some(2000)
+        );
+        assert_eq!(
+            state.last_issued("alice", "pod-1", WorkloadCertType::Server),
+            None
+        );
+        assert_eq!(
+            state.last_issued("alice", "pod-2", WorkloadCertType::Client),
+            None
         );
     }
 
@@ -1656,6 +1715,26 @@ pub(crate) mod tests {
     }
 
     const CASSINI: &str = "cassini.polar.serviceaccount.cluster.local";
+
+    // cert-issuer's record says when in seconds; the ledger's issuances are in milliseconds, and so is what it records.
+    #[test]
+    fn a_reported_certificate_is_timed_in_milliseconds() {
+        let mut state = CredentialsState::default();
+        state.apply(&page(
+            "log-1",
+            1,
+            vec![reported(
+                1,
+                CASSINI,
+                cert_issuer_common::CertType::Client,
+                "r1",
+            )],
+        ));
+        assert_eq!(
+            state.last_issued(CASSINI, "pod-1", WorkloadCertType::Client),
+            Some(1001 * 1000)
+        );
+    }
 
     #[test]
     fn a_reported_certificate_is_found_superseded_and_revoked_like_an_issued_one() {

@@ -232,9 +232,9 @@ impl IssuanceHandler {
             };
         };
         // Fails closed rather than proceeding with a degraded renewal
-        // check: instance_binding is what the pod-cannot-renew-itself
-        // property is actually keyed on, so a token/config combination
-        // that doesn't provide it can't be safely processed at all.
+        // rule: instance_binding is what the rule is keyed on, so a
+        // token/config combination that doesn't provide it can't be safely
+        // processed at all.
         let Some(instance_binding) = validated.instance_binding else {
             warn!(
                 "Validated token for '{identity}' has no instance_binding -- refusing rather than degrading the renewal check"
@@ -244,30 +244,7 @@ impl IssuanceHandler {
             };
         };
 
-        // ---- Step 4: renewal-prevention check ----
-        let already_valid = match call_check_renewal(
-            &self.ledger,
-            &identity,
-            &instance_binding,
-            request.cert_type,
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Ledger CheckRenewal call failed: {e}");
-                return IssuanceReply::Refused {
-                    reason: IssuanceRefusalReason::TokenInvalid,
-                };
-            }
-        };
-        if already_valid {
-            return IssuanceReply::Refused {
-                reason: IssuanceRefusalReason::AlreadyHasValidCertificate,
-            };
-        }
-
-        // ---- Step 5: grant lookup ----
+        // ---- Step 4: grant lookup ----
         let grant = match call_check_grant(&self.ledger, &token_identity).await {
             Ok(g) => g,
             Err(e) => {
@@ -294,6 +271,35 @@ impl IssuanceHandler {
             (CredentialKind::Kubernetes, grant) => grant.map(|g| g.permissions).unwrap_or_default(),
         };
 
+        // ---- Step 5: the renewal rule (docs/architecture/deployments.md, "The renewal rule") ----
+        //
+        // A pod restarted in place asks again under its UID, and is issued again, but not more than one certificate
+        // of a type within the bound. Asked last, just before signing, so only a signing that fails gives it back.
+        let admitted_at = polar::time::now_millis();
+        match call_admit(
+            &self.ledger,
+            &identity,
+            &instance_binding,
+            request.cert_type,
+            admitted_at,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(%identity, %instance_binding, cert_type = ?request.cert_type, "refused: issued one of this type within the renewal bound");
+                return IssuanceReply::Refused {
+                    reason: IssuanceRefusalReason::TooSoon,
+                };
+            }
+            Err(e) => {
+                error!("Ledger Admit call failed: {e}");
+                return IssuanceReply::Refused {
+                    reason: IssuanceRefusalReason::TokenInvalid,
+                };
+            }
+        }
+
         // ---- Step 6: sign, via cert-issuer's /issue ----
         let extra_sans = extra_sans_for(
             request.cert_type,
@@ -318,6 +324,13 @@ impl IssuanceHandler {
             Ok(r) => r,
             Err(e) => {
                 error!("cert-issuer /issue failed after all prior checks passed: {e}");
+                // Nothing was issued, so the pod is held to no bound by this ask.
+                let _ = self.ledger.send_message(LedgerMessage::Release {
+                    identity,
+                    instance_binding,
+                    cert_type: request.cert_type,
+                    at: admitted_at,
+                });
                 return IssuanceReply::Refused {
                     reason: IssuanceRefusalReason::SigningFailed,
                 };
@@ -378,18 +391,20 @@ async fn call_check_grant(
     }
 }
 
-async fn call_check_renewal(
+async fn call_admit(
     ledger: &ActorRef<LedgerMessage>,
     identity: &str,
     instance_binding: &str,
     cert_type: WorkloadCertType,
+    now: i64,
 ) -> Result<bool, String> {
     match ractor::rpc::call(
         ledger,
-        |reply| LedgerMessage::CheckRenewal {
+        |reply| LedgerMessage::Admit {
             identity: identity.to_string(),
             instance_binding: instance_binding.to_string(),
             cert_type,
+            now,
             reply,
         },
         None,
@@ -872,7 +887,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn already_valid_certificate_is_refused_and_issue_is_never_called() {
+    async fn a_pod_issued_within_the_bound_is_refused_too_soon_and_issue_is_never_called() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/validate"))
@@ -907,7 +922,8 @@ pub(crate) mod tests {
                         identity: "admin-tool.polar.serviceaccount.cluster.local".to_string(),
                         instance_binding: "admin-tool-uid".to_string(),
                         serial: "already-issued-serial".to_string(),
-                        timestamp: 1000,
+                        // A minute ago: inside the renewal bound.
+                        timestamp: polar::time::now_millis() - 60_000,
                         cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
                         grant_key: None,
                         certificate_pem:
@@ -944,7 +960,7 @@ pub(crate) mod tests {
         assert!(matches!(
             reply,
             IssuanceReply::Refused {
-                reason: IssuanceRefusalReason::AlreadyHasValidCertificate
+                reason: IssuanceRefusalReason::TooSoon
             }
         ));
         server.verify().await;
@@ -1198,7 +1214,7 @@ pub(crate) mod tests {
             "{server_cert:?}"
         );
 
-        // The pod cannot be issued a second of either: the renewal rule, per type.
+        // Not a second of either within the bound: the renewal rule, per type.
         for again in [
             request_for(Client, &[]),
             request_for(Server, &[CASSINI_NAME]),
@@ -1208,12 +1224,79 @@ pub(crate) mod tests {
                 matches!(
                     reply,
                     IssuanceReply::Refused {
-                        reason: IssuanceRefusalReason::AlreadyHasValidCertificate
+                        reason: IssuanceRefusalReason::TooSoon
                     }
                 ),
                 "{reply:?}"
             );
         }
+    }
+
+    // docs/architecture/deployments.md, "The renewal rule": a pod restarted in place, its certificate still valid, is
+    // issued again once the bound has passed, and its old certificate is superseded and revoked.
+    #[tokio::test]
+    async fn a_pod_restarted_in_place_after_the_bound_is_issued_again_and_its_old_certificate_revoked()
+     {
+        let server = MockServer::start().await;
+        kubernetes_pod(&server, "pod-1").await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_with_serial("new")))
+            .mount(&server)
+            .await;
+        let ledger = spawn_test_ledger().await;
+        call_append(
+            &ledger,
+            CredentialsEvent::IssuanceCompleted {
+                identity: "git-server.polar.serviceaccount.cluster.local".to_string(),
+                instance_binding: "pod-1".to_string(),
+                serial: "old".to_string(),
+                // Six minutes ago, and still valid: what a pod restarted in place holds.
+                timestamp: polar::time::now_millis() - 6 * 60_000,
+                cert_type: Client,
+                grant_key: None,
+                certificate_pem: "pem".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let handler = handler_for(&server, ledger.clone()).await;
+
+        let reply = handler.handle(request_for(Client, &[])).await;
+        assert!(matches!(reply, IssuanceReply::Issued { .. }), "{reply:?}");
+        let revoked = ractor::call!(ledger, LedgerMessage::RevokedSerials).unwrap();
+        assert_eq!(revoked, vec!["old".to_string()]);
+    }
+
+    // A signing that failed issued nothing, so it holds the pod to no bound: asking again is admitted.
+    #[tokio::test]
+    async fn a_signing_that_failed_does_not_hold_the_pod_to_the_bound() {
+        let server = MockServer::start().await;
+        kubernetes_pod(&server, "pod-1").await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .respond_with(ResponseTemplate::new(500))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/issue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_with_serial("s1")))
+            .mount(&server)
+            .await;
+        let handler = handler_for(&server, spawn_test_ledger().await).await;
+        let failed = handler.handle(request_for(Client, &[])).await;
+        assert!(
+            matches!(
+                failed,
+                IssuanceReply::Refused {
+                    reason: IssuanceRefusalReason::SigningFailed
+                }
+            ),
+            "{failed:?}"
+        );
+        let again = handler.handle(request_for(Client, &[])).await;
+        assert!(matches!(again, IssuanceReply::Issued { .. }), "{again:?}");
     }
 
     #[tokio::test]

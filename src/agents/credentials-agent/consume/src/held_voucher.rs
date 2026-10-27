@@ -32,8 +32,9 @@
 //!   cert-issuer, so a Cassini restart completes with only cert-issuer and this agent up.
 //!
 //! The rules ([`rule`]): a bootstrap service in the authority model, not this agent's own successor (vouched for by no
-//! one), bound to a pod, for a client or server certificate, and with no valid certificate of that type for that pod
-//! already. The attestation agent's instance check joins them once it exists (step 6).
+//! one), bound to a pod, for a client or server certificate, and admitted by the renewal rule: not issued one of that
+//! type for that pod within the bound (docs/architecture/deployments.md, "The renewal rule"). The attestation agent's
+//! instance check joins them once it exists (step 6).
 
 use crate::ledger::LedgerMessage;
 use cassini_client::TcpClientMessage;
@@ -51,12 +52,12 @@ use tracing::{info, warn};
 pub const HELD_POLL_EVERY: Duration = Duration::from_secs(10);
 
 /// Whether to vouch for `offer`: a bootstrap service's (`bootstrap`, from the authority model), not `own_identity`,
-/// bound to a pod, for a client or server certificate, and without a valid one of that type for that pod already.
+/// bound to a pod, for a client or server certificate, and not `too_soon` by the renewal rule.
 pub fn rule(
     offer: &HeldOffer,
     bootstrap: &BTreeSet<String>,
     own_identity: &str,
-    already_holds_one: bool,
+    too_soon: bool,
 ) -> HeldDecision {
     let refuse = |reason: &str| HeldDecision::Refuse {
         reason: reason.to_string(),
@@ -73,8 +74,8 @@ pub fn rule(
     if workload_cert_type(&offer.cert_type).is_none() {
         return refuse("neither a client nor a server certificate");
     }
-    if already_holds_one {
-        return refuse("this pod already holds a valid certificate of this type");
+    if too_soon {
+        return refuse("this pod was issued a certificate of this type less than five minutes ago");
     }
     HeldDecision::Vouch
 }
@@ -123,35 +124,33 @@ pub struct HeldVoucher;
 
 impl HeldVoucherState {
     async fn decide(&self, offer: &HeldOffer) -> HeldDecision {
-        let already_holds_one = match (
+        let (bootstrap, own) = (&self.args.bootstrap, &self.args.own_identity);
+        // The renewal rule is asked last, and only of an offer the other rules allow, since admitting records it.
+        let decision = match (
+            rule(offer, bootstrap, own, false),
             &offer.instance_binding,
             workload_cert_type(&offer.cert_type),
         ) {
-            (Some(binding), Some(cert_type)) => {
-                match ractor::call!(self.args.ledger, |reply| LedgerMessage::CheckRenewal {
+            (HeldDecision::Vouch, Some(binding), Some(cert_type)) => {
+                match ractor::call!(self.args.ledger, |reply| LedgerMessage::Admit {
                     identity: offer.identity.clone(),
                     instance_binding: binding.clone(),
                     cert_type,
+                    now: polar::time::now_millis(),
                     reply,
                 }) {
-                    Ok(holds) => holds,
+                    Ok(admitted) => rule(offer, bootstrap, own, !admitted),
                     Err(e) => {
                         // Not knowing is not a reason to vouch: refused, and the pod asks again as a new one.
-                        warn!("the ledger could not say whether the pod holds a certificate: {e}");
-                        return HeldDecision::Refuse {
+                        warn!("the ledger could not apply the renewal rule: {e}");
+                        HeldDecision::Refuse {
                             reason: "the credentials agent could not check its ledger".to_string(),
-                        };
+                        }
                     }
                 }
             }
-            _ => false,
+            (decision, _, _) => decision,
         };
-        let decision = rule(
-            offer,
-            &self.args.bootstrap,
-            &self.args.own_identity,
-            already_holds_one,
-        );
         info!(held = %offer.id, identity = %offer.identity, decision = ?decision, "a held request was decided");
         decision
     }
@@ -274,9 +273,9 @@ mod tests {
     }
 
     #[test]
-    fn a_bootstrap_service_s_pod_with_no_certificate_of_its_type_is_vouched_for_and_nothing_else_is()
+    fn a_bootstrap_service_s_pod_not_issued_one_of_its_type_lately_is_vouched_for_and_nothing_else_is()
      {
-        let ok = |o: &HeldOffer, holds| rule(o, &bootstrap(), OWN, holds);
+        let ok = |o: &HeldOffer, too_soon| rule(o, &bootstrap(), OWN, too_soon);
         assert_eq!(
             ok(&offer(OBSERVER, Some("pod-1"), CertType::Client), false),
             HeldDecision::Vouch
@@ -306,7 +305,7 @@ mod tests {
         }
         assert!(
             refused(ok(&offer(OBSERVER, Some("pod-1"), CertType::Client), true))
-                .contains("already holds")
+                .contains("five minutes")
         );
     }
 
@@ -386,8 +385,9 @@ mod tests {
         }
     }
 
-    /// The ledger told, as cert-issuer's record tells it, that `identity`'s pod `binding` holds a client certificate.
-    async fn holds_one(ledger: &ActorRef<LedgerMessage>, identity: &str, binding: &str) {
+    /// The ledger told, as cert-issuer's record tells it, that `identity`'s pod `binding` was issued a client
+    /// certificate `ago` seconds ago.
+    async fn issued_ago(ledger: &ActorRef<LedgerMessage>, identity: &str, binding: &str, ago: i64) {
         let page = RecordReply {
             log: "log-1".to_string(),
             entries: vec![RecordEntry {
@@ -398,7 +398,7 @@ mod tests {
                 cert_type: CertType::Client,
                 path: IssuePath::Vouched,
                 instance_binding: Some(binding.to_string()),
-                signed_at: 1000,
+                signed_at: polar::time::now_millis() / 1000 - ago,
                 not_after: 4_000_000_000,
                 certificate_pem: "pem".to_string(),
             }],
@@ -439,9 +439,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pod_the_ledger_says_holds_a_certificate_of_the_type_is_refused() {
+    async fn a_pod_the_ledger_says_was_issued_one_of_the_type_lately_is_refused() {
         let rig = rig(HandshakeClient::new("http://127.0.0.1:1".to_string())).await;
-        holds_one(&rig.ledger, OBSERVER, "pod-1").await;
+        issued_ago(&rig.ledger, OBSERVER, "pod-1", 60).await;
         rig.voucher
             .send_message(offered(
                 &offer(OBSERVER, Some("pod-1"), CertType::Client),
@@ -451,7 +451,25 @@ mod tests {
         settle().await;
         let published = rig.published.lock().unwrap().clone();
         assert_eq!(published.len(), 1);
-        assert!(refused(published[0].1.decision.clone()).contains("already holds"));
+        assert!(refused(published[0].1.decision.clone()).contains("five minutes"));
+    }
+
+    // docs/architecture/deployments.md, "The renewal rule": a bootstrap service restarted in place, its certificate
+    // still valid, is vouched for once the bound has passed.
+    #[tokio::test]
+    async fn a_pod_issued_one_before_the_bound_is_vouched_for_again() {
+        let rig = rig(HandshakeClient::new("http://127.0.0.1:1".to_string())).await;
+        issued_ago(&rig.ledger, OBSERVER, "pod-1", 6 * 60).await;
+        rig.voucher
+            .send_message(offered(
+                &offer(OBSERVER, Some("pod-1"), CertType::Client),
+                Some(CERT_ISSUER),
+            ))
+            .unwrap();
+        settle().await;
+        let published = rig.published.lock().unwrap().clone();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].1.decision, HeldDecision::Vouch);
     }
 
     #[tokio::test]

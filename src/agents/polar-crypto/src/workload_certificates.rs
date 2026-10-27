@@ -113,7 +113,9 @@ fn transport(e: ObserverClientError) -> RequestError {
 fn is_temporary(reason: &IssuanceRefusalReason) -> bool {
     matches!(
         reason,
-        IssuanceRefusalReason::SigningFailed | IssuanceRefusalReason::TokenIntrospectionFailed
+        IssuanceRefusalReason::SigningFailed
+            | IssuanceRefusalReason::TokenIntrospectionFailed
+            | IssuanceRefusalReason::TooSoon
     )
 }
 
@@ -477,6 +479,8 @@ mod tests {
         for temporary in [
             IssuanceRefusalReason::SigningFailed,
             IssuanceRefusalReason::TokenIntrospectionFailed,
+            // The renewal bound: polar-init waits it out (docs/architecture/deployments.md, "The renewal rule").
+            IssuanceRefusalReason::TooSoon,
         ] {
             *consumer.answer.lock().unwrap() = Some(IssuanceReply::Refused { reason: temporary });
             let err = request_certificate(&client, TOKEN, IDENTITY, &client_request(), &offers())

@@ -102,6 +102,8 @@ pub struct LedgerActorState {
     projection_actor: ActorRef<ProjectionMessage>,
     /// Told when an event adds a revoked serial, for whoever publishes the set to the agents.
     revocation_changes: Arc<OutputPort<RevokedChanged>>,
+    /// The renewal rule's admissions not yet recorded (docs/architecture/deployments.md, "The renewal rule").
+    admissions: crate::renewal::Admissions,
 }
 
 /// Why a secret was not stored.
@@ -159,14 +161,32 @@ pub enum LedgerMessage {
         reply: RpcReplyPort<Option<GrantRecord>>,
     },
     /// Whether `(identity, instance_binding)` currently holds a valid,
-    /// unrevoked certificate of this type -- the renewal-prevention check
-    /// itself. A pod instance may hold one client and one server
-    /// certificate, so it is asked per type.
+    /// unrevoked certificate of this type. Asked per type, since a pod
+    /// instance may hold one client and one server certificate. Not the
+    /// renewal rule, which is [`LedgerMessage::Admit`].
     CheckRenewal {
         identity: String,
         instance_binding: String,
         cert_type: WorkloadCertType,
         reply: RpcReplyPort<bool>,
+    },
+    /// The renewal rule (docs/architecture/deployments.md, "The renewal rule"): whether `identity`'s pod
+    /// `instance_binding` may be issued a certificate of `cert_type` at `now`, which it may unless it was issued one, or
+    /// admitted to be, within the bound. Admitting records `now`; asks are answered one at a time, so two at once are
+    /// never both admitted.
+    Admit {
+        identity: String,
+        instance_binding: String,
+        cert_type: WorkloadCertType,
+        now: i64,
+        reply: RpcReplyPort<bool>,
+    },
+    /// Gives back the admission made at `at`, for an issuance that did not happen.
+    Release {
+        identity: String,
+        instance_binding: String,
+        cert_type: WorkloadCertType,
+        at: i64,
     },
     /// Where cert-issuer's record has been read to (docs/architecture/cert-issuer-isolation.md, "Step 2"): its log and its
     /// last entry read, or none before any page.
@@ -305,6 +325,7 @@ impl Actor for LedgerActor {
             credentials_state,
             projection_actor: args.projection_actor,
             revocation_changes: Arc::new(OutputPort::default()),
+            admissions: crate::renewal::Admissions::default(),
         })
     }
 
@@ -401,6 +422,32 @@ impl Actor for LedgerActor {
                     cert_type,
                 );
                 let _ = reply.send(has_valid);
+            }
+            LedgerMessage::Admit {
+                identity,
+                instance_binding,
+                cert_type,
+                now,
+                reply,
+            } => {
+                let admitted = state.admissions.admit(
+                    &state.credentials_state,
+                    &identity,
+                    &instance_binding,
+                    cert_type,
+                    now,
+                );
+                let _ = reply.send(admitted);
+            }
+            LedgerMessage::Release {
+                identity,
+                instance_binding,
+                cert_type,
+                at,
+            } => {
+                state
+                    .admissions
+                    .release(&identity, &instance_binding, cert_type, at);
             }
             LedgerMessage::RecordCursor { reply } => {
                 let _ = reply.send(state.credentials_state.record_cursor());
@@ -684,6 +731,45 @@ pub(crate) mod tests {
             ractor::rpc::CallResult::Success(result) => result,
             other => panic!("expected Success, got {other:?}"),
         }
+    }
+
+    pub(crate) async fn admit(
+        ledger: &ActorRef<LedgerMessage>,
+        identity: &str,
+        instance_binding: &str,
+        now: i64,
+    ) -> bool {
+        ractor::call!(ledger, |reply| LedgerMessage::Admit {
+            identity: identity.to_string(),
+            instance_binding: instance_binding.to_string(),
+            cert_type: WorkloadCertType::Client,
+            now,
+            reply,
+        })
+        .expect("call should succeed")
+    }
+
+    // docs/architecture/deployments.md, "The renewal rule": the ledger admits one issuance per pod and type within the
+    // bound, answering one ask at a time, so two asks at once are never both admitted; one given back is lifted.
+    #[tokio::test]
+    async fn the_ledger_admits_one_ask_of_two_at_once_and_lifts_one_given_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = spawn_ledger(dir.path().join("events.jsonl").to_str().unwrap()).await;
+        let (a, b) = tokio::join!(
+            admit(&ledger, "alice", "pod-1", 1000),
+            admit(&ledger, "alice", "pod-1", 1000)
+        );
+        assert!(a ^ b, "one of the two: {a} {b}");
+        ledger
+            .send_message(LedgerMessage::Release {
+                identity: "alice".to_string(),
+                instance_binding: "pod-1".to_string(),
+                cert_type: WorkloadCertType::Client,
+                at: 1000,
+            })
+            .unwrap();
+        assert!(admit(&ledger, "alice", "pod-1", 2000).await, "given back");
+        assert!(!admit(&ledger, "alice", "pod-1", 3000).await);
     }
 
     pub(crate) async fn check_agent_escrow_renewal(

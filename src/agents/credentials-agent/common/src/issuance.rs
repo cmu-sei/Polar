@@ -141,6 +141,10 @@ pub enum IssuanceRefusalReason {
     /// credential may have: a server certificate on an IdP credential, names on a client request, or a name
     /// that is not a plain DNS name (a wildcard, an address, a permission or a capability).
     RequestNotPermitted,
+    /// This pod was issued, or is being issued, a certificate of this type less than the renewal bound ago (five
+    /// minutes): a pod restarted in place is issued again, but not more often than that (docs/architecture/
+    /// deployments.md, "The renewal rule"). Worth asking again once the bound has passed.
+    TooSoon,
 }
 
 #[cfg(test)]

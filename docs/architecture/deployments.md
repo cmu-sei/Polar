@@ -169,6 +169,36 @@ pod still running destroys its key (`key-custody.md`, step 5), and the broker en
 set grows by one serial for every restart, and the set is never pruned, so it keeps growing. Pruning a serial once
 its certificate has expired is a follow-up (`remaining-work.md`).
 
+*Built (2026-10-27).*
+- *The rule:* `credentials-agent/consume/src/renewal.rs` (`Admissions`, `RENEWAL_BOUND_MILLIS`), applied by the ledger
+  actor (`LedgerMessage::Admit` and `Release`).
+- *Issuance:* `issuance.rs` asks it last, just before signing, refuses `TooSoon`, and gives the admission back when
+  signing fails.
+- *The voucher:* `held_voucher.rs` asks it only of an offer the other rules allow.
+- *The state* (`state.rs`): `last_issued`; superseding puts the serial in `revoked_serials`; a pod reissued in place
+  no longer leaves its old serial naming the new record; reported times are in milliseconds.
+- *polar-crypto* counts `TooSoon` as temporary. The observer answers it `429 Too Many Requests`
+  (`credentials-agent/observe/src/handler.rs`); its client reads the reply whatever the status.
+- *The `local` target's three hand charts* present the one client certificate to Neo4j. `makeGraphEnv` takes the
+  certificate's directory, and the `ace` job passes its own. The render diff is those three charts alone, and
+  `sandbox-local` renders the same.
+- *Tests:*
+  - the property over asks, issuances, givings-back and restarts, its gaps landing on the bound now and then;
+  - one per type and per pod;
+  - the ledger's record holding the bound after a restart;
+  - two asks at once;
+  - a pod issued again after the bound with its old certificate revoked, and one within it refused `TooSoon` without
+    reaching cert-issuer;
+  - a failed signing given back;
+  - the voucher refusing within the bound and vouching after it;
+  - superseded serials revoked;
+  - an in-place reissue not revoked by its old serial;
+  - reported times in milliseconds.
+- *Mutations caught:* the admission unrecorded, the ledger's record ignored, the bound inclusive (the property catches
+  it too), superseded not revoked, the old serial still indexed, seconds kept, no giving back, the voucher ignoring
+  the rule.
+- *Not run:* `infra/tests/resolve.nu` and `render-determinism.nu` need a cluster (they validate against an apiserver).
+
 ## Build order, each tests first
 
 1. The custody daemon (`key-custody.md`), which item 4 puts first.

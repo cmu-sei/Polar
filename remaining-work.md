@@ -663,8 +663,8 @@ Principle: declare each environment variable once, with its type, default, docum
   holds or signs with a P-256 key (its PKCS#8 parser takes RSA alone, its ECDSA only verifies), and RSA in the kernel
   signs 240 to 1,500 times slower, so the key stays in the daemon's locked memory (`key-custody.md`, "The process
   keyring, probed"). Step 3 built: `polar-init` takes the daemon's CSR on either path, judges the certificate against
-  it, installs it and writes no `key.pem` (`--cert type:dir:custody:`). Next: the renewal rule (`deployments.md`, build
-  step 2), then the catalog and the charts (step 4).
+  it, installs it and writes no `key.pem` (`--cert type:dir:custody:`). The renewal rule built 2026-10-27 (`deployments.md`,
+  "The renewal rule"). Next: the catalog and the charts (step 4), after settling neo4rs and its key file.
 - [ ] Prune the revoked set (2026-10-27): `revoked_serials` (`credentials-agent/consume/src/state.rs`) is only
   inserted into, and once superseded certificates are published as revoked (`deployments.md`, "The renewal rule") it
   grows by one serial every time a pod restarts. A serial whose certificate has expired can no longer be presented,
