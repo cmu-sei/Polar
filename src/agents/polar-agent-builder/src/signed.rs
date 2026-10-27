@@ -34,7 +34,7 @@
 //!    the shape an update has;
 //! 4. it is addressed to this agent, so a document signed for one agent cannot be applied by another;
 //! 5. the signer may make this change ([`polar_signing::Authority`]);
-//! 6. the signer is not revoked (a seam only: nothing revokes yet).
+//! 6. the signer is not revoked (the credentials agent's revoked set, `authority::RevokedSerials`).
 //!
 //! The version check, and everything about whether the values are acceptable, belong to the
 //! ConfigurationActor and run after this. An agent that has no pinned CA to verify against refuses every
@@ -173,8 +173,8 @@ struct Change {
     value: String,
 }
 
-/// Whether a signer's certificate has been revoked. Nothing revokes certificates yet, so the first
-/// implementation says no; this is where a revocation list will be consulted.
+/// Whether a signer's certificate has been revoked. An agent consults the set the credentials agent publishes
+/// (`authority::RevokedSerials`); `NoRevocation` says no, for a verifier that has no such set.
 pub trait Revocation: Send + Sync {
     fn is_revoked(&self, signer: &SignerInfo) -> bool;
 }

@@ -60,6 +60,8 @@ name = "cassini-server"
 path = "src/main.rs"
 
 [dev-dependencies]
+# The custody daemon's watcher, end to end with the broker (docs/architecture/key-custody.md, step 5).
+polar-custody-daemon.workspace = true
 polar-router.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 proptest = { workspace = true }

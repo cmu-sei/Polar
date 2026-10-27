@@ -935,6 +935,7 @@ dependencies = [
  "polar",
  "polar-agent-builder",
  "polar-custody",
+ "polar-custody-daemon",
  "polar-env",
  "polar-health",
  "polar-policy",
@@ -5758,9 +5759,31 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
- "tracing-subscriber",
  "x509-parser",
  "zeroize",
+]
+
+[[package]]
+name = "polar-custody-daemon"
+version = "1.0.0"
+dependencies = [
+ "cassini-client",
+ "cassini-types",
+ "credentials_agent_common",
+ "libc",
+ "polar-agent-builder",
+ "polar-custody",
+ "polar-env",
+ "proptest",
+ "ractor",
+ "rand 0.10.3",
+ "rcgen",
+ "rkyv",
+ "rsa 0.10.0-rc.18",
+ "rustls",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

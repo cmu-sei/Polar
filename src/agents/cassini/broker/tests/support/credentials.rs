@@ -23,6 +23,8 @@
 
 //! The credentials agent, as the broker and the custody daemon hear it, for the tests of revocation and of watchers
 //! (docs/architecture/key-custody.md, step 5). Apart from `support`, which the cert-issuer server's tests share.
+//! Each test binary that includes it uses only some of it.
+#![allow(dead_code)]
 
 use crate::support::{TestBroker, TestClient};
 
@@ -34,7 +36,8 @@ pub const CREDENTIALS: &str = "credentials-agent.polar.serviceaccount.cluster.lo
 pub struct CredentialsAgent {
     pub client: TestClient,
     signer: rsa::RsaPrivateKey,
-    version: std::sync::atomic::AtomicU64,
+    /// The last snapshot it published: what it answers a request for the current authority with.
+    current: std::sync::Mutex<Option<Vec<u8>>>,
 }
 
 impl CredentialsAgent {
@@ -48,6 +51,10 @@ impl CredentialsAgent {
             &[
                 format!("p:pub:{AUTHORITY_SNAPSHOT_REPLIES_TOPIC}"),
                 format!("p:pub:{AUTHORITY_UPDATES_TOPIC}"),
+                format!(
+                    "p:sub:{}",
+                    credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC
+                ),
                 "g:cassini-client".to_string(),
             ],
         );
@@ -58,16 +65,60 @@ impl CredentialsAgent {
             signer: SIGNER
                 .get_or_init(|| rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap())
                 .clone(),
-            version: std::sync::atomic::AtomicU64::new(0),
+            current: std::sync::Mutex::new(None),
         }
     }
 
     /// Publishes, as a snapshot signed with its key, that `serials` are every certificate revoked.
     pub fn revoke(&self, serials: &[String]) {
+        let snapshot = self.revoked_snapshot(serials, &self.signer);
+        *self.current.lock().unwrap() = Some(snapshot.clone());
         self.client.publish(
             credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
-            &self.revoked_snapshot(serials, &self.signer),
+            &snapshot,
         );
+    }
+
+    /// From now on, answers each request for the current authority with the last snapshot it published, as the
+    /// credentials agent does.
+    pub async fn answer_requests(self: &std::sync::Arc<Self>) {
+        use credentials_agent_common::authority_update::{
+            AUTHORITY_SNAPSHOT_REPLIES_TOPIC, AUTHORITY_SNAPSHOT_REQUESTS_TOPIC,
+        };
+        self.client.subscribe(AUTHORITY_SNAPSHOT_REQUESTS_TOPIC);
+        self.client
+            .wait_for(
+                "its subscription to requests",
+                std::time::Duration::from_secs(10),
+                |c| c.subscribed(AUTHORITY_SNAPSHOT_REQUESTS_TOPIC),
+            )
+            .await;
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut answered = 0;
+            loop {
+                let asked = me.client.received_count(AUTHORITY_SNAPSHOT_REQUESTS_TOPIC);
+                if asked > answered {
+                    answered = asked;
+                    if let Some(current) = me.current.lock().unwrap().clone() {
+                        me.client
+                            .publish(AUTHORITY_SNAPSHOT_REPLIES_TOPIC, &current);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+    }
+
+    /// How many requests for the current authority it has heard from `identity` (the broker asks too, as no one).
+    pub fn requests_from(&self, identity: &str) -> usize {
+        self.client
+            .received_from(
+                credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC,
+            )
+            .iter()
+            .filter(|(_, by)| by.as_deref() == Some(identity))
+            .count()
     }
 
     /// A snapshot saying `serials` are revoked, signed by `signer` and carrying its key.
@@ -76,10 +127,10 @@ impl CredentialsAgent {
             AuthorityBody, AuthorityPayload, AuthoritySnapshot, sign,
         };
         use rsa::pkcs8::EncodePublicKey;
-        let version = self
-            .version
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
+        // One count for the whole test binary, as the credentials agent's versions only rise: a stand-in that comes
+        // back after a broker's restart is not heard as older.
+        static VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let version = VERSION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let revoked = AuthorityPayload {
             sequence: version,
             version,

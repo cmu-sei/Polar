@@ -54,6 +54,17 @@ pub struct Custody {
     /// The pinned CA, DER.
     ca: Vec<u8>,
     slots: HashMap<Slot, Held>,
+    /// A certificate it held was revoked: its keys are gone, and it refuses everything.
+    revoked: bool,
+}
+
+// No key, no certificate: only whether it is revoked.
+impl std::fmt::Debug for Custody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Custody")
+            .field("revoked", &self.is_revoked())
+            .finish_non_exhaustive()
+    }
 }
 
 /// The DER of the first certificate in `pem`.
@@ -70,11 +81,52 @@ impl Custody {
         Ok(Self {
             ca,
             slots: HashMap::new(),
+            revoked: false,
         })
+    }
+
+    /// The serial of the certificate installed in `slot`, as the credentials agent's ledger writes it.
+    pub fn serial(&self, slot: Slot) -> Option<String> {
+        let leaf = self.slots.get(&slot)?.chain.as_ref()?.first()?;
+        cert_issuer_common::serial::serial_from_pem(leaf)
+    }
+
+    /// The certificate chain installed in `slot`, PEM.
+    pub fn chain(&self, slot: Slot) -> Option<Vec<String>> {
+        self.slots.get(&slot)?.chain.clone()
+    }
+
+    /// The credentials agent says `serials` are revoked (docs/architecture/key-custody.md, step 5). If any is a
+    /// certificate installed here, every key is destroyed (the slots go, and each key is zeroed as it goes), and from
+    /// then on every request is refused: the daemon is to exit. Returns the slots whose certificates were revoked.
+    pub fn revoke(&mut self, serials: &[String]) -> Vec<Slot> {
+        let mut revoked: Vec<Slot> = self
+            .slots
+            .keys()
+            .copied()
+            .filter(|slot| {
+                self.serial(*slot)
+                    .is_some_and(|serial| serials.contains(&serial))
+            })
+            .collect();
+        revoked.sort_by_key(|slot| matches!(slot, Slot::Server));
+        if !revoked.is_empty() {
+            self.slots.clear();
+            self.revoked = true;
+        }
+        revoked
+    }
+
+    /// Whether a certificate it held has been revoked.
+    pub fn is_revoked(&self) -> bool {
+        self.revoked
     }
 
     /// The answer to `request` from a caller with `roles`, at `now` (Unix seconds).
     pub fn handle(&mut self, roles: Roles, request: Request, now: i64) -> Reply {
+        if self.revoked {
+            return Reply::Refused(Refusal::Revoked);
+        }
         match request {
             // A slot is sealed once a certificate is installed in it. In a pod polar-init and the workload are one
             // UID, so the roles are kept apart in time: the workload runs after polar-init has installed every
@@ -105,6 +157,9 @@ impl Custody {
     /// The answer to a request that changes nothing (a signature, a certificate), which callers may have answered at
     /// once; anything else is refused here.
     pub fn handle_read(&self, roles: Roles, request: Request) -> Reply {
+        if self.revoked {
+            return Reply::Refused(Refusal::Revoked);
+        }
         match request {
             Request::Certificate { slot } if roles.installer || roles.workload => {
                 match self.slots.get(&slot) {
@@ -553,6 +608,97 @@ pub(crate) mod tests {
         );
     }
 
+    /// The serial of `certificate`, as the credentials agent's ledger writes it.
+    fn serial_of(certificate: &str) -> String {
+        cert_issuer_common::serial::serial_from_pem(certificate).unwrap()
+    }
+
+    fn handshake() -> Vec<u8> {
+        certificate_verify_input(CLIENT_CONTEXT, &[7; 32])
+    }
+
+    #[test]
+    fn its_own_serial_revoked_destroys_every_key_and_refuses_everything_after() {
+        let ca = test_ca();
+        let (mut custody, certificate) = installed(&ca);
+        let server_csr = csr(&mut custody, Slot::Server);
+        assert_eq!(custody.serial(Slot::Client), Some(serial_of(&certificate)));
+        assert_eq!(
+            custody.revoke(&["00ff".to_string(), serial_of(&certificate)]),
+            vec![Slot::Client]
+        );
+        assert!(custody.is_revoked());
+        assert!(
+            custody.slots.is_empty(),
+            "every key destroyed, the server slot's too"
+        );
+        assert_eq!(
+            sign(&custody, WORKLOAD, handshake()),
+            Reply::Refused(Refusal::Revoked)
+        );
+        for request in [
+            Request::Certificate { slot: Slot::Client },
+            Request::MakeCsr {
+                slot: Slot::Client,
+                identity: IDENTITY.to_string(),
+                names: vec![],
+            },
+            Request::Install {
+                slot: Slot::Server,
+                chain_pem: vec![certify(&ca, &server_csr)],
+            },
+        ] {
+            assert_eq!(
+                custody.handle(INSTALLER, request, time_now()),
+                Reply::Refused(Refusal::Revoked)
+            );
+        }
+        assert_eq!(custody.serial(Slot::Client), None);
+    }
+
+    #[test]
+    fn another_serial_revoked_changes_nothing() {
+        let ca = test_ca();
+        let (mut custody, _) = installed(&ca);
+        assert!(custody.revoke(&["00ff".to_string()]).is_empty());
+        assert!(custody.revoke(&[]).is_empty());
+        assert!(!custody.is_revoked());
+        assert!(matches!(
+            sign(&custody, WORKLOAD, handshake()),
+            Reply::Signature(_)
+        ));
+    }
+
+    #[test]
+    fn a_server_slot_s_serial_revokes_it() {
+        let ca = test_ca();
+        let mut custody = Custody::new(&ca.pem).unwrap();
+        let server = certify(&ca, &csr(&mut custody, Slot::Server));
+        assert_eq!(
+            custody.handle(
+                INSTALLER,
+                Request::Install {
+                    slot: Slot::Server,
+                    chain_pem: vec![server.clone()]
+                },
+                time_now()
+            ),
+            Reply::Installed
+        );
+        assert_eq!(custody.revoke(&[serial_of(&server)]), vec![Slot::Server]);
+        assert!(custody.is_revoked());
+    }
+
+    #[test]
+    fn a_key_with_no_certificate_has_no_serial_to_revoke() {
+        let ca = test_ca();
+        let mut custody = Custody::new(&ca.pem).unwrap();
+        csr(&mut custody, Slot::Client);
+        assert_eq!(custody.serial(Slot::Client), None);
+        assert!(custody.revoke(&["00ff".to_string()]).is_empty());
+        assert!(!custody.is_revoked());
+    }
+
     mod props {
         use super::*;
         use crate::tls::SERVER_CONTEXT;
@@ -623,6 +769,25 @@ pub(crate) mod tests {
                 let held = &custody.slots[&Slot::Client];
                 prop_assert_eq!(held.key.spki_der(), key);
                 prop_assert_eq!(held.chain.clone(), Some(vec![certificate.clone()]));
+            }
+
+            /// For any sequence of revoked sets, the custody signs exactly while no set it was given has held its
+            /// own serial, and once one has, never again whatever follows.
+            #[test]
+            fn it_signs_exactly_until_its_serial_is_revoked(sets in prop::collection::vec((any::<bool>(), prop::collection::vec("[0-9a-f]{2,8}", 0..3)), 0..8)) {
+                let (mut custody, certificate) = installed(ca());
+                let own = cert_issuer_common::serial::serial_from_pem(&certificate).unwrap();
+                let mut seen_own = false;
+                for (with_own, others) in sets {
+                    let mut set: Vec<String> = others.into_iter().filter(|s| *s != own).collect();
+                    if with_own {
+                        set.push(own.clone());
+                    }
+                    custody.revoke(&set);
+                    seen_own |= with_own;
+                    let signed = matches!(sign(&custody, WORKLOAD, handshake()), Reply::Signature(_));
+                    prop_assert_eq!(signed, !seen_own);
+                }
             }
 
             #[test]

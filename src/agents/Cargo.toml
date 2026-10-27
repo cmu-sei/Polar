@@ -68,6 +68,7 @@ members = [
     "polar-init",
     "polar-kernel-keyring",
     "polar-custody",
+    "polar-custody/daemon",
     "polar-signing",
     "polar-sign",
     "polar-agent-builder",
@@ -193,6 +194,7 @@ polar-signing = { path = "polar-signing" }
 polar-scheduler-common = { path = "polar-scheduler/common" }
 polar-env = { path = "polar-env" }
 polar-custody = { path = "polar-custody" }
+polar-custody-daemon = { path = "polar-custody/daemon" }
 polar-git-server-common = { path = "polar-git-server/common" }
 polar-health = { path = "polar-health" }
 polar-kernel-keyring = { path = "polar-kernel-keyring" }

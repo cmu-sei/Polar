@@ -94,6 +94,19 @@ Read 2026-10-22, after stage 5a found the first while measuring (`broker-baselin
   first (`claim_held`, `subscriber.rs:237`); what nobody claims is let go a retention window after the takeover
   (`end_expired_sessions`). An instance that lost its session and asks to resume it is given a new one that supersedes
   nothing, so two live instances do not take turns closing each other (682). Tests: `broker/tests/supersede.rs`.
+  *Since 2026-10-27* the superseded session is drained, not stopped, once its subscribers hold: a stop is a signal,
+  ahead of the queued `CloseConnection`, so a session with nothing to hold ended before closing its connection and left
+  the old instance connected with no session.
+- **Watcher sessions (2026-10-27, `key-custody.md`, step 5).** A registration may ask for a watcher
+  (`ClientMessage::RegistrationRequest { watcher }`): the custody daemon's, beside its pod's workload under the same
+  certificate. A watcher neither supersedes nor is superseded, is never resumed, ends when its connection goes, claims
+  nothing held for its identity (`GetHeldSessions`), and may hear the two authority topics and ask for a snapshot,
+  nothing else (`authority::watcher_may`). Tests: `broker/tests/watcher.rs`.
+- **Revoked certificates (2026-10-27, `key-custody.md`, step 5).** The listener reads the leaf's serial at accept. A
+  certificate the credentials agent's revoked set names is refused at registration, unless it registers a watcher, and
+  on each change of authority every connection whose certificate is now revoked is closed, a watcher's apart; the
+  session is kept for the retention window, for the identity's next certificate to claim. Tests:
+  `broker/tests/revocation.rs`, `custody_revocation.rs`.
 - **Why:** a replaced pod (a rollout, a Job retry) usually registers before the broker sees the old connection is dead.
   The replacement takes over and inherits what was waiting for the old one.
 - **Fan-out.** A topic delivers every message to every subscriber (`topic.rs:728`). There are no consumer groups.

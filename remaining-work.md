@@ -669,8 +669,10 @@ Principle: declare each environment variable once, with its type, default, docum
   daemon's (`key-custody.md`, "The neo4rs patch"). Step 4 built 2026-10-27: the sealing, the broker's and git server's listeners, the health actor's watch, the
   image, and the catalog with its switch (on by default; the scheduler observer on key files). Step 6, the speed gate,
   closed 2026-10-27: the daemon signs once for a connection, at about 320,000 a second, and the broker's handshake rate
-  holds with it; the benches stay as measures (`key-custody.md`, "Step 6"). Next: a fresh sandbox-local (step 7);
-  revocation (step 5) before or after.
+  holds with it; the benches stay as measures (`key-custody.md`, "Step 6"). Step 5, revocation, built 2026-10-27: the
+  broker refuses a revoked certificate at registration and closes its connections on a change, a watcher session apart;
+  each pod's daemon watches as a watcher session and destroys its keys and exits when its own serial is revoked
+  (`key-custody.md`, "Step 5"). Next: a fresh sandbox-local (step 7).
 - [ ] The Cassini load harness with the custody daemons (wanted by the maintainer, 2026-10-27; not yet): run
   `infra/load-harness.nu` (`src/agents/cassini/test`) on a target with custody on, its producers and sinks signing
   through their pods' daemons, and compare with the key-file baseline (`broker-baseline.md`). The harness workloads are

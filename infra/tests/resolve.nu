@@ -174,7 +174,13 @@ def main [] {
             assert equal $daemon_env.POLAR_CUSTODY_CA_CERT "/etc/polar-ca/ca.pem"
             assert equal $daemon_env.POLAR_CUSTODY_INSTALLER_UID "1000"
             assert equal $daemon_env.POLAR_CUSTODY_WORKLOAD_UIDS "1000"
+            # Where it watches, as its pod, for its own revocation (docs/architecture/key-custody.md, step 5): the
+            # broker the pod's own clients are given.
             let polar_init = ($pod.initContainers | get 1)
+            let client_env = ($polar_init.env | reduce --fold {} {|e, acc| $acc | insert $e.name ($e.value? | default "") })
+            assert equal $daemon_env.BROKER_ADDR $client_env.BROKER_ADDR
+            assert equal $daemon_env.CASSINI_SERVER_NAME $client_env.CASSINI_SERVER_NAME
+            assert ($daemon_env.BROKER_ADDR | str starts-with $"($daemon_env.CASSINI_SERVER_NAME):") "the address is the name's"
             assert ($polar_init.env | where name == "TLS_CLIENT_KEY" | is-empty) "polar-init has no key file either"
             for c in [$daemon $polar_init ($pod.containers | first)] {
                 assert ($c.volumeMounts | any {|m| $m.mountPath == "/run/polar-custody" }) $"($c.name) shares the socket"

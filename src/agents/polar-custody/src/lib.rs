@@ -30,11 +30,13 @@
 //! - [`protocol`]: the requests and replies, and how they are framed.
 //! - [`server`]: the socket, the caller check, and requests in flight at once.
 //! - [`client`]: the blocking client a workload uses, and a rustls signing key over it.
+//! - [`own`]: the daemon's own handshake, its watcher's, signed in process.
 
 pub mod client;
 pub mod custody;
 pub mod environment;
 pub mod key;
+pub mod own;
 pub mod protocol;
 pub mod server;
 pub mod tls;

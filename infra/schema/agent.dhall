@@ -202,6 +202,16 @@ let render =
                             , name = "POLAR_CUSTODY_WORKLOAD_UIDS"
                             , value = Some c.workload_uids
                             }
+                          -- Where it watches, as its pod, for its own revocation (docs/architecture/key-custody.md,
+                          -- step 5): the broker every client in the pod is given.
+                          , kubernetes.EnvVar::{
+                            , name = "BROKER_ADDR"
+                            , value = Some Constants.cassiniAddr
+                            }
+                          , kubernetes.EnvVar::{
+                            , name = "CASSINI_SERVER_NAME"
+                            , value = Some Constants.cassiniDNSName
+                            }
                           ]
                         , volumeMounts = Some
                           [ kubernetes.VolumeMount::{

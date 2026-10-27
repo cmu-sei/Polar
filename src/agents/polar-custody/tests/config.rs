@@ -354,3 +354,89 @@ async fn a_server_with_a_key_file_is_as_before() {
         .expect("TLS 1.2, as before");
     done.await.unwrap().unwrap();
 }
+
+/// A custody in this process, its client slot holding a certificate from `ca`: what the daemon holds once polar-init
+/// has installed it.
+fn custody_installed(
+    ca: &TestCa,
+) -> (
+    Arc<std::sync::RwLock<polar_custody::custody::Custody>>,
+    String,
+) {
+    use polar_custody::custody::{Custody, Roles};
+    use polar_custody::protocol::{Reply, Request};
+    let mut custody = Custody::new(&ca.pem).unwrap();
+    let installer = Roles {
+        installer: true,
+        workload: false,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let Reply::Csr(csr) = custody.handle(
+        installer,
+        Request::MakeCsr {
+            slot: Slot::Client,
+            identity: IDENTITY.to_string(),
+            names: vec![],
+        },
+        now,
+    ) else {
+        panic!("a CSR");
+    };
+    let certificate = certify(ca, &csr);
+    assert_eq!(
+        custody.handle(
+            installer,
+            Request::Install {
+                slot: Slot::Client,
+                chain_pem: vec![certificate.clone()],
+            },
+            now,
+        ),
+        Reply::Installed
+    );
+    (Arc::new(std::sync::RwLock::new(custody)), certificate)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_daemon_s_own_handshake_is_signed_in_process_with_tls13_alone() {
+    let ca = test_ca();
+    let (custody, _) = custody_installed(&ca);
+    let config = polar_custody::own::own_client_config(custody, &ca.pem).unwrap();
+    let (address, seen) = server(&ca, &[&TLS13]).await;
+    connect(config.clone(), address)
+        .await
+        .expect("the handshake");
+    assert_eq!(seen.await.unwrap().unwrap(), IDENTITY);
+    let (address, seen) = server(&ca, &[&TLS12]).await;
+    assert!(connect(config, address).await.is_err());
+    // Refused because it was never offered, not because the custody then declined to sign a TLS 1.2 handshake.
+    let refused = seen.await.unwrap().unwrap_err();
+    assert!(
+        refused.contains("Tls12NotOfferedOrEnabled"),
+        "the daemon's own connection offered TLS 1.2: {refused}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn once_revoked_the_daemon_s_own_handshake_fails() {
+    let ca = test_ca();
+    let (custody, certificate) = custody_installed(&ca);
+    let config = polar_custody::own::own_client_config(custody.clone(), &ca.pem).unwrap();
+    let serial = cert_issuer_common::serial::serial_from_pem(&certificate).unwrap();
+    custody.write().unwrap().revoke(&[serial]);
+    let (address, seen) = server(&ca, &[&TLS13]).await;
+    assert!(connect(config, address).await.is_err());
+    assert!(seen.await.unwrap().is_err(), "no certificate seen signed");
+}
+
+#[test]
+fn the_daemon_s_own_configuration_needs_a_certificate_installed() {
+    let ca = test_ca();
+    let custody = Arc::new(std::sync::RwLock::new(
+        polar_custody::custody::Custody::new(&ca.pem).unwrap(),
+    ));
+    assert!(polar_custody::own::own_client_config(custody, &ca.pem).is_err());
+}

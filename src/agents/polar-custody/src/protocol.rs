@@ -82,6 +82,10 @@ pub enum Refusal {
     /// (docs/architecture/key-custody.md, step 4, item 1).
     #[error("the slot is sealed: a certificate is installed in it")]
     Sealed,
+    /// A certificate this daemon held was revoked: every key it held is destroyed, and it answers nothing more
+    /// (docs/architecture/key-custody.md, step 5).
+    #[error("revoked: this daemon's keys are destroyed")]
+    Revoked,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]

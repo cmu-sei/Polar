@@ -144,6 +144,13 @@ impl Pki {
         self.path("ca.pem")
     }
 
+    /// What cert-issuer gives a pod's CSR: a client certificate under this CA, as polar-init has it certified.
+    pub fn certify_client_csr(&self, csr_pem: &str) -> String {
+        let mut request = rcgen::CertificateSigningRequestParams::from_pem(csr_pem).unwrap();
+        request.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        request.signed_by(&self.issuer).unwrap().pem()
+    }
+
     /// The serial of `identity`'s client certificate, written as the credentials agent's ledger writes it.
     pub fn serial_of(&self, identity: &str) -> String {
         let (cert, _) = self.client(identity);
@@ -621,6 +628,17 @@ impl TestClient {
         client
     }
 
+    /// Connects with `config` as given (a key of the custody daemon's, say) and waits until the broker has registered it.
+    pub async fn connect_configured(config: TCPClientConfig) -> Self {
+        let client = Self::spawn(config, None).await;
+        client
+            .wait_for("a registration", Duration::from_secs(10), |c| {
+                c.registration_id().is_some()
+            })
+            .await;
+        client
+    }
+
     /// Starts connecting as `identity`, a watcher or not, and returns at once: for a client the broker may turn away.
     pub async fn start_connecting(
         broker: &TestBroker,
@@ -629,6 +647,18 @@ impl TestClient {
         watcher: bool,
     ) -> Self {
         let (cert, key) = broker.pki.client(identity);
+        let config = TCPClientConfig::from_values(
+            broker.addr.clone(),
+            "localhost".to_string(),
+            broker.pki.ca().to_string_lossy().into_owned(),
+            cert.to_string_lossy().into_owned(),
+            key.to_string_lossy().into_owned(),
+        );
+        let config = if watcher { config.as_watcher() } else { config };
+        Self::spawn(config, registration_id).await
+    }
+
+    async fn spawn(config: TCPClientConfig, registration_id: Option<String>) -> Self {
         let events = Arc::new(Mutex::new(Vec::new()));
         let port = Arc::new(OutputPort::default());
         let (collector, _) = Actor::spawn(
@@ -641,14 +671,6 @@ impl TestClient {
         .await
         .unwrap();
         port.subscribe(collector, Some);
-        let config = TCPClientConfig::from_values(
-            broker.addr.clone(),
-            "localhost".to_string(),
-            broker.pki.ca().to_string_lossy().into_owned(),
-            cert.to_string_lossy().into_owned(),
-            key.to_string_lossy().into_owned(),
-        );
-        let config = if watcher { config.as_watcher() } else { config };
         let (transport, _) = Actor::spawn(
             None,
             TcpClientActor,

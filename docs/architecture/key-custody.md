@@ -23,7 +23,8 @@
 
 # Key custody: a daemon per pod that holds the mTLS key
 
-Status, 2026-10-27: cleared by the maintainer, with the four recommendations below. Nothing here is built.
+Status, 2026-10-27: cleared by the maintainer, with the four recommendations below. Built: steps 1 to 5, each recorded
+in its section below; step 6, the speed gate, closed; step 7, a fresh sandbox-local, to come.
 
 ## Why
 
@@ -787,6 +788,47 @@ the key once it is revoked.
   `tests/supersede.rs` (the race above, six rounds); the wire's round trip of the flag
   (`cassini/types/tests/props/lib.rs`). Mutations caught: each of the listener's and the session manager's rules
   dropped or widened, and the drain put back to a stop.
+
+*Built (2026-10-27): the daemon's part* (item 2).
+- *Its own crate:* the binary moved to `polar-custody/daemon` (package `polar-custody-daemon`, binary still
+  `polar-custody`, so the image's build is unchanged), since `cassini-client` depends on `polar-custody`. `libc` and
+  `tracing-subscriber` went with it.
+- *The custody* (`polar-custody/src/custody.rs`): `Custody::revoke(serials)` destroys every key when a set names a
+  certificate it holds (the slots go, each key zeroed as it goes), and from then on every request is refused with
+  `Refusal::Revoked`; `serial` and `chain` read a slot's certificate.
+- *Its own handshake* (`polar-custody/src/own.rs`): `own_client_config`, the client slot's certificate signed for in
+  process through the same rule as every signature (`OwnSigningKey`, the workload's role), TLS 1.3 alone. The plan
+  had a third `ClientKey` kind; the Cassini client takes a TLS configuration made in code instead
+  (`TCPClientConfig::with_tls`, the files then never read), as neo4rs takes one (`with_rustls_config`), which leaves the
+  three places that match on `ClientKey` alone.
+- *The authority:* `AuthorityCore`, the decision with no actors, moved from `polar-agent-builder` to
+  `credentials_agent_common::authority_leaf`, with its tests, and the builder re-exports it, so the daemon keeps the
+  credentials agent's authority by the rules every agent keeps without the builder's policy engine in the process
+  that holds the keys.
+- *The watch* (`polar-custody/daemon/src/watch.rs`): `Watch` says what something heard means for the keys held, and
+  revokes in the custody; the `Watcher` actor connects, once the client slot holds a certificate, as a watcher session,
+  subscribes to the two authority topics and asks for a snapshot each time it registers, reconnects on each tick after
+  a lost connection, and on a revocation stops its connection and calls `on_revoked`. The binary exits then with code 3
+  (`REVOKED`); the kubelet restarts the sidecar empty.
+- *Its environment* (`main.rs`): `BROKER_ADDR` and `CASSINI_SERVER_NAME` now required, and `POLAR_AUTHORITY_PUBLISHER`
+  with every agent's default (a test holds the two defaults together). The catalog gives the sidecar the broker every
+  client in the pod is given (`infra/schema/agent.dhall`, `Constants.cassiniAddr`, `cassiniDNSName`). The broker's own
+  pod has no client slot, so its daemon never connects (the limit recorded above).
+- *Tests:* the custody's revocation (its serial, another, a server slot's, a key without a certificate) and a property
+  that it signs exactly until a set names it; the daemon's own handshake (TLS 1.3 alone, by the server's reason; failing
+  once revoked; none without a certificate); the client's configuration made in code used without reading a file;
+  `Watch` (a snapshot or a later update naming it, other serials, an impostor, another key, an update before a key) and
+  a property over sequences of what is heard, that it signs exactly until a set it believes names it; end to end
+  (`cassini/broker/tests/custody_revocation.rs`): a revoked pod's daemon told and its keys gone, its workload's
+  session ended; a revocation published while the daemon was away heard in the snapshot it asks for; signing before
+  any authority, as the credentials agent's own pod must; the workload and the watcher side by side for three seconds
+  with no supersession either way; and the watcher back after Cassini restarts. The catalog: the sidecar given the
+  pod's broker (`infra/tests/resolve.nu`). Mutations caught: each rule of the custody's revocation, the watcher's
+  subscribing, asking, being a watcher and reconnecting, `Watch` revoking and asking, the own configuration offering
+  TLS 1.2, and the client ignoring a configuration given.
+- *Not run:* the four resolve tests that ask the agents' images to judge their documents, which need the cluster's
+  registry; the cluster was down. They do not cover the daemon's environment.
+- *Seen on a cluster:* not yet; step 7.
 
 ## Step 6, the speed gate: the plan (2026-10-27, closed)
 

@@ -239,6 +239,9 @@ pub struct TCPClientConfig {
     /// Whether it registers a watcher session (`ClientMessage::RegistrationRequest`), the custody daemon's: one that
     /// hears the credentials agent's authority beside its identity's own session, and nothing else.
     pub watcher: bool,
+    /// A TLS configuration made in code, used as given in place of the CA, certificate and key files, which are then
+    /// never read: the custody daemon's own, whose key is in its own memory (docs/architecture/key-custody.md, step 5).
+    pub tls: Option<Arc<ClientConfig>>,
 }
 
 #[derive(Debug)]
@@ -265,6 +268,7 @@ impl TCPClientConfig {
             client_key: ClientKey::File(client_key_path),
             reconnect: ReconnectMode::default(),
             watcher: false,
+            tls: None,
         }
     }
 
@@ -278,6 +282,12 @@ impl TCPClientConfig {
     /// watcher that goes, and asks afresh each time it connects.
     pub fn as_watcher(mut self) -> Self {
         self.watcher = true;
+        self
+    }
+
+    /// This configuration, connecting with `tls` as given: the files it names are not read.
+    pub fn with_tls(mut self, tls: Arc<ClientConfig>) -> Self {
+        self.tls = Some(tls);
         self
     }
 
@@ -323,6 +333,7 @@ impl TCPClientConfig {
             client_key,
             reconnect: ReconnectMode::default(),
             watcher: false,
+            tls: None,
         })
     }
 
@@ -347,6 +358,7 @@ impl TCPClientConfig {
             client_key,
             reconnect: ReconnectMode::default(),
             watcher: false,
+            tls: None,
         })
     }
 }
@@ -1293,53 +1305,62 @@ impl Actor for TcpClientActor {
         }
         drop(_g);
 
-        // --- 2. Load CA certificate into root store ---
-        let _g = debug_span!("tls.load_ca_cert").entered();
-        let mut root_cert_store = rustls::RootCertStore::empty();
-        let ca_path = &args.config.ca_certificate_path;
+        // A configuration made in code is used as given; otherwise it is built from the files.
+        let client_config = match &args.config.tls {
+            Some(tls) => tls.clone(),
+            None => {
+                // --- 2. Load CA certificate into root store ---
+                let _g = debug_span!("tls.load_ca_cert").entered();
+                let mut root_cert_store = rustls::RootCertStore::empty();
+                let ca_path = &args.config.ca_certificate_path;
 
-        let ca_cert = CertificateDer::from_pem_file(ca_path).map_err(|e| {
-            ActorProcessingErr::from(anyhow::anyhow!(
-                "Failed to read CA certificate from {ca_path}: {e}"
-            ))
-        })?;
+                let ca_cert = CertificateDer::from_pem_file(ca_path).map_err(|e| {
+                    ActorProcessingErr::from(anyhow::anyhow!(
+                        "Failed to read CA certificate from {ca_path}: {e}"
+                    ))
+                })?;
 
-        root_cert_store.add(ca_cert).map_err(|e| {
-            ActorProcessingErr::from(anyhow::anyhow!(
-                "Failed to add CA certificate to root store: {e}"
-            ))
-        })?;
-        drop(_g);
+                root_cert_store.add(ca_cert).map_err(|e| {
+                    ActorProcessingErr::from(anyhow::anyhow!(
+                        "Failed to add CA certificate to root store: {e}"
+                    ))
+                })?;
+                drop(_g);
 
-        // --- 3. Build WebPKI verifier ---
-        let _g = debug_span!("tls.build_verifier").entered();
-        let verifier = WebPkiServerVerifier::builder(Arc::new(root_cert_store))
-            .build()
-            .map_err(|e| {
-                ActorProcessingErr::from(anyhow::anyhow!("Failed to build WebPKI verifier: {e}"))
-            })?;
-        drop(_g);
+                // --- 3. Build WebPKI verifier ---
+                let _g = debug_span!("tls.build_verifier").entered();
+                let verifier = WebPkiServerVerifier::builder(Arc::new(root_cert_store))
+                    .build()
+                    .map_err(|e| {
+                        ActorProcessingErr::from(anyhow::anyhow!(
+                            "Failed to build WebPKI verifier: {e}"
+                        ))
+                    })?;
+                drop(_g);
 
-        // --- 4. Load client cert; its key is a file or the custody daemon's ---
-        let _g = debug_span!("tls.load_client_cert_key").entered();
-        let mut certs = Vec::new();
-        let cert_path = &args.config.client_certificate_path;
+                // --- 4. Load client cert; its key is a file or the custody daemon's ---
+                let _g = debug_span!("tls.load_client_cert_key").entered();
+                let mut certs = Vec::new();
+                let cert_path = &args.config.client_certificate_path;
 
-        let client_cert = CertificateDer::from_pem_file(cert_path).map_err(|e| {
-            ActorProcessingErr::from(anyhow::anyhow!(
-                "Failed to read client certificate from {cert_path}: {e}"
-            ))
-        })?;
+                let client_cert = CertificateDer::from_pem_file(cert_path).map_err(|e| {
+                    ActorProcessingErr::from(anyhow::anyhow!(
+                        "Failed to read client certificate from {cert_path}: {e}"
+                    ))
+                })?;
 
-        certs.push(client_cert);
-        drop(_g);
+                certs.push(client_cert);
+                drop(_g);
 
-        // --- 5. Build Rustls client config ---
-        let _g = debug_span!("tls.build_client_config").entered();
-        let client_config =
-            polar_custody::client::client_config(verifier, certs, &args.config.client_key)
-                .map_err(|e| ActorProcessingErr::from(anyhow::anyhow!(e)))?;
-        drop(_g);
+                // --- 5. Build Rustls client config ---
+                let _g = debug_span!("tls.build_client_config").entered();
+                let client_config =
+                    polar_custody::client::client_config(verifier, certs, &args.config.client_key)
+                        .map_err(|e| ActorProcessingErr::from(anyhow::anyhow!(e)))?;
+                drop(_g);
+                Arc::new(client_config)
+            }
+        };
 
         // --- 6. Determine registration state ---
         let registration = match args.registration_id {
@@ -1359,7 +1380,7 @@ impl Actor for TcpClientActor {
             reader: None,
             writer: None,
             registration,
-            client_config: Arc::new(client_config),
+            client_config,
             delivery: args.delivery,
             abort_handle: None,
             answers: args.answers,
@@ -2062,5 +2083,56 @@ mod registration_tests {
             .await
             .unwrap();
         assert_eq!(registered_ids(&events), ["same"]);
+    }
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::*;
+
+    fn nowhere() -> TCPClientConfig {
+        TCPClientConfig::from_values(
+            // Nothing listens here: the transport's connecting is not what is tested.
+            "127.0.0.1:9".into(),
+            "localhost".into(),
+            "/nowhere/ca.pem".into(),
+            "/nowhere/cert.pem".into(),
+            "/nowhere/key.pem".into(),
+        )
+        .with_reconnect(ReconnectMode::LeaveToSupervisor)
+    }
+
+    async fn start(config: TCPClientConfig) -> Result<ActorRef<TcpClientMessage>, String> {
+        Actor::spawn(
+            None,
+            TcpClientActor,
+            TcpClientArgs {
+                config,
+                registration_id: None,
+                delivery: DeliveryMode::Broadcast(Arc::new(OutputPort::default())),
+                answers: None,
+            },
+        )
+        .await
+        .map(|(actor, _)| actor)
+        .map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn a_configuration_made_in_code_is_used_as_given_and_no_file_is_read() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let made = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth(),
+        );
+        let transport = start(nowhere().with_tls(made))
+            .await
+            .expect("started without reading the files");
+        transport.stop(None);
+        assert!(
+            start(nowhere()).await.is_err(),
+            "without one, the files are read, and these are not there"
+        );
     }
 }

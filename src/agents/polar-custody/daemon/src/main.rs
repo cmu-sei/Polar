@@ -28,17 +28,28 @@
 //! - `POLAR_CUSTODY_SOCKET`: where the socket is, on a volume only the pod's containers share;
 //! - `POLAR_CUSTODY_CA_CERT`: the CA the pod was given, which every certificate installed must come from;
 //! - `POLAR_CUSTODY_INSTALLER_UID`: `polar-init`'s UID;
-//! - `POLAR_CUSTODY_WORKLOAD_UIDS`: the workload containers' UIDs, comma-separated.
+//! - `POLAR_CUSTODY_WORKLOAD_UIDS`: the workload containers' UIDs, comma-separated;
+//! - `BROKER_ADDR` and `CASSINI_SERVER_NAME`: Cassini, where it watches as its pod for its own revocation (step 5);
+//! - `POLAR_AUTHORITY_PUBLISHER`: the credentials agent's identity, by default its service account, as every agent's.
+//!
+//! When the credentials agent revokes a certificate it holds, it destroys every key and exits with [`REVOKED`].
 
 use polar_custody::custody::Custody;
 use polar_custody::server::{Callers, bind, serve};
+use polar_custody_daemon::watch::{DEFAULT_PUBLISHER, PUBLISHER_VARIABLE, Watcher, WatcherArgs};
 use std::sync::{Arc, RwLock};
 use tracing::{error, info, warn};
+
+/// The exit code once a certificate it held is revoked and its keys are destroyed.
+const REVOKED: i32 = 3;
 
 struct Settings {
     socket: String,
     ca_pem: String,
     callers: Callers,
+    broker: String,
+    server_name: String,
+    publisher: String,
 }
 
 fn settings() -> Result<Settings, Vec<String>> {
@@ -54,6 +65,13 @@ fn settings() -> Result<Settings, Vec<String>> {
     let ca_path = var("POLAR_CUSTODY_CA_CERT");
     let installer = var("POLAR_CUSTODY_INSTALLER_UID");
     let workload = var("POLAR_CUSTODY_WORKLOAD_UIDS");
+    let broker = var("BROKER_ADDR");
+    let server_name = var("CASSINI_SERVER_NAME");
+    let publisher = std::env::var(PUBLISHER_VARIABLE)
+        .ok()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| DEFAULT_PUBLISHER.to_string());
     let ca_pem = ca_path
         .as_ref()
         .and_then(|path| match std::fs::read_to_string(path) {
@@ -85,19 +103,32 @@ fn settings() -> Result<Settings, Vec<String>> {
             }
         }
     });
-    match (socket, ca_pem, installer_uid, workload_uids) {
-        (Some(socket), Some(ca_pem), Some(installer_uid), Some(workload_uids))
-            if problems.is_empty() =>
-        {
-            Ok(Settings {
-                socket,
-                ca_pem,
-                callers: Callers {
-                    installer_uid,
-                    workload_uids,
-                },
-            })
-        }
+    match (
+        socket,
+        ca_pem,
+        installer_uid,
+        workload_uids,
+        broker,
+        server_name,
+    ) {
+        (
+            Some(socket),
+            Some(ca_pem),
+            Some(installer_uid),
+            Some(workload_uids),
+            Some(broker),
+            Some(server_name),
+        ) if problems.is_empty() => Ok(Settings {
+            socket,
+            ca_pem,
+            callers: Callers {
+                installer_uid,
+                workload_uids,
+            },
+            broker,
+            server_name,
+            publisher,
+        }),
         _ => Err(problems),
     }
 }
@@ -151,7 +182,23 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    info!(socket = %settings.socket, installer = settings.callers.installer_uid, workload = ?settings.callers.workload_uids, "custody daemon serving");
+    let watching = WatcherArgs {
+        custody: custody.clone(),
+        ca_pem: settings.ca_pem.clone(),
+        broker: settings.broker.clone(),
+        server_name: settings.server_name.clone(),
+        publisher: settings.publisher.clone(),
+        // Its keys are destroyed already (`Custody::revoke`): the kubelet restarts it empty.
+        on_revoked: Arc::new(|slots| {
+            error!(?slots, "revoked: exiting");
+            std::process::exit(REVOKED);
+        }),
+    };
+    if let Err(e) = ractor::Actor::spawn(None, Watcher, watching).await {
+        error!("cannot watch for this pod's revocation: {e}");
+        std::process::exit(1);
+    }
+    info!(socket = %settings.socket, installer = settings.callers.installer_uid, workload = ?settings.callers.workload_uids, broker = %settings.broker, publisher = %settings.publisher, "custody daemon serving");
     if let Err(e) = serve(listener, custody, Arc::new(settings.callers)).await {
         error!("the socket failed: {e}");
         std::process::exit(1);
