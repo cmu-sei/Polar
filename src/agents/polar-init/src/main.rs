@@ -47,6 +47,8 @@
 //!                                GET /ca without verification and pinned.
 //!   POLAR_INIT_ESCROW_BOOTSTRAP  `true` runs the escrow bootstrap (default:
 //!                                false); set for an agent that needs encryption
+//!   POLAR_CUSTODY_SOCKET         The custody daemon's socket; required when a
+//!                                --cert's key is `custody`, the daemon's
 //!   TLS_*, BROKER_ADDR, CASSINI_SERVER_NAME, KUBERNETES_SA_TOKEN
 //!                                The Cassini client's and the crypto actor's,
 //!                                required when the bootstrap runs
@@ -59,6 +61,7 @@ mod goodbye;
 mod handle;
 
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use cassini_client::{TcpClientActor, TcpClientArgs};
@@ -70,6 +73,8 @@ use cert_issuer_common::{
 };
 use clap::Parser;
 use credentials_agent_common::issuance::WorkloadCertType;
+use polar_custody::client::{ClientError, CustodyClient};
+use polar_custody::protocol::{FrameError, Slot};
 use polar_health::DepCertEndpoint;
 use ractor::Actor;
 
@@ -101,8 +106,18 @@ async fn within<T>(
 struct CertRequest {
     cert_type: CertType,
     cert_dir: String,
-    key_algorithm: keypair::KeyAlgorithm,
+    key: KeyMaker,
     extra_sans: Vec<String>,
+}
+
+/// Who makes a certificate's key, as the `--cert` key-algorithm field says.
+#[derive(Debug, Clone)]
+enum KeyMaker {
+    /// polar-init, of this algorithm; the key is written beside the certificate.
+    Here(keypair::KeyAlgorithm),
+    /// `custody`: the pod's custody daemon, a P-256 key in the slot of the certificate's type, which it keeps; no
+    /// key file is written (docs/architecture/key-custody.md, step 3).
+    Custody,
 }
 
 impl FromStr for CertRequest {
@@ -138,12 +153,13 @@ impl FromStr for CertRequest {
             ));
         }
 
-        let key_algorithm = match parts[2].trim().to_lowercase().as_str() {
-            "ed25519" => keypair::KeyAlgorithm::Ed25519,
-            "ecdsa-p256" => keypair::KeyAlgorithm::EcdsaP256,
+        let key = match parts[2].trim().to_lowercase().as_str() {
+            "ed25519" => KeyMaker::Here(keypair::KeyAlgorithm::Ed25519),
+            "ecdsa-p256" => KeyMaker::Here(keypair::KeyAlgorithm::EcdsaP256),
+            "custody" => KeyMaker::Custody,
             other => {
                 return Err(format!(
-                    "invalid key algorithm '{}': expected 'ed25519' or 'ecdsa-p256'",
+                    "invalid key algorithm '{}': expected 'ed25519', 'ecdsa-p256' or 'custody'",
                     other
                 ));
             }
@@ -163,7 +179,7 @@ impl FromStr for CertRequest {
         Ok(CertRequest {
             cert_type,
             cert_dir,
-            key_algorithm,
+            key,
             extra_sans,
         })
     }
@@ -187,7 +203,8 @@ struct Args {
 
     /// Certificate to issue.
     /// Format: type:dir:key-algorithm[:extra-sans]
-    /// where extra-sans is a comma-separated list of DNS names.
+    /// where key-algorithm is ed25519 or ecdsa-p256 (polar-init makes the key and writes it), or custody (the
+    /// custody daemon makes it and keeps it; no key file), and extra-sans is a comma-separated list of DNS names.
     /// May be specified multiple times.
     #[arg(long = "cert", value_name = "TYPE:DIR:ALGORITHM[:SANS]")]
     certs: Vec<String>,
@@ -263,6 +280,8 @@ async fn main() {
             }
         };
     let token_path = settings.token_path.clone();
+    let custody = custody_for(&cert_requests, settings.custody_socket.as_deref())
+        .unwrap_or_else(|why| stop(why));
 
     // Phase 1: wait for all dep cert endpoints to be healthy.
     if !dep_endpoints.is_empty() {
@@ -345,6 +364,7 @@ async fn main() {
                     &dns_identity,
                     req,
                     pinned_ca.as_deref().map(str::as_bytes),
+                    custody.as_ref(),
                 )
                 .await;
             }
@@ -377,6 +397,7 @@ async fn main() {
                     req,
                     &pinned_ca,
                     &offers,
+                    custody.as_ref(),
                 )
                 .await
                 {
@@ -646,7 +667,29 @@ async fn issue_cert(
     dns_identity: &str,
     req: &CertRequest,
     pinned_ca: Option<&[u8]>,
+    custody: Option<&Arc<CustodyClient>>,
 ) {
+    let algorithm = match (&req.key, custody) {
+        (KeyMaker::Here(algorithm), _) => algorithm,
+        (KeyMaker::Custody, Some(daemon)) => {
+            let delay = Duration::from_secs(POLL_INTERVAL_SECS);
+            if let Err(why) = issue_custody_cert_from_cert_issuer(
+                client,
+                sa_token,
+                dns_identity,
+                req,
+                pinned_ca,
+                daemon,
+                delay,
+            )
+            .await
+            {
+                stop(why);
+            }
+            return;
+        }
+        (KeyMaker::Custody, None) => stop(no_daemon(req)),
+    };
     if keeps_existing_bundle(req, dns_identity, pinned_ca) {
         return;
     }
@@ -654,12 +697,11 @@ async fn issue_cert(
         "issuing {:?} cert into '{}' (algorithm: {:?}, extra-sans: {:?})",
         req.cert_type,
         req.cert_dir,
-        req.key_algorithm,
+        algorithm,
         req.extra_sans,
     );
 
-    let csr_output = match keypair::generate_csr(dns_identity, &req.key_algorithm, &req.extra_sans)
-    {
+    let csr_output = match keypair::generate_csr(dns_identity, algorithm, &req.extra_sans) {
         Ok(c) => c,
         Err(e) => {
             // CSR generation failure is almost certainly a bug or
@@ -691,6 +733,202 @@ async fn issue_cert(
         &response.expires_at.to_string(),
     )
     .await;
+}
+
+// ---------------------------------------------------------------------------
+// A certificate whose key is the custody daemon's (docs/architecture/key-custody.md, step 3)
+// ---------------------------------------------------------------------------
+
+/// The daemon's client for the certificates whose key is its own: `None` when none is, and why not when one is and
+/// there is no socket, or two of one type ask for its one slot of that type. Said before anything waits.
+fn custody_for(
+    requests: &[CertRequest],
+    socket: Option<&str>,
+) -> Result<Option<Arc<CustodyClient>>, String> {
+    let custody: Vec<&CertRequest> = requests
+        .iter()
+        .filter(|req| matches!(req.key, KeyMaker::Custody))
+        .collect();
+    if custody.is_empty() {
+        return Ok(None);
+    }
+    for (i, req) in custody.iter().enumerate() {
+        if custody[..i]
+            .iter()
+            .any(|earlier| slot_of(&earlier.cert_type) == slot_of(&req.cert_type))
+        {
+            return Err(format!(
+                "two {:?} certs ask for the custody daemon's key, and it holds one of each type",
+                req.cert_type
+            ));
+        }
+    }
+    let socket = socket.ok_or_else(|| {
+        format!(
+            "a cert whose key is the custody daemon's needs {}, the daemon's socket",
+            cassini_client::environment::CUSTODY_SOCKET.name()
+        )
+    })?;
+    Ok(Some(Arc::new(CustodyClient::new(socket))))
+}
+
+fn no_daemon(req: &CertRequest) -> String {
+    format!(
+        "the {:?} cert into '{}' is the custody daemon's, and there is no daemon",
+        req.cert_type, req.cert_dir
+    )
+}
+
+/// The daemon's slot for a certificate of `cert_type`: a server certificate's key is the server slot's, every other
+/// the client slot's (`--cert` takes only the two).
+fn slot_of(cert_type: &CertType) -> Slot {
+    match cert_type {
+        CertType::Server => Slot::Server,
+        CertType::Client | CertType::Service | CertType::Signing => Slot::Client,
+    }
+}
+
+/// One request to the daemon, waited for while it cannot be reached (the sidecar starting, its socket not there yet)
+/// and given up at a refusal, which asking again would not change.
+async fn of_the_daemon<T: Send + 'static>(
+    daemon: &Arc<CustodyClient>,
+    what: &str,
+    delay: Duration,
+    ask: impl Fn(&CustodyClient) -> Result<T, ClientError> + Send + Sync + Clone + 'static,
+) -> Result<T, String> {
+    loop {
+        let (daemon, ask) = (daemon.clone(), ask.clone());
+        match tokio::task::spawn_blocking(move || ask(&daemon)).await {
+            Ok(Ok(answer)) => return Ok(answer),
+            Ok(Err(ClientError::Frame(FrameError::Io(e)))) => {
+                tracing::warn!("cannot reach the custody daemon to {what}: {e}, retrying...");
+                tokio::time::sleep(delay).await;
+            }
+            Ok(Err(e)) => return Err(format!("the custody daemon would not {what}: {e}")),
+            Err(e) => return Err(format!("asking the custody daemon to {what} failed: {e}")),
+        }
+    }
+}
+
+/// The daemon's CSR for `req`, for a key it makes and keeps in the slot of the certificate's type.
+async fn custody_csr(
+    daemon: &Arc<CustodyClient>,
+    req: &CertRequest,
+    dns_identity: &str,
+    delay: Duration,
+) -> Result<String, String> {
+    let (slot, identity, names) = (
+        slot_of(&req.cert_type),
+        dns_identity.to_string(),
+        req.extra_sans.clone(),
+    );
+    of_the_daemon(daemon, "make a CSR", delay, move |daemon| {
+        daemon.make_csr(slot, &identity, &names)
+    })
+    .await
+}
+
+/// The certificate handed to the daemon, which judges it again (its key, the CA it was given) before it signs with
+/// it; then the certificate and the CA written for the workload, and no key. The daemon holds the certificate before
+/// the workload can read it.
+async fn install_and_write(
+    daemon: &Arc<CustodyClient>,
+    req: &CertRequest,
+    dns_identity: &str,
+    cert_pem: &str,
+    ca_pem: &str,
+    delay: Duration,
+) -> Result<(), String> {
+    let (slot, chain) = (slot_of(&req.cert_type), vec![cert_pem.to_string()]);
+    of_the_daemon(daemon, "install the certificate", delay, move |daemon| {
+        daemon.install(slot, chain.clone())
+    })
+    .await?;
+    loop {
+        match output::write_certificate(std::path::Path::new(&req.cert_dir), cert_pem, ca_pem) {
+            Ok(()) => {
+                tracing::info!(
+                    "issued {:?} cert for '{dns_identity}', its key the custody daemon's",
+                    req.cert_type
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "failed to write the cert to '{}': {e}, retrying...",
+                    req.cert_dir
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+/// A certificate from cert-issuer whose key is the daemon's. An old bundle is never kept: the daemon's key is new at
+/// every start, so no certificate from before is for it (docs/architecture/deployments.md, item 4). With the CA the
+/// pod was given, the certificate is judged against it before the daemon is given it.
+async fn issue_custody_cert_from_cert_issuer(
+    client: &handshake::HandshakeClient,
+    sa_token: &str,
+    dns_identity: &str,
+    req: &CertRequest,
+    pinned_ca: Option<&[u8]>,
+    daemon: &Arc<CustodyClient>,
+    delay: Duration,
+) -> Result<(), String> {
+    tracing::info!(
+        "issuing {:?} cert into '{}', its key the custody daemon's (extra-sans: {:?})",
+        req.cert_type,
+        req.cert_dir,
+        req.extra_sans,
+    );
+    let csr = custody_csr(daemon, req, dns_identity, delay).await?;
+    let response = obtain_from_cert_issuer(client, sa_token, &csr, req, delay).await?;
+    if let Some(pinned_ca) = pinned_ca {
+        judged_for_csr(
+            req,
+            dns_identity,
+            &response.certificate_pem,
+            &csr,
+            pinned_ca,
+        )
+        .map_err(|why| {
+            format!(
+                "refusing the {:?} cert cert-issuer issued: {why}",
+                req.cert_type
+            )
+        })?;
+    }
+    install_and_write(
+        daemon,
+        req,
+        dns_identity,
+        &response.certificate_pem,
+        &response.ca_chain_pem,
+        delay,
+    )
+    .await
+}
+
+/// [`trusted_issuance`] for a certificate whose key the daemon holds: judged against the key `csr_pem` carries.
+fn judged_for_csr(
+    req: &CertRequest,
+    dns_identity: &str,
+    cert_pem: &str,
+    csr_pem: &str,
+    pinned_ca: &[u8],
+) -> Result<String, String> {
+    let usage = usage_of(&req.cert_type)
+        .ok_or_else(|| format!("a {:?} cert is not judged here", req.cert_type))?;
+    output::judge_certificate(
+        cert_pem.as_bytes(),
+        csr_pem.as_bytes(),
+        pinned_ca,
+        dns_identity,
+        &req.extra_sans,
+        usage,
+        std::time::SystemTime::now(),
+    )
 }
 
 /// One certificate from cert-issuer, for the same CSR however many times it is asked: what is only unavailable is
@@ -832,9 +1070,26 @@ async fn obtain_via_observer(
     offers: &credentials_agent_common::session_offer::OfferCheck,
     delay: Duration,
 ) -> Result<polar_crypto::workload_certificates::IssuedCertificate, String> {
-    use polar_crypto::workload_certificates::{RequestError, request_certificate};
+    use polar_crypto::workload_certificates::request_certificate;
+    observer_patiently(delay, || {
+        request_certificate(observer, token, dns_identity, request, offers)
+    })
+    .await
+}
+
+/// One attempt after another at the observer, waiting out whatever is only unavailable and stopping at what is
+/// final. `Ok` is what came; `Err` says why it will not come.
+async fn observer_patiently<T, Attempt>(
+    delay: Duration,
+    mut attempt: impl FnMut() -> Attempt,
+) -> Result<T, String>
+where
+    Attempt:
+        std::future::Future<Output = Result<T, polar_crypto::workload_certificates::RequestError>>,
+{
+    use polar_crypto::workload_certificates::RequestError;
     loop {
-        match request_certificate(observer, token, dns_identity, request, offers).await {
+        match attempt().await {
             Ok(issued) => return Ok(issued),
             Err(RequestError::Retry(why)) => {
                 tracing::warn!("the credentials agent cannot issue just yet: {why}, retrying...");
@@ -863,7 +1118,31 @@ async fn issue_cert_via_observer(
     req: &CertRequest,
     pinned_ca: &str,
     offers: &credentials_agent_common::session_offer::OfferCheck,
+    custody: Option<&Arc<CustodyClient>>,
 ) -> Result<(), String> {
+    let Some(cert_type) = workload_cert_type(&req.cert_type) else {
+        return Err(format!(
+            "the credentials agent does not issue a {:?} cert here",
+            req.cert_type
+        ));
+    };
+    let algorithm = match (&req.key, custody) {
+        (KeyMaker::Here(algorithm), _) => algorithm,
+        (KeyMaker::Custody, Some(daemon)) => {
+            return issue_custody_cert_via_observer(
+                observer,
+                sa_token,
+                dns_identity,
+                req,
+                cert_type,
+                pinned_ca,
+                offers,
+                daemon,
+            )
+            .await;
+        }
+        (KeyMaker::Custody, None) => return Err(no_daemon(req)),
+    };
     if keeps_existing_bundle(req, dns_identity, Some(pinned_ca.as_bytes())) {
         return Ok(());
     }
@@ -871,18 +1150,12 @@ async fn issue_cert_via_observer(
         "requesting {:?} cert into '{}' from the credentials agent (algorithm: {:?}, names: {:?})",
         req.cert_type,
         req.cert_dir,
-        req.key_algorithm,
+        algorithm,
         req.extra_sans,
     );
-    let Some(cert_type) = workload_cert_type(&req.cert_type) else {
-        return Err(format!(
-            "the credentials agent does not issue a {:?} cert here",
-            req.cert_type
-        ));
-    };
     let request = polar_crypto::workload_certificates::CertificateRequest {
         cert_type,
-        key_algorithm: req.key_algorithm.clone(),
+        key_algorithm: algorithm.clone(),
         names: req.extra_sans.clone(),
     };
     match obtain_via_observer(
@@ -924,6 +1197,57 @@ async fn issue_cert_via_observer(
         }
         Err(why) => Err(why),
     }
+}
+
+/// A certificate from the credentials agent whose key is the daemon's: its CSR sealed and sent as any other, the
+/// certificate judged against the pinned CA and the CSR's key, then installed. No old bundle is kept (as for
+/// cert-issuer's, above).
+#[allow(clippy::too_many_arguments)]
+async fn issue_custody_cert_via_observer(
+    observer: &credentials_agent_client::ObserverClient,
+    sa_token: &str,
+    dns_identity: &str,
+    req: &CertRequest,
+    cert_type: WorkloadCertType,
+    pinned_ca: &str,
+    offers: &credentials_agent_common::session_offer::OfferCheck,
+    daemon: &Arc<CustodyClient>,
+) -> Result<(), String> {
+    use polar_crypto::workload_certificates::request_certificate_with_csr;
+    tracing::info!(
+        "requesting {:?} cert into '{}' from the credentials agent, its key the custody daemon's (names: {:?})",
+        req.cert_type,
+        req.cert_dir,
+        req.extra_sans,
+    );
+    let delay = Duration::from_secs(POLL_INTERVAL_SECS);
+    let csr = custody_csr(daemon, req, dns_identity, delay).await?;
+    let issued = observer_patiently(delay, || {
+        request_certificate_with_csr(observer, sa_token, cert_type, &req.extra_sans, &csr, offers)
+    })
+    .await?;
+    judged_for_csr(
+        req,
+        dns_identity,
+        &issued.certificate_pem,
+        &csr,
+        pinned_ca.as_bytes(),
+    )
+    .map_err(|why| {
+        format!(
+            "refusing the {:?} cert the credentials agent's observer handed over: {why}",
+            req.cert_type
+        )
+    })?;
+    install_and_write(
+        daemon,
+        req,
+        dns_identity,
+        &issued.certificate_pem,
+        pinned_ca,
+        delay,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1233,6 +1557,7 @@ mod tests {
             &a_request_into(&dir),
             &pinned,
             &offers,
+            None,
         )
         .await
         .unwrap();
@@ -1263,6 +1588,7 @@ mod tests {
             &a_request_into(&dir),
             &ours.pem,
             &offers_under(&ours),
+            None,
         )
         .await
         .unwrap_err();
@@ -1296,6 +1622,7 @@ mod tests {
                 &a_request_into(&dir),
                 &ours.pem,
                 &offers_under(&ours),
+                None,
             )
             .await
             .unwrap_err();
@@ -1442,5 +1769,266 @@ mod tests {
             .filter(|r| r.url.path() == "/workload/issue")
             .count();
         assert_eq!(attempts, 1);
+    }
+
+    // ---- a certificate whose key is the custody daemon's (docs/architecture/key-custody.md, step 3) -----------
+
+    mod custody {
+        use super::*;
+        use polar_custody::client::{ClientError, CustodyClient};
+        use polar_custody::protocol::{Refusal, Slot};
+        use std::os::unix::fs::MetadataExt as _;
+        use std::sync::Arc;
+
+        /// A daemon trusting `ca`, on a socket in `dir`; `installer` says whether this process may make CSRs and
+        /// install, as polar-init's UID may.
+        fn serve_daemon(
+            dir: &std::path::Path,
+            ca_pem: &str,
+            installer: bool,
+        ) -> std::path::PathBuf {
+            use polar_custody::custody::Custody;
+            use polar_custody::server::{Callers, bind, serve};
+            let uid = std::fs::metadata(dir).unwrap().uid();
+            let socket = dir.join("custody.sock");
+            tokio::spawn(serve(
+                bind(&socket).unwrap(),
+                Arc::new(std::sync::RwLock::new(Custody::new(ca_pem).unwrap())),
+                Arc::new(Callers {
+                    installer_uid: if installer { uid } else { uid + 1 },
+                    workload_uids: vec![uid],
+                }),
+            ));
+            socket
+        }
+
+        fn daemon_at(socket: &std::path::Path) -> Arc<CustodyClient> {
+            Arc::new(CustodyClient::new(socket))
+        }
+
+        /// What the daemon holds in its client slot: the certificate, or why none.
+        async fn held(daemon: &Arc<CustodyClient>) -> Result<Vec<String>, ClientError> {
+            let daemon = daemon.clone();
+            tokio::task::spawn_blocking(move || daemon.certificate(Slot::Client))
+                .await
+                .unwrap()
+        }
+
+        fn a_custody_request_into(dir: &tempfile::TempDir) -> CertRequest {
+            format!("client:{}:custody:", dir.path().display())
+                .parse()
+                .unwrap()
+        }
+
+        #[test]
+        fn a_cert_whose_key_is_the_daemon_s_says_custody() {
+            let req: CertRequest = "server:/etc/tls:custody:a.svc,b.svc".parse().unwrap();
+            assert!(matches!(req.key, KeyMaker::Custody));
+            assert_eq!(req.extra_sans, vec!["a.svc", "b.svc"]);
+            let req: CertRequest = "client:/etc/tls:ecdsa-p256:".parse().unwrap();
+            assert!(matches!(
+                req.key,
+                KeyMaker::Here(keypair::KeyAlgorithm::EcdsaP256)
+            ));
+            let why = "client:/etc/tls:rsa:".parse::<CertRequest>().unwrap_err();
+            assert!(why.contains("custody"), "the choices are named: {why}");
+        }
+
+        #[test]
+        fn a_custody_cert_needs_the_socket_and_there_is_one_per_type() {
+            let parse = |certs: &[&str]| -> Vec<CertRequest> {
+                certs.iter().map(|c| c.parse().unwrap()).collect()
+            };
+            let files = parse(&["client:/a:ecdsa-p256:", "client:/b:ecdsa-p256:"]);
+            assert!(custody_for(&files, None).unwrap().is_none(), "none asked");
+
+            let one = parse(&["client:/a:custody:", "client:/b:ecdsa-p256:"]);
+            let why = custody_for(&one, None).unwrap_err();
+            assert!(why.contains("POLAR_CUSTODY_SOCKET"), "{why}");
+            assert!(custody_for(&one, Some("/s")).unwrap().is_some());
+
+            let both = parse(&["client:/a:custody:", "server:/b:custody:x.svc"]);
+            assert!(custody_for(&both, Some("/s")).unwrap().is_some());
+
+            let two = parse(&["client:/a:custody:", "client:/b:custody:"]);
+            let why = custody_for(&two, Some("/s")).unwrap_err();
+            assert!(why.contains("one"), "one slot per type: {why}");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn through_the_observer_the_daemon_holds_the_certificate_and_no_key_is_written() {
+            let ours = test_ca();
+            let pinned = ours.pem.clone();
+            let offers = offers_under(&ours);
+            let offer = an_offer_signed_by(&ours, CREDENTIALS_AGENT);
+            let sockets = tempfile::TempDir::new().unwrap();
+            let daemon = daemon_at(&serve_daemon(sockets.path(), &ours.pem, true));
+            let server = an_observer_signing_with(ours, "NOT A CA".to_string(), offer).await;
+            let observer = credentials_agent_client::ObserverClient::new(server.uri());
+            let dir = tempfile::TempDir::new().unwrap();
+            std::fs::write(dir.path().join("key.pem"), "a key from before").unwrap();
+
+            issue_cert_via_observer(
+                &observer,
+                "token",
+                ME,
+                &a_custody_request_into(&dir),
+                &pinned,
+                &offers,
+                Some(&daemon),
+            )
+            .await
+            .unwrap();
+
+            let cert = std::fs::read_to_string(dir.path().join("cert.pem")).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("ca.pem")).unwrap(),
+                pinned
+            );
+            assert!(!dir.path().join("key.pem").exists(), "no key file");
+            assert_eq!(held(&daemon).await.unwrap(), vec![cert]);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_certificate_another_ca_signed_is_neither_installed_nor_written() {
+            let (ours, theirs) = (test_ca(), test_ca());
+            let offer = an_offer_signed_by(&ours, CREDENTIALS_AGENT);
+            let sockets = tempfile::TempDir::new().unwrap();
+            let daemon = daemon_at(&serve_daemon(sockets.path(), &ours.pem, true));
+            let server = an_observer_signing_with(theirs, String::new(), offer).await;
+            let observer = credentials_agent_client::ObserverClient::new(server.uri());
+            let dir = tempfile::TempDir::new().unwrap();
+            let why = issue_cert_via_observer(
+                &observer,
+                "token",
+                ME,
+                &a_custody_request_into(&dir),
+                &ours.pem,
+                &offers_under(&ours),
+                Some(&daemon),
+            )
+            .await
+            .unwrap_err();
+            assert!(why.contains("not signed by the pinned CA"), "{why}");
+            assert!(!dir.path().join("cert.pem").exists());
+            assert!(matches!(
+                held(&daemon).await,
+                Err(ClientError::Refused(Refusal::NoCertificate))
+            ));
+        }
+
+        /// cert-issuer, signing whatever CSR it is sent with `ca`.
+        struct CertIssuerSigns(TestCa);
+
+        impl wiremock::Respond for CertIssuerSigns {
+            fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                let mut csr = rcgen::CertificateSigningRequestParams::from_pem(
+                    body["csr_pem"].as_str().unwrap(),
+                )
+                .unwrap();
+                csr.params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+                let now = time::OffsetDateTime::now_utc();
+                csr.params.not_before = now - time::Duration::hours(1);
+                csr.params.not_after = now + time::Duration::hours(1);
+                let cert = csr
+                    .signed_by(&rcgen::Issuer::from_params(&self.0.params, &self.0.key))
+                    .unwrap();
+                ResponseTemplate::new(200).set_body_json(cert_issuer_common::IssueResponse {
+                    certificate_pem: cert.pem(),
+                    ca_chain_pem: self.0.pem.clone(),
+                    serial_number: "01".to_string(),
+                    session_id: "s".to_string(),
+                    expires_at: now + time::Duration::hours(1),
+                })
+            }
+        }
+
+        // A pod whose init container runs again keeps its emptyDir, and with it the bundle from before; the daemon's
+        // key is new, so that bundle is not kept, and a certificate is asked for (deployments.md, item 4).
+        #[tokio::test(flavor = "multi_thread")]
+        async fn from_cert_issuer_too_and_a_bundle_from_before_is_not_kept() {
+            let ca = test_ca();
+            let pinned = ca.pem.clone();
+            let sockets = tempfile::TempDir::new().unwrap();
+            let daemon = daemon_at(&serve_daemon(sockets.path(), &ca.pem, true));
+            let dir = tempfile::TempDir::new().unwrap();
+            let (old_cert, old_key) = signed_by(&ca, &[ME]);
+            output::write_bundle(
+                dir.path(),
+                &output::OutputBundle {
+                    cert_pem: &old_cert,
+                    key_pem: &old_key,
+                    ca_pem: &pinned,
+                },
+            )
+            .unwrap();
+
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/issue"))
+                .respond_with(CertIssuerSigns(ca))
+                .mount(&server)
+                .await;
+            let client = handshake::HandshakeClient::new(server.uri());
+            issue_custody_cert_from_cert_issuer(
+                &client,
+                "token",
+                ME,
+                &a_custody_request_into(&dir),
+                Some(pinned.as_bytes()),
+                &daemon,
+                MILLISECOND,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(server.received_requests().await.unwrap().len(), 1, "asked");
+            let cert = std::fs::read_to_string(dir.path().join("cert.pem")).unwrap();
+            assert_ne!(cert, old_cert);
+            assert!(!dir.path().join("key.pem").exists());
+            assert_eq!(held(&daemon).await.unwrap(), vec![cert]);
+        }
+
+        // The daemon is a native sidecar declared before polar-init: started first, but its socket may not be there
+        // the moment polar-init asks.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_socket_that_comes_late_is_waited_for() {
+            let ca = test_ca();
+            let sockets = tempfile::TempDir::new().unwrap();
+            let socket = sockets.path().join("custody.sock");
+            let daemon = daemon_at(&socket);
+            let path = sockets.path().to_path_buf();
+            let ca_pem = ca.pem.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                serve_daemon(&path, &ca_pem, true);
+            });
+            let csr = custody_csr(
+                &daemon,
+                &"client:/x:custody:".parse().unwrap(),
+                ME,
+                MILLISECOND,
+            )
+            .await
+            .unwrap();
+            assert!(csr.contains("CERTIFICATE REQUEST"));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_daemon_that_refuses_stops_polar_init() {
+            let ca = test_ca();
+            let sockets = tempfile::TempDir::new().unwrap();
+            let daemon = daemon_at(&serve_daemon(sockets.path(), &ca.pem, false));
+            let why = custody_csr(
+                &daemon,
+                &"client:/x:custody:".parse().unwrap(),
+                ME,
+                MILLISECOND,
+            )
+            .await
+            .unwrap_err();
+            assert!(why.contains("may not ask"), "{why}");
+        }
     }
 }

@@ -432,3 +432,152 @@ mod existing {
         unusable_because(judge(&half, &[], Usage::Server), "key.pem cannot be read");
     }
 }
+
+// ---------------------------------------------------------------------------
+// A certificate whose key is the custody daemon's (docs/architecture/key-custody.md, step 3): judged against the key
+// its CSR carries, and written with no key file
+// ---------------------------------------------------------------------------
+
+mod custody {
+    use cert_client::output::{OutputError, Usage, judge_certificate, write_certificate};
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertificateSigningRequestParams,
+        ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, PKCS_ECDSA_P256_SHA256,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::SystemTime;
+    use tempfile::TempDir;
+
+    const IDENTITY: &str = "git-repo-observer.polar.serviceaccount.cluster.local";
+
+    struct Ca {
+        params: CertificateParams,
+        key: KeyPair,
+        pem: String,
+    }
+
+    fn ca() -> Ca {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let pem = params.self_signed(&key).unwrap().pem();
+        Ca { params, key, pem }
+    }
+
+    /// A CSR for `names`, as the daemon makes one with a key it keeps.
+    fn csr(names: &[&str]) -> String {
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        CertificateParams::new(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+            .unwrap()
+            .serialize_request(&key)
+            .unwrap()
+            .pem()
+            .unwrap()
+    }
+
+    /// What an issuer does with `csr`: a client certificate under `ca` for an hour.
+    fn issued(ca: &Ca, csr: &str) -> String {
+        let mut request = CertificateSigningRequestParams::from_pem(csr).unwrap();
+        request.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let now = time::OffsetDateTime::now_utc();
+        request.params.not_before = now - time::Duration::minutes(1);
+        request.params.not_after = now + time::Duration::hours(1);
+        request
+            .signed_by(&Issuer::from_params(&ca.params, &ca.key))
+            .unwrap()
+            .pem()
+    }
+
+    fn judged(cert: &str, csr: &str, ca: &Ca, names: &[&str]) -> Result<String, String> {
+        let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        judge_certificate(
+            cert.as_bytes(),
+            csr.as_bytes(),
+            ca.pem.as_bytes(),
+            IDENTITY,
+            &names,
+            Usage::Client,
+            SystemTime::now(),
+        )
+    }
+
+    #[test]
+    fn a_certificate_for_the_csr_s_key_is_accepted() {
+        let ca = ca();
+        let csr = csr(&[IDENTITY]);
+        assert!(judged(&issued(&ca, &csr), &csr, &ca, &[]).is_ok());
+    }
+
+    #[test]
+    fn a_certificate_for_another_key_is_refused() {
+        let ca = ca();
+        let cert = issued(&ca, &csr(&[IDENTITY]));
+        let why = judged(&cert, &csr(&[IDENTITY]), &ca, &[]).unwrap_err();
+        assert!(why.contains("not for the key"), "{why}");
+    }
+
+    #[test]
+    fn the_rest_is_judged_as_a_bundle_is() {
+        let (ours, theirs) = (ca(), ca());
+        let csr = csr(&[IDENTITY]);
+        let why = judged(&issued(&theirs, &csr), &csr, &ours, &[]).unwrap_err();
+        assert!(why.contains("not signed by"), "{why}");
+        let why = judged(&issued(&ours, &csr), &csr, &ours, &["neo4j"]).unwrap_err();
+        assert!(why.contains("does not name 'neo4j'"), "{why}");
+        let other = csr_for_another(&ours);
+        let why = judged(&other, &csr, &ours, &[]).unwrap_err();
+        assert!(why.contains("does not name"), "{why}");
+    }
+
+    fn csr_for_another(ca: &Ca) -> String {
+        let other = csr(&["kube-agent.polar.serviceaccount.cluster.local"]);
+        issued(ca, &other)
+    }
+
+    #[test]
+    fn a_csr_that_is_not_one_is_refused() {
+        let ca = ca();
+        let cert = issued(&ca, &csr(&[IDENTITY]));
+        let why = judged(&cert, "not a csr", &ca, &[]).unwrap_err();
+        assert!(why.contains("CSR"), "{why}");
+    }
+
+    #[test]
+    fn the_certificate_and_the_ca_are_written_and_no_key_is_left() {
+        let dir = TempDir::new().unwrap();
+        // A key file from before has no place beside a certificate whose key is the daemon's.
+        std::fs::write(dir.path().join("key.pem"), "an old key").unwrap();
+        write_certificate(dir.path(), "CERT", "CA").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("cert.pem")).unwrap(),
+            "CERT"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ca.pem")).unwrap(),
+            "CA"
+        );
+        assert!(!dir.path().join("key.pem").exists());
+        for name in ["cert.pem", "ca.pem"] {
+            let mode = std::fs::metadata(dir.path().join(name))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o644, "{name}");
+        }
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.len(), 2, "nothing else, no .tmp: {names:?}");
+    }
+
+    #[test]
+    fn a_missing_directory_is_said() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("absent");
+        assert!(matches!(
+            write_certificate(&missing, "CERT", "CA"),
+            Err(OutputError::DirMissing(_))
+        ));
+    }
+}

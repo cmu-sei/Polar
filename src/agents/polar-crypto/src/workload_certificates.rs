@@ -129,7 +129,42 @@ pub async fn request_certificate(
     let csr = generate_csr(identity, &request.key_algorithm, &request.names)
         .map_err(|e| RequestError::Failed(format!("cannot generate the CSR: {e}")))?;
     let private_key_pem = Zeroizing::new(csr.private_key_pem);
+    let issued = request_certificate_with_csr(
+        observer,
+        token,
+        request.cert_type,
+        &request.names,
+        &csr.csr_pem,
+        offers,
+    )
+    .await?;
+    Ok(IssuedCertificate {
+        certificate_pem: issued.certificate_pem,
+        ca_chain_pem: issued.ca_chain_pem,
+        private_key_pem,
+        escrow_public_key_pem: issued.escrow_public_key_pem,
+    })
+}
 
+/// A certificate issued for a CSR made elsewhere, whose key this side never held.
+#[derive(Debug)]
+pub struct IssuedForCsr {
+    pub certificate_pem: String,
+    pub ca_chain_pem: String,
+    /// The credentials agent's escrow public key, which the reply carries so the pod need not ask for it.
+    pub escrow_public_key_pem: String,
+}
+
+/// One attempt at one certificate for `csr_pem`, a CSR made elsewhere: by the pod's custody daemon, which holds its key
+/// (docs/architecture/key-custody.md, step 3). Asked and sealed as [`request_certificate`] asks.
+pub async fn request_certificate_with_csr(
+    observer: &ObserverClient,
+    token: &str,
+    cert_type: WorkloadCertType,
+    names: &[String],
+    csr_pem: &str,
+    offers: &OfferCheck,
+) -> Result<IssuedForCsr, RequestError> {
     let offer = match observer.open_session().await.map_err(transport)? {
         SessionOutcome::Offer(offer) => offer,
         SessionOutcome::Busy => {
@@ -150,9 +185,9 @@ pub async fn request_certificate(
 
     let sealed = SealedIssuanceRequest {
         session_id: offer.session_id,
-        csr_pem: csr.csr_pem,
-        cert_type: request.cert_type,
-        names: request.names.clone(),
+        csr_pem: csr_pem.to_string(),
+        cert_type,
+        names: names.to_vec(),
         sealed_credential,
     };
     match observer.issue_sealed(&sealed).await.map_err(transport)? {
@@ -160,10 +195,9 @@ pub async fn request_certificate(
             certificate_pem,
             ca_chain_pem,
             escrow_public_key_pem,
-        }) => Ok(IssuedCertificate {
+        }) => Ok(IssuedForCsr {
             certificate_pem,
             ca_chain_pem,
-            private_key_pem,
             escrow_public_key_pem,
         }),
         SealedOutcome::Issuance(IssuanceReply::Refused { reason }) if is_temporary(&reason) => {
@@ -391,6 +425,28 @@ mod tests {
         assert_eq!(sent.cert_type, WorkloadCertType::Server);
         assert_eq!(sent.names, request.names);
         assert!(sent.csr_pem.contains("CERTIFICATE REQUEST"));
+    }
+
+    /// The custody daemon makes the key and the CSR (docs/architecture/key-custody.md, step 3): the CSR sent is the one
+    /// given, as it was given, and nothing of a key comes back.
+    #[tokio::test]
+    async fn a_csr_made_elsewhere_is_the_one_sent() {
+        let (_server, consumer, client) = observer().await;
+        let elsewhere = generate_csr(IDENTITY, &KeyAlgorithm::EcdsaP256, &[]).unwrap();
+        let issued = request_certificate_with_csr(
+            &client,
+            TOKEN,
+            WorkloadCertType::Client,
+            &[],
+            &elsewhere.csr_pem,
+            &offers(),
+        )
+        .await
+        .unwrap();
+        assert!(!issued.certificate_pem.is_empty());
+        let answered = consumer.requests_it_answered.lock().unwrap();
+        assert_eq!(answered[0].csr_pem, elsewhere.csr_pem);
+        assert_eq!(answered[0].cert_type, WorkloadCertType::Client);
     }
 
     #[tokio::test]

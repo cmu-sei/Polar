@@ -67,6 +67,23 @@ pub fn write_bundle(dir: &Path, bundle: &OutputBundle<'_>) -> Result<(), OutputE
     Ok(())
 }
 
+/// Write a certificate whose key is the custody daemon's, and the CA, to `dir` atomically, as [`write_bundle`] writes
+/// them, and remove any `key.pem`: there is no key file beside such a certificate (docs/architecture/key-custody.md,
+/// step 3).
+pub fn write_certificate(dir: &Path, cert_pem: &str, ca_pem: &str) -> Result<(), OutputError> {
+    if !dir.exists() {
+        return Err(OutputError::DirMissing(dir.to_path_buf()));
+    }
+
+    write_atomic(dir, "cert.pem", cert_pem.as_bytes(), 0o644)?;
+    write_atomic(dir, "ca.pem", ca_pem.as_bytes(), 0o644)?;
+    match std::fs::remove_file(dir.join("key.pem")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// What a certificate is for, as the extended key usage says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Usage {
@@ -123,7 +140,14 @@ pub fn existing_bundle(
         },
     };
     match judge(
-        &cert_pem, &key_pem, &ca_pem, ca_name, identity, names, usage, now,
+        &cert_pem,
+        Key::File(&key_pem),
+        &ca_pem,
+        ca_name,
+        identity,
+        names,
+        usage,
+        now,
     ) {
         Ok(not_after) => ExistingBundle::Reusable { not_after },
         Err(why) => ExistingBundle::Unusable(why),
@@ -145,7 +169,7 @@ pub fn judge_bundle(
 ) -> Result<String, String> {
     judge(
         cert_pem,
-        key_pem,
+        Key::File(key_pem),
         pinned_ca,
         "the pinned CA",
         identity,
@@ -155,11 +179,43 @@ pub fn judge_bundle(
     )
 }
 
-/// The one judgement both callers make. `ca_name` names the CA in the reasons.
+/// Whether a certificate whose key is the custody daemon's can be used (docs/architecture/key-custody.md, step 3):
+/// judged as [`judge_bundle`] judges one, except that its key is the one `csr_pem`, the CSR it was issued for,
+/// carries, since there is no key file. `Ok` is when it expires.
+pub fn judge_certificate(
+    cert_pem: &[u8],
+    csr_pem: &[u8],
+    pinned_ca: &[u8],
+    identity: &str,
+    names: &[String],
+    usage: Usage,
+    now: std::time::SystemTime,
+) -> Result<String, String> {
+    judge(
+        cert_pem,
+        Key::Csr(csr_pem),
+        pinned_ca,
+        "the pinned CA",
+        identity,
+        names,
+        usage,
+        now,
+    )
+}
+
+/// Where the certificate's key is to be found, for the judgement to check the certificate is for it.
+enum Key<'a> {
+    /// `key.pem`, the key itself.
+    File(&'a [u8]),
+    /// The CSR the certificate was issued for, whose key another holds.
+    Csr(&'a [u8]),
+}
+
+/// The one judgement every caller makes. `ca_name` names the CA in the reasons.
 #[allow(clippy::too_many_arguments)]
 fn judge(
     cert_pem: &[u8],
-    key_pem: &[u8],
+    key: Key<'_>,
     ca_pem: &[u8],
     ca_name: &str,
     identity: &str,
@@ -229,12 +285,36 @@ fn judge(
         return Err(format!("the certificate is not for {usage:?} use"));
     }
 
-    let key = std::str::from_utf8(key_pem)
-        .map_err(|e| e.to_string())
-        .and_then(|pem| rcgen::KeyPair::from_pem(pem).map_err(|e| e.to_string()))
-        .map_err(|e| format!("key.pem is not a private key: {e}"))?;
-    if key.public_key_raw() != cert.public_key().subject_public_key.data.as_ref() {
-        return Err("key.pem is not the certificate's key".to_string());
+    let certified = cert.public_key().subject_public_key.data.as_ref();
+    match key {
+        Key::File(key_pem) => {
+            let key = std::str::from_utf8(key_pem)
+                .map_err(|e| e.to_string())
+                .and_then(|pem| rcgen::KeyPair::from_pem(pem).map_err(|e| e.to_string()))
+                .map_err(|e| format!("key.pem is not a private key: {e}"))?;
+            if key.public_key_raw() != certified {
+                return Err("key.pem is not the certificate's key".to_string());
+            }
+        }
+        Key::Csr(csr_pem) => {
+            use x509_parser::prelude::FromDer as _;
+            let (_, block) = x509_parser::pem::parse_x509_pem(csr_pem)
+                .map_err(|e| format!("the CSR is not PEM: {e}"))?;
+            let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(
+                &block.contents,
+            )
+            .map_err(|e| format!("the CSR is not a CSR: {e}"))?;
+            if csr
+                .certification_request_info
+                .subject_pki
+                .subject_public_key
+                .data
+                .as_ref()
+                != certified
+            {
+                return Err("the certificate is not for the key the CSR carries".to_string());
+            }
+        }
     }
 
     Ok(not_after.to_string())

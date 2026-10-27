@@ -171,6 +171,9 @@ pub struct InitSettings {
     /// `None` when the bootstrap is not asked for, in which case nothing of the client's or the
     /// crypto actor's is read or required.
     pub escrow: Option<EscrowSettings>,
+    /// The custody daemon's socket, through which a certificate whose key is the daemon's is made and installed
+    /// (docs/architecture/key-custody.md, step 3). The Cassini client's variable: the daemon is the pod's.
+    pub custody_socket: Option<String>,
 }
 
 /// The one snapshot of the process polar-init runs on: its own variables, the Cassini
@@ -218,6 +221,10 @@ impl InitSettings {
         let cert_issuer_url = optional(CERT_ISSUER_URL.read(env), &mut note);
         let observer_url = optional(OBSERVER_URL.read(env), &mut note);
         let credentials_agent = optional(CREDENTIALS_AGENT_IDENTITY.read(env), &mut note);
+        let custody_socket = optional(
+            cassini_client::environment::CUSTODY_SOCKET.read(env),
+            &mut note,
+        );
         // Said once, whatever else is wrong: which address a mode needs.
         for problem in issuer_is_consistent(env) {
             note(problem);
@@ -267,6 +274,7 @@ impl InitSettings {
             issuance,
             token_path,
             escrow,
+            custody_socket,
         })
     }
 }
@@ -402,6 +410,27 @@ mod tests {
         assert_eq!(config.var("GRAPH_PASSWORD"), None);
         assert_eq!(config.var("BROKER_ADDR").as_deref(), Some("cassini:8080"));
         assert!(InitSettings::from_env(&config).is_ok());
+    }
+
+    /// The custody daemon's socket, where a certificate whose key is the daemon's is made and installed
+    /// (docs/architecture/key-custody.md, step 3); the same variable the Cassini client reads.
+    #[test]
+    fn the_custody_socket_is_read_when_given() {
+        let s = InitSettings::from_env(&snapshot(&with(&[
+            OWN,
+            &[("POLAR_CUSTODY_SOCKET", "/custody/custody.sock")],
+        ])))
+        .unwrap();
+        assert_eq!(s.custody_socket.as_deref(), Some("/custody/custody.sock"));
+        let s = InitSettings::from_env(&snapshot(&with(&[OWN, &[("POLAR_CUSTODY_SOCKET", "  ")]])))
+            .unwrap();
+        assert_eq!(s.custody_socket, None, "blank is not given");
+        assert_eq!(
+            InitSettings::from_env(&with(&[OWN]))
+                .unwrap()
+                .custody_socket,
+            None
+        );
     }
 
     // ---- where the certificates are requested from ---------------------------------------------------------

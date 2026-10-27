@@ -301,6 +301,31 @@ renewal rule is built (`deployments.md`, items 1 and 2, its build step 2). Decid
 is built after step 3 and before step 4 gives pods a daemon, so no pod runs with a daemon it cannot be issued for
 again after a restart.
 
+*Built (2026-10-27): step 3,* as planned:
+- *`polar-init`* (`polar-init/src/main.rs`):
+  - `KeyMaker::{Here, Custody}` parsed from the key-algorithm field;
+  - `custody_for` says before anything waits whether a socket is needed, and refuses two of a type;
+  - `of_the_daemon` waits while the daemon cannot be reached and stops at a refusal;
+  - `custody_csr`, then the path's own retries, then `judged_for_csr` and `install_and_write`;
+  - `issue_custody_cert_from_cert_issuer` and `issue_custody_cert_via_observer`, neither keeping an old bundle.
+- *`polar-crypto`:* `request_certificate_with_csr`, with `request_certificate` built on it.
+- *The cert-issuer client* (`output.rs`): `judge_certificate`, a certificate judged against its CSR's key by the same
+  judgement as a bundle's, and `write_certificate`, the certificate and the CA with any `key.pem` removed.
+- *`POLAR_CUSTODY_SOCKET`* is read into `InitSettings`; it is the Cassini client's variable, already in
+  `polar-init`'s snapshot.
+- *Tests:*
+  - the flag;
+  - the socket rule and one per type;
+  - both paths against a daemon in the test: the daemon holds the certificate, `ca.pem` is the pinned CA, and an
+    earlier `key.pem` is gone;
+  - a certificate under another CA neither installed nor written;
+  - a bundle from before not kept;
+  - a socket that comes late, waited for;
+  - a daemon that refuses, stopped at;
+  - a CSR made elsewhere sent as given;
+  - the CSR judgement's cases and the keyless writer.
+- *Mutations caught:* an old bundle kept, an unreachable daemon taken as final, two of a type let through.
+
 ## Build order, each tests first
 
 1. The daemon: key generation (process keyring or memory), the CSR, taking the certificate and judging it, signing,

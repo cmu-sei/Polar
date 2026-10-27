@@ -5843,6 +5843,7 @@ dependencies = [
  "credentials-agent-client",
  "credentials_agent_common",
  "polar-crypto",
+ "polar-custody",
  "polar-env",
  "polar-health",
  "polar-kernel-keyring",

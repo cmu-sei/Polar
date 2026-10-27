@@ -34,6 +34,7 @@ clap = { workspace = true }
 credentials-agent-client.workspace = true
 credentials_agent_common.workspace = true
 polar-crypto.workspace = true
+polar-custody.workspace = true
 polar-env.workspace = true
 polar-kernel-keyring.workspace = true
 polar-health = { path = "../polar-health" }
