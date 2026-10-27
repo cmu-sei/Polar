@@ -545,7 +545,7 @@ The plan:
    - the health actor: rejuvenating on an empty daemon and on a different certificate, tolerating an unreachable one
      for its ticks and then rejuvenating, and nothing while the daemon holds the certificate;
    - `infra/tests/rules.nu` and `charts.nu` brought along.
-8. *After it:* the speed gate (step 6), then a fresh sandbox-local (step 7). Revocation (step 5) can come before or
+8. *After it:* the speed gate (step 6, closed 2026-10-27), then a fresh sandbox-local (step 7). Revocation (step 5) can come before or
    after; the renewal rule is in.
 
 *Built (2026-10-27): the sealing.* `Custody::handle` (`polar-custody/src/custody.rs`) refuses `MakeCsr` and `Install`
@@ -663,7 +663,7 @@ daemon keeps its installer apart from its workload, under one UID.
 - *(c) Both roles to UID 1000, nothing more.* A compromised workload could replace the key (`MakeCsr`), which is a
   denial of service and no more, since it cannot have a certificate signed. The weakest.
 
-## Step 6, the speed gate: the plan (2026-10-27, its question decided)
+## Step 6, the speed gate: the plan (2026-10-27, closed)
 
 What is there, read for this:
 - *Resumption, the question "Speed" left open, answered.* A client reconnecting with the configuration it connected with
@@ -708,7 +708,8 @@ The plan:
 
 *Built (2026-10-27): the storm bench, and its first figures* (precisionws, i9-13950HX, 24 threads; release builds;
 `polar-custody/tests/bench.rs`, `the_daemon_s_cost_at_each_concurrency_of_the_storm`, and
-`cassini/broker/tests/storm.rs`; both ignored by default, each asserting its criterion after printing its table).
+`cassini/broker/tests/storm.rs`; both ignored by default, each asserting its criterion after printing its table, as
+built at `a39c43a4`).
 
 - *The first criterion is missed, as it was put.* Added at p99 over in-process signing at the same concurrency, over
   four runs:
@@ -742,6 +743,20 @@ The plan:
 release; the cluster's storm at step 7 confirms it under real pods and cgroups. The question, as it was put: (a) the
 bench now, the cluster confirming; (b) the cluster's storm alone, the gate waiting for step 7; (c) the bench alone.
 
+*Closed (the maintainer, 2026-10-27): no further measurement, and no gate.* The first criterion measured the wrong
+thing. The daemon signs once for each full handshake, so once for a connection, never for a packet or a byte, and a
+resumed connection costs no signature at all; what it adds is paid at connecting and nowhere else. Its capacity, about
+320,000 signatures a second, is some six times Cassini's ceiling of 40,000 to 50,000 requests a second (the
+maintainer's figure), even were every request a new connection, and the broker's handshake rate with the daemon's key
+holds against key files at every concurrency the bench could reach. So:
+- both benches stay, as measures that print their tables and assert nothing
+  (`the_daemon_s_cost_at_each_concurrency_of_a_storm`, and
+  `a_broker_s_handshake_rate_in_a_storm_with_a_key_file_and_with_the_daemon`), ignored by default and run in release
+  when a figure is wanted;
+- the cluster's storm (item 3) is not built; step 7 runs without it;
+- the broker breaking at 256 connections at once is carried as a finding of its own (`remaining-work.md`), apart from
+  custody.
+
 ## Build order, each tests first
 
 1. The daemon: key generation (process keyring or memory), the CSR, taking the certificate and judging it, signing,
@@ -760,5 +775,6 @@ bench now, the cluster confirming; (b) the cluster's storm alone, the gate waiti
 4. The catalog and the charts: the sidecar in the `agent` and `service` kinds, its socket volume, its UID; Cassini's
    listener taking the signer.
 5. Revocation: the daemon on its own serial, its exit, and the broker ending revoked sessions.
-6. The speed gate: the reconnection storm in the load harness, with key files and with the daemon.
+6. The speed gate: the reconnection storm in the load harness, with key files and with the daemon. *Closed
+   2026-10-27: the benches measure it, and nothing gates on them ("Step 6, the speed gate").*
 7. On a fresh sandbox-local: no `key.pem` in any pod; a revoked agent's session ends and its key is gone.

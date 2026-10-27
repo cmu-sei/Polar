@@ -125,8 +125,6 @@ async fn a_signature_through_the_socket_against_one_in_process() {
 
 /// The concurrencies the storm asks the daemon for signatures at (docs/architecture/key-custody.md, step 6).
 const CONCURRENCY: [usize; 4] = [1, 8, 32, 128];
-/// The most the daemon may add to a signature at p99, against one signed in process at the same concurrency.
-const MOST_ADDED_AT_P99: Duration = Duration::from_micros(100);
 /// Signatures a concurrency asks for, spread over its callers.
 const STORM_SIGNATURES: usize = 10_000;
 
@@ -158,13 +156,14 @@ fn at_once(callers: usize, sign: Arc<dyn Fn() + Send + Sync>) -> (Vec<Duration>,
     (times, started.elapsed())
 }
 
-/// The gate's first criterion (docs/architecture/key-custody.md, step 6): at each concurrency of the storm, a signature
-/// through the daemon costs no more than 100 µs at p99 over one signed in process at the same concurrency. The daemon
-/// on a runtime of its own, as its process has; the callers share one client, as one process's handshakes do. Ignored
-/// by default; run with `cargo test --release -p polar-custody --test bench -- --ignored --nocapture`.
+/// A signature through the daemon against one signed in process, at each concurrency of a storm, callers asking again
+/// as soon as they are answered: the daemon held at its capacity (docs/architecture/key-custody.md, step 6, where the
+/// figures are read and the gate closed). The daemon on a runtime of its own, as its process has; the callers share one
+/// client, as one process's handshakes do. A measure, not a gate: it prints and asserts nothing. Ignored by default; run
+/// with `cargo test --release -p polar-custody --test bench -- --ignored --nocapture`.
 #[test]
 #[ignore]
-fn the_daemon_s_cost_at_each_concurrency_of_the_storm() {
+fn the_daemon_s_cost_at_each_concurrency_of_a_storm() {
     use ring::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair};
     let ca = test_ca();
     let daemon = daemon_apart(&ca, both());
@@ -185,7 +184,6 @@ fn the_daemon_s_cost_at_each_concurrency_of_the_storm() {
     println!(
         "callers  in process p50 / p99      daemon p50 / p99        added at p99   daemon signatures/s"
     );
-    let mut missed = Vec::new();
     for callers in CONCURRENCY {
         let (key, m, rng) = (local.clone(), message.clone(), random.clone());
         let (in_process, _) = at_once(
@@ -208,13 +206,5 @@ fn the_daemon_s_cost_at_each_concurrency_of_the_storm() {
             "{callers:>7}  {p50:>10.1?} / {p99:>10.1?}   {d50:>10.1?} / {d99:>10.1?}   {added:>12.1?}   {:>10.0}",
             through.len() as f64 / wall.as_secs_f64()
         );
-        if added > MOST_ADDED_AT_P99 {
-            missed.push(format!("{callers} callers: {added:?} added at p99"));
-        }
     }
-    assert!(
-        missed.is_empty(),
-        "the gate's first criterion, at most {MOST_ADDED_AT_P99:?} added at p99, is missed: {}",
-        missed.join("; ")
-    );
 }

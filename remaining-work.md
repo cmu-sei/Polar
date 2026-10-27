@@ -667,8 +667,14 @@ Principle: declare each environment variable once, with its type, default, docum
   "The renewal rule"). neo4rs settled 2026-10-27: our fork
   (`daveman1010221/neo4rs`, `v0.9.0-rc.10` and one commit) takes a rustls configuration, and the graph's key may be the
   daemon's (`key-custody.md`, "The neo4rs patch"). Step 4 built 2026-10-27: the sealing, the broker's and git server's listeners, the health actor's watch, the
-  image, and the catalog with its switch (on by default; the scheduler observer on key files). Next: the speed gate
-  (step 6), then a fresh sandbox-local (step 7); revocation (step 5) before or after.
+  image, and the catalog with its switch (on by default; the scheduler observer on key files). Step 6, the speed gate,
+  closed 2026-10-27: the daemon signs once for a connection, at about 320,000 a second, and the broker's handshake rate
+  holds with it; the benches stay as measures (`key-custody.md`, "Step 6"). Next: a fresh sandbox-local (step 7);
+  revocation (step 5) before or after.
+- [ ] The broker at 256 connections at once (found 2026-10-27, by the storm bench, `cassini/broker/tests/storm.rs`):
+  with key files and with the daemon alike, a p99 handshake of 1.0 to 1.1 s, a TCP connection retried after its SYN
+  went unanswered, some rounds at 250 a second, the host's `somaxconn` and SYN backlog at 4,096. At 64 at once the p99
+  is 3 to 31 ms. Look at the listener's accept loop and its backlog first (`cassini/broker/src/listener.rs`).
 - [ ] The Neo4j image's label (found 2026-10-27): `infra/images.nuon` gives the external `neo4j` image the tag `5.26.2`,
   but the image it points at (`~/Documents/projects/nix-neo4j/result-neo4j-image`) is Neo4j 2025.08.0 built from source
   (`nix-neo4j/pkgs/neo4j-from-source.nix`). What is pinned and what is run should say the same.

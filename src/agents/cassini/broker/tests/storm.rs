@@ -21,9 +21,9 @@
    DM26-0670
 */
 
-//! The speed gate's second criterion (docs/architecture/key-custody.md, step 6): a broker taking C new connections at
-//! once, each a full TLS 1.3 handshake, completes them at no less than 90% of its rate with a key file when its key is
-//! the custody daemon's. The clients' keys are files in both, each connection a fresh configuration so nothing resumes:
+//! A broker taking C new connections at once, each a full TLS 1.3 handshake, with its key a file and then the custody
+//! daemon's (docs/architecture/key-custody.md, step 6, where the figures are read and the gate closed). A measure, not
+//! a gate: it prints and asserts nothing. The clients' keys are files in both, each connection a fresh configuration so nothing resumes:
 //! what is measured is the broker's daemon, which signs once for every connection in the cluster. Ignored by default;
 //! run with `cargo test --release -p cassini-broker --test storm -- --ignored --nocapture`.
 
@@ -41,8 +41,6 @@ use support::{Pki, TestBroker, serial};
 const STORM: [usize; 4] = [1, 16, 64, 256];
 /// Rounds of each, the rate the median of them.
 const ROUNDS: usize = 5;
-/// The least the daemon's rate may be, as a share of the key file's.
-const LEAST_SHARE: f64 = 0.9;
 
 /// A daemon trusting `pki`'s CA, on a runtime of its own as the daemon's process has (`#[tokio::main]`).
 fn daemon_apart(pki: &Pki, dir: &std::path::Path) -> std::path::PathBuf {
@@ -142,7 +140,7 @@ async fn measure(pki: &Pki, addr: &str) -> Vec<(usize, f64, Duration, Duration)>
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore]
-async fn a_broker_whose_key_is_the_daemon_s_keeps_its_handshake_rate_in_a_storm() {
+async fn a_broker_s_handshake_rate_in_a_storm_with_a_key_file_and_with_the_daemon() {
     let _only = serial().await;
 
     let files = TestBroker::start_on(Pki::new()).await;
@@ -158,21 +156,11 @@ async fn a_broker_whose_key_is_the_daemon_s_keeps_its_handshake_rate_in_a_storm(
     custody.stop().await;
 
     println!("at once   files /s   p50 / p99             daemon /s   p50 / p99             share");
-    let mut missed = Vec::new();
     for ((count, f_rate, f50, f99), (_, d_rate, d50, d99)) in with_files.iter().zip(&with_daemon) {
         let share = d_rate / f_rate;
         println!(
             "{count:>7}   {f_rate:>8.0}   {f50:>8.1?} / {f99:>8.1?}   {d_rate:>8.0}   {d50:>8.1?} / {d99:>8.1?}   {:>5.1}%",
             share * 100.0
         );
-        if share < LEAST_SHARE {
-            missed.push(format!("{count} at once: {:.1}%", share * 100.0));
-        }
     }
-    assert!(
-        missed.is_empty(),
-        "the gate's second criterion, at least {:.0}% of the key file's rate, is missed: {}",
-        LEAST_SHARE * 100.0,
-        missed.join("; ")
-    );
 }
