@@ -23,7 +23,7 @@
 
 # Key custody: a daemon per pod that holds the mTLS key
 
-Status, 2026-10-27: a design for the maintainer to clear. Nothing here is built.
+Status, 2026-10-27: cleared by the maintainer, with the four recommendations below. Nothing here is built.
 
 ## Why
 
@@ -102,29 +102,48 @@ zeroed). Two things make it whole:
 | Root on the node | reads the file | reads the daemon's memory; with lockdown, not a key in the kernel keyring |
 | Revoking a certificate | nothing stops a copy before it expires | the key is destroyed and the broker ends its sessions |
 
-## Open, for the maintainer
+## Decided (the maintainer, 2026-10-27: all four as recommended)
 
-1. **What a revoked pod does next.** Destroying its key ends its identity. Then either the daemon exits and the pod
-   restarts (in place) and asks again, which the credentials agent can refuse, or it stays without a key until it is
-   replaced. Recommendation: exit, so the pod's ending is visible and the credentials agent decides, by its own rules
-   and the attestation agent's word, whether it is issued again.
-2. **The broker ending revoked sessions.** It is the other half of immediacy, and Cassini is not on the builder.
-   Recommendation: built with the daemon, the broker holding the revoked set from the same signed updates.
-3. **The escrow key in the daemon too.** One place for every key a pod holds; `CryptoActor` asks the daemon to decrypt
-   as the workload asks it to sign. Recommendation: after the mTLS key, as its own step.
-4. **The bootstrap services.** Cassini and the credentials agent run `polar-init` and can carry the daemon like
-   everyone; cert-issuer signs itself in process with no `polar-init` and keeps its key as now.
+1. **A revoked pod's daemon exits** once it has destroyed the key, so the pod restarts (in place) and asks again, and the
+   credentials agent decides, by its own rules and the attestation agent's word, whether it is issued again.
+2. **The broker ends a revoked certificate's sessions,** built with the daemon, holding the revoked set from the same
+   signed authority updates.
+3. **The escrow key moves into the daemon later,** as its own step after the mTLS key: one place for every key a pod
+   holds, `CryptoActor` asking the daemon to decrypt as the workload asks it to sign.
+4. **Cassini and the credentials agent carry the daemon** like every other pod; cert-issuer keeps its in-process key.
+
+## Speed: Cassini is its first user (the maintainer, 2026-10-27)
+
+Every TLS handshake signs once on each side: the client with its key, Cassini with its server key. So Cassini's daemon
+signs once for every connection anyone in the cluster makes, and its load is the cluster's connection rate: every agent
+registering at once when Cassini comes back (the reconnection storm), every rejuvenation, every reconnect after a
+dropped session. What that asks of the design:
+- *The algorithm before the keyring.* An ECDSA P-256 signature (today's key type) or an Ed25519 one is cheap; an RSA one
+  is far slower, and slower still at 4096 bits. Where the kernel cannot sign a fast key type, the daemon holds the key in
+  its own memory rather than switch the key to RSA to suit the kernel. The keyring is used only where it costs nothing
+  in the algorithm.
+- *No setup per signature.* One long-lived connection per process to its daemon, requests named so many are in flight
+  at once, a compact fixed message (no JSON), and a daemon that signs concurrently. A signature costs a local round trip
+  and the arithmetic, nothing more.
+- *Fewer signatures.* TLS 1.3 resumption lets a client reconnect without a new signature on either side; whether the
+  broker and the clients resume today is to be read before the build, and turned on if not.
+- *A gate, measured.* The load harness (`broker-baseline.md`) gains a reconnection storm (every client at once, and a
+  steady rate of reconnects), run with key files and with the daemon. The proposal, to be confirmed by the first
+  measurement: the daemon adds no more than 100 µs to a signature at p99 under the storm, and Cassini's handshakes per
+  second fall by no more than 10%. A build that misses it does not ship.
 
 ## Build order, each tests first
 
 1. The daemon: key generation (process keyring or memory), the CSR, taking the certificate and judging it, signing,
-   the socket and its caller check. Properties: a signature verifies under the certificate it holds; no message gets the
-   key out; a caller that is not the pod's is refused.
+   the socket and its caller check, and requests in flight concurrently. Properties: a signature verifies under the
+   certificate it holds; no message gets the key out; a caller that is not the pod's is refused. A benchmark of a
+   signature through the socket against one in process, from the start.
 2. The workload signer in `polar-crypto` (rustls), and the Cassini client and the HTTP identities taking it in place of
    `TLS_CLIENT_KEY`.
 3. `polar-init` taking the daemon's CSR and handing it the certificate; the bundle in the shared volume becomes the
    certificate and `ca.pem` alone.
 4. The catalog and the charts: the sidecar in the `agent` and `service` kinds, its socket volume, its UID; Cassini's
    listener taking the signer.
-5. Revocation: the daemon on its own serial, and the broker ending revoked sessions.
-6. On a fresh sandbox-local: no `key.pem` in any pod; a revoked agent's session ends and its key is gone.
+5. Revocation: the daemon on its own serial, its exit, and the broker ending revoked sessions.
+6. The speed gate: the reconnection storm in the load harness, with key files and with the daemon.
+7. On a fresh sandbox-local: no `key.pem` in any pod; a revoked agent's session ends and its key is gone.
