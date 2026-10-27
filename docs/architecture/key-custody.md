@@ -451,6 +451,105 @@ alone, and the setting is one Neo4j 2025.08 declares (`SslPolicyConfig`: `dbms.s
 - *Mutations caught:* no client certificate presented; both keys accepted.
 - *Not yet seen against a real Neo4j:* step 7.
 
+## Step 4, the plan (2026-10-27, for review)
+
+What is there, read for this:
+- *How a pod is made.* A workload's kind (`infra/config/kinds.nuon`: `agent`, `service`, `ca`) and its capabilities
+  (`capabilities.nuon`) are resolved (`infra/resolve.nu`) into a record. `schema/agent.dhall` renders that record as a
+  Job: polar-init the one init container (`functions.makePolarInitContainer`), the workload the one container.
+- *Every container is UID 1000* (`Constants.DropAllCapSecurityContext`: `runAsUser` and `runAsGroup` 1000), polar-init
+  and the workload alike.
+- *The escrow key needs that.* polar-init loads it into the user keyring of its UID, with permissions for possessor and
+  user only (`polar-kernel-keyring/src/lib.rs`, `keyctl_setperm(serial, KEY_POS_ALL | KEY_USR_ALL)`). The workload
+  adopts it as the same UID. A polar-init under another UID would put the key where the workload cannot reach it.
+- *The key variables:*
+  - `TLS_CLIENT_KEY` (the `cassini` capability, and `Constants.commonClientEnv`, which polar-init is given too);
+  - `GRAPH_CLIENT_KEY` (`graph-write`, the same file);
+  - `TLS_SERVER_KEY` (`cassini-server`, the broker's listener, `cassini/broker/src/listener.rs`, `with_single_cert`);
+  - `POLAR_GIT_SERVER_KEY` (`git-server`, its listener, `polar-git-server/server/src/tls.rs`).
+
+  Each certificate is one `--cert` built in `resolve.nu` (`$"($cert_kind):($c.dir):ecdsa-p256:($san)"`). The git
+  server holds a client and a server certificate; every other workload holds one.
+- *The schema can say it.* dhall-kubernetes 1.31 (`schema/kubernetes.dhall`) renders a container's
+  `restartPolicy: Always`, which makes it a native sidecar, so step 4 does not wait for 1.35.
+- *Images are Nix attributes* (`infra/images.nuon`: `polarInitImage` and the rest).
+- *No pod carries a seccomp profile yet*, so the design's "under the builder's seccomp profile" waits for the runtime
+  attestation work.
+- *Not the daemon's to hold:*
+  - cert-issuer, the `ca` kind with no polar-init, which makes its own key and refuses the socket (step 2);
+  - Neo4j's server, whose JVM reads files;
+  - the `ace` job's Neo4j client, a hand chart.
+
+  They keep key files, so step 7's "no `key.pem` in any pod" reads "in any pod but these three".
+
+The plan:
+1. *The two roles, one UID: open, the question below.* The daemon tells polar-init (who makes CSRs and installs) from
+   the workload (who signs) by UID, and here they must be the same UID.
+2. *The daemon's image and its container.*
+   - `polarPkgs.polarCustody.image` beside `polarInitImage`, listed in `images.nuon`.
+   - The container is a native sidecar: an init container with `restartPolicy: Always`, declared before polar-init,
+     so it starts first and lives as long as the pod.
+   - It runs under its own UID, 1001, group 1000, so it shares the socket with the pod's containers. Its socket is
+     0660 and checked by `SO_PEERCRED`. It runs non-root with every capability dropped but `IPC_LOCK`, so that
+     `mlockall` can lock its memory, as the design has it; without the capability a container's memory-lock limit
+     makes the lock fail, and that is only logged.
+   - Its environment:
+     - `POLAR_CUSTODY_SOCKET=/run/polar-custody/custody.sock`;
+     - `POLAR_CUSTODY_CA_CERT=/etc/polar-ca/ca.pem` (the `pinned-ca` capability's mount, which every `agent` and
+       `service` has);
+     - the installer's and the workload's UIDs.
+   - A memory-backed `emptyDir`, `polar-custody`, at `/run/polar-custody` in the sidecar, polar-init and the workload.
+3. *What the catalog renders for a pod with the daemon* (resolved in `resolve.nu`, rendered in `agent.dhall`):
+   - every certificate polar-init issues is `type:dir:custody:sans` (one per type: a render error otherwise);
+   - polar-init is given `POLAR_CUSTODY_SOCKET` and not `TLS_CLIENT_KEY`;
+   - the workload is given `POLAR_CUSTODY_SOCKET`, and not the key variables. Each capability marks its key variable
+     (`key_of: "client"` or `"server"`), and a marked variable is left out under the daemon.
+4. *The switch* (degraded operation, item 2):
+   - a target's `custody` setting, on by default;
+   - a workload's `custody: false` to leave one out;
+   - the `ca` kind never has the daemon.
+
+   Off renders exactly what renders today; the test is the render being byte for byte the same.
+5. *The two listeners take the daemon's server key.*
+   - `polar_custody::server`-side, beside `client_config`: a rustls server configuration offering TLS 1.3 alone, its
+     certificate resolved to the daemon's server slot.
+   - The broker reads `TLS_SERVER_KEY` or the socket, exactly one, as the client does; so does the git server
+     (`POLAR_GIT_SERVER_KEY`).
+   - Every client of either is rustls and speaks TLS 1.3.
+6. *A daemon that restarts ends the pod.*
+   - A sidecar that fails is restarted by the kubelet, empty: no key and no certificate, and nobody installs one, since
+     polar-init has run. Sessions already up go on; new handshakes fail.
+   - So `polar-healthcheck`, the workload's liveness probe, asks the daemon for its certificate when
+     `POLAR_CUSTODY_SOCKET` is set, and fails without one. With `restartPolicy: Never` a failed probe fails the pod,
+     and the Job makes a new one, with a new daemon, polar-init and certificate (the renewal rule admits it).
+   - After the move to Deployments, the restart rule does the same in place.
+7. *Tests first:*
+   - the render with the switch off, byte for byte the same as before;
+   - with it on:
+     - the sidecar first, with its UID, group and capability;
+     - the socket volume in the three containers;
+     - every `--cert` `custody`;
+     - no key variable in polar-init or the workload, and the socket in both;
+     - the `ca` kind and `custody: false` workloads unchanged;
+   - two certificates of one type under the daemon refused at render;
+   - the broker and the git server: a TLS 1.3 handshake whose server signature the daemon made, with `TLS_SERVER_KEY`
+     or the socket, exactly one;
+   - `polar-healthcheck` failing on a daemon with no certificate;
+   - `infra/tests/rules.nu` and `charts.nu` brought along.
+8. *After it:* the speed gate (step 6), then a fresh sandbox-local (step 7). Revocation (step 5) can come before or
+   after; the renewal rule is in.
+
+*The question for the maintainer, item 1: how the daemon keeps its installer apart from its workload, under one UID.*
+- *(a) Seal each slot once installed (recommended).* The daemon takes `MakeCsr` and `Install` for a slot until a
+  certificate is installed in it, and then only `Certificate` and `Sign`. The workload starts after every init
+  container has finished, so each slot it uses is sealed before it runs. A compromised workload cannot replace the key
+  or the certificate; on a slot it does not use it can make a CSR and nothing more, since it has no token to have one
+  signed. One change in `custody.rs`, a refusal of its own, and its tests and a property.
+- *(b) polar-init under a UID of its own.* The roles are kept as built, but the escrow key's hand-off through the user
+  keyring breaks (it is per UID), so the escrow custody changes with it. Larger, and in code that works.
+- *(c) Both roles to UID 1000, nothing more.* A compromised workload could replace the key (`MakeCsr`), which is a
+  denial of service and no more, since it cannot have a certificate signed. The weakest.
+
 ## Build order, each tests first
 
 1. The daemon: key generation (process keyring or memory), the CSR, taking the certificate and judging it, signing,
