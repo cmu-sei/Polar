@@ -139,7 +139,7 @@ dropped session. What that asks of the design:
 - *Slots.* One key per slot, `client` and `server`, since a pod can hold both (Cassini, Neo4j). P-256, today's type.
   First in the daemon's locked memory; the process keyring next, through a load-and-sign path in `polar-kernel-keyring`
   where the kernel takes P-256, and memory where it does not (rcgen builds a CSR from a key it cannot see, so nothing
-  else changes).
+  else changes). Probed 2026-10-27: no kernel takes P-256, so memory it is (below, "The process keyring, probed").
 - *The protocol.* rkyv frames on a Unix socket, each request with an id so many are in flight: `MakeCsr { slot, identity,
   names }`, `Install { slot, chain }` (the certificate must be for the slot's key and signed by the pinned CA, as
   `judge_bundle` judges a bundle), `Certificate { slot }`, `Sign { slot, message }`.
@@ -227,6 +227,27 @@ terms and recorded here:
   certificate to an mTLS server. Mutations caught: TLS 1.2 offered, the timeout dropped, the two kinds swapped, both
   accepted, the HTTP identity left off. The section's check of an empty environment now reports four problems, not
   five: a relation runs once every variable parses, so the key is named as soon as the others are given.
+
+*The process keyring, probed (2026-10-27, precisionws, 7.3.0, FIPS on).* The kernel cannot hold the daemon's key, and
+turning ECDSA back on would not change that:
+- *The probe.* A P-256 private key as PKCS#8, given to `add_key("asymmetric", ...)` in the probe's process keyring, is
+  refused with `ENOPKG`, as on 7.2.9 (`remaining-work.md`, "Harden the mTLS client key"). An RSA-2048 control loads and
+  signs (`KEYCTL_PKEY_SIGN`, `enc=pkcs1`). The RSA tests in `polar-kernel-keyring` pass.
+- *Why, in the 7.3 source.* The PKCS#8 parser takes RSA alone (`crypto/asymmetric_keys/pkcs8_parser.c`,
+  `pkcs8_note_algo`: anything but `OID_rsaEncryption` is `-ENOPKG`). The kernel's ECDSA verifies only
+  (`crypto/ecdsa.c`: `.verify` and `.set_pub_key`, no `.sign`, and no private key in its context).
+- *The ECDSA option is off,* and harmless here. Whitey's hand-curated 7.0.3 configuration turned off
+  `CONFIG_CRYPTO_ECDSA`, with DH and ECDH, and recorded no reason (`/etc/nixos` `440f29c`). precisionws's 7.3
+  configuration descends from it; the booted kernel has `ecc` and `ecdh_generic` and no ECDSA module. With the option
+  on, the kernel could verify P-256 signatures and still neither hold nor sign with a P-256 key.
+- *RSA, to suit the kernel, measured.* The kernel signs RSA-2048 in 2.9 ms at the median (p99 3.1 ms), and RSA-4096 in
+  18 ms (p99 23 ms), against `ring`'s P-256 in 12 µs: 240 to 1,500 times slower. And it signs PKCS#1 v1.5 only, where
+  TLS 1.3 needs RSA-PSS, which would take the raw private-key step with the padding done in user space. The decision
+  above stands ("The algorithm before the keyring"): P-256, in the daemon's locked memory, zeroed when it goes.
+- *What that leaves.* Root on the node can read the daemon's memory, where with lockdown it could not read a key in
+  the keyring (the threat table above). The keyring is to be revisited when the kernel's PKCS#8 parser takes EC keys
+  and its ECDSA signs. The escrow key, RSA-4096 and used to decrypt rarely, stays in the keyring, where the kernel can
+  hold it.
 
 ## Build order, each tests first
 
