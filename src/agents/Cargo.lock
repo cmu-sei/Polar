@@ -5727,6 +5727,7 @@ dependencies = [
  "p256",
  "proptest",
  "rcgen",
+ "ring",
  "rkyv",
  "rustls",
  "tempfile",

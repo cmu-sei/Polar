@@ -36,8 +36,8 @@ path = "src/main.rs"
 [dependencies]
 cert-issuer-common = { version = "1.0.0", path = "../cert-issuer/common" }
 libc.workspace = true
-p256.workspace = true
 rcgen.workspace = true
+ring = "0.17.14"
 rkyv.workspace = true
 rustls.workspace = true
 thiserror.workspace = true
@@ -48,6 +48,8 @@ x509-parser.workspace = true
 zeroize = { version = "1.9.0", features = ["aarch64"] }
 
 [dev-dependencies]
+# The tests check signatures with a second, independent implementation.
+p256.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tokio-rustls.workspace = true

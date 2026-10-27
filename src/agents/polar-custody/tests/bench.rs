@@ -58,14 +58,16 @@ async fn a_signature_through_the_socket_against_one_in_process() {
     .unwrap();
     let message = certificate_verify_input(CLIENT_CONTEXT, &[3; 32]);
 
-    // In process: the same signature, with a key this process holds.
-    let local = p256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap();
+    // In process: the same signature with a key this process holds, through ring, as rustls signs for a workload today.
+    use ring::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair};
+    let random = ring::rand::SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &random).unwrap();
+    let local =
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &random).unwrap();
     let in_process: Vec<Duration> = (0..SIGNATURES)
         .map(|_| {
             let started = Instant::now();
-            let signature: p256::ecdsa::Signature =
-                p256::ecdsa::signature::Signer::sign(&local, &message);
-            std::hint::black_box(signature.to_der());
+            std::hint::black_box(local.sign(&random, &message).unwrap());
             started.elapsed()
         })
         .collect();

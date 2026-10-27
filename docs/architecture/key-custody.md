@@ -155,7 +155,7 @@ dropped session. What that asks of the design:
   builder agent at first.
 
 *Built (2026-10-27): step 1,* in `src/agents/polar-custody`. `tls.rs` (the TLS 1.3 CertificateVerify check), `key.rs`
-(a P-256 key made through rcgen and held as a `p256` signing key, its CSR built by `cert_issuer_common::keypair::
+(a P-256 key made and signed by `ring`, its CSR built by `cert_issuer_common::keypair::
 csr_for_key`, split out of `generate_csr` for a key the caller cannot see), `custody.rs` (the slots, the roles, and the
 judgement of a certificate installed: its key, its first name, valid now, no CA, signed by the pinned CA),
 `protocol.rs` (rkyv frames, a request id each), `server.rs` (the socket at 0660, `SO_PEERCRED`, every request on its
@@ -174,6 +174,26 @@ through the socket, one caller, p50 108 µs, p99 208 µs (96 µs added at p99, i
 at once, p50 232 µs, p99 473 µs, 32,800 signatures a second. The socket costs little at the median; the arithmetic
 costs most of it: the pure-Rust `p256` signs in about 100 µs, where `ring`, which rustls uses already, is several times
 faster. A step to take before the speed gate.
+
+*With `ring` (2026-10-27, same machine and bench, five runs).* `ring` needs nothing of the kernel: it is a user-space
+library, its arithmetic in assembly and its randomness from `getrandom(2)`, and the 7.3 kernel with FIPS on
+(`/proc/sys/crypto/fips_enabled` = 1) neither blocks nor changes it; every rustls handshake in Polar already signs
+with it (the workspace `Cargo.toml` turns on `ring` for rustls, rustls-webpki and tokio-rustls). The daemon's key is
+now a `ring::signature::EcdsaKeyPair` (`key.rs`); `p256` stays only in the tests, as a second implementation to verify
+its signatures. The bench's in-process line is now `ring` too, as rustls signs for a workload today. In process p50
+12 µs, p99 14 to 25 µs; through the socket, one caller, p50 16 to 17 µs, p99 21 to 36 µs (0 to 22 µs added at p99,
+against 96); eight callers, p50 40 to 43 µs, p99 145 to 244 µs, 151,000 to 181,000 signatures a second, about five
+times the first measurement. The daemon costs about 5 µs a signature at the median. Not a FIPS-validated module, and
+neither was anything Polar signs with before; that is a separate question from custody (the kernel's FIPS mode covers
+the kernel's own crypto, not a process's).
+
+*What `ring` does not do, and the slot does instead.* `p256`'s signing key zeroed itself when dropped; `ring`'s
+`EcdsaKeyPair` does not, nor does the PKCS#8 `Document` it is made from, so a key replaced by a new `MakeCsr` would
+have left its scalar in the daemon's freed memory. Both are plain arrays (the scalar's limbs, the nonce key's digest,
+the public point; no heap, no `Drop`), so `SlotKey` holds the pair boxed in a `MaybeUninit` and zeroes it in `Drop`,
+and zeroes the `Document` once the pair is read from it (`key.rs`; tested, and the mutation that drops the wipe is
+caught). What a stack copy made while generating leaves behind is as it was with `p256`: not reachable, and the
+memory locked and the process not dumpable.
 
 ## Build order, each tests first
 
