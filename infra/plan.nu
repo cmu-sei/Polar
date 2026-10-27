@@ -101,19 +101,20 @@ export def needs_runtime [plan: list] {
     $plan | where on | any {|s| $s.runtime? | default false }
 }
 
-# Port-forwards needed by the admin and browser steps, and only those.
+# Port-forwards needed by the admin and browser steps, and only those: each the namespace and service `just
+# port-forwards-up` forwards it from, by which a forward already running is found (forwards.nu).
 export def build_forwards [config: record] {
     let d = (deployed_charts $config)
     mut f = []
     if "credentials-agent" in $d {
-        $f = ($f | append { name: "observer", svc: "credentials-agent-observer" })
+        $f = ($f | append { name: "observer", ns: "polar", svc: "credentials-agent-observer" })
     }
     if "neo4j" in $d {
-        $f = ($f | append { name: "neo4j", svc: "polar-db-svc" })
+        $f = ($f | append { name: "neo4j", ns: "polar-graph", svc: "polar-db-svc" })
     }
     # The seed pushes to the git server from this machine.
     if ("credentials-agent" in $d) and ("polar-git-server" in $d) and ("polar-scheduler-observer" in $d) {
-        $f = ($f | append { name: "git", svc: "polar-git-server" })
+        $f = ($f | append { name: "git", ns: "polar", svc: "polar-git-server" })
     }
     $f
 }

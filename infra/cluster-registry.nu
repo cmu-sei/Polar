@@ -43,6 +43,7 @@
 
 use registry.nu [target_cluster]
 use retry.nu [with_retries]
+use forwards.nu [forward_live, stop_stale]
 use dhall-cache.nu
 
 export const NAMESPACE = "polar-registry"
@@ -169,8 +170,12 @@ export def answers [local_port: int] {
     $r.exit_code == 0 and $r.stdout == "200"
 }
 
+# The forward to the registry runs for this cluster; one left from another cluster's run is stopped first (forwards.nu).
 def forward_running [] {
-    (do { ^pgrep -f $"port-forward -n ($NAMESPACE) svc/($NAME)" } | complete).exit_code == 0
+    if (stop_stale $NAMESPACE $NAME) > 0 {
+        print "  -- stopped the registry's port-forward left from another cluster"
+    }
+    forward_live $NAMESPACE $NAME
 }
 
 # Applies the registry for `target` (and its storage first), waits until it is ready, and starts the forward this machine pushes

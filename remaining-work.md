@@ -682,9 +682,13 @@ Principle: declare each environment variable once, with its type, default, docum
   `job_for` copies the pod untouched apart from its name, labels and ConfigMap; never run so. To check: the Jobs
   complete with a native sidecar running, the log reading (`-c` for each container) skips the daemon's container, and
   the renewal rule's five minutes per pod do not slow a plan's runs.
-- [ ] `up.nu` trusts a port-forward that is already running (found 2026-10-27, custody step 7): it does not ask which
-  cluster the forward reaches, so loops left from another cluster's run, pointing at a kubeconfig since removed, make a
-  service look down ("the deployment git server did not answer"). Check each forward's cluster, or restart them.
+- [x] `up.nu` trusted a port-forward that was already running (found 2026-10-27, custody step 7; done 2026-10-27): it did
+  not ask which cluster the forward reached, so loops left from another cluster's run, pointing at a kubeconfig since
+  removed, made a service look down ("the deployment git server did not answer"). `infra/forwards.nu` now finds a
+  forward's loop and kubectl by their command lines and reads the KUBECONFIG each runs under (`/proc/<pid>/environ`): a
+  forward is live only under this shell's, and the others are stopped by their pids. `up.nu`'s forwards, the deployment
+  git server's (`deploy-repo.nu`) and the registry's (`cluster-registry.nu`) all use it. Tests: `infra/tests/forwards.nu`
+  (a real loop under an old kubeconfig found and stopped), and each forward's namespace checked against the Justfile.
 - [x] The custody daemon logs nothing at info (found 2026-10-27, step 7; done 2026-10-27): with no `RUST_LOG` its filter
   was errors only (`polar-custody/daemon/src/main.rs`), where every other agent logs at info. `console_filter` now gives
   `RUST_LOG`, or `info` when it is unset or does not parse, as `polar::logging` does.

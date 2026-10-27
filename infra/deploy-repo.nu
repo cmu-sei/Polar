@@ -50,6 +50,7 @@ use retry.nu [with_retries]
 use registry.nu [node_registry, push_registry]
 use digest.nu [registry_digest]
 use cluster-registry.nu [cluster_of]
+use forwards.nu [forward_live, stop_stale]
 use layers.nu [layer_problems, to_apply]
 use cluster-inputs.nu
 use deploy-objects.nu [BOOTSTRAP_LAYERS, annotate_config_hashes, documents, git_repository, has_job, kustomization, provenance, published_layers, readme, unpinned_images, yaml_docs]
@@ -228,8 +229,12 @@ def kubectl_apply [objects: list] {
     if $r.exit_code != 0 { error make --unspanned { msg: $"the cluster refused the deployment git server's objects: ($r.stderr | str trim)" } }
 }
 
+# The forward to the server runs for this cluster; one left from another cluster's run is stopped first (forwards.nu).
 def forward_running [] {
-    (do { ^pgrep -f $"port-forward -n ($NAMESPACE) svc/($SERVICE)" } | complete).exit_code == 0
+    if (stop_stale $NAMESPACE $SERVICE) > 0 {
+        print "  -- stopped the deployment git server's port-forward left from another cluster"
+    }
+    forward_live $NAMESPACE $SERVICE
 }
 
 # The commit the server's main branch is at, or "" when it has none.

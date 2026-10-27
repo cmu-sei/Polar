@@ -107,6 +107,19 @@ def main [] {
             }
         }
         {
+            name: "each forward names the namespace and service the Justfile forwards it from"
+            body: {
+                let c = (config ["neo4j"] ["credentials-agent.yaml" "polar-git-server.yaml" "polar-scheduler-observer.yaml"])
+                let justfile = (open --raw ($env.FILE_PWD | path join ".." ".." "Justfile"))
+                for f in (build_forwards $c) {
+                    assert ($justfile | str contains $"start_pf ($f.name) ") $"($f.name) is a forward the Justfile starts"
+                    let line = ($justfile | lines | where {|l| $l | str contains $"start_pf ($f.name) " } | first)
+                    let words = ($line | split row --regex '\s+' | where {|w| $w | is-not-empty })
+                    assert equal ($words | skip 2 | first 2) [$f.ns $f.svc] $"($f.name): ($line)"
+                }
+            }
+        }
+        {
             name: "the git server is port-forwarded when the seed will push to it"
             body: {
                 let c = (config [] ["credentials-agent.yaml" "polar-git-server.yaml" "polar-scheduler-observer.yaml"])

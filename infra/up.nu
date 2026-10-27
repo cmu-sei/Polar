@@ -67,7 +67,7 @@ use secrets-lib.nu [existing_required_secrets, secrets_check]
 use retry.nu [with_retries]
 use admin.nu [aside_path, is_another_clusters, move_aside]
 use browser.nu [browser_expected, browser_found, browser_problems, neo4j_answer, neo4j_probe, nss_db, password_verdict, probe_until_answered]
-use forwards.nu [ensure_observer_forward]
+use forwards.nu [ensure_observer_forward, forward_live, stop_stale]
 use egress.nu [egress_report, kube_probe, probe_url]
 use seed.nu
 use cluster-inputs.nu
@@ -528,7 +528,12 @@ def step_infra [config: record, --quiet] {
 }
 
 def step_forwards [forwards: list] {
-    let missing = ($forwards | where {|f| not ({ ^pgrep -f $"svc/($f.svc)" } | cmd_ok) })
+    # A forward left from another cluster's run holds the port and reaches nothing here: stopped, and started again.
+    for f in $forwards {
+        let stopped = (stop_stale $f.ns $f.svc)
+        if $stopped > 0 { note $"stopped a port-forward for ($f.name) left from another cluster" }
+    }
+    let missing = ($forwards | where {|f| not (forward_live $f.ns $f.svc) })
     if ($missing | is-empty) {
         ok "required port-forwards already running"
         return
