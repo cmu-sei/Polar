@@ -263,10 +263,20 @@ impl Actor for CertIssuerSupervisor {
             .config()
             .read(&cassini_client::environment::TLS_CLIENT_CERT)
             .map_err(|e| e.to_string())?;
-        let key = configured
-            .config()
-            .read(&cassini_client::environment::TLS_CLIENT_KEY)
-            .map_err(|e| e.to_string())?;
+        // It makes its own key and writes it where TLS_CLIENT_KEY says; the custody daemon comes to it with the
+        // catalog (docs/architecture/key-custody.md, build order, step 4).
+        let key = match cassini_client::environment::read_client_key(&**configured.config())
+            .map_err(|e| e.to_string())?
+        {
+            cassini_client::ClientKey::File(path) => path,
+            cassini_client::ClientKey::Custody(_) => {
+                return Err(
+                    "cert-issuer signs its own client certificate and writes its key to TLS_CLIENT_KEY; \
+                     POLAR_CUSTODY_SOCKET is not for it yet"
+                        .into(),
+                );
+            }
+        };
         let ca_file = configured
             .config()
             .read(&cassini_client::environment::TLS_CA_CERT)

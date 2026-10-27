@@ -55,6 +55,7 @@ async-trait.workspace = true
 cassini-tracing.workspace = true
 cassini-types.workspace = true
 opentelemetry.workspace = true
+polar-custody.workspace = true
 polar-env.workspace = true
 polar-router.workspace = true
 ractor.workspace = true

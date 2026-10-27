@@ -23,6 +23,7 @@
 
 pub use cassini_tracing::{init_tracing, shutdown_tracing};
 pub use cassini_tracing::{try_set_parent_otel, try_set_parent_wire};
+pub use polar_custody::client::ClientKey;
 mod connect;
 pub mod environment;
 pub mod facade;
@@ -35,7 +36,7 @@ use rkyv::rancor::Error;
 use rustls::ClientConfig;
 use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::pki_types::{CertificateDer, ServerName};
 use socket2::SockRef;
 use std::env;
 use std::marker::PhantomData;
@@ -231,7 +232,8 @@ pub struct TCPClientConfig {
     pub server_name: String,
     pub ca_certificate_path: String,
     pub client_certificate_path: String,
-    pub client_key_path: String,
+    /// The certificate's key: a file, or the custody daemon, which signs for it.
+    pub client_key: ClientKey,
     /// What the transport does when the connection is lost.
     pub reconnect: ReconnectMode,
 }
@@ -257,7 +259,7 @@ impl TCPClientConfig {
             server_name,
             ca_certificate_path,
             client_certificate_path,
-            client_key_path,
+            client_key: ClientKey::File(client_key_path),
             reconnect: ReconnectMode::default(),
         }
     }
@@ -278,7 +280,7 @@ impl TCPClientConfig {
     /// Every problem is reported together, each naming the variable and what it is for.
     pub fn from_env(env: &dyn polar_env::Env) -> Result<Self, String> {
         use environment::{
-            BROKER_ADDR, CASSINI_SERVER_NAME, TLS_CA_CERT, TLS_CLIENT_CERT, TLS_CLIENT_KEY,
+            BROKER_ADDR, CASSINI_SERVER_NAME, TLS_CA_CERT, TLS_CLIENT_CERT, read_client_key,
         };
         let mut problems = Vec::new();
         let mut take = |read: Result<String, polar_env::EnvError>| match read {
@@ -289,19 +291,25 @@ impl TCPClientConfig {
             }
         };
         let client_certificate_path = take(TLS_CLIENT_CERT.read(env));
-        let client_key_path = take(TLS_CLIENT_KEY.read(env));
         let ca_certificate_path = take(TLS_CA_CERT.read(env));
         let broker_endpoint = take(BROKER_ADDR.read(env));
         let server_name = take(CASSINI_SERVER_NAME.read(env));
-        if !problems.is_empty() {
+        let client_key = match read_client_key(env) {
+            Ok(key) => Some(key),
+            Err(error) => {
+                problems.push(error.to_string());
+                None
+            }
+        };
+        let (Some(client_key), true) = (client_key, problems.is_empty()) else {
             return Err(problems.join("; "));
-        }
+        };
         Ok(TCPClientConfig {
             broker_endpoint,
             server_name,
             ca_certificate_path,
             client_certificate_path,
-            client_key_path,
+            client_key,
             reconnect: ReconnectMode::default(),
         })
     }
@@ -317,14 +325,14 @@ impl TCPClientConfig {
         let server_name = server_name.or_else(|| env::var("CASSINI_SERVER_NAME").ok())?;
         let ca_certificate_path = ca_cert.or_else(|| env::var("TLS_CA_CERT").ok())?;
         let client_certificate_path = client_cert.or_else(|| env::var("TLS_CLIENT_CERT").ok())?;
-        let client_key_path = client_key.or_else(|| env::var("TLS_CLIENT_KEY").ok())?;
+        let client_key = ClientKey::File(client_key.or_else(|| env::var("TLS_CLIENT_KEY").ok())?);
 
         Some(TCPClientConfig {
             broker_endpoint,
             server_name,
             ca_certificate_path,
             client_certificate_path,
-            client_key_path,
+            client_key,
             reconnect: ReconnectMode::default(),
         })
     }
@@ -1295,11 +1303,10 @@ impl Actor for TcpClientActor {
             })?;
         drop(_g);
 
-        // --- 4. Load client cert and key ---
+        // --- 4. Load client cert; its key is a file or the custody daemon's ---
         let _g = debug_span!("tls.load_client_cert_key").entered();
         let mut certs = Vec::new();
         let cert_path = &args.config.client_certificate_path;
-        let key_path = &args.config.client_key_path;
 
         let client_cert = CertificateDer::from_pem_file(cert_path).map_err(|e| {
             ActorProcessingErr::from(anyhow::anyhow!(
@@ -1308,24 +1315,13 @@ impl Actor for TcpClientActor {
         })?;
 
         certs.push(client_cert);
-
-        let private_key = PrivateKeyDer::from_pem_file(key_path).map_err(|e| {
-            ActorProcessingErr::from(anyhow::anyhow!(
-                "Failed to read client private key from {key_path}: {e}"
-            ))
-        })?;
         drop(_g);
 
         // --- 5. Build Rustls client config ---
         let _g = debug_span!("tls.build_client_config").entered();
-        let client_config = rustls::ClientConfig::builder()
-            .with_webpki_verifier(verifier)
-            .with_client_auth_cert(certs, private_key)
-            .map_err(|e| {
-                ActorProcessingErr::from(anyhow::anyhow!(
-                    "Failed to build Rustls client config: {e}"
-                ))
-            })?;
+        let client_config =
+            polar_custody::client::client_config(verifier, certs, &args.config.client_key)
+                .map_err(|e| ActorProcessingErr::from(anyhow::anyhow!(e)))?;
         drop(_g);
 
         // --- 6. Determine registration state ---

@@ -96,3 +96,20 @@ pub fn both() -> Callers {
         workload_uids: vec![own_uid()],
     }
 }
+
+/// The first DNS name on a certificate: the identity, as Polar's certificates carry it.
+pub fn first_dns_name(der: &[u8]) -> String {
+    use x509_parser::prelude::*;
+    let (_, cert) = X509Certificate::from_der(der).unwrap();
+    cert.subject_alternative_name()
+        .unwrap()
+        .unwrap()
+        .value
+        .general_names
+        .iter()
+        .find_map(|n| match n {
+            GeneralName::DNSName(d) => Some(d.to_string()),
+            _ => None,
+        })
+        .unwrap()
+}

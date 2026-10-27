@@ -43,7 +43,12 @@ jsonwebtoken.workspace = true
 clap.workspace = true
 
 cert-issuer-common = { path = "../common" }
+polar-custody.workspace = true
 rand.workspace = true
+rustls.workspace = true
+
+[dev-dependencies]
+tokio-rustls.workspace = true
 
 
 [[bin]]

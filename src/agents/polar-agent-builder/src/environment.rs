@@ -270,13 +270,24 @@ mod tests {
     #[test]
     fn a_provided_capability_demands_the_environment_its_components_read() {
         let problems = check_environment(&env(&[("POLAR_CAPABILITIES", "cassini")]));
-        assert_eq!(problems.len(), 5, "{problems:?}");
+        // The four it requires; the key is judged with the custody socket once they are given.
+        assert_eq!(problems.len(), 4, "{problems:?}");
         assert!(problems.iter().any(|p| p.starts_with("TLS_CLIENT_CERT")));
         assert!(problems.iter().any(|p| p.starts_with("BROKER_ADDR")));
 
         let mut sound = CASSINI_ENV.to_vec();
         sound.push(("POLAR_CAPABILITIES", "cassini"));
         assert_eq!(check_environment(&env(&sound)), Vec::<String>::new());
+
+        let mut keyless = sound.clone();
+        keyless.retain(|(k, _)| *k != "TLS_CLIENT_KEY");
+        let problems = check_environment(&env(&keyless));
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("TLS_CLIENT_KEY") && problems[0].contains("POLAR_CUSTODY_SOCKET")
+        );
+        keyless.push(("POLAR_CUSTODY_SOCKET", "/custody/custody.sock"));
+        assert_eq!(check_environment(&env(&keyless)), Vec::<String>::new());
     }
 
     #[test]

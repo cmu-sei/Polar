@@ -22,7 +22,7 @@
 */
 
 use cassini_client::{
-    RegistrationState, TCPClientConfig,
+    ClientKey, RegistrationState, TCPClientConfig,
     cli::{IpcRequest, IpcResponse, OutputFormat, print_control_result},
 };
 use cassini_types::{ControlResult, SessionDetails, SessionMap};
@@ -51,7 +51,7 @@ proptest! {
         prop_assert_eq!(&config.server_name, &server_name);
         prop_assert_eq!(&config.ca_certificate_path, &ca_cert);
         prop_assert_eq!(&config.client_certificate_path, &client_cert);
-        prop_assert_eq!(&config.client_key_path, &client_key);
+        prop_assert_eq!(&config.client_key, &ClientKey::File(client_key));
     }
 
     #[test]

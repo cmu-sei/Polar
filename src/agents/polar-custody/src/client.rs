@@ -36,9 +36,14 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// The most idle connections kept.
 const IDLE: usize = 8;
+
+/// How long a request may wait on the daemon. rustls signs in the handshake, on whatever thread runs it, so a daemon
+/// that never answered would hold that thread for good; a signature takes tens of microseconds.
+pub const TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -57,6 +62,7 @@ pub struct CustodyClient {
     path: PathBuf,
     idle: Mutex<Vec<UnixStream>>,
     next: AtomicU64,
+    timeout: Duration,
 }
 
 impl CustodyClient {
@@ -65,7 +71,21 @@ impl CustodyClient {
             path: path.into(),
             idle: Mutex::new(Vec::new()),
             next: AtomicU64::new(1),
+            timeout: TIMEOUT,
         }
+    }
+
+    /// This client, waiting `timeout` on each request instead of [`TIMEOUT`].
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    fn connect(&self) -> std::io::Result<UnixStream> {
+        let stream = UnixStream::connect(&self.path)?;
+        stream.set_read_timeout(Some(self.timeout))?;
+        stream.set_write_timeout(Some(self.timeout))?;
+        Ok(stream)
     }
 
     /// One request and its reply, on an idle connection or a new one. A connection that fails is dropped.
@@ -73,7 +93,7 @@ impl CustodyClient {
         let idle = self.idle.lock().ok().and_then(|mut idle| idle.pop());
         let mut stream = match idle {
             Some(stream) => stream,
-            None => UnixStream::connect(&self.path).map_err(FrameError::Io)?,
+            None => self.connect().map_err(FrameError::Io)?,
         };
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         write_frame(&mut stream, &Envelope { id, body })?;
@@ -202,5 +222,44 @@ impl rustls::client::ResolvesClientCert for CustodyClientCert {
 
     fn has_certs(&self) -> bool {
         true
+    }
+}
+
+/// Where a workload's client key is: a file it reads, or the custody daemon's socket, through which the daemon signs
+/// for it with a key the workload never holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientKey {
+    File(String),
+    Custody(String),
+}
+
+/// A client configuration presenting `chain` with `key`, verifying the server with `verifier`. With the daemon's key it
+/// offers TLS 1.3 alone, the only handshakes the daemon signs; with a key file, what rustls offers by default, as before.
+pub fn client_config(
+    verifier: Arc<rustls::client::WebPkiServerVerifier>,
+    chain: Vec<CertificateDer<'static>>,
+    key: &ClientKey,
+) -> Result<rustls::ClientConfig, String> {
+    match key {
+        ClientKey::File(path) => {
+            use rustls::pki_types::PrivateKeyDer;
+            use rustls::pki_types::pem::PemObject as _;
+            let private_key = PrivateKeyDer::from_pem_file(path)
+                .map_err(|e| format!("Failed to read client private key from {path}: {e}"))?;
+            rustls::ClientConfig::builder()
+                .with_webpki_verifier(verifier)
+                .with_client_auth_cert(chain, private_key)
+                .map_err(|e| format!("Failed to build Rustls client config: {e}"))
+        }
+        ClientKey::Custody(socket) => {
+            let signer = CustodySigningKey::new(Arc::new(CustodyClient::new(socket)), Slot::Client);
+            Ok(
+                rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                    .with_webpki_verifier(verifier)
+                    .with_client_cert_resolver(Arc::new(CustodyClientCert(Arc::new(
+                        CertifiedKey::new(chain, Arc::new(signer)),
+                    )))),
+            )
+        }
     }
 }

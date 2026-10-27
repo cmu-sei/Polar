@@ -22,7 +22,7 @@
 */
 
 use cassini_client::{
-    ClientEventForwarder, ClientEventForwarderArgs, RegistrationState, TCPClientConfig,
+    ClientEventForwarder, ClientEventForwarderArgs, ClientKey, RegistrationState, TCPClientConfig,
     cli::{IpcRequest, IpcResponse, OutputFormat, print_control_result},
 };
 use cassini_types::{ClientEvent as CassiniClientEvent, ControlResult, SessionDetails, SessionMap};
@@ -267,7 +267,10 @@ async fn test_tcp_client_config_from_values() {
     assert_eq!(config.server_name, "broker.example.com");
     assert_eq!(config.ca_certificate_path, "/path/to/ca.crt");
     assert_eq!(config.client_certificate_path, "/path/to/client.crt");
-    assert_eq!(config.client_key_path, "/path/to/client.key");
+    assert_eq!(
+        config.client_key,
+        ClientKey::File("/path/to/client.key".into())
+    );
 }
 
 #[tokio::test]
@@ -284,7 +287,7 @@ async fn test_tcp_client_config_from_values_empty_strings() {
     assert_eq!(config.server_name, "");
     assert_eq!(config.ca_certificate_path, "");
     assert_eq!(config.client_certificate_path, "");
-    assert_eq!(config.client_key_path, "");
+    assert_eq!(config.client_key, ClientKey::File(String::new()));
 }
 
 #[tokio::test]
@@ -301,7 +304,10 @@ async fn test_tcp_client_config_from_values_unicode() {
     assert_eq!(config.server_name, "пример.com");
     assert_eq!(config.ca_certificate_path, "/путь/к/сертификату.crt");
     assert_eq!(config.client_certificate_path, "/путь/к/клиенту.crt");
-    assert_eq!(config.client_key_path, "/путь/к/ключу.key");
+    assert_eq!(
+        config.client_key,
+        ClientKey::File("/путь/к/ключу.key".into())
+    );
 }
 
 // ===== Tests for RegistrationState variants =====

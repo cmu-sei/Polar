@@ -188,6 +188,7 @@ polar-escrow = { path = "polar-escrow" }
 polar-signing = { path = "polar-signing" }
 polar-scheduler-common = { path = "polar-scheduler/common" }
 polar-env = { path = "polar-env" }
+polar-custody = { path = "polar-custody" }
 polar-git-server-common = { path = "polar-git-server/common" }
 polar-health = { path = "polar-health" }
 polar-kernel-keyring = { path = "polar-kernel-keyring" }

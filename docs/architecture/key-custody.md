@@ -61,7 +61,8 @@ has none of the kernel's limits, and it can do what the keyring cannot (decide, 
   kernel cannot hold the key type, the daemon holds it, in locked memory, zeroed when it goes. Either way the workload
   sees the same thing.
 - **The workload signs through a socket.** A Unix socket on a volume shared only by the pod's own containers. A rustls
-  signer in `polar-crypto` (`rustls::sign::SigningKey`) sends what a handshake needs signed and returns the signature;
+  signer in `polar-custody`'s client (`rustls::sign::SigningKey`; not `polar-crypto`, which depends on the Cassini
+  client that takes the signer) sends what a handshake needs signed and returns the signature;
   the Cassini client, the HTTP clients with an identity, and Cassini's own listener take it in place of a key file. A
   local round trip, synchronous as rustls wants, as a keyring signature is a syscall. The daemon answers only its own
   pod's containers (the socket's permissions, and `SO_PEERCRED` checked on each connection), and only signs: no
@@ -195,13 +196,45 @@ and zeroes the `Document` once the pair is read from it (`key.rs`; tested, and t
 caught). What a stack copy made while generating leaves behind is as it was with `p256`: not reachable, and the
 memory locked and the process not dumpable.
 
+*Built (2026-10-27): step 2.* The workload takes the daemon's key in place of a key file, decided on the doc's own
+terms and recorded here:
+- *Which key.* `POLAR_CUSTODY_SOCKET` (the variable the daemon binds) or `TLS_CLIENT_KEY`, exactly one: neither or both
+  is refused, naming both. `TLS_CLIENT_KEY` is now optional, and the rule is the `cassini-client` section's relation
+  (`cassini_client::environment::read_client_key`), so the agent builder and the render-time check judge an
+  environment as the client reads it. The two become `ClientKey::{File, Custody}` (`polar_custody::client`,
+  re-exported by `cassini_client`).
+- *The certificate stays a file,* `TLS_CLIENT_CERT`, as step 3 has it (the bundle becomes the certificate and `ca.pem`).
+  The daemon judged the certificate it was given against its own key; one that differed would fail the handshake.
+- *TLS 1.3 alone with the daemon's key,* in one place (`polar_custody::client::client_config`); with a key file, what
+  rustls offers by default, as before. The test checks the server's reason (TLS 1.2 never offered), since the daemon
+  refusing to sign a TLS 1.2 handshake would fail it too and hide a configuration that offered it.
+- *A daemon that does not answer* fails the signature after 5 s (`client::TIMEOUT`, on the socket's reads and writes)
+  rather than holding the thread rustls signs on; without it a stuck daemon would hold a tokio worker for good.
+- *Who takes it:* the Cassini client (`cassini/client/src/lib.rs`, its TLS configuration in `pre_start`); the
+  cert-issuer client's HTTP identity (`HandshakeClient::for_trust_mode_with_identity`), through a rustls
+  configuration handed to reqwest whole (`use_preconfigured_tls`), since a PEM identity cannot carry a key the client
+  never holds; and the credentials agent's own key, for both (`ConsumerSettings::own_key`).
+- *Not yet:* cert-issuer's own key, which it makes and writes to `TLS_CLIENT_KEY` itself (it refuses the socket, so
+  the catalog cannot give it one by mistake; step 4); Cassini's listener (step 4). The admin CLI and the dev setup keep
+  key files: they are run by people, not in pods.
+- *For step 3 to settle:* `polar-init`'s own Cassini session (the escrow bootstrap, `polar-init/src/main.rs`,
+  `ensure_escrow_bootstrapped`) reads the same client variables (`TCPClientConfig::from_env`), so with the socket set
+  it signs through the daemon too, and the daemon lets `polar-init`'s UID make CSRs and install, not sign. The likely
+  answer, to be cleared with step 3: in a pod that runs the bootstrap, its UID is among the workload's as well.
+- *Tests:* the daemon's key signing a handshake built by `client_config`; TLS 1.2 never offered with it; a key file as
+  before; a silent daemon failing in time; every way of giving the two variables (unset, blank, a path), the section
+  judging each as the client reads it; the credentials agent reading either; the HTTP identity presenting the daemon's
+  certificate to an mTLS server. Mutations caught: TLS 1.2 offered, the timeout dropped, the two kinds swapped, both
+  accepted, the HTTP identity left off. The section's check of an empty environment now reports four problems, not
+  five: a relation runs once every variable parses, so the key is named as soon as the others are given.
+
 ## Build order, each tests first
 
 1. The daemon: key generation (process keyring or memory), the CSR, taking the certificate and judging it, signing,
    the socket and its caller check, and requests in flight concurrently. Properties: a signature verifies under the
    certificate it holds; no message gets the key out; a caller that is not the pod's is refused. A benchmark of a
    signature through the socket against one in process, from the start.
-2. The workload signer in `polar-crypto` (rustls), and the Cassini client and the HTTP identities taking it in place of
+2. The workload signer in `polar-custody` (rustls), and the Cassini client and the HTTP identities taking it in place of
    `TLS_CLIENT_KEY`.
 3. `polar-init` taking the daemon's CSR and handing it the certificate; the bundle in the shared volume becomes the
    certificate and `ca.pem` alone.

@@ -857,13 +857,13 @@ impl Actor for ConsumerSupervisor {
         // floor is configured (docs/architecture/cert-issuer-isolation.md).
         let cert_issuer_ca_path = settings.ca_cert.clone();
         let own_cert_path = settings.own_cert_path.clone();
-        let own_key_path = settings.own_key_path.clone();
+        let own_key = settings.own_key.clone();
         let make_cert_issuer_client = || async {
             HandshakeClient::for_trust_mode_with_identity(
                 cert_issuer_url.clone(),
                 cert_issuer_ca_path.as_deref(),
                 &own_cert_path,
-                &own_key_path,
+                &own_key,
             )
             .await
             .map_err(|e| {
