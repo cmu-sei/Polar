@@ -258,6 +258,15 @@ Each step tests first, with property tests where an invariant holds.
    certificate when it is made). Its two sides deploy together: a new `polar-init` refuses an old consumer's unsigned
    offers.
 
+   *Validated on sandbox-local, 2026-10-26* (a fresh `just reset` and `up.nu --dev` from `645f23f8`, with the escrow
+   certificate's EKU fix): the consumer's workload issuance actor was issued its signing certificate before it took a
+   request (digitalSignature and 1.3.6.1.5.5.7.3.36, on the internal path, 12 h under sandbox-local's `server_lifetime`,
+   renewal set for 21600 s); all 16 pods on the observer path (Neo4j and the ACE job among them) were rendered with
+   `POLAR_INIT_CREDENTIALS_AGENT_IDENTITY` and were issued their certificates, which `polar-init` asks for only after the
+   offer's signature holds, and none refused an offer. OpenSSL takes the signing certificate for neither TLS role. An
+   offer from someone else is refused by the tests, not on the cluster, which would need someone in the middle of the
+   observer's HTTP.
+
    *Built (2026-10-26): 1a and 1b,* in code and tests, not yet on a cluster. The catalog's `agent` and `service` kinds
    give `pinned-ca` and the `ca` kind does not (`infra/config/kinds.nuon`; the per-workload entries that said it are
    gone); the Neo4j and ACE charts mount `Constants.polarCaVolume` and set `POLAR_INIT_CA_CERT` through

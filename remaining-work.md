@@ -570,7 +570,11 @@ NOTHING IS OPEN for path 1 now: steps 4 to 6 wait for the go-ahead. Path 2 (prop
 - [x] **An escrow certificate (`CertType::Service`) authenticates over mTLS.** FIXED 2026-10-26 (shown, then
   fixed: `emailProtection`, and `verify_escrow_certificate` requires it; credentials-agent-architecture.md, "Each
   certificate makes its own layer's decision"). An escrow certificate already issued keeps the old form, since one
-  is never issued again for the same identity (below), so a cluster carries the fix once its ledger is fresh. It has no extended key usage
+  is never issued again for the same identity (below), so a cluster carries the fix once its ledger is fresh.
+  Validated on a fresh sandbox-local the same day (`645f23f8`): both escrow certificates issued (git-repo-observer,
+  kube-consumer) carry keyEncipherment and emailProtection; `openssl verify -purpose` refuses them as TLS client and
+  server and takes them for S/MIME encryption, while the client certificates are the reverse; and `polar-sign sign`
+  fetched git-repo-observer's from the gateway, accepted it, and sealed a secret to it. It has no extended key usage
   (`cert-issuer/server/src/ca.rs:283`), and rustls-webpki takes a certificate without one for client and server
   authentication alike (`required_if_present`), so it connects to Cassini as its agent, with the agent's permissions.
   Whoever holds an escrow private key (the agent, and the escrow it is kept in) can do so. Found 2026-10-26, building
@@ -590,7 +594,8 @@ NOTHING IS OPEN for path 1 now: steps 4 to 6 wait for the go-ahead. Path 2 (prop
   `Service` certificate `server_lifetime` (3600 s in `infra/config/workloads/cert-issuer.nuon`) unless the identity has
   an override (graph and ace on sandbox-local: a year, for every certificate type). So an hour after an agent's first
   start its published escrow certificate has expired and is not replaced, and `polar-sign fetch` refuses it
-  (`NotValidNow`). Read from the code 2026-10-26, not yet seen on a cluster; the escrow key outlives the pod by design,
+  (`NotValidNow`). On sandbox-local `server_lifetime` is 43200 s, so there it is twelve hours (the two issued
+  2026-10-26 run 01:42 to 13:42 UTC). Read from the code 2026-10-26, not yet seen to expire on a cluster; the escrow key outlives the pod by design,
   so the question is whether its certificate should be renewed for the same key, and on what lifetime.
 
 ## Environment contract (`polar-env`), decided 2026-10-07
