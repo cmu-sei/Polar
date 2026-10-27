@@ -663,7 +663,7 @@ daemon keeps its installer apart from its workload, under one UID.
 - *(c) Both roles to UID 1000, nothing more.* A compromised workload could replace the key (`MakeCsr`), which is a
   denial of service and no more, since it cannot have a certificate signed. The weakest.
 
-## Step 6, the speed gate: the plan (2026-10-27, for review)
+## Step 6, the speed gate: the plan (2026-10-27, its question decided)
 
 What is there, read for this:
 - *Resumption, the question "Speed" left open, answered.* A client reconnecting with the configuration it connected with
@@ -706,9 +706,9 @@ The plan:
    task spawned for each request in the daemon; its lock; the client's eight idle connections; the broker signing on
    its Tokio workers.
 
-*Open, item 2 and 3: which is the gate of record.* (a) The storm bench now, repeatable and needing no cluster, with
-the cluster's storm at step 7 to confirm it (recommended); (b) the cluster's storm alone, so the gate waits for step 7;
-(c) the bench alone.
+*Decided (the maintainer, 2026-10-27): (a), the storm bench is the gate of record,* run in release before a custody
+release; the cluster's storm at step 7 confirms it under real pods and cgroups. The question, as it was put: (a) the
+bench now, the cluster confirming; (b) the cluster's storm alone, the gate waiting for step 7; (c) the bench alone.
 
 ## Build order, each tests first
 
