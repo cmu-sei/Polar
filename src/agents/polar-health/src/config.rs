@@ -63,6 +63,9 @@ pub struct HealthConfig {
     pub cert_paths: Vec<String>,
     /// Dependency endpoints whose certificates must be healthy before rejuvenating.
     pub dep_cert_endpoints: Vec<DepCertEndpoint>,
+    /// The custody daemon's socket, when the pod's keys are the daemon's: the actor asks it each tick whether it still
+    /// holds them (docs/architecture/key-custody.md, step 4, item 6). Declared by the Cassini client, or the broker.
+    pub custody_socket: Option<String>,
 }
 
 /// The value of a read, or its problem recorded and a placeholder put in its place so the
@@ -104,6 +107,11 @@ impl HealthConfig {
         let graph_deadline_secs = take!(problems, GRAPH_DEADLINE_SECS.read(env), 0);
         let cassini_deadline_secs = take!(problems, CASSINI_DEADLINE_SECS.read(env), 0);
         let probe_stale_secs = take!(problems, STALE_SECS.read(env), 0);
+        let custody_socket = take!(
+            problems,
+            polar_custody::environment::CUSTODY_SOCKET.read(env),
+            None
+        );
 
         if !problems.is_empty() {
             return Err(problems.join("; "));
@@ -121,6 +129,7 @@ impl HealthConfig {
             file_path,
             cert_paths: cert_paths.unwrap_or_default(),
             dep_cert_endpoints: dep_cert_endpoints.unwrap_or(args.dep_cert_endpoints),
+            custody_socket,
         };
         config.validate()?;
         Ok(config)
@@ -215,6 +224,19 @@ mod tests {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         HealthConfig::from_env(args(), &map)
+    }
+
+    // The pod's keys are the custody daemon's: the actor asks it each tick (docs/architecture/key-custody.md, step 4).
+    #[test]
+    fn the_custody_socket_is_read_when_the_pod_has_one() {
+        assert_eq!(load(&[]).unwrap().custody_socket, None);
+        assert_eq!(
+            load(&[("POLAR_CUSTODY_SOCKET", "/run/polar-custody/custody.sock")])
+                .unwrap()
+                .custody_socket
+                .as_deref(),
+            Some("/run/polar-custody/custody.sock")
+        );
     }
 
     #[test]

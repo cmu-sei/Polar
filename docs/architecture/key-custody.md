@@ -555,6 +555,27 @@ refused certificate not sealing, and a property, that once installed nothing any
 certificate. The test that a new key drops the old certificate goes with the rule. The mutation that drops the seal
 is caught by both.
 
+*Built (2026-10-27): the health actor watches the daemon* (`polar-health`).
+- *The reading* (`src/custody.rs`): each tick, with `POLAR_CUSTODY_SOCKET` set (`HealthConfig::custody_socket`), the
+  actor asks the daemon for each slot's certificate, off its own thread: it `Holds` one, is `Empty`, or is
+  `Unreachable`. It does not compare the certificate with the one on disk, as item 6 first said. A slot once installed
+  is sealed, a daemon that restarts loses both, and polar-init installs before it writes `cert.pem`, so a
+  different certificate cannot be.
+- *The rule* (`machine.rs`, `custody_rejuvenation`), in the Normal phase and before the connections, since an empty
+  daemon may be why they are down:
+  - `Empty` enters rejuvenation at once;
+  - `Unreachable` is borne for two ticks and enters it on the third (`MAX_CUSTODY_UNREACHABLE_TICKS`), the count
+    starting again when the daemon answers.
+- *The hard deadlines still come first:* Cassini down past its deadline while the agent waits to rejuvenate is that
+  deadline's `Unhealthy`, an orderly end all the same.
+- *Tests:*
+  - the reading against a real daemon: empty, holding a certificate in the server slot alone, and none at all;
+  - the machine: nothing while the daemon holds its certificate; rejuvenation at once on an empty daemon, Cassini
+    down; Cassini's deadline coming first; the unreachable count;
+  - the actor reaching `Rejuvenate` on an empty daemon though its certificate is far from rejuvenation;
+  - the config reading the socket.
+- *Mutations caught:* the actor never asking, an empty daemon ignored, the unreachable count never reset.
+
 *Built (2026-10-27): the listeners.*
 - *`polar_custody::client::server_config`* and `ServerKey`: a server configuration with a key file as before, or the
   daemon's server slot, offering TLS 1.3 alone (`CustodyServerCert` resolves every client to the slot's certificate).

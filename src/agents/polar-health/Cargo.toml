@@ -33,6 +33,7 @@ authors.workspace = true
 virtual-time = []
 
 [ dependencies ]
+polar-custody = { workspace = true }
 polar-env = { workspace = true, features = ["document"] }
 rand = { workspace = true }
 ractor = { workspace = true }

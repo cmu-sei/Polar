@@ -91,12 +91,15 @@ pub(crate) struct CertReading {
     /// `Err` when a certificate is past the hard threshold, or unreadable.
     pub hard: Result<(), String>,
     pub min_ttl: Option<i64>,
+    /// What the custody daemon holds, when the keys are its (docs/architecture/key-custody.md, step 4).
+    pub custody: crate::custody::Custody,
 }
 
 pub(crate) fn read(paths: &[String], expiry_threshold_secs: i64, now: i64) -> CertReading {
     CertReading {
         hard: check_hard(paths, expiry_threshold_secs, now),
         min_ttl: min_ttl(paths, now),
+        custody: crate::custody::Custody::NotUsed,
     }
 }
 

@@ -69,6 +69,7 @@ fn config() -> HealthConfig {
         file_path: String::new(),
         cert_paths: vec![],
         dep_cert_endpoints: vec![],
+        custody_socket: None,
     }
 }
 
@@ -195,6 +196,7 @@ fn simulate(scenario: &Scenario) -> Run {
                     Ok(())
                 },
                 min_ttl: Some(ttl),
+                custody: crate::custody::Custody::NotUsed,
             };
             let outcome = match machine.tick(now, &reading) {
                 TickStep::Done(outcome) => outcome,

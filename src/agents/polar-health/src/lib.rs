@@ -61,6 +61,7 @@ use x509_parser::prelude::*;
 mod certs;
 mod clock;
 pub mod config;
+mod custody;
 mod machine;
 pub mod probe;
 #[cfg(test)]
@@ -884,11 +885,18 @@ impl Actor for HealthCheckActor {
         match message {
             HealthCheckMessage::Tick => {
                 let now = HealthState::now();
-                let certs = certs::read(
+                let mut certs = certs::read(
                     &state.config.cert_paths,
                     state.config.expiry_threshold_secs,
                     now as i64,
                 );
+                // The custody daemon, asked off this actor's thread: it is a round trip on a socket, and a daemon that
+                // does not answer is waited for, a little (docs/architecture/key-custody.md, step 4, item 6).
+                if let Some(socket) = state.config.custody_socket.clone() {
+                    certs.custody = tokio::task::spawn_blocking(move || custody::read(&socket))
+                        .await
+                        .unwrap_or_else(|e| custody::Custody::Unreachable(e.to_string()));
+                }
                 match state.machine.tick(now, &certs) {
                     TickStep::Done(outcome) => finish_tick(&myself, state, outcome).await?,
                     TickStep::NeedDeps => {
@@ -1329,6 +1337,54 @@ mod tests {
         let seen = seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "exactly one verdict: {seen:?}");
         assert!(matches!(&seen[0], HealthVerdict::Unhealthy(r) if r.contains("hard threshold")));
+
+        actor.stop(None);
+        handle.await.unwrap();
+    }
+
+    // docs/architecture/key-custody.md, step 4, item 6: the actor asks the custody daemon each tick, and a daemon that
+    // restarted empty is a rejuvenation, though the certificate itself is far from it.
+    #[tokio::test(start_paused = true)]
+    async fn an_empty_custody_daemon_becomes_a_rejuvenation() {
+        use polar_custody::custody::Custody as Daemon;
+        use polar_custody::server::{Callers, bind, serve};
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("health.json");
+        let cert = cert_file(&dir, "agent.pem", 36_000);
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca = params
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap()
+            .pem();
+        let uid = std::fs::metadata(dir.path()).unwrap().uid();
+        let socket = dir.path().join("custody.sock");
+        tokio::spawn(serve(
+            bind(&socket).unwrap(),
+            Arc::new(std::sync::RwLock::new(Daemon::new(&ca).unwrap())),
+            Arc::new(Callers {
+                installer_uid: uid,
+                workload_uids: vec![uid],
+            }),
+        ));
+        let config = health_config(&[
+            (POLAR_HEALTH_FILE_ENV, file.to_str().unwrap()),
+            (POLAR_HEALTH_CERTS_ENV, &cert),
+            ("POLAR_CUSTODY_SOCKET", socket.to_str().unwrap()),
+        ]);
+
+        let (a, seen, _collector) = args_with_verdicts(config).await;
+        let (actor, handle) = Actor::spawn(None, HealthCheckActor, a).await.unwrap();
+        actor.cast(HealthCheckMessage::CassiniConnected).unwrap();
+        wait_for_state_within(
+            &file,
+            "a shutting_down file after the rejuvenation verdict",
+            Duration::from_secs(400),
+            |s| s.phase == HealthPhase::ShuttingDown,
+        )
+        .await;
+        assert_eq!(*seen.lock().unwrap(), vec![HealthVerdict::Rejuvenate]);
 
         actor.stop(None);
         handle.await.unwrap();

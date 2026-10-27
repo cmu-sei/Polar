@@ -33,6 +33,7 @@
 //! what it returns.
 
 use crate::certs::CertReading;
+use crate::custody::Custody;
 use crate::{
     DEFAULT_JITTER_WINDOW_SECS, HealthCheckMessage, HealthConfig, HealthPhase, HealthState,
     HealthVerdict, RejuvenationPhase,
@@ -71,6 +72,9 @@ pub(crate) enum TickStep {
 /// fires the file is already about to read as dead.
 pub(crate) const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 3;
 
+/// How many ticks in a row the custody daemon may be unreachable before the agent rejuvenates, as for one found empty.
+pub(crate) const MAX_CUSTODY_UNREACHABLE_TICKS: u32 = 3;
+
 /// Turns a random number into a delay inside the jitter window.
 pub(crate) fn jitter_secs(random: u32) -> u64 {
     u64::from(random) % DEFAULT_JITTER_WINDOW_SECS
@@ -102,6 +106,8 @@ pub(crate) struct HealthMachine {
     concluded: Option<HealthVerdict>,
     /// The topics the agent was last told it is refused, carried in every write.
     refused: Vec<crate::RefusedTopic>,
+    /// Ticks in a row the custody daemon could not be asked.
+    custody_unreachable_ticks: u32,
 }
 
 impl HealthMachine {
@@ -121,6 +127,39 @@ impl HealthMachine {
             write_failures: 0,
             concluded: None,
             refused: Vec::new(),
+            custody_unreachable_ticks: 0,
+        }
+    }
+
+    /// Why the custody daemon means the agent must rejuvenate, if it does (docs/architecture/key-custody.md, step 4,
+    /// item 6): it is empty, having restarted, or it has been unreachable for too many ticks. Either way the pod can
+    /// make no new connection, and the agent ends in order and is replaced, waiting first for what issues its
+    /// replacement. The agent's health actor decides this, not the Kubernetes probe.
+    fn custody_rejuvenation(&mut self, custody: &Custody) -> Option<String> {
+        match custody {
+            Custody::NotUsed | Custody::Holds => {
+                self.custody_unreachable_ticks = 0;
+                None
+            }
+            Custody::Empty => Some(
+                "the custody daemon holds no certificate: it restarted, and this pod can make no new connection"
+                    .to_string(),
+            ),
+            Custody::Unreachable(why) => {
+                self.custody_unreachable_ticks += 1;
+                if self.custody_unreachable_ticks >= MAX_CUSTODY_UNREACHABLE_TICKS {
+                    Some(format!(
+                        "the custody daemon could not be asked {} times in a row: {why}",
+                        self.custody_unreachable_ticks
+                    ))
+                } else {
+                    tracing::warn!(
+                        "healthcheck: the custody daemon could not be asked ({}): {why}",
+                        self.custody_unreachable_ticks
+                    );
+                    None
+                }
+            }
         }
     }
 
@@ -360,6 +399,15 @@ impl HealthMachine {
 
         match self.phase.clone() {
             RejuvenationPhase::Normal => {
+                // Before the connections: an empty daemon may be why they are down, and they will not come back.
+                if let Some(why) = self.custody_rejuvenation(&certs.custody) {
+                    tracing::warn!("healthcheck: entering rejuvenation mode ({why})");
+                    self.phase = RejuvenationPhase::WaitingForDeps;
+                    return TickStep::Done(TickOutcome {
+                        write: Some(self.healthy(now)),
+                        next: Next::Reschedule,
+                    });
+                }
                 if !self.connections_healthy() {
                     tracing::warn!(
                         "healthcheck: connections unhealthy (cassini={} graph={} expects_cassini={} expects_graph={}), waiting for recovery",
@@ -482,6 +530,7 @@ mod tests {
             file_path: String::new(),
             cert_paths: vec![],
             dep_cert_endpoints: vec![],
+            custody_socket: None,
         }
     }
 
@@ -503,6 +552,7 @@ mod tests {
         CertReading {
             hard: Ok(()),
             min_ttl,
+            custody: crate::custody::Custody::NotUsed,
         }
     }
 
@@ -636,6 +686,81 @@ mod tests {
         );
     }
 
+    // -- the custody daemon (docs/architecture/key-custody.md, step 4, item 6) ---------------------------------
+
+    fn reading(custody: Custody) -> CertReading {
+        CertReading {
+            custody,
+            ..certs(Some(10_000))
+        }
+    }
+
+    #[test]
+    fn a_daemon_holding_its_certificate_changes_nothing() {
+        let mut m = connected(false);
+        for t in 1..5 {
+            let o = done(m.tick(T0 + 30 * t, &reading(Custody::Holds)));
+            assert_eq!(o.write.unwrap().status, HealthStatus::Healthy);
+        }
+        assert_eq!(m.phase(), &RejuvenationPhase::Normal);
+    }
+
+    // A daemon restarted empty: the pod can make no new connection, ever, and its sessions may already be gone. The
+    // agent rejuvenates at once, waiting for what issues its replacement, even with Cassini down.
+    #[test]
+    fn an_empty_daemon_starts_rejuvenation_at_once_even_with_cassini_down() {
+        let mut m = connected(false);
+        m.on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 1);
+        done(m.tick(T0 + 10, &reading(Custody::Empty)));
+        assert_eq!(m.phase(), &RejuvenationPhase::WaitingForDeps);
+        assert!(matches!(
+            m.tick(T0 + 20, &reading(Custody::Empty)),
+            TickStep::NeedDeps
+        ));
+        m.deps_checked(T0 + 20, true, 0);
+        let o = done(m.tick(T0 + 30, &reading(Custody::Empty)));
+        assert!(
+            matches!(o.next, Next::Verdict(HealthVerdict::Rejuvenate)),
+            "{:?}",
+            o.next
+        );
+    }
+
+    // The hard deadlines still come first: Cassini down past its deadline while the agent waits to rejuvenate is the
+    // deadline's verdict, an orderly end all the same.
+    #[test]
+    fn cassini_s_deadline_still_comes_first_while_the_agent_waits_to_rejuvenate() {
+        let mut m = connected(false);
+        m.on_message(&HealthCheckMessage::CassiniDisconnected, T0 + 1);
+        done(m.tick(T0 + 10, &reading(Custody::Empty)));
+        let o = done(m.tick(T0 + 90, &reading(Custody::Empty)));
+        assert!(
+            matches!(&o.next, Next::Verdict(HealthVerdict::Unhealthy(r)) if r.contains("cassini")),
+            "{:?}",
+            o.next
+        );
+    }
+
+    #[test]
+    fn an_unreachable_daemon_is_borne_for_two_ticks_and_rejuvenates_on_the_third() {
+        let unreachable = || reading(Custody::Unreachable("refused".to_string()));
+        let mut m = connected(false);
+        done(m.tick(T0 + 30, &unreachable()));
+        done(m.tick(T0 + 60, &unreachable()));
+        assert_eq!(m.phase(), &RejuvenationPhase::Normal, "borne twice");
+        done(m.tick(T0 + 90, &unreachable()));
+        assert_eq!(m.phase(), &RejuvenationPhase::WaitingForDeps);
+
+        // Reached in between: the count starts again.
+        let mut m = connected(false);
+        done(m.tick(T0 + 30, &unreachable()));
+        done(m.tick(T0 + 60, &unreachable()));
+        done(m.tick(T0 + 90, &reading(Custody::Holds)));
+        done(m.tick(T0 + 120, &unreachable()));
+        done(m.tick(T0 + 150, &unreachable()));
+        assert_eq!(m.phase(), &RejuvenationPhase::Normal);
+    }
+
     // -- the Normal phase -----------------------------------------------------
 
     #[test]
@@ -715,6 +840,7 @@ mod tests {
         let reading = CertReading {
             hard: Err("cert expires soon".to_string()),
             min_ttl: Some(10),
+            custody: crate::custody::Custody::NotUsed,
         };
         let o = done(m.tick(T0 + 30, &reading));
         assert_eq!(
@@ -731,6 +857,7 @@ mod tests {
         let bad = CertReading {
             hard: Err("expired".to_string()),
             min_ttl: None,
+            custody: crate::custody::Custody::NotUsed,
         };
         for phase in [
             RejuvenationPhase::Normal,
@@ -937,6 +1064,7 @@ mod tests {
         let bad = CertReading {
             hard: Err("expired".into()),
             min_ttl: None,
+            custody: crate::custody::Custody::NotUsed,
         };
         let w = done(m.tick(T0 + 30, &bad)).write.unwrap();
         assert_eq!(w.phase, HealthPhase::ShuttingDown);
@@ -1064,6 +1192,7 @@ mod tests {
         let bad = CertReading {
             hard: Err("expired".into()),
             min_ttl: None,
+            custody: crate::custody::Custody::NotUsed,
         };
         assert_eq!(cassini_verdict(m.tick(T0 + 100, &bad)), "expired");
     }
@@ -1097,6 +1226,7 @@ mod tests {
         let bad = CertReading {
             hard: Err("expired".into()),
             min_ttl: None,
+            custody: crate::custody::Custody::NotUsed,
         };
         let w = done(m.tick(T0 + 30, &bad)).write.unwrap();
         assert_eq!(w.phase, HealthPhase::ShuttingDown);
@@ -1112,6 +1242,7 @@ mod tests {
         let bad = CertReading {
             hard: Err("expired".into()),
             min_ttl: None,
+            custody: crate::custody::Custody::NotUsed,
         };
         for i in 2..6 {
             let o = done(m.tick(T0 + 30 * i, &bad));
@@ -1138,6 +1269,7 @@ mod tests {
         let bad = CertReading {
             hard: Err("expired".into()),
             min_ttl: None,
+            custody: crate::custody::Custody::NotUsed,
         };
         done(m.tick(T0 + 30, &bad));
         let w = done(m.tick(T0 + 60, &certs(Some(3000)))).write.unwrap();

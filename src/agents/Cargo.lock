@@ -5827,6 +5827,7 @@ dependencies = [
 name = "polar-health"
 version = "1.0.0"
 dependencies = [
+ "polar-custody",
  "polar-env",
  "proptest",
  "ractor",
