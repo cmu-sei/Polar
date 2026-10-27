@@ -685,8 +685,9 @@ Principle: declare each environment variable once, with its type, default, docum
 - [ ] `up.nu` trusts a port-forward that is already running (found 2026-10-27, custody step 7): it does not ask which
   cluster the forward reaches, so loops left from another cluster's run, pointing at a kubeconfig since removed, make a
   service look down ("the deployment git server did not answer"). Check each forward's cluster, or restart them.
-- [ ] The custody daemon logs nothing at info (found 2026-10-27, step 7): with no `RUST_LOG` its filter is errors only
-  (`polar-custody/daemon/src/main.rs`), where every other agent logs at info. Default it to info.
+- [x] The custody daemon logs nothing at info (found 2026-10-27, step 7; done 2026-10-27): with no `RUST_LOG` its filter
+  was errors only (`polar-custody/daemon/src/main.rs`), where every other agent logs at info. `console_filter` now gives
+  `RUST_LOG`, or `info` when it is unset or does not parse, as `polar::logging` does.
 - [ ] No admin can revoke (found 2026-10-27, step 7): `just admin-provision` grants no `c:revoke`, so no account the
   documented flow makes can revoke a certificate. Whether the first admin should hold it is the maintainer's to say.
 - [ ] Pin the credentials agent's authority key to the CA (planned 2026-10-27, `authority-distribution.md`, "Pinning

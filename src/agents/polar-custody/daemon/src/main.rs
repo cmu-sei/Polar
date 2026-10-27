@@ -153,10 +153,17 @@ fn harden() {
     }
 }
 
+/// What it logs: `RUST_LOG`, or `info` when that is unset or does not parse, as every agent (`polar::logging`).
+fn console_filter(rust_log: Option<String>) -> tracing_subscriber::EnvFilter {
+    rust_log
+        .and_then(|filter| tracing_subscriber::EnvFilter::try_new(filter).ok())
+        .unwrap_or_else(|| tracing_subscriber::EnvFilter::new("info"))
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(console_filter(std::env::var("RUST_LOG").ok()))
         .init();
     let settings = match settings() {
         Ok(settings) => settings,
@@ -202,5 +209,21 @@ async fn main() {
     if let Err(e) = serve(listener, custody, Arc::new(settings.callers)).await {
         error!("the socket failed: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_logs_at_info_unless_rust_log_says_otherwise_as_every_agent_does() {
+        assert_eq!(console_filter(None).to_string(), "info");
+        assert_eq!(console_filter(Some("debug".into())).to_string(), "debug");
+        assert_eq!(
+            console_filter(Some("not a filter [".into())).to_string(),
+            "info",
+            "a filter that does not parse would log nothing it was meant to"
+        );
     }
 }
