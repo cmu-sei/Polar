@@ -752,6 +752,8 @@ The plan:
 Recommended: (a).
 
 *Decided (the maintainer, 2026-10-27): (a), a watcher session of the daemon's own.*
+What a watcher is, its rules and its weak points: `cassini-broker.md`, "Watcher sessions"; how the daemon's
+snapshots work: `authority-distribution.md`, "Snapshots".
 
 *Changed in building it (2026-10-27): refused at registration, not at accept.* Item 1 as planned closed every
 connection under a revoked certificate. But the daemon's watcher presents the pod's certificate, so the broker would

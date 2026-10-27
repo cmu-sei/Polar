@@ -139,6 +139,79 @@ has a lifetime.
   (128-135) describes a degraded state that keeps running on the static floor while the credentials agent is away, as a
   domain member uses its cached credentials. To be settled: see `policy-enforcement.md`.
 
+## Snapshots (read from the code, 2026-10-27)
+
+A snapshot is the credentials agent's whole current authority in one message. Live updates come one at a time
+(`polar-authority-updates`); a snapshot is how an agent that has just started, or has fallen behind, catches up.
+
+- *What it carries* (`AuthoritySnapshot`, `credentials-agent/common/src/authority_update.rs`): the public half of the
+  key the credentials agent signs with (its escrow key, decision 4), and the latest signed update of each kind (policy,
+  groups, revoked serials), oldest sequence first. Each update keeps its own signature: a snapshot is a bundle of
+  signed updates, not a document signed whole.
+- *Its topics:* a request (`AuthoritySnapshotRequest`, empty) on `polar-authority-snapshot-requests`, and the snapshot on
+  `polar-authority-snapshot-replies`. They are topics of their own because the router allows one handler per topic and
+  the escrow key's replies already belong to the crypto actor.
+- *When an agent asks* (`polar-agent-builder/src/authority.rs`, `AuthorityActor`):
+  - when its Cassini client registers, or registers again;
+  - every 30 seconds while it has no key pinned;
+  - when an update shows it missed one (a jump in the sequence), no more than once in five seconds;
+  - when the broker refuses what its own gate admitted (`Behind`), its authority perhaps older than the broker's.
+  The broker asks once when it starts, since it never registers (`cassini/broker/src/authority.rs`), and the custody
+  daemon's watcher asks each time it registers (`key-custody.md`, step 5).
+- *How the credentials agent answers* (`credentials-agent/consume/src/authority_publisher.rs`): requests are coalesced
+  into one snapshot every five seconds at most (`SNAPSHOT_COALESCE`), however many agents ask; the snapshot goes to every
+  subscriber of the replies topic, so one answers all; and after half an hour with no update it republishes unasked
+  (`REPUBLISH_AFTER`, decision 8), the backstop for an agent that missed one.
+- *How a receiver believes it* (`AuthorityCore`, `credentials_agent_common::authority_leaf`):
+  - only from the identity the broker gives the credentials agent (`POLAR_AUTHORITY_PUBLISHER`), checked first and
+    cheaply, so nobody else can make an agent do signature work;
+  - the first snapshot from that identity pins its key for good, and a snapshot naming another key is refused and
+    reported, a key that changes under a running system being an incident and never an update;
+  - each update in it is verified on its own, one that fails is skipped and reported, and the rest are applied;
+  - versions decide what replaces what is held, and a jump in a snapshot is not a miss, so a snapshot republished
+    unchanged changes nothing.
+- *Found in testing (2026-10-27):* a topic with no subscribers keeps what is published until one subscribes, so the
+  broker's request at its start waits on the requests topic until the credentials agent subscribes, and is answered
+  then. Harmless: a late answer is a right one.
+- *Its weak points:*
+  - *The key is trusted on first use.* It is learnt from the first snapshot, on the broker's word about who published
+    it, and nothing pins it beforehand. A compromised broker could give a freshly started agent a forged first snapshot
+    under a key of its own: the broker's word is the only thing that says who published it. The plan below.
+  - *Every snapshot reaches every subscriber,* the policy's whole text with it, and since step 5 a pod with the custody
+    daemon has two (its workload and its daemon's watcher). Coalescing bounds the rate cluster-wide, not per asker;
+    capping watchers bounds the subscribers (`cassini-broker.md`, "Capping watchers").
+
+## Pinning the key to the CA: the plan (2026-10-27, on the to-do list)
+
+The credentials agent's escrow key is made in its own pod at its first start (`EscrowKeypair::load_or_generate`, on its
+volume) and nothing certifies it, so the catalog cannot carry its fingerprint before that start, and the leaves learn
+it on first use. Every pod already pins the internal CA (the `pinned-ca` capability, `/etc/polar-ca/ca.pem`), and the
+credentials agent's session offers are already signed under a certificate from it (`CertType::Signing`,
+`core-restarts.md`, "1c in detail"). So the key is to be certified by the CA, and a snapshot believed only with that
+certificate.
+
+1. *A signing certificate for the escrow key.* The credentials agent asks `/internal/issue` for a `CertType::Signing`
+   certificate for its own identity whose key is its escrow key (a CSR signed by that key), as it already asks one for
+   its session offers' key. `digitalSignature` and `id-kp-documentSigning`, so no TLS stack takes it. It renews it at
+   half its life. Decision 4 stands: one key, the escrow key; only its certificate is new.
+2. *The snapshot carries it.* `AuthoritySnapshot` gains the certificate chain. Until it holds one valid now, the
+   credentials agent publishes no snapshot, as it answers a session request with `Busy` until it holds its signing
+   certificate.
+3. *A leaf believes a snapshot only with a certificate that:* chains to its pinned CA; is valid now; names the
+   publisher it believes first; carries `id-kp-documentSigning`; and is for the key the snapshot names. Then the key is
+   pinned as now, and never replaced: a key that changes, even certified, is still an incident. Live updates are
+   verified against the pinned key, as now. `AuthorityCore::new` takes the pinned CA beside the publisher: the builder
+   gives it the pod's pinned CA, the broker its client CA, the custody daemon `POLAR_CUSTODY_CA_CERT`.
+4. *Tests first:* a snapshot with no certificate, one under another CA, out of date, naming another identity, of
+   another type (`Service`, `Client`), or for another key, each refused and nothing pinned; a good one pinned; a
+   property, that a snapshot is believed exactly when all five hold; the credentials agent publishing nothing before
+   its certificate and renewing it. Mutations on each check.
+5. *To read in building:* making a CSR signed by an RSA key the `rsa` fork holds (rcgen's `SigningKey` over it), and
+   whether cert-issuer signs a `Signing` CSR with an RSA key as it does an ECDSA one.
+6. *Considered and set aside:* the key's fingerprint in the catalog (the key would have to exist before the render,
+   outside the pod that keeps it, which the escrow key's custody forbids); signing authority with the session offers'
+   Ed25519 key (it is renewed, so it could not be pinned, and decision 4 gives the work to the escrow key).
+
 ## Where things are decided
 
 There are two evaluation sites, running the same machinery:

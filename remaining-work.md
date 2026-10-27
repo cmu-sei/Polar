@@ -680,6 +680,14 @@ Principle: declare each environment variable once, with its type, default, docum
   `job_for` copies the pod untouched apart from its name, labels and ConfigMap; never run so. To check: the Jobs
   complete with a native sidecar running, the log reading (`-c` for each container) skips the daemon's container, and
   the renewal rule's five minutes per pod do not slow a plan's runs.
+- [ ] Pin the credentials agent's authority key to the CA (planned 2026-10-27, `authority-distribution.md`, "Pinning
+  the key to the CA"): the leaves learn the key that signs authority from the first snapshot, on the broker's word, so a
+  forged first snapshot could pin a key of someone else's. The escrow key gets a `CertType::Signing` certificate, the
+  snapshot carries it, and a leaf believes a snapshot only under a certificate that chains to its pinned CA and names
+  the credentials agent.
+- [ ] Cap watcher sessions (planned 2026-10-27, `cassini-broker.md`, "Capping watchers"): nothing bounds how many
+  watchers an identity opens. One per certificate serial, the newest winning, so a holder of a certificate has one and
+  the daemon always gets back in.
 - [ ] The control plane's `ListSessions` always fails (found 2026-10-27, building custody step 5): the control
   manager asks the session manager for `GetSessions` (`cassini/broker/src/control.rs`), and the session manager has no
   arm for it (`session.rs`), so the call's reply port is dropped and the answer is `InternalError("Operation failed")`.

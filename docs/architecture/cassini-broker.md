@@ -97,11 +97,8 @@ Read 2026-10-22, after stage 5a found the first while measuring (`broker-baselin
   *Since 2026-10-27* the superseded session is drained, not stopped, once its subscribers hold: a stop is a signal,
   ahead of the queued `CloseConnection`, so a session with nothing to hold ended before closing its connection and left
   the old instance connected with no session.
-- **Watcher sessions (2026-10-27, `key-custody.md`, step 5).** A registration may ask for a watcher
-  (`ClientMessage::RegistrationRequest { watcher }`): the custody daemon's, beside its pod's workload under the same
-  certificate. A watcher neither supersedes nor is superseded, is never resumed, ends when its connection goes, claims
-  nothing held for its identity (`GetHeldSessions`), and may hear the two authority topics and ask for a snapshot,
-  nothing else (`authority::watcher_may`). Tests: `broker/tests/watcher.rs`.
+- **Watcher sessions (2026-10-27).** Beside an identity's session, a watcher of it may run: below, "Watcher
+  sessions".
 - **Revoked certificates (2026-10-27, `key-custody.md`, step 5).** The listener reads the leaf's serial at accept. A
   certificate the credentials agent's revoked set names is refused at registration, unless it registers a watcher, and
   on each change of authority every connection whose certificate is now revoked is closed, a watcher's apart; the
@@ -115,6 +112,62 @@ Read 2026-10-22, after stage 5a found the first while measuring (`broker-baselin
   receives every message (two `kube-consumer`s would both write each to the graph). Scaling a consumer or processor out
   needs both a way to tell a replica from a replacement and delivery shared within a group; an observer that scales out
   has to split its source, which the broker cannot do for it. Open, in `remaining-work.md`.
+
+## Watcher sessions (2026-10-27, `key-custody.md`, step 5)
+
+A watcher is a second, limited session under an identity's certificate, beside the identity's own. Only the custody
+daemon uses one: it holds the pod's key, connects as the pod (the pod's certificate is the only one it has), and must
+hear of its own revocation whatever the workload does. Without a kind of its own, its session and the workload's would
+supersede each other in turn.
+
+- *Declared, not proven.* A client asks for one at registration (`ClientMessage::RegistrationRequest { watcher }`;
+  `TCPClientConfig::as_watcher`). The broker cannot tell the daemon's connection from the workload's, both presenting
+  the pod's certificate, so the rules make declaring one gain nothing.
+- *The rules* (`session.rs`, `listener.rs`):
+  - it neither supersedes nor is superseded by its identity's session; a new pod's session still supersedes the old
+    pod's;
+  - it is never resumed and resumes nothing: it ends when its connection goes, nothing held for it, and registers afresh
+    each time;
+  - it claims nothing held for its identity's superseded sessions (`GetHeldSessions` answers a watcher nothing): that
+    is the identity's next session's;
+  - it may subscribe to `polar-authority-updates` and `polar-authority-snapshot-replies` and publish to
+    `polar-authority-snapshot-requests`, nothing else (`authority::watcher_may`, `WATCHER_REFUSAL`), and within those it
+    is decided as its identity's session is (Cedar, then the certificate's floor), so a watcher may never more than its
+    identity;
+  - a revoked certificate may still register one, and on a change of authority the broker leaves watchers open, so the
+    daemon is never cut off before it hears its own revocation.
+- *What a holder of the certificate gains from one:* the authority topics, signed and not secret, which every agent
+  hears anyway, until the certificate ends (an hour for a client's). With the daemon nobody holds the key once it is
+  revoked; with key files a stolen key could listen that long.
+- *Its weak points:*
+  - nothing bounds how many watchers an identity opens: a compromised workload could open hundreds, each holding the
+    broker's memory and a connection and each able to ask for snapshots (the plan below);
+  - it proves nothing about who opened it; nothing needs that today;
+  - the broker's own pod has no client slot, so its daemon has no watcher, and the broker's server key ends only with
+    its certificate (12 hours on the local targets);
+  - a revoked watcher is left open, not ended: the daemon exits once it has heard, but a stolen key file's watcher would
+    not.
+- *Tests:* `broker/tests/watcher.rs`, `revocation.rs`, `custody_revocation.rs`.
+
+### Capping watchers: the plan (2026-10-27, on the to-do list)
+
+1. *One watcher per certificate, the newest winning.* A watcher registering under the same identity and certificate
+   serial as a watcher already there ends the older: its connection closed and its session ended, nothing held.
+   - *Per serial, not per identity.* Each pod's certificate is its own (a new serial for each pod and each restart), so
+     one per serial bounds each holder of a certificate to one watcher, and a replacement pod's daemon never displaces
+     the old pod's while both run in a rollout.
+   - *Newest wins, not first wins.* With first wins a compromised workload could take the slot first and keep its daemon
+     out for good, and the daemon would never hear its revocation. With newest wins the daemon, which reconnects each
+     tick and asks for a snapshot each time it registers, always gets back in: at worst the two take turns, which gains
+     the workload nothing, and each turn's request is coalesced by the credentials agent (five seconds).
+   - *What it bounds:* watchers of an identity to its live certificates, and snapshot deliveries to two for each pod.
+2. *The serial reaches the session manager with the registration,* read by the broker from the handshake beside the
+   identity (`BrokerMessage::RegistrationRequest`), never sent by the client.
+3. *Tests first:* two watchers under one certificate, the older closed and its session gone; two under different
+   certificates of one identity, both kept; the identity's own session untouched throughout; a property, that after any
+   sequence of registrations and disconnections at most one watcher is live for each serial and it is the newest; end
+   to end, a second watcher under the pod's certificate opened against the daemon's, and the daemon still hearing its
+   revocation. Mutations on each rule.
 
 ## What is refused, and what the client learns
 
