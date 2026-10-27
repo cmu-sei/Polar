@@ -154,6 +154,8 @@ to be settled before the move:
   wants `Recreate`, and the ledger lock is the backstop either way.
 - *Init containers must be reentrant*: `polar-init` and the escrow bootstrap, run again in the same pod.
 
+The plan for the move, with these settled one at a time: `deployments.md`.
+
 ## Open, to be settled when it is built
 
 - The two workloads' names in the catalog, their capabilities (`Capability` in `polar-agent-builder`), the
