@@ -188,6 +188,45 @@ A snapshot is the credentials agent's whole current authority in one message. Li
     daemon has two (its workload and its daemon's watcher). Coalescing bounds the rate cluster-wide, not per asker;
     capping watchers bounds the subscribers (`cassini-broker.md`, "Capping watchers").
 
+## Pruning the revoked set: the plan (2026-10-27, for review)
+
+What is there, read for this:
+- *The set only grows.* The ledger's `revoked_serials` (`credentials-agent/consume/src/state.rs`) takes every
+  explicitly revoked serial and, since 2026-10-27, every superseded one (`deployments.md`, "The renewal rule"), so it
+  grows by a serial with every pod restart, for good. The whole set goes out in each `Revoked` update and snapshot, and
+  the broker, every agent and every custody daemon look through it on each change.
+- *Its version is its size.* The publisher sends it with "how many there are" as its version
+  (`authority_publisher.rs`, `RevocationsChanged`: "the set only grows"), and a leaf takes an update only with a higher
+  version than it holds. A set made smaller by pruning would have a lower one, and every leaf would ignore it.
+- *What it is used for.* Only for publishing: the ledger's own decisions (an author revoked, `admin_action.rs`) read the
+  revoked flag on the record, not the set. The ledger's set can stay whole; what is published is what gets pruned.
+- *An expired certificate needs no revocation.* Every verifier refuses it on its own: TLS (the broker, Neo4j, the git
+  server), signed documents (`polar-signing`, `valid_at`), the custody daemon (an expired certificate is never installed).
+- *Where the expiry is known.* The ledger keeps the certificate of what it issued or was told of, but not always for
+  good: a pod issued again in place replaces its record (`record_workload_certificate`, "its old serial no longer
+  names this record"), and an account's or an agent's escrow certificate is kept only while current. So the expiry must
+  be kept when the serial is revoked, not looked up later.
+
+The plan:
+1. *Keep each revoked serial's expiry when it is revoked.* `CredentialsState` gains `revoked_until: BTreeMap<serial,
+   not_after>`, filled as the serial goes in: from the record it supersedes, or, for an explicit `Revoke`, from the
+   record the serial names, if the ledger has one. Read from the certificate's PEM while folding, so a replay of the log
+   gives the same. A serial whose certificate the ledger never saw has no expiry and is kept for good, as now.
+2. *What is published.* `published_revocations(now)`: every revoked serial except those whose certificate ended more
+   than a margin before `now`. The margin is for clocks that run behind: recommended one hour, the life of a client
+   certificate, so a verifier an hour slow still sees the serial while it could still take the certificate.
+3. *A version that rises for both changes.* The version is the number of serials ever revoked plus the number of those
+   whose certificate has ended (by the margin): an addition raises the first, an expiry the second, and neither falls
+   while time goes forward. It is never below the version published today (the size), so the leaves running now take it.
+4. *When it is published.* As now when a serial is revoked, and on a tick (every ten minutes) when the version has risen
+   because a certificate ended, through the book's own check (`would_replace`).
+5. *Tests first:* a superseded and an explicitly revoked serial each kept with their expiry, a replay giving the same; an
+   ended serial dropped once the margin has passed and not before; a serial of no known certificate kept; a property,
+   that for any sequence of revocations and of times moving forward, what is published is exactly the revoked serials
+   not ended by the margin, and its version rises exactly when that set changes; the publisher sending the smaller set
+   on its tick, with a higher version, and a leaf taking it.
+6. *Not changed:* the ledger's whole set, and `LedgerMessage::RevokedSerials` (the issuance tests read it).
+
 ## Pinning the key to the CA (planned 2026-10-27; built 2026-10-27)
 
 The credentials agent's escrow key is made in its own pod at its first start (`EscrowKeypair::load_or_generate`, on its
