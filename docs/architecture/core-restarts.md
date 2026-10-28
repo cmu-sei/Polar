@@ -421,7 +421,7 @@ Each step tests first, with property tests where an invariant holds.
 8. **On a fresh sandbox-local:** each core member killed in turn, and two at once, checking what opened against the
    table, in cert-issuer's log, its record and the ledger.
 
-## Step 5, the ticket: the plan (2026-10-28, for review)
+## Step 5, the ticket: the plan (2026-10-28, its two questions decided)
 
 `deployments.md`'s build step 6. What was decided (question 1, B, 2026-10-26; with the move, `deployments.md`, question
 5): a planned restart hands over; the outgoing credentials agent tells cert-issuer over Cassini that its successor may
@@ -476,11 +476,13 @@ step 4); attestation decides who gets through, when it exists (step 6).
    agent's successor bound to the same pod as its last certificate, once it has gone unheard (the window's absence, so
    no faster than today, but only that pod, until the window opens for any). *Recommendation:* the ticket as decided,
    with the principle restated as "no message opens an entry except the credentials agent's own ticket, for its own
-   pod". It is what makes a rejuvenation quick and asks the outgoing agent's consent.
+   pod". It is what makes a rejuvenation quick and asks the outgoing agent's consent. **Decided (the maintainer,
+   2026-10-28): the ticket,** and the principle restated so (`floor_state.rs`'s module comment with it).
 2. *Which endings leave a ticket.* Every orderly ending (a rejuvenation, and a SIGTERM's drain), or a rejuvenation
    alone. A pod deleted is replaced by a new UID, which a ticket bound to the old one cannot admit, so a ticket left by
    every drain admits nothing more. *Recommendation:* every orderly ending: one path, and a SIGTERM to a pod that then
-   restarts in place (an operator's, a test's) is quick too.
+   restarts in place (an operator's, a test's) is quick too. **Decided (the maintainer, 2026-10-28): every orderly
+   ending.**
 
 ### Tests first
 
