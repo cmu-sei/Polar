@@ -719,12 +719,22 @@ Principle: declare each environment variable once, with its type, default, docum
   `POLAR_INIT_ESCROW_BOOTSTRAP` is set with no certificate of the daemon's. So "Degraded operation", item 1 (key files
   a whole mode) holds for every agent but those with `encryption`. None is affected today (kube-consumer and
   git-repo-observer have daemons; the scheduler, on key files, does not encrypt), but a target with `custody` off would
-  be. Either the render refuses that combination, or key-file mode gets an escrow path of its own; not decided.
+  be. Either the render refuses that combination, or key-file mode gets an escrow path of its own. *Decided (the
+  maintainer, 2026-10-28): the render refuses it,* saying why, as `polar-init` already does (`custody_for`); "Degraded
+  operation" stays a supported mode for agents that do not encrypt, and its docs say so. Not built.
 - [ ] A revoked custodian is told so by the refusal's text (found 2026-10-28, custody step 9, on the cluster): the
   daemon reads its revocation by comparing `RegistrationResponse`'s reason to `cassini_types::REVOKED_REFUSAL`
   (`polar-custody/daemon/src/watch.rs`), so a broker with a different text (part A changed it) leaves an older daemon
   retrying, keys held, until its pod ends (53 s for git-repo-processor's in the rollout). A refusal code on the wire
-  would not depend on the wording. Harmless while every image deploys together.
+  would not depend on the wording. Harmless while every image deploys together. *Decided (the maintainer,
+  2026-10-28): a code on the wire:* `RegistrationRefused` carries a reason code beside its text, and the daemon matches
+  the code. Not built.
+- [ ] A pod with a custody daemon may still buy a key-file certificate with its token (found 2026-10-28): on the
+  observer route `polar-init` requests every `--cert` with a key file itself (`issue_cert_via_observer`), and
+  `custody_for` allows a mix, so "the token buys only the custodian's certificate" is the render's convention, not a
+  check. *Decided (the maintainer, 2026-10-28): refused,* by `polar-init` at startup and by a render rule. Not built.
+- [ ] `polar-kernel-keyring` is used by nothing since custody step 9 (cargo reports it as an unused workspace
+  dependency). *Decided (the maintainer, 2026-10-28): kept in the tree.*
 - [ ] The credentials agent's consumer logs "no handler for topic" for admin-action and account requests it has just
   handed to their actors (found 2026-10-28, custody step 8): those two dispatch branches fall through to the warning,
   as before this work. Misleading only.
