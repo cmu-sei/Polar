@@ -412,6 +412,14 @@ Deployment on its pool's node, the nine volumes bound, every workload and daemon
 custodian fetching everything (kube-consumer's and git-repo-observer's the escrow key), the graph writers reaching
 Neo4j, no Failed pod. jira-observer restarts in place on the target's placeholder Jira, as it failed before.
 
+*`local-minimal`, the exemplar without Flux, on a fresh single-node `u7s`* (2026-10-28, nix-usernetes `main`'s node
+image, `up.nu local-minimal --dev` at `d43180d6`): `up.nu`'s own apply path, which step 4 changed for Deployments and
+only unit tests had run. No Job; the sixteen workloads Deployments of one, ready but jira-observer (its placeholder
+Jira); the eight volumes bound; every workload and daemon registered, none refused; every custodian fetching everything,
+the escrow keys included; the graph writers reaching Neo4j. An ending (SIGTERM to kube-observer's agent) restarted the
+pod in place, under its UID, daemon and polar-init again. A second `up.nu` changed nothing: every manifest
+"unchanged", every pod's UID and restart count the same.
+
 ### Tests first
 
 - `infra/tests/rules.nu`: the Deployment rule (one replica, `Recreate`, the restart rule; each missing refused).
