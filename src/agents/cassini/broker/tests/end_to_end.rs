@@ -275,3 +275,57 @@ async fn a_client_hears_what_it_publishes_to_a_topic_it_subscribes_to() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_control_plane_lists_the_live_sessions_with_their_subscriptions() {
+    with_broker(|broker| async move {
+        let listener = TestClient::connect(&broker, "listener.test").await;
+        listener.subscribe("greetings");
+        listener.subscribe("weather");
+        let quiet = TestClient::connect(&broker, "quiet.test").await;
+        pause().await;
+        let listener_id = listener.registration_id().unwrap();
+        let quiet_id = quiet.registration_id().unwrap();
+
+        quiet.control(cassini_types::ControlOp::ListSessions);
+        quiet
+            .wait_for("an answer", Duration::from_secs(10), |c| {
+                !c.control_results().is_empty()
+            })
+            .await;
+        let Ok(cassini_types::ControlResult::SessionList(sessions)) =
+            quiet.control_results().remove(0)
+        else {
+            panic!("not a list of sessions: {:?}", quiet.control_results());
+        };
+        assert_eq!(sessions.len(), 2, "{sessions:?}");
+        assert_eq!(sessions[&listener_id].registration_id, listener_id);
+        assert_eq!(
+            sessions[&listener_id].subscriptions,
+            ["greetings".to_string(), "weather".to_string()]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+        );
+        assert!(sessions[&quiet_id].subscriptions.is_empty());
+
+        // A session taken over by a new one of its identity is no longer listed: its client gone (a pod replaced), and
+        // a new one registered in its place.
+        listener.vanish().await;
+        let _replacement = TestClient::connect(&broker, "listener.test").await;
+        pause().await;
+        quiet.control(cassini_types::ControlOp::ListSessions);
+        quiet
+            .wait_for("a second answer", Duration::from_secs(10), |c| {
+                c.control_results().len() >= 2
+            })
+            .await;
+        let Ok(cassini_types::ControlResult::SessionList(sessions)) =
+            quiet.control_results().remove(1)
+        else {
+            panic!("not a list of sessions");
+        };
+        assert!(!sessions.contains_key(&listener_id), "{sessions:?}");
+        assert_eq!(sessions.len(), 2);
+    })
+    .await;
+}

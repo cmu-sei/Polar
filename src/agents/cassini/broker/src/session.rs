@@ -205,6 +205,32 @@ impl Actor for SessionManager {
                 )
                 .await?;
             }
+            // The control plane's ListSessions: every session the broker holds, connected or kept for its client's
+            // return, but not one taken over by a newer session of its identity. A session's subscriptions are its
+            // subscriber actors, each registered as `<registration id>:<topic>`.
+            BrokerMessage::GetSessions { reply_to, .. } => {
+                let names = ractor::registry::registered();
+                let sessions: cassini_types::SessionMap = state
+                    .sessions
+                    .iter()
+                    .filter(|(_, session)| !session.superseded)
+                    .map(|(id, _)| {
+                        let prefix = format!("{id}:");
+                        let subscriptions = names
+                            .iter()
+                            .filter_map(|name| name.strip_prefix(&prefix).map(str::to_string))
+                            .collect();
+                        (
+                            id.clone(),
+                            cassini_types::SessionDetails {
+                                registration_id: id.clone(),
+                                subscriptions,
+                            },
+                        )
+                    })
+                    .collect();
+                let _ = reply_to.send(sessions);
+            }
             BrokerMessage::GetSessionRef {
                 registration_id,
                 reply_to,

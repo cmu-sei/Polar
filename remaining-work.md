@@ -707,10 +707,12 @@ Principle: declare each environment variable once, with its type, default, docum
   serial, holding its place for a tenure (30 s) before the newest replaces it. Plain "newest wins", as planned, let a
   compromised workload's watcher keep its daemon from ever hearing its revocation; the tenure gives whoever holds the
   place time to hear it.
-- [ ] The control plane's `ListSessions` always fails (found 2026-10-27, building custody step 5): the control
-  manager asks the session manager for `GetSessions` (`cassini/broker/src/control.rs`), and the session manager has no
-  arm for it (`session.rs`), so the call's reply port is dropped and the answer is `InternalError("Operation failed")`.
-  Nothing in the repository's tests lists sessions through it.
+- [x] The control plane's `ListSessions` always failed (found 2026-10-27, building custody step 5; fixed 2026-10-27):
+  the control manager asks the session manager for `GetSessions` (`cassini/broker/src/control.rs`), which had no arm
+  for it, so the reply port was dropped and the answer was `InternalError("Operation failed")`. It now answers with every
+  session it holds but one taken over, each with its subscriptions, read from the registry names of its subscriber
+  actors (`<registration id>:<topic>`), so the answer needs no other actor within the control plane's 100 ms. Test:
+  `tests/end_to_end.rs`, `the_control_plane_lists_the_live_sessions_with_their_subscriptions`.
 - [ ] The broker at 256 connections at once (found 2026-10-27, by the storm bench, `cassini/broker/tests/storm.rs`):
   with key files and with the daemon alike, a p99 handshake of 1.0 to 1.1 s, a TCP connection retried after its SYN
   went unanswered, some rounds at 250 a second, the host's `somaxconn` and SYN backlog at 4,096. At 64 at once the p99
