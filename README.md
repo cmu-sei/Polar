@@ -84,10 +84,10 @@ bin/polar-dev forward                             # step 6: then https://localho
 
 | Decision | Choices | The examples use |
 |---|---|---|
-| Your cluster | A local dev node ([nix-usernetes](https://github.com/daveman1010220/nix-usernetes)), or any cluster you can reach with `kubectl` and have admin rights in | a local nix-usernetes node |
+| Your cluster | A local dev node ([nix-usernetes](https://github.com/daveman1010220/nix-usernetes)), minikube (on a Mac, say: **On minikube**, below), or any cluster you can reach with `kubectl` and have admin rights in; **Kubernetes 1.36 or later** in every case | a local nix-usernetes node |
 | Where you work | **The dev container in the cluster** (`bin/polar-dev`: your machine needs only `kubectl`, `ssh`, `git` and a browser), the dev container on your machine (needs `podman` or `docker`), or the tools installed on your machine. See **Working environments** | in the cluster |
 | Images | **Built from source** (`up.nu --dev`; the way when you change code), or **published** ones copied in (`up.nu --import-from docker.io/<account>`; nothing is built) | built from source |
-| Target | **`local-minimal`**, applied by `up.nu` directly, or **`sandbox-local`**, published signed to a deployment git server in the cluster and applied by Flux; or a target of your own (**Using your own target**) | `local-minimal` |
+| Target | **`local-minimal`**, applied by `up.nu` directly, for one node or many; or **`sandbox-local`**, published signed to a deployment git server in the cluster and applied by Flux, its workloads placed on node pools the cluster must have (**What Polar asks of the cluster**); or a target of your own (**Using your own target**) | `local-minimal` |
 | Registry | **In the cluster** (the shipped targets keep it there; nothing to run anywhere), or one you bring. See **Registries** | in the cluster |
 
 You also need data for ACE to show: a Neo4j populated with work items (**Data source**, below).
@@ -125,16 +125,36 @@ old one's resource types, or `kubectl get all` asks for types it no longer has (
 rm -rf ~/.kube/cache/discovery/127.0.0.1_6443
 ```
 
+*On minikube* (an Apple-silicon Mac, for example), `local-minimal` is the target: one node, no Flux, no node pools. Use
+minikube **v1.39.0 or later**, the first to offer Kubernetes 1.36 and 1.37 (it starts 1.37 by default; this is from its
+release notes as an aggregator reports them, so check minikube's own release page). Give it as much memory and as many CPUs as
+you can spare: the deployment is twenty-odd pods (Neo4j, Keycloak and Postgres among them).
+
+```bash
+minikube start --cpus <n> --memory <MiB> --extra-config=kubelet.registry-pull-qps=0
+kubectl version                    # Server Version v1.36 or later
+```
+
+Then the images: on an Apple-silicon Mac they are the `arm64` ones, which `--import-from` picks by itself (step 4); the dev
+container (`bin/polar-dev`) picks its own the same way. `sandbox-local` on minikube needs one node per pool, labelled and tainted
+as the last item below says (`minikube start --nodes 4`, then `kubectl label` and `kubectl taint` three of them); that has not
+been tried.
+
 What Polar asks of the cluster:
 
+- **Kubernetes 1.36 or later.** Every workload is a Deployment of one pod that restarts in place, its init containers and
+  its custody sidecar with it, by a container restart rule (`RestartAllContainers`), which is on by default from 1.36
+  (`docs/architecture/deployments.md`). On an older cluster its pods are refused.
+- **For `sandbox-local`, its node pools.** It places each workload on a node by pool (`docs/architecture/placement.md`): a
+  node each for `core`, `observers` and `writers`, labelled `polar.dev/pool=<pool>` and tainted
+  `polar.dev/pool=<pool>:NoSchedule`, and at least one node without a taint for the rest. A cluster without them leaves its
+  pods Pending; `local-minimal` places nothing.
 - **A storage class** for persistent volumes. The `local-minimal` and `sandbox-local` targets install a local-path
   provisioner and a class named `managed-csi` (`storage.class` in `infra/config/cluster.nuon`) unless the cluster already
   has a class of that name; on a cluster with a class of its own, set `storage.class` to it.
 - **A kube-proxy that answers NodePorts on `localhost`** (the iptables mode does; IPVS and some kube-proxy replacements do
   not), for the registry in the cluster (**Registries**), or a registry you bring.
 - **The cluster's DNS domain** in `domain` in the same file, if it is not `cluster.local`.
-- **The `pkcs8_key_parser` kernel module** loaded on the nodes (`sudo modprobe pkcs8_key_parser`): the agents' key custody
-  needs it.
 - **Pods that can resolve names and reach the internet**, if you want to observe repositories on GitHub or GitLab. `up.nu`
   checks this at the end and says what it found. A DNS search domain on the node that makes every lookup slow (some
   university and corporate networks, and a VPN) is a common cause of slow or timed-out pods: a lookup of a name inside the
@@ -200,7 +220,7 @@ whether it is already done, and picks up where it stopped.
 *Images, the choice:*
 
 - **`--dev`** builds every image from this checkout and pushes it, through a port-forward, to the registry in the cluster.
-  It is the way when you have changed code, and it restarts every Job to pick up the new images. The first build takes a
+  It is the way when you have changed code, and it rolls out every Deployment whose image it rebuilt. The first build takes a
   long while; the Nix store it fills is kept. Neo4j is built in the sibling repository **`nix-neo4j`**, not here: unless
   you built it, it is copied from where it is published (`docker.io/daveman1010220`, its row in `infra/images.nuon`). To
   use your own build, check `nix-neo4j` out at `~/Documents/projects/nix-neo4j` and build it there (`nix build -L
@@ -230,9 +250,9 @@ namespaces, so they do not share a cluster: rebuild the cluster between them (st
 
 What `local-minimal` deploys: Neo4j, Cassini, `cert-issuer`, the credentials agent and its observer, ACE, the ingestion
 agents, a git server for the schedules repository, and Keycloak with its own Postgres (an optional identity-provider route
-for certificates for people). ACE runs as a Kubernetes Job: it asks for its mTLS client certificate in an init container
-each time a pod starts, which is how it recovers when a certificate or its environment changes, and it holds no other
-cluster permissions.
+for certificates for people). Each runs as a Deployment of one pod that restarts in place whenever it ends: its init
+container asks for its certificates again each time, which is how it rejuvenates and how it recovers when a certificate or
+its environment changes. ACE holds no other cluster permissions.
 
 The cluster CA is made once, by `polar-admin-grant bootstrap-ca` (the `cert-issuer-ca` Secret and the `polar-ca`
 ConfigMap), and refuses to be made again; replacing it means rebuilding the cluster. Everything else gets its certificates
@@ -272,18 +292,17 @@ In the dev container, `just cluster-status` shows the nodes and every pod, and `
 
 Things that look wrong and are not:
 
-- **Pods in `Error` next to a running replacement.** The agents are Kubernetes Jobs and exit on purpose, about once an
-  hour, when their certificates are renewed; the Job starts a fresh pod. Look at the newest pod. On a bring-up, a
-  scheduler observer can also fail once if Polar's git server is still starting, and its next pod runs.
-- **`jira-observer` failing** when no Jira is set up for the target: its credentials come from the target's secrets (see
-  **Secrets setup**). A pile of its failed pods grows: `just cluster-prune-failed` deletes failed pods and leaves running
-  ones.
+- **Restarts counting up on running pods.** The agents end on purpose, about once an hour, when their certificates are
+  renewed, and their pod restarts in place (the same pod, its init containers again): a `RESTARTS` that grows is that,
+  not a crash. After such a restart every container's last state reads exit 137, `RestartingAllContainers`: that is the
+  kubelet's own record, not the agent's exit. On a bring-up, a scheduler observer can also restart once if Polar's git
+  server is still starting.
+- **`jira-observer` restarting** when no Jira is set up for the target: its credentials come from the target's secrets (see
+  **Secrets setup**). Its pod restarts in place each time; nothing piles up.
 - **`ErrImagePull: pull QPS exceeded` or `ImagePullBackOff`, briefly, when many pods start at once.** The kubelet's limit
   on registry requests (step 1). It retries by itself and the pods start.
 - **A port-forward that stops answering** after a pod was replaced: forwards follow one pod. Run `just port-forwards-down`
   and then `just port-forwards-up` (in the dev container), or `bin/polar-dev forward` again (on your machine).
-- **A Job that is slow to replace a pod you deleted by hand.** The Job controller waits longer after each failure, up to
-  about six minutes.
 - **`the git server does not answer yet ... trying again` while seeding the schedules repository.** The git server had
   just restarted (it does when its settings change). The step retries and goes on.
 - **`[polar] TLS certs missing -> building .#tlsCerts ... ERROR`** from a dev shell entered before the dev shell's TLS
@@ -540,7 +559,8 @@ skopeo copy --dest-tls-verify=false \
 `--dest-creds user:password` (or `--dest-authfile`) if it needs a login.
 
 To publish images for others, `nu infra/images.nu publish --to docker.io/<account> --arch arm64 [--authfile <file>]` builds them for
-that architecture (cross-built with Nix when it is not yours) and pushes them under those names. It uses the login `podman login docker.io`
+that architecture and pushes them under those names. One that is not yours is built through the builder's emulation of it
+(binfmt): it works, and it is slow (some hours for every image for `arm64` on an `x86_64` machine). It uses the login `podman login docker.io`
 stored (or `--authfile`). A third-party mirror (for example `flux-source-controller`) is published only when you name it, and is copied from
 its own registry for that architecture; `import` takes mirrors from their registries, so those copies are for people who cannot reach them.
 
@@ -906,17 +926,16 @@ podman run -p 8080:8080 \
 
 There is no static, offline-generated dev PKI any more: every certificate
 comes from `cert-issuer`, signed by the cluster's own CA. To iterate on an
-agent, rebuild its image, push it and bounce its pod; Jobs create a
-fresh pod, and `polar-init` fetches a new certificate on startup:
+agent, rebuild its image, push it and restart its Deployment; its new pod
+pulls the image again, and `polar-init` fetches a new certificate on startup:
 
 ```bash
 just image <image-name>      # build it and push it to the cluster's registry
-kubectl -n polar delete pod -l job-name=<job-name>
+kubectl -n polar rollout restart deployment/<workload>
 ```
 
-(`nu infra/images.nu list` has the image names. Delete a pod once: the
-Job controller waits longer after each pod that fails, so deleting several
-in a row delays the replacement.)
+(`nu infra/images.nu list` has the image names; `kubectl -n polar get deploy`
+the workloads.)
 
 Human access (Neo4j Browser and the admin tools) uses a user certificate
 claimed through the admin flow; see **Admin access and your user
