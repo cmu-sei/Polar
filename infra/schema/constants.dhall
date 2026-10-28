@@ -238,6 +238,15 @@ let custodyClientEnv =
 -- See infra/INFRA.md for the one case it makes worse (a pod stuck terminating on a dead node).
 let JobPodReplacementPolicy = "Failed"
 
+-- A pod that restarts in place (docs/architecture/deployments.md, step 4): its workload container's one rule restarts the
+-- whole pod, its init containers and sidecars included, on every exit (`NotIn` nothing), so every ending runs polar-init
+-- again under the same UID.
+let RestartAllContainersOnEveryExit =
+      { action = "RestartAllContainers"
+      , exitCodes = Some
+        { operator = "NotIn", values = Some ([] : List Natural) }
+      }
+
 in  { PolarNamespace
     , GraphNamespace
     , AuthNamespace
@@ -270,6 +279,7 @@ in  { PolarNamespace
     , DropAllCapSecurityContext
     , RejectSidecarAnnotation
     , JobPodReplacementPolicy
+    , RestartAllContainersOnEveryExit
     , commonClientTls
     , certEmptyDirVolume
     , saTokenVolume

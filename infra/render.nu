@@ -36,7 +36,7 @@
 #   nu infra/up.nu <target>
 
 use validate.nu *
-use rules.nu [job_replacement_problems, apply_order_problems, pull_policy_problems]
+use rules.nu [job_replacement_problems, in_place_problems, apply_order_problems, pull_policy_problems]
 use layers.nu [layer_problems, to_apply]
 use registry.nu [node_registry]
 use lock.nu [effective, lock_problems, pin_text]
@@ -180,6 +180,10 @@ def main [
     check_job_replacement_policy $output_dir
     print ""
 
+    print "Checking that pods with polar-init restart in place..."
+    check_in_place $output_dir
+    print ""
+
     print "Checking image pull policies..."
     check_pull_policies $output_dir
     print ""
@@ -276,6 +280,16 @@ def check_job_replacement_policy [output_dir: string] {
     let files = (ls $output_dir | get name | where {|f| $f | str ends-with ".yaml" })
     let docs = ($files | reduce --fold [] {|f, acc| $acc ++ (docs_in_file $f) })
     let problems = (job_replacement_problems $docs)
+    for p in $problems { print $"  ERROR: ($p)" }
+    if ($problems | length) > 0 { exit 1 }
+}
+
+# A Deployment whose pod runs polar-init restarts in place, one pod at a time (infra/rules.nu in_place_problems;
+# docs/architecture/deployments.md, step 4).
+def check_in_place [output_dir: string] {
+    let files = (ls $output_dir | get name | where {|f| $f | str ends-with ".yaml" })
+    let docs = ($files | reduce --fold [] {|f, acc| $acc ++ (docs_in_file $f) })
+    let problems = (in_place_problems $docs)
     for p in $problems { print $"  ERROR: ($p)" }
     if ($problems | length) > 0 { exit 1 }
 }

@@ -129,6 +129,20 @@ def main [] {
             assert equal ($r.stdout | from yaml | get restartPolicyRules) [{ action: "RestartAllContainers" }]
         }
 
+        # docs/architecture/deployments.md, step 4: ace, a pod with polar-init, restarts in place, one pod at a time.
+        "the ACE job is a Deployment that restarts in place": {
+            use ../rules.nu [in_place_problems]
+            let out = (render ace {})
+            let docs = (open --raw ($out | path join "ace.yaml") | split row "\n---\n" | each {|d| $d | from yaml })
+            let ace = ($docs | where {|d| ($d.kind? | default "") in ["Job" "Deployment"] } | first)
+            assert equal $ace.kind "Deployment"
+            assert equal (in_place_problems [$ace]) []
+            # the Service still selects its pod
+            let svc = ($docs | where kind == "Service" | first)
+            assert equal $svc.spec.selector { name: $ace.metadata.name }
+            assert equal ($ace.spec.template.metadata.labels | get name) $ace.metadata.name
+        }
+
         "Neo4j's server certificate is requested from the credentials agent": {
             let out = (render neo4j {})
             let vars = (init_env ($out | path join "neo4j-statefulset.yaml"))

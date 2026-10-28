@@ -54,8 +54,8 @@ let Spec =
       , sa_token_secret : Optional Text
       , automount_sa_token : Optional Bool
       , restart_policy : Text
-      , backoff_limit : Natural
-      , ttl_after_finished_secs : Natural
+      -- A run's Job (the `run` kind), or none: a Deployment of one that restarts in place.
+      , job : Optional { backoff_limit : Natural, ttl_after_finished_secs : Natural }
       , probe : A.Probe
       , termination_grace_secs : Natural
       , fs_group : Optional Natural

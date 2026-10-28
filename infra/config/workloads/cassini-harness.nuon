@@ -30,14 +30,14 @@
 [
   {
     name: "harness-producer"
-    kind: "agent"
+    kind: "run"
     image: "harness-producer"
     config: "document"
   }
 
   {
     name: "harness-sink"
-    kind: "agent"
+    kind: "run"
     image: "harness-sink"
     config: "document"
   }

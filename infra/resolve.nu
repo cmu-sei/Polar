@@ -56,6 +56,9 @@ const CONFIG = ($INFRA | path join "config")
 
 const DEFAULT_TARGET = "local-minimal"
 
+# The start marker's file, in the health volume (docs/architecture/deployments.md, step 4).
+const START_MARKER_FILE = "started-by-polar-init"
+
 # The custody daemon's place in a pod (docs/architecture/key-custody.md, step 4): its socket, on a volume the pod's
 # containers share; the CA it judges certificates by (the pinned-ca capability's, which every agent and service has);
 # its own UID, and the group it shares the socket with; and polar-init's and the workload's UID, which is one
@@ -501,6 +504,18 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     let h = $spec.health
     $volumes = ($volumes | append { name: $h.volume, secret: null, audience: null, from: "kind" })
     $mounts = ($mounts | append { name: $h.volume, path: $h.dir, read_only: false, from: "kind" })
+
+    # A pod that restarts in place (a Deployment's: `job` null) and runs polar-init: polar-init leaves the start marker in the
+    # health volume at the end of every run, and the workload takes it as it starts, so a container restarted alone, which
+    # finds none, exits for its pod to restart whole (docs/architecture/deployments.md, step 4). cert-issuer has no
+    # polar-init, and a run's Job no restart in place: neither is told.
+    let in_place = (($spec.job? | default null) == null)
+    if $in_place and $entry.kind != "ca" {
+        let marker = $"($h.dir)/($START_MARKER_FILE)"
+        $env_list = ($env_list | append (env_entry { name: "POLAR_START_MARKER", value: $marker } $vars "kind" $name))
+        $init_env = ($init_env | append (env_entry { name: "POLAR_INIT_START_MARKER", value: $marker } $vars "kind" $name))
+        $init_mounts = ($init_mounts | append { name: $h.volume, path: $h.dir, from: "kind" })
+    }
     let cert_files = ($cert_dirs | str join ",")
     let dep_list = ($deps | get endpoint | str join ",")
     for e in [
@@ -608,9 +623,9 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         service_account: ($spec.service_account? | default $name)
         sa_token_secret: $sa_secret
         automount_sa_token: (if $sa_secret == null { false } else { null })
-        restart_policy: $spec.restart_policy
-        backoff_limit: $spec.backoff_limit
-        ttl_after_finished_secs: $spec.ttl_after_finished_secs
+        # Kept by the pod and restarted in place (a Deployment), or a Job's, which the Job controller replaces.
+        restart_policy: (if $in_place { "Always" } else { "Never" })
+        job: ($spec.job? | default null)
         probe: $spec.probe
         termination_grace_secs: $grace
         fs_group: ($spec.fs_group? | default null)
@@ -809,7 +824,7 @@ def floor_record [w: record, target: string, kinds: record, caps: record, vars: 
 
 # ── Comparison with a rendered manifest ──────────────────────────────────────
 
-# The same facts as resolve produces, read back from a rendered Job manifest.
+# The same facts as resolve produces, read back from a rendered workload manifest (a Deployment, or a run's Job).
 def actual_of [file: string] {
     let doc = (open --raw $file | from yaml)
     let pod = $doc.spec.template.spec
@@ -824,8 +839,7 @@ def actual_of [file: string] {
         service_account: $pod.serviceAccountName
         automount_sa_token: ($pod | get -o automountServiceAccountToken)
         restart_policy: $pod.restartPolicy
-        backoff_limit: $doc.spec.backoffLimit
-        ttl_after_finished_secs: $doc.spec.ttlSecondsAfterFinished
+        job: (if $doc.kind == "Job" { { backoff_limit: $doc.spec.backoffLimit, ttl_after_finished_secs: $doc.spec.ttlSecondsAfterFinished } } else { null })
         termination_grace_secs: ($pod | get -o terminationGracePeriodSeconds)
         env: ($c.env | each {|e|
             {
@@ -857,8 +871,7 @@ def expected_of [r: record] {
         service_account: $r.service_account
         automount_sa_token: $r.automount_sa_token
         restart_policy: $r.restart_policy
-        backoff_limit: $r.backoff_limit
-        ttl_after_finished_secs: $r.ttl_after_finished_secs
+        job: $r.job
         termination_grace_secs: $r.termination_grace_secs
         env: ($r.env | each {|e| { name: $e.name, value: $e.value, secret: $e.secret, key: $e.key } })
         volumes: ($r.volumes | each {|v| { name: $v.name, secret: $v.secret, audience: $v.audience } })
@@ -940,7 +953,7 @@ def "main names" [--target: string = $DEFAULT_TARGET] {
 def "main scaffolds" [dir: string, --target: string = $DEFAULT_TARGET] {
     let from = (scaffold_dir_for $target)
     mkdir $dir
-    let agents = (all_workloads $target | where kind == "agent")
+    let agents = (all_workloads $target | where kind in ["agent" "run"])
     for w in $agents {
         let scaffold = (with-env { POLAR_SCAFFOLD_DIR: $from.dir } { scaffold_of $w.name $w })
         let name = ($scaffold | get agent.name)
@@ -969,7 +982,7 @@ def "main explain" [
     print $"  needs: ($r.needs | str join ', ')"
     print ""
     print "  values:"
-    for k in [namespace image pull_policy polar_init_image issuer bootstrap cert_issuer_url service_account sa_token_secret automount_sa_token restart_policy backoff_limit ttl_after_finished_secs termination_grace_secs] {
+    for k in [namespace image pull_policy polar_init_image issuer bootstrap cert_issuer_url service_account sa_token_secret automount_sa_token restart_policy job termination_grace_secs] {
         let v = ($r | get $k)
         let o = ($r._origin | get -o $k | default "derived")
         print $"    ($k | fill -w 24)  (one_line $v)   [($o)]"

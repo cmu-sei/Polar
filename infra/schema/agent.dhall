@@ -239,6 +239,8 @@ let render =
 
         let placed = functions.placementOf v.placement
 
+        let restart = functions.restartOf v.job
+
         let podSpec =
               kubernetes.PodSpec::{
               , nodeSelector = placed.nodeSelector
@@ -277,6 +279,8 @@ let render =
               , containers =
                 [ kubernetes.Container::{
                   , name = v.name
+                  , restartPolicy = restart.restartPolicy
+                  , restartPolicyRules = restart.restartPolicyRules
                   , image = Some v.image
                   , imagePullPolicy = Some v.pull_policy
                   , securityContext = Some Constants.DropAllCapSecurityContext
@@ -305,26 +309,7 @@ let render =
                 ]
               }
 
-        in  kubernetes.Job::{
-            , metadata = kubernetes.ObjectMeta::{
-              , name = Some v.name
-              , namespace = Some v.namespace
-              , annotations = Some [ Constants.RejectSidecarAnnotation ]
-              }
-            , spec = Some kubernetes.JobSpec::{
-              , backoffLimit = Some v.backoff_limit
-              , podReplacementPolicy = Some Constants.JobPodReplacementPolicy
-              , parallelism = Some 1
-              , completions = Some 1
-              , ttlSecondsAfterFinished = Some v.ttl_after_finished_secs
-              , template = kubernetes.PodTemplateSpec::{
-                , metadata = Some kubernetes.ObjectMeta::{
-                  , name = Some v.name
-                  , labels = Some [ { mapKey = "name", mapValue = v.name } ]
-                  }
-                , spec = Some podSpec
-                }
-              }
-            }
+        in  functions.workloadOf
+              { name = v.name, namespace = v.namespace, job = v.job, pod = podSpec }
 
 in  render

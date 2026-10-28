@@ -102,6 +102,19 @@ def with_target [config: record, body: closure] {
     }
 }
 
+# The workload object (Deployment or Job) `render-catalog.nu` renders for `name` under `target`.
+def object_of [name: string, target: string] {
+    let out = (mktemp --directory)
+    let r = (do { ^nu ($INFRA | path join "render-catalog.nu") $target $out --only $name } | complete)
+    if $r.exit_code != 0 {
+        rm -rf $out
+        error make { msg: $"the render of ($name) failed: ($r.stderr | lines | last 5 | str join '; ')" }
+    }
+    let docs = (open --raw ($out | path join $"($name).yaml") | split row "\n---\n" | each {|d| $d | from yaml })
+    rm -rf $out
+    $docs | where {|d| ($d.kind? | default "") in ["Job" "Deployment"] } | first
+}
+
 # The pod `render-catalog.nu` renders for `name` under `target`, read back from its output.
 def pod_of [name: string, target: string] {
     let out = (mktemp --directory)
@@ -287,6 +300,43 @@ def main [] {
                 assert equal ($plain.nodeSelector? | default null) null $n
                 assert equal ($plain.tolerations? | default null) null $n
             }
+        }
+
+        # docs/architecture/deployments.md, step 4: every workload restarts in place, a Deployment of one; the load harness,
+        # which runs to completion, is a Job of the `run` kind.
+        "every workload is a Deployment that restarts in place, and the load harness a Job": {
+            use ../rules.nu [in_place_problems]
+            for t in [sandbox-local local-minimal] {
+                for n in (^nu $RESOLVER names --target $t | from json) {
+                    let o = (object_of $n $t)
+                    if $n in [harness-producer harness-sink] {
+                        assert equal $o.kind "Job" $"($t) ($n)"
+                        assert equal $o.spec.template.spec.restartPolicy "Never" $n
+                    } else {
+                        assert equal $o.kind "Deployment" $"($t) ($n)"
+                        assert equal (in_place_problems [$o]) [] $"($t) ($n)"
+                        # cert-issuer has no polar-init, which is what the rule looks for, so its own are checked here.
+                        assert equal $o.spec.replicas 1 $n
+                        assert equal $o.spec.strategy.type "Recreate" $n
+                        let c = ($o.spec.template.spec.containers | first)
+                        assert equal $c.restartPolicy "Always" $n
+                        assert equal $c.restartPolicyRules [{ action: "RestartAllContainers", exitCodes: { operator: "NotIn", values: [] } }] $n
+                    }
+                }
+            }
+        }
+
+        # A container restarted alone finds no marker and exits, so its pod restarts whole: polar-init leaves the
+        # marker where the workload takes it, in the health volume, for a Deployment and not for a run's Job.
+        "polar-init leaves the start marker where the workload takes it, in a Deployment's pod alone": {
+            let marker = "/var/run/polar-health/started-by-polar-init"
+            let r = (resolve "kube-consumer")
+            assert equal (env_value $r "POLAR_START_MARKER") $marker
+            assert equal (init_env_value $r "POLAR_INIT_START_MARKER") $marker
+            assert ($r.init_mounts | any {|m| $m.name == "polar-health" and $m.path == "/var/run/polar-health" }) $"($r.init_mounts)"
+            let job = (resolve_for sandbox-local "harness-sink")
+            assert equal (env_value $job "POLAR_START_MARKER" sandbox-local) null
+            assert equal (init_env_value $job "POLAR_INIT_START_MARKER") null
         }
 
         "a target with custody off renders every pod with key files, as before": {

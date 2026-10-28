@@ -21,12 +21,14 @@
 
 -- infra/layers/2-services/ace/job.dhall
 --
--- ACE Job and Service.
+-- ACE Deployment and Service.
 --
--- ACE runs as a Job, not a Deployment, for the same reason every other
--- Polar workload does: a Job's pod is fully replaced on completion/retry,
--- which re-runs the polar-init init container and issues a fresh
--- certificate. A Deployment's in-place container restart does not.
+-- ACE restarts in place, as every Polar workload does (docs/architecture/deployments.md, step 4): a Deployment of one,
+-- `Recreate`, whose container's rule restarts the whole pod on every exit, so an ending runs the polar-init init container
+-- again and issues a fresh certificate, under the same pod. (It was a Job for that until 2026-10-28: a Deployment's
+-- container restarted alone does not run polar-init.) A container its liveness probe kills is restarted alone, without
+-- polar-init, and ACE is no builder agent, so nothing turns that into a whole-pod restart; with its year-long certificate
+-- it restarts on a valid one.
 --
 -- ACE requests a one-year certificate (see identityLifetimeOverrides in
 -- the target's overrides.dhall) -- day to day, this means ACE almost
@@ -108,10 +110,12 @@ let render =
               , kubernetes.VolumeMount::{ name = "polar-health", mountPath = "/var/run/polar-health" }
               ]
 
+        let restart = functions.restartOf (None functions.Job)
+
         let podSpec = kubernetes.PodSpec::{
               , serviceAccountName = Some v.serviceAccountName
               , imagePullSecrets   = Some v.imagePullSecrets
-              , restartPolicy      = Some "Never"
+              , restartPolicy      = Some "Always"
               , volumes            = Some volumes
               , initContainers     = Some
                 [ functions.makePolarInitContainer
@@ -130,6 +134,8 @@ let render =
               , containers =
                 [ kubernetes.Container::{
                   , name            = v.name
+                  , restartPolicy   = restart.restartPolicy
+                  , restartPolicyRules = restart.restartPolicyRules
                   , image           = Some v.image
                   , imagePullPolicy = Some v.imagePullPolicy
                   , securityContext = Some Constants.DropAllCapSecurityContext
@@ -148,28 +154,13 @@ let render =
                 ]
               }
 
-        let job =
-              kubernetes.Job::{
-              , metadata = kubernetes.ObjectMeta::{
-                , name        = Some v.name
-                , namespace   = Some Constants.PolarNamespace
-                , annotations = Some [ Constants.RejectSidecarAnnotation ]
+        let workload =
+              functions.workloadOf
+                { name = v.name
+                , namespace = Constants.PolarNamespace
+                , job = None functions.Job
+                , pod = podSpec
                 }
-              , spec = Some kubernetes.JobSpec::{
-                , backoffLimit            = Some 1000000
-                , podReplacementPolicy = Some Constants.JobPodReplacementPolicy
-                , parallelism             = Some 1
-                , completions             = Some 1
-                , ttlSecondsAfterFinished = Some 300
-                , template                = kubernetes.PodTemplateSpec::{
-                  , metadata = Some kubernetes.ObjectMeta::{
-                    , name   = Some v.name
-                    , labels = Some [ { mapKey = "name", mapValue = v.name } ]
-                    }
-                  , spec = Some podSpec
-                  }
-                }
-              }
 
         let service =
               kubernetes.Service::{
@@ -190,7 +181,7 @@ let render =
                 }
               }
 
-        in  [ kubernetes.Resource.Job     job
+        in  [ workload
             , kubernetes.Resource.Service service
             ]
 

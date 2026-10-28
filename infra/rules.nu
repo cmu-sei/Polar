@@ -73,6 +73,41 @@ export def job_replacement_problems [docs: list]: nothing -> list<string> {
     }
 }
 
+# What is wrong with a Deployment whose pod runs polar-init, which restarts in place (docs/architecture/deployments.md,
+# step 4): one pod (`replicas: 1`) replaced only once the old one is gone (`Recreate`), never two of one identity at once;
+# and its workload containers kept by the pod (`restartPolicy: Always`) and restarting the whole pod on every exit
+# (`RestartAllContainers`, `NotIn []`), so that every ending runs polar-init again. A Deployment without polar-init
+# (Keycloak, Jaeger) is not one of these.
+export def in_place_problems [docs: list]: nothing -> list<string> {
+    $docs
+    | where {|d| ($d.kind? | default "") == "Deployment" }
+    | where {|d| ($d.spec?.template?.spec?.initContainers? | default [] | any {|c| $c.name == "polar-init" }) }
+    | each {|d|
+        let name = $d.metadata.name
+        let pod = $d.spec.template.spec
+        mut p = []
+        if ($d.spec.replicas? | default 1) != 1 {
+            $p = ($p | append $"Deployment ($name) has ($d.spec.replicas) replicas: one pod of an identity at a time")
+        }
+        if ($d.spec.strategy?.type? | default "RollingUpdate") != "Recreate" {
+            $p = ($p | append $"Deployment ($name) does not roll out by Recreate: a rolling update starts the new pod before the old one ends")
+        }
+        for c in ($pod.containers? | default []) {
+            if ($c.restartPolicy? | default "") != "Always" {
+                $p = ($p | append $"Deployment ($name)'s container ($c.name) has no restartPolicy Always: its restart rule needs one")
+            }
+            let rules = ($c.restartPolicyRules? | default [])
+            if not ($rules | any {|r| $r.action? == "RestartAllContainers" }) {
+                $p = ($p | append $"Deployment ($name)'s container ($c.name) has no RestartAllContainers rule: an ending would not run polar-init again")
+            } else if not ($rules | any {|r| $r.action? == "RestartAllContainers" and $r.exitCodes?.operator? == "NotIn" and ($r.exitCodes?.values? | default []) == [] }) {
+                $p = ($p | append $"Deployment ($name)'s container ($c.name) restarts its pod on some exits, not on every exit")
+            }
+        }
+        $p
+    }
+    | flatten
+}
+
 # The pod spec of a rendered object, or null when it has none: a Pod's own, a workload's template, a CronJob's.
 def pod_spec_of [d: record] {
     match ($d.kind? | default "") {

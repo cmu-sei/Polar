@@ -97,6 +97,43 @@ def main [] {
             assert equal (placement_of { pools: ["core"] } "writers") null
         }
 
+        # docs/architecture/deployments.md, step 4: a pod that runs polar-init restarts in place, one at a time.
+        "a Deployment whose pod runs polar-init restarts in place, one pod at a time": {
+            let rule = { action: "RestartAllContainers", exitCodes: { operator: "NotIn", values: [] } }
+            let good = {
+                kind: "Deployment"
+                metadata: { name: "kube-consumer" }
+                spec: {
+                    replicas: 1
+                    strategy: { type: "Recreate" }
+                    template: { spec: {
+                        restartPolicy: "Always"
+                        initContainers: [{ name: "polar-custody", restartPolicy: "Always" } { name: "polar-init" }]
+                        containers: [{ name: "kube-consumer", restartPolicy: "Always", restartPolicyRules: [$rule] }]
+                    } }
+                }
+            }
+            assert equal (in_place_problems [$good]) []
+            # a Deployment without polar-init (Keycloak, Jaeger) is not one of these
+            let plain = ($good | update spec.template.spec.initContainers [] | update spec.template.spec.containers [{ name: "keycloak" }] | update spec.strategy { type: "RollingUpdate" })
+            assert equal (in_place_problems [$plain]) []
+            let cases = [
+                [what needle doc];
+                ["two replicas" "replicas" ($good | update spec.replicas 2)]
+                ["a rolling update" "Recreate" ($good | update spec.strategy { type: "RollingUpdate" })]
+                ["no strategy" "Recreate" ($good | reject spec.strategy)]
+                ["no rule" "RestartAllContainers" ($good | update spec.template.spec.containers.0 { name: "kube-consumer", restartPolicy: "Always" })]
+                ["exit 1 only" "every exit" ($good | update spec.template.spec.containers.0.restartPolicyRules [{ action: "RestartAllContainers", exitCodes: { operator: "In", values: [1] } }])]
+                ["the container left to the pod" "restartPolicy" ($good | update spec.template.spec.containers.0 { name: "kube-consumer", restartPolicyRules: [$rule] })]
+            ]
+            for c in $cases {
+                let p = (in_place_problems [$c.doc])
+                assert equal ($p | length) 1 $c.what
+                assert (has $p "kube-consumer") $c.what
+                assert (has $p $c.needle) $"($c.what): ($p)"
+            }
+        }
+
         "a Job that replaces pods only after they are gone passes": {
             let docs = [{ kind: "Job", metadata: { name: "kube-consumer" }, spec: { podReplacementPolicy: "Failed" } }]
             assert equal (job_replacement_problems $docs) []

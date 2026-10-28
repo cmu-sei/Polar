@@ -305,9 +305,87 @@ let placementOf =
               placement
         }
 
+-- What a workload is (docs/architecture/deployments.md, step 4): a run's Job (`job` some), which the Job controller
+-- replaces; or a Deployment of one, `Recreate` (never two pods of one identity), whose pod restarts in place.
+let Job = { backoff_limit : Natural, ttl_after_finished_secs : Natural }
+
+let workloadOf =
+      \(w : { name : Text, namespace : Text, job : Optional Job, pod : kubernetes.PodSpec.Type }) ->
+        let labels = [ { mapKey = "name", mapValue = w.name } ]
+
+        let metadata =
+              kubernetes.ObjectMeta::{
+              , name = Some w.name
+              , namespace = Some w.namespace
+              , annotations = Some [ Constants.RejectSidecarAnnotation ]
+              }
+
+        let template =
+              kubernetes.PodTemplateSpec::{
+              , metadata = Some kubernetes.ObjectMeta::{
+                , name = Some w.name
+                , labels = Some labels
+                }
+              , spec = Some w.pod
+              }
+
+        in  merge
+              { None =
+                  kubernetes.Resource.Deployment
+                    kubernetes.Deployment::{
+                    , metadata
+                    , spec = Some kubernetes.DeploymentSpec::{
+                      , replicas = Some 1
+                      , strategy = Some kubernetes.DeploymentStrategy::{
+                        , type = Some "Recreate"
+                        }
+                      , selector = kubernetes.LabelSelector::{
+                        , matchLabels = Some labels
+                        }
+                      , template
+                      }
+                    }
+              , Some =
+                  \(job : Job) ->
+                    kubernetes.Resource.Job
+                      kubernetes.Job::{
+                      , metadata
+                      , spec = Some kubernetes.JobSpec::{
+                        , backoffLimit = Some job.backoff_limit
+                        , podReplacementPolicy = Some Constants.JobPodReplacementPolicy
+                        , parallelism = Some 1
+                        , completions = Some 1
+                        , ttlSecondsAfterFinished = Some job.ttl_after_finished_secs
+                        , template
+                        }
+                      }
+              }
+              w.job
+
+-- The workload container's restart: in a Deployment's pod, kept by the pod and restarting the whole pod on every exit; in
+-- a run's Job, left to the pod (`Never`).
+let restartOf =
+      \(job : Optional Job) ->
+        merge
+          { None =
+            { restartPolicy = Some "Always"
+            , restartPolicyRules = Some
+              [ Constants.RestartAllContainersOnEveryExit ]
+            }
+          , Some =
+              \(_ : Job) ->
+                { restartPolicy = None Text
+                , restartPolicyRules = None (List kubernetes.ContainerRestartRule.Type)
+                }
+          }
+          job
+
 in  { makeGraphEnv
     , Placement
     , placementOf
+    , Job
+    , workloadOf
+    , restartOf
     , makeOpaqueSecret
     , makeDeployment
     , DockerRegistrySecret
