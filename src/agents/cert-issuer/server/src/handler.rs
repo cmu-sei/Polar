@@ -161,7 +161,11 @@ impl Handler {
         };
         let now = std::time::Instant::now();
         let workload = &claims.workload_identity;
-        let credentials_agent = self.internal_callers.iter().any(|c| c == dns_identity);
+        // The credentials agent's custodian waits as the credentials agent does (docs/architecture/key-custody.md,
+        // "Part A's bootstrap: the custodian").
+        let service =
+            cert_issuer_common::custody::custodian_of(dns_identity).unwrap_or(dns_identity);
+        let credentials_agent = self.internal_callers.iter().any(|c| c == service);
         let open = gate.open(now);
         if open.admits(credentials_agent) {
             info!(workload = %workload, floor_state = ?open, "admitted on its token: the floor state has its entry open");

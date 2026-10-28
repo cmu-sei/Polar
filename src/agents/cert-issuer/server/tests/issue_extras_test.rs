@@ -636,6 +636,61 @@ async fn a_request_the_state_does_not_admit_is_held_offered_once_and_signed_once
     assert_eq!(offers.lock().unwrap().len(), 2);
 }
 
+/// The credentials agent's own custodian (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian") waits
+/// as the credentials agent does: its successor's custodian is vouched for by no one, so it is held and never offered.
+#[tokio::test]
+async fn the_credentials_agent_s_custodian_waits_as_it_does_and_is_never_offered() {
+    let credentials_workload = "system:serviceaccount:polar:credentials-agent";
+    let floor = Some(vec![BootstrapIdentity {
+        workload: credentials_workload.to_string(),
+        cert_type: CertType::Client,
+        names: vec![],
+        vouched_only: false,
+        publish: vec![],
+        subscribe: vec![],
+        groups: vec![],
+    }]);
+    let (mut handler, ca) = rig(floor);
+    let (_gate, offers) = gated(&mut handler, just_restarted());
+    let token = mint_token(
+        TEST_KID,
+        primary_keypair(),
+        serde_json::json!({
+            "iss": TEST_ISSUER,
+            "aud": TEST_AUDIENCE,
+            "sub": credentials_workload,
+            "exp": now_plus(300),
+            "kubernetes.io": {
+                "namespace": "polar",
+                "pod": { "name": "credentials-agent-abc", "uid": "11111111-2222-3333-4444-555555555555" }
+            }
+        }),
+    );
+    let custodian = cert_issuer_common::custody::custodian_identity(CREDENTIALS_AGENT);
+    let csr = generate_csr(&custodian, &KeyAlgorithm::EcdsaP256, &[]).expect("csr");
+    let response = handler
+        .handle(
+            None,
+            &token,
+            IssueRequest {
+                csr_pem: csr.csr_pem,
+                cert_type: CertType::Custody,
+                extra_sans: vec![],
+                subject_dn_defaults: None,
+            },
+        )
+        .await;
+    assert_eq!(
+        (response.status, outcome(&response)),
+        (202, Some(IssueOutcome::Held))
+    );
+    assert!(
+        offers.lock().unwrap().is_empty(),
+        "never offered to the credentials agent itself"
+    );
+    assert!(ca.asked.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn a_held_request_the_credentials_agent_refuses_is_refused_at_every_ask_after() {
     let (mut handler, ca) = rig(floor_with_this_workload());
