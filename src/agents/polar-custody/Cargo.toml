@@ -30,6 +30,10 @@ path = "src/lib.rs"
 
 [dependencies]
 cert-issuer-common = { version = "1.0.0", path = "../cert-issuer/common" }
+# The pod's escrow key (docs/architecture/key-custody.md, "Part A"): P-256, sealed and unwrapped through polar-escrow.
+p256 = { workspace = true, features = ["pem"] }
+polar-escrow.workspace = true
+rsa.workspace = true
 polar-env.workspace = true
 rcgen.workspace = true
 ring = "0.17.14"
@@ -47,5 +51,6 @@ libc.workspace = true
 # The tests check signatures with a second, independent implementation.
 p256.workspace = true
 proptest.workspace = true
+rand.workspace = true
 tempfile.workspace = true
 tokio-rustls.workspace = true

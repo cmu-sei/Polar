@@ -25,13 +25,21 @@
 //! socket. `polar-init` (the installer) makes a slot's key and CSR and installs the certificate it is issued; the workload
 //! signs handshakes and reads the certificate; no request gives the key out.
 //!
+//! The custodian (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"): `polar-init` installs only
+//! the custodian's own certificate, bought with the pod's token, and says what the custodian is to fetch
+//! (`Request::Bootstrap`); the custodian fills the workload's slots and the escrow key itself, through the operations
+//! below that no request reaches. The custodian's key signs only the daemon's own handshake; the escrow key only
+//! unwraps.
+//!
 //! A certificate is installed only if it is for the slot's own key, names the identity its CSR was made for, is valid
 //! now, is no CA, and was signed by the CA the pod was given, as `polar-init` judges a bundle today
 //! (`cert-client`, `judge_bundle`).
 
+use crate::escrow::EscrowKey;
 use crate::key::SlotKey;
 use crate::protocol::{Refusal, Reply, Request, Slot};
 use crate::tls::is_tls13_certificate_verify;
+use cert_issuer_common::custody::{CustodyPermission, custodian_of, is_reserved};
 use std::collections::HashMap;
 use x509_parser::prelude::*;
 
@@ -50,10 +58,30 @@ struct Held {
     chain: Option<Vec<String>>,
 }
 
+/// What the custodian is to fetch for the workload (`Request::Bootstrap`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    /// The workload's identity: the custodian's is `custody.<identity>`.
+    pub identity: String,
+    pub client: bool,
+    /// The server certificate's names, if it is to have one.
+    pub server: Option<Vec<String>>,
+    pub escrow: bool,
+}
+
 pub struct Custody {
     /// The pinned CA, DER.
     ca: Vec<u8>,
     slots: HashMap<Slot, Held>,
+    /// What the custodian is to fetch, once `polar-init` has said.
+    plan: Option<Plan>,
+    /// An escrow key made for issuance, not yet escrowed.
+    pending_escrow: Option<EscrowKey>,
+    /// The pod's escrow key, which only unwraps.
+    escrow: Option<EscrowKey>,
+    /// The custodian has fetched everything the plan says, or could not.
+    ready: bool,
+    failed: Option<String>,
     /// A certificate it held was revoked: its keys are gone, and it refuses everything.
     revoked: bool,
 }
@@ -81,6 +109,11 @@ impl Custody {
         Ok(Self {
             ca,
             slots: HashMap::new(),
+            plan: None,
+            pending_escrow: None,
+            escrow: None,
+            ready: false,
+            failed: None,
             revoked: false,
         })
     }
@@ -112,6 +145,8 @@ impl Custody {
         revoked.sort_by_key(|slot| matches!(slot, Slot::Server));
         if !revoked.is_empty() {
             self.slots.clear();
+            self.pending_escrow = None;
+            self.escrow = None;
             self.revoked = true;
         }
         revoked
@@ -136,6 +171,31 @@ impl Custody {
             {
                 Reply::Refused(Refusal::Sealed)
             }
+            // Once the custodian has its plan, the workload's slots are its own to fill.
+            Request::MakeCsr { slot, .. } | Request::Install { slot, .. }
+                if roles.installer && slot != Slot::Custodian && self.plan.is_some() =>
+            {
+                Reply::Refused(Refusal::Sealed)
+            }
+            // The custodians' space is the custodian slot's, and only that slot's.
+            Request::MakeCsr {
+                slot, ref identity, ..
+            } if roles.installer && (slot == Slot::Custodian) != is_reserved(identity) => {
+                Reply::Refused(Refusal::BadRequest(
+                    "the custodian slot is for a custodian's identity, and only it is".to_string(),
+                ))
+            }
+            Request::Bootstrap {
+                identity,
+                client,
+                server,
+                escrow,
+            } if roles.installer => self.bootstrap(Plan {
+                identity,
+                client,
+                server,
+                escrow,
+            }),
             Request::MakeCsr {
                 slot,
                 identity,
@@ -170,6 +230,11 @@ impl Custody {
                     }) => Reply::Certificate(chain.clone()),
                 }
             }
+            // The custodian's key signs the daemon's own handshake, in process (`sign_own`), and no caller's.
+            Request::Sign {
+                slot: Slot::Custodian,
+                ..
+            } => Reply::Refused(Refusal::NotPermitted),
             Request::Sign { slot, message } if roles.workload => {
                 let Some(held) = self.slots.get(&slot) else {
                     return Reply::Refused(Refusal::NoKey);
@@ -182,8 +247,210 @@ impl Custody {
                 }
                 Reply::Signature(held.key.sign(&message))
             }
+            Request::Ready if roles.installer => match (&self.failed, self.ready) {
+                (Some(why), _) => Reply::Refused(Refusal::BootstrapFailed(why.clone())),
+                (None, true) => Reply::Ready,
+                (None, false) => Reply::Refused(Refusal::NotReady),
+            },
+            Request::Unwrap { wrapped } if roles.workload => match &self.escrow {
+                None => Reply::Refused(Refusal::NoKey),
+                Some(key) => match key.unwrap(&wrapped) {
+                    Ok(unwrapped) => Reply::Unwrapped(unwrapped.to_vec()),
+                    Err(_) => Reply::Refused(Refusal::BadRequest(
+                        "not a key wrapped to this pod's escrow key".to_string(),
+                    )),
+                },
+            },
             _ => Reply::Refused(Refusal::NotPermitted),
         }
+    }
+
+    /// The plan `polar-init` gives, once the custodian's certificate is installed: only what that certificate names,
+    /// for the workload it is the custodian of, and once.
+    fn bootstrap(&mut self, plan: Plan) -> Reply {
+        if self.plan.is_some() {
+            return Reply::Refused(Refusal::Sealed);
+        }
+        let Some(Held {
+            identity: custodian,
+            chain: Some(chain),
+            ..
+        }) = self.slots.get(&Slot::Custodian)
+        else {
+            return Reply::Refused(Refusal::NoCertificate);
+        };
+        if custodian_of(custodian) != Some(plan.identity.as_str()) || is_reserved(&plan.identity) {
+            return Reply::Refused(Refusal::BadRequest(format!(
+                "`{}` is not the workload this custodian keeps keys for",
+                plan.identity
+            )));
+        }
+        let names = chain
+            .first()
+            .and_then(|leaf| cert_issuer_common::custody::extract_custody_permissions(leaf).ok())
+            .unwrap_or_default();
+        for (wanted, permission) in [
+            (plan.client, CustodyPermission::Client),
+            (plan.server.is_some(), CustodyPermission::Server),
+            (plan.escrow, CustodyPermission::Escrow),
+        ] {
+            if wanted && !names.contains(&permission) {
+                return Reply::Refused(Refusal::BadRequest(format!(
+                    "the custodian's certificate does not name {}",
+                    permission.to_san_string()
+                )));
+            }
+        }
+        self.ready = !plan.client && plan.server.is_none() && !plan.escrow;
+        self.plan = Some(plan);
+        Reply::Installed
+    }
+
+    // ---- the custodian's own operations: no request reaches these ------------------------------------------------
+
+    /// What the custodian is to fetch, once `polar-init` has said.
+    pub fn plan(&self) -> Option<Plan> {
+        self.plan.clone()
+    }
+
+    /// Whether the plan is fetched.
+    pub fn is_ready(&self) -> bool {
+        self.ready
+    }
+
+    /// Everything the plan says is fetched.
+    pub fn set_ready(&mut self) {
+        if !self.revoked && self.failed.is_none() {
+            self.ready = true;
+        }
+    }
+
+    /// The custodian could not fetch what it was asked to, and will not: `polar-init` is told, and the pod starts
+    /// again.
+    pub fn set_failed(&mut self, why: String) {
+        if !self.ready {
+            self.failed = Some(why);
+        }
+    }
+
+    /// A new key for one of the workload's slots, and its CSR, for the custodian to ask its certificate with.
+    pub fn workload_csr(&mut self, slot: Slot, names: Vec<String>) -> Result<String, Refusal> {
+        let identity = match (&self.plan, slot) {
+            (_, Slot::Custodian) => return Err(Refusal::NotPermitted),
+            (Some(plan), _) => plan.identity.clone(),
+            (None, _) => return Err(Refusal::NotPermitted),
+        };
+        if self.revoked {
+            return Err(Refusal::Revoked);
+        }
+        if self.is_sealed(slot) {
+            return Err(Refusal::Sealed);
+        }
+        match self.make_csr(slot, identity, names) {
+            Reply::Csr(csr) => Ok(csr),
+            Reply::Refused(refusal) => Err(refusal),
+            other => Err(Refusal::BadRequest(format!("unexpected: {other:?}"))),
+        }
+    }
+
+    /// The certificate the custodian was issued for one of the workload's slots, judged as `polar-init`'s would be.
+    pub fn install_workload(
+        &mut self,
+        slot: Slot,
+        chain_pem: Vec<String>,
+        now: i64,
+    ) -> Result<(), Refusal> {
+        if slot == Slot::Custodian || self.plan.is_none() {
+            return Err(Refusal::NotPermitted);
+        }
+        if self.revoked {
+            return Err(Refusal::Revoked);
+        }
+        if self.is_sealed(slot) {
+            return Err(Refusal::Sealed);
+        }
+        match self.install(slot, chain_pem, now) {
+            Reply::Installed => Ok(()),
+            Reply::Refused(refusal) => Err(refusal),
+            other => Err(Refusal::BadRequest(format!("unexpected: {other:?}"))),
+        }
+    }
+
+    /// A new escrow key, when nothing is escrowed for the workload, and its CSR, naming the workload.
+    pub fn escrow_csr(&mut self) -> Result<String, Refusal> {
+        let identity = self
+            .plan
+            .as_ref()
+            .filter(|plan| plan.escrow)
+            .map(|plan| plan.identity.clone())
+            .ok_or(Refusal::NotPermitted)?;
+        if self.revoked {
+            return Err(Refusal::Revoked);
+        }
+        if self.escrow.is_some() {
+            return Err(Refusal::Sealed);
+        }
+        let key = EscrowKey::generate().map_err(Refusal::BadRequest)?;
+        let csr = key.csr(&identity).map_err(Refusal::BadRequest)?;
+        self.pending_escrow = Some(key);
+        Ok(csr)
+    }
+
+    /// The new escrow key, sealed to `recipient`, the credentials agent's key the daemon pinned under the CA: the one
+    /// way the key leaves. Never to a key a caller names.
+    pub fn sealed_escrow(
+        &self,
+        recipient: &rsa::RsaPublicKey,
+    ) -> Result<polar_escrow::EscrowedSecret, Refusal> {
+        if self.revoked {
+            return Err(Refusal::Revoked);
+        }
+        self.pending_escrow
+            .as_ref()
+            .ok_or(Refusal::NoKey)?
+            .sealed_to(recipient)
+            .map_err(Refusal::BadRequest)
+    }
+
+    /// The new escrow key is escrowed: it is the pod's.
+    pub fn hold_pending_escrow(&mut self) -> Result<(), Refusal> {
+        if self.revoked {
+            return Err(Refusal::Revoked);
+        }
+        if self.escrow.is_some() {
+            return Err(Refusal::Sealed);
+        }
+        self.escrow = Some(self.pending_escrow.take().ok_or(Refusal::NoKey)?);
+        Ok(())
+    }
+
+    /// The escrow key a retrieval opened to (PKCS#8 PEM), P-256 only: it is the pod's.
+    pub fn hold_retrieved_escrow(&mut self, pem: &str) -> Result<(), Refusal> {
+        if self.revoked {
+            return Err(Refusal::Revoked);
+        }
+        if self.escrow.is_some() || !self.plan.as_ref().is_some_and(|plan| plan.escrow) {
+            return Err(Refusal::Sealed);
+        }
+        self.escrow = Some(EscrowKey::from_pkcs8_pem(pem).map_err(Refusal::BadCertificate)?);
+        self.pending_escrow = None;
+        Ok(())
+    }
+
+    /// A signature over the daemon's own handshake with the custodian's key: a TLS 1.3 CertificateVerify input, and
+    /// nothing once revoked. In process only (`own`).
+    pub fn sign_own(&self, message: &[u8]) -> Result<Vec<u8>, Refusal> {
+        if self.revoked {
+            return Err(Refusal::Revoked);
+        }
+        let held = self.slots.get(&Slot::Custodian).ok_or(Refusal::NoKey)?;
+        if held.chain.is_none() {
+            return Err(Refusal::NoCertificate);
+        }
+        if !is_tls13_certificate_verify(message) {
+            return Err(Refusal::NotTls13Handshake);
+        }
+        Ok(held.key.sign(message))
     }
 
     fn make_csr(&mut self, slot: Slot, identity: String, names: Vec<String>) -> Reply {
@@ -717,8 +984,29 @@ pub(crate) mod tests {
 
         /// Any request a caller could send, with this slot's identity or another.
         fn request() -> impl Strategy<Value = Request> {
-            let slot = prop_oneof![Just(Slot::Client), Just(Slot::Server)];
+            let slot = prop_oneof![
+                Just(Slot::Client),
+                Just(Slot::Server),
+                Just(Slot::Custodian)
+            ];
             prop_oneof![
+                (
+                    "[a-z.-]{1,30}",
+                    any::<bool>(),
+                    prop::option::of(prop::collection::vec("[a-z.]{1,12}", 0..2)),
+                    any::<bool>()
+                )
+                    .prop_map(|(identity, client, server, escrow)| {
+                        Request::Bootstrap {
+                            identity,
+                            client,
+                            server,
+                            escrow,
+                        }
+                    }),
+                Just(Request::Ready),
+                prop::collection::vec(any::<u8>(), 0..160)
+                    .prop_map(|wrapped| Request::Unwrap { wrapped }),
                 (slot.clone(), "[a-z.-]{1,30}").prop_map(|(slot, identity)| Request::MakeCsr {
                     slot,
                     identity,
@@ -797,13 +1085,440 @@ pub(crate) mod tests {
                     let reply = custody.handle(Roles { installer, workload }, request, time_now());
                     let bytes = format!("{reply:?}").into_bytes();
                     let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&reply).unwrap().to_vec();
-                    for held in custody.slots.values() {
-                        let secret = held.key.secret_bytes();
+                    let mut secrets: Vec<Vec<u8>> = custody.slots.values().map(|held| held.key.secret_bytes()).collect();
+                    secrets.extend(custody.escrow.iter().chain(custody.pending_escrow.iter()).map(|k| k.secret_bytes()));
+                    for secret in secrets {
                         prop_assert!(!encoded.windows(secret.len()).any(|w| w == secret.as_slice()));
                         let hex: String = secret.iter().map(|b| format!("{b:02x}")).collect();
                         prop_assert!(!String::from_utf8_lossy(&bytes).contains(&hex));
                     }
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod custodian_tests {
+    //! The custodian (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"): its slot, its plan, what it
+    //! fills, and the escrow key, which only unwraps.
+    use super::tests::{IDENTITY, TestCa, certify, test_ca, time_now};
+    use super::*;
+    use crate::tls::{CLIENT_CONTEXT, certificate_verify_input};
+    use proptest::prelude::*;
+
+    const INSTALLER: Roles = Roles {
+        installer: true,
+        workload: false,
+    };
+    const WORKLOAD: Roles = Roles {
+        installer: false,
+        workload: true,
+    };
+
+    fn custodian() -> String {
+        cert_issuer_common::custody::custodian_identity(IDENTITY)
+    }
+
+    /// What cert-issuer signs for a custodian: its CSR, with the custody names it asked for.
+    fn certify_custodian(ca: &TestCa, csr_pem: &str, permissions: &[CustodyPermission]) -> String {
+        let mut csr = rcgen::CertificateSigningRequestParams::from_pem(csr_pem).unwrap();
+        for p in permissions {
+            csr.params
+                .subject_alt_names
+                .push(rcgen::SanType::URI(p.to_san_string().try_into().unwrap()));
+        }
+        let now = time_now();
+        csr.params.not_before =
+            rcgen::date_time_ymd(1970, 1, 1) + std::time::Duration::from_secs((now - 60) as u64);
+        csr.params.not_after =
+            rcgen::date_time_ymd(1970, 1, 1) + std::time::Duration::from_secs((now + 3600) as u64);
+        csr.params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        csr.signed_by(&ca.issuer).unwrap().pem()
+    }
+
+    /// A custody whose custodian slot holds a certificate naming `permissions`.
+    fn with_custodian(ca: &TestCa, permissions: &[CustodyPermission]) -> (Custody, String) {
+        let mut custody = Custody::new(&ca.pem).unwrap();
+        let Reply::Csr(csr) = custody.handle(
+            INSTALLER,
+            Request::MakeCsr {
+                slot: Slot::Custodian,
+                identity: custodian(),
+                names: vec![],
+            },
+            time_now(),
+        ) else {
+            panic!("a CSR");
+        };
+        let certificate = certify_custodian(ca, &csr, permissions);
+        assert_eq!(
+            custody.handle(
+                INSTALLER,
+                Request::Install {
+                    slot: Slot::Custodian,
+                    chain_pem: vec![certificate.clone()],
+                },
+                time_now(),
+            ),
+            Reply::Installed
+        );
+        (custody, certificate)
+    }
+
+    fn plan(client: bool, server: Option<Vec<String>>, escrow: bool) -> Request {
+        Request::Bootstrap {
+            identity: IDENTITY.to_string(),
+            client,
+            server,
+            escrow,
+        }
+    }
+
+    fn handshake() -> Vec<u8> {
+        certificate_verify_input(CLIENT_CONTEXT, &[3; 32])
+    }
+
+    #[test]
+    fn the_custodian_slot_holds_a_custodian_s_identity_and_no_other_slot_does() {
+        let ca = test_ca();
+        let mut custody = Custody::new(&ca.pem).unwrap();
+        for (slot, identity) in [
+            (Slot::Custodian, IDENTITY.to_string()),
+            (Slot::Client, custodian()),
+            (Slot::Server, custodian()),
+        ] {
+            let reply = custody.handle(
+                INSTALLER,
+                Request::MakeCsr {
+                    slot,
+                    identity: identity.clone(),
+                    names: vec![],
+                },
+                time_now(),
+            );
+            assert!(
+                matches!(reply, Reply::Refused(Refusal::BadRequest(_))),
+                "{slot:?} {identity}: {reply:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_custodian_s_key_signs_the_daemon_s_own_handshake_and_no_caller_s() {
+        let ca = test_ca();
+        let (custody, _) = with_custodian(&ca, &[]);
+        for roles in [
+            INSTALLER,
+            WORKLOAD,
+            Roles {
+                installer: true,
+                workload: true,
+            },
+        ] {
+            assert_eq!(
+                custody.handle_read(
+                    roles,
+                    Request::Sign {
+                        slot: Slot::Custodian,
+                        message: handshake()
+                    }
+                ),
+                Reply::Refused(Refusal::NotPermitted)
+            );
+        }
+        assert!(custody.sign_own(&handshake()).is_ok());
+        assert_eq!(
+            custody.sign_own(b"anything else"),
+            Err(Refusal::NotTls13Handshake)
+        );
+    }
+
+    #[test]
+    fn a_plan_is_for_the_custodian_s_workload_only_what_its_certificate_names_and_once() {
+        let ca = test_ca();
+        // Before the custodian's certificate: nothing to plan for.
+        let mut bare = Custody::new(&ca.pem).unwrap();
+        assert_eq!(
+            bare.handle(INSTALLER, plan(true, None, false), time_now()),
+            Reply::Refused(Refusal::NoCertificate)
+        );
+        let (mut custody, _) = with_custodian(&ca, &[CustodyPermission::Client]);
+        // Another workload's.
+        let other = Request::Bootstrap {
+            identity: "kube-consumer.polar.serviceaccount.cluster.local".to_string(),
+            client: true,
+            server: None,
+            escrow: false,
+        };
+        assert!(matches!(
+            custody.handle(INSTALLER, other, time_now()),
+            Reply::Refused(Refusal::BadRequest(_))
+        ));
+        // What its certificate does not name.
+        for unnamed in [plan(true, Some(vec![]), false), plan(true, None, true)] {
+            assert!(matches!(
+                custody.handle(INSTALLER, unnamed, time_now()),
+                Reply::Refused(Refusal::BadRequest(_))
+            ));
+        }
+        // Not the workload's.
+        assert_eq!(
+            custody.handle(WORKLOAD, plan(true, None, false), time_now()),
+            Reply::Refused(Refusal::NotPermitted)
+        );
+        assert_eq!(
+            custody.handle(INSTALLER, plan(true, None, false), time_now()),
+            Reply::Installed
+        );
+        assert_eq!(
+            custody.handle(INSTALLER, plan(true, None, false), time_now()),
+            Reply::Refused(Refusal::Sealed)
+        );
+        // And the workload's slots are the custodian's to fill now, not polar-init's.
+        let reply = custody.handle(
+            INSTALLER,
+            Request::MakeCsr {
+                slot: Slot::Client,
+                identity: IDENTITY.to_string(),
+                names: vec![],
+            },
+            time_now(),
+        );
+        assert_eq!(reply, Reply::Refused(Refusal::Sealed));
+    }
+
+    #[test]
+    fn ready_is_said_once_everything_planned_is_fetched_or_never_if_it_failed() {
+        let ca = test_ca();
+        let (mut custody, _) = with_custodian(&ca, &[CustodyPermission::Client]);
+        assert_eq!(
+            custody.handle_read(INSTALLER, Request::Ready),
+            Reply::Refused(Refusal::NotReady)
+        );
+        custody.handle(INSTALLER, plan(true, None, false), time_now());
+        assert_eq!(
+            custody.handle_read(INSTALLER, Request::Ready),
+            Reply::Refused(Refusal::NotReady)
+        );
+        assert_eq!(
+            custody.handle_read(WORKLOAD, Request::Ready),
+            Reply::Refused(Refusal::NotPermitted)
+        );
+        custody.set_ready();
+        assert_eq!(custody.handle_read(INSTALLER, Request::Ready), Reply::Ready);
+        // A plan with nothing to fetch, a bootstrap service's custodian's, is ready at once.
+        let (mut nothing, _) = with_custodian(&ca, &[]);
+        assert_eq!(
+            nothing.handle(INSTALLER, plan(false, None, false), time_now()),
+            Reply::Installed
+        );
+        assert_eq!(nothing.handle_read(INSTALLER, Request::Ready), Reply::Ready);
+        // A failure is said, and stays said.
+        let (mut failing, _) = with_custodian(&ca, &[CustodyPermission::Client]);
+        failing.handle(INSTALLER, plan(true, None, false), time_now());
+        failing.set_failed("refused".to_string());
+        failing.set_ready();
+        assert_eq!(
+            failing.handle_read(INSTALLER, Request::Ready),
+            Reply::Refused(Refusal::BootstrapFailed("refused".to_string()))
+        );
+    }
+
+    #[test]
+    fn the_custodian_fills_the_workload_s_slot_for_the_planned_identity_and_the_workload_signs_with_it()
+     {
+        let ca = test_ca();
+        let (mut custody, _) = with_custodian(&ca, &[CustodyPermission::Client]);
+        assert_eq!(
+            custody.workload_csr(Slot::Client, vec![]),
+            Err(Refusal::NotPermitted),
+            "no plan yet"
+        );
+        custody.handle(INSTALLER, plan(true, None, false), time_now());
+        assert_eq!(
+            custody.workload_csr(Slot::Custodian, vec![]),
+            Err(Refusal::NotPermitted)
+        );
+        let csr = custody.workload_csr(Slot::Client, vec![]).unwrap();
+        assert_eq!(
+            cert_issuer_common::csr_san::csr_dns_sans(&csr).unwrap(),
+            vec![IDENTITY.to_string()]
+        );
+        custody
+            .install_workload(Slot::Client, vec![certify(&ca, &csr)], time_now())
+            .unwrap();
+        assert!(matches!(
+            custody.handle_read(
+                WORKLOAD,
+                Request::Sign {
+                    slot: Slot::Client,
+                    message: handshake()
+                }
+            ),
+            Reply::Signature(_)
+        ));
+        assert_eq!(
+            custody.workload_csr(Slot::Client, vec![]),
+            Err(Refusal::Sealed)
+        );
+    }
+
+    #[test]
+    fn the_escrow_key_made_here_is_sealed_to_the_pinned_key_and_then_only_unwraps_for_the_workload()
+    {
+        let ca = test_ca();
+        let (mut custody, _) = with_custodian(&ca, &[CustodyPermission::Escrow]);
+        assert_eq!(
+            custody.escrow_csr(),
+            Err(Refusal::NotPermitted),
+            "no plan yet"
+        );
+        custody.handle(INSTALLER, plan(false, None, true), time_now());
+        let csr = custody.escrow_csr().unwrap();
+        assert_eq!(
+            cert_issuer_common::csr_san::csr_dns_sans(&csr).unwrap(),
+            vec![IDENTITY.to_string()]
+        );
+        let credentials_agent = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        let sealed = custody
+            .sealed_escrow(&credentials_agent.to_public_key())
+            .unwrap();
+        // Before it is escrowed it unwraps nothing.
+        assert_eq!(
+            custody.handle_read(
+                WORKLOAD,
+                Request::Unwrap {
+                    wrapped: vec![0; 113]
+                }
+            ),
+            Reply::Refused(Refusal::NoKey)
+        );
+        custody.hold_pending_escrow().unwrap();
+        // The key escrowed is the key held: a secret sealed to its public half unwraps through the daemon.
+        let opened = sealed.decrypt(&credentials_agent).unwrap();
+        let public =
+            crate::escrow::EscrowKey::from_pkcs8_pem(std::str::from_utf8(&opened).unwrap())
+                .unwrap()
+                .public_key_pem()
+                .unwrap();
+        let secret = polar_escrow::EscrowedSecret::encrypt(b"a token", &public).unwrap();
+        let Reply::Unwrapped(key) = custody.handle_read(
+            WORKLOAD,
+            Request::Unwrap {
+                wrapped: secret.wrapped_key().to_vec(),
+            },
+        ) else {
+            panic!("not unwrapped");
+        };
+        let plaintext = secret
+            .decrypt_with(polar_escrow::Suite::HpkeP256, |_| Ok(key.clone()))
+            .unwrap();
+        assert_eq!(plaintext.as_slice(), b"a token");
+        // Not the installer's, and nothing else is unwrapped.
+        assert_eq!(
+            custody.handle_read(
+                INSTALLER,
+                Request::Unwrap {
+                    wrapped: secret.wrapped_key().to_vec()
+                }
+            ),
+            Reply::Refused(Refusal::NotPermitted)
+        );
+        assert!(matches!(
+            custody.handle_read(
+                WORKLOAD,
+                Request::Unwrap {
+                    wrapped: vec![1; 113]
+                }
+            ),
+            Reply::Refused(Refusal::BadRequest(_))
+        ));
+        // Held: no second key.
+        assert_eq!(custody.escrow_csr(), Err(Refusal::Sealed));
+    }
+
+    #[test]
+    fn a_retrieved_escrow_key_is_held_if_it_is_p256_and_revocation_destroys_it() {
+        let ca = test_ca();
+        let (mut custody, certificate) = with_custodian(&ca, &[CustodyPermission::Escrow]);
+        custody.handle(INSTALLER, plan(false, None, true), time_now());
+        let rsa = rsa::RsaPrivateKey::new(&mut rand::rng(), 1024).unwrap();
+        let rsa_pem =
+            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&rsa, rsa::pkcs8::LineEnding::LF).unwrap();
+        assert!(
+            matches!(custody.hold_retrieved_escrow(&rsa_pem), Err(Refusal::BadCertificate(why)) if why.contains("no migration"))
+        );
+        let key = crate::escrow::EscrowKey::generate().unwrap();
+        custody
+            .hold_retrieved_escrow(&key.pkcs8_pem().unwrap())
+            .unwrap();
+        // Held once, never replaced: not by another retrieval, not by a key made here.
+        let other = crate::escrow::EscrowKey::generate().unwrap();
+        assert_eq!(
+            custody.hold_retrieved_escrow(&other.pkcs8_pem().unwrap()),
+            Err(Refusal::Sealed)
+        );
+        assert_eq!(custody.escrow_csr(), Err(Refusal::Sealed));
+        assert_eq!(custody.hold_pending_escrow(), Err(Refusal::Sealed));
+        assert_eq!(
+            custody.escrow.as_ref().map(|k| k.secret_bytes()),
+            Some(key.secret_bytes())
+        );
+        let secret =
+            polar_escrow::EscrowedSecret::encrypt(b"x", &key.public_key_pem().unwrap()).unwrap();
+        assert!(matches!(
+            custody.handle_read(
+                WORKLOAD,
+                Request::Unwrap {
+                    wrapped: secret.wrapped_key().to_vec()
+                }
+            ),
+            Reply::Unwrapped(_)
+        ));
+        // The custodian's own certificate revoked: every key goes, the escrow key with them.
+        let serial = cert_issuer_common::serial::serial_from_pem(&certificate).unwrap();
+        assert_eq!(custody.revoke(&[serial]), vec![Slot::Custodian]);
+        assert_eq!(
+            custody.handle_read(
+                WORKLOAD,
+                Request::Unwrap {
+                    wrapped: secret.wrapped_key().to_vec()
+                }
+            ),
+            Reply::Refused(Refusal::Revoked)
+        );
+        assert!(custody.escrow.is_none() && custody.pending_escrow.is_none());
+        assert_eq!(custody.sign_own(&handshake()), Err(Refusal::Revoked));
+    }
+
+    proptest! {
+        /// Whatever any caller asks, in any order, the custodian's key never signs for it, and the escrow key, once
+        /// held, is never replaced.
+        #[test]
+        fn no_caller_signs_with_the_custodian_s_key_or_replaces_the_escrow_key(
+            requests in prop::collection::vec((
+                prop_oneof![
+                    prop::collection::vec(any::<u8>(), 0..120).prop_map(|message| Request::Sign { slot: Slot::Custodian, message }),
+                    Just(Request::Sign { slot: Slot::Custodian, message: certificate_verify_input(CLIENT_CONTEXT, &[3; 32]) }),
+                    "[a-z.-]{1,30}".prop_map(|identity| Request::MakeCsr { slot: Slot::Custodian, identity, names: vec![] }),
+                    Just(Request::Bootstrap { identity: IDENTITY.to_string(), client: false, server: None, escrow: true }),
+                    prop::collection::vec(any::<u8>(), 0..120).prop_map(|wrapped| Request::Unwrap { wrapped }),
+                ],
+                any::<bool>(),
+                any::<bool>(),
+            ), 0..10),
+        ) {
+            let ca = test_ca();
+            let (mut custody, _) = with_custodian(&ca, &[CustodyPermission::Escrow]);
+            custody.handle(INSTALLER, plan(false, None, true), time_now());
+            let key = crate::escrow::EscrowKey::generate().unwrap();
+            custody.hold_retrieved_escrow(&key.pkcs8_pem().unwrap()).unwrap();
+            let held = key.secret_bytes();
+            for (request, installer, workload) in requests {
+                let reply = custody.handle(Roles { installer, workload }, request, time_now());
+                prop_assert!(!matches!(reply, Reply::Signature(_)), "{reply:?}");
+                prop_assert_eq!(custody.escrow.as_ref().map(|k| k.secret_bytes()), Some(held.clone()));
             }
         }
     }

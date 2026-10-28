@@ -76,6 +76,9 @@ pub fn own_uid() -> u32 {
 
 pub struct Daemon {
     pub socket: PathBuf,
+    /// What it holds, for a test to set as the daemon's custodian would.
+    #[allow(dead_code)]
+    pub custody: Arc<RwLock<Custody>>,
     _dir: tempfile::TempDir,
 }
 
@@ -85,8 +88,12 @@ pub async fn daemon(ca: &TestCa, callers: Callers) -> Daemon {
     let socket = dir.path().join("custody.sock");
     let listener = bind(&socket).unwrap();
     let custody = Arc::new(RwLock::new(Custody::new(&ca.pem).unwrap()));
-    tokio::spawn(serve(listener, custody, Arc::new(callers)));
-    Daemon { socket, _dir: dir }
+    tokio::spawn(serve(listener, custody.clone(), Arc::new(callers)));
+    Daemon {
+        socket,
+        custody,
+        _dir: dir,
+    }
 }
 
 /// A daemon serving `callers`, trusting `ca`, on a thread and runtime of its own, as it is a process of its own in a pod:
@@ -96,7 +103,9 @@ pub fn daemon_apart(ca: &TestCa, callers: Callers) -> Daemon {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("custody.sock");
     let (ready, bound) = std::sync::mpsc::channel();
-    let (path, ca_pem) = (socket.clone(), ca.pem.clone());
+    let path = socket.clone();
+    let custody = Arc::new(RwLock::new(Custody::new(&ca.pem).unwrap()));
+    let served = custody.clone();
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -104,13 +113,16 @@ pub fn daemon_apart(ca: &TestCa, callers: Callers) -> Daemon {
             .unwrap();
         runtime.block_on(async move {
             let listener = bind(&path).unwrap();
-            let custody = Arc::new(RwLock::new(Custody::new(&ca_pem).unwrap()));
             ready.send(()).unwrap();
-            let _ = serve(listener, custody, Arc::new(callers)).await;
+            let _ = serve(listener, served, Arc::new(callers)).await;
         });
     });
     bound.recv().unwrap();
-    Daemon { socket, _dir: dir }
+    Daemon {
+        socket,
+        custody,
+        _dir: dir,
+    }
 }
 
 /// This process as both the installer and the workload.

@@ -26,6 +26,7 @@
 //!
 //! - [`tls`]: the one kind of message it signs, a TLS 1.3 CertificateVerify input.
 //! - [`key`]: a slot's key, made here and never given out.
+//! - [`escrow`]: the pod's escrow key, which only unwraps.
 //! - [`custody`]: the slots and what each caller may ask of them, without the socket.
 //! - [`protocol`]: the requests and replies, and how they are framed.
 //! - [`server`]: the socket, the caller check, and requests in flight at once.
@@ -35,6 +36,7 @@
 pub mod client;
 pub mod custody;
 pub mod environment;
+pub mod escrow;
 pub mod key;
 pub mod own;
 pub mod protocol;

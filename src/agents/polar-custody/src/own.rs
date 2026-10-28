@@ -21,30 +21,24 @@
    DM26-0670
 */
 
-//! The daemon's own handshake (docs/architecture/key-custody.md, step 5): its watcher connects to Cassini as the pod,
-//! presenting the client slot's certificate, and signs in this process with the slot's key, through the same rule
-//! as every signature it makes (a TLS 1.3 CertificateVerify input, and nothing once revoked). Nothing here reaches the
-//! socket, and nothing gives the key out.
+//! The daemon's own handshake (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"): the custodian
+//! connects to Cassini as itself, `custody.<X>`, presenting the custodian slot's certificate, and signs in this process
+//! with the slot's key, by the same rule as every signature the daemon makes (a TLS 1.3 CertificateVerify input, and
+//! nothing once revoked). No request signs with that key; nothing here reaches the socket, and nothing gives it out.
 
-use crate::custody::{Custody, Roles};
-use crate::protocol::{Reply, Request, Slot};
+use crate::custody::Custody;
+use crate::protocol::Slot;
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject as _;
 use rustls::sign::{CertifiedKey, Signer, SigningKey};
 use rustls::{SignatureAlgorithm, SignatureScheme};
 use std::sync::{Arc, RwLock};
 
-/// What the daemon's own signatures are asked as: the workload's role, so they pass every check a workload's does.
-const OWN: Roles = Roles {
-    installer: false,
-    workload: true,
-};
-
-/// A rustls signing key over a slot of this process's custody: ECDSA P-256 SHA-256, TLS 1.3 handshakes only.
+/// A rustls signing key over the custodian slot of this process's custody: ECDSA P-256 SHA-256, TLS 1.3 handshakes
+/// only.
 #[derive(Debug, Clone)]
 pub struct OwnSigningKey {
     custody: Arc<RwLock<Custody>>,
-    slot: Slot,
 }
 
 impl SigningKey for OwnSigningKey {
@@ -65,18 +59,11 @@ impl Signer for OwnSigningKey {
             .custody
             .read()
             .map_err(|_| rustls::Error::General("the custody's lock is poisoned".to_string()))?;
-        match custody.handle_read(
-            OWN,
-            Request::Sign {
-                slot: self.slot,
-                message: message.to_vec(),
-            },
-        ) {
-            Reply::Signature(signature) => Ok(signature),
-            other => Err(rustls::Error::General(format!(
-                "the custody did not sign its own handshake: {other:?}"
-            ))),
-        }
+        custody.sign_own(message).map_err(|refusal| {
+            rustls::Error::General(format!(
+                "the custody did not sign its own handshake: {refusal}"
+            ))
+        })
     }
 
     fn scheme(&self) -> SignatureScheme {
@@ -84,7 +71,7 @@ impl Signer for OwnSigningKey {
     }
 }
 
-/// Hands rustls the client slot's certificate and its in-process key whenever a server asks for a client certificate.
+/// Hands rustls the custodian's certificate and its in-process key whenever a server asks for a client certificate.
 #[derive(Debug)]
 struct OwnClientCert(Arc<CertifiedKey>);
 
@@ -98,7 +85,7 @@ impl rustls::client::ResolvesClientCert for OwnClientCert {
     }
 }
 
-/// A client configuration for the daemon's own connection: the client slot's certificate, signed for in process,
+/// A client configuration for the daemon's own connection: the custodian's certificate, signed for in process,
 /// TLS 1.3 alone, the server verified under `ca_pem`. An error while the slot holds no certificate.
 pub fn own_client_config(
     custody: Arc<RwLock<Custody>>,
@@ -107,8 +94,8 @@ pub fn own_client_config(
     let chain = custody
         .read()
         .map_err(|_| "the custody's lock is poisoned".to_string())?
-        .chain(Slot::Client)
-        .ok_or("the client slot holds no certificate yet")?
+        .chain(Slot::Custodian)
+        .ok_or("the custodian slot holds no certificate yet")?
         .iter()
         .map(|pem| {
             CertificateDer::from_pem_slice(pem.as_bytes())
@@ -125,10 +112,7 @@ pub fn own_client_config(
     let verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
         .build()
         .map_err(|e| format!("the server verifier: {e}"))?;
-    let key = OwnSigningKey {
-        custody,
-        slot: Slot::Client,
-    };
+    let key = OwnSigningKey { custody };
     Ok(
         rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
             .with_webpki_verifier(verifier)

@@ -148,6 +148,46 @@ impl CustodyClient {
             other => Err(refused_or_unexpected(other)),
         }
     }
+
+    /// What the custodian is to fetch for `identity` (docs/architecture/key-custody.md, "Part A's bootstrap: the
+    /// custodian"): `polar-init`'s, once the custodian's certificate is installed.
+    pub fn bootstrap(
+        &self,
+        identity: &str,
+        client: bool,
+        server: Option<Vec<String>>,
+        escrow: bool,
+    ) -> Result<(), ClientError> {
+        match self.request(Request::Bootstrap {
+            identity: identity.to_string(),
+            client,
+            server,
+            escrow,
+        })? {
+            Reply::Installed => Ok(()),
+            other => Err(refused_or_unexpected(other)),
+        }
+    }
+
+    /// Whether the custodian has fetched what it was asked to: `Ok(true)` when it has, `Ok(false)` while it is still
+    /// fetching, and an error once it cannot.
+    pub fn ready(&self) -> Result<bool, ClientError> {
+        match self.request(Request::Ready)? {
+            Reply::Ready => Ok(true),
+            Reply::Refused(crate::protocol::Refusal::NotReady) => Ok(false),
+            other => Err(refused_or_unexpected(other)),
+        }
+    }
+
+    /// The AES key `wrapped` opens to under the pod's escrow key, wiped when dropped: the workload's.
+    pub fn unwrap(&self, wrapped: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>, ClientError> {
+        match self.request(Request::Unwrap {
+            wrapped: wrapped.to_vec(),
+        })? {
+            Reply::Unwrapped(key) => Ok(zeroize::Zeroizing::new(key)),
+            other => Err(refused_or_unexpected(other)),
+        }
+    }
 }
 
 fn refused_or_unexpected(reply: Reply) -> ClientError {

@@ -266,3 +266,67 @@ async fn a_tls13_handshake_with_client_authentication_is_signed_by_the_daemon() 
         "the server saw the daemon's certificate"
     );
 }
+
+/// The custodian's part, through the socket (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"):
+/// polar-init installs the custodian's certificate and gives the plan, asks until it is ready; the workload unwraps
+/// through the escrow key the custodian holds, and never signs with the custodian's key.
+#[tokio::test(flavor = "multi_thread")]
+async fn polar_init_gives_the_plan_waits_for_ready_and_the_workload_unwraps_through_the_escrow_key()
+{
+    use cert_issuer_common::custody::{CustodyPermission, custodian_identity};
+    let ca = test_ca();
+    let daemon = daemon(&ca, both()).await;
+    let socket = daemon.socket.clone();
+    let custody = daemon.custody.clone();
+    let key = polar_custody::escrow::EscrowKey::generate().unwrap();
+    let public = key.public_key_pem().unwrap();
+    tokio::task::spawn_blocking(move || {
+        let client = CustodyClient::new(socket);
+        let csr = client
+            .make_csr(Slot::Custodian, &custodian_identity(IDENTITY), &[])
+            .unwrap();
+        let mut request = rcgen::CertificateSigningRequestParams::from_pem(&csr).unwrap();
+        request.params.subject_alt_names.push(rcgen::SanType::URI(
+            CustodyPermission::Escrow
+                .to_san_string()
+                .try_into()
+                .unwrap(),
+        ));
+        request.params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        let certificate = request.signed_by(&ca.issuer).unwrap().pem();
+        client.install(Slot::Custodian, vec![certificate]).unwrap();
+        client.bootstrap(IDENTITY, false, None, true).unwrap();
+        assert!(!client.ready().unwrap(), "nothing fetched yet");
+        // What the custodian does: the escrow key retrieved into it.
+        {
+            let mut custody = custody.write().unwrap();
+            let pem = as_a_retrieval_opens_it(&key);
+            custody.hold_retrieved_escrow(&pem).unwrap();
+            custody.set_ready();
+        }
+        assert!(client.ready().unwrap());
+        let secret = polar_escrow::EscrowedSecret::encrypt(b"a token", &public).unwrap();
+        let unwrapped = client.unwrap(secret.wrapped_key()).unwrap();
+        let opened = secret
+            .decrypt_with(polar_escrow::Suite::HpkeP256, |_| Ok(unwrapped.to_vec()))
+            .unwrap();
+        assert_eq!(opened.as_slice(), b"a token");
+        assert!(matches!(
+            client.sign(
+                Slot::Custodian,
+                &certificate_verify_input(CLIENT_CONTEXT, &[5; 32])
+            ),
+            Err(ClientError::Refused(Refusal::NotPermitted))
+        ));
+    })
+    .await
+    .unwrap();
+}
+
+/// The escrow key as a retrieval opens it: its PKCS#8 PEM.
+fn as_a_retrieval_opens_it(key: &polar_custody::escrow::EscrowKey) -> String {
+    // Sealed for escrow and opened again, as the credentials agent and the custodian do.
+    let recipient = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+    let sealed = key.sealed_to(&recipient.to_public_key()).unwrap();
+    String::from_utf8(sealed.decrypt(&recipient).unwrap().to_vec()).unwrap()
+}

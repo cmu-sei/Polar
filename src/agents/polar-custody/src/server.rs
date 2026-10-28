@@ -75,15 +75,18 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// The reply to one request: a key or a certificate changes the slots, under the write lock; anything else reads.
+/// The reply to one request: a key, a certificate or the custodian's plan changes the custody, under the write lock;
+/// anything else reads.
 pub fn respond(custody: &RwLock<Custody>, roles: Roles, request: Request) -> Reply {
     match request {
-        Request::MakeCsr { .. } | Request::Install { .. } => match custody.write() {
-            Ok(mut custody) => custody.handle(roles, request, now()),
-            Err(_) => Reply::Refused(crate::protocol::Refusal::BadRequest(
-                "the custody is poisoned".to_string(),
-            )),
-        },
+        Request::MakeCsr { .. } | Request::Install { .. } | Request::Bootstrap { .. } => {
+            match custody.write() {
+                Ok(mut custody) => custody.handle(roles, request, now()),
+                Err(_) => Reply::Refused(crate::protocol::Refusal::BadRequest(
+                    "the custody is poisoned".to_string(),
+                )),
+            }
+        }
         _ => match custody.read() {
             Ok(custody) => custody.handle_read(roles, request),
             Err(_) => Reply::Refused(crate::protocol::Refusal::BadRequest(

@@ -374,11 +374,12 @@ fn custody_installed(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
+    // The daemon's own connection is its custodian's, `custody.<X>`.
     let Reply::Csr(csr) = custody.handle(
         installer,
         Request::MakeCsr {
-            slot: Slot::Client,
-            identity: IDENTITY.to_string(),
+            slot: Slot::Custodian,
+            identity: cert_issuer_common::custody::custodian_identity(IDENTITY),
             names: vec![],
         },
         now,
@@ -390,7 +391,7 @@ fn custody_installed(
         custody.handle(
             installer,
             Request::Install {
-                slot: Slot::Client,
+                slot: Slot::Custodian,
                 chain_pem: vec![certificate.clone()],
             },
             now,
@@ -409,7 +410,10 @@ async fn the_daemon_s_own_handshake_is_signed_in_process_with_tls13_alone() {
     connect(config.clone(), address)
         .await
         .expect("the handshake");
-    assert_eq!(seen.await.unwrap().unwrap(), IDENTITY);
+    assert_eq!(
+        seen.await.unwrap().unwrap(),
+        cert_issuer_common::custody::custodian_identity(IDENTITY)
+    );
     let (address, seen) = server(&ca, &[&TLS12]).await;
     assert!(connect(config, address).await.is_err());
     // Refused because it was never offered, not because the custody then declined to sign a TLS 1.2 handshake.

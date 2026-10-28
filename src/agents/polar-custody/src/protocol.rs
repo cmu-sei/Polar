@@ -31,11 +31,13 @@ use std::io::{Read, Write};
 /// The largest frame either side sends or takes: a certificate chain fits many times over.
 pub const MAX_FRAME: usize = 64 * 1024;
 
-/// Which key: a pod may hold a client certificate and a server certificate.
+/// Which key: a pod may hold a client certificate and a server certificate, and the daemon holds its own, the
+/// custodian's (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"), which no request signs with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Archive, Serialize, Deserialize)]
 pub enum Slot {
     Client,
     Server,
+    Custodian,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
@@ -52,6 +54,19 @@ pub enum Request {
     Certificate { slot: Slot },
     /// A signature with `slot`'s key over `message`, a TLS 1.3 CertificateVerify input: the workload's.
     Sign { slot: Slot, message: Vec<u8> },
+    /// What the custodian is to fetch for `identity`, the workload, once its own certificate is installed: its client
+    /// certificate, its server certificate with these names, its escrow key. Only what the custodian's certificate
+    /// names. `polar-init`'s, once; the slots it names are the custodian's to fill from then on.
+    Bootstrap {
+        identity: String,
+        client: bool,
+        server: Option<Vec<String>>,
+        escrow: bool,
+    },
+    /// Whether the custodian has fetched everything it was asked to: `polar-init`'s, before it writes the bundle.
+    Ready,
+    /// The AES key `wrapped` opens to under the pod's escrow key (`polar_escrow::unwrap_p256`): the workload's.
+    Unwrap { wrapped: Vec<u8> },
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
@@ -61,6 +76,10 @@ pub enum Reply {
     Certificate(Vec<String>),
     /// A DER-encoded ECDSA P-256 SHA-256 signature.
     Signature(Vec<u8>),
+    /// The custodian has fetched everything it was asked to.
+    Ready,
+    /// An unwrapped key: 32 bytes.
+    Unwrapped(Vec<u8>),
     Refused(Refusal),
 }
 
@@ -86,6 +105,12 @@ pub enum Refusal {
     /// (docs/architecture/key-custody.md, step 5).
     #[error("revoked: this daemon's keys are destroyed")]
     Revoked,
+    /// The custodian has not fetched everything it was asked to yet: ask again.
+    #[error("the custodian is still fetching what it was asked to")]
+    NotReady,
+    /// The custodian could not fetch what it was asked to, and will not: the pod is to start again.
+    #[error("the custodian could not fetch what it was asked to: {0}")]
+    BootstrapFailed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
