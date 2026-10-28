@@ -108,6 +108,27 @@ def main [] {
     # The charts' Dhall reads the node registry from the environment, which render.nu sets; these render a chart without it.
     $env.POLAR_NODE_REGISTRY = (node_registry local-minimal)
     let tests = {
+        # docs/architecture/deployments.md, step 3: the move to Deployments restarts a pod in place by a container's
+        # restart rule, which the schema's Kubernetes types have from dhall-kubernetes 1.35.
+        "the schema's containers take a restart rule, for agents that restart in place": {
+            let file = (mktemp --suffix ".dhall")
+            ([
+                $"let k = ($INFRA)/schema/kubernetes.dhall"
+                "in  k.Container::{"
+                "    , name = \"agent\""
+                "    , restartPolicyRules = Some"
+                "      [ { action = \"RestartAllContainers\""
+                "        , exitCodes = None { operator : Text, values : Optional (List Natural) }"
+                "        }"
+                "      ]"
+                "    }"
+            ] | str join "\n") | save --force $file
+            let r = (do { ^dhall-to-yaml --file $file } | complete)
+            rm $file
+            assert equal $r.exit_code 0 $r.stderr
+            assert equal ($r.stdout | from yaml | get restartPolicyRules) [{ action: "RestartAllContainers" }]
+        }
+
         "Neo4j's server certificate is requested from the credentials agent": {
             let out = (render neo4j {})
             let vars = (init_env ($out | path join "neo4j-statefulset.yaml"))

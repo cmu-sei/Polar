@@ -48,7 +48,7 @@ let render =
           , selector    = kubernetes.LabelSelector::{
             , matchLabels = Some (toMap { name = v.name })
             }
-          , serviceName = v.name
+          , serviceName = Some v.name
           , replicas    = Some 1
           , template    = kubernetes.PodTemplateSpec::{
             , metadata = Some kubernetes.ObjectMeta::{

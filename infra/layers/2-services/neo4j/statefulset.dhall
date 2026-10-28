@@ -161,7 +161,7 @@ let render =
               , selector    = kubernetes.LabelSelector::{
                 , matchLabels = Some (toMap { name = v.name })
                 }
-              , serviceName = Constants.neo4jServiceName
+              , serviceName = Some Constants.neo4jServiceName
               , replicas    = Some 1
               , template    = kubernetes.PodTemplateSpec::{
                 , metadata = Some kubernetes.ObjectMeta::{

@@ -19,9 +19,11 @@
 --
 -- DM26-0670
 
--- dhall-k8s import for the project
+-- dhall-k8s import for the project: 1.35, whose containers take restart rules (docs/architecture/deployments.md,
+-- step 3). The three schema files that import this one pin it by the same hash, and Dhall loads a pinned import from its
+-- cache by the hash: a new version here moves those pins with it, or they keep loading the old one.
 let kubernetes =
-      https://raw.githubusercontent.com/dhall-lang/dhall-kubernetes/refs/heads/master/1.31/package.dhall
-        sha256:1a0d599eabb9dd154957edc59bb8766ea59b4a245ae45bdd55450654c12814b0
+      https://raw.githubusercontent.com/dhall-lang/dhall-kubernetes/refs/heads/master/1.35/package.dhall
+        sha256:2086df2178fdb83a08bd4ca89c951f12e4ce16d3cc1441005fcda943a028bb8c
 
 in  kubernetes
