@@ -23,7 +23,8 @@
 
 # Agents as Deployments that restart in place
 
-Status, 2026-10-27: cleared by the maintainer, its five questions decided as written below. Nothing here is built.
+Status, 2026-10-27: cleared by the maintainer, its five questions decided as written below. 2026-10-28: build steps 1 to
+3 done (the custody daemon, `key-custody.md`; the renewal rule, below; the Dhall schema at 1.35, below); step 4 next.
 
 ## Why, and what Kubernetes gives
 
@@ -89,10 +90,10 @@ Each with a recommendation; to be taken one at a time.
 - **The restart rule.** The workload container's `restartPolicy: Always` and one rule, `RestartAllContainers` on every
   exit, so a rejuvenation, a crash and a shutdown verdict all run `polar-init` again. Native sidecars (the custody daemon)
   restart with them.
-- **The Dhall types.** The schema imports dhall-kubernetes 1.31 (`infra/schema/kubernetes.dhall`), whose containers
-  have no restart rules; dhall-kubernetes goes to 1.35, which has them (beta in 1.35; the action is text, so
-  `RestartAllContainers` fits). Moving the schema to 1.35 is a step of its own, every chart and the catalog rendered
-  before and after.
+- **The Dhall types.** The schema imported dhall-kubernetes 1.31 (`infra/schema/kubernetes.dhall`), whose containers
+  have no restart rules; 1.35 has them (beta in 1.35; the action is text, so `RestartAllContainers` fits). Moving the
+  schema to 1.35 was a step of its own, every chart and the catalog rendered before and after: done 2026-10-28 ("Step
+  3", below).
 - **Init containers again in one pod.** `polar-init` writes its bundle atomically, file by file (`output.rs`,
   `write_bundle`), so a second run replaces the first. (The escrow key is the custody daemon's since custody step 9, and
   the daemon restarts empty with the pod: there is no keyring entry to displace.) Checked once more when built.
@@ -249,3 +250,16 @@ The plan:
   charts' render fails on (as the dry run did).
 - *Not here:* rendering any restart rule (step 4); the cluster, since nothing rendered changes, so no redeploy;
   `src/deploy`, a tree `infra` does not render from (found reading for this, not touched).
+
+*Cleared by the maintainer and built (2026-10-28).*
+- *The test* (`infra/tests/charts.nu`, "the schema's containers take a restart rule"): a container with a
+  `RestartAllContainers` rule, from the schema's own types, renders with its rule. It failed on 1.31 ("Expression
+  doesn't match annotation", `+ restartPolicyRules`) and passes on 1.35.
+- *The change:* `infra/schema/kubernetes.dhall` at 1.35 (`sha256:2086df21…`), with a comment that the three files
+  importing it move with it; `agents.dhall`, `constants.dhall` and `functions.dhall` pinned to the same hash; Neo4j's
+  and Postgres's `serviceName = Some …`.
+- *Checked:* `local-minimal`, `local` and `sandbox-local`, catalog and charts, rendered before (HEAD, its
+  `cluster-inputs.nuon` copied in) and after: byte for byte the same. The unrendered agent charts type-check.
+  `tests/charts.nu` (10 of 10), `rules.nu` (29 of 29), `resolve.nu` (60 of 61: the one failing, "workloads still
+  asking cert-issuer are listed as pending", fails the same way without this change). Mutation caught: `functions.dhall`'s pin left at 1.31, six of
+  the chart tests failing on it.
