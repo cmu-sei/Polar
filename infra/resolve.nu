@@ -574,6 +574,10 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         # Whose signature on a session offer it believes (docs/architecture/core-restarts.md, "1c in detail").
         | append { name: "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY", value: (identity_of "credentials-agent" $target $kinds $cluster), secret: null, key: null, from: "issuer" }
     } else { $init_env })
+    let escrow = (escrow_problems $custody $init_env)
+    if ($escrow | is-not-empty) {
+        error make { msg: $"($name): ($escrow | str join '; ')" }
+    }
 
     {
         name: $name

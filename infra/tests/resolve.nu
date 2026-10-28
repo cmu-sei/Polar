@@ -218,6 +218,17 @@ def main [] {
             }
         }
 
+        # An agent that encrypts has its escrow key only through the custody daemon's custodian (key-custody.md, step 9):
+        # with custody off, its render is refused and says why (the maintainer, 2026-10-28).
+        "a target with custody off refuses an agent that encrypts": {
+            with_target { cluster: { custody: { enabled: false } }, workloads: {} } {|t|
+                let r = (do { ^nu $RESOLVER json kube-consumer --target $t } | complete)
+                assert ($r.exit_code != 0) "kube-consumer encrypts, and has no daemon"
+                assert ($r.stderr | str contains "kube-consumer") $r.stderr
+                assert ($r.stderr | str contains "custody") $r.stderr
+            }
+        }
+
         "a target with custody off renders every pod with key files, as before": {
             with_target { cluster: { custody: { enabled: false } }, workloads: {} } {|t|
                 let r = (resolve_for $t "kube-observer")
@@ -762,8 +773,10 @@ def main [] {
                 assert equal (env_value $r "POLAR_CUSTODY_SOCKET") "/run/polar-custody/custody.sock" $n
                 assert equal (env_value $r "GRAPH_CA_CERT") "/etc/tls/certs/ca.pem" $n
             }
+            # kube-consumer encrypts, so with custody off it is refused, not rendered on key files ("a target with custody
+            # off refuses an agent that encrypts").
             with_target { cluster: { custody: { enabled: false } }, workloads: {} } {|t|
-                for n in [kube-consumer jira-processor polar-scheduler git-repo-processor credentials-agent] {
+                for n in [jira-processor polar-scheduler git-repo-processor credentials-agent] {
                     let r = (resolve_for $t $n)
                     assert equal $r.certs ["client:/etc/tls/certs:ecdsa-p256:"] $n
                     assert ($r.volumes | where name == "neo4j-client-tls" | is-empty) $n

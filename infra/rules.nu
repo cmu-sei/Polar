@@ -151,15 +151,35 @@ export def issuer_problems [records: list, enforced: bool]: nothing -> record {
 # What a workload's certificates carry of its scaffold: the declared and family topics (`topics`), not the implied
 # ones, which follow from its identity and its groups; and its `groups`, which decide those. Sorted, each once.
 # What is wrong with a pod's certificates when its keys are the custody daemon's: it holds one key of each type, client
-# and server, so two certificates of one type cannot both be its (docs/architecture/key-custody.md, step 4). `specs` are
-# polar-init's `--cert` values, `type:dir:algorithm:names`; only those whose algorithm is `custody` count.
+# and server, so two certificates of one type cannot both be its (docs/architecture/key-custody.md, step 4); and with it,
+# the token buys only its custodian's certificate ("Part A's bootstrap: the custodian"), so none beside the daemon's has a
+# key file, as polar-init's `custody_for` also says (the maintainer, 2026-10-28). `specs` are polar-init's `--cert`
+# values, `type:dir:algorithm:names`; with none whose algorithm is `custody`, there is nothing to say.
 export def custody_cert_problems [specs: list<string>]: nothing -> list<string> {
-    let custody = ($specs | each {|c| $c | split row ":" } | where {|p| ($p | get -o 2) == "custody" })
-    $custody | group-by {|p| $p.0 } | items {|kind, certs|
+    let parts = ($specs | each {|c| $c | split row ":" })
+    let custody = ($parts | where {|p| ($p | get -o 2) == "custody" })
+    if ($custody | is-empty) { return [] }
+    let two = ($custody | group-by {|p| $p.0 } | items {|kind, certs|
         if ($certs | length) > 1 {
             $"two ($kind) certificates under the custody daemon \(($certs | each {|p| $p.1 } | str join ', ')\): it holds one key of each type"
         }
-    } | compact
+    } | compact)
+    let files = ($parts | where {|p| ($p | get -o 2) != "custody" } | each {|p|
+        $"the ($p.0) certificate into ($p.1) has a key file beside the custody daemon's: with the daemon, the token buys only its custodian's certificate"
+    })
+    $two ++ $files
+}
+
+# What is wrong with a pod whose polar-init is asked to fetch the escrow key (`POLAR_INIT_ESCROW_BOOTSTRAP`, from the
+# `encryption` capability) when it has no custody daemon: only the daemon's custodian fetches the escrow key
+# (docs/architecture/key-custody.md, step 9), and polar-init would stop at once. `custody` is whether the pod has the
+# daemon; `init_env` is polar-init's environment, as records with `name` and `value`. Decided by the maintainer,
+# 2026-10-28: the render refuses it, and key files stay a supported mode for agents that do not encrypt.
+export def escrow_problems [custody: bool, init_env: list]: nothing -> list<string> {
+    let escrow = ($init_env | any {|e| $e.name == "POLAR_INIT_ESCROW_BOOTSTRAP" and ($e.value? | default "") == "true" })
+    if $escrow and (not $custody) {
+        ["it encrypts, and its escrow key is fetched only by the custody daemon's custodian, which this pod does not have: turn custody on for it, or leave it out of this target"]
+    } else { [] }
 }
 
 def own_topics [r: record]: nothing -> record {

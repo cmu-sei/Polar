@@ -56,6 +56,28 @@ def main [] {
             assert equal (custody_cert_problems ["client:/a:ecdsa-p256:" "client:/b:ecdsa-p256:"]) []
         }
 
+        # With the daemon, the token buys only the custodian's certificate (docs/architecture/key-custody.md, "Part A's
+        # bootstrap: the custodian"), so a certificate with a key file beside the daemon's is refused, as polar-init does.
+        "a pod given the custody daemon has no certificate with a key file": {
+            let mixed = (custody_cert_problems ["client:/etc/tls/certs:custody:" "server:/etc/tls/git-server:ecdsa-p256:git.svc"])
+            assert equal ($mixed | length) 1
+            assert ($mixed.0 | str contains "/etc/tls/git-server") $mixed.0
+            assert ($mixed.0 | str contains "custodian") $mixed.0
+        }
+
+        # The escrow key is only the custody daemon's custodian's to fetch (key-custody.md, step 9): a pod whose polar-init
+        # is asked to fetch it and that has no daemon is refused, as polar-init would refuse it (the maintainer, 2026-10-28).
+        "a pod asked to escrow its key needs the custody daemon": {
+            let escrow = [{ name: "POLAR_INIT_ESCROW_BOOTSTRAP", value: "true" }]
+            let off = (escrow_problems false $escrow)
+            assert equal ($off | length) 1
+            assert ($off.0 | str contains "custody") $off.0
+            assert equal (escrow_problems true $escrow) []
+            assert equal (escrow_problems false []) []
+            assert equal (escrow_problems false [{ name: "POLAR_INIT_ESCROW_BOOTSTRAP", value: "false" }]) []
+            assert equal (escrow_problems false [{ name: "POLAR_INIT_CA_CERT", value: "true" }]) []
+        }
+
         "a Job that replaces pods only after they are gone passes": {
             let docs = [{ kind: "Job", metadata: { name: "kube-consumer" }, spec: { podReplacementPolicy: "Failed" } }]
             assert equal (job_replacement_problems $docs) []
