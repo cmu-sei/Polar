@@ -735,6 +735,10 @@ Principle: declare each environment variable once, with its type, default, docum
   `custody_for` allows a mix, so "the token buys only the custodian's certificate" is the render's convention, not a
   check. *Decided (the maintainer, 2026-10-28): refused,* by `polar-init` at startup and by a render rule. *Built
   2026-10-28* (`key-custody.md`, "Step 9's follow-ups").
+- [ ] The docs still describe the agents as Jobs (found 2026-10-28, after the move to Deployments, `deployments.md`,
+  step 4): about forty passages in `health-and-shutdown.md`, `pod-reaper.md`, `core-restarts.md` and `infra/INFRA.md`
+  (an agent's ending making a new pod, the Job's replacement policy, forced layers). Each to read and say what is true
+  now: the pod restarts in place, a run's Job is the load harness alone.
 - [ ] polar-init and the workload may no longer need one UID (found 2026-10-28): `infra/resolve.nu`'s `CUSTODY` gives
   them one "since the escrow key's hand-off through the user keyring needs it", and that hand-off is gone since custody
   step 9. Whether anything else needs it (the custody socket's group, the shared volumes' files) is to read before the

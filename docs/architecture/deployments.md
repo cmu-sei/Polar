@@ -24,7 +24,8 @@
 # Agents as Deployments that restart in place
 
 Status, 2026-10-27: cleared by the maintainer, its five questions decided as written below. 2026-10-28: build steps 1 to
-3 done (the custody daemon, `key-custody.md`; the renewal rule, below; the Dhall schema at 1.35, below); step 4 next.
+5 done (the custody daemon, `key-custody.md`; the renewal rule, the Dhall schema at 1.35, and the Deployments, below,
+seen on `u7c`); step 6, the ticket, next.
 
 ## Why, and what Kubernetes gives
 
@@ -377,6 +378,39 @@ once, and the rule restarts the whole pod.
   until its images are rebuilt (the images there do not declare `POLAR_START_MARKER`; today's binaries accept the
   documents), and the cert-issuer one fails as before. Mutations caught: start ignoring a missing marker; the rule on
   exit 1 alone; `RollingUpdate`; the harness rendered as a Deployment.
+
+### On the cluster (2026-10-28, build step 5)
+
+*The upgrade,* `up.nu sandbox-local --dev` over the running five-node `u7c`:
+- *The first run stopped at publishing the layers:* both exemplar targets' layers still waited on `job-name=` (cert-issuer,
+  cassini, the credentials agent and its observer), and `deploy-objects.nu` found no such Job. Fixed (`32ab3a2e`): they
+  wait on the pods' `name` label, and a test now turns every wait of a target's published layers into its health
+  check against the target's render.
+- *Then:* every workload a Deployment of one, no Job left, each pod on its pool's node; every workload and daemon
+  registered, none refused, every custodian fetching everything; no Failed pod. Flux applied the Deployments and pruned
+  the Jobs in one reconcile, so for a moment an old Job's pod and its Deployment's pod both ran: once, at the change.
+- *An ending restarts in place* (`kube-observer`'s agent sent SIGTERM from an ephemeral container sharing its process
+  namespace): it drained and exited in 10 s, the whole pod restarted under the same UID (the daemon, `polar-init` and
+  the agent each once), `polar-init` waited out `TooSoon` (the five-minute bound: its certificate was 3 minutes old),
+  was issued a new one (a new serial), and the broker applied two revoked-set changes as it was issued (the old
+  custodian's and client certificates superseded); no Failed pod.
+- *The credentials agent restarted in place* the same way: cert-issuer held its request until its entry opened (45 s),
+  and its ledger replayed once (257 events).
+- *A changed Deployment rolled out by `Recreate`:* the old pod gone before the new one was made; never two.
+- *A liveness probe's kill restarts the whole pod* (`kube-observer`'s probe made to fail, its Flux Kustomization
+  suspended for the test and resumed after): the kubelet restarted the agent's container alone; it found no marker
+  and exited; 4 s later the whole pod restarted, `polar-init` with it, under the same UID.
+- *Read when built:* after a whole-pod restart every container's last state is the kubelet's own, exit 137, reason
+  `RestartingAllContainers` ("The container is removed because RestartAllContainers in place"), and its previous logs
+  are gone, so an agent's own exit code is not seen there. A probe whose command does not exist is an error ("unknown
+  state"), not a failure, and kills nothing. No backoff was seen between in-place restarts.
+- *Tests against the rebuilt images:* `resolve.nu` 63 of 64 (the one failing, "workloads still asking cert-issuer are
+  listed as pending", fails as before this step).
+
+*A fresh bring-up* (u7c reset onto nix-usernetes `d26c6e7`, then `up.nu sandbox-local --dev`): no Job, every workload a
+Deployment on its pool's node, the nine volumes bound, every workload and daemon registered and none refused, every
+custodian fetching everything (kube-consumer's and git-repo-observer's the escrow key), the graph writers reaching
+Neo4j, no Failed pod. jira-observer restarts in place on the target's placeholder Jira, as it failed before.
 
 ### Tests first
 
