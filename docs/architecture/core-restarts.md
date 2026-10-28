@@ -421,6 +421,86 @@ Each step tests first, with property tests where an invariant holds.
 8. **On a fresh sandbox-local:** each core member killed in turn, and two at once, checking what opened against the
    table, in cert-issuer's log, its record and the ledger.
 
+## Step 5, the ticket: the plan (2026-10-28, for review)
+
+`deployments.md`'s build step 6. What was decided (question 1, B, 2026-10-26; with the move, `deployments.md`, question
+5): a planned restart hands over; the outgoing credentials agent tells cert-issuer over Cassini that its successor may
+be signed once, within a few minutes; the ticket is in the record; a crash leaves none and goes through its window (C,
+step 4); attestation decides who gets through, when it exists (step 6).
+
+### What was read, and what the move changed
+
+- *How the successor comes through today* (seen on `u7c`, 2026-10-28, `deployments.md`, "On the cluster"): its
+  polar-init asks cert-issuer on its token alone for its client certificate and its custodian's, both bootstrap
+  signings; the floor state (`cert-issuer/server/src/floor_state.rs`) holds them until the credentials agent has gone
+  unheard for the bound (`PRESENCE_BOUND`, 60 s) while Cassini holds (`Open::CredentialsAgentOnly`), then signs. The
+  restart in place took 45 s of holding.
+- *What the move changed:* the successor is the same pod, under the same UID, and cert-issuer already knows that UID:
+  its record (`record.rs`, `RecordEntry::instance_binding`) keeps the pod each signing was for, the credentials agent's
+  current certificate included. So a ticket need not carry the UID, nor the agent learn its own: cert-issuer binds a
+  ticket to the instance of the last certificate it signed for the credentials agent. That answers the gap found after
+  the decision ("the Job makes the new pod only once the old one has ended ... so the outgoing agent cannot name it"):
+  the ticket now admits one pod, not any pod of the service account.
+- *What it does not close:* whoever can create a token for the credentials agent's service account bound to that pod
+  (`serviceaccounts/token`) can ask inside the ticket's minutes. Attestation (step 6) is what closes that, as decided.
+- *Where it would sit:* the outgoing side in the consumer's drain (`credentials-agent/consume/src/supervisor.rs`,
+  `begin_drain`, on `PrepareShutdown`, before `ProceedWithShutdown`, while its Cassini session holds); the incoming side
+  in cert-issuer's gate (`gate.rs`), beside the held requests (`held.rs`), whose topics show the precedent: published by
+  the credentials agent, taken only when the broker says the credentials agent published them
+  (`cert-issuer-held-replies`).
+
+### The design
+
+1. *The ticket:* the credentials agent publishes it on a new topic, `cert-issuer-successor-tickets`, as its drain
+   begins; it carries only when it was issued. cert-issuer takes it only when the broker says the credentials agent
+   published it, and binds it to the pod UID of its last client certificate for the credentials agent, from its record.
+2. *What it admits:* a token-only request for the credentials agent's identity whose token is bound to that UID, once
+   for each type the successor asks for (its client certificate and its custodian's), within five minutes of the ticket
+   (the renewal bound: `deployments.md`, item 2). The signing is recorded with a path of its own, `Ticketed`, as a
+   vouched one is `Vouched`.
+3. *In the record:* the ticket itself is an entry, as decided, so the ledger learns of it with the signings; cert-issuer
+   restarted inside the five minutes reads it back.
+4. *What else is unchanged:* without a ticket (a crash, a pod deleted or evicted, a ticket expired or used), the crash
+   window (C) as today; with one, a request bound to another pod is not admitted by it, and waits for the window as
+   before; the observer's and Cassini's held requests as they are.
+5. *The floor's topics:* the new topic in the credentials agent's and cert-issuer's own (their `TOPICS` and the floor
+   entries, `topics.md`), so the broker carries it between them alone.
+
+### For the maintainer
+
+1. *A message that opens.* `floor_state.rs` says "No message opens an entry ... What opens is an absence, and time", for
+   question 2's reason: "A rule that opened it on being told would be a rule an attacker could tell." A ticket is a
+   message that opens the credentials agent's entry, for one pod, for five minutes. Taking it only from the credentials
+   agent's own session meets the reason (whoever can publish as the credentials agent already holds its key, and could
+   sign as it), but the principle as written would change. *Or,* with no ticket: cert-issuer admits the credentials
+   agent's successor bound to the same pod as its last certificate, once it has gone unheard (the window's absence, so
+   no faster than today, but only that pod, until the window opens for any). *Recommendation:* the ticket as decided,
+   with the principle restated as "no message opens an entry except the credentials agent's own ticket, for its own
+   pod". It is what makes a rejuvenation quick and asks the outgoing agent's consent.
+2. *Which endings leave a ticket.* Every orderly ending (a rejuvenation, and a SIGTERM's drain), or a rejuvenation
+   alone. A pod deleted is replaced by a new UID, which a ticket bound to the old one cannot admit, so a ticket left by
+   every drain admits nothing more. *Recommendation:* every orderly ending: one path, and a SIGTERM to a pod that then
+   restarts in place (an operator's, a test's) is quick too.
+
+### Tests first
+
+- cert-issuer: a property over sequences of tickets (from the credentials agent or another publisher), requests (the
+  identity, the pod UID, the type) and time: a request is admitted against a ticket exactly when a ticket from the
+  credentials agent is under five minutes old, bound to that UID, and that type has not been signed against it;
+  otherwise what the window and the held requests decide, as now. Examples: the ticket in the record, and read back
+  after a restart; the signing recorded `Ticketed`; a ticket with no certificate for the credentials agent in the
+  record binds to nothing.
+- The credentials agent: the ticket published as the drain begins, before `ProceedWithShutdown`, and only once.
+- polar-init: unchanged (it asks as it does).
+- Mutations: the publisher check dropped; the UID check dropped; a ticket used twice; one used after five minutes.
+
+### On the cluster
+
+On `u7c`: the credentials agent sent SIGTERM, as on 2026-10-28: its successor signed at its first ask, against the
+ticket, with no hold, under the same UID, the ticket and both signings in the record and the ledger; a pod of the
+credentials agent's service account with another UID, asking inside the five minutes, not admitted by the ticket; the
+pod deleted instead (a new UID): the window, as today.
+
 ## Open questions
 
 To be taken one at a time, after the certificate record (`cert-issuer-isolation.md`, 2026-10-23), which the rest
