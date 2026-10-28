@@ -98,7 +98,9 @@ Read 2026-10-22, after stage 5a found the first while measuring (`broker-baselin
   ahead of the queued `CloseConnection`, so a session with nothing to hold ended before closing its connection and left
   the old instance connected with no session.
 - **Revoked certificates (2026-10-27, `key-custody.md`, step 5).** The listener reads the leaf's serial at accept. A
-  certificate the credentials agent's revoked set names is refused at registration (`authority::REVOKED_REFUSAL`), and
+  certificate the credentials agent's revoked set names is refused at registration (`cassini_types::Refusal::revoked()`:
+  the code `RefusalCode::Revoked`, which a reader acts on, and the words `REVOKED_REFUSAL`, for people; since
+  2026-10-28, when an older daemon matching the words did not hear its revocation once they changed), and
   on each change of authority every connection whose certificate is now revoked is closed; the session is kept for the
   retention window, for the identity's next certificate to claim. Tests: `broker/tests/revocation.rs`,
   `custody_revocation.rs`. (Until 2026-10-28 a revoked certificate could still register a watcher: below.)
@@ -127,7 +129,8 @@ custodian's, `custody.<X>`, under a certificate of its own whose key only the da
 - its floor is the custodian's (`CUSTODIAN_PUBLISHES`, `CUSTODIAN_SUBSCRIBES`, implied by the identity), so nothing
   limits it that the floor does not;
 - a revoked custodian is refused and closed like any revoked certificate, and the daemon, refused as revoked
-  (`ClientEvent::RegistrationRefused`), destroys every key and exits; X revoked leaves the custodian's session open to
+  (`ClientEvent::RegistrationRefused` with `RefusalCode::Revoked`, whatever its words), destroys every key and exits; X
+  revoked leaves the custodian's session open to
   hear it;
 - a workload cannot open a session as its custodian (it cannot sign as one), so there is nothing to cap.
 

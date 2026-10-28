@@ -416,6 +416,9 @@ The plan:
    pod without the daemon runs exactly as Polar ran before custody. What it gives up is stated where it is chosen: the
    key is in the pod's volume, readable by the workload, so a compromised workload can copy it and be the agent
    elsewhere until its certificate expires or is revoked (the table in "What it protects").
+   *Except an agent that encrypts (since step 9, 2026-10-28):* its escrow key is fetched only by the daemon's custodian,
+   so without the daemon it has none, and the render refuses it (`rules.nu`, `escrow_problems`), as `polar-init` would
+   (`custody_for`); the maintainer decided so rather than give key-file mode an escrow path of its own.
 2. *The choice is the target's, rendered.* Step 4 gives the target a `custody` setting, on by default. Off renders
    every pod without the sidecar, its `--cert` as `ecdsa-p256`, and its key variables as files. A deployment that
    cannot run our daemon image, or uses stock neo4rs, sets it off. It can be per workload as well, so that only the
@@ -773,7 +776,8 @@ the key once it is revoked.
   (`cassini/client/src/lib.rs`).
 - *The listener* (`cassini/broker/src/listener.rs`): the leaf's serial read at accept (`extract_peer_serial`,
   `cert_issuer_common::serial::serial_from_cert`); a revoked certificate refused at registration
-  (`authority::REVOKED_REFUSAL`) and closed, unless it registers a watcher; on each change of authority
+  (`authority::REVOKED_REFUSAL`; since 2026-10-28 `cassini_types::Refusal::revoked()`, read by its code) and closed,
+  unless it registers a watcher; on each change of authority
   (`JudgeSubscriptions`) a revoked agent's connection closed, its session kept for the retention window; a watcher held
   to the three authority uses (`authority::watcher_may`, `WATCHER_REFUSAL`), and within them decided as its identity's
   session is.
@@ -1284,6 +1288,32 @@ asked; Mullvad off for the run):** what was checked, how, and what was not.
   the wire instead of its text would remove it (`remaining-work.md`).
 - *What it leaves:* `polar-kernel-keyring`, used by nothing now (the maintainer to decide whether it goes); an agent
   with `encryption` cannot run without the daemon (`remaining-work.md`).
+
+**Step 9's follow-ups (decided by the maintainer and built, 2026-10-28).**
+- *Kept:* `polar-kernel-keyring`, in the tree though nothing uses it.
+- *The refusal by its code.* `ClientMessage::RegistrationResponse` carries `Result<String, Refusal>`, a `Refusal`
+  being a `RefusalCode` (`Revoked`, `Other`) and its words (`cassini/types/src/lib.rs`). The listener refuses a revoked
+  certificate `Revoked` and everything else `Other`; the broker's internal messages stay text, since only the listener
+  says revoked. The client passes the code on in `ClientEvent::RegistrationRefused`, and the daemon's watcher destroys
+  its keys on the code alone (`polar-custody/daemon/src/watch.rs`). No `ShuttingDown` code: nothing would read it yet.
+  The rkyv layout changed, so images before and after it do not read each other's registration answers; they deploy
+  together. Tests: the round trip of any code and words (`cassini/types/tests/props/lib.rs`); the client passing the
+  code as it came, the revoked words under `Other` not a revocation; the watcher, as the daemon starts it, destroying
+  its keys exactly when the code is `Revoked`, whatever the words (a property); the broker's revoked registration
+  refused `Revoked` (`broker/tests/revocation.rs`). Mutations caught: the watcher matching the words again; the
+  listener sending `Other` for a revoked certificate.
+- *With the daemon, every certificate is its.* The token buys only the custodian's certificate, so a `--cert` with a
+  key file beside a `custody` one would be bought with it as well: `polar-init` stops at once, naming it
+  (`custody_for`), and the render refuses it (`rules.nu`, `custody_cert_problems`); the catalog never makes such a mix
+  (`resolve.nu`, the certificates' algorithm). Tests: an example, and a property over any `--cert`s, escrow flag and
+  socket that `polar-init` goes on exactly when the pod's keys are all the daemon's or none, no two of one type, the
+  socket given, and no escrow key asked for without the daemon. Mutations caught: no mix check; the mix checked only
+  when escrowing; the one-slot-per-type check gone. The step-3 test that let a mix through with a socket now refuses
+  it, as decided.
+- *An agent that encrypts needs the daemon* ("Degraded operation", item 1): the render refuses a pod whose polar-init
+  is asked for the escrow key and that has no daemon (`rules.nu`, `escrow_problems`, called from `resolve.nu`), saying
+  why. A target with custody off leaves out its encryption agents (kube-consumer and git-repo-observer today), or its
+  render names them.
 
 **Decided along the way (2026-10-27, the maintainer):** the custodian identity, instead of the token on a retrieval
 or a daemon-signed ephemeral (2a); X's certificates from the credentials agent, not from cert-issuer; forced
