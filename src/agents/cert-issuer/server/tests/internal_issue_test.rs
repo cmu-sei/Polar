@@ -90,6 +90,8 @@ fn handler(ca: Arc<dyn CaClient>, internal_callers: Vec<&str>) -> Handler {
 fn request_for(csr_identity: &str, asserted_identity: &str) -> InternalIssueRequest {
     let csr = generate_csr(csr_identity, &KeyAlgorithm::EcdsaP256, &[]).expect("csr");
     InternalIssueRequest {
+        instance_binding: None,
+        expires_by: None,
         csr_pem: csr.csr_pem,
         identity: asserted_identity.to_string(),
         cert_type: CertType::Client,
@@ -214,6 +216,8 @@ async fn an_escrow_certificate_lives_the_service_lifetime_and_not_the_server_lif
         .handle_internal_issue(
             Some(ALLOWED_CALLER),
             InternalIssueRequest {
+                instance_binding: None,
+                expires_by: None,
                 cert_type: CertType::Service,
                 ..request_for(TARGET_IDENTITY, TARGET_IDENTITY)
             },
@@ -237,6 +241,8 @@ async fn an_escrow_certificate_lives_the_service_lifetime_and_not_the_server_lif
 
 fn signing_request_for(identity: &str) -> InternalIssueRequest {
     InternalIssueRequest {
+        instance_binding: None,
+        expires_by: None,
         cert_type: CertType::Signing,
         ..request_for(identity, identity)
     }

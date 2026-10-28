@@ -61,6 +61,8 @@ pub async fn certify(
     drop(pem);
     let issued = cert_issuer
         .issue_internal(InternalIssueRequest {
+            instance_binding: None,
+            expires_by: None,
             csr_pem: csr,
             identity: identity.to_string(),
             cert_type: CertType::Signing,

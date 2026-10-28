@@ -115,6 +115,8 @@ impl WorkloadIssuanceHandler {
             .issuance
             .cert_issuer
             .issue_internal(InternalIssueRequest {
+                instance_binding: None,
+                expires_by: None,
                 csr_pem: csr.csr_pem,
                 identity: self.own_identity.clone(),
                 cert_type: CertType::Signing,

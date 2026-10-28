@@ -408,8 +408,28 @@ impl Handler {
             Ok(id) => id,
             Err(e) => return error_response(IssueOutcome::InvalidToken, &e.to_string()),
         };
+        // The custodians' space is signed in only as a custodian's certificate, for the workload the token proves
+        // (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"): a workload named like one (a
+        // service account may have dots in its name) is refused whatever it asks for.
+        if cert_issuer_common::custody::is_reserved(&dns_identity) {
+            warn!(identity = %dns_identity, "a token whose workload is named like a custodian: refused");
+            return error_response(
+                IssueOutcome::CallerNotAuthorized,
+                "no workload's identity may be in the custodians' space",
+            );
+        }
+        let workload_identity = dns_identity;
+        let dns_identity = if request.cert_type == cert_issuer_common::CertType::Custody {
+            cert_issuer_common::custody::custodian_identity(&workload_identity)
+        } else {
+            workload_identity.clone()
+        };
         if let Err(e) = csr::verify_identity(&parsed_csr, &dns_identity) {
             return error_response(IssueOutcome::IdentityMismatch, &e.to_string());
+        }
+        if let Some(detail) = custody_names_refusal(&request.cert_type, &request.extra_sans) {
+            warn!(identity = %dns_identity, "{detail}");
+            return error_response(IssueOutcome::InvalidCsr, &detail);
         }
 
         // ---- Step 3.2: administrative capabilities are not requestable here ----
@@ -475,6 +495,9 @@ impl Handler {
                     cert_issuer_common::record::IssuePath::TokenOnly
                 },
                 claims.instance_binding.clone(),
+                // A custodian lives as long as its workload's certificates would.
+                Some(&workload_identity),
+                None,
             )
             .await;
         if response.status == 200
@@ -502,6 +525,8 @@ impl Handler {
         account_subject: Option<cert_issuer_common::AccountSubject>,
         path: cert_issuer_common::record::IssuePath,
         instance_binding: Option<String>,
+        lifetime_of: Option<&str>,
+        expires_by: Option<i64>,
     ) -> HandlerResponse {
         // TODO: pass this in so we get a cert valid for multiple SANs
         let all_sans = match csr::validate_extra_sans(dns_identity, &extra_sans) {
@@ -561,7 +586,7 @@ impl Handler {
         // verification work is done.
         let lifetime = self
             .identity_lifetime_overrides
-            .get(dns_identity)
+            .get(lifetime_of.unwrap_or(dns_identity))
             .copied()
             .unwrap_or(if account_subject.is_some() {
                 // An account certificate: the person's own identity, which
@@ -571,7 +596,8 @@ impl Handler {
             } else {
                 match cert_type {
                     cert_issuer_common::CertType::Server => self.server_lifetime,
-                    cert_issuer_common::CertType::Client => self.default_lifetime,
+                    cert_issuer_common::CertType::Client
+                    | cert_issuer_common::CertType::Custody => self.default_lifetime,
                     // Not short-lived like Client: a service's durable identity, which senders encrypt to long after
                     // the pod that asked has gone, and which is never issued twice for an identity. What protects it
                     // is to be revocation, once built, not a tight expiry; the lifetime is to be revisited then.
@@ -580,6 +606,21 @@ impl Handler {
                     cert_issuer_common::CertType::Signing => self.server_lifetime,
                 }
             });
+
+        // No certificate outlives the end it was given (a custodian's), and none is signed once that is past.
+        let lifetime = match expires_by {
+            None => lifetime,
+            Some(end) => {
+                let left = end - time::OffsetDateTime::now_utc().unix_timestamp();
+                if left <= 0 {
+                    return error_response(
+                        IssueOutcome::CallerNotAuthorized,
+                        "the certificate would end before it began",
+                    );
+                }
+                lifetime.min(std::time::Duration::from_secs(left as u64))
+            }
+        };
 
         let ca_request = CaIssueRequest {
             csr_pem,
@@ -678,6 +719,41 @@ impl Handler {
             );
         }
 
+        // ---- Step 1.6: no custodian here ----
+        //
+        // A custodian is what a pod's token buys, and only a token (docs/architecture/key-custody.md, "Part A's
+        // bootstrap: the custodian"): the internal caller signs nothing in the custodians' space, and no custody name.
+        if request.cert_type == cert_issuer_common::CertType::Custody
+            || cert_issuer_common::custody::is_reserved(&request.identity)
+        {
+            warn!(peer_identity = %caller, identity = %request.identity, "internal issuance refused: the custodians' space");
+            return error_response(
+                IssueOutcome::CallerNotAuthorized,
+                "a custodian's certificate is signed only on its pod's token",
+            );
+        }
+        if let Some(detail) = custody_names_refusal(&request.cert_type, &request.extra_sans) {
+            return error_response(IssueOutcome::InvalidCsr, &detail);
+        }
+
+        // ---- Step 1.7: a server certificate's names are its workload's ----
+        //
+        // As on /issue for a vouched request: the floor's list of names for the workload, whoever asks.
+        if request.cert_type == cert_issuer_common::CertType::Server
+            && let Some(floor) = &self.floor
+        {
+            let workload = cert_issuer_common::identity::kubernetes_subject_of(&request.identity);
+            if let Err(refusal) = crate::floor::admit_vouched(
+                floor,
+                workload.as_deref().unwrap_or(&request.identity),
+                &request.cert_type,
+                &request.extra_sans,
+            ) {
+                warn!(identity = %request.identity, "internal issuance refused: {refusal}");
+                return error_response(IssueOutcome::CallerNotAuthorized, &refusal.to_string());
+            }
+        }
+
         // ---- Step 2: CSR parsing ----
         let parsed_csr = match csr::parse_csr(&request.csr_pem) {
             Ok(c) => c,
@@ -704,7 +780,9 @@ impl Handler {
             request.subject_dn_defaults,
             request.account_subject,
             cert_issuer_common::record::IssuePath::Internal,
+            request.instance_binding,
             None,
+            request.expires_by,
         )
         .await
     }
@@ -912,6 +990,29 @@ fn validate_account_subject(subject: &cert_issuer_common::AccountSubject) -> Res
         );
     }
     Ok(())
+}
+
+/// Why a request's extra names may not go with its type: a custody name is a custodian's certificate's alone, and a
+/// custodian's certificate carries custody names and nothing else (docs/architecture/key-custody.md, "Part A's
+/// bootstrap: the custodian").
+fn custody_names_refusal(
+    cert_type: &cert_issuer_common::CertType,
+    extra_sans: &[String],
+) -> Option<String> {
+    use cert_issuer_common::custody::{CustodyPermission, names_custody};
+    if cert_type == &cert_issuer_common::CertType::Custody {
+        extra_sans
+            .iter()
+            .find(|name| CustodyPermission::from_san_string(name).is_err())
+            .map(|name| {
+                format!("a custodian's certificate carries custody names only, not `{name}`")
+            })
+    } else {
+        extra_sans
+            .iter()
+            .find(|name| names_custody(name))
+            .map(|name| format!("a custody name is a custodian's certificate's alone: `{name}`"))
+    }
 }
 
 fn error_response(outcome: IssueOutcome, detail: &str) -> HandlerResponse {

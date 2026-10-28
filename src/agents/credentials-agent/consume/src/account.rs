@@ -149,6 +149,8 @@ impl AccountHandler {
         let issued = self
             .cert_issuer
             .issue_internal(InternalIssueRequest {
+                instance_binding: None,
+                expires_by: None,
                 csr_pem,
                 identity: account_id.clone(),
                 cert_type: CertType::Client,

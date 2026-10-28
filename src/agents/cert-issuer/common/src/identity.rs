@@ -171,6 +171,17 @@ pub fn workload_of(identity: &str) -> Option<&str> {
     (!workload.is_empty() && !namespace.is_empty() && !domain.is_empty()).then_some(workload)
 }
 
+/// The token subject a Kubernetes workload identity was made from: `system:serviceaccount:<namespace>:<workload>` for
+/// the `<workload>.<namespace>.serviceaccount.<domain>` that [`normalize_identity`] makes of it, which is what a grant
+/// is written under. None for an identity [`workload_of`] reads no workload from (a person's, a dotted service
+/// account's). The credentials agent uses it where a custodian asks on its workload's behalf, with no token to read
+/// the subject from (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+pub fn kubernetes_subject_of(identity: &str) -> Option<String> {
+    let workload = workload_of(identity)?;
+    let namespace = identity[workload.len() + 1..].split_once('.')?.0;
+    Some(format!("system:serviceaccount:{namespace}:{workload}"))
+}
+
 /// Every dot-separated segment of `value` must be a valid DNS label:
 /// letters, digits, and hyphens only, and non-empty. Applied to raw
 /// claim values before they become part of a SAN -- unlike the
@@ -198,7 +209,7 @@ mod unit_tests {
     //! needs it imports the same implementation -- there is no
     //! per-side copy to drift.
 
-    use super::{IdentityError, IdentityNormalization, normalize_identity};
+    use super::{IdentityError, IdentityNormalization, kubernetes_subject_of, normalize_identity};
 
     fn k8s(cluster_domain: &str) -> IdentityNormalization {
         IdentityNormalization::KubernetesServiceAccount {
@@ -471,6 +482,40 @@ mod unit_tests {
                 let identity = format!("{user}.{scope}");
                 prop_assert_eq!(workload_of(&identity), None);
             }
+        }
+    }
+
+    #[test]
+    fn the_subject_is_read_back_from_a_workload_identity_and_from_nothing_else() {
+        assert_eq!(
+            kubernetes_subject_of("kube-consumer.polar.serviceaccount.cluster.local").as_deref(),
+            Some("system:serviceaccount:polar:kube-consumer")
+        );
+        for not_a_workload in [
+            "alice.keycloak",
+            "custody.kube-consumer.polar.serviceaccount.cluster.local",
+            "kube-consumer.polar.cluster.local",
+            "",
+        ] {
+            assert_eq!(
+                kubernetes_subject_of(not_a_workload),
+                None,
+                "{not_a_workload}"
+            );
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_subject_read_back_normalizes_to_the_same_identity(
+            name in "[a-z0-9][a-z0-9-]{0,20}",
+            namespace in "[a-z0-9][a-z0-9-]{0,20}",
+            domain in "[a-z0-9]{1,10}(\\.[a-z0-9]{1,10}){0,2}",
+        ) {
+            let strategy = IdentityNormalization::KubernetesServiceAccount { cluster_domain: domain };
+            let subject = format!("system:serviceaccount:{namespace}:{name}");
+            let identity = normalize_identity(&subject, None, &strategy).unwrap();
+            proptest::prop_assert_eq!(kubernetes_subject_of(&identity), Some(subject));
         }
     }
 }

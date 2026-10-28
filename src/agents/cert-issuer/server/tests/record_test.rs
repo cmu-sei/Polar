@@ -158,6 +158,8 @@ async fn every_route_s_signing_is_recorded_with_how_it_came() {
         &h.handle_internal_issue(
             Some(CREDENTIALS_AGENT),
             InternalIssueRequest {
+                instance_binding: None,
+                expires_by: None,
                 csr_pem: csr.csr_pem,
                 identity: account.to_string(),
                 cert_type: CertType::Client,

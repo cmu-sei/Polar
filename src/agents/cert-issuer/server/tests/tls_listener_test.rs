@@ -193,6 +193,8 @@ fn status(response: &str) -> u16 {
 fn internal_body() -> String {
     let csr = generate_csr(TARGET, &KeyAlgorithm::EcdsaP256, &[]).unwrap();
     serde_json::to_string(&InternalIssueRequest {
+        instance_binding: None,
+        expires_by: None,
         csr_pem: csr.csr_pem,
         identity: TARGET.to_string(),
         cert_type: CertType::Client,

@@ -32,6 +32,7 @@ use time::OffsetDateTime;
 pub mod ca_root;
 pub mod capability;
 pub mod csr_san;
+pub mod custody;
 pub mod group;
 pub mod held;
 pub mod hierarchy;
@@ -81,6 +82,11 @@ pub enum CertType {
     /// Signed only on `/internal/issue`, for the internal caller's own identity: the credentials agent's session
     /// offers are signed with one (docs/architecture/core-restarts.md, "1c in detail").
     Signing,
+    /// The custody daemon's own certificate (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"):
+    /// client authentication, for its own Cassini session, named `custody.<X>` for the workload X its pod's token
+    /// proves ([`custody::custodian_identity`]). Its `p:custody:` names say what it may ask the credentials agent for
+    /// on X's behalf. Signed only on a token, never on `/internal/issue`: it is what the pod proves itself for.
+    Custody,
 }
 
 /// `id-kp-documentSigning` (RFC 9336): the extended key usage of a [`CertType::Signing`] certificate.
@@ -93,6 +99,7 @@ impl std::fmt::Display for CertType {
             Self::Server => "server",
             Self::Service => "service",
             Self::Signing => "signing",
+            Self::Custody => "custody",
         };
         write!(f, "{s}")
     }
@@ -234,6 +241,15 @@ pub struct InternalIssueRequest {
     /// `None` for every other internal issuance.
     #[serde(default)]
     pub account_subject: Option<AccountSubject>,
+    /// The pod instance a workload's certificate is for, recorded as a token's would be: a custodian's, when the
+    /// credentials agent asks on a custodian's behalf (docs/architecture/key-custody.md, "Part A's bootstrap: the
+    /// custodian"). `None` for every other internal issuance.
+    #[serde(default)]
+    pub instance_binding: Option<String>,
+    /// The latest the certificate may end (Unix seconds): its lifetime is cut to it, and nothing is signed once it is
+    /// past. A custodian's end, so that none of its workload's certificates outlives it. `None`: the lifetime alone.
+    #[serde(default)]
+    pub expires_by: Option<i64>,
 }
 
 /// Error response body. Always returned on non-2xx responses.

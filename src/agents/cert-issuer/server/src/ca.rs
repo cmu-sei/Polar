@@ -291,7 +291,8 @@ impl CaClient for RcgenCaClient {
         let not_after = not_before + req.lifetime;
 
         let eku = match req.cert_type {
-            CertType::Client => vec![ExtendedKeyUsagePurpose::ClientAuth],
+            // The custodian's own Cassini session: a client, and nothing else.
+            CertType::Client | CertType::Custody => vec![ExtendedKeyUsagePurpose::ClientAuth],
             CertType::Server => vec![
                 ExtendedKeyUsagePurpose::ServerAuth,
                 ExtendedKeyUsagePurpose::ClientAuth, // keep both — Cassini connects to peers too
@@ -309,7 +310,7 @@ impl CaClient for RcgenCaClient {
         };
         csr.params.extended_key_usages = eku;
         csr.params.key_usages = match req.cert_type {
-            CertType::Client | CertType::Server | CertType::Signing => {
+            CertType::Client | CertType::Server | CertType::Signing | CertType::Custody => {
                 vec![KeyUsagePurpose::DigitalSignature]
             }
             // What a secret is sealed to, not anything that signs: by key agreement to a P-256 key (HPKE), or by

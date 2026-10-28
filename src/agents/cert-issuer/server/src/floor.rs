@@ -116,6 +116,14 @@ pub fn admit_token_only(
     else {
         return Err(Refusal::NotBootstrap);
     };
+    // Its custodian too, for its daemon's own session (docs/architecture/key-custody.md, "Part A's bootstrap: the
+    // custodian"): it asks for nothing on the service's behalf, whose certificates come from here as they always did.
+    if cert_type == &CertType::Custody {
+        return match extra_sans.first() {
+            None => Ok(()),
+            Some(name) => Err(Refusal::NameNotAllowed(name.clone())),
+        };
+    }
     if &entry.cert_type != cert_type {
         return Err(Refusal::WrongType {
             allowed: entry.cert_type.clone(),

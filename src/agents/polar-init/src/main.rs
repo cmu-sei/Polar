@@ -784,7 +784,10 @@ fn no_daemon(req: &CertRequest) -> String {
 fn slot_of(cert_type: &CertType) -> Slot {
     match cert_type {
         CertType::Server => Slot::Server,
-        CertType::Client | CertType::Service | CertType::Signing => Slot::Client,
+        // `--cert` takes only the two; the custodian's certificate is never a `--cert`.
+        CertType::Client | CertType::Service | CertType::Signing | CertType::Custody => {
+            Slot::Client
+        }
     }
 }
 
@@ -1023,7 +1026,7 @@ fn workload_cert_type(cert_type: &CertType) -> Option<WorkloadCertType> {
     match cert_type {
         CertType::Client => Some(WorkloadCertType::Client),
         CertType::Server => Some(WorkloadCertType::Server),
-        CertType::Service | CertType::Signing => None,
+        CertType::Service | CertType::Signing | CertType::Custody => None,
     }
 }
 
@@ -1033,7 +1036,7 @@ fn usage_of(cert_type: &CertType) -> Option<output::Usage> {
     match cert_type {
         CertType::Server => Some(output::Usage::Server),
         CertType::Client => Some(output::Usage::Client),
-        CertType::Service | CertType::Signing => None,
+        CertType::Service | CertType::Signing | CertType::Custody => None,
     }
 }
 

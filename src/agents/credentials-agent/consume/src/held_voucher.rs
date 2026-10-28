@@ -84,7 +84,7 @@ fn workload_cert_type(cert_type: &CertType) -> Option<WorkloadCertType> {
     match cert_type {
         CertType::Client => Some(WorkloadCertType::Client),
         CertType::Server => Some(WorkloadCertType::Server),
-        CertType::Service | CertType::Signing => None,
+        CertType::Service | CertType::Signing | CertType::Custody => None,
     }
 }
 
