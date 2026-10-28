@@ -50,7 +50,7 @@ def main [] {
             name: "cert-issuer"
             depends_on: ["platform"]
             # A catalog workload of kind `ca` (config/workloads/cert-issuer.nuon): a Job, waited for through its Service.
-            wait_for: [ { kind: "pods", ns: "polar", ref: "job-name=cert-issuer", label: "cert-issuer" } ]
+            wait_for: [ { kind: "pods", ns: "polar", ref: "name=cert-issuer", label: "cert-issuer" } ]
             files: [
                 "cert-issuer-resources.yaml"
                 "cert-issuer.yaml"
@@ -78,7 +78,7 @@ def main [] {
         {
             name: "cassini"
             depends_on: ["data"]
-            wait_for: [ { kind: "pods", ns: "polar", ref: "job-name=cassini", label: "cassini" } ]
+            wait_for: [ { kind: "pods", ns: "polar", ref: "name=cassini", label: "cassini" } ]
             files: [
                 "cassini-resources.yaml"
                 "cassini.yaml"
@@ -89,8 +89,8 @@ def main [] {
             name: "identity"
             depends_on: ["cassini"]
             wait_for: [
-            { kind: "pods", ns: "polar", ref: "job-name=credentials-agent", label: "credentials-agent" }
-            { kind: "pods", ns: "polar", ref: "job-name=credentials-agent-observer", label: "credentials-agent-observer" }
+            { kind: "pods", ns: "polar", ref: "name=credentials-agent", label: "credentials-agent" }
+            { kind: "pods", ns: "polar", ref: "name=credentials-agent-observer", label: "credentials-agent-observer" }
         ]
             files: [
                 "credentials-agent-resources.yaml"

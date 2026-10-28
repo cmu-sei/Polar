@@ -302,6 +302,33 @@ def main [] {
             }
         }
 
+        # Flux waits on what each layer's wait_for names, as deploy-objects.nu turns it into a health check; one that names
+        # nothing the render makes fails the publish (2026-10-28: the targets still waited on Jobs that had become
+        # Deployments). So every wait of the exemplar targets is checked against their render.
+        "every wait of a target's layers names a workload its render makes": {
+            use ../deploy-objects.nu [health_check, documents, BOOTSTRAP_LAYERS]
+            for t in [sandbox-local local-minimal] {
+                let out = (mktemp --directory)
+                let cat = (do { ^nu ($INFRA | path join "render-catalog.nu") $t ($out | path join "catalog") } | complete)
+                assert equal $cat.exit_code 0 $cat.stderr
+                let charts = (do { ^nu ($INFRA | path join "render.nu") $t --charts-into ($out | path join "charts") } | complete)
+                assert equal $charts.exit_code 0 $charts.stderr
+                let config = (^nu ($INFRA | path join "targets" $t "target.nu") | from nuon)
+                # The bootstrap layers (Flux itself) are up.nu's to apply, never published, so never a health check.
+                for layer in ($config.apply_layers | where name not-in $BOOTSTRAP_LAYERS) {
+                    let docs = ($layer.files | each {|f|
+                        let found = ([($out | path join "catalog" $f) ($out | path join "charts" $f)] | where {|p| $p | path exists })
+                        if ($found | is-empty) { [] } else { documents (open --raw ($found | first)) }
+                    } | flatten)
+                    for w in $layer.wait_for {
+                        let checked = (try { health_check $w $docs; null } catch {|e| $e.msg })
+                        assert equal $checked null $"($t), layer ($layer.name), ($w.ref)"
+                    }
+                }
+                rm -rf $out
+            }
+        }
+
         # docs/architecture/deployments.md, step 4: every workload restarts in place, a Deployment of one; the load harness,
         # which runs to completion, is a Job of the `run` kind.
         "every workload is a Deployment that restarts in place, and the load harness a Job": {
