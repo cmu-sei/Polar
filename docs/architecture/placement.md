@@ -23,7 +23,7 @@
 
 # Placement: Polar's workloads by node
 
-Status, 2026-10-28: the plan, cleared by the maintainer, and built ("Built", below); not yet on the cluster.
+Status, 2026-10-28: the plan, cleared by the maintainer, built, and seen on the five-node `u7c` ("On the cluster").
 
 *Where it is going (the maintainer, 2026-10-28):* Polar ships two kinds of exemplar target in `infra/targets`.
 `sandbox-local`, with Flux and the node pools, shows how a deployment on a cluster with placement marks should work.
@@ -128,13 +128,26 @@ cluster-kubeconfig` in nix-usernetes), which wipes it: done only when the mainta
 --dev`, and checked: every pod on its pool's node (`kubectl get pods -o wide`), nothing Pending, every PVC bound, and
 the agents registered and the custodians fetched as before. The result goes to the nix-usernetes session.
 
+*Done (2026-10-28), on the five-node `u7c`* (nix-usernetes `d26c6e7`: reset, up, init, kubeconfig; then `up.nu
+sandbox-local --dev` at `34be7533`, stopped at the browser step, Mullvad connected throughout):
+- *Every pod on its pool's node:* core has cassini, cert-issuer, the credentials agent, git-repo-controller and the git
+  server; observers the four observers and the credentials agent's; writers the four graph writers and Neo4j; services
+  ace, Jaeger, Keycloak, Postgres, Flux, the registry, the deployment git server, local-path and CoreDNS. Nothing
+  Pending.
+- *Every volume bound, on its pod's node:* the credentials agent's, cert-issuer's and the git server's on core,
+  Neo4j's three on writers, the rest on services. local-path's helper pods managed the tainted nodes (the open
+  question below, answered).
+- *The rest as before:* every workload and daemon registered once and was refused nothing, every custodian fetched
+  everything (kube-consumer's and git-repo-observer's the escrow key), and the graph writers reach Neo4j on its node
+  with their keys the daemon's. jira-observer fails on the target's placeholder Jira, as always.
+
 ## Open, and assumed
 
-- *local-path's helper pods on a tainted node* (untested by nix-usernetes): the provisioner creates a volume's
+- *local-path's helper pods on a tainted node* (untested by nix-usernetes; *answered 2026-10-28: they work*, above): the provisioner creates a volume's
   directory with a helper pod on the volume's node. Three volumes land on tainted nodes: the credentials agent's ledger
   and the git server's repositories (core) and Neo4j's (writers). If one of their PVCs hangs, the helper pod is the
   first place to look, and its tolerations are the provisioner's configuration, nix-usernetes'.
-- *Assumed, to check on the cluster:* the in-cluster registry's NodePort (30500), which every node's kubelet pulls
+- *Checked 2026-10-28:* the in-cluster registry's NodePort (30500), which every node's kubelet pulls
   from at `localhost:30500`, answers on every worker, as it did on one node and on `cp` and `core`.
 - *Not in this plan:* placement for the other targets (no cluster of theirs has pools), and anything finer than a
   node (per-pod user namespaces, `hostUsers: false`, are a separate item).
