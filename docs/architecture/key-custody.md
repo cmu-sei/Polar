@@ -1046,7 +1046,7 @@ Decided item 3. Two keys are left outside a daemon, and they are not alike.
    candidate key types in any case. Sealed like the others once it holds a key (`Refusal::Sealed`). A revocation
    (`Custody::revoke`) destroys it with the rest. Its copy in escrow is the credentials agent's, untouched: the next pod
    has it again only if the credentials agent agrees.
-2. **The bootstrap's key never leaves the daemon.** New requests, all the installer's (`polar-init`):
+2. *Superseded by the custodian (below).* **The bootstrap's key never leaves the daemon.** New requests, all the installer's (`polar-init`):
    - `EscrowExchange`: the daemon makes an X25519 ephemeral and returns its public half. `polar-init` sends it in
      `RetrieveAgentEscrowKeypairRequest`, as `CryptoActor` does now.
    - `EscrowReceive { payload }`: the sealed reply. The daemon opens it with the ephemeral (once: the ephemeral goes,
@@ -1058,7 +1058,7 @@ Decided item 3. Two keys are left outside a daemon, and they are not alike.
      under the CA since "Pinning the key to the CA"), never to a key the caller names: otherwise any caller could have
      the key sealed to a key of its own. Once, and only for a key made by `EscrowCsr` and not yet sealed. Without a
      pinned authority yet it is refused (`NoAuthority`), and `polar-init` retries, as it retries the bootstrap now.
-2a. **Found while building (2026-10-27): the workload could still retrieve the key itself.** The credentials agent
+2a. *Settled by the custodian (below).* **Found while building (2026-10-27): the workload could still retrieve the key itself.** The credentials agent
    answers a retrieval by the requester's broker identity alone (`credentials-agent/consume/src/
    agent_escrow_keypair_bootstrap.rs`), and seals the key to whatever X25519 key the request names; the workload has
    that identity too. So a compromised workload could publish its own `RetrieveAgentEscrowKeypairRequest` and have its
@@ -1071,14 +1071,123 @@ Decided item 3. Two keys are left outside a daemon, and they are not alike.
      caller sends ever is (`Sign` takes a TLS 1.3 CertificateVerify input only), and the credentials agent checks it
      against the requester's certificate. Holds even with a token in the workload, and asks the credentials agent to
      know each requester's current certificate.
-   Open, for the maintainer.
-3. **The workload decrypts through the socket.** `Decrypt { slot: Escrow, ciphertext }`, the workload's, returns the
+   The maintainer took neither: "why ... the daemon cannot be distinguished as its own identity?"
+3. **The workload decrypts through the socket.** `Unwrap { wrapped }` since the HPKE choice ("The crypto change"); first written as `Decrypt { slot: Escrow, ciphertext }`, the workload's, returns the
    plaintext (the same oracle the workload holds today with the key). Refused for the other slots. In `CryptoActor`, a
    third holder, `EscrowKeypairHandle::Daemon`, and the three decryption sites become one function over the holder. A
    workload with a daemon socket never bootstraps on its own (it has no token in any case).
 4. **What goes, after it is validated on a cluster** ("Clean up after validation"): the user-keyring path, its number
    file and `POLAR_ESCROW_KEY_HANDLE`, `handle.rs`, and `CryptoActor`'s adoption. The in-memory holder stays for tests
    and a workload with no daemon.
+
+### Part A's bootstrap: the custodian, the plan (2026-10-27, for review)
+
+Replaces items 2 and 2a. The design is the maintainer's (2026-10-27): **the token buys only the custodian's
+certificate, and the custodian's certificate buys the rest.**
+
+Why: in items 2 and 2a the daemon could not be told from the workload. They share the pod's certificate, so the
+credentials agent could not refuse the workload what it gave the daemon (2a). And the broker could not tell them apart
+either, which is why a watcher declares itself (`RegistrationRequest { watcher }`, `authority::watcher_may`) and why a
+revoked certificate may still register one ("Watcher sessions", `cassini-broker.md`). Items 2 and 2a also had
+`polar-init` drive the escrow bootstrap through socket requests, which the workload could make too, since polar-init
+and the workload are one UID ("Step 4", item 1).
+
+**What stays as it is.** Every certificate of a non-bootstrap pod comes through the credentials agent, never from
+cert-issuer directly (`cert-issuer-isolation.md`, rolled out 2026-10-14): `polar-init` reaches it through the
+observer, the token sealed to the consumer. The renewal rule (`credentials-agent/consume/src/issuance.rs`,
+`call_admit`, keyed on the identity, the pod instance and the type, with the five-minute bound of `deployments.md`,
+item 2), the grants, the ledger record and cert-issuer's floor all stay where they are.
+
+1. **The custodian's certificate, the only thing the token buys.** At start the daemon makes its own key, in a slot of
+   its own, `Slot::Custodian`, that no request ever signs with (`Sign` refuses it): the daemon signs its own
+   handshakes in process (`own.rs`), as it does now. `polar-init` asks for the slot's CSR, takes it through the
+   observer with the token, exactly as it takes a client certificate today, and installs what comes back; the slot is
+   then sealed, like the others. That is all `polar-init` does with the daemon. It has seen the token and a public
+   certificate.
+   - *A new type, `CertType::Custody`,* as `Signing` was added: client authentication, for the custodian's Cassini
+     session, and nothing a TLS server or a secret is for. Its first name is `custody.<X>`, where X is the identity the
+     token proves (`custody.kube-consumer.polar.serviceaccount.cluster.local`); cert-issuer derives it from the token,
+     and no caller names it.
+   - *It says what it may ask for, on X's behalf.* The credentials agent writes it, from the catalog, as `p:` names of
+     a new custody kind in the certificate (`cert-issuer/common/src/permission.rs`): a client certificate, a server
+     certificate with its names (from the allowlist cert-issuer already keeps per workload), and an escrow key if the
+     workload has `encryption`. The daemon reads its own certificate to know what to fetch, and the credentials agent
+     checks each request against the same certificate: one source, so they cannot disagree.
+   - *Attestation is here.* This is the step where the pod proves itself, so the attestation agent's word, when it
+     exists (`runtime-attestation.md`), is asked at this issuance.
+2. **The custodian fetches the pod's credentials, over its own Cassini session, as `custody.X`.** None of it is a
+   socket request.
+   - *X's certificates.* For each slot its certificate names, the daemon makes the slot's key and CSR and asks the
+     credentials agent for X's certificate. The credentials agent issues it (through cert-issuer, as it does now) only
+     to `custody.X`, only for what the custodian's certificate names, and never past the custodian's own expiry.
+   - *X's escrow key.* The daemon asks for it, sealed to an ephemeral it opens itself
+     (`ephemeral_exchange::EphemeralSession`); if none is escrowed, it makes a P-256 key, has it issued
+     (`CertType::Service`), seals it to the credentials agent's key it pinned under the CA, and stores it under
+     `agent_escrow_keypair_secret_name(X)`. The credentials agent answers retrieval, escrow issuance and that store only
+     to `custody.X`, and refuses them to X itself: the workload, which is X, can neither retrieve the key nor replace
+     it. No token travels on any of these.
+   - *Then the daemon says it is ready.* `polar-init` waits on a new `Ready` request, then reads the certificates
+     (`Certificate`) and writes the public bundle (the certificates and `ca.pem`) for the workload, as it writes it
+     now.
+3. **The custodian's authority is spent, not kept** (the maintainer's concern: what went out of scope with `polar-init`
+   must not live on in a long-running daemon). The credentials agent answers each kind of request from a custodian
+   certificate once: one certificate of each type it names, one escrow retrieval or one issue and store. It accepts
+   them only within five minutes of the custodian certificate's issue (the bound `deployments.md` already uses). After
+   that every request from it is refused, enforced where the daemon cannot reach. What the daemon keeps is a
+   certificate good for listening: the authority updates, its snapshots, and its own revocation.
+4. **Forced rejuvenation is untouched.** Nothing renews. The custodian's certificate is issued once per pod instance,
+   and none of X's outlives it. X's health actor ends the agent as its shortest-lived certificate nears expiry
+   (`polar-health/src/machine.rs`); `RestartAllContainers` restarts the daemon with it (`deployments.md`, "How the
+   move is done"), so the new instance has a new daemon with no keys, whose custodian certificate only `polar-init`
+   can get, with the token it alone reads. A compromised daemon cannot stretch its life: it has one certificate of each
+   type, spent authority, and no token.
+5. **What the broker does with it.** The custodian is its own identity, so its session neither supersedes X's nor is
+   superseded by it, by the rules every session already has. cert-issuer's floor gives custody identities the
+   authority topics and the custody requests, and nothing else; the broker's watcher flag and the registration
+   exception for a revoked certificate are no longer needed. The cap of one watcher per serial, with its tenure
+   ("Capping watchers"), becomes one session per custodian certificate, by the same rule. When X's certificate is
+   revoked, the custodian's session is open and hears it; when the custodian's own certificate is revoked (the pod
+   itself), the broker closes its session and refuses it at registration, the rule for every revoked certificate, and
+   the daemon, refused as revoked, destroys every key and exits (`Custody::revoke`, which also checks the custodian's
+   serial). How the daemon learns it is the refusal's to carry, to be read from the broker when built.
+6. **The bootstrap pods** (Cassini and the credentials agent: nothing comes up before them) keep going to cert-issuer
+   directly, as now, for their own certificates, which `polar-init` carries into the daemon as today (`MakeCsr`,
+   `Install`). They get a custodian certificate the same way, from cert-issuer with the token, for their daemon's
+   session; they hold no escrow key, and the spent rule has nothing to spend.
+7. **The socket after this.** The installer: the custodian's CSR, its certificate, `Ready` (and, in the bootstrap
+   pods, `MakeCsr` and `Install` as now). The workload: `Sign` (client, server), `Certificate`, and `Unwrap` for the
+   escrow key (item 3 above). Nothing a caller sends starts a retrieval, an issuance or a seal.
+
+**What the long-running daemon holds after the bootstrap:** X's mTLS keys and its escrow key, which it must hold for
+the pod's life to serve them (the escrow key in the user keyring today, reachable by UID and left behind by a killed
+pod), and the custodian's key, whose certificate can only listen. What is left is the daemon itself, a long-lived
+process the workload can talk to, which `polar-init` never was: kept to a small protocol with sealed slots, and the
+hardening already planned (its own UID, not dumpable, locked memory, seccomp).
+
+**Build order, each tests first.**
+1. cert-issuer and cert-issuer-common: `CertType::Custody`, its naming from the token, its floor; the custody `p:`
+   names, with properties (a round trip, and refusal of a malformed or forged name).
+2. The credentials agent: the custodian's issuance on the observer path; X's certificates issued to `custody.X`
+   only, within what its certificate names, its window and its expiry, once each; escrow retrieval, issuance and the
+   store for `custody.X` only, refused to X. Properties: for any sequence of requests from a custodian, each kind is
+   answered at most once, never after the window, and no certificate outlives the custodian's; nothing is answered to
+   X that is the custodian's to ask.
+3. The daemon: `Slot::Custodian`, its session as `custody.X`, the bootstrap actor (certificates, escrow, `Ready`),
+   `Unwrap`, and revocation on the custodian's serial.
+4. `polar-init`: the custodian's CSR and install, `Ready`, the bundle from `Certificate`.
+5. The broker: custody identities by their floor, the watcher flag still accepted until this is validated.
+6. `polar-crypto`: the daemon holder (`Unwrap`); no bootstrap in the workload.
+7. The bootstrap pods.
+8. On a fresh cluster: no token outside `polar-init`; no key outside a daemon; the workload refused its own escrow key;
+   a custodian refused a second certificate and a request after its window; a rejuvenation getting everything new;
+   X revoked and the custodian revoked, each ending as it should.
+9. After that is validated, the cleanup: the watcher flag and its revoked-registration exception, `polar-init`'s
+   escrow bootstrap, the user-keyring path, and the workload's own bootstrap in `CryptoActor`.
+
+**Decided along the way (2026-10-27, the maintainer):** the custodian identity, instead of the token on a retrieval
+or a daemon-signed ephemeral (2a); X's certificates from the credentials agent, not from cert-issuer; forced
+rejuvenation kept; the custodian's authority spent, not kept. **Decided here, by precedent:** a new certificate type
+(as `Signing` was), the name `custody.<X>`, and the five-minute window (`deployments.md`, item 2).
 
 ### Part B: the credentials agent's key
 
