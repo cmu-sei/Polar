@@ -1162,6 +1162,9 @@ credentials agent's key stays RSA until part B, so for the whole of part A the e
 
 - **Part A first** (the maintainer, 2026-10-27).
 - **HPKE with P-256** for the agents' escrow keys (the maintainer, 2026-10-27), and for part B's decryption key.
+- **No migration** (the maintainer, 2026-10-27): the change ships with a fresh install, and what was sealed to an
+  agent's RSA key is sealed again (`polar-sign seal`). A daemon handed an RSA key from escrow refuses it, naming the key
+  type.
 
 ## Build order, each tests first
 
