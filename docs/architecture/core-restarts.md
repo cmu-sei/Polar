@@ -421,7 +421,7 @@ Each step tests first, with property tests where an invariant holds.
 8. **On a fresh sandbox-local:** each core member killed in turn, and two at once, checking what opened against the
    table, in cert-issuer's log, its record and the ledger.
 
-## Step 5, the ticket: the plan (2026-10-28, its two questions decided)
+## Step 5, the ticket: the plan (2026-10-28, cleared, its questions decided, built)
 
 `deployments.md`'s build step 6. What was decided (question 1, B, 2026-10-26; with the move, `deployments.md`, question
 5): a planned restart hands over; the outgoing credentials agent tells cert-issuer over Cassini that its successor may
@@ -495,6 +495,38 @@ step 4); attestation decides who gets through, when it exists (step 6).
 - The credentials agent: the ticket published as the drain begins, before `ProceedWithShutdown`, and only once.
 - polar-init: unchanged (it asks as it does).
 - Mutations: the publisher check dropped; the UID check dropped; a ticket used twice; one used after five minutes.
+
+### Built (2026-10-28), before the cluster
+
+- *The ticket's words* (`cert-issuer/common/src/ticket.rs`): `SUCCESSOR_TICKETS_TOPIC`, `SuccessorTicket { issued_at }`,
+  `TICKET_LIFETIME_SECS` (300).
+- *The record, its own entry kind (the maintainer, 2026-10-28)*: `TicketEntry` (the pod, when it was taken and expires,
+  when the credentials agent says it issued it) is a line of cert-issuer's log of its own, numbered with the
+  certificates; a page holds both, by their one numbering and one limit, and `RecordReply::tickets` is empty from a
+  cert-issuer before tickets; `IssuePath::Ticketed` for a signing against one. cert-issuer: `Record` reads and writes
+  both kinds of line, `last_client_binding`, and `RecordingCa::take_ticket`, which takes a ticket only from the
+  credentials agent and only when its last client certificate names a pod.
+- *What a ticket admits* (`cert-issuer/server/src/ticket.rs`, `Tickets`): the bound pod, a client and a custodian's
+  certificate once each, until it expires; a failed signing gives its type back; restored at start from the record's
+  last ticket and what was signed against it. The gate holds it (`FloorGate::install_ticket`, `admit_ticket`), the
+  handler asks it before the floor state for the credentials agent's identity (and its custodian's), and records the
+  signing `Ticketed`. The supervisor takes tickets on the topic, records and installs them.
+- *The floor's principle* restated in `floor_state.rs`, as decided.
+- *The credentials agent*: on `PrepareShutdown`, before its drain lets go of anything, it publishes the ticket
+  (`leave_successor_ticket`), once; it declares the topic as one it publishes of its own accord. Its ledger keeps a
+  reported ticket in `CertificatesReported::tickets` (an old ledger replays with none), read through once by number.
+- *Found on the way, fixed apart:* `served` and the catalog topic test still asked for kind `agent` alone, so step 4's
+  `run` kind had cost the scheduler its harness topics (`05a1bdbf`); and since custody step 9 the credentials agent's
+  four escrow topics had no other side in the catalog, now said to wait for custodians (`97554be2`).
+- *Tests:* the record (bound to the last client certificate's pod; refused from anyone else, with nothing to bind,
+  unreadable; one numbering and one page limit; read back after a restart); the table (examples, the record's
+  restoring, and a property: an ask is admitted exactly as the rule says, over any sequence of tickets, asks and
+  givings-back); the handler (the successor signed at its first ask and recorded `Ticketed`, once for its type; another
+  pod's token held); the credentials agent's ticket readable by cert-issuer and declared; the ledger reporting a ticket
+  once, and an old report replaying. Mutations caught: the pod check, the once-only check and the expiry dropped in the
+  table; the publisher check dropped (caught only once its test gave the other publisher a certificate of its own); the
+  ledger reporting a ticket again. Not tested apart: the supervisors' few lines between the topic and the table, on each
+  side, which the cluster run exercises. The workspace: 2853 passed, none failed.
 
 ### On the cluster
 
