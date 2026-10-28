@@ -85,6 +85,11 @@ pub enum CertIssuerSupervisorMessage {
         payload: Vec<u8>,
         published_by: Option<String>,
     },
+    /// The credentials agent's successor ticket arrived, published (the broker says) by `published_by`.
+    TicketLeft {
+        payload: Vec<u8>,
+        published_by: Option<String>,
+    },
 }
 
 pub struct CertIssuerSupervisor;
@@ -196,12 +201,18 @@ impl Actor for CertIssuerSupervisor {
             .iter()
             .all(|e| e.path == cert_issuer_common::record::IssuePath::Own);
         let offers = myself.clone();
-        let gate = Arc::new(FloorGate::new(
-            FloorState::new(fresh, std::time::Instant::now()),
-            Box::new(move |held| {
-                let _ = offers.send_message(CertIssuerSupervisorMessage::OfferHeld(held));
-            }),
-        ));
+        // The successor ticket the record holds, if any, with what was signed against it: a restart inside its five
+        // minutes does not lose it (docs/architecture/core-restarts.md, "Step 5, the ticket").
+        let tickets = crate::ticket::Tickets::restored(record.tickets(), record.entries());
+        let gate = Arc::new(
+            FloorGate::new(
+                FloorState::new(fresh, std::time::Instant::now()),
+                Box::new(move |held| {
+                    let _ = offers.send_message(CertIssuerSupervisorMessage::OfferHeld(held));
+                }),
+            )
+            .with_tickets(tickets),
+        );
         info!(
             fresh,
             "floor state: {}",
@@ -290,6 +301,7 @@ impl Actor for CertIssuerSupervisor {
 
         let asked = myself.clone();
         let answered = myself.clone();
+        let ticketed = myself.clone();
         let resources = AgentBuilder::new(myself.clone(), SERVICE_NAME)
             .with_lifecycle_handler(|event| {
                 Some(CertIssuerSupervisorMessage::ClientEvent { event })
@@ -307,6 +319,15 @@ impl Actor for CertIssuerSupervisor {
                 HELD_REPLIES_TOPIC,
                 move |incoming| {
                     let _ = answered.send_message(CertIssuerSupervisorMessage::HeldAnswered {
+                        payload: incoming.payload,
+                        published_by: incoming.published_by,
+                    });
+                },
+            ))
+            .with_subscription(polar_agent_builder::Subscription::new(
+                cert_issuer_common::ticket::SUCCESSOR_TICKETS_TOPIC,
+                move |incoming| {
+                    let _ = ticketed.send_message(CertIssuerSupervisorMessage::TicketLeft {
                         payload: incoming.payload,
                         published_by: incoming.published_by,
                     });
@@ -408,6 +429,34 @@ impl Actor for CertIssuerSupervisor {
                         }
                     }
                     Err(why) => warn!("not answered: {why}"),
+                }
+            }
+            CertIssuerSupervisorMessage::TicketLeft {
+                payload,
+                published_by,
+            } => {
+                // Recorded before it admits anything, and taken from the credentials agent alone.
+                let now = time::OffsetDateTime::now_utc().unix_timestamp();
+                match state
+                    .record
+                    .take_ticket(
+                        &payload,
+                        published_by.as_deref(),
+                        &state.internal_callers,
+                        now,
+                    )
+                    .await
+                {
+                    Ok(ticket) => {
+                        state.gate.install_ticket(&ticket);
+                        info!(
+                            pod = %ticket.instance_binding,
+                            expires_at = ticket.expires_at,
+                            seq = ticket.seq,
+                            "the credentials agent left a successor ticket: its pod's successor may be signed on its token"
+                        );
+                    }
+                    Err(why) => warn!("a successor ticket not taken: {why}"),
                 }
             }
             CertIssuerSupervisorMessage::OfferHeld(held) => {

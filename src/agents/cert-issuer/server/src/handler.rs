@@ -132,6 +132,16 @@ pub struct ValidateHandlerResponse {
     pub body: ValidateHandlerBody,
 }
 
+/// How the floor's gate let a token-only request through.
+enum Gated {
+    /// On its token: no floor, or the floor state has its entry open.
+    Token,
+    /// The credentials agent vouched for it, held.
+    Vouched(crate::held::HeldKey),
+    /// Against the credentials agent's successor ticket.
+    Ticketed,
+}
+
 impl Handler {
     /// Whether the connection's verified mTLS peer is one that vouches for the request: an internal caller
     /// (the credentials agent), which has applied its own controls and states the certificate itself.
@@ -149,7 +159,7 @@ impl Handler {
         claims: &crate::oidc::ValidatedClaims,
         dns_identity: &str,
         request: &IssueRequest,
-    ) -> Result<Option<crate::held::HeldKey>, HandlerResponse> {
+    ) -> Result<Gated, HandlerResponse> {
         use crate::held::{Asked, HeldKey};
         let (false, false, Some(gate), Some(_)) = (
             own,
@@ -157,7 +167,7 @@ impl Handler {
             &self.gate,
             &self.floor,
         ) else {
-            return Ok(None);
+            return Ok(Gated::Token);
         };
         let now = std::time::Instant::now();
         let workload = &claims.workload_identity;
@@ -166,10 +176,22 @@ impl Handler {
         let service =
             cert_issuer_common::custody::custodian_of(dns_identity).unwrap_or(dns_identity);
         let credentials_agent = self.internal_callers.iter().any(|c| c == service);
+        // The credentials agent's successor, the same pod restarted in place, against its predecessor's ticket
+        // (docs/architecture/core-restarts.md, "Step 5, the ticket"), before any window.
+        if credentials_agent
+            && gate.admit_ticket(
+                claims.instance_binding.as_deref(),
+                &request.cert_type,
+                time::OffsetDateTime::now_utc().unix_timestamp(),
+            )
+        {
+            info!(workload = %workload, cert_type = ?request.cert_type, "admitted on its token against the credentials agent's successor ticket");
+            return Ok(Gated::Ticketed);
+        }
         let open = gate.open(now);
         if open.admits(credentials_agent) {
             info!(workload = %workload, floor_state = ?open, "admitted on its token: the floor state has its entry open");
-            return Ok(None);
+            return Ok(Gated::Token);
         }
         if credentials_agent {
             // Its successor is vouched for by no one: it waits until the state opens its entry.
@@ -197,7 +219,7 @@ impl Handler {
         match gate.ask(key.clone(), offer, now) {
             Asked::Vouched(id) => {
                 info!(workload = %workload, held = %id, "signed: the credentials agent vouched for the held request");
-                Ok(Some(key))
+                Ok(Gated::Vouched(key))
             }
             Asked::Refused(reason) => {
                 warn!(workload = %workload, reason = %reason, "refused: the credentials agent refused the held request");
@@ -471,8 +493,8 @@ impl Handler {
         // A bootstrap service on its token alone is signed when the floor state has its entry open; otherwise its
         // request is held, offered to the credentials agent, and signed once it vouches for it
         // (docs/architecture/core-restarts.md, "3 in detail").
-        let held = match self.gate_on_token(own, peer_identity, &claims, &dns_identity, &request) {
-            Ok(held) => held,
+        let gated = match self.gate_on_token(own, peer_identity, &claims, &dns_identity, &request) {
+            Ok(gated) => gated,
             Err(response) => return response,
         };
 
@@ -480,7 +502,8 @@ impl Handler {
         //
         // Everything past identity verification is identical for
         // /issue and /internal/issue, so it lives in one place.
-        let vouched = self.vouched_for(peer_identity) || held.is_some();
+        let vouched = self.vouched_for(peer_identity) || matches!(gated, Gated::Vouched(_));
+        let signed_cert_type = request.cert_type.clone();
         let response = self
             .sign_verified(
                 &dns_identity,
@@ -490,11 +513,14 @@ impl Handler {
                 request.extra_sans.into_iter().chain(floor_names).collect(),
                 request.subject_dn_defaults,
                 None,
-                // For the record: its own, vouched for by the credentials agent, or on the token alone.
+                // For the record: its own, vouched for by the credentials agent, against the credentials agent's
+                // successor ticket, or on the token alone.
                 if own {
                     cert_issuer_common::record::IssuePath::Own
                 } else if vouched {
                     cert_issuer_common::record::IssuePath::Vouched
+                } else if matches!(gated, Gated::Ticketed) {
+                    cert_issuer_common::record::IssuePath::Ticketed
                 } else {
                     cert_issuer_common::record::IssuePath::TokenOnly
                 },
@@ -504,10 +530,15 @@ impl Handler {
                 None,
             )
             .await;
-        if response.status == 200
-            && let (Some(key), Some(gate)) = (held, &self.gate)
-        {
-            gate.signed(&key);
+        if let Some(gate) = &self.gate {
+            match gated {
+                Gated::Vouched(key) if response.status == 200 => gate.signed(&key),
+                // A signing the ticket admitted that failed: its type may be asked for again.
+                Gated::Ticketed if response.status != 200 => {
+                    gate.give_back_ticket(&signed_cert_type)
+                }
+                _ => {}
+            }
         }
         response
     }

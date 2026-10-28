@@ -35,8 +35,10 @@
 //!   step 3); absent while cert-issuer's Cassini session holds, its entry alone opens (its crash, situation 3); absent
 //!   with Cassini gone too, every entry opens (two or more of the core down: bootstrap again).
 //!
-//! No message opens an entry: hearing the credentials agent, or Cassini accepting cert-issuer, only ever closes. What
-//! opens is an absence, and time.
+//! No message opens an entry but one: hearing the credentials agent, or Cassini accepting cert-issuer, only ever closes,
+//! and what opens is an absence, and time. The one is the credentials agent's own successor ticket, for its own pod
+//! (`crate::ticket`; docs/architecture/core-restarts.md, "Step 5, the ticket"; the maintainer, 2026-10-28), taken only
+//! from the credentials agent, whom whoever could send it as already holds the key of.
 
 use std::time::{Duration, Instant};
 

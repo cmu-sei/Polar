@@ -325,7 +325,13 @@ impl CredentialsState {
         now: i64,
     ) -> Option<CredentialsEvent> {
         use cert_issuer_common::record::IssuePath;
-        let last = page.entries.last()?.seq;
+        // Certificates and tickets share the record's numbers.
+        let last = page
+            .entries
+            .iter()
+            .map(|e| e.seq)
+            .chain(page.tickets.iter().map(|t| t.seq))
+            .max()?;
         // In the same log the cursor never moves back: a page can arrive after a later one.
         let read = match &self.record_cursor {
             Some((log, read)) if *log == page.log => Some(*read),
@@ -356,13 +362,29 @@ impl CredentialsState {
                     }),
             })
             .collect();
-        if certificates.is_empty() && read.is_some_and(|read| through <= read) {
+        // A ticket has no serial: what is new of them is what is past where this log was read to.
+        let tickets: Vec<credentials_agent_common::events::ReportedTicket> = page
+            .tickets
+            .iter()
+            .filter(|t| read.is_none_or(|read| t.seq > read))
+            .map(|t| credentials_agent_common::events::ReportedTicket {
+                seq: t.seq,
+                identity: t.identity.clone(),
+                instance_binding: t.instance_binding.clone(),
+                taken_at: t.taken_at,
+                expires_at: t.expires_at,
+                issued_at: t.issued_at,
+            })
+            .collect();
+        if certificates.is_empty() && tickets.is_empty() && read.is_some_and(|read| through <= read)
+        {
             return None;
         }
         Some(CredentialsEvent::CertificatesReported {
             log: page.log.clone(),
             through,
             certificates,
+            tickets,
             timestamp: now,
         })
     }
@@ -1785,6 +1807,7 @@ pub(crate) mod tests {
             log: log.to_string(),
             through,
             certificates,
+            tickets: Vec::new(),
             timestamp: 3000,
         }
     }
@@ -2014,6 +2037,7 @@ pub(crate) mod tests {
         cert_issuer_common::record::RecordReply {
             log: log.to_string(),
             entries,
+            tickets: Vec::new(),
             more: false,
         }
     }
@@ -2066,6 +2090,60 @@ pub(crate) mod tests {
             } => {
                 assert_eq!((log.as_str(), *through, *timestamp), ("log-1", 2, 7));
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// docs/architecture/core-restarts.md, "Step 5, the ticket": a successor ticket cert-issuer took is in its record,
+    /// numbered with the certificates, and the ledger learns of it as it does of them: reported once, and read through.
+    #[test]
+    fn a_page_s_successor_ticket_is_reported_and_read_through_once() {
+        let mut state = CredentialsState::default();
+        let mut page = reply("log-1", vec![]);
+        page.tickets = vec![cert_issuer_common::record::TicketEntry {
+            log: "log-1".into(),
+            seq: 3,
+            identity: "credentials-agent.polar.serviceaccount.cluster.local".into(),
+            instance_binding: "pod-uid".into(),
+            taken_at: 100,
+            expires_at: 400,
+            issued_at: 99,
+        }];
+        let event = state
+            .reported_page(&page, Some(&bootstrap()), 7)
+            .expect("an event");
+        match &event {
+            CredentialsEvent::CertificatesReported {
+                through,
+                certificates,
+                tickets,
+                ..
+            } => {
+                assert_eq!(*through, 3);
+                assert!(certificates.is_empty());
+                assert_eq!(
+                    tickets
+                        .iter()
+                        .map(|t| (t.seq, t.instance_binding.as_str()))
+                        .collect::<Vec<_>>(),
+                    vec![(3, "pod-uid")]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        state.apply(&event);
+        assert!(
+            state.reported_page(&page, Some(&bootstrap()), 8).is_none(),
+            "the same page again: nothing new"
+        );
+    }
+
+    #[test]
+    fn a_report_written_before_tickets_replays_with_none() {
+        let old =
+            r#"{"CertificatesReported":{"log":"l","through":2,"certificates":[],"timestamp":1}}"#;
+        match serde_json::from_str::<CredentialsEvent>(old).unwrap() {
+            CredentialsEvent::CertificatesReported { tickets, .. } => assert!(tickets.is_empty()),
             other => panic!("{other:?}"),
         }
     }

@@ -73,6 +73,12 @@
           "purpose": "the credentials agent asking for the record, after the last entry it holds"
         },
         {
+          "name": "cert-issuer-successor-tickets",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the credentials agent's successor ticket, left as its orderly ending begins"
+        },
+        {
           "name": "polar-authority-snapshot-replies",
           "access": "subscribe",
           "from": "implied",
@@ -211,6 +217,13 @@
           ]
         },
         {
+          "name": "cert-issuer-successor-tickets",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "this agent's successor ticket, left for cert-issuer as its orderly ending begins",
+          "unprompted": "as its orderly ending begins: a rejuvenation, or a SIGTERM's drain"
+        },
+        {
           "name": "credentials-account-replies",
           "access": "publish",
           "from": "declared",
@@ -251,6 +264,7 @@
           "access": "publish",
           "from": "declared",
           "purpose": "an issued escrow keypair, or why not",
+          "waits": "a custodian reads it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_SUBSCRIBES)",
           "causes": [
             {
               "kind": "topic",
@@ -262,7 +276,8 @@
           "name": "credentials-agent-escrow-issuance-requests",
           "access": "subscribe",
           "from": "declared",
-          "purpose": "an agent asking for an escrow keypair to be issued"
+          "purpose": "a custodian asking for its workload's escrow keypair to be issued",
+          "waits": "a custodian publishes it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_PUBLISHES)"
         },
         {
           "name": "credentials-agent-escrow-key-replies",
@@ -401,6 +416,7 @@
           "access": "publish",
           "from": "declared",
           "purpose": "an agent's escrow keypair, or the refusal",
+          "waits": "a custodian reads it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_SUBSCRIBES)",
           "causes": [
             {
               "kind": "topic",
@@ -412,7 +428,8 @@
           "name": "credentials-retrieve-agent-escrow-keypair-requests",
           "access": "subscribe",
           "from": "declared",
-          "purpose": "an agent's request for its own escrow keypair"
+          "purpose": "a custodian's request for its workload's escrow keypair",
+          "waits": "a custodian publishes it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_PUBLISHES)"
         },
         {
           "name": "credentials-retrieve-secret-replies",

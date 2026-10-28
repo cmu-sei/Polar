@@ -28,7 +28,10 @@
 
 use crate::floor_state::{FloorState, Heard, Open};
 use crate::held::{Asked, HeldKey, HeldRequests};
+use crate::ticket::Tickets;
+use cert_issuer_common::CertType;
 use cert_issuer_common::held::{HeldOffer, HeldReply};
+use cert_issuer_common::record::TicketEntry;
 use std::sync::Mutex;
 use std::time::Instant;
 use tracing::info;
@@ -39,6 +42,8 @@ pub type Offer = Box<dyn Fn(Vec<HeldOffer>) + Send + Sync>;
 pub struct FloorGate {
     state: Mutex<FloorState>,
     held: Mutex<HeldRequests>,
+    /// The credentials agent's successor ticket in force (docs/architecture/core-restarts.md, "Step 5, the ticket").
+    tickets: Mutex<Tickets>,
     offer: Offer,
 }
 
@@ -51,7 +56,43 @@ impl FloorGate {
         Self {
             state: Mutex::new(state),
             held: Mutex::new(held),
+            tickets: Mutex::new(Tickets::default()),
             offer,
+        }
+    }
+
+    /// The tickets as the record left them, at start.
+    pub fn with_tickets(self, tickets: Tickets) -> Self {
+        if let Ok(mut held) = self.tickets.lock() {
+            *held = tickets;
+        }
+        self
+    }
+
+    /// A ticket the record now holds: the credentials agent's successor, on that pod, may be signed against it.
+    pub fn install_ticket(&self, ticket: &TicketEntry) {
+        if let Ok(mut tickets) = self.tickets.lock() {
+            tickets.install(ticket);
+        }
+    }
+
+    /// Whether the credentials agent's token-only request, bound to `instance_binding`, for `cert_type`, at `now` (Unix
+    /// seconds), is admitted against its successor ticket; if it is, that type is used.
+    pub fn admit_ticket(
+        &self,
+        instance_binding: Option<&str>,
+        cert_type: &CertType,
+        now: i64,
+    ) -> bool {
+        self.tickets
+            .lock()
+            .is_ok_and(|mut tickets| tickets.admit(instance_binding, cert_type, now))
+    }
+
+    /// A signing admitted against the ticket that failed: its type may be asked for again.
+    pub fn give_back_ticket(&self, cert_type: &CertType) {
+        if let Ok(mut tickets) = self.tickets.lock() {
+            tickets.give_back(cert_type);
         }
     }
 

@@ -73,6 +73,11 @@ impl PolarAgent for CertIssuer {
             cert_issuer_common::held::HELD_REPLIES_TOPIC,
             "the credentials agent's answers to the requests it holds",
         ),
+        // The credentials agent's successor ticket (docs/architecture/core-restarts.md, "Step 5, the ticket").
+        TopicDecl::subscribe(
+            cert_issuer_common::ticket::SUCCESSOR_TICKETS_TOPIC,
+            "the credentials agent's successor ticket, left as its orderly ending begins",
+        ),
     ];
     const HELP: Option<&'static str> = Some(
         "cert-issuer signs Polar's certificates. A caller with only a service account token is signed what the floor \
@@ -129,6 +134,10 @@ mod tests {
         );
         topic(
             cert_issuer_common::held::HELD_REPLIES_TOPIC,
+            Access::Subscribe,
+        );
+        topic(
+            cert_issuer_common::ticket::SUCCESSOR_TICKETS_TOPIC,
             Access::Subscribe,
         );
         let reply = topic(RECORD_REPLIES_TOPIC, Access::Publish);

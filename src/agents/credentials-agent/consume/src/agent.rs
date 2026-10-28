@@ -134,6 +134,13 @@ impl PolarAgent for CredentialsConsumer {
             "this agent's answer to a request cert-issuer holds: vouched for, or refused",
         )
         .because(&[Cause::Topic(cert_issuer_common::held::HELD_REQUESTS_TOPIC)]),
+        // As its orderly ending begins: its successor, the same pod restarted in place, may be signed on its token
+        // (docs/architecture/core-restarts.md, "Step 5, the ticket").
+        TopicDecl::publish(
+            cert_issuer_common::ticket::SUCCESSOR_TICKETS_TOPIC,
+            "this agent's successor ticket, left for cert-issuer as its orderly ending begins",
+        )
+        .of_its_own_accord("as its orderly ending begins: a rejuvenation, or a SIGTERM's drain"),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_ADMIN_ACTION_REPLIES_TOPIC,
             "the answer to an administrator action",

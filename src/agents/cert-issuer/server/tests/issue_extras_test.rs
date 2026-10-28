@@ -770,6 +770,65 @@ async fn the_credentials_agent_s_successor_is_held_but_offered_to_no_one_and_adm
     assert_eq!(*ca.paths.lock().unwrap(), vec![IssuePath::TokenOnly]);
 }
 
+/// docs/architecture/core-restarts.md, "Step 5, the ticket": the credentials agent's successor, the same pod restarted in
+/// place, is signed at its first ask against its predecessor's ticket, recorded as such, once for each type; a token for
+/// another pod is held, as it was before tickets.
+#[tokio::test]
+async fn the_credentials_agent_s_successor_is_signed_against_its_ticket_once_for_each_type_and_only_for_its_pod()
+ {
+    let (mut handler, ca) = rig(floor_with_this_workload());
+    handler.internal_callers.push(IDENTITY.to_string());
+    let (gate, offers) = gated(&mut handler, just_restarted());
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    gate.install_ticket(&cert_issuer_common::record::TicketEntry {
+        log: "l".into(),
+        seq: 1,
+        identity: IDENTITY.into(),
+        instance_binding: "11111111-2222-3333-4444-555555555555".into(),
+        taken_at: now,
+        expires_at: now + 300,
+        issued_at: now,
+    });
+
+    // First, a token for another pod of the same service account: not admitted by the ticket, held as before.
+    let other_pod = mint_token(
+        TEST_KID,
+        primary_keypair(),
+        serde_json::json!({
+            "iss": TEST_ISSUER,
+            "aud": TEST_AUDIENCE,
+            "sub": WORKLOAD,
+            "exp": now_plus(300),
+            "kubernetes.io": {
+                "namespace": "polar",
+                "pod": { "name": "another", "uid": "99999999-2222-3333-4444-555555555555" }
+            }
+        }),
+    );
+    let other = handler
+        .handle(None, &other_pod, request(CertType::Client, &[]))
+        .await;
+    assert_eq!(other.status, 202, "{other:?}");
+    assert!(ca.asked.lock().unwrap().is_empty());
+
+    // Its own pod: signed at its first ask, recorded against the ticket.
+    let response = handler
+        .handle(None, &mint_default_token(), request(CertType::Client, &[]))
+        .await;
+    assert_eq!(response.status, 200, "{response:?}");
+    assert_eq!(*ca.paths.lock().unwrap(), vec![IssuePath::Ticketed]);
+    // Once: the second ask waits for the window, as before tickets.
+    let again = handler
+        .handle(None, &mint_default_token(), request(CertType::Client, &[]))
+        .await;
+    assert_eq!(again.status, 202);
+    assert_eq!(ca.asked.lock().unwrap().len(), 1);
+    assert!(
+        offers.lock().unwrap().is_empty(),
+        "the credentials agent's successor is offered to no one"
+    );
+}
+
 #[tokio::test]
 async fn neither_a_request_the_credentials_agent_vouches_for_nor_one_with_no_floor_is_held() {
     let (mut handler, _) = rig(floor_with_this_workload_vouched_only());

@@ -202,6 +202,11 @@ pub struct ConsumerSupervisor;
 /// Every topic this agent's own subscriptions take: its requests, the authority snapshots it answers, cert-issuer's
 /// record answers and its held requests. A draining agent lets go of them all (docs/architecture/health-and-shutdown.md,
 /// section 4).
+/// The successor ticket as this agent publishes it at `now` (Unix seconds).
+pub(crate) fn successor_ticket(now: i64) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(&cert_issuer_common::ticket::SuccessorTicket { issued_at: now })
+}
+
 pub(crate) fn drain_topics() -> Vec<&'static str> {
     REQUEST_TOPICS
         .iter()
@@ -752,6 +757,34 @@ impl ConsumerSupervisor {
         }
         if let Some(voucher) = state.held_voucher.take() {
             voucher.stop(Some("draining".to_string()));
+        }
+    }
+
+    /// Publishes the successor ticket for cert-issuer, which binds it to this pod by its own record. A failure is
+    /// logged and stops nothing: the successor then waits for the crash window, as before tickets.
+    fn leave_successor_ticket(client: &TcpClient) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let payload = match successor_ticket(now) {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!("CONSUMER_SUPERVISOR: the successor ticket could not be written: {e}");
+                return;
+            }
+        };
+        if let Err(e) =
+            client
+                .as_actor_ref()
+                .send_message(cassini_client::TcpClientMessage::publish(
+                    cert_issuer_common::ticket::SUCCESSOR_TICKETS_TOPIC.to_string(),
+                    payload,
+                    None,
+                ))
+        {
+            warn!("CONSUMER_SUPERVISOR: the successor ticket could not be left (continuing): {e}");
+        } else {
+            info!("CONSUMER_SUPERVISOR: left cert-issuer a successor ticket for this pod");
         }
     }
 
@@ -1390,6 +1423,10 @@ impl Actor for ConsumerSupervisor {
                         "CONSUMER_SUPERVISOR: PrepareShutdown received (rejuvenation), \
                          unsubscribing from Cassini and entering drain window"
                     );
+                    // Before the drain lets go of anything: cert-issuer may sign this pod's successor on its token
+                    // (docs/architecture/core-restarts.md, "Step 5, the ticket"). Once, since a second PrepareShutdown
+                    // finds the drain begun.
+                    Self::leave_successor_ticket(&state.broker_client);
                     Self::begin_drain(state);
                     Self::schedule_drain_end(&myself);
                 }
@@ -1625,6 +1662,24 @@ impl Actor for ConsumerSupervisor {
 #[cfg(test)]
 mod drain_tests {
     use super::*;
+
+    /// docs/architecture/core-restarts.md, "Step 5, the ticket": what this agent leaves is what cert-issuer reads, it
+    /// names no pod, and the agent declares publishing it.
+    #[test]
+    fn the_successor_ticket_is_what_cert_issuer_reads() {
+        let payload = super::successor_ticket(1_798_000_000).unwrap();
+        let read: cert_issuer_common::ticket::SuccessorTicket =
+            serde_json::from_slice(&payload).unwrap();
+        assert_eq!(read.issued_at, 1_798_000_000);
+        let scaffold =
+            polar_agent_builder::agent::scaffold_document::<crate::agent::CredentialsConsumer>();
+        assert!(
+            scaffold.topics.iter().any(|t| t.name
+                == cert_issuer_common::ticket::SUCCESSOR_TICKETS_TOPIC
+                && t.access == polar_agent_builder::Access::Publish),
+            "the ticket's topic is declared"
+        );
+    }
 
     #[test]
     fn a_draining_agent_lets_go_of_every_topic_it_subscribes_to() {

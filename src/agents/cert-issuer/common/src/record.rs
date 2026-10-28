@@ -59,6 +59,8 @@ pub enum IssuePath {
     Internal,
     /// cert-issuer's own TLS server certificate, which it signs for itself at start.
     Own,
+    /// On a token alone, against the credentials agent's successor ticket (`crate::ticket`): its own successor's.
+    Ticketed,
 }
 
 /// One certificate cert-issuer signed, as its log holds it.
@@ -83,6 +85,24 @@ pub struct RecordEntry {
     pub certificate_pem: String,
 }
 
+/// A successor ticket cert-issuer took (`crate::ticket`), as its log holds it: numbered with the certificates, in the
+/// same log, and reported to the credentials agent with them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TicketEntry {
+    pub log: String,
+    pub seq: u64,
+    /// The credentials agent's identity, which published it.
+    pub identity: String,
+    /// The pod it admits: the one cert-issuer's record gave the credentials agent's last client certificate.
+    pub instance_binding: String,
+    /// When cert-issuer took it, and when it stops admitting (Unix seconds).
+    pub taken_at: i64,
+    pub expires_at: i64,
+    /// When the credentials agent says it issued it, by its own clock.
+    pub issued_at: i64,
+}
+
 /// The credentials agent's question: every entry after `after` in `log`. A log that is not cert-issuer's present one
 /// (or none, at first) is answered from its first entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,5 +118,42 @@ pub struct RecordRequest {
 pub struct RecordReply {
     pub log: String,
     pub entries: Vec<RecordEntry>,
+    /// The tickets among the same numbers, in order (none from a cert-issuer that takes none).
+    #[serde(default)]
+    pub tickets: Vec<TicketEntry>,
     pub more: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reply from a cert-issuer before tickets (docs/architecture/core-restarts.md, "Step 5, the ticket") reads with
+    /// none, and one with a ticket reads back whole.
+    #[test]
+    fn a_reply_without_tickets_reads_with_none_and_one_with_a_ticket_reads_back() {
+        let old: RecordReply =
+            serde_json::from_str(r#"{"log":"l","entries":[],"more":false}"#).unwrap();
+        assert!(old.tickets.is_empty());
+        let reply = RecordReply {
+            log: "l".into(),
+            entries: vec![],
+            tickets: vec![TicketEntry {
+                log: "l".into(),
+                seq: 7,
+                identity: "credentials-agent.polar.serviceaccount.cluster.local".into(),
+                instance_binding: "pod-uid".into(),
+                taken_at: 100,
+                expires_at: 400,
+                issued_at: 99,
+            }],
+            more: false,
+        };
+        let text = serde_json::to_string(&reply).unwrap();
+        assert_eq!(serde_json::from_str::<RecordReply>(&text).unwrap(), reply);
+        assert_eq!(
+            serde_json::to_string(&IssuePath::Ticketed).unwrap(),
+            "\"ticketed\""
+        );
+    }
 }

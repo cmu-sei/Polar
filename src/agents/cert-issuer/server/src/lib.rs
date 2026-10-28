@@ -50,6 +50,7 @@ pub mod server;
 pub mod settings;
 pub mod supervisor;
 pub mod telemetry;
+pub mod ticket;
 pub mod tls;
 
 // Re-export wire types so tests in this crate can use them

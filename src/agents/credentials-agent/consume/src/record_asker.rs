@@ -259,6 +259,7 @@ mod tests {
         serde_json::to_vec(&RecordReply {
             log: "log-1".to_string(),
             entries,
+            tickets: Vec::new(),
             more,
         })
         .unwrap()

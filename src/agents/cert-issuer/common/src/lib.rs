@@ -43,6 +43,7 @@ pub mod permission;
 pub mod public_key;
 pub mod record;
 pub mod serial;
+pub mod ticket;
 
 // cert_issuer_common/src/lib.rs — add to IssueRequest
 #[derive(

@@ -445,6 +445,7 @@ mod tests {
                 not_after: 4_000_000_000,
                 certificate_pem: "pem".to_string(),
             }],
+            tickets: Vec::new(),
             more: false,
         };
         ractor::call!(ledger, |reply| LedgerMessage::TakeRecordPage {

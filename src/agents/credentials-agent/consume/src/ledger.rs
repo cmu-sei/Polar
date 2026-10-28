@@ -1009,6 +1009,7 @@ pub(crate) mod tests {
                 not_after: 5000,
                 certificate_pem: "pem".to_string(),
             }],
+            tickets: Vec::new(),
             more: false,
         };
         assert_eq!(

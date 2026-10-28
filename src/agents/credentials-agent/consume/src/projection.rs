@@ -812,6 +812,7 @@ pub(crate) mod tests {
             log: "log-1".to_string(),
             through: 2,
             certificates: vec![certificate("r1", false), certificate("r2", true)],
+            tickets: Vec::new(),
             timestamp: 3000,
         };
         let ops = graph_ops_for_event(&event, false);
@@ -843,6 +844,7 @@ pub(crate) mod tests {
             log: "log-1".to_string(),
             through: 3,
             certificates: vec![],
+            tickets: Vec::new(),
             timestamp: 3100,
         };
         assert!(graph_ops_for_event(&quiet, false).is_empty());

@@ -230,6 +230,7 @@ mod tests {
                 not_after: 5000,
                 certificate_pem: certificate(identity, groups),
             }],
+            tickets: Vec::new(),
             more: false,
         };
         ractor::call!(ledger, |reply| LedgerMessage::TakeRecordPage {

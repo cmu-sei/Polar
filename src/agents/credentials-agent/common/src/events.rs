@@ -413,8 +413,25 @@ pub enum CredentialsEvent {
         log: String,
         through: u64,
         certificates: Vec<ReportedCertificate>,
+        /// The credentials agent's successor tickets cert-issuer took, among the same numbers
+        /// (docs/architecture/core-restarts.md, "Step 5, the ticket"); none in a ledger written before them.
+        #[serde(default)]
+        tickets: Vec<ReportedTicket>,
         timestamp: i64,
     },
+}
+
+/// A successor ticket cert-issuer took and reported: the pod it admitted, and for how long.
+#[derive(
+    Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
+)]
+pub struct ReportedTicket {
+    pub seq: u64,
+    pub identity: String,
+    pub instance_binding: String,
+    pub taken_at: i64,
+    pub expires_at: i64,
+    pub issued_at: i64,
 }
 
 /// A certificate cert-issuer signed and reported, that the ledger did not already hold.

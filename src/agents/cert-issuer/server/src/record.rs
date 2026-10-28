@@ -27,17 +27,19 @@
 //! for the log, a page at a time ([`RecordingCa::page`]), so that no certificate cert-issuer signs stays unknown to it.
 
 use crate::ca::{CaClient, CaError, CaIssueRequest, IssuedCert};
-use cert_issuer_common::record::{RecordEntry, RecordReply, RecordRequest};
+use cert_issuer_common::record::{RecordEntry, RecordReply, RecordRequest, TicketEntry};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// The log on disk, one JSON line per certificate, and what it holds, read once when opened.
+/// The log on disk, one JSON line per certificate or successor ticket (docs/architecture/core-restarts.md, "Step 5, the
+/// ticket"), numbered together, and what it holds, read once when opened.
 pub struct Record {
     path: PathBuf,
     log: String,
     entries: Vec<RecordEntry>,
+    tickets: Vec<TicketEntry>,
 }
 
 impl Record {
@@ -60,19 +62,34 @@ impl Record {
                 .map_err(|e| format!("the record {}: {e}", path.display()))?;
         }
         let mut entries = Vec::new();
+        let mut tickets = Vec::new();
+        let mut last_log = None;
         for (n, line) in complete.lines().enumerate() {
-            let entry: RecordEntry = serde_json::from_str(line)
-                .map_err(|e| format!("the record {}, line {}: {e}", path.display(), n + 1))?;
-            entries.push(entry);
+            // A certificate's line has its serial and certificate; a ticket's has neither, and nothing else.
+            match serde_json::from_str::<RecordEntry>(line) {
+                Ok(entry) => {
+                    last_log = Some(entry.log.clone());
+                    entries.push(entry);
+                }
+                Err(certificate) => {
+                    let ticket: TicketEntry = serde_json::from_str(line).map_err(|_| {
+                        format!(
+                            "the record {}, line {}: {certificate}",
+                            path.display(),
+                            n + 1
+                        )
+                    })?;
+                    last_log = Some(ticket.log.clone());
+                    tickets.push(ticket);
+                }
+            }
         }
-        let log = match entries.last() {
-            Some(last) => last.log.clone(),
-            None => uuid::Uuid::new_v4().to_string(),
-        };
+        let log = last_log.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         Ok(Self {
             path: path.to_path_buf(),
             log,
             entries,
+            tickets,
         })
     }
 
@@ -81,9 +98,30 @@ impl Record {
         &self.log
     }
 
-    /// What the log holds, in order.
+    /// The certificates the log holds, in order.
     pub fn entries(&self) -> &[RecordEntry] {
         &self.entries
+    }
+
+    /// The successor tickets the log holds, in order.
+    pub fn tickets(&self) -> &[TicketEntry] {
+        &self.tickets
+    }
+
+    /// The pod of the last client certificate signed for `identity`, which a ticket from it is bound to.
+    pub fn last_client_binding(&self, identity: &str) -> Option<String> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| e.identity == identity && e.cert_type == cert_issuer_common::CertType::Client)
+            .and_then(|e| e.instance_binding.clone())
+    }
+
+    /// The number the next entry takes, certificate or ticket.
+    fn next_seq(&self) -> u64 {
+        let certificates = self.entries.last().map_or(0, |e| e.seq);
+        let tickets = self.tickets.last().map_or(0, |t| t.seq);
+        certificates.max(tickets) + 1
     }
 
     /// The answer to `request`, at most `limit` entries: those after its number in this log, or from the first entry
@@ -94,11 +132,33 @@ impl Record {
         } else {
             0
         };
-        let rest: Vec<&RecordEntry> = self.entries.iter().filter(|e| e.seq > after).collect();
+        // Both kinds, by their one numbering: the first `limit` numbers after `after`.
+        let mut numbers: Vec<u64> = self
+            .entries
+            .iter()
+            .map(|e| e.seq)
+            .chain(self.tickets.iter().map(|t| t.seq))
+            .filter(|seq| *seq > after)
+            .collect();
+        numbers.sort_unstable();
+        let more = numbers.len() > limit;
+        let through = numbers.iter().take(limit).next_back().copied();
+        let within = |seq: u64| seq > after && through.is_some_and(|t| seq <= t);
         RecordReply {
             log: self.log.clone(),
-            entries: rest.iter().take(limit).map(|e| (*e).clone()).collect(),
-            more: rest.len() > limit,
+            entries: self
+                .entries
+                .iter()
+                .filter(|e| within(e.seq))
+                .cloned()
+                .collect(),
+            tickets: self
+                .tickets
+                .iter()
+                .filter(|t| within(t.seq))
+                .cloned()
+                .collect(),
+            more,
         }
     }
 
@@ -106,7 +166,7 @@ impl Record {
     fn append(&mut self, request: &CaIssueRequest, issued: &IssuedCert) -> Result<(), String> {
         let entry = RecordEntry {
             log: self.log.clone(),
-            seq: self.entries.last().map_or(1, |e| e.seq + 1),
+            seq: self.next_seq(),
             serial: issued.serial_number.clone(),
             identity: request.sans.first().cloned().unwrap_or_default(),
             cert_type: request.cert_type.clone(),
@@ -116,7 +176,37 @@ impl Record {
             not_after: issued.not_after.unix_timestamp(),
             certificate_pem: issued.certificate_pem.clone(),
         };
-        let line = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
+        self.write_line(&serde_json::to_string(&entry).map_err(|e| e.to_string())?)?;
+        self.entries.push(entry);
+        Ok(())
+    }
+
+    /// Appends a successor ticket from `identity`, bound to the pod of its last client certificate, taken at `now`
+    /// (Unix seconds), and syncs the log; none is appended when there is no such certificate to bind it to.
+    fn append_ticket(
+        &mut self,
+        identity: &str,
+        issued_at: i64,
+        now: i64,
+    ) -> Result<TicketEntry, String> {
+        let instance_binding = self.last_client_binding(identity).ok_or_else(|| {
+            format!("{identity} has no client certificate with a pod in the record: a ticket would bind to nothing")
+        })?;
+        let ticket = TicketEntry {
+            log: self.log.clone(),
+            seq: self.next_seq(),
+            identity: identity.to_string(),
+            instance_binding,
+            taken_at: now,
+            expires_at: now + cert_issuer_common::ticket::TICKET_LIFETIME_SECS,
+            issued_at,
+        };
+        self.write_line(&serde_json::to_string(&ticket).map_err(|e| e.to_string())?)?;
+        self.tickets.push(ticket.clone());
+        Ok(ticket)
+    }
+
+    fn write_line(&self, line: &str) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
@@ -127,9 +217,7 @@ impl Record {
             .map_err(|e| format!("{}: {e}", self.path.display()))?;
         file.write_all(format!("{line}\n").as_bytes())
             .and_then(|_| file.sync_data())
-            .map_err(|e| format!("{}: {e}", self.path.display()))?;
-        self.entries.push(entry);
-        Ok(())
+            .map_err(|e| format!("{}: {e}", self.path.display()))
     }
 }
 
@@ -150,6 +238,39 @@ impl RecordingCa {
     /// The answer to `request`, at most `limit` entries.
     pub async fn page(&self, request: &RecordRequest, limit: usize) -> RecordReply {
         self.record.lock().await.page(request, limit)
+    }
+
+    /// A successor ticket that arrived on `SUCCESSOR_TICKETS_TOPIC`, published (the broker says) by `published_by`, taken at
+    /// `now` (Unix seconds): recorded, bound to the pod of the credentials agent's last client certificate, and returned
+    /// for the gate to admit by; or why not. Only one of `internal_callers`, the credentials agent, is heard.
+    pub async fn take_ticket(
+        &self,
+        payload: &[u8],
+        published_by: Option<&str>,
+        internal_callers: &[String],
+        now: i64,
+    ) -> Result<TicketEntry, String> {
+        let Some(publisher) = published_by else {
+            return Err("a successor ticket with no verified publisher".to_string());
+        };
+        if !internal_callers.iter().any(|c| c == publisher) {
+            return Err(format!(
+                "{publisher} sent a successor ticket, and only the credentials agent may"
+            ));
+        }
+        let ticket: cert_issuer_common::ticket::SuccessorTicket =
+            serde_json::from_slice(payload)
+                .map_err(|e| format!("a successor ticket that does not read: {e}"))?;
+        self.record
+            .lock()
+            .await
+            .append_ticket(publisher, ticket.issued_at, now)
+    }
+
+    /// The tickets and the certificates the record holds, for the gate to be restored from at start.
+    pub async fn tickets_and_entries(&self) -> (Vec<TicketEntry>, Vec<RecordEntry>) {
+        let record = self.record.lock().await;
+        (record.tickets.clone(), record.entries.clone())
     }
 
     /// The reply to a request that arrived on `RECORD_REQUESTS_TOPIC`, published (the broker says) by `published_by`,
@@ -235,6 +356,194 @@ mod tests {
 
     fn recording(path: &Path) -> RecordingCa {
         RecordingCa::new(Arc::new(CountingCa::default()), Record::open(path).unwrap())
+    }
+
+    fn ticket_payload() -> Vec<u8> {
+        serde_json::to_vec(&cert_issuer_common::ticket::SuccessorTicket { issued_at: 990 }).unwrap()
+    }
+
+    /// docs/architecture/core-restarts.md, "Step 5, the ticket": a ticket from the credentials agent is bound to the pod
+    /// of its last client certificate, from the record, and is itself an entry of the record, numbered with the
+    /// certificates and reported with them.
+    #[tokio::test]
+    async fn a_ticket_from_the_credentials_agent_is_bound_to_its_last_client_certificate_s_pod_and_recorded()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("issued.jsonl");
+        let ca = recording(&log);
+        let mut earlier = request(CREDENTIALS_AGENT, CertType::Client, IssuePath::TokenOnly);
+        earlier.instance_binding = Some("old-pod".into());
+        ca.issue(earlier).await.unwrap();
+        ca.issue(request(
+            CREDENTIALS_AGENT,
+            CertType::Client,
+            IssuePath::TokenOnly,
+        ))
+        .await
+        .unwrap();
+        ca.issue(request(
+            "cassini.polar.serviceaccount.cluster.local",
+            CertType::Server,
+            IssuePath::TokenOnly,
+        ))
+        .await
+        .unwrap();
+        let callers = vec![CREDENTIALS_AGENT.to_string()];
+        let ticket = ca
+            .take_ticket(&ticket_payload(), Some(CREDENTIALS_AGENT), &callers, 1000)
+            .await
+            .unwrap();
+        assert_eq!(ticket.seq, 4);
+        assert_eq!(
+            ticket.instance_binding, "pod-uid",
+            "the last client certificate's pod, not an earlier one"
+        );
+        assert_eq!(ticket.identity, CREDENTIALS_AGENT);
+        assert_eq!(
+            (ticket.taken_at, ticket.expires_at, ticket.issued_at),
+            (1000, 1300, 990)
+        );
+
+        let page = ca
+            .page(
+                &RecordRequest {
+                    log: None,
+                    after: 0,
+                },
+                10,
+            )
+            .await;
+        assert_eq!(
+            page.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(page.tickets, vec![ticket.clone()]);
+        // Read back after a restart, and numbered on from it.
+        let reopened = Record::open(&log).unwrap();
+        assert_eq!(reopened.tickets(), &[ticket]);
+        let ca = RecordingCa::new(Arc::new(CountingCa::default()), reopened);
+        ca.issue(request("w", CertType::Client, IssuePath::TokenOnly))
+            .await
+            .unwrap();
+        let page = ca
+            .page(
+                &RecordRequest {
+                    log: Some(page.log.clone()),
+                    after: 4,
+                },
+                10,
+            )
+            .await;
+        assert_eq!(
+            page.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![5]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ticket_from_anyone_else_or_with_nothing_to_bind_to_is_not_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("issued.jsonl");
+        let ca = recording(&log);
+        let callers = vec![CREDENTIALS_AGENT.to_string()];
+        // No client certificate of the credentials agent's in the record: nothing to bind it to.
+        let why = ca
+            .take_ticket(&ticket_payload(), Some(CREDENTIALS_AGENT), &callers, 1000)
+            .await
+            .unwrap_err();
+        assert!(why.contains("no client certificate"), "{why}");
+        ca.issue(request(
+            CREDENTIALS_AGENT,
+            CertType::Client,
+            IssuePath::TokenOnly,
+        ))
+        .await
+        .unwrap();
+        // Another publisher, with a client certificate of its own in the record: only who published refuses it.
+        let other = "kube-observer.polar.serviceaccount.cluster.local";
+        ca.issue(request(other, CertType::Client, IssuePath::TokenOnly))
+            .await
+            .unwrap();
+        let why = ca
+            .take_ticket(&ticket_payload(), Some(other), &callers, 1000)
+            .await
+            .unwrap_err();
+        assert!(why.contains("only the credentials agent"), "{why}");
+        assert!(
+            ca.take_ticket(&ticket_payload(), None, &callers, 1000)
+                .await
+                .is_err()
+        );
+        assert!(
+            ca.take_ticket(b"not a ticket", Some(CREDENTIALS_AGENT), &callers, 1000)
+                .await
+                .is_err()
+        );
+        assert!(
+            Record::open(&log).unwrap().tickets().is_empty(),
+            "none of them recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_holds_certificates_and_tickets_in_one_numbering_and_one_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("issued.jsonl");
+        let ca = recording(&log);
+        let callers = vec![CREDENTIALS_AGENT.to_string()];
+        ca.issue(request(
+            CREDENTIALS_AGENT,
+            CertType::Client,
+            IssuePath::TokenOnly,
+        ))
+        .await
+        .unwrap();
+        ca.issue(request("a", CertType::Client, IssuePath::TokenOnly))
+            .await
+            .unwrap();
+        ca.take_ticket(&ticket_payload(), Some(CREDENTIALS_AGENT), &callers, 1000)
+            .await
+            .unwrap();
+        ca.issue(request(
+            CREDENTIALS_AGENT,
+            CertType::Client,
+            IssuePath::Ticketed,
+        ))
+        .await
+        .unwrap();
+        let first = ca
+            .page(
+                &RecordRequest {
+                    log: None,
+                    after: 0,
+                },
+                2,
+            )
+            .await;
+        assert_eq!(
+            first.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(first.tickets.is_empty());
+        assert!(first.more);
+        let next = ca
+            .page(
+                &RecordRequest {
+                    log: Some(first.log.clone()),
+                    after: 2,
+                },
+                2,
+            )
+            .await;
+        assert_eq!(
+            next.tickets.iter().map(|t| t.seq).collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(
+            next.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![4]
+        );
+        assert!(!next.more);
     }
 
     #[tokio::test]
