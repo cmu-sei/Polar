@@ -1080,7 +1080,7 @@ Decided item 3. Two keys are left outside a daemon, and they are not alike.
    file and `POLAR_ESCROW_KEY_HANDLE`, `handle.rs`, and `CryptoActor`'s adoption. The in-memory holder stays for tests
    and a workload with no daemon.
 
-### Part A's bootstrap: the custodian, the plan (2026-10-27, for review)
+### Part A's bootstrap: the custodian, the plan (2026-10-27, cleared by the maintainer)
 
 Replaces items 2 and 2a. The design is the maintainer's (2026-10-27): **the token buys only the custodian's
 certificate, and the custodian's certificate buys the rest.**
@@ -1183,6 +1183,12 @@ hardening already planned (its own UID, not dumpable, locked memory, seccomp).
    X revoked and the custodian revoked, each ending as it should.
 9. After that is validated, the cleanup: the watcher flag and its revoked-registration exception, `polar-init`'s
    escrow bootstrap, the user-keyring path, and the workload's own bootstrap in `CryptoActor`.
+
+**Also in this work** (the maintainer, 2026-10-27: "slice this up and/or fold it in however you'd like"): `CryptoActor`
+checks a recipient's escrow certificate before encrypting to its key. Today it takes `public_key_pem` and ignores the
+`certificate_pem` beside it (`polar-crypto/src/lib.rs`, `handle_encrypt_for_recipient`), believing the channel. The
+certificate must chain to the pinned CA, name the recipient, be a `Service` certificate, and hold that key. Encryption to
+another agent stays in the workload: it needs no key the daemon holds, and the custodian's authority is spent.
 
 **Decided along the way (2026-10-27, the maintainer):** the custodian identity, instead of the token on a retrieval
 or a daemon-signed ephemeral (2a); X's certificates from the credentials agent, not from cert-issuer; forced
