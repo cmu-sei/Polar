@@ -539,6 +539,11 @@ pub struct SessionSummary {
     pub registration_id: String,
 }
 
+/// What the broker tells a revoked certificate that asks to register as anything but a watcher: the custody daemon's
+/// custodian reads its own revocation in it (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+pub const REVOKED_REFUSAL: &str =
+    "the broker refused: this certificate is revoked, and may register only a watcher session";
+
 /// Events emitted by the client.
 #[derive(Clone, Debug)]
 pub enum ClientEvent {
@@ -552,6 +557,12 @@ pub enum ClientEvent {
         published_by: Option<String>,
     },
     TransportError {
+        reason: String,
+    },
+    /// The broker refused to register the session (`reason` says why) and closes the connection. The custody daemon's
+    /// custodian reads it: a refusal as revoked means its own certificate is revoked (docs/architecture/key-custody.md,
+    /// "Part A's bootstrap: the custodian").
+    RegistrationRefused {
         reason: String,
     },
     ControlResponse {

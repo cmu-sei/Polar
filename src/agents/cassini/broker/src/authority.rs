@@ -175,8 +175,7 @@ impl BrokerAuthority {
 pub const WATCHER_REFUSAL: &str = "the broker refused: a watcher session may hear the credentials agent's authority and ask for it, nothing else";
 
 /// What a revoked certificate is told when it asks to register as anything but a watcher.
-pub const REVOKED_REFUSAL: &str =
-    "the broker refused: this certificate is revoked, and may register only a watcher session";
+pub const REVOKED_REFUSAL: &str = cassini_types::REVOKED_REFUSAL;
 
 /// Whether a watcher session may use `topic` this way: hear the credentials agent's updates and snapshots, and ask for
 /// a snapshot. Within these it is decided as its identity's session is, so a watcher never may more. Pure.

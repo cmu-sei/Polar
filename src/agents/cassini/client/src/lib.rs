@@ -754,6 +754,11 @@ impl TcpClientActor {
                     }
                     Err(e) => {
                         warn!("Failed to register session with the server. {e}");
+                        // Said to whoever listens, as it is final for this connection: the broker closes it.
+                        TcpClientActor::dispatch_event(
+                            delivery,
+                            ClientEvent::RegistrationRefused { reason: e },
+                        );
                     }
                 }
             }
@@ -1731,6 +1736,20 @@ mod process_client_message_tests {
         TcpClientActor::process_client_message(myself, &delivery, None, message);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         captured.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn a_refused_registration_is_said_with_the_broker_s_reason() {
+        let events = dispatched_for(ClientMessage::RegistrationResponse {
+            result: Err(cassini_types::REVOKED_REFUSAL.to_string()),
+            trace_ctx: None,
+        })
+        .await;
+        assert!(
+            matches!(events.as_slice(), [ClientEvent::RegistrationRefused { reason }]
+                if reason == cassini_types::REVOKED_REFUSAL),
+            "{events:?}"
+        );
     }
 
     #[tokio::test]
