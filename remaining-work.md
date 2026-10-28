@@ -654,7 +654,8 @@ Principle: declare each environment variable once, with its type, default, docum
 - [ ] Cassini client reliability redesign (2026-10-08; design in `docs/architecture/cassini-client-reliability.md`, five diagrams): split `TcpClientActor` into a stable facade with a sequenced outbox and a disposable transport; a message leaves the outbox only when the broker acknowledges that exact message, so the protocol needs a message identity in the publish and its ack (today `PublishRequestAck` carries only the topic); at the first sign of trouble the outbox is written to a file and everything goes to it until the connection is back, then rehydrated and retransmitted in order; duplicates are removed by a per-sender epoch and sequence carried end to end. Open decisions in section 6 of the note (where duplicates are removed, where the file lives given that rejuvenation replaces the pod, broker persistence, bounds, receipts). Steps in section 7. Makes the domain supervisors' `InfrastructureRespawned` handling, the supervisor's `respawn_tcp_client` and the crypto actor's `ClientReplaced` unnecessary
   - [x] Build step 1 (2026-10-08): `cassini_client::facade::TcpClientFacade` is the address the builder path holds (named `{service}.tcp`); it supervises the transport (`TcpClientActor`, named `{service}.tcp.transport`) and brings a new one up with a 1 s to 30 s doubling backoff that starts over after a registration; publishes made while no transport is registered are held (1000, oldest dropped) and sent in order once one registers; `TcpClient::publish` honours `OfflineBehavior` from the facade's online flag (`Fail` errors, `Drop` succeeds without sending, `Queue` goes to the facade). The infrastructure supervisor's respawn path, `InfrastructureEvent::Respawned`, the six domain supervisors' `InfrastructureRespawned` handlers and the crypto actor's `ClientReplaced` are gone; the client front ending is an orderly shutdown. Not yet seen on the cluster. Unchanged on purpose: un-migrated agents still use the transport directly, and a message already written to a connection that dies is still lost (step 2)
   - [~] Build steps 1b to 5 as in the note: 1b is the broker's dead-connection detection and a retention window of R = 10 minutes for a disconnected session (see the BUG item above); the acknowledged outbox with `(epoch, seq)` and per-message acks; the offline file; dedupe at the broker and at subscribers; the broker's per-subscriber outbox keyed by identity. Update 2026-10-09: step 1b is DONE (dead-connection detection in about a minute at both ends, retention window R = 10 minutes, goodbye ends a session, resume replays what was missed, supersede by identity, all measured or exercised on the cluster); steps 2 to 5 remain: the acknowledged outbox with `(epoch, seq)` and per-message acks, the offline file, dedupe at the broker and subscribers, and the broker's per-subscriber outbox keyed by identity
-- [ ] Harden the mTLS client key. DESIGNED and cleared 2026-10-27: a custody daemon per pod
+- [x] Harden the mTLS client key (done 2026-10-27: steps 1 to 5 built, 6 closed, 7 seen on `u7c`, revocation end to
+  end; the load harness with the daemons as fast as with key files). DESIGNED and cleared 2026-10-27: a custody daemon per pod
   (`docs/architecture/key-custody.md`) holds the key, in its process keyring where the kernel can take it, and signs
   for the workload over a socket, with revocation by destroying the key. Built 2026-10-27: step 1, the daemon
   (`src/agents/polar-custody`, signing with `ring`, about 5 µs a signature over the socket at the median), and step 2,
@@ -742,11 +743,14 @@ Principle: declare each environment variable once, with its type, default, docum
 
 ## Dev environment and hygiene
 
-- [ ] `cassini/broker/tests/supersede.rs` is flaky: one run in six to eight fails "timed out waiting for its connection
-  to be closed" (`support/mod.rs:610`, a 5 s wait for the superseded connection to close), more often under load (twice
-  in a workspace run alongside the Neo4j containers). Measured 2026-10-21 on the commit before the session-identity
-  change (`e75bbc42`) as well as after it, so it is not that change. Not investigated further: whether the broker is slow
-  to close the old connection or the wait is too short.
+- [x] `cassini/broker/tests/supersede.rs` was flaky (fixed 2026-10-27): one run in six to eight failed "timed out
+  waiting for its connection to be closed" (`support/mod.rs:610`, a 5 s wait for the superseded connection to close),
+  more often under load. Measured 2026-10-21 on the commit before the session-identity change (`e75bbc42`) as well as
+  after it, so it was not that change. The cause, found building custody step 5: a superseded session with nothing to
+  hold was stopped (a signal, ahead of its queue) before it had handled `CloseConnection`, so the old connection was
+  never closed; it is drained now (`session.rs`, `complete_takeover`, `96b6a3d1`), with a test of its own
+  (`a_superseded_session_with_no_subscriptions_has_its_connection_closed_too`). Since: 15 runs of `supersede.rs` in a
+  row, none failed.
 
 - [ ] **A test runner for the Nushell tests, as `cargo test` is for the Rust ones (the maintainer, 2026-10-26).** It
   finds the tests itself and runs the whole batch or any part of it: one file, or the tests whose names match a filter,
@@ -792,7 +796,7 @@ Principle: declare each environment variable once, with its type, default, docum
   and not the kernel. Checked: three restarts keep every element; 30 rounds of deleting a NodePort Service's only
   pod, with restarts, the ClusterIP and NodePort answer each time. nix-container-lib images have no
   `/etc/protocols` or `/etc/services` either, which would expose any of them to the same class of bug.
-- [ ] `IfNotPresent` + `:latest`: mitigated by `images.nu` dropping the node's cached copy (u7s only); proper fix is hash-based tags
+- [ ] `IfNotPresent` + `:latest`: mitigated by `images.nu` dropping each node's cached copy (every node of a nix-usernetes cluster since 2026-10-27); proper fix is hash-based tags
 - [ ] `my.env`: `GRAPH_PASSWORD` / `NEO4J_AUTH` after the password change; dev shell `BIND_ADDR`/`BROKER_ADDR` on 8080 collides with the Keycloak port-forward; `CASSINI_SHUTDOWN_TOKEN` is a dev constant
 - [ ] ace <-> Neo4j connectivity (parked; ace is running)
 - [ ] scheduler-observer `config_tests` isolation (`serial_test`)
