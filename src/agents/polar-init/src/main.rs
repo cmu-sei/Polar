@@ -45,26 +45,21 @@
 //!                                verified against from the first request.
 //!                                If unset, the CA is fetched once from
 //!                                GET /ca without verification and pinned.
-//!   POLAR_INIT_ESCROW_BOOTSTRAP  `true` runs the escrow bootstrap (default:
-//!                                false); set for an agent that needs encryption
+//!   POLAR_INIT_ESCROW_BOOTSTRAP  `true` has the custodian fetch the escrow key
+//!                                (default: false); set for an agent that needs
+//!                                encryption, and needs a `custody` --cert
 //!   POLAR_CUSTODY_SOCKET         The custody daemon's socket; required when a
 //!                                --cert's key is `custody`, the daemon's
-//!   TLS_*, BROKER_ADDR, CASSINI_SERVER_NAME, KUBERNETES_SA_TOKEN
-//!                                The Cassini client's and the crypto actor's,
-//!                                required when the bootstrap runs
 
 // Reading the process environment goes through polar-env (see clippy.toml).
 #![deny(clippy::disallowed_methods)]
 
 mod environment;
-mod goodbye;
-mod handle;
 
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cassini_client::{TcpClientActor, TcpClientArgs};
 use cert_client::{handshake, output, token};
 use cert_issuer_common::keypair;
 use cert_issuer_common::{
@@ -76,16 +71,8 @@ use credentials_agent_common::issuance::WorkloadCertType;
 use polar_custody::client::{ClientError, CustodyClient};
 use polar_custody::protocol::{FrameError, Slot};
 use polar_health::DepCertEndpoint;
-use ractor::Actor;
 
 const POLL_INTERVAL_SECS: u64 = 5;
-
-/// How long the escrow-keypair bootstrap may take once the certificates are issued: its own Cassini client registering,
-/// then the credentials agent answering. Neither wait ends on its own, so a client that never registers (or has died)
-/// or an answer that never comes would hold the pod in its init container for good, with nothing to retry it. Past this
-/// it exits 1 and the pod is replaced (2026-10-21: a load-harness pod waited eleven minutes, after its certificate was
-/// issued, for an escrow request that never reached the credentials agent).
-const ESCROW_BOOTSTRAP_DEADLINE: Duration = Duration::from_secs(120);
 
 /// How long the custodian has to fetch what it is asked to (docs/architecture/key-custody.md, "Part A's bootstrap: the
 /// custodian"): inside its own five-minute window, after which the credentials agent answers it nothing.
@@ -284,8 +271,12 @@ async fn main() {
             }
         };
     let token_path = settings.token_path.clone();
-    let custody = custody_for(&cert_requests, settings.custody_socket.as_deref())
-        .unwrap_or_else(|why| stop(why));
+    let custody = custody_for(
+        &cert_requests,
+        settings.custody_socket.as_deref(),
+        settings.escrow,
+    )
+    .unwrap_or_else(|why| stop(why));
 
     // Phase 1: wait for all dep cert endpoints to be healthy.
     if !dep_endpoints.is_empty() {
@@ -375,7 +366,7 @@ async fn main() {
             // A bootstrap service's custodian, for its daemon's own session: it fetches nothing, since the service's
             // certificates come from cert-issuer as above.
             if let Some(daemon) = &custody {
-                if settings.escrow.is_some() {
+                if settings.escrow {
                     stop(
                         "a bootstrap service escrows no key: its escrow key would be its custodian's to fetch, \
                          from the credentials agent it comes up before"
@@ -430,7 +421,7 @@ async fn main() {
             // The token buys the custodian's certificate and nothing else: the custodian fetches the rest
             // (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
             if let Some(daemon) = &custody {
-                let plan = custodian_plan(&cert_requests, settings.escrow.is_some());
+                let plan = custodian_plan(&cert_requests, settings.escrow);
                 if let Err(why) = custodian_via_observer(
                     &observer,
                     &sa_token,
@@ -460,170 +451,13 @@ async fn main() {
 
     tracing::info!("all certs issued");
 
-    // Phase 4: ensure this identity's own escrow keypair genuinely
-    // exists and is escrowed with the Credentials Agent -- only for an
-    // agent that needs encryption (see environment::ESCROW_BOOTSTRAP's
-    // own doc comment for why). This is
-    // the only point in this agent's entire lifecycle where the SA
-    // token read above is ever readable at all; the main, long-
-    // running agent container never has it mounted.
-    match &settings.escrow {
-        None => tracing::info!(
-            "{} is not true: this workload escrows no keypair",
-            environment::ESCROW_BOOTSTRAP.name()
-        ),
-        // The custodian has fetched it, and holds it.
-        Some(_) if custody.is_some() => {
-            tracing::info!("the escrow key is the custody daemon's, fetched by its custodian")
-        }
-        Some(escrow) => {
-            if let Err(why) = within(
-                ESCROW_BOOTSTRAP_DEADLINE,
-                "the escrow-keypair bootstrap",
-                ensure_escrow_bootstrapped(&dns_identity, escrow),
-            )
-            .await
-            {
-                eprintln!(
-                    "error: {why} (its Cassini client never registered, or the credentials agent never answered); \
-                     exiting so the pod is replaced"
-                );
-                std::process::exit(1);
-            }
-        }
+    // The escrow key, when asked for, is the custody daemon's, fetched by its custodian above: the custodian's plan
+    // asked for it, and the daemon was Ready only once it held it (docs/architecture/key-custody.md, step 9).
+    if settings.escrow {
+        tracing::info!("the escrow key is the custody daemon's, fetched by its custodian");
     }
 
     tracing::info!("polar-init complete, handing off to main container");
-}
-
-/// Establishes a real, standalone Cassini connection (using the
-/// just-issued client-type mTLS cert), a real, bare RouterActor, and
-/// a real CryptoActor instance registered against it, sends
-/// EnsureBootstrapped, and retries until it succeeds -- matching this
-/// binary's own, established "never exit non-zero due to a transient
-/// failure" philosophy, since this genuinely depends on the
-/// Credentials Agent specifically being reachable, not just
-/// cert-issuer.
-///
-/// Constructs TcpClientActor with DeliveryMode::Router directly
-/// (mirroring lib::cassini::TcpClient::spawn_with_router's own,
-/// real, internal shape) rather than calling that helper itself,
-/// since this binary has no real, enclosing supervisor actor to
-/// link against at all -- just a bare main(). The lifecycle closure
-/// is a genuine no-op: this flow never observes a ClientEvent
-/// lifecycle event (Registered, TransportError, etc.) at all, only
-/// CryptoActor's own EnsureBootstrapped reply.
-async fn ensure_escrow_bootstrapped(_own_identity: &str, escrow: &environment::EscrowSettings) {
-    // The client's coordinates (TLS_CA_CERT, TLS_CLIENT_CERT, TLS_CLIENT_KEY, BROKER_ADDR and
-    // CASSINI_SERVER_NAME, the same commonClientEnv every agent's main container gets) were
-    // read and judged with the rest of the environment at startup, so they are certainly here.
-    let client_config = escrow.client.clone();
-
-    let (router, _) = Actor::spawn(None, polar_router::RouterActor, ())
-        .await
-        .expect("RouterActor::pre_start does no fallible work of its own -- spawning it can't genuinely fail here");
-
-    let lifecycle: std::sync::Arc<dyn Fn(cassini_types::ClientEvent) + Send + Sync> =
-        std::sync::Arc::new(|_event| {});
-
-    let (tcp_client, _) = loop {
-        match Actor::spawn(
-            None,
-            TcpClientActor,
-            TcpClientArgs {
-                config: client_config.clone(),
-                registration_id: None,
-                delivery: cassini_client::DeliveryMode::Router {
-                    router: router.clone(),
-                    lifecycle: lifecycle.clone(),
-                },
-                answers: None,
-            },
-        )
-        .await
-        {
-            Ok(spawned) => break spawned,
-            Err(e) => {
-                tracing::warn!("failed to establish Cassini connection: {e}, retrying...");
-                tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
-            }
-        }
-    };
-
-    // This actor is never stopped: stopping it releases the key it holds from the kernel keyring,
-    // and the key has to outlive this container for the workload to adopt it. The process exits.
-    let (crypto_actor, _) = Actor::spawn(
-        None,
-        polar_crypto::CryptoActor,
-        polar_crypto::CryptoActorArgs::new(tcp_client.clone(), router)
-            .with_settings(escrow.crypto.clone()),
-    )
-    .await
-    .expect("CryptoActor::pre_start does no fallible work of its own -- spawning it can't genuinely fail here");
-
-    // The client drops any Subscribe sent before it has registered, so
-    // wait for a registration id before telling CryptoActor to subscribe.
-    // This binary has no supervisor to forward ClientEvent::Registered,
-    // and its lifecycle closure above is a no-op.
-    let mut polls: u64 = 0;
-    loop {
-        match ractor::call!(
-            tcp_client,
-            cassini_client::TcpClientMessage::GetRegistrationId
-        ) {
-            Ok(Some(_)) => break,
-            Ok(None) => {}
-            // A client that has died answers nothing, ever: say so, and let the deadline end the wait.
-            Err(e) => {
-                if polls.is_multiple_of(50) {
-                    tracing::warn!("the Cassini client does not answer: {e}");
-                }
-            }
-        }
-        polls += 1;
-        if polls.is_multiple_of(50) {
-            tracing::info!(
-                "still waiting for the Cassini client to register ({}s)",
-                polls / 5
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    if let Err(e) = crypto_actor.send_message(polar_crypto::CryptoMessage::ClientRegistered) {
-        tracing::warn!("failed to tell CryptoActor the client registered: {e}");
-    }
-
-    loop {
-        match ractor::call!(crypto_actor, |reply| {
-            polar_crypto::CryptoMessage::EnsureBootstrapped { reply }
-        }) {
-            Ok(Ok(custody)) => {
-                tracing::info!("escrow-keypair bootstrap complete ({custody:?})");
-                // Tell the workload how the key is held: its number if the kernel holds it,
-                // nothing if this process had to, so the workload does what it always did.
-                if let Err(e) =
-                    handle::record_custody(&escrow.crypto.escrow_key_handle_path, custody)
-                {
-                    // Not fatal: without a number the workload retrieves the key itself.
-                    tracing::warn!("{e}; the workload will hold the key itself");
-                }
-                // Leave the broker properly so it ends this session now, rather than keeping it
-                // for the workload's identity to find. The crypto actor is left running: the key
-                // it holds must outlive init.
-                if !goodbye::say_goodbye(&tcp_client, std::time::Duration::from_secs(2)).await {
-                    tracing::warn!("could not confirm the goodbye to the broker");
-                }
-                return;
-            }
-            Ok(Err(e)) => {
-                tracing::warn!("escrow-keypair bootstrap failed: {e}, retrying...");
-            }
-            Err(e) => {
-                tracing::warn!("failed to reach CryptoActor: {e}, retrying...");
-            }
-        }
-        tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -795,16 +629,25 @@ async fn issue_cert(
 // ---------------------------------------------------------------------------
 
 /// The daemon's client for the certificates whose key is its own: `None` when none is, and why not when one is and
-/// there is no socket, or two of one type ask for its one slot of that type. Said before anything waits.
+/// there is no socket, or two of one type ask for its one slot of that type, or the escrow key is asked for and there
+/// is no daemon's custodian to fetch it. Said before anything waits.
 fn custody_for(
     requests: &[CertRequest],
     socket: Option<&str>,
+    escrow: bool,
 ) -> Result<Option<Arc<CustodyClient>>, String> {
     let custody: Vec<&CertRequest> = requests
         .iter()
         .filter(|req| matches!(req.key, KeyMaker::Custody))
         .collect();
     if custody.is_empty() {
+        if escrow {
+            return Err(format!(
+                "{} asks for the escrow key, which only the custody daemon's custodian fetches, and no --cert's key \
+                 is the daemon's",
+                environment::ESCROW_BOOTSTRAP.name()
+            ));
+        }
         return Ok(None);
     }
     for (i, req) in custody.iter().enumerate() {
@@ -2106,19 +1949,39 @@ mod tests {
                 certs.iter().map(|c| c.parse().unwrap()).collect()
             };
             let files = parse(&["client:/a:ecdsa-p256:", "client:/b:ecdsa-p256:"]);
-            assert!(custody_for(&files, None).unwrap().is_none(), "none asked");
+            assert!(
+                custody_for(&files, None, false).unwrap().is_none(),
+                "none asked"
+            );
 
             let one = parse(&["client:/a:custody:", "client:/b:ecdsa-p256:"]);
-            let why = custody_for(&one, None).unwrap_err();
+            let why = custody_for(&one, None, false).unwrap_err();
             assert!(why.contains("POLAR_CUSTODY_SOCKET"), "{why}");
-            assert!(custody_for(&one, Some("/s")).unwrap().is_some());
+            assert!(custody_for(&one, Some("/s"), false).unwrap().is_some());
 
             let both = parse(&["client:/a:custody:", "server:/b:custody:x.svc"]);
-            assert!(custody_for(&both, Some("/s")).unwrap().is_some());
+            assert!(custody_for(&both, Some("/s"), false).unwrap().is_some());
 
             let two = parse(&["client:/a:custody:", "client:/b:custody:"]);
-            let why = custody_for(&two, Some("/s")).unwrap_err();
+            let why = custody_for(&two, Some("/s"), false).unwrap_err();
             assert!(why.contains("one"), "one slot per type: {why}");
+        }
+
+        /// The escrow key is fetched only by the daemon's custodian (docs/architecture/key-custody.md, step 9): asked
+        /// for with no certificate of the daemon's, there is no custodian to fetch it, and polar-init stops at once.
+        #[test]
+        fn an_escrow_key_needs_the_custody_daemon() {
+            let parse = |certs: &[&str]| -> Vec<CertRequest> {
+                certs.iter().map(|c| c.parse().unwrap()).collect()
+            };
+            let files = parse(&["client:/a:ecdsa-p256:"]);
+            let why = custody_for(&files, Some("/s"), true).unwrap_err();
+            assert!(why.contains("escrow"), "{why}");
+            assert!(why.contains("custodian"), "{why}");
+            assert!(custody_for(&files, None, false).unwrap().is_none());
+
+            let daemon = parse(&["client:/a:custody:"]);
+            assert!(custody_for(&daemon, Some("/s"), true).unwrap().is_some());
         }
 
         fn client_plan() -> CustodianPlan {

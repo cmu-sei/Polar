@@ -234,10 +234,11 @@ let credentialsAgentIssuerEnv =
           }
         ]
 
--- The escrow bootstrap runs only when `extraEnv` asks for it (POLAR_INIT_ESCROW_BOOTSTRAP): the
+-- The custodian fetches the escrow key only when `extraEnv` asks for it (POLAR_INIT_ESCROW_BOOTSTRAP): the
 -- catalog's `encryption` capability does, for an agent that needs encryption, and no hand chart does.
 -- As `makePolarInitContainer`, the client's environment given: `Constants.commonClientEnv` with a key file, or
--- `Constants.custodyClientEnv` when the key is the custody daemon's (docs/architecture/key-custody.md, step 4).
+-- `Constants.custodyClientEnv` when the key is the custody daemon's (docs/architecture/key-custody.md, step 4);
+-- polar-init reads only the daemon's socket of it.
 let makePolarInitContainerWith =
       \(clientEnv : List kubernetes.EnvVar.Type) ->
       \(polarInitImage : Text) ->
@@ -258,11 +259,6 @@ let makePolarInitContainerWith =
         , env = Some
           (   [ kubernetes.EnvVar::{ name = "POLAR_INIT_CERT_ISSUER_URL", value = Some certIssuerUrl }
               , kubernetes.EnvVar::{ name = "POLAR_INIT_TOKEN_PATH",      value = Some tokenPath      }
-              -- polar-crypto's escrow bootstrap (Phase 4) presents this
-              -- as its Kubernetes credential. Without it, it falls back
-              -- to the automounted token, whose audience is the API
-              -- server's, not cert-issuer's.
-              , kubernetes.EnvVar::{ name = "KUBERNETES_SA_TOKEN",        value = Some tokenPath      }
               ]
             # clientEnv
             # extraEnv

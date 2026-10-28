@@ -6015,7 +6015,6 @@ name = "polar-init"
 version = "1.0.0"
 dependencies = [
  "cassini-client",
- "cassini-types",
  "cert-client",
  "cert-issuer-common",
  "clap",
@@ -6025,10 +6024,6 @@ dependencies = [
  "polar-custody",
  "polar-env",
  "polar-health",
- "polar-kernel-keyring",
- "polar-router",
- "ractor",
- "rand 0.10.3",
  "rcgen",
  "rsa 0.10.0-rc.18",
  "rustls",

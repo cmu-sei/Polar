@@ -28,7 +28,6 @@ authors.workspace = true
 
 [dependencies]
 cassini-client = { workspace = true }
-cassini-types = { workspace = true }
 cert-issuer-common = { path = "../cert-issuer/common" }
 clap = { workspace = true }
 credentials-agent-client.workspace = true
@@ -36,10 +35,7 @@ credentials_agent_common.workspace = true
 polar-crypto.workspace = true
 polar-custody.workspace = true
 polar-env.workspace = true
-polar-kernel-keyring.workspace = true
 polar-health = { path = "../polar-health" }
-polar-router.workspace = true
-ractor = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -47,7 +43,6 @@ tracing-subscriber = { workspace = true }
 rustls = { workspace = true }
 
 [dev-dependencies]
-rand.workspace = true
 wiremock.workspace = true
 serde_json.workspace = true
 rsa.workspace = true

@@ -33,8 +33,6 @@
 //! The Cassini client's and the crypto actor's variables are declared by those crates and
 //! reused, so the init container and the agent it starts read them the same way.
 
-use cassini_client::TCPClientConfig;
-use polar_crypto::environment::CryptoSettings;
 use polar_env::{Config, Defaulted, Described, Env, Optional, Section};
 
 /// Where the projected service-account token is, unless the deployment says.
@@ -78,13 +76,14 @@ pub const CREDENTIALS_AGENT_IDENTITY: Optional<String> = Optional::text(
     "the credentials agent's identity (`<name>.<namespace>.serviceaccount.<domain>`): a session offer is sealed to only if a signing certificate naming it, under the CA, signed the offer; required when POLAR_INIT_ISSUER is `credentials-agent`",
 );
 
-/// Runs the escrow-keypair bootstrap. Only an agent with a crypto actor reads the escrowed keypair, so the render
-/// sets it for a workload whose code needs encryption (the `encryption` capability), and for no other: the core
-/// services, which the bootstrap travels through or asks, never do (docs/architecture/policy-enforcement.md,
-/// "Decisions", 2026-10-22).
+/// Asks the custodian to fetch the escrow keypair into the custody daemon (docs/architecture/key-custody.md, "Part A's
+/// bootstrap: the custodian"). Only an agent with a crypto actor reads the escrowed keypair, so the render sets it for
+/// a workload whose code needs encryption (the `encryption` capability), and for no other: the core services, which
+/// the custodian's requests travel through or ask, never do (docs/architecture/policy-enforcement.md, "Decisions",
+/// 2026-10-22).
 pub const ESCROW_BOOTSTRAP: Defaulted<bool> = Defaulted::flag(
     "POLAR_INIT_ESCROW_BOOTSTRAP",
-    "whether to escrow this workload's keypair with the credentials agent before it starts: true for a workload whose agent needs encryption, which the render derives from its scaffold",
+    "whether the custody daemon's custodian fetches this workload's escrow keypair before it starts: true for a workload whose agent needs encryption, which the render derives from its scaffold; it needs a certificate whose key is the daemon's",
     "false",
 );
 
@@ -138,13 +137,6 @@ fn issuer_is_consistent(env: &dyn Env) -> Vec<String> {
     }
 }
 
-/// What the escrow bootstrap needs, which an init that does not run it does not.
-#[derive(Debug, Clone)]
-pub struct EscrowSettings {
-    pub client: TCPClientConfig,
-    pub crypto: CryptoSettings,
-}
-
 /// Where the certificates are requested from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Issuance {
@@ -168,21 +160,20 @@ pub enum Issuance {
 pub struct InitSettings {
     pub issuance: Issuance,
     pub token_path: String,
-    /// `None` when the bootstrap is not asked for, in which case nothing of the client's or the
-    /// crypto actor's is read or required.
-    pub escrow: Option<EscrowSettings>,
+    /// Whether the custodian's plan asks for the escrow key: the custodian fetches it into the daemon, and polar-init
+    /// itself connects to nothing for it (docs/architecture/key-custody.md, step 9).
+    pub escrow: bool,
     /// The custody daemon's socket, through which a certificate whose key is the daemon's is made and installed
     /// (docs/architecture/key-custody.md, step 3). The Cassini client's variable: the daemon is the pod's.
     pub custody_socket: Option<String>,
 }
 
-/// The one snapshot of the process polar-init runs on: its own variables, the Cassini
-/// client's and the crypto actor's, and nothing else.
+/// The one snapshot of the process polar-init runs on: its own variables and the Cassini
+/// client's (the custody daemon's socket is the client's variable), and nothing else.
 pub fn snapshot(env: &dyn Env) -> Config {
     Config::builder(env)
         .register(&SECTION)
         .register(&cassini_client::environment::SECTION)
-        .register(&polar_crypto::environment::SECTION)
         .build()
 }
 
@@ -240,30 +231,11 @@ impl InitSettings {
                 ca_cert_path,
             },
         };
-        let bootstrap = match ESCROW_BOOTSTRAP.read(env) {
+        let escrow = match ESCROW_BOOTSTRAP.read(env) {
             Ok(value) => value,
             Err(error) => {
                 note(error.to_string());
                 false
-            }
-        };
-
-        let escrow = if !bootstrap {
-            None
-        } else {
-            let client = TCPClientConfig::from_env(env);
-            let crypto = CryptoSettings::from_env(env);
-            match (client, crypto) {
-                (Ok(client), Ok(crypto)) => Some(EscrowSettings { client, crypto }),
-                (client, crypto) => {
-                    if let Err(e) = client {
-                        note(e);
-                    }
-                    if let Err(e) = crypto {
-                        note(e);
-                    }
-                    None
-                }
             }
         };
 
@@ -319,20 +291,19 @@ mod tests {
             }
         );
         assert_eq!(s.token_path, DEFAULT_TOKEN_PATH);
-        assert!(
-            s.escrow.is_none(),
-            "not asked: nothing of the client is read"
-        );
+        assert!(!s.escrow, "not asked");
     }
 
     #[test]
     fn the_bootstrap_runs_only_when_asked_and_a_value_that_is_not_a_flag_is_a_problem() {
         let s = InitSettings::from_env(&with(&[OWN, &[("POLAR_INIT_ESCROW_BOOTSTRAP", "false")]]))
             .unwrap();
-        assert!(s.escrow.is_none(), "false does not ask");
-        // Asked, so the bootstrap's settings are required.
-        let error = InitSettings::from_env(&with(&[OWN, ESCROW])).unwrap_err();
-        assert!(error.contains("BROKER_ADDR"), "{error}");
+        assert!(!s.escrow, "false does not ask");
+        assert!(
+            InitSettings::from_env(&with(&[OWN, ESCROW]))
+                .unwrap()
+                .escrow
+        );
         let error = InitSettings::from_env(&with(&[OWN, &[("POLAR_INIT_ESCROW_BOOTSTRAP", "1x")]]))
             .unwrap_err();
         assert!(error.contains("POLAR_INIT_ESCROW_BOOTSTRAP"), "{error}");
@@ -346,26 +317,23 @@ mod tests {
             &[("POLAR_INIT_SKIP_ESCROW_BOOTSTRAP", "")],
         ])))
         .unwrap();
-        assert!(s.escrow.is_none());
+        assert!(!s.escrow);
     }
 
+    /// The escrow key is the custodian's to fetch (docs/architecture/key-custody.md, step 9), so asking for it reads
+    /// nothing of the Cassini client's or the crypto actor's: polar-init no longer connects to the broker.
     #[test]
-    fn an_agent_that_bootstraps_has_the_client_and_crypto_settings() {
+    fn an_agent_that_escrows_needs_nothing_of_the_client() {
         let s = InitSettings::from_env(&with(&[
             OWN,
-            BOOTSTRAP,
             ESCROW,
             &[
-                ("KUBERNETES_SA_TOKEN", "/workspace/token"),
                 ("POLAR_INIT_CA_CERT", "/ca/ca.pem"),
                 ("POLAR_INIT_TOKEN_PATH", "/t"),
             ],
         ]))
         .unwrap();
-        let escrow = s.escrow.expect("bootstrap asked for");
-        assert_eq!(escrow.client.broker_endpoint, "cassini:8080");
-        assert_eq!(escrow.crypto.own_certificate_path, "/c/cert.pem");
-        assert_eq!(escrow.crypto.service_account_token_path, "/workspace/token");
+        assert!(s.escrow);
         assert_eq!(
             s.issuance,
             Issuance::CertIssuer {
@@ -378,15 +346,9 @@ mod tests {
 
     #[test]
     fn every_problem_is_reported_together_before_anything_waits() {
-        let error = InitSettings::from_env(&with(&[ESCROW])).unwrap_err();
-        for name in [
-            "POLAR_INIT_CERT_ISSUER_URL",
-            "TLS_CLIENT_CERT",
-            "TLS_CLIENT_KEY",
-            "TLS_CA_CERT",
-            "BROKER_ADDR",
-            "CASSINI_SERVER_NAME",
-        ] {
+        let error =
+            InitSettings::from_env(&with(&[&[("POLAR_INIT_ESCROW_BOOTSTRAP", "1x")]])).unwrap_err();
+        for name in ["POLAR_INIT_CERT_ISSUER_URL", "POLAR_INIT_ESCROW_BOOTSTRAP"] {
             assert!(error.contains(name), "{name}: {error}");
         }
     }
@@ -399,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn the_snapshot_holds_only_what_the_three_sections_declare() {
+    fn the_snapshot_holds_only_what_the_two_sections_declare() {
         let config = snapshot(&with(&[
             OWN,
             BOOTSTRAP,
