@@ -135,6 +135,10 @@ record: the credentials agent learns of what it signed, and says so over Cassini
 
 ## What each situation needs
 
+*Since 2026-10-28 an ending restarts the same pod in place* (`deployments.md`, step 4): "its new pod" below is that pod,
+restarted, under its UID, `polar-init` again; a pod deleted, evicted or lost with its node is still replaced by a new one,
+under a new UID. The credentials agent's own restart goes through its successor ticket ("Step 5, the ticket", below).
+
 - **1, cert-issuer restarts.** It must tell nominal from bootstrap with no state of its own about it. Its record is on a
   durable volume, and with Cassini up it can connect as a client and hear the core, so "nominal" can be "Cassini
   accepts it and the credentials agent answers". It says "I'm alive again" over Cassini itself.

@@ -32,7 +32,14 @@ The Reaper stays a separate agent that only deletes. With the agents moving to D
 (`runtime-attestation.md`, "Deployments, next"), Failed pods mostly stop accumulating; the Reaper stays for clusters
 older than that.
 
-## The problem
+**Update, 2026-10-28:** the move is done (`deployments.md`, step 4, seen on `u7c` and on a single-node `u7s`): every agent
+is a Deployment of one whose pod restarts in place at every ending, so an ending leaves no Failed pod, and the Jira observer
+without a Jira restarts in place instead of piling up. Clusters older than 1.36 are no longer supported (the maintainer,
+2026-10-28), so the reason the Reaper was kept is gone. What can still leave a Failed pod: an eviction (disk pressure, which
+is what filled a node before; the evicted pod object stays, its Deployment making another), and the load harness's Jobs
+(`load-harness.nu` deletes them after a run). Whether that is worth an agent is open; until then, `just cluster-prune-failed`.
+
+## The problem (as it was, until 2026-10-28)
 
 Every agent ends a pod by exiting 1, so that its Job (`restartPolicy: Never`, `backoffLimit` 1000000) replaces it
 (`health-and-shutdown.md`). Rejuvenation does this about hourly per agent, and every ending leaves a pod in phase Failed

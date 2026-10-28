@@ -56,8 +56,10 @@ A second principle follows from the first: **health decides *when* to stop; the
 InfrastructureSupervisor decides *how* to stop.** SIGTERM is not a health
 event, so it is not the HealthCheckActor's concern.
 
-No agent ever exits with code 0. Every ending is non-zero so the Job
-(`restartPolicy: Never`) replaces the pod, and `polar-init` issues fresh certificates.
+No agent ever exits with code 0. Every ending, whatever its code, restarts the whole pod in place: the agent is a Deployment
+of one whose container's rule restarts the pod on every exit (`RestartAllContainers`; `docs/architecture/deployments.md`,
+step 4), so `polar-init` runs again and issues fresh certificates, under the same pod. (Until 2026-10-28 the agent was a Job,
+`restartPolicy: Never`, which replaced the pod with a new one.)
 
 ## 2. Components
 
@@ -330,8 +332,13 @@ should never fire on a working agent. It fires when nothing in the process can r
 
 How fast it acts then is a bound, not a hope. The file turns stale 91 s after the
 last write, the first probe to see it fails (at most one period later), and the
-second consecutive failure, a period after that, kills the pod: at most
+second consecutive failure, a period after that, kills the container: at most
 91 + 30 + 30 = 151 s after the last write, never before 91 s.
+
+The kubelet restarts a container its probe killed alone, without `polar-init`, and the pod's restart rule does not act on
+that kill. So the agent, started again, finds no fresh-start marker (polar-init leaves one at every run, the agent takes it as
+it starts) and exits 1, which the rule turns into a restart of the whole pod (`polar-agent-builder/src/start_marker.rs`;
+`docs/architecture/deployments.md`, step 4). Seen on `u7c`, 2026-10-28: the whole pod restarted 16 s after the kill.
 
 ### How this is tested
 

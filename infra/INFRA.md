@@ -205,7 +205,7 @@ infra/
   cluster-inputs.nu      what belongs to one cluster and exists only after it does (the git server's administrators)
   agent-pods.nu          asks an agent's image about itself (--scaffold, --check) as a pod on the cluster
   document.nu            how the resolver fills an agent's configuration document
-  rules.nu               checks on what a workload resolves to and on a render (image pull policies, Job replacement)
+  rules.nu               checks on what a workload resolves to and on a render (image pull policies, restarts in place, Job replacement)
   compare-manifests.nu   compares two renders by meaning
   layers.nu              groups a target's files into layers (check, split)
   images.nu  images.nuon which images exist, and building, pushing, importing and publishing them
@@ -218,7 +218,7 @@ infra/
   secrets-lib.nu         what the targets' secrets.nu scripts share
   tools.nu  runtime.nu   the standalone Polar tools; which container runtime (podman or docker)
   validate.nu            environment validation helpers
-  apply.nu               the decisions up.nu makes while applying: which Jobs to restart, which images are stale
+  apply.nu               the decisions up.nu makes while applying: what to restart or roll out, which images are stale
   retry.nu               try again for a while, and stop at once on a failure that cannot be fixed
   forwards.nu            wait for a port-forward to answer; restart it if it does not
   admin.nu               what to do with ~/.config/polar-admin that belongs to another cluster
@@ -236,7 +236,7 @@ infra/
     facets.nuon          the operations every capability must answer
     workloads/*.nuon     one entry per catalog workload
   schema/                Dhall vocabulary
-    agent.dhall  agent-spec.dhall          the Job template and its input type
+    agent.dhall  agent-spec.dhall          the agent template (a Deployment, or a run's Job) and its input type
     resources.dhall  resources-spec.dhall  RBAC and token Secrets alongside a workload
     functions.dhall  constants.dhall ...   shared helpers and static constants
   layers/                custom charts, by dependency
@@ -288,7 +288,7 @@ infra/targets/<t>/config.nuon   per-target overrides
 a resolved record (JSON)
         │
         ▼   json-to-dhall       typechecks it against schema/agent-spec.dhall
-        ▼   schema/agent.dhall  the one Job template for agents
+        ▼   schema/agent.dhall  the one template for agents (a Deployment, or a run's Job)
         ▼   dhall-to-yaml
 manifests/<name>.yaml           (+ manifests/<name>-resources.yaml if it has RBAC etc.)
 ```
@@ -375,6 +375,8 @@ Read while planning cert-issuer's move into the catalog (`docs/architecture/cert
   `schema/ca-spec.dhall`): the same Job with no polar-init, the kind's projected token mounted in its own container, the
   Kubernetes API token mounted, a Secret's file `mode`, and the pod's `fs_group`; see
   `docs/architecture/cert-issuer-isolation.md`, step 1c.*
+  *Since 2026-10-28 it renders a Deployment of one that restarts in place, or a `run`'s Job
+  (`functions.workloadOf`; `docs/architecture/deployments.md`, step 4).*
   The template renders one `Job` (`agent.dhall:226-246`), and its init container is unconditional
   (`agent.dhall:173-194`, `functions.dhall:223-259`); capabilities' `init` parts only add env and mounts to it. Its
   header: "If a workload does not fit this shape, it stays a custom chart (the escape hatch). Do not add a Bool to the
@@ -422,7 +424,8 @@ Read while planning cert-issuer's move into the catalog (`docs/architecture/cert
   outside the catalog (Neo4j's, from its chart's values, in `POLAR_FLOOR_EXTRA`).
 - **Waiting at apply.** A layer's `wait_for` with `ref: "name=…"` resolves only to a Deployment, StatefulSet or
   DaemonSet; `job-name=…` resolves to the Endpoints of a Service selecting the Job's pods (`layers.nu:36-37`,
-  `:72-80`, `deploy-objects.nu:81-111`), which is how Cassini, a Job, is waited for.
+  `:72-80`, `deploy-objects.nu:81-111`), which is how Cassini, a Job, is waited for. *Since 2026-10-28 the targets wait on
+  `name=…`, every agent being a Deployment, checked as itself.*
 - **`render.nu`'s cert-issuer checks** (`check_cert_issuer_identity`, `check_ca_provisioning`) read the chart's
   `cert-issuer-configmap.yaml` and returned without a word when it was absent. *Since 2026-10-23 they read cert-issuer's
   catalog document (`cert-issuer-resources.yaml`), and fail when cert-issuer is rendered and its document is not there.*
@@ -498,11 +501,12 @@ can have completely different orderings.
 
 Then `up.nu` runs the steps that need workloads: the admin flow, the seed and the browser.
 
-How a layer's `wait_for` becomes a Flux health check: a `statefulset` or a Deployment is checked as itself. A Job is not: Flux's own Job
-reader counts a Job as healthy only when it has completed, and an agent never does, so it is waited for through the Endpoints of the Service
-that selects its pods (they have no `subsets` until a pod is ready). A Job with no Service is not waited for. A layer with a Job is applied
-with `force: true`, since a Job's pod template is immutable. A workload that reads a ConfigMap carries a fingerprint of it in its pod
-template when it is published (`polar.dev/config-hash`), so a changed ConfigMap changes the Job and Flux recreates it.
+How a layer's `wait_for` becomes a Flux health check: a `statefulset` or a Deployment is checked as itself, and every agent is a
+Deployment (waited on by its pods' `name` label). A Job is not: Flux's own Job reader counts a Job as healthy only when it has completed,
+so one that runs for good would be waited for through the Endpoints of the Service that selects its pods, and one with no Service is not
+waited for; no layer holds such a Job now (the load harness's are rendered and never applied). A layer with a Job is applied with
+`force: true`, since a Job's pod template is immutable. A workload that reads a ConfigMap carries a fingerprint of it in its pod template
+when it is published (`polar.dev/config-hash`), so a changed ConfigMap changes the Deployment and Flux rolls it out.
 
 **The registry.** The registry as the nodes name it is the prefix of every image in a manifest, and it is one value, resolved by
 `infra/registry.nu`: `POLAR_NODE_REGISTRY` in the environment, else the target's `cluster.registry` in its `config.nuon`, else
@@ -605,7 +609,8 @@ ignored without a word.)
 
 `schema/` is the Dhall vocabulary:
 
-- **`agent.dhall`, `agent-spec.dhall`**: the agent Job template and the record type it takes.
+- **`agent.dhall`, `agent-spec.dhall`**: the agent template and the record type it takes: a Deployment of one that restarts in
+  place, or, for the `run` kind (the load harness), a Job (`docs/architecture/deployments.md`, step 4).
 - **`resources.dhall`, `resources-spec.dhall`**: the objects that live alongside a workload (ClusterRole, binding, token Secret).
 - **`kubernetes.dhall`**: Dhall bindings for Kubernetes types.
 - **`functions.dhall`**: shared helpers (`makeDeployment`, `makePolarInitContainer`, the proxy cert helpers, ...).
@@ -813,7 +818,7 @@ One vocabulary, two enforcement points:
 | Where | When | What it does |
 |---|---|---|
 | `resolve.nu check` | render time | an unknown `needs` entry, or a capability that does not answer every facet, fails |
-| `AgentBuilder::build()` | agent startup | the agent's declared requirements must be a subset of `POLAR_CAPABILITIES`, else it exits non-zero (a Job restarts) |
+| `AgentBuilder::build()` | agent startup | the agent's declared requirements must be a subset of `POLAR_CAPABILITIES`, else it exits non-zero (its pod restarts in place) |
 
 The same shape applies to time. The agent's code declares the least it needs to drain
 (`.with_shutdown_budget(..)`, a requirement, not a preference) and the catalog says how
@@ -910,7 +915,7 @@ Scalars override; `needs` and `env` entries are appended.
 ### Add a custom chart (the escape hatch)
 
 Use this when a workload does not fit a catalog kind: a StatefulSet, a Deployment
-with a PVC, anything with more structure than an agent Job. This is what the
+with a PVC, anything with more structure than an agent's Deployment. This is what the
 existing services are today.
 
 1. Pick the layer by dependency and create `infra/layers/<layer>/<name>/` with a
@@ -1032,31 +1037,30 @@ nushell gotchas that have bitten this pipeline:
 
 ---
 
-## Jobs wait for the old pod to be gone
+## The old pod is gone before the new one starts
 
-Every Job sets `podReplacementPolicy: Failed` (`JobPodReplacementPolicy` in
-`schema/constants.dhall`, used by `agent.dhall` and every custom chart). The Kubernetes default,
-`TerminatingOrFailed`, creates the replacement pod the moment the old one starts terminating, so a
-pod that is deleted or evicted overlaps with its replacement for the whole drain, up to its
-`terminationGracePeriodSeconds`: two instances of one identity at once, with the same volumes and the same
-Cassini identity (the credentials agent's ledger is on a `ReadWriteOnce` volume, which still lets two pods
-on one node mount it). Their kernel keys do not collide: each pod loads its own key under its own number. With `Failed` the controller waits until the old pod is fully gone.
+*Since 2026-10-28 every agent is a Deployment of one that restarts in place (`docs/architecture/deployments.md`, step 4):* an
+ending, planned or not, restarts the same pod, so there is nothing to replace. A pod that is really replaced (deleted,
+evicted, lost with its node, or a changed Deployment rolled out) is replaced by `strategy: Recreate`, which ends the old pod
+before it makes the new one. A rolling update would start the new one first: two instances of one identity at once, with the
+same Cassini identity (and the credentials agent's ledger on a `ReadWriteOnce` volume, which still lets two pods on one node
+mount it). `render.nu` refuses a Deployment with `polar-init` that lacks `Recreate`, one replica or the restart rule
+(`in_place_problems` in `rules.nu`).
 
-This costs nothing in the normal case. Every agent ends a pod by exiting non-zero, whether it chose to
-(rejuvenation, a health verdict) or was told to (SIGTERM runs the drain and then exits 1), so a pod
-always finishes `Failed` and the Job replaces it as before. `render.nu` refuses a render in which a
-Job does not carry the policy (`job_replacement_problems` in `rules.nu`).
+A Job, the `run` kind's (the load harness) and a custom chart's, sets `podReplacementPolicy: Failed` (`JobPodReplacementPolicy`
+in `schema/constants.dhall`) for the same reason: the Kubernetes default, `TerminatingOrFailed`, creates the replacement pod
+the moment the old one starts terminating. `render.nu` refuses a Job without it (`job_replacement_problems`).
 
 **The risk it brings: a pod stuck terminating.** If a pod's node dies or becomes unreachable, the
-kubelet cannot confirm the pod stopped, and the pod stays `Terminating`. With `Failed` the Job then
-creates no replacement until the pod is gone, where the default would have started one. For a
+kubelet cannot confirm the pod stopped, and the pod stays `Terminating`. `Recreate` (and a Job's `Failed`) then
+create no replacement until the pod is gone, where a rolling update (or the default) would have started one. For a
 single-instance agent that is the correct failure (the alternative is a second instance running
 beside one that may still be alive), but it is an outage until someone acts.
 
 - A healthy node with a slow pod is not this case: the kubelet kills the container when
   `terminationGracePeriodSeconds` ends, the pod goes `Failed`, and the replacement starts. That
   period is derived from the shutdown budget, so the overlap-free wait is bounded.
-- For a dead node there is no field on the Job or the pod that force-deletes the pod; the manifest can
+- For a dead node there is no field on the workload or the pod that force-deletes the pod; the manifest can
   only tune how soon it is marked for deletion (`tolerationSeconds` on the `unreachable` and
   `not-ready` tolerations). The fix is an operator action once the node is known to be down: taint
   the node `node.kubernetes.io/out-of-service` (NoExecute), which tells the control plane to force
@@ -1064,7 +1068,7 @@ beside one that may still be alive), but it is an outage until someone acts.
   also works, but only do it when the node is confirmed down, since it removes the pod object
   without any evidence the process stopped. Check the Kubernetes documentation for your version
   before relying on the exact taint form.
-- The dev cluster has one node, so a dead node means no cluster and this does not arise there.
+- On the single-node dev cluster (u7s) a dead node means no cluster, and this does not arise; on a multi-node one (u7c) it can.
 
 ## Known issues and limits
 

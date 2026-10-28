@@ -735,10 +735,17 @@ Principle: declare each environment variable once, with its type, default, docum
   `custody_for` allows a mix, so "the token buys only the custodian's certificate" is the render's convention, not a
   check. *Decided (the maintainer, 2026-10-28): refused,* by `polar-init` at startup and by a render rule. *Built
   2026-10-28* (`key-custody.md`, "Step 9's follow-ups").
-- [ ] The docs still describe the agents as Jobs (found 2026-10-28, after the move to Deployments, `deployments.md`,
-  step 4): about forty passages in `health-and-shutdown.md`, `pod-reaper.md`, `core-restarts.md` and `infra/INFRA.md`
-  (an agent's ending making a new pod, the Job's replacement policy, forced layers). Each to read and say what is true
-  now: the pod restarts in place, a run's Job is the load harness alone.
+- [x] The docs still describe the agents as Jobs (found 2026-10-28, after the move to Deployments, `deployments.md`,
+  step 4; done 2026-10-28): what states how things are now says so in `health-and-shutdown.md` (an ending, and a probe's
+  kill through the fresh-start marker), `pod-reaper.md` (an update: endings leave no Failed pod, what still can),
+  `infra/INFRA.md` (the template, the waits, Flux's health checks, `Recreate` and a Job's replacement policy, the keyring
+  gone) and `README.md` (minikube, Kubernetes 1.36, restarts in place). What records how things were (dated readings and
+  decisions, `core-restarts.md`'s and `INFRA.md`'s among them) is kept, with a dated note where it no longer holds.
+- [ ] Publishing images for another architecture is emulated, and slow (found 2026-10-28, publishing for `arm64` from
+  `x86_64`): `images.nu publish --arch arm64` builds `.#packages.aarch64-linux…`, whose `rustc` runs under the builder's
+  binfmt emulation of aarch64, and each agent's image compiles the shared workspace crates again; image 1 took about
+  half an hour and the rest some ten to fifteen minutes each. Cross-compiling (an `x86_64` compiler targeting aarch64,
+  in the flake's image builds), and building the shared crates once for every image, would make it a fraction of that.
 - [ ] polar-init and the workload may no longer need one UID (found 2026-10-28): `infra/resolve.nu`'s `CUSTODY` gives
   them one "since the escrow key's hand-off through the user keyring needs it", and that hand-off is gone since custody
   step 9. Whether anything else needs it (the custody socket's group, the shared volumes' files) is to read before the
