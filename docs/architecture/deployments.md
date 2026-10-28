@@ -319,17 +319,19 @@ The plan:
 1. *The load harness's Jobs.* A new kind, `run` (extending `agent`, keeping the Job fields and template), for the
    producer and the sink; or a field on an entry (`runs_to_completion: true`) choosing the Job within a kind.
    *Recommendation:* the kind. A kind already says a workload's shape (`agent`, `service`, `ca`), and what it renders as
-   is shape.
+   is shape. **Decided (the maintainer, 2026-10-28): the kind, `run`.**
 2. *A pod killed by its liveness probe restarts only its workload container* (tried, above): no `polar-init`, the same
    certificates, the daemon keeping its keys. Today the same kill fails the pod, and the Job makes a new one. The probe
    is the fallback for a supervisor that no longer answers (the health actor decides the rest). *Recommendation:*
    accept it. The restarted process starts from the same valid certificates and daemon, and its health actor
    rejuvenates it, the whole pod then, when they near their end; a probe kill is not a renewal, and nothing is issued
-   for it.
+   for it. **Decided (the maintainer, 2026-10-28): not accepted; a probe kill restarts the whole pod too.** How is the
+   next question (below).
 3. *Clusters older than 1.36,* where `RestartAllContainers` is not on by default: keep rendering Jobs for a target that
    says its cluster is older, or require 1.36 or later for every target. *Recommendation:* require 1.36 or later. Every
    cluster Polar runs on is 1.37, two paths would each need testing, and the Reaper's note on older clusters
-   (`pod-reaper.md`) then reads as not supported.
+   (`pod-reaper.md`) then reads as not supported. **Decided (the maintainer, 2026-10-28): 1.36 or later, for every
+   target.**
 
 ### Tests first
 
