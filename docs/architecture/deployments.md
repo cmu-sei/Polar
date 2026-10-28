@@ -333,6 +333,27 @@ The plan:
    (`pod-reaper.md`) then reads as not supported. **Decided (the maintainer, 2026-10-28): 1.36 or later, for every
    target.**
 
+### A probe's kill restarts the whole pod: the fresh-start marker (the maintainer, 2026-10-28)
+
+The kubelet restarts a container its liveness probe killed alone, and the restart rule acts only on an exit the
+container makes. So the agent makes one: started without `polar-init` having run since its last start, it exits 1 at
+once, and the rule restarts the whole pod.
+- *The marker:* each run of `polar-init` leaves a one-use file, `started-by-polar-init`, in the health volume
+  (`kinds.nuon`, `health.dir`), which `polar-init` is given as a mount for it; the workload already writes its health
+  file there.
+- *The check, in `polar-agent-builder`* (so every catalog agent has it), before anything else starts: the marker is
+  removed; absent, the agent logs that it was restarted without `polar-init` and exits 1.
+- *Only where it is asked for:* the render sets `POLAR_START_MARKER` (its path) for a Deployment's workload; unset, as
+  for an agent run by hand or in a test, nothing is checked. A `run` Job is not asked: its pod is never restarted in
+  place.
+- *What it covers:* any restart of the workload container alone (a probe's kill, and whatever else the kubelet restarts
+  alone), for one extra start of a few seconds. Not covered: a hand chart without the builder (the `ace` Deployment); its
+  certificate lives a year, so a restart alone reuses a valid one.
+- *Tests:* the builder's check (marker present: removed and started; absent: exit 1; variable unset: nothing checked);
+  `polar-init` leaving the marker on every run, the second included; the render setting the variable and the mount for a
+  Deployment and not for a `run` Job. On the cluster: the probe made to fail on one agent, and the whole pod restarted,
+  `polar-init` run again.
+
 ### Tests first
 
 - `infra/tests/rules.nu`: the Deployment rule (one replica, `Recreate`, the restart rule; each missing refused).
