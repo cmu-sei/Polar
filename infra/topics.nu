@@ -26,12 +26,13 @@
 # agent does (docs/architecture/topics.md). What is decided here is which workloads a family serves, and which
 # declared topics have no other side (docs/architecture/policy-enforcement.md, "Decisions").
 
-# The workloads a topic family is expanded for, comma-separated as POLAR_SERVED_WORKLOADS takes them: the agents among
+# The workloads a topic family is expanded for, comma-separated as POLAR_SERVED_WORKLOADS takes them: the agents (the
+# `agent` and `run` kinds) among
 # `workloads` (catalog entries) that read a configuration document. A service (the broker) is not a Cassini client and
 # subscribes to no configuration topic.
 export def served [workloads: list]: nothing -> string {
     $workloads
-    | where {|w| ($w.kind? | default "agent") == "agent" and ($w.config? | default "env") == "document" }
+    | where {|w| ($w.kind? | default "agent") in ["agent" "run"] and ($w.config? | default "env") == "document" }
     | get name
     | sort
     | str join ","

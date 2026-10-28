@@ -63,9 +63,9 @@ def scaffold_of [w: record, served_list: string] {
 }
 
 def main [] {
-    # The agents, and cert-issuer (kind `ca`: an agent with a template of its own, docs/architecture/cert-issuer-isolation.md,
+    # The agents (the `agent` and `run` kinds), and cert-issuer (kind `ca`: an agent with a template of its own, docs/architecture/cert-issuer-isolation.md,
     # step 1c), whose topics are the other side of the credentials agent's record topics.
-    let agents = (catalog | where {|w| ($w.kind? | default "agent") in ["agent" "ca"] and ($w.config? | default "env") == "document" })
+    let agents = (catalog | where {|w| ($w.kind? | default "agent") in ["agent" "run" "ca"] and ($w.config? | default "env") == "document" })
     let served_list = (served (catalog))
     print $"building and asking ($agents | length) catalog agents for their scaffolds..."
     # One at a time: two builds of one crate with different features would share its binary.

@@ -45,6 +45,10 @@ def main [] {
                     { name: "credentials-agent", kind: "agent", config: "document" }
                 ]
                 assert equal (served $workloads) "credentials-agent,kube-observer"
+                # A run's Job (the load harness, docs/architecture/deployments.md, step 4) is an agent all the same: the
+                # scheduler forwards it its configuration.
+                let with_run = ($workloads | append { name: "harness-sink", kind: "run", config: "document" })
+                assert equal (served $with_run) "credentials-agent,harness-sink,kube-observer"
             }
         }
         {
