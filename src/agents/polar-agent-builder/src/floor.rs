@@ -71,7 +71,17 @@ impl Floor {
                 .into_iter()
                 .map(|(key, _)| key)
                 .collect(),
+            // A custodian is no workload: what it may use is its identity's, the same for every custodian, and nothing
+            // its certificate could add (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+            None if cert_issuer_common::custody::custodian_of(&identity).is_some() => {
+                custodian_topics()
+            }
             None => BTreeSet::new(),
+        };
+        let declared = if cert_issuer_common::custody::custodian_of(&identity).is_some() {
+            BTreeSet::new()
+        } else {
+            declared
         };
         Ok(Self {
             identity,
@@ -121,6 +131,20 @@ impl Floor {
     }
 }
 
+/// What every custodian may publish and subscribe to: its own requests and their replies, and the authority.
+fn custodian_topics() -> BTreeSet<(String, Access)> {
+    use credentials_agent_common::{CUSTODIAN_PUBLISHES, CUSTODIAN_SUBSCRIBES};
+    CUSTODIAN_PUBLISHES
+        .iter()
+        .map(|t| (t.to_string(), Access::Publish))
+        .chain(
+            CUSTODIAN_SUBSCRIBES
+                .iter()
+                .map(|t| (t.to_string(), Access::Subscribe)),
+        )
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +192,42 @@ mod tests {
             floor.facts("somebody.elses", Access::Publish),
             polar_policy::TopicFacts::default()
         );
+    }
+
+    #[test]
+    fn a_custodian_may_use_its_own_requests_and_the_authority_and_nothing_its_certificate_adds() {
+        let custodian = "custody.kube-consumer.polar.serviceaccount.cluster.local";
+        let floor = Floor::from_certificate_pem(&certificate_with(&[
+            custodian,
+            "p:custody:client",
+            "p:pub:kubernetes.cluster.consumer.Pod",
+            "g:cassini-client",
+        ]))
+        .unwrap();
+        for topic in credentials_agent_common::CUSTODIAN_PUBLISHES {
+            assert!(floor.allows(topic, Access::Publish), "{topic}");
+            assert!(floor.facts(topic, Access::Publish).implied, "{topic}");
+        }
+        for topic in credentials_agent_common::CUSTODIAN_SUBSCRIBES {
+            assert!(floor.allows(topic, Access::Subscribe), "{topic}");
+        }
+        // Not what its certificate declares, not its group's, not its workload's.
+        assert!(!floor.allows("kubernetes.cluster.consumer.Pod", Access::Publish));
+        assert!(!floor.allows("agent.kube-consumer.configuration", Access::Subscribe));
+        assert!(!floor.allows(
+            credentials_agent_common::CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
+            Access::Publish
+        ));
+        // And its workload is not given its custodian's.
+        let workload = Floor::from_certificate_pem(&certificate_with(&[
+            "kube-consumer.polar.serviceaccount.cluster.local",
+            "g:cassini-client",
+        ]))
+        .unwrap();
+        assert!(!workload.allows(
+            credentials_agent_common::CREDENTIALS_CUSTODIAN_ISSUANCE_REQUESTS_TOPIC,
+            Access::Publish
+        ));
     }
 
     #[test]
