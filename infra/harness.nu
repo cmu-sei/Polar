@@ -81,7 +81,7 @@ export def verdict [owner_logs: string, intruder_logs: string] {
 }
 
 def logs_of [workload: string] {
-    let pod = (^kubectl -n polar get pods -l $"job-name=($workload)" --field-selector=status.phase=Running -o name | lines | first)
+    let pod = (^kubectl -n polar get pods -l $"name=($workload)" --field-selector=status.phase=Running -o name | lines | first)
     ^kubectl -n polar logs $pod --tail=5000 | complete | get stdout
 }
 

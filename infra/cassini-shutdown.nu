@@ -26,7 +26,7 @@
 # Asks the Cassini broker in the cluster to shut down in order, over the wire, the way an operator
 # would: with the shutdown token, as a client with a certificate the Polar CA signed. The token is
 # the Secret the secrets step made (`cassini-shutdown-token`), not a constant. The broker then runs
-# its five phases and exits, and the Job starts a new pod.
+# its five phases and exits, and its pod restarts in place, polar-init with it (docs/architecture/deployments.md, step 4).
 #
 #   nu infra/cassini-shutdown.nu                 # as the admin in ~/.config/polar-admin
 #   nu infra/cassini-shutdown.nu --user alice

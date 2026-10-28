@@ -121,6 +121,13 @@ def main [] {
         "a workload whose ConfigMaps did not change is not rolled, whatever kubectl printed": {
             assert (not (workload_needs_restart 3 3 []))
         }
+        # docs/architecture/deployments.md, step 4: the agents are Deployments, and images keep their tags, so an
+        # unchanged Deployment whose pod runs a rebuilt image's old copy is rolled, as a Job in that state was restarted.
+        "a Deployment whose image was rebuilt under its tag is rolled, unless its own spec changed": {
+            assert (workload_needs_restart 3 3 [] ["kube-consumer: 10.0.2.2:5000/kube-consumer:latest"])
+            assert (not (workload_needs_restart 3 4 [] ["kube-consumer: 10.0.2.2:5000/kube-consumer:latest"]))
+            assert (not (workload_needs_restart null 1 [] ["kube-consumer: 10.0.2.2:5000/kube-consumer:latest"]))
+        }
         "an image is stale when what a pod runs is not what the registry serves, and never when the registry's answer is unknown": {
             let running = [
                 { image: "10.0.2.2:5000/a:latest", digest: "sha256:old" }
@@ -214,7 +221,8 @@ def main [] {
         "cassini is waited on before anything after it is applied": {
             let gate = (gate_after "cassini.yaml")
             assert ($gate != null)
-            assert equal $gate.ref "job-name=cassini"
+            # the pods' own label: cassini is a Deployment's pod (docs/architecture/deployments.md, step 4)
+            assert equal $gate.ref "name=cassini"
         }
         "a manifest that is nobody's dependency has no gate": {
             assert equal (gate_after "kube-observer.yaml") null

@@ -127,10 +127,10 @@ def served_digest [image: string] {
     if ($line | is-empty) { null } else { $line | first | str replace --regex '(?i)^docker-content-digest:\s*' '' | str trim }
 }
 
-# The images a Job's pods are running, init containers too (polar-init is rebuilt like the rest): the image
+# The images the pods `selector` picks are running, init containers too (polar-init is rebuilt like the rest): the image
 # as the pod names it, and the digest it pulled.
-def running_images [ns: string, job: string] {
-    let r = (do { ^kubectl -n $ns get pods -l $"job-name=($job)" -o json } | complete)
+def running_images [ns: string, selector: string] {
+    let r = (do { ^kubectl -n $ns get pods -l $selector -o json } | complete)
     if $r.exit_code != 0 { return [] }
     $r.stdout
     | from json
@@ -152,9 +152,10 @@ def generation_of [ns: string, kind: string, name: string] {
     if $r.exit_code != 0 or ($text | is-empty) { null } else { $text | into int }
 }
 
-# Which of these Jobs run an image the registry no longer serves under that tag (apply.nu's stale_images).
-def stale_for [jobs: list] {
-    let running = ($jobs | each {|j| running_images $j.ns $j.name } | flatten)
+# Which of these workloads (`{ ns, selector }`) run an image the registry no longer serves under that tag (apply.nu's
+# stale_images).
+def stale_for [workloads: list] {
+    let running = ($workloads | each {|w| running_images $w.ns $w.selector } | flatten)
     if ($running | is-empty) { return [] }
     let served = ($running | get image | uniq | each {|i| { image: $i, digest: (served_digest $i) } } | where digest != null)
     stale_images $running $served
@@ -187,7 +188,7 @@ def apply_file [output_dir: string, filename: string, changed: list<string> = []
                 | each {|j| $j | insert ready (pod_ready $j.ns $"job-name=($j.name)") }
             } else { [] }
         } else { [] }
-        let stale = if $diff.exit_code == 0 { stale_for $jobs } else { [] }
+        let stale = if $diff.exit_code == 0 { stale_for ($jobs | each {|j| { ns: $j.ns, selector: $"job-name=($j.name)" } }) } else { [] }
         let changed_config = ($users | where kind == "Job" | get configmaps | flatten | where {|c| $c in $changed } | uniq)
         let verdict = (job_verdict $diff.exit_code $jobs $stale $changed_config)
         if not $verdict.restart {
@@ -218,15 +219,19 @@ def apply_file [output_dir: string, filename: string, changed: list<string> = []
     }
     let now_changed = (changed_configmaps $applied.stdout)
     # A Deployment or StatefulSet is not restarted by its ConfigMap changing, and it reads the ConfigMap when its
-    # pods start. If its own spec changed it is rolling already and is not rolled twice; whether it did is its
-    # generation, not what kubectl printed, since `configured` is printed for more than a changed spec.
+    # pods start; nor by its image being rebuilt under the same tag, which its pods pull only when they start (the
+    # agents are Deployments: docs/architecture/deployments.md, step 4). If its own spec changed it is rolling already
+    # and is not rolled twice; whether it did is its generation, not what kubectl printed, since `configured` is printed
+    # for more than a changed spec.
     for it in ($rollers | enumerate) {
         let u = $it.item
         let kind = ($u.kind | str lowercase)
         let hit = ($u.configmaps | where {|c| $c in ($changed ++ $now_changed) })
         let after = (generation_of $u.ns $kind $u.name)
-        if (workload_needs_restart ($before | get $it.index | get generation) $after $hit) {
-            note $"($kind)/($u.name): restarting it, its ConfigMap changed, ($hit | str join ', ')"
+        let stale = (stale_for [{ ns: $u.ns, selector: $"name=($u.name)" }])
+        if (workload_needs_restart ($before | get $it.index | get generation) $after $hit $stale) {
+            let why = (if ($hit | is-not-empty) { $"its ConfigMap changed, ($hit | str join ', ')" } else { $"its image was rebuilt, ($stale | str join '; ')" })
+            note $"($kind)/($u.name): restarting it, ($why)"
             ^kubectl -n $u.ns rollout restart $"($kind)/($u.name)"
         }
     }
@@ -311,11 +316,11 @@ def build_waits [config: record] {
         $w = ($w | append { kind: "pods", ns: $POLAR, ref: "name=cert-issuer", label: "cert-issuer" })
     }
     if "cassini" in $d {
-        $w = ($w | append { kind: "pods", ns: $POLAR, ref: "job-name=cassini", label: "cassini" })
+        $w = ($w | append { kind: "pods", ns: $POLAR, ref: "name=cassini", label: "cassini" })
     }
     if "credentials-agent" in $d {
-        $w = ($w | append { kind: "pods", ns: $POLAR, ref: "job-name=credentials-agent", label: "credentials-agent" })
-        $w = ($w | append { kind: "pods", ns: $POLAR, ref: "job-name=credentials-agent-observer", label: "credentials-agent-observer" })
+        $w = ($w | append { kind: "pods", ns: $POLAR, ref: "name=credentials-agent", label: "credentials-agent" })
+        $w = ($w | append { kind: "pods", ns: $POLAR, ref: "name=credentials-agent-observer", label: "credentials-agent-observer" })
     }
     if "neo4j" in $d {
         $w = ($w | append { kind: "statefulset", ns: $GRAPH, ref: "statefulset/polar-neo4j", label: "neo4j" })
@@ -642,10 +647,10 @@ def step_browser [username: string] {
 # accepts as an administrator, and the credentials agent must be up to take the policy.
 def seed_waits [] {
     [
-        { kind: "pods", ns: $POLAR, ref: "job-name=polar-git-server", label: "polar-git-server" }
-        { kind: "pods", ns: $POLAR, ref: "job-name=polar-scheduler-observer", label: "polar-scheduler-observer" }
-        { kind: "pods", ns: $POLAR, ref: "job-name=polar-scheduler", label: "polar-scheduler" }
-        { kind: "pods", ns: $POLAR, ref: "job-name=credentials-agent", label: "credentials-agent" }
+        { kind: "pods", ns: $POLAR, ref: "name=polar-git-server", label: "polar-git-server" }
+        { kind: "pods", ns: $POLAR, ref: "name=polar-scheduler-observer", label: "polar-scheduler-observer" }
+        { kind: "pods", ns: $POLAR, ref: "name=polar-scheduler", label: "polar-scheduler" }
+        { kind: "pods", ns: $POLAR, ref: "name=credentials-agent", label: "credentials-agent" }
     ]
 }
 
@@ -738,7 +743,7 @@ def step_seed [target: string, config: record, username: string, mail: string, a
     # The seed is part of the cluster being up: say so only when the credentials agent has the policy.
     let deadline = ((date now) + 3min)
     loop {
-        let pod = (^kubectl -n $POLAR get pods -l job-name=credentials-agent --field-selector=status.phase=Running -o name | lines | first)
+        let pod = (^kubectl -n $POLAR get pods -l name=credentials-agent --field-selector=status.phase=Running -o name | lines | first)
         let logs = (^kubectl -n $POLAR logs $pod --tail=5000 | complete | get stdout)
         if (seed authority_published $logs "policy") { break }
         if (date now) > $deadline {

@@ -41,7 +41,7 @@ export def gate_after [file: string] {
 
 def gates [] {
     [
-        { file: "cassini.yaml", ns: $POLAR, ref: "job-name=cassini", label: "cassini" }
+        { file: "cassini.yaml", ns: $POLAR, ref: "name=cassini", label: "cassini" }
     ]
 }
 
@@ -134,8 +134,8 @@ export def config_users [manifest: string] {
 # when its pods start. Not when its own spec changed (its `metadata.generation` went up, so it is rolling
 # already: `kubectl apply` prints `configured` for more than that, so its words are not the test), and not when it
 # did not exist before. `before` and `after` are the generation around the apply, null when there is none.
-export def workload_needs_restart [before: any, after: any, changed_configmaps: list] {
-    ($changed_configmaps | is-not-empty) and ($before != null) and ($before == $after)
+export def workload_needs_restart [before: any, after: any, changed_configmaps: list, stale: list = []] {
+    (($changed_configmaps | is-not-empty) or ($stale | is-not-empty)) and ($before != null) and ($before == $after)
 }
 
 # The containers of running pods that run a different image than the registry serves now for the name they were started from, as
