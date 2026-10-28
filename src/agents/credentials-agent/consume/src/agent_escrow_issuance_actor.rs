@@ -21,11 +21,12 @@
    DM26-0670
 */
 
-//! Wraps AgentEscrowIssuanceHandler in its own actor -- mirrors
-//! issuance_actor.rs's own IssuanceActor exactly, for the identical
-//! reason: deserialize_and_dispatch is synchronous and can't itself
-//! await this handler's own async work (cert-issuer's two HTTP
-//! calls, ledger RPCs).
+//! Wraps AgentEscrowIssuanceHandler in its own actor: the dispatch is
+//! synchronous and can't itself await this handler's own async work
+//! (cert-issuer's HTTP call, ledger RPCs). Carries the broker-verified
+//! published_by, since only the workload's custodian is answered
+//! (docs/architecture/key-custody.md, "Part A's bootstrap: the
+//! custodian").
 
 use crate::agent_escrow_issuance::AgentEscrowIssuanceHandler;
 use crate::supervisor::BROKER_CLIENT_NAME;
@@ -47,9 +48,15 @@ pub struct AgentEscrowIssuanceActorState {
     handler: AgentEscrowIssuanceHandler,
 }
 
+/// The envelope, bundled with the broker-verified published_by.
+pub struct AgentEscrowIssuanceDispatch {
+    pub envelope: Envelope<AgentEscrowIssuanceRequest>,
+    pub published_by: Option<String>,
+}
+
 #[async_trait]
 impl Actor for AgentEscrowIssuanceActor {
-    type Msg = Envelope<AgentEscrowIssuanceRequest>;
+    type Msg = AgentEscrowIssuanceDispatch;
     type State = AgentEscrowIssuanceActorState;
     type Arguments = AgentEscrowIssuanceActorArgs;
 
@@ -69,8 +76,11 @@ impl Actor for AgentEscrowIssuanceActor {
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let correlation_id = message.correlation_id.clone();
-        let reply = state.handler.handle(message.payload).await;
+        let correlation_id = message.envelope.correlation_id.clone();
+        let reply = state
+            .handler
+            .handle(message.envelope.payload, message.published_by)
+            .await;
 
         let envelope = Envelope {
             correlation_id,

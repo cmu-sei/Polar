@@ -1106,17 +1106,6 @@ async fn publish_retrieve_agent_escrow_keypair_request(
     .await
 }
 
-/// Reads this pod's own, mounted Kubernetes service-account token --
-/// mirrors cert-issuer/server's own oidc.rs (the established pattern
-/// for this in this codebase): re-read on every call, never cached,
-/// since Kubernetes rotates this token automatically and a cached
-/// copy could genuinely be expired by the time it's used.
-fn read_kubernetes_sa_token(path: &str) -> Result<String, CryptoError> {
-    std::fs::read_to_string(path)
-        .map(|s| s.trim().to_string())
-        .map_err(|e| CryptoError::CredentialUnavailable(format!("{path}: {e}")))
-}
-
 /// The complete agent escrow-keypair bootstrap sequence -- see
 /// CryptoMessage::EnsureOwnEscrowKeypair's own doc comment for the
 /// full, intended behavior.
@@ -1145,10 +1134,9 @@ async fn handle_ensure_own_escrow_keypair(
         return Ok(existing_key);
     }
 
-    // Step 2: issuance fallback. Read this pod's own, real Kubernetes
-    // credential -- the same one cert-issuer's own oidc.rs already
-    // knows how to validate on the receiving end.
-    let credential = read_kubernetes_sa_token(&paths.service_account_token)?;
+    // Step 2: issuance fallback. Answered only to the workload's custodian since the custody daemon keeps the key
+    // (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"); this path is retired with it.
+    let _ = &paths.service_account_token;
 
     // Step 3: generate a real CSR, RSA specifically -- this is the
     // agent's own encryption-capable escrow identity, not a
@@ -1163,7 +1151,6 @@ async fn handle_ensure_own_escrow_keypair(
         &agent_escrow_issuance_reply_router,
         AgentEscrowIssuanceRequest {
             csr_pem: csr_output.csr_pem,
-            credential,
         },
     )
     .await?;

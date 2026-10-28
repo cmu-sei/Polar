@@ -23,17 +23,22 @@
 
 //! The third issuance lifecycle -- automated agent escrow-identity
 //! issuance. Deliberately its own handler, not a reuse of
-//! IssuanceHandler, mirroring that handler's own overall shape
-//! (credential classification through cert-issuer's two endpoints,
-//! the ledger's own checks, reply construction) but with every step
-//! adapted to this flow's genuinely different semantics -- see each
-//! step's own comment for exactly what differs and why.
+//! IssuanceHandler: a service's escrow identity is durable, one per
+//! identity, not one per pod instance.
+//!
+//! Asked for by the workload's custodian, never by the workload, and
+//! with no token (docs/architecture/key-custody.md, "Part A's
+//! bootstrap: the custodian"): the custodian's certificate is what its
+//! pod's token bought, and it names the escrow key. The escrow key is
+//! made in the custody daemon; its CSR names the workload, and the
+//! certificate is signed on `/internal/issue` for the workload.
 
-use crate::credential::{CredentialKind, classify_credential};
+use crate::custodian::{CustodianRefusal, custodian};
 use crate::escrow::EscrowKeypair;
 use crate::ledger::LedgerMessage;
 use cert_client::handshake::HandshakeClient;
 use cert_issuer_common::CertType;
+use cert_issuer_common::custody::CustodyPermission;
 use cert_issuer_common::permission::{Permission, PermissionScope};
 use credentials_agent_common::agent_escrow_issuance::{
     AgentEscrowIssuanceRefusalReason, AgentEscrowIssuanceReply, AgentEscrowIssuanceRequest,
@@ -50,7 +55,7 @@ use tracing::{error, warn};
 /// default: unrestricted service-to-service communication, no
 /// specific target -- matching admin bootstrap's own "nothing more
 /// privileged than any other agent gets" reasoning. A real grant
-/// still overrides this when one exists (see Step 5, below); this is
+/// still overrides this when one exists (see Step 3, below); this is
 /// only ever the fallback, not a ceiling on what's expressible.
 fn default_agent_escrow_permissions() -> Vec<Permission> {
     vec![Permission {
@@ -61,171 +66,116 @@ fn default_agent_escrow_permissions() -> Vec<Permission> {
 
 pub struct AgentEscrowIssuanceHandler {
     pub ledger: ActorRef<LedgerMessage>,
+    /// cert-issuer, reached with this agent's own certificate, for `/internal/issue`.
     pub cert_issuer: HandshakeClient,
-    pub known_kubernetes_issuers: Vec<String>,
     pub escrow_keypair: Arc<EscrowKeypair>,
 }
 
 impl AgentEscrowIssuanceHandler {
-    pub async fn handle(&self, request: AgentEscrowIssuanceRequest) -> AgentEscrowIssuanceReply {
-        // ---- Step 1: classify the credential ----
-        // Same mechanism as IssuanceHandler's own Step 1, but this
-        // flow only ever accepts a genuine Kubernetes credential --
-        // an agent's own service identity, never a human's IdP token.
-        // Anything else is a real anomaly worth a clear, explicit
-        // refusal, not a silent misroute or a fallback attempt to
-        // treat it as one anyway.
-        let kind = match classify_credential(&request.credential, &self.known_kubernetes_issuers) {
-            Ok(k) => k,
-            Err(e) => {
-                warn!("Credential classification failed: {e}");
-                return AgentEscrowIssuanceReply::Refused {
-                    reason: AgentEscrowIssuanceRefusalReason::CredentialInvalid,
-                };
-            }
-        };
-        if kind != CredentialKind::Kubernetes {
-            warn!(
-                "Agent escrow-identity issuance request arrived with a non-Kubernetes credential -- refusing"
-            );
-            return AgentEscrowIssuanceReply::Refused {
-                reason: AgentEscrowIssuanceRefusalReason::NotAKubernetesCredential,
-            };
-        }
-
-        // No introspection step here at all -- a Kubernetes
-        // credential never goes through it, matching how
-        // IssuanceHandler's own Kubernetes-credential path already
-        // skips it entirely (only LikelyIdp calls introspection
-        // there).
-
-        // ---- Step 2: real validation via cert-issuer's /validate ----
-        // Identical mechanism to IssuanceHandler's own Step 3.
-        let validated = match self
-            .cert_issuer
-            .validate(
-                &request.credential,
-                // The certificate's own identity: what the pod presents on every mTLS connection, and so what
-                // the retrieve handler looks its escrow key up by.
-                cert_issuer_common::ValidateRequest {
-                    include_normalized_identity: true,
-                },
-            )
-            .await
+    pub async fn handle(
+        &self,
+        request: AgentEscrowIssuanceRequest,
+        requested_by: Option<String>,
+    ) -> AgentEscrowIssuanceReply {
+        let refused = |reason| AgentEscrowIssuanceReply::Refused { reason };
+        // ---- Step 1: who asks: the workload's custodian, live, in its window, its certificate naming the key ----
+        let custodian = match custodian(
+            &self.ledger,
+            requested_by.as_deref(),
+            CustodyPermission::Escrow,
+        )
+        .await
         {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("cert-issuer /validate rejected the credential: {e}");
-                return AgentEscrowIssuanceReply::Refused {
-                    reason: AgentEscrowIssuanceRefusalReason::CredentialInvalid,
-                };
+            Ok(custodian) => custodian,
+            Err(CustodianRefusal::WindowClosed) => {
+                return refused(AgentEscrowIssuanceRefusalReason::CustodianWindowClosed);
+            }
+            Err(CustodianRefusal::NotACustodian(why)) => {
+                warn!(?requested_by, "agent escrow issuance refused: {why}");
+                return refused(AgentEscrowIssuanceRefusalReason::NotACustodian);
+            }
+            Err(CustodianRefusal::Unavailable(e)) => {
+                error!("the ledger could not be asked about a custodian: {e}");
+                return refused(AgentEscrowIssuanceRefusalReason::NotACustodian);
             }
         };
+        let identity = custodian.workload;
 
-        // Two names for one credential: a grant is written under the token's own identity, and everything
-        // else in the ledger (the renewal check, the record) is keyed on the certificate's. With no normalized
-        // identity there is no telling where the certificate would be looked for, so the request is refused.
-        let token_identity = validated.workload_identity;
-        let Some(identity) = validated.normalized_identity else {
-            warn!(
-                "cert-issuer gave no normalized identity for '{token_identity}' -- refusing rather than recording the certificate where nothing looks for it"
-            );
-            return AgentEscrowIssuanceReply::Refused {
-                reason: AgentEscrowIssuanceRefusalReason::CredentialInvalid,
-            };
-        };
-        // Still extracted and still recorded on the resulting event
-        // (see Step 6, below), for the same audit-visibility reason
-        // IssuanceCompleted records it -- but, unlike IssuanceHandler's
-        // own Step 3, a missing instance_binding doesn't fail this
-        // request closed: the renewal-prevention check this flow uses
-        // (Step 3, below) is identity-scoped, not
-        // (identity, instance_binding)-scoped, so it doesn't actually
-        // depend on this claim being present the way the ordinary
-        // mTLS issuance flow's own check does.
-        let instance_binding = validated.instance_binding.unwrap_or_default();
-
-        // ---- Step 3: renewal-prevention check, identity-scoped ----
-        // Deliberately not IssuanceHandler's own CheckRenewal (which
-        // is keyed on (identity, instance_binding), a pod-instance
-        // concept) -- a service's escrow identity isn't pod-scoped at
-        // all. See AgentEscrowCertificateRecord's own doc comment
-        // (state.rs) for why a second, competing service certificate
-        // for the same identity would break a real invariant the
-        // certificate-lookup query relies on.
-        let already_has_one = match call_check_agent_escrow_renewal(&self.ledger, &identity).await {
-            Ok(v) => v,
+        // ---- Step 2: renewal-prevention check, identity-scoped ----
+        //
+        // Not the pod-instance renewal rule: a service's escrow identity
+        // isn't pod-scoped at all. See AgentEscrowCertificateRecord's own
+        // doc comment (state.rs) for why a second, competing service
+        // certificate for the same identity would break a real invariant
+        // the certificate-lookup query relies on.
+        match call_check_agent_escrow_renewal(&self.ledger, &identity).await {
+            Ok(false) => {}
+            Ok(true) => {
+                return refused(
+                    AgentEscrowIssuanceRefusalReason::AlreadyHasValidServiceCertificate,
+                );
+            }
             Err(e) => {
                 error!("Ledger CheckAgentEscrowRenewal call failed: {e}");
-                return AgentEscrowIssuanceReply::Refused {
-                    reason: AgentEscrowIssuanceRefusalReason::CredentialInvalid,
-                };
+                return refused(AgentEscrowIssuanceRefusalReason::CredentialInvalid);
             }
-        };
-        if already_has_one {
-            return AgentEscrowIssuanceReply::Refused {
-                reason: AgentEscrowIssuanceRefusalReason::AlreadyHasValidServiceCertificate,
-            };
         }
 
-        // ---- Step 4: grant lookup, defaulting to a uniform set ----
-        // Same real infrastructure IssuanceHandler's own Kubernetes-
-        // credential path already uses (grant.map(|g| g.permissions)
-        // .unwrap_or_default()) -- "uniform for now" means this real
-        // mechanism exists and currently falls back to a default when
-        // no grant is found, not that the mechanism was skipped
-        // entirely. An admin who has explicitly granted specific
-        // permissions to this identity ahead of time still overrides
-        // the default.
-        let grant = match call_check_grant(&self.ledger, &token_identity).await {
-            Ok(g) => g,
-            Err(e) => {
-                error!("Ledger CheckGrant call failed: {e}");
-                return AgentEscrowIssuanceReply::Refused {
-                    reason: AgentEscrowIssuanceRefusalReason::CredentialInvalid,
-                };
-            }
+        // ---- Step 3: grant lookup, defaulting to a uniform set ----
+        //
+        // A grant is written under the workload's token subject, which the
+        // custodian's path has no token to read: it is the inverse of the
+        // workload identity's normalization.
+        let grant = match cert_issuer_common::identity::kubernetes_subject_of(&identity) {
+            Some(subject) => match call_check_grant(&self.ledger, &subject).await {
+                Ok(grant) => grant,
+                Err(e) => {
+                    error!("Ledger CheckGrant call failed: {e}");
+                    return refused(AgentEscrowIssuanceRefusalReason::CredentialInvalid);
+                }
+            },
+            None => None,
         };
         let permissions = grant
             .map(|g| g.permissions)
             .unwrap_or_else(default_agent_escrow_permissions);
 
-        // ---- Step 5: sign, via cert-issuer's /issue ----
-        // CertType::Service, not CertType::Client -- this is a
-        // service's own durable encryption identity, never a TLS
-        // handshake role. See cert-issuer-common's own CertType::Service
-        // doc comment for the full X.509 extension reasoning.
-        let extra_sans: Vec<String> = permissions.iter().map(|p| p.to_san_string()).collect();
+        // ---- Step 4: sign, via cert-issuer's /internal/issue, for the workload ----
+        //
+        // CertType::Service: a service's own durable encryption identity,
+        // never a TLS role, and not one that ends with the custodian: it
+        // outlives every pod.
         let issued = match self
             .cert_issuer
-            .issue(
-                &request.credential,
-                &request.csr_pem,
-                CertType::Service,
-                extra_sans,
-                None,
-            )
+            .issue_internal(cert_issuer_common::InternalIssueRequest {
+                csr_pem: request.csr_pem,
+                identity: identity.clone(),
+                cert_type: CertType::Service,
+                extra_sans: permissions.iter().map(|p| p.to_san_string()).collect(),
+                subject_dn_defaults: None,
+                account_subject: None,
+                instance_binding: Some(custodian.instance_binding.clone()),
+                expires_by: None,
+            })
             .await
         {
             Ok(r) => r,
             Err(e) => {
-                error!("cert-issuer /issue failed after all prior checks passed: {e}");
-                return AgentEscrowIssuanceReply::Refused {
-                    reason: AgentEscrowIssuanceRefusalReason::SigningFailed,
-                };
+                error!("cert-issuer /internal/issue failed after all prior checks passed: {e}");
+                return refused(AgentEscrowIssuanceRefusalReason::SigningFailed);
             }
         };
 
-        // ---- Step 6: record the issuance ----
+        // ---- Step 5: record the issuance ----
+        //
         // AgentEscrowIssuanceCompleted, not IssuanceCompleted -- a
         // genuinely different event for a genuinely different kind of
-        // certificate. Same "already signed, so a logging failure
-        // here is an audit-trail gap, not a reason to fail the
-        // caller's already-valid certificate" reasoning as
-        // IssuanceHandler's own Step 7.
+        // certificate. Already signed, so a logging failure here is an
+        // audit-trail gap, not a reason to fail the caller's valid
+        // certificate.
         let event = CredentialsEvent::AgentEscrowIssuanceCompleted {
             identity,
-            instance_binding,
+            instance_binding: custodian.instance_binding,
             serial: issued.serial_number,
             timestamp: polar::time::now_millis(),
             certificate_pem: issued.certificate_pem.clone(),
@@ -306,35 +256,11 @@ async fn call_append(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::{LedgerActor, LedgerActorArgs};
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use crate::custodian::tests::{CUSTODIAN, POD, X, ledger_with_custodian};
+    use credentials_agent_common::custodian::CUSTODIAN_WINDOW_SECS;
     use credentials_agent_common::events::GrantReason;
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn make_token(iss: &str) -> String {
-        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
-        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"iss":"{iss}"}}"#));
-        format!("{header}.{payload}.")
-    }
-
-    async fn spawn_test_ledger() -> ActorRef<LedgerMessage> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("events.jsonl");
-        std::mem::forget(dir);
-        let (ledger, _) = ractor::Actor::spawn(
-            None,
-            LedgerActor,
-            LedgerActorArgs {
-                log_path: path.to_str().unwrap().to_string(),
-                projection_actor: crate::projection::tests::fake_projection_actor().await,
-            },
-        )
-        .await
-        .unwrap();
-        ledger
-    }
 
     fn fake_issue_response() -> cert_issuer_common::IssueResponse {
         cert_issuer_common::IssueResponse {
@@ -342,384 +268,169 @@ mod tests {
                 "-----BEGIN CERTIFICATE-----\nfake-service\n-----END CERTIFICATE-----\n".to_string(),
             ca_chain_pem: "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----\n"
                 .to_string(),
-            serial_number: "service-01:23:45".to_string(),
-            session_id: "00000000-0000-0000-0000-000000000002".to_string(),
-            expires_at: time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+            serial_number: "service-serial".to_string(),
+            session_id: "00000000-0000-0000-0000-000000000001".to_string(),
+            expires_at: time::OffsetDateTime::now_utc() + time::Duration::days(365),
+        }
+    }
+
+    /// cert-issuer, signing a service certificate for the workload with `extra_sans`, and nothing else.
+    async fn cert_issuer_signing(extra_sans: &[&str]) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/internal/issue"))
+            .and(body_partial_json(serde_json::json!({
+                "identity": X,
+                "cert_type": "SERVICE",
+                "instance_binding": POD,
+                "extra_sans": extra_sans,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fake_issue_response()))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn handler(ledger: ActorRef<LedgerMessage>, server: &MockServer) -> AgentEscrowIssuanceHandler {
+        AgentEscrowIssuanceHandler {
+            ledger,
+            cert_issuer: HandshakeClient::new(server.uri()),
+            escrow_keypair: crate::escrow::tests::test_keypair(),
+        }
+    }
+
+    fn request() -> AgentEscrowIssuanceRequest {
+        AgentEscrowIssuanceRequest {
+            csr_pem: "fake-csr".to_string(),
+        }
+    }
+
+    fn reason(reply: &AgentEscrowIssuanceReply) -> Option<AgentEscrowIssuanceRefusalReason> {
+        match reply {
+            AgentEscrowIssuanceReply::Refused { reason } => Some(reason.clone()),
+            _ => None,
         }
     }
 
     #[tokio::test]
-    async fn kubernetes_credential_succeeds_and_issues_a_service_certificate() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/validate"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                cert_issuer_common::ValidateResponse {
-                    workload_identity:
-                        "git-observer.polar.serviceaccount.cluster.local".to_string(),
-                    instance_binding: Some("pod-uid-1".to_string()),
-                    jti: None,
-                    normalized_identity: Some(
-                        "git-observer.polar.serviceaccount.cluster.local".to_string(),
-                    ),
-                },
-            ))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/issue"))
-            .and(body_partial_json(serde_json::json!({
-                "cert_type": "SERVICE"
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(fake_issue_response()))
-            .mount(&server)
-            .await;
-
-        let handler = AgentEscrowIssuanceHandler {
-            ledger: spawn_test_ledger().await,
-            cert_issuer: HandshakeClient::new(server.uri()),
-            known_kubernetes_issuers: vec![
-                "https://kubernetes.default.svc.cluster.local".to_string(),
-            ],
-            escrow_keypair: crate::escrow::tests::test_keypair(),
-        };
-
-        let reply = handler
-            .handle(AgentEscrowIssuanceRequest {
-                csr_pem: "fake-csr".to_string(),
-                credential: make_token("https://kubernetes.default.svc.cluster.local"),
-            })
-            .await;
-
-        assert!(matches!(reply, AgentEscrowIssuanceReply::Issued { .. }));
-    }
-
-    #[tokio::test]
-    async fn idp_credential_is_refused_as_not_a_kubernetes_credential() {
-        let handler = AgentEscrowIssuanceHandler {
-            ledger: spawn_test_ledger().await,
-            cert_issuer: HandshakeClient::new("http://127.0.0.1:1".to_string()),
-            known_kubernetes_issuers: vec![
-                "https://kubernetes.default.svc.cluster.local".to_string(),
-            ],
-            escrow_keypair: crate::escrow::tests::test_keypair(),
-        };
-
-        let reply = handler
-            .handle(AgentEscrowIssuanceRequest {
-                csr_pem: "fake-csr".to_string(),
-                credential: make_token(
-                    "http://keycloak-svc.polar-auth.svc.cluster.local:8080/realms/polar",
-                ),
-            })
-            .await;
-
-        assert!(matches!(
-            reply,
-            AgentEscrowIssuanceReply::Refused {
-                reason: AgentEscrowIssuanceRefusalReason::NotAKubernetesCredential
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn the_service_certificate_is_found_by_the_identity_the_certificate_carries() {
-        // The retrieve handler asks whether the requester has an escrow key by the identity of its mTLS
-        // connection, which is the certificate's DNS name, not the token's raw identity.
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/validate"))
-            // cert-issuer returns the normalized identity only when asked for it.
-            .and(body_partial_json(serde_json::json!({
-                "include_normalized_identity": true
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                cert_issuer_common::ValidateResponse {
-                    workload_identity: "system:serviceaccount:polar:git-observer".to_string(),
-                    instance_binding: Some("pod-uid-1".to_string()),
-                    jti: None,
-                    normalized_identity: Some(
-                        "git-observer.polar.serviceaccount.cluster.local".to_string(),
-                    ),
-                },
-            ))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/issue"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(fake_issue_response()))
-            .mount(&server)
-            .await;
-        let ledger = spawn_test_ledger().await;
-        let handler = AgentEscrowIssuanceHandler {
-            ledger: ledger.clone(),
-            cert_issuer: HandshakeClient::new(server.uri()),
-            known_kubernetes_issuers: vec![
-                "https://kubernetes.default.svc.cluster.local".to_string(),
-            ],
-            escrow_keypair: crate::escrow::tests::test_keypair(),
-        };
-        let reply = handler
-            .handle(AgentEscrowIssuanceRequest {
-                csr_pem: "fake-csr".to_string(),
-                credential: make_token("https://kubernetes.default.svc.cluster.local"),
-            })
+    async fn a_custodian_is_issued_its_workload_s_service_certificate_recorded_under_the_workload()
+    {
+        let ledger = ledger_with_custodian(&[CustodyPermission::Escrow], 0).await;
+        let server = cert_issuer_signing(&["p:s2s"]).await;
+        let reply = handler(ledger.clone(), &server)
+            .handle(request(), Some(CUSTODIAN.to_string()))
             .await;
         assert!(
             matches!(reply, AgentEscrowIssuanceReply::Issued { .. }),
             "{reply:?}"
         );
-
         assert!(
-            call_check_agent_escrow_renewal(
-                &ledger,
-                "git-observer.polar.serviceaccount.cluster.local"
-            )
-            .await
-            .unwrap(),
-            "the service certificate is not found by the identity it presents"
+            call_check_agent_escrow_renewal(&ledger, X).await.unwrap(),
+            "the service certificate is not found by the workload's identity"
         );
         assert!(
-            !call_check_agent_escrow_renewal(&ledger, "system:serviceaccount:polar:git-observer")
+            !call_check_agent_escrow_renewal(&ledger, CUSTODIAN)
                 .await
                 .unwrap(),
-            "the raw token identity must not be what it is recorded under"
+            "the custodian's identity must not be what it is recorded under"
         );
     }
 
     #[tokio::test]
-    async fn a_credential_the_issuer_gave_no_normalized_identity_for_is_refused() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/validate"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                cert_issuer_common::ValidateResponse {
-                    workload_identity: "system:serviceaccount:polar:git-observer".to_string(),
-                    instance_binding: Some("pod-uid-1".to_string()),
-                    jti: None,
-                    normalized_identity: None,
-                },
-            ))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/issue"))
-            .respond_with(ResponseTemplate::new(500))
-            .expect(0)
-            .mount(&server)
-            .await;
-        let handler = AgentEscrowIssuanceHandler {
-            ledger: spawn_test_ledger().await,
-            cert_issuer: HandshakeClient::new(server.uri()),
-            known_kubernetes_issuers: vec![
-                "https://kubernetes.default.svc.cluster.local".to_string(),
-            ],
-            escrow_keypair: crate::escrow::tests::test_keypair(),
-        };
-        let reply = handler
-            .handle(AgentEscrowIssuanceRequest {
-                csr_pem: "fake-csr".to_string(),
-                credential: make_token("https://kubernetes.default.svc.cluster.local"),
-            })
-            .await;
-        assert!(
-            matches!(
-                reply,
-                AgentEscrowIssuanceReply::Refused {
-                    reason: AgentEscrowIssuanceRefusalReason::CredentialInvalid
-                }
+    async fn no_one_but_the_workload_s_live_custodian_in_its_window_naming_the_key_is_answered() {
+        for (requester, permissions, age, expected) in [
+            (
+                Some(X),
+                vec![CustodyPermission::Escrow],
+                0,
+                AgentEscrowIssuanceRefusalReason::NotACustodian,
             ),
-            "{reply:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn already_has_a_service_certificate_is_refused_and_issue_is_never_called() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/validate"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                cert_issuer_common::ValidateResponse {
-                    workload_identity:
-                        "git-observer.polar.serviceaccount.cluster.local".to_string(),
-                    instance_binding: Some("pod-uid-2".to_string()),
-                    jti: None,
-                    normalized_identity: Some(
-                        "git-observer.polar.serviceaccount.cluster.local".to_string(),
-                    ),
-                },
-            ))
-            .mount(&server)
-            .await;
-        // /issue is deliberately NOT mocked -- if it's ever called, the
-        // request fails with no matching mock, which this test
-        // explicitly checks for below.
-        let issue_mock = Mock::given(method("POST")).and(path("/issue"));
-        issue_mock
-            .respond_with(ResponseTemplate::new(500))
-            .expect(0)
-            .mount(&server)
-            .await;
-
-        let ledger = spawn_test_ledger().await;
-        // Seed a prior service certificate for the SAME identity but a
-        // DIFFERENT instance_binding -- proving the check is genuinely
-        // identity-scoped, not pod-instance-scoped the way ordinary
-        // mTLS renewal-prevention is.
-        let _ =
-            ractor::rpc::call(
-                &ledger,
-                |reply| LedgerMessage::Append {
-                    event: CredentialsEvent::AgentEscrowIssuanceCompleted {
-                        identity: "git-observer.polar.serviceaccount.cluster.local".to_string(),
-                        instance_binding: "pod-uid-1".to_string(),
-                        serial: "already-issued-service-serial".to_string(),
-                        timestamp: 1000,
-                        certificate_pem:
-                            "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
-                                .to_string(),
-                    },
-                    reply,
-                },
+            (
                 None,
-            )
-            .await
-            .unwrap();
-
-        let handler = AgentEscrowIssuanceHandler {
-            ledger,
-            cert_issuer: HandshakeClient::new(server.uri()),
-            known_kubernetes_issuers: vec![
-                "https://kubernetes.default.svc.cluster.local".to_string(),
-            ],
-            escrow_keypair: crate::escrow::tests::test_keypair(),
-        };
-
-        let reply = handler
-            .handle(AgentEscrowIssuanceRequest {
-                csr_pem: "fake-csr".to_string(),
-                credential: make_token("https://kubernetes.default.svc.cluster.local"),
-            })
-            .await;
-
-        assert!(matches!(
-            reply,
-            AgentEscrowIssuanceReply::Refused {
-                reason: AgentEscrowIssuanceRefusalReason::AlreadyHasValidServiceCertificate
-            }
-        ));
-        server.verify().await;
+                vec![CustodyPermission::Escrow],
+                0,
+                AgentEscrowIssuanceRefusalReason::NotACustodian,
+            ),
+            (
+                Some(CUSTODIAN),
+                vec![CustodyPermission::Client],
+                0,
+                AgentEscrowIssuanceRefusalReason::NotACustodian,
+            ),
+            (
+                Some(CUSTODIAN),
+                vec![CustodyPermission::Escrow],
+                (CUSTODIAN_WINDOW_SECS + 1) * 1000,
+                AgentEscrowIssuanceRefusalReason::CustodianWindowClosed,
+            ),
+        ] {
+            let ledger = ledger_with_custodian(&permissions, age).await;
+            let server = cert_issuer_signing(&["p:s2s"]).await;
+            let reply = handler(ledger, &server)
+                .handle(request(), requester.map(str::to_string))
+                .await;
+            assert_eq!(
+                reason(&reply),
+                Some(expected),
+                "{requester:?} {permissions:?} {age}"
+            );
+            assert!(server.received_requests().await.unwrap().is_empty());
+        }
     }
 
     #[tokio::test]
-    async fn no_grant_found_falls_back_to_the_uniform_default_permission_set() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/validate"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                cert_issuer_common::ValidateResponse {
-                    workload_identity:
-                        "system:serviceaccount:polar:nobody-granted-this".to_string(),
-                    instance_binding: Some("pod-uid-1".to_string()),
-                    jti: None,
-                    normalized_identity: Some(
-                        "nobody-granted-this.polar.serviceaccount.cluster.local".to_string(),
-                    ),
-                },
-            ))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/issue"))
-            .and(body_partial_json(serde_json::json!({
-                "extra_sans": ["p:s2s"]
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(fake_issue_response()))
-            .mount(&server)
-            .await;
-
-        let handler = AgentEscrowIssuanceHandler {
-            ledger: spawn_test_ledger().await,
-            cert_issuer: HandshakeClient::new(server.uri()),
-            known_kubernetes_issuers: vec![
-                "https://kubernetes.default.svc.cluster.local".to_string(),
-            ],
-            escrow_keypair: crate::escrow::tests::test_keypair(),
-        };
-
-        let reply = handler
-            .handle(AgentEscrowIssuanceRequest {
-                csr_pem: "fake-csr".to_string(),
-                credential: make_token("https://kubernetes.default.svc.cluster.local"),
-            })
-            .await;
-
-        assert!(matches!(reply, AgentEscrowIssuanceReply::Issued { .. }));
-    }
-
-    #[tokio::test]
-    async fn existing_grant_overrides_the_default_permission_set() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/validate"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                cert_issuer_common::ValidateResponse {
-                    workload_identity: "system:serviceaccount:polar:special-agent".to_string(),
-                    instance_binding: Some("pod-uid-1".to_string()),
-                    jti: None,
-                    normalized_identity: Some(
-                        "special-agent.polar.serviceaccount.cluster.local".to_string(),
-                    ),
-                },
-            ))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/issue"))
-            .and(body_partial_json(serde_json::json!({
-                "extra_sans": ["p:s2s:cassini.cluster.local"]
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(fake_issue_response()))
-            .mount(&server)
-            .await;
-
-        let ledger = spawn_test_ledger().await;
-        let _ = ractor::rpc::call(
+    async fn already_has_a_service_certificate_is_refused_and_cert_issuer_is_never_asked() {
+        let ledger = ledger_with_custodian(&[CustodyPermission::Escrow], 0).await;
+        // A prior service certificate for the same identity but another pod: the check is identity-scoped.
+        call_append(
             &ledger,
-            |reply| LedgerMessage::Append {
-                event: CredentialsEvent::Grant {
-                    target_identity: "system:serviceaccount:polar:special-agent".to_string(),
-                    permissions: vec![Permission {
-                        scope: PermissionScope::ServiceToService,
-                        target: Some("cassini.cluster.local".to_string()),
-                    }],
-                    granted_by: "admin".to_string(),
-                    timestamp: 1000,
-                    reason: GrantReason::ServiceOnboarding,
-                },
-                reply,
+            CredentialsEvent::AgentEscrowIssuanceCompleted {
+                identity: X.to_string(),
+                instance_binding: "pod-uid-0".to_string(),
+                serial: "already-issued-service-serial".to_string(),
+                timestamp: 1000,
+                certificate_pem: "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
+                    .to_string(),
             },
-            None,
         )
         .await
         .unwrap();
-
-        let handler = AgentEscrowIssuanceHandler {
-            ledger,
-            cert_issuer: HandshakeClient::new(server.uri()),
-            known_kubernetes_issuers: vec![
-                "https://kubernetes.default.svc.cluster.local".to_string(),
-            ],
-            escrow_keypair: crate::escrow::tests::test_keypair(),
-        };
-
-        let reply = handler
-            .handle(AgentEscrowIssuanceRequest {
-                csr_pem: "fake-csr".to_string(),
-                credential: make_token("https://kubernetes.default.svc.cluster.local"),
-            })
+        let server = cert_issuer_signing(&["p:s2s"]).await;
+        let reply = handler(ledger, &server)
+            .handle(request(), Some(CUSTODIAN.to_string()))
             .await;
+        assert_eq!(
+            reason(&reply),
+            Some(AgentEscrowIssuanceRefusalReason::AlreadyHasValidServiceCertificate)
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
 
-        assert!(matches!(reply, AgentEscrowIssuanceReply::Issued { .. }));
+    #[tokio::test]
+    async fn an_existing_grant_overrides_the_default_permission_set() {
+        let ledger = ledger_with_custodian(&[CustodyPermission::Escrow], 0).await;
+        call_append(
+            &ledger,
+            CredentialsEvent::Grant {
+                target_identity: "system:serviceaccount:polar:kube-consumer".to_string(),
+                permissions: vec![Permission {
+                    scope: PermissionScope::ServiceToService,
+                    target: Some("cassini.cluster.local".to_string()),
+                }],
+                granted_by: "admin".to_string(),
+                timestamp: 1000,
+                reason: GrantReason::ServiceOnboarding,
+            },
+        )
+        .await
+        .unwrap();
+        let server = cert_issuer_signing(&["p:s2s:cassini.cluster.local"]).await;
+        let reply = handler(ledger, &server)
+            .handle(request(), Some(CUSTODIAN.to_string()))
+            .await;
+        assert!(
+            matches!(reply, AgentEscrowIssuanceReply::Issued { .. }),
+            "{reply:?}"
+        );
     }
 }

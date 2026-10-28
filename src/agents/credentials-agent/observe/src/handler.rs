@@ -535,6 +535,10 @@ fn reply_to_response(reply: IssuanceReply) -> Response {
             IssuanceRefusalReason::SigningFailed => StatusCode::SERVICE_UNAVAILABLE,
             IssuanceRefusalReason::RequestNotPermitted => StatusCode::FORBIDDEN,
             IssuanceRefusalReason::TooSoon => StatusCode::TOO_MANY_REQUESTS,
+            // A custodian's answers, which come over Cassini and never through the observer; mapped all the same.
+            IssuanceRefusalReason::NotACustodian | IssuanceRefusalReason::CustodianWindowClosed => {
+                StatusCode::FORBIDDEN
+            }
         },
     };
     (status, Json(reply)).into_response()

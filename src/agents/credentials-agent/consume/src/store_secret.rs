@@ -43,7 +43,7 @@
 use crate::escrow::EscrowKeypair;
 use crate::ledger::{LedgerMessage, SecretStoreError};
 use crate::retrieve_secret::{call_check_certificate, call_check_secret};
-use credentials_agent_common::agent_escrow_keypair_bootstrap::agent_escrow_keypair_secret_name;
+use credentials_agent_common::agent_escrow_keypair_bootstrap::escrow_keypair_owner;
 use credentials_agent_common::events::CredentialsEvent;
 use credentials_agent_common::retrieve_secret::is_valid_secret_name;
 use credentials_agent_common::secret::{
@@ -60,10 +60,10 @@ pub struct StoreSecretHandler {
     pub policy: PolicyLookup,
 }
 
-/// What an identity may store when policy has nothing to say: a name in its own namespace, and the name its own
-/// escrow keypair is stored under.
+/// What an identity may store when policy has nothing to say: a name in its own namespace. The name an escrow keypair
+/// is stored under is never policy's or the floor's: it is its workload's custodian's, once (`store_escrow_keypair`).
 pub fn floor_allows(requester: &str, name: &str) -> bool {
-    namespace_of(name) == Some(requester) || name == agent_escrow_keypair_secret_name(requester)
+    namespace_of(name) == Some(requester)
 }
 
 fn refused(reason: StoreRefusalReason) -> StoreSecretReply {
@@ -85,6 +85,12 @@ impl StoreSecretHandler {
         if let Err(problem) = validate_labels(&request.labels) {
             debug!(%stored_by, %problem, "a store was refused for its labels");
             return refused(StoreRefusalReason::InvalidLabels);
+        }
+        // An agent's escrow key is its custodian's to store, once, and no one else's (docs/architecture/key-custody.md,
+        // "Part A's bootstrap: the custodian"): not the agent's, whose workload must never hold the key, and not
+        // policy's to widen.
+        if let Some(owner) = escrow_keypair_owner(&request.name).map(str::to_string) {
+            return self.store_escrow_keypair(&owner, request, stored_by).await;
         }
 
         let requester_certificate = match call_check_certificate(&self.ledger, &stored_by).await {
@@ -138,6 +144,43 @@ impl StoreSecretHandler {
             return refused(StoreRefusalReason::PolicyDenied);
         }
 
+        self.append(request, stored_by).await
+    }
+
+    /// The escrow key of `owner`, stored by its custodian, within its window, its certificate naming the key, when
+    /// nothing is stored under the name yet. Refused otherwise, saying nothing more than policy would.
+    async fn store_escrow_keypair(
+        &self,
+        owner: &str,
+        request: StoreSecretRequest,
+        stored_by: String,
+    ) -> StoreSecretReply {
+        match crate::custodian::custodian(
+            &self.ledger,
+            Some(&stored_by),
+            cert_issuer_common::custody::CustodyPermission::Escrow,
+        )
+        .await
+        {
+            Ok(custodian) if custodian.workload == owner => {}
+            Ok(_) | Err(_) => {
+                tracing::warn!(%stored_by, %owner, "an escrow key stored by someone other than its custodian: refused");
+                return refused(StoreRefusalReason::PolicyDenied);
+            }
+        }
+        match call_check_secret(&self.ledger, &request.name).await {
+            Ok(None) => {}
+            Ok(Some(_)) => return refused(StoreRefusalReason::NameTaken),
+            Err(e) => {
+                error!("Failed to check stored secret {}: {e}", request.name);
+                return StoreSecretReply::Failed { detail: e };
+            }
+        }
+        self.append(request, stored_by).await
+    }
+
+    /// Stores `request` as `stored_by`'s, once it is sealed to this agent's own key.
+    async fn append(&self, request: StoreSecretRequest, stored_by: String) -> StoreSecretReply {
         if request.secret.encrypted_to_pem() != self.escrow_keypair.public_key_pem() {
             return refused(StoreRefusalReason::WrongEscrowKey);
         }
@@ -277,24 +320,88 @@ mod tests {
         assert_eq!(stored.labels.get("kind").map(String::as_str), Some("token"));
     }
 
+    // ---- an escrow key: its custodian's to store, once, and no one else's, whatever policy says ------------------
+
+    /// A world whose ledger holds the custodian of `crate::custodian::tests::X`, its certificate naming `permissions`.
+    async fn world_with_custodian(
+        policy: Policy<'_>,
+        permissions: &[cert_issuer_common::custody::CustodyPermission],
+        age_millis: i64,
+    ) -> World {
+        let mut w = world(policy, &[crate::custodian::tests::X]).await;
+        let ledger = crate::custodian::tests::ledger_with_custodian(permissions, age_millis).await;
+        seed_mtls_certificate(&ledger, crate::custodian::tests::X).await;
+        w.handler.ledger = ledger.clone();
+        w.ledger = ledger;
+        w
+    }
+
     #[tokio::test]
-    async fn with_no_policy_loaded_an_agent_may_escrow_its_own_keypair_under_its_historic_name() {
-        let w = world(Policy::NoRules, &["alice", "bob"]).await;
-        let own = credentials_agent_common::agent_escrow_keypair_bootstrap::agent_escrow_keypair_secret_name("alice");
+    async fn an_escrow_key_is_stored_by_its_workload_s_custodian_once() {
+        use crate::custodian::tests::{CUSTODIAN, X};
+        use cert_issuer_common::custody::CustodyPermission;
+        let w = world_with_custodian(Policy::NoRules, &[CustodyPermission::Escrow], 0).await;
+        let name = credentials_agent_common::agent_escrow_keypair_bootstrap::agent_escrow_keypair_secret_name(X);
         assert_eq!(
             w.handler
-                .handle(request(&w, &own, b"k"), Some("alice".into()))
+                .handle(request(&w, &name, b"k"), Some(CUSTODIAN.into()))
                 .await,
             StoreSecretReply::Stored
         );
-        // Not another agent's keypair.
-        let theirs = credentials_agent_common::agent_escrow_keypair_bootstrap::agent_escrow_keypair_secret_name("alice");
+        assert_eq!(held(&w, &name).await.unwrap().stored_by, CUSTODIAN);
+        // Never replaced, not even by the custodian that stored it.
         assert_eq!(
             w.handler
-                .handle(request(&w, &theirs, b"k"), Some("bob".into()))
+                .handle(request(&w, &name, b"another"), Some(CUSTODIAN.into()))
                 .await,
-            refused(StoreRefusalReason::PolicyDenied)
+            refused(StoreRefusalReason::NameTaken)
         );
+    }
+
+    #[tokio::test]
+    async fn an_escrow_key_is_stored_by_no_one_else_however_policy_reads() {
+        use crate::custodian::tests::{CUSTODIAN, X};
+        use cert_issuer_common::custody::CustodyPermission;
+        use credentials_agent_common::agent_escrow_keypair_bootstrap::agent_escrow_keypair_secret_name;
+        use credentials_agent_common::custodian::CUSTODIAN_WINDOW_SECS;
+        for policy in [Policy::NoRules, Policy::Rules(PERMIT_ANY_STORE)] {
+            let w = world_with_custodian(policy, &[CustodyPermission::Escrow], 0).await;
+            for (name, by) in [
+                // the workload itself, whose workload must never hold the key
+                (agent_escrow_keypair_secret_name(X), X),
+                // the custodian, for another workload's key
+                (
+                    agent_escrow_keypair_secret_name("other.polar.serviceaccount.cluster.local"),
+                    CUSTODIAN,
+                ),
+            ] {
+                assert_eq!(
+                    w.handler
+                        .handle(request(&w, &name, b"k"), Some(by.into()))
+                        .await,
+                    refused(StoreRefusalReason::PolicyDenied),
+                    "{name} by {by}"
+                );
+            }
+        }
+        // A custodian whose certificate does not name the key, and one past its window.
+        for (permissions, age) in [
+            (vec![CustodyPermission::Client], 0),
+            (
+                vec![CustodyPermission::Escrow],
+                (CUSTODIAN_WINDOW_SECS + 1) * 1000,
+            ),
+        ] {
+            let w = world_with_custodian(Policy::Rules(PERMIT_ANY_STORE), &permissions, age).await;
+            let name = agent_escrow_keypair_secret_name(X);
+            assert_eq!(
+                w.handler
+                    .handle(request(&w, &name, b"k"), Some(CUSTODIAN.into()))
+                    .await,
+                refused(StoreRefusalReason::PolicyDenied),
+                "{permissions:?} {age}"
+            );
+        }
     }
 
     #[tokio::test]

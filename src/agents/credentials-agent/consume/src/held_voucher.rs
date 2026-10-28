@@ -62,17 +62,27 @@ pub fn rule(
     let refuse = |reason: &str| HeldDecision::Refuse {
         reason: reason.to_string(),
     };
-    if offer.identity == own_identity {
+    // A bootstrap service's custodian is held and vouched for as the service is (docs/architecture/key-custody.md,
+    // "Part A's bootstrap: the custodian"): judged by the service it keeps keys for.
+    let service = if offer.cert_type == CertType::Custody {
+        match cert_issuer_common::custody::custodian_of(&offer.identity) {
+            Some(service) => service,
+            None => return refuse("a custodian's certificate for no custodian's identity"),
+        }
+    } else {
+        offer.identity.as_str()
+    };
+    if service == own_identity {
         return refuse("the credentials agent's own successor is vouched for by no one");
     }
-    if !bootstrap.contains(&offer.identity) {
+    if !bootstrap.contains(service) {
         return refuse("not a bootstrap service");
     }
     if offer.instance_binding.is_none() {
         return refuse("its token is bound to no pod");
     }
     if workload_cert_type(&offer.cert_type).is_none() {
-        return refuse("neither a client nor a server certificate");
+        return refuse("neither a client, a server nor a custodian's certificate");
     }
     if too_soon {
         return refuse("this pod was issued a certificate of this type less than five minutes ago");
@@ -84,7 +94,8 @@ fn workload_cert_type(cert_type: &CertType) -> Option<WorkloadCertType> {
     match cert_type {
         CertType::Client => Some(WorkloadCertType::Client),
         CertType::Server => Some(WorkloadCertType::Server),
-        CertType::Service | CertType::Signing | CertType::Custody => None,
+        CertType::Custody => Some(WorkloadCertType::Custody),
+        CertType::Service | CertType::Signing => None,
     }
 }
 
@@ -303,6 +314,38 @@ mod tests {
         for t in [CertType::Service, CertType::Signing] {
             assert!(refused(ok(&offer(OBSERVER, Some("p"), t), false)).contains("neither"));
         }
+        // A bootstrap service's custodian is the service's to vouch for; the credentials agent's own is no one's, and
+        // one named for no service, or for a service that is not bootstrap, is refused.
+        let custodian = cert_issuer_common::custody::custodian_identity;
+        assert_eq!(
+            ok(
+                &offer(&custodian(CASSINI), Some("pod-2"), CertType::Custody),
+                false
+            ),
+            HeldDecision::Vouch
+        );
+        assert!(
+            refused(ok(
+                &offer(&custodian(OWN), Some("pod-3"), CertType::Custody),
+                false
+            ))
+            .contains("own successor")
+        );
+        assert!(
+            refused(ok(&offer(CASSINI, Some("pod-2"), CertType::Custody), false))
+                .contains("no custodian")
+        );
+        assert!(
+            refused(ok(
+                &offer(
+                    &custodian("kube-observer.polar.serviceaccount.cluster.local"),
+                    Some("p"),
+                    CertType::Custody
+                ),
+                false
+            ))
+            .contains("not a bootstrap")
+        );
         assert!(
             refused(ok(&offer(OBSERVER, Some("pod-1"), CertType::Client), true))
                 .contains("five minutes")

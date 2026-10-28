@@ -32,6 +32,7 @@ pub mod authority_leaf;
 pub mod authority_state;
 pub mod authority_update;
 pub mod certificate;
+pub mod custodian;
 pub mod decrypt_on_behalf_of;
 pub mod ephemeral_exchange;
 pub mod escrow_key;
@@ -150,6 +151,32 @@ pub const CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC: &str =
 pub const CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC: &str =
     "credentials-retrieve-agent-escrow-keypair-replies";
 
+/// A custodian asking for one of its workload's certificates (custodian.rs, docs/architecture/key-custody.md, "Part
+/// A's bootstrap: the custodian"): answered only to `custody.<X>`, for X, within its window, once of each type.
+pub const CREDENTIALS_CUSTODIAN_ISSUANCE_REQUESTS_TOPIC: &str =
+    "credentials-custodian-issuance-requests";
+pub const CREDENTIALS_CUSTODIAN_ISSUANCE_REPLIES_TOPIC: &str =
+    "credentials-custodian-issuance-replies";
+
+/// What a custodian publishes and subscribes to, and nothing else (docs/architecture/key-custody.md, "Part A's bootstrap:
+/// the custodian"): its own requests and their replies, and the authority. The floor every agent and the broker read
+/// from a certificate gives a custodian's identity these and no more (`polar_agent_builder::Floor`).
+pub const CUSTODIAN_PUBLISHES: [&str; 5] = [
+    CREDENTIALS_CUSTODIAN_ISSUANCE_REQUESTS_TOPIC,
+    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
+    CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
+    authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC,
+];
+pub const CUSTODIAN_SUBSCRIBES: [&str; 6] = [
+    CREDENTIALS_CUSTODIAN_ISSUANCE_REPLIES_TOPIC,
+    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
+    CREDENTIALS_STORE_SECRET_REPLIES_TOPIC,
+    authority_update::AUTHORITY_UPDATES_TOPIC,
+    authority_update::AUTHORITY_SNAPSHOT_REPLIES_TOPIC,
+];
+
 /// Decrypting something a *different* agent encrypted -- see
 /// decrypt_on_behalf_of.rs's own DecryptOnBehalfOfRequest/Reply and
 /// its own module doc for the complete, real reasoning. Genuinely, a
@@ -166,7 +193,7 @@ pub const CREDENTIALS_DECRYPT_ON_BEHALF_OF_REPLIES_TOPIC: &str =
 /// Every topic the credentials agent serves a request on: its consumer subscribes to each, and unsubscribes from each
 /// when shutdown begins; its request gate and the authority model judge `Action::"request"` on each
 /// (docs/architecture/authority-model.md, slice 9).
-pub const REQUEST_TOPICS: [&str; 13] = [
+pub const REQUEST_TOPICS: [&str; 14] = [
     CREDENTIALS_ADMIN_ACTION_REQUESTS_TOPIC,
     CREDENTIALS_ACCOUNT_REQUESTS_TOPIC,
     CREDENTIALS_ISSUANCE_REQUESTS_TOPIC,
@@ -180,4 +207,5 @@ pub const REQUEST_TOPICS: [&str; 13] = [
     CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
     CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC,
     CREDENTIALS_WORKLOAD_ISSUANCE_REQUESTS_TOPIC,
+    CREDENTIALS_CUSTODIAN_ISSUANCE_REQUESTS_TOPIC,
 ];

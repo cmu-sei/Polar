@@ -154,6 +154,7 @@ const RETRIEVE_SECRET_ACTOR_NAME: &str = "polar.credentials-agent.retrieve-secre
 const AGENT_ESCROW_KEYPAIR_BOOTSTRAP_ACTOR_NAME: &str =
     "polar.credentials-agent.agent-escrow-keypair-bootstrap";
 const AGENT_ESCROW_ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.agent-escrow-issuance";
+const CUSTODIAN_ISSUANCE_ACTOR_NAME: &str = "polar.credentials-agent.custodian-issuance";
 const AGENT_ESCROW_KEY_ACTOR_NAME: &str = "polar.credentials-agent.agent-escrow-key";
 const DECRYPT_ON_BEHALF_OF_ACTOR_NAME: &str = "polar.credentials-agent.decrypt-on-behalf-of";
 
@@ -344,28 +345,6 @@ impl Supervisor for ConsumerSupervisor {
             return;
         }
 
-        if topic == CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC {
-            match rkyv::from_bytes::<Envelope<AgentEscrowIssuanceRequest>, rkyv::rancor::Error>(
-                &payload,
-            ) {
-                Ok(envelope) => {
-                    if let Some(actor) = where_is(AGENT_ESCROW_ISSUANCE_ACTOR_NAME.to_string()) {
-                        if let Err(e) = actor.send_message(envelope) {
-                            warn!("Failed to forward agent escrow-issuance request to actor: {e}");
-                        }
-                    } else {
-                        warn!("Agent escrow-issuance actor not yet registered, dropping request");
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to deserialize agent escrow-issuance request from topic {topic}: {e}"
-                    );
-                }
-            }
-            return;
-        }
-
         if topic == CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC {
             match rkyv::from_bytes::<Envelope<AgentEscrowKeyRequest>, rkyv::rancor::Error>(&payload)
             {
@@ -496,6 +475,52 @@ impl ConsumerSupervisor {
             Err(e) => {
                 warn!("Failed to deserialize retrieve-secret request: {e}");
             }
+        }
+    }
+
+    /// An agent escrow-issuance request, forwarded with the broker-verified published_by: only the workload's
+    /// custodian is answered (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+    fn dispatch_agent_escrow_issuance_request(payload: Vec<u8>, published_by: Option<String>) {
+        match rkyv::from_bytes::<Envelope<AgentEscrowIssuanceRequest>, rkyv::rancor::Error>(
+            &payload,
+        ) {
+            Ok(envelope) => match where_is(AGENT_ESCROW_ISSUANCE_ACTOR_NAME.to_string()) {
+                Some(actor) => {
+                    if let Err(e) = actor.send_message(
+                        crate::agent_escrow_issuance_actor::AgentEscrowIssuanceDispatch {
+                            envelope,
+                            published_by,
+                        },
+                    ) {
+                        warn!("Failed to forward agent escrow-issuance request to actor: {e}");
+                    }
+                }
+                None => warn!("Agent escrow-issuance actor not yet registered, dropping request"),
+            },
+            Err(e) => warn!("Failed to deserialize agent escrow-issuance request: {e}"),
+        }
+    }
+
+    /// A custodian's request for one of its workload's certificates, forwarded with the broker-verified published_by,
+    /// which is the custodian.
+    fn dispatch_custodian_issuance_request(payload: Vec<u8>, published_by: Option<String>) {
+        use credentials_agent_common::custodian::CustodianIssuanceRequest;
+        match rkyv::from_bytes::<Envelope<CustodianIssuanceRequest>, rkyv::rancor::Error>(&payload)
+        {
+            Ok(envelope) => match where_is(CUSTODIAN_ISSUANCE_ACTOR_NAME.to_string()) {
+                Some(actor) => {
+                    if let Err(e) = actor.send_message(
+                        crate::custodian_issuance_actor::CustodianIssuanceDispatch {
+                            envelope,
+                            published_by,
+                        },
+                    ) {
+                        warn!("Failed to forward a custodian's issuance request to actor: {e}");
+                    }
+                }
+                None => warn!("Custodian issuance actor not yet registered, dropping request"),
+            },
+            Err(e) => warn!("Failed to deserialize a custodian's issuance request: {e}"),
         }
     }
 
@@ -705,6 +730,10 @@ impl ConsumerSupervisor {
             );
         } else if topic == CREDENTIALS_DECRYPT_ON_BEHALF_OF_REQUESTS_TOPIC {
             ConsumerSupervisor::dispatch_decrypt_on_behalf_of_request(payload, published_by);
+        } else if topic == CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC {
+            ConsumerSupervisor::dispatch_agent_escrow_issuance_request(payload, published_by);
+        } else if topic == credentials_agent_common::CREDENTIALS_CUSTODIAN_ISSUANCE_REQUESTS_TOPIC {
+            ConsumerSupervisor::dispatch_custodian_issuance_request(payload, published_by);
         } else {
             ConsumerSupervisor::deserialize_and_dispatch(topic, payload);
         }
@@ -943,9 +972,26 @@ impl Actor for ConsumerSupervisor {
         let agent_escrow_issuance_handler = AgentEscrowIssuanceHandler {
             ledger: ledger.clone(),
             cert_issuer: make_cert_issuer_client().await?,
-            known_kubernetes_issuers: settings.kubernetes_issuers.clone(),
             escrow_keypair: escrow_keypair.clone(),
         };
+        // A custodian's requests for its workload's certificates (docs/architecture/key-custody.md, "Part A's
+        // bootstrap: the custodian").
+        let (_custodian_issuance_actor, _) =
+            crate::custodian_issuance_actor::CustodianIssuanceActor::spawn_linked(
+                Some(CUSTODIAN_ISSUANCE_ACTOR_NAME.to_string()),
+                crate::custodian_issuance_actor::CustodianIssuanceActor,
+                crate::custodian_issuance_actor::CustodianIssuanceActorArgs {
+                    handler: crate::custodian::CustodianIssuanceHandler {
+                        ledger: ledger.clone(),
+                        cert_issuer: make_cert_issuer_client().await?,
+                        escrow_keypair: escrow_keypair.clone(),
+                        authority_model: authority_model.clone(),
+                    },
+                },
+                myself.get_cell(),
+            )
+            .await
+            .map_err(ActorProcessingErr::from)?;
         let (_agent_escrow_issuance_actor, _) = AgentEscrowIssuanceActor::spawn_linked(
             Some(AGENT_ESCROW_ISSUANCE_ACTOR_NAME.to_string()),
             AgentEscrowIssuanceActor,
@@ -2107,18 +2153,10 @@ mod agent_escrow_wiring_tests {
     };
     use crate::agent_escrow_key::AgentEscrowKeyHandler;
     use crate::agent_escrow_key_actor::{AgentEscrowKeyActor, AgentEscrowKeyActorArgs};
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use credentials_agent_common::agent_escrow_issuance::AgentEscrowIssuanceRequest;
     use credentials_agent_common::agent_escrow_key::{AgentEscrowKeyReply, AgentEscrowKeyRequest};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn make_token(iss: &str) -> String {
-        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none"}"#);
-        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"iss":"{iss}"}}"#));
-        format!("{header}.{payload}.")
-    }
 
     async fn check_agent_escrow_key(
         ledger: &ActorRef<LedgerMessage>,
@@ -2154,21 +2192,7 @@ mod agent_escrow_wiring_tests {
 
         let cert_issuer = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/validate"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                cert_issuer_common::ValidateResponse {
-                    workload_identity: "system:serviceaccount:polar:git-observer".to_string(),
-                    instance_binding: Some("pod-uid-1".to_string()),
-                    jti: None,
-                    normalized_identity: Some(
-                        "git-observer.polar.serviceaccount.cluster.local".to_string(),
-                    ),
-                },
-            ))
-            .mount(&cert_issuer)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/issue"))
+            .and(path("/internal/issue"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(cert_issuer_common::IssueResponse {
                     certificate_pem:
@@ -2198,12 +2222,27 @@ mod agent_escrow_wiring_tests {
         .await
         .unwrap();
 
+        // The workload's custodian, which alone is answered.
+        crate::issuance::call_append(
+            &ledger,
+            credentials_agent_common::events::CredentialsEvent::IssuanceCompleted {
+                identity: crate::custodian::tests::CUSTODIAN.to_string(),
+                instance_binding: crate::custodian::tests::POD.to_string(),
+                serial: "0c".to_string(),
+                timestamp: polar::time::now_millis(),
+                cert_type: credentials_agent_common::issuance::WorkloadCertType::Custody,
+                grant_key: None,
+                certificate_pem: crate::custodian::tests::custodian_pem(
+                    &[cert_issuer_common::custody::CustodyPermission::Escrow],
+                    3600,
+                ),
+            },
+        )
+        .await
+        .unwrap();
         let handler = AgentEscrowIssuanceHandler {
             ledger: ledger.clone(),
             cert_issuer: HandshakeClient::new(cert_issuer.uri()),
-            known_kubernetes_issuers: vec![
-                "https://kubernetes.default.svc.cluster.local".to_string(),
-            ],
             escrow_keypair: crate::escrow::tests::test_keypair(),
         };
 
@@ -2217,7 +2256,6 @@ mod agent_escrow_wiring_tests {
 
         let request = AgentEscrowIssuanceRequest {
             csr_pem: "fake-csr".to_string(),
-            credential: make_token("https://kubernetes.default.svc.cluster.local"),
         };
         let envelope = Envelope {
             correlation_id: "test-correlation-id".to_string(),
@@ -2228,17 +2266,16 @@ mod agent_escrow_wiring_tests {
             .to_vec();
 
         // The real function every incoming Cassini message on this
-        // topic actually goes through.
-        ConsumerSupervisor::deserialize_and_dispatch(
+        // topic actually goes through, with the publisher the broker verified.
+        ConsumerSupervisor::dispatch_request(
             CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC.to_string(),
             bytes,
+            Some(crate::custodian::tests::CUSTODIAN.to_string()),
         );
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-        let record =
-            check_agent_escrow_key(&ledger, "git-observer.polar.serviceaccount.cluster.local")
-                .await;
+        let record = check_agent_escrow_key(&ledger, crate::custodian::tests::X).await;
         assert!(
             record.is_some(),
             "AgentEscrowIssuanceCompleted must have actually been recorded in the ledger by now"
@@ -2637,7 +2674,24 @@ mod agent_escrow_keypair_bootstrap_wiring_tests {
         .await
         .unwrap();
 
-        // Seed a real, stored "escrow keypair" secret.
+        // The workload's custodian, which alone is answered, and a real, stored "escrow keypair" secret.
+        crate::issuance::call_append(
+            &ledger,
+            credentials_agent_common::events::CredentialsEvent::IssuanceCompleted {
+                identity: crate::custodian::tests::CUSTODIAN.to_string(),
+                instance_binding: crate::custodian::tests::POD.to_string(),
+                serial: "0c".to_string(),
+                timestamp: polar::time::now_millis(),
+                cert_type: credentials_agent_common::issuance::WorkloadCertType::Custody,
+                grant_key: None,
+                certificate_pem: crate::custodian::tests::custodian_pem(
+                    &[cert_issuer_common::custody::CustodyPermission::Escrow],
+                    3600,
+                ),
+            },
+        )
+        .await
+        .unwrap();
         let escrow_keypair = crate::escrow::tests::test_keypair();
         let original_plaintext = b"a real escrowed keypair, via the real dispatch path";
         let stored_secret =
@@ -2646,9 +2700,9 @@ mod agent_escrow_keypair_bootstrap_wiring_tests {
             &ledger,
             |reply| LedgerMessage::Append {
                 event: credentials_agent_common::events::CredentialsEvent::SecretStored {
-                    name: agent_escrow_keypair_secret_name("git-observer"),
+                    name: agent_escrow_keypair_secret_name(crate::custodian::tests::X),
                     secret: stored_secret,
-                    stored_by: "git-observer".to_string(),
+                    stored_by: crate::custodian::tests::CUSTODIAN.to_string(),
                     timestamp: 1000,
                     labels: Default::default(),
                 },
@@ -2689,7 +2743,7 @@ mod agent_escrow_keypair_bootstrap_wiring_tests {
         // exists to exercise.
         ConsumerSupervisor::dispatch_agent_escrow_keypair_bootstrap_request(
             bytes,
-            Some("git-observer".to_string()),
+            Some(crate::custodian::tests::CUSTODIAN.to_string()),
         );
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -3009,9 +3063,9 @@ mod builder_wiring_tests {
     }
 
     #[test]
-    fn there_are_thirteen_distinct_request_topics_and_none_takes_a_raw_ledger_event() {
+    fn there_are_fourteen_distinct_request_topics_and_none_takes_a_raw_ledger_event() {
         let distinct: HashSet<&str> = REQUEST_TOPICS.iter().copied().collect();
-        assert_eq!(REQUEST_TOPICS.len(), 13);
+        assert_eq!(REQUEST_TOPICS.len(), 14);
         for removed in [
             "credentials-grants",
             "credentials-revocations",
@@ -3021,7 +3075,7 @@ mod builder_wiring_tests {
         }
         assert_eq!(
             distinct.len(),
-            13,
+            14,
             "a topic is listed twice: {REQUEST_TOPICS:?}"
         );
     }

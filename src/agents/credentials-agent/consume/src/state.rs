@@ -346,8 +346,14 @@ impl CredentialsState {
                 signed_at: e.signed_at,
                 not_after: e.not_after,
                 certificate_pem: e.certificate_pem.clone(),
+                // A bootstrap service's custodian is as expected as the service (docs/architecture/key-custody.md,
+                // "Part A's bootstrap: the custodian").
                 unexpected: e.path == IssuePath::TokenOnly
-                    && bootstrap.is_some_and(|b| !b.contains(&e.identity)),
+                    && bootstrap.is_some_and(|b| {
+                        let identity = cert_issuer_common::custody::custodian_of(&e.identity)
+                            .unwrap_or(&e.identity);
+                        !b.contains(identity)
+                    }),
             })
             .collect();
         if certificates.is_empty() && read.is_some_and(|read| through <= read) {
@@ -384,10 +390,10 @@ impl CredentialsState {
                 Vec::new()
             }
             (_, cert_type) => {
-                let cert_type = if *cert_type == CertType::Server {
-                    WorkloadCertType::Server
-                } else {
-                    WorkloadCertType::Client
+                let cert_type = match cert_type {
+                    CertType::Server => WorkloadCertType::Server,
+                    CertType::Custody => WorkloadCertType::Custody,
+                    _ => WorkloadCertType::Client,
                 };
                 // cert-issuer's record says when in seconds; the ledger's times are milliseconds.
                 self.record_workload_certificate(
@@ -786,6 +792,16 @@ impl CredentialsState {
     /// A reissue for the same identity marks any prior entry revoked
     /// (see apply()'s own IssuanceCompleted handling), so there's at
     /// most one non-revoked entry per identity at any given time.
+    /// The live custodian certificate `identity` holds: the custody daemon's own, named `custody.<X>`
+    /// (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+    pub fn custodian_certificate_for(&self, identity: &str) -> Option<&CertificateRecord> {
+        self.valid_certificates.values().find(|record| {
+            record.identity == identity
+                && record.cert_type == WorkloadCertType::Custody
+                && !record.revoked
+        })
+    }
+
     pub fn certificate_for(&self, identity: &str) -> Option<&CertificateRecord> {
         // The requester's certificate is its client certificate. A server
         // certificate is the listener's, and says nothing of what the
@@ -858,6 +874,7 @@ impl CredentialsState {
     /// or else its account's, while that is not revoked. None for anyone else.
     pub fn requester_certificate(&self, identity: &str) -> Option<&str> {
         self.certificate_for(identity)
+            .or_else(|| self.custodian_certificate_for(identity))
             .map(|record| record.certificate_pem.as_str())
             .or_else(|| {
                 self.account_certificate_for(identity)

@@ -21,7 +21,12 @@
    DM26-0670
 */
 
-//! The agent escrow-keypair bootstrap retrieve flow. Mirrors
+//! The agent escrow-keypair bootstrap retrieve flow. Answered to the
+//! workload's custodian only, within its window, its certificate
+//! naming the escrow key (docs/architecture/key-custody.md, "Part A's
+//! bootstrap: the custodian"): never to the workload itself, which
+//! holds no token and so never chose the ephemeral it would be sealed
+//! to. Mirrors
 //! retrieve_secret.rs's own shape and validation discipline closely
 //! -- same escrow-private-key decrypt step -- but re-encrypts via the
 //! ephemeral X25519 exchange (ephemeral_exchange.rs) instead of a
@@ -57,11 +62,30 @@ impl AgentEscrowKeypairBootstrapHandler {
             };
         };
 
-        // No certificate lookup here at all, unlike
-        // RetrieveSecretHandler's own Step 1 -- the requester's own
-        // ephemeral public key (carried in the request itself) is
-        // the only target this flow ever re-encrypts to.
-        let secret_name = agent_escrow_keypair_secret_name(&requested_by);
+        // Who asks: the workload's custodian. Its ephemeral public key
+        // (carried in the request itself) is the only target this flow
+        // ever re-encrypts to, and the custody daemon opens it.
+        let workload = match crate::custodian::custodian(
+            &self.ledger,
+            Some(&requested_by),
+            cert_issuer_common::custody::CustodyPermission::Escrow,
+        )
+        .await
+        {
+            Ok(custodian) => custodian.workload,
+            Err(crate::custodian::CustodianRefusal::WindowClosed) => {
+                return RetrieveAgentEscrowKeypairReply::Refused {
+                    reason: RetrieveAgentEscrowKeypairRefusalReason::CustodianWindowClosed,
+                };
+            }
+            Err(refusal) => {
+                tracing::warn!(%requested_by, ?refusal, "an escrow key asked for by someone other than its custodian: refused");
+                return RetrieveAgentEscrowKeypairReply::Refused {
+                    reason: RetrieveAgentEscrowKeypairRefusalReason::NotACustodian,
+                };
+            }
+        };
+        let secret_name = agent_escrow_keypair_secret_name(&workload);
         let stored_secret =
             match crate::retrieve_secret::call_check_secret(&self.ledger, &secret_name).await {
                 Ok(Some(stored)) => stored.secret,
@@ -106,31 +130,16 @@ impl AgentEscrowKeypairBootstrapHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::custodian::tests::{CUSTODIAN, X, ledger_with_custodian};
+    use cert_issuer_common::custody::CustodyPermission;
+    use credentials_agent_common::custodian::CUSTODIAN_WINDOW_SECS;
     use credentials_agent_common::escrow_secret::EscrowedSecret;
-    use crate::ledger::{LedgerActor, LedgerActorArgs};
     use credentials_agent_common::events::CredentialsEvent;
     use x25519_dalek::{EphemeralSecret, PublicKey};
 
-    async fn spawn_test_ledger() -> ActorRef<LedgerMessage> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("events.jsonl");
-        std::mem::forget(dir);
-        let (ledger, _) = ractor::Actor::spawn(
-            None,
-            LedgerActor,
-            LedgerActorArgs {
-                log_path: path.to_str().unwrap().to_string(),
-                projection_actor: crate::projection::tests::fake_projection_actor().await,
-            },
-        )
-        .await
-        .unwrap();
-        ledger
-    }
-
     #[tokio::test]
     async fn retrieve_genuinely_reencrypts_via_the_ephemeral_exchange() {
-        let ledger = spawn_test_ledger().await;
+        let ledger = ledger_with_custodian(&[CustodyPermission::Escrow], 0).await;
         let escrow_keypair = crate::escrow::tests::test_keypair();
 
         // Seed a real, stored "escrow keypair" secret, encrypted to
@@ -143,9 +152,9 @@ mod tests {
             &ledger,
             |reply| LedgerMessage::Append {
                 event: CredentialsEvent::SecretStored {
-                    name: agent_escrow_keypair_secret_name("git-observer"),
+                    name: agent_escrow_keypair_secret_name(X),
                     secret: stored_secret,
-                    stored_by: "git-observer".to_string(),
+                    stored_by: CUSTODIAN.to_string(),
                     timestamp: 1000,
                     labels: Default::default(),
                 },
@@ -169,7 +178,7 @@ mod tests {
                 RetrieveAgentEscrowKeypairRequest {
                     ephemeral_public_key: requester_public_key,
                 },
-                Some("git-observer".to_string()),
+                Some(CUSTODIAN.to_string()),
             )
             .await;
 
@@ -187,9 +196,71 @@ mod tests {
         }
     }
 
+    /// The workload itself, a custodian whose certificate does not name the key, and one past its window, all with
+    /// a key stored to be had.
+    #[tokio::test]
+    async fn no_one_but_the_workload_s_custodian_in_its_window_is_given_the_key() {
+        for (requester, permissions, age, expected) in [
+            (
+                X,
+                vec![CustodyPermission::Escrow],
+                0,
+                RetrieveAgentEscrowKeypairRefusalReason::NotACustodian,
+            ),
+            (
+                CUSTODIAN,
+                vec![CustodyPermission::Client],
+                0,
+                RetrieveAgentEscrowKeypairRefusalReason::NotACustodian,
+            ),
+            (
+                CUSTODIAN,
+                vec![CustodyPermission::Escrow],
+                (CUSTODIAN_WINDOW_SECS + 1) * 1000,
+                RetrieveAgentEscrowKeypairRefusalReason::CustodianWindowClosed,
+            ),
+        ] {
+            let ledger = ledger_with_custodian(&permissions, age).await;
+            let escrow_keypair = crate::escrow::tests::test_keypair();
+            let stored =
+                EscrowedSecret::encrypt(b"the key", escrow_keypair.public_key_pem()).unwrap();
+            crate::issuance::call_append(
+                &ledger,
+                CredentialsEvent::SecretStored {
+                    name: agent_escrow_keypair_secret_name(X),
+                    secret: stored,
+                    stored_by: CUSTODIAN.to_string(),
+                    timestamp: 1000,
+                    labels: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+            let handler = AgentEscrowKeypairBootstrapHandler {
+                escrow_keypair,
+                ledger,
+            };
+            let reply = handler
+                .handle(
+                    RetrieveAgentEscrowKeypairRequest {
+                        ephemeral_public_key: PublicKey::from(&EphemeralSecret::random())
+                            .to_bytes(),
+                    },
+                    Some(requester.to_string()),
+                )
+                .await;
+            match reply {
+                RetrieveAgentEscrowKeypairReply::Refused { reason } => {
+                    assert_eq!(reason, expected, "{requester} {permissions:?} {age}")
+                }
+                other => panic!("{requester} {permissions:?} {age}: {other:?}"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn anonymous_publisher_is_refused() {
-        let ledger = spawn_test_ledger().await;
+        let ledger = ledger_with_custodian(&[CustodyPermission::Escrow], 0).await;
         let handler = AgentEscrowKeypairBootstrapHandler {
             escrow_keypair: crate::escrow::tests::test_keypair(),
             ledger,
@@ -217,7 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_stored_keypair_yet_returns_not_found() {
-        let ledger = spawn_test_ledger().await;
+        let ledger = ledger_with_custodian(&[CustodyPermission::Escrow], 0).await;
         let handler = AgentEscrowKeypairBootstrapHandler {
             escrow_keypair: crate::escrow::tests::test_keypair(),
             ledger,
@@ -231,7 +302,7 @@ mod tests {
                 RetrieveAgentEscrowKeypairRequest {
                     ephemeral_public_key: requester_public_key,
                 },
-                Some("nobody-has-bootstrapped-yet".to_string()),
+                Some(CUSTODIAN.to_string()),
             )
             .await;
 
@@ -240,7 +311,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_different_identities_do_not_see_each_others_keypairs() {
-        let ledger = spawn_test_ledger().await;
+        let ledger = ledger_with_custodian(&[CustodyPermission::Escrow], 0).await;
         let escrow_keypair = crate::escrow::tests::test_keypair();
 
         let stored_secret =
@@ -250,9 +321,11 @@ mod tests {
             &ledger,
             |reply| LedgerMessage::Append {
                 event: CredentialsEvent::SecretStored {
-                    name: agent_escrow_keypair_secret_name("alice"),
+                    name: agent_escrow_keypair_secret_name(
+                        "alice.polar.serviceaccount.cluster.local",
+                    ),
                     secret: stored_secret,
-                    stored_by: "alice".to_string(),
+                    stored_by: "custody.alice.polar.serviceaccount.cluster.local".to_string(),
                     timestamp: 1000,
                     labels: Default::default(),
                 },
@@ -276,7 +349,7 @@ mod tests {
                 RetrieveAgentEscrowKeypairRequest {
                     ephemeral_public_key: requester_public_key,
                 },
-                Some("bob".to_string()),
+                Some(CUSTODIAN.to_string()),
             )
             .await;
 

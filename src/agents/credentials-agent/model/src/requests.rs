@@ -85,6 +85,14 @@ pub fn publishes<'a>(model: &'a Model, identity: &str, topic: &str) -> Option<&'
         .map(|t| &t.origin)
 }
 
+/// Whether `identity` is a custodian and `topic` one it publishes: a custodian is no catalog workload, and what it may
+/// publish is its identity's (`credentials_agent_common::CUSTODIAN_PUBLISHES`; docs/architecture/key-custody.md,
+/// "Part A's bootstrap: the custodian"). Its requests are judged as implied ones.
+pub fn custodian_publishes(identity: &str, topic: &str) -> bool {
+    cert_issuer_common::custody::custodian_of(identity).is_some()
+        && credentials_agent_common::CUSTODIAN_PUBLISHES.contains(&topic)
+}
+
 /// What Cedar is told of an origin: `context.declared` (family topics included) and `context.implied`.
 pub fn facts_of(origin: Option<&Origin>) -> TopicFacts {
     TopicFacts {

@@ -75,6 +75,20 @@ pub fn check_request_shape(
     names: &[String],
 ) -> Result<(), RequestNotPermitted> {
     match cert_type {
+        // A custodian is a pod's, so a Kubernetes credential's; its names are the custody permissions it asks for,
+        // each once (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+        WorkloadCertType::Custody => {
+            let permissions: Option<std::collections::BTreeSet<_>> = names
+                .iter()
+                .map(|n| cert_issuer_common::custody::CustodyPermission::from_san_string(n).ok())
+                .collect();
+            match permissions {
+                Some(set) if kind == CredentialKind::Kubernetes && set.len() == names.len() => {
+                    Ok(())
+                }
+                _ => Err(RequestNotPermitted),
+            }
+        }
         WorkloadCertType::Client => {
             if names.is_empty() {
                 Ok(())
@@ -98,7 +112,7 @@ pub fn check_request_shape(
 /// The extra names the certificate is signed with: a client certificate carries the permissions of its grant and
 /// the topics and groups the authority model gives its workload (none for a requester the model does not have the
 /// credentials agent issue, a person's for one), a server certificate the names it asked for and nothing else.
-fn extra_sans_for(
+pub(crate) fn extra_sans_for(
     cert_type: WorkloadCertType,
     names: &[String],
     grant_permissions: &[cert_issuer_common::permission::Permission],
@@ -110,14 +124,15 @@ fn extra_sans_for(
             .map(|p| p.to_san_string())
             .chain(model_gives.map(|n| n.san_strings()).unwrap_or_default())
             .collect(),
-        WorkloadCertType::Server => names.to_vec(),
+        WorkloadCertType::Server | WorkloadCertType::Custody => names.to_vec(),
     }
 }
 
-fn signing_type(cert_type: WorkloadCertType) -> CertType {
+pub(crate) fn signing_type(cert_type: WorkloadCertType) -> CertType {
     match cert_type {
         WorkloadCertType::Client => CertType::Client,
         WorkloadCertType::Server => CertType::Server,
+        WorkloadCertType::Custody => CertType::Custody,
     }
 }
 
@@ -242,6 +257,14 @@ impl IssuanceHandler {
             return IssuanceReply::Refused {
                 reason: IssuanceRefusalReason::TokenInvalid,
             };
+        };
+        // A custodian's certificate is its own identity's, `custody.<X>`, not the workload's: it is admitted and
+        // recorded under that, where the custodian's later requests look it up (docs/architecture/key-custody.md,
+        // "Part A's bootstrap: the custodian").
+        let identity = if request.cert_type == WorkloadCertType::Custody {
+            cert_issuer_common::custody::custodian_identity(&identity)
+        } else {
+            identity
         };
 
         // ---- Step 4: grant lookup ----
@@ -371,7 +394,7 @@ impl IssuanceHandler {
 // Ledger call helpers
 // ---------------------------------------------------------------------------
 
-async fn call_check_grant(
+pub(crate) async fn call_check_grant(
     ledger: &ActorRef<LedgerMessage>,
     identity: &str,
 ) -> Result<Option<crate::state::GrantRecord>, String> {
@@ -391,7 +414,7 @@ async fn call_check_grant(
     }
 }
 
-async fn call_admit(
+pub(crate) async fn call_admit(
     ledger: &ActorRef<LedgerMessage>,
     identity: &str,
     instance_binding: &str,
@@ -417,7 +440,7 @@ async fn call_admit(
     }
 }
 
-async fn call_append(
+pub(crate) async fn call_append(
     ledger: &ActorRef<LedgerMessage>,
     event: CredentialsEvent,
 ) -> Result<(), String> {
@@ -665,6 +688,73 @@ pub(crate) mod tests {
             ))
             .await;
         assert!(matches!(reply, IssuanceReply::Issued { .. }), "{reply:?}");
+    }
+
+    /// The custodian's certificate on the token path (docs/architecture/key-custody.md, "Part A's bootstrap: the
+    /// custodian"): it carries the custody names it asks for and nothing the model gives the workload, and it is
+    /// recorded under the custodian's identity, where its later requests look it up.
+    #[tokio::test]
+    async fn a_custodian_s_certificate_carries_its_custody_names_and_is_recorded_as_the_custodian_s()
+     {
+        let names = ["p:custody:client", "p:custody:escrow"];
+        let server = issuer_expecting("kube-consumer", &names).await;
+        let ledger = spawn_test_ledger().await;
+        let handler = IssuanceHandler {
+            authority_model: model_with_kube_consumer(),
+            ..handler_for(&server, ledger.clone()).await
+        };
+        let reply = handler
+            .handle(request_for(WorkloadCertType::Custody, &names))
+            .await;
+        assert!(matches!(reply, IssuanceReply::Issued { .. }), "{reply:?}");
+        let custodian = ractor::call!(ledger, |reply| LedgerMessage::CustodianCertificate {
+            identity: "custody.kube-consumer.polar.serviceaccount.cluster.local".to_string(),
+            reply,
+        })
+        .unwrap();
+        assert!(custodian.is_some_and(|r| r.instance_binding == "kube-consumer-uid"));
+        assert!(
+            crate::retrieve_secret::call_check_certificate(
+                &ledger,
+                "kube-consumer.polar.serviceaccount.cluster.local"
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "a custodian's certificate is not its workload's"
+        );
+    }
+
+    #[test]
+    fn a_custodian_asks_for_custody_names_each_once_and_nothing_else() {
+        use CredentialKind::{Kubernetes, LikelyIdp};
+        let shape = |kind, names: &[&str]| {
+            check_request_shape(
+                kind,
+                WorkloadCertType::Custody,
+                &names.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
+            )
+        };
+        assert!(shape(Kubernetes, &[]).is_ok());
+        assert!(
+            shape(
+                Kubernetes,
+                &["p:custody:client", "p:custody:server", "p:custody:escrow"]
+            )
+            .is_ok()
+        );
+        for names in [
+            &["p:custody:client", "p:custody:client"][..],
+            &["p:custody:root"][..],
+            &["p:sub:polar-authority-updates"][..],
+            &["kube-consumer.polar.svc.cluster.local"][..],
+        ] {
+            assert!(shape(Kubernetes, names).is_err(), "{names:?}");
+        }
+        assert!(
+            shape(LikelyIdp, &["p:custody:client"]).is_err(),
+            "a person has no custodian"
+        );
     }
 
     #[tokio::test]

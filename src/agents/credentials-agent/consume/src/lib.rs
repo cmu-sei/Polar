@@ -42,6 +42,8 @@ pub mod authority_sections;
 pub mod certificate;
 pub mod certificate_actor;
 pub mod credential;
+pub mod custodian;
+pub mod custodian_issuance_actor;
 pub mod decrypt_on_behalf_of;
 pub mod decrypt_on_behalf_of_actor;
 pub mod escrow;

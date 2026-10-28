@@ -77,6 +77,10 @@ pub enum WorkloadCertType {
     #[default]
     Client,
     Server,
+    /// The custody daemon's own certificate (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"):
+    /// what the pod's token buys, once per pod instance, named `custody.<X>`. Its names are the custody permissions it
+    /// asks for (`p:custody:client`, `server`, `escrow`).
+    Custody,
 }
 
 impl WorkloadCertType {
@@ -145,6 +149,12 @@ pub enum IssuanceRefusalReason {
     /// minutes): a pod restarted in place is issued again, but not more often than that (docs/architecture/
     /// deployments.md, "The renewal rule"). Worth asking again once the bound has passed.
     TooSoon,
+    /// A request on a custodian's path from someone who is not a custodian the ledger holds a live certificate for, or
+    /// for something its certificate does not name (docs/architecture/key-custody.md, "Part A's bootstrap: the
+    /// custodian").
+    NotACustodian,
+    /// A custodian's request after its window (`custodian::CUSTODIAN_WINDOW_SECS`): its authority is spent.
+    CustodianWindowClosed,
 }
 
 #[cfg(test)]

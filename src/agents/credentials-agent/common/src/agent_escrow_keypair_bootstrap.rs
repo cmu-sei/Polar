@@ -57,7 +57,16 @@ use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 /// canonical logic, rather than being reconstructed independently by
 /// both the storing and retrieving sides.
 pub fn agent_escrow_keypair_secret_name(identity: &str) -> String {
-    format!("agent-escrow-keypair:{identity}")
+    format!("{AGENT_ESCROW_KEYPAIR_PREFIX}{identity}")
+}
+
+const AGENT_ESCROW_KEYPAIR_PREFIX: &str = "agent-escrow-keypair:";
+
+/// The workload whose escrow key `name` is stored under, if it is such a name: the inverse of
+/// [`agent_escrow_keypair_secret_name`]. Such a name is its custodian's to store, once, and no one's to retrieve by
+/// name (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+pub fn escrow_keypair_owner(name: &str) -> Option<&str> {
+    name.strip_prefix(AGENT_ESCROW_KEYPAIR_PREFIX)
 }
 
 #[derive(
@@ -117,6 +126,12 @@ pub enum RetrieveAgentEscrowKeypairRefusalReason {
     /// requester's own mTLS certificate at all; the ephemeral
     /// exchange doesn't need one.
     AnonymousPublisherNotAllowed,
+    /// The requester is not a custodian the ledger holds a live certificate for, or its certificate does not name the
+    /// escrow key: an agent's escrow key is retrieved by its custodian only, never by the agent itself
+    /// (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+    NotACustodian,
+    /// A custodian's request after its window: its authority is spent.
+    CustodianWindowClosed,
 }
 
 #[cfg(test)]
@@ -240,5 +255,19 @@ mod tests {
             rkyv::from_bytes::<RetrieveAgentEscrowKeypairReply, rkyv::rancor::Error>(&bytes)
                 .unwrap();
         assert_eq!(original, restored_rkyv);
+    }
+
+    #[test]
+    fn the_owner_of_an_escrow_keypair_name_is_read_back_and_no_other_name_has_one() {
+        let x = "kube-consumer.polar.serviceaccount.cluster.local";
+        assert_eq!(
+            escrow_keypair_owner(&agent_escrow_keypair_secret_name(x)),
+            Some(x)
+        );
+        assert_eq!(
+            escrow_keypair_owner("kube-consumer.polar.serviceaccount.cluster.local/a-token"),
+            None
+        );
+        assert_eq!(escrow_keypair_owner("agent-escrow-keypair"), None);
     }
 }

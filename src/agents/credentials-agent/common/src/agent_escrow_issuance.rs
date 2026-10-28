@@ -36,16 +36,15 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 
-/// Published (wrapped in `polar::request_reply::Envelope`) by
-/// CryptoActor to `credentials-agent-escrow-issuance-requests` --
-/// core-to-core only, unlike IssuanceRequest, which the observer also
-/// proxies for external, human-facing callers. An agent's own service
-/// identity is never external in that sense.
+/// Published (wrapped in `polar::request_reply::Envelope`) by a custodian to
+/// `credentials-agent-escrow-issuance-requests`, for its workload, when nothing is escrowed for it yet: the escrow key
+/// is made in the custody daemon, and its CSR names the workload. Answered only to the workload's custodian, within its
+/// window (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"). There is no token: the custodian's
+/// certificate is what its pod's token bought.
 #[derive(Debug, Clone, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentEscrowIssuanceRequest {
     pub csr_pem: String,
-    pub credential: String,
 }
 
 /// Published to `credentials-agent-escrow-issuance-replies`, wrapped
@@ -98,6 +97,11 @@ pub enum AgentEscrowIssuanceRefusalReason {
     /// one non-revoked entry per identity" property this system's
     /// certificate-lookup query already relies on.
     AlreadyHasValidServiceCertificate,
+    /// The requester is not a custodian the ledger holds a live certificate for, or its certificate does not name the
+    /// escrow key.
+    NotACustodian,
+    /// A custodian's request after its window: its authority is spent.
+    CustodianWindowClosed,
     /// Everything up through credential validation succeeded, but
     /// cert-issuer's own /issue call itself failed (CA unavailable,
     /// an internal signing error).
@@ -112,7 +116,6 @@ mod tests {
         AgentEscrowIssuanceRequest {
             csr_pem: "-----BEGIN CERTIFICATE REQUEST-----\n...\n-----END CERTIFICATE REQUEST-----"
                 .to_string(),
-            credential: "some-k8s-service-account-token".to_string(),
         }
     }
 
@@ -122,7 +125,6 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let restored: AgentEscrowIssuanceRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(original.csr_pem, restored.csr_pem);
-        assert_eq!(original.credential, restored.credential);
     }
 
     #[test]
@@ -134,14 +136,12 @@ mod tests {
         let restored: AgentEscrowIssuanceRequest =
             rkyv::from_bytes::<AgentEscrowIssuanceRequest, rkyv::rancor::Error>(&bytes).unwrap();
         assert_eq!(original.csr_pem, restored.csr_pem);
-        assert_eq!(original.credential, restored.credential);
     }
 
     #[test]
     fn agent_escrow_issuance_request_rejects_unknown_fields() {
         let json = r#"{
             "csr_pem": "...",
-            "credential": "...",
             "unexpected_field": "should not be allowed"
         }"#;
         let result: Result<AgentEscrowIssuanceRequest, _> = serde_json::from_str(json);
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn agent_escrow_issuance_request_rejects_missing_fields() {
-        let json = r#"{ "csr_pem": "only-one-field" }"#;
+        let json = r#"{}"#;
         let result: Result<AgentEscrowIssuanceRequest, _> = serde_json::from_str(json);
         assert!(result.is_err());
     }
@@ -207,6 +207,8 @@ mod tests {
             AgentEscrowIssuanceRefusalReason::NotAKubernetesCredential,
             AgentEscrowIssuanceRefusalReason::AlreadyHasValidServiceCertificate,
             AgentEscrowIssuanceRefusalReason::SigningFailed,
+            AgentEscrowIssuanceRefusalReason::NotACustodian,
+            AgentEscrowIssuanceRefusalReason::CustodianWindowClosed,
         ] {
             let original = AgentEscrowIssuanceReply::Refused { reason };
             let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&original)

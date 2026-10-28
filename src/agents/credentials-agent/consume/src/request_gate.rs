@@ -116,7 +116,17 @@ pub async fn judged(
                 r#"Action::"request""#,
                 &format!(r#"Request::"{topic}""#),
                 polar_policy::Facts {
-                    topic: Some(facts_of(origin)),
+                    topic: Some(
+                        if credentials_agent_model::requests::custodian_publishes(requester, topic)
+                        {
+                            polar_policy::TopicFacts {
+                                declared: false,
+                                implied: true,
+                            }
+                        } else {
+                            facts_of(origin)
+                        },
+                    ),
                     ..Default::default()
                 },
             )
@@ -127,7 +137,12 @@ pub async fn judged(
             Err(LookupError::Unavailable(why)) => PolicySaid::Unavailable(why),
         }
     };
-    admitted(&said, origin.is_some(), topic)
+    admitted(
+        &said,
+        origin.is_some()
+            || credentials_agent_model::requests::custodian_publishes(requester, topic),
+        topic,
+    )
 }
 
 #[ractor::async_trait]
@@ -349,6 +364,53 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    /// A custodian is no catalog workload: what it may publish is its identity's, and nothing more
+    /// (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+    #[tokio::test]
+    async fn with_no_rules_a_custodian_is_admitted_on_its_own_requests_and_no_others() {
+        use crate::custodian::tests::{CUSTODIAN, POD, custodian_pem};
+        let r = rig(Policy::NoRules, true).await;
+        crate::issuance::call_append(
+            &r.args.ledger,
+            credentials_agent_common::events::CredentialsEvent::IssuanceCompleted {
+                identity: CUSTODIAN.to_string(),
+                instance_binding: POD.to_string(),
+                serial: "0c".to_string(),
+                timestamp: polar::time::now_millis(),
+                cert_type: credentials_agent_common::issuance::WorkloadCertType::Custody,
+                grant_key: None,
+                certificate_pem: custodian_pem(
+                    &cert_issuer_common::custody::CustodyPermission::ALL,
+                    3600,
+                ),
+            },
+        )
+        .await
+        .unwrap();
+        for topic in credentials_agent_common::CUSTODIAN_PUBLISHES
+            .into_iter()
+            .filter(|t| credentials_agent_common::REQUEST_TOPICS.contains(t))
+        {
+            gate(&r, topic, CUSTODIAN).await.unwrap();
+        }
+        for topic in credentials_agent_common::REQUEST_TOPICS
+            .into_iter()
+            .filter(|t| !credentials_agent_common::CUSTODIAN_PUBLISHES.contains(t))
+        {
+            let refused = gate(&r, topic, CUSTODIAN).await.unwrap_err();
+            assert!(refused.contains("does not publish"), "{topic}: {refused}");
+        }
+        // And a workload does not publish its custodian's: kube-observer has no encryption to ask with.
+        let refused = gate(
+            &r,
+            credentials_agent_common::CREDENTIALS_CUSTODIAN_ISSUANCE_REQUESTS_TOPIC,
+            &id("kube-observer"),
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.contains("does not publish"), "{refused}");
     }
 
     #[tokio::test]

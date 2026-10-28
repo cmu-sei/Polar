@@ -71,6 +71,18 @@ impl RetrieveSecretHandler {
                 reason: RetrieveRefusalReason::InvalidSecretName,
             };
         }
+        // An agent's escrow key is retrieved by its custodian alone, through the ephemeral exchange, never by name
+        // (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"). Denied as policy denies, saying
+        // nothing of whether one is stored.
+        if credentials_agent_common::agent_escrow_keypair_bootstrap::escrow_keypair_owner(
+            &request.name,
+        )
+        .is_some()
+        {
+            return RetrieveSecretReply::Denied {
+                reason: "policy does not permit this identity to retrieve this secret".to_string(),
+            };
+        }
 
         let requester_certificate = match call_check_certificate(&self.ledger, &requested_by).await
         {
@@ -498,6 +510,24 @@ pub(crate) mod tests {
             }
             other => panic!("expected Found, got {other:?}"),
         }
+    }
+
+    /// An escrow key is its custodian's to retrieve, through the ephemeral exchange, never anyone's by name: not even
+    /// with a policy that permits this identity this very secret (docs/architecture/key-custody.md, "Part A's
+    /// bootstrap: the custodian").
+    #[tokio::test]
+    async fn an_escrow_key_is_never_retrieved_by_name_whatever_policy_permits() {
+        let x = "kube-consumer.polar.serviceaccount.cluster.local";
+        let name = credentials_agent_common::agent_escrow_keypair_bootstrap::agent_escrow_keypair_secret_name(x);
+        let w = world(Some((x, name.as_str()))).await;
+        seed_mtls_certificate(&w.ledger, x).await;
+        seed_escrow_certificate(&w.ledger, x).await;
+        store_secret_by(&w.ledger, &w.escrow_keypair, &name, b"the key", x).await;
+        let reply = w.handler.handle(request(&name), Some(x.into())).await;
+        assert!(
+            matches!(reply, RetrieveSecretReply::Denied { .. }),
+            "{reply:?}"
+        );
     }
 
     #[tokio::test]
