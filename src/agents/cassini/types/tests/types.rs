@@ -278,12 +278,11 @@ fn test_client_message_registration_request() {
     let msg = ClientMessage::RegistrationRequest {
         registration_id: None,
         trace_ctx: None,
-        watcher: false,
     };
 
     assert_eq!(
         format!("{:?}", msg),
-        "RegistrationRequest { registration_id: None, trace_ctx: None, watcher: false }"
+        "RegistrationRequest { registration_id: None, trace_ctx: None }"
     );
 }
 
@@ -421,7 +420,6 @@ fn test_broker_message_from_client_message() {
     let client_msg = ClientMessage::RegistrationRequest {
         registration_id: Some("client-id".to_string()),
         trace_ctx: None,
-        watcher: true,
     };
 
     let broker_msg = BrokerMessage::from_client_message(client_msg, "client1".to_string(), None);
@@ -430,12 +428,10 @@ fn test_broker_message_from_client_message() {
         BrokerMessage::RegistrationRequest {
             registration_id,
             client_id,
-            watcher,
             ..
         } => {
             assert_eq!(registration_id, Some("client-id".to_string()));
             assert_eq!(client_id, "client1".to_string());
-            assert!(watcher, "the client's ask for a watcher session is carried");
         }
         _ => panic!("Expected RegistrationRequest"),
     }

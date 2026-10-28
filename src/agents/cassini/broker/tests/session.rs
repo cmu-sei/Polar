@@ -65,7 +65,6 @@ mod tests {
             broker: Actor::spawn(None, MockActor, ()).await.unwrap().0,
             listener_mgr: None,
             retention: std::time::Duration::from_secs(600),
-            watcher_tenure: cassini_broker::DEFAULT_WATCHER_TENURE,
         };
 
         // Just make sure we can spawn the SessionManager
@@ -87,7 +86,6 @@ mod tests {
             broker: broker_ref,
             listener_mgr: None,
             retention: std::time::Duration::from_secs(600),
-            watcher_tenure: cassini_broker::DEFAULT_WATCHER_TENURE,
         };
 
         // Spawn SessionManager
@@ -104,8 +102,6 @@ mod tests {
             client_id: "test-client".to_string(),
             trace_ctx: None,
             peer_identity: None,
-            peer_serial: None,
-            watcher: false,
         };
 
         // This should not panic or error
@@ -123,7 +119,6 @@ mod tests {
             broker: broker_ref,
             listener_mgr: None,
             retention: std::time::Duration::from_secs(600),
-            watcher_tenure: cassini_broker::DEFAULT_WATCHER_TENURE,
         };
 
         // Spawn SessionManager
@@ -154,7 +149,6 @@ mod tests {
             broker: broker_ref,
             listener_mgr: None,
             retention: std::time::Duration::from_secs(600),
-            watcher_tenure: cassini_broker::DEFAULT_WATCHER_TENURE,
         };
 
         // Spawn SessionManager
@@ -184,7 +178,6 @@ mod tests {
             broker: broker_ref,
             listener_mgr: None,
             retention: std::time::Duration::from_secs(600),
-            watcher_tenure: cassini_broker::DEFAULT_WATCHER_TENURE,
         };
 
         // Spawn SessionManager
@@ -212,7 +205,6 @@ mod tests {
             broker: broker_ref,
             listener_mgr: None,
             retention: std::time::Duration::from_secs(600),
-            watcher_tenure: cassini_broker::DEFAULT_WATCHER_TENURE,
         };
 
         // Spawn SessionManager
@@ -242,7 +234,6 @@ mod tests {
             broker: broker_ref,
             listener_mgr: None,
             retention: std::time::Duration::from_secs(600),
-            watcher_tenure: cassini_broker::DEFAULT_WATCHER_TENURE,
         };
 
         // Spawn SessionManager

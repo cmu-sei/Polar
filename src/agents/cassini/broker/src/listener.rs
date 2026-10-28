@@ -653,9 +653,6 @@ struct ListenerState {
     peer_identity: Option<String>,
     /// The serial of this connection's certificate, checked against the revoked set.
     peer_serial: Option<String>,
-    /// Whether the client registered a watcher session: one that may hear authority and ask for it, nothing else, and
-    /// that stays open under a revoked certificate so the custody daemon hears of its own revocation.
-    watcher: bool,
     /// What this connection's certificate admits where no policy speaks, or why it cannot be read.
     floor: Result<Arc<Floor>, String>,
     authority: BrokerAuthority,
@@ -695,9 +692,6 @@ impl Listener {
     /// refused by default. `Err` is the reason, which the client is told.
     /// A decision this connection made a moment ago, under the same authority, is not made again.
     async fn decide(state: &mut ListenerState, topic: &str, access: Access) -> Result<(), String> {
-        if state.watcher && !crate::authority::watcher_may(topic, access) {
-            return Err(crate::authority::WATCHER_REFUSAL.to_string());
-        }
         let floor = match &state.floor {
             Ok(floor) => floor.clone(),
             Err(why) => return Err(format!("the broker refused: {why}")),
@@ -815,7 +809,6 @@ impl Actor for Listener {
             broker: args.broker,
             peer_identity: args.peer_identity,
             peer_serial: args.peer_serial,
-            watcher: false,
             floor: args.floor,
             decisions: args.authority.cache(),
             authority: args.authority,
@@ -953,10 +946,10 @@ impl Actor for Listener {
                 state.session_ref = Some(session_ref);
             }
             BrokerMessage::JudgeSubscriptions { topics } => {
-                // Sent on every change of authority: a certificate revoked since is closed, a watcher's apart. Its
-                // session is kept for the retention window, as after any lost connection, for the identity's next
-                // certificate to claim; this one cannot resume it, refused at registration.
-                if !state.watcher && Self::is_revoked(state) {
+                // Sent on every change of authority: a certificate revoked since is closed. Its session is kept for the
+                // retention window, as after any lost connection, for the identity's next certificate to claim; this
+                // one cannot resume it, refused at registration.
+                if Self::is_revoked(state) {
                     warn!(identity = ?state.peer_identity, serial = ?state.peer_serial, "the connection's certificate is revoked: closing it");
                     let client_id = state.client_id.clone();
                     return self
@@ -988,12 +981,8 @@ impl Actor for Listener {
                 client_id,
                 trace_ctx,
                 peer_identity,
-                watcher,
-                // What the client's message carried is nothing: the serial is this connection's own, filled in below.
-                peer_serial: _,
             } => {
-                state.watcher = watcher;
-                if !watcher && Self::is_revoked(state) {
+                if Self::is_revoked(state) {
                     warn!(identity = ?state.peer_identity, serial = ?state.peer_serial, "a revoked certificate asked to register: refused, and closed");
                     let msg = ClientMessage::RegistrationResponse {
                         result: Err(crate::authority::REVOKED_REFUSAL.to_string()),
@@ -1014,7 +1003,6 @@ impl Actor for Listener {
                     client_id,
                     trace_ctx,
                     peer_identity,
-                    watcher,
                 )
                 .await?;
             }
@@ -1149,7 +1137,6 @@ impl Actor for Listener {
 
 impl Listener {
     // ===== Handler methods for Listener =====
-    #[allow(clippy::too_many_arguments)]
     async fn handle_registration_request(
         &self,
         myself: ActorRef<BrokerMessage>,
@@ -1158,7 +1145,6 @@ impl Listener {
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
         peer_identity: Option<String>,
-        watcher: bool,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.request.registration", %client_id, registration_id = ?registration_id);
         try_set_parent_otel(&span, trace_ctx);
@@ -1170,8 +1156,6 @@ impl Listener {
             client_id: client_id.clone(),
             trace_ctx: Some(span.context()),
             peer_identity,
-            peer_serial: state.peer_serial.clone(),
-            watcher,
         }) {
             let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {e}");
             error!("{err_msg}");
@@ -1286,11 +1270,6 @@ impl Listener {
                     Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await
                 {
                     error!(error = ?e, "Failed to write RegistrationResponse");
-                }
-                // A watcher refused is closed, so its client ends and comes again: the custody daemon's makes a new
-                // connection on its next tick.
-                if state.watcher {
-                    myself.stop(Some("WATCHER_REFUSED".to_string()));
                 }
             }
         }

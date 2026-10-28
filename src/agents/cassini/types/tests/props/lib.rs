@@ -115,21 +115,19 @@ proptest! {
 // ==================== Registration Property Tests ====================
 
 proptest! {
-    /// A registration request comes off the wire as it was sent, and the broker's message made of it asks for the same
-    /// kind of session (docs/architecture/key-custody.md, step 5: a watcher's ask is never lost on the way).
+    /// A registration request comes off the wire as it was sent, and the broker's message made of it asks to resume the
+    /// same session, if any.
     #[test]
-    fn a_registration_request_keeps_its_kind_through_the_wire(
+    fn a_registration_request_keeps_its_session_through_the_wire(
         registration_id in proptest::option::of("[a-z0-9-]{1,36}"),
-        watcher in any::<bool>(),
     ) {
         use cassini_types::{BrokerMessage, ClientMessage};
-        let sent = ClientMessage::RegistrationRequest { registration_id: registration_id.clone(), trace_ctx: None, watcher };
+        let sent = ClientMessage::RegistrationRequest { registration_id: registration_id.clone(), trace_ctx: None };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&sent).unwrap();
         let received = rkyv::from_bytes::<ClientMessage, rkyv::rancor::Error>(&bytes).unwrap();
         match BrokerMessage::from_client_message(received, "c".to_string(), None) {
-            BrokerMessage::RegistrationRequest { registration_id: got, watcher: asked, .. } => {
+            BrokerMessage::RegistrationRequest { registration_id: got, .. } => {
                 prop_assert_eq!(got, registration_id);
-                prop_assert_eq!(asked, watcher);
             }
             _ => prop_assert!(false, "not a registration request"),
         }

@@ -185,8 +185,9 @@ A snapshot is the credentials agent's whole current authority in one message. Li
     published it, so a compromised broker could have given a freshly started agent a forged first snapshot under a key
     of its own. It is now pinned under the CA (below).
   - *Every snapshot reaches every subscriber,* the policy's whole text with it, and since step 5 a pod with the custody
-    daemon has two (its workload and its daemon's watcher). Coalescing bounds the rate cluster-wide, not per asker;
-    capping watchers bounds the subscribers (`cassini-broker.md`, "Capping watchers").
+    daemon has two (its workload and its daemon's custodian, `custody.<X>`, since 2026-10-28; its watcher before).
+    Coalescing bounds the rate cluster-wide, not per asker; the subscribers are bounded by one session per identity,
+    and a workload cannot open its custodian's (`cassini-broker.md`, "Watcher sessions").
 
 ## Pruning the revoked set (planned, cleared and built 2026-10-27)
 

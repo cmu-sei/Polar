@@ -89,10 +89,6 @@ pub struct BrokerArgs {
     /// How long a connection keeps the broker's decision about a topic; zero keeps none.
     pub decision_cache: Duration,
 
-    /// How long a watcher holds its place before a newer one under its certificate may replace it. `None` is
-    /// `DEFAULT_WATCHER_TENURE`.
-    pub watcher_tenure: Option<Duration>,
-
     /// The configuration `run` judged: the snapshot, the health settings and the shutdown budget,
     /// from which the broker builds its infrastructure (the health check, the signals, the
     /// shutdown handshake with its budget and watchdog).
@@ -113,7 +109,6 @@ impl BrokerArgs {
             ca_cert_file: settings.ca_cert_file,
             shutdown_auth_token: Some(settings.shutdown_auth_token),
             decision_cache: settings.decision_cache,
-            watcher_tenure: None,
             configured,
         }
     }
@@ -260,7 +255,6 @@ impl Actor for Broker {
                     .session_timeout
                     .map(std::time::Duration::from_secs)
                     .unwrap_or(crate::DEFAULT_SESSION_RETENTION),
-                watcher_tenure: args.watcher_tenure.unwrap_or(crate::DEFAULT_WATCHER_TENURE),
             },
             myself.clone().into(),
         )
@@ -471,8 +465,6 @@ impl Actor for Broker {
                 client_id,
                 trace_ctx,
                 peer_identity,
-                peer_serial,
-                watcher,
             } => {
                 self.handle_registration_request(
                     myself,
@@ -481,8 +473,6 @@ impl Actor for Broker {
                     client_id,
                     trace_ctx,
                     peer_identity,
-                    peer_serial,
-                    watcher,
                 )
                 .await?;
             }
@@ -713,7 +703,6 @@ impl Broker {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn handle_registration_request(
         &self,
         _myself: ActorRef<BrokerMessage>,
@@ -722,8 +711,6 @@ impl Broker {
         client_id: String,
         trace_ctx: Option<opentelemetry::Context>,
         peer_identity: Option<String>,
-        peer_serial: Option<String>,
-        watcher: bool,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.broker.registration_request", %client_id, registration_id = ?registration_id);
         try_set_parent_otel(&span, trace_ctx);
@@ -749,8 +736,6 @@ impl Broker {
                 client_id: client_id.clone(),
                 trace_ctx: Some(span.context()),
                 peer_identity: peer_identity.clone(),
-                peer_serial,
-                watcher,
             }) {
                 error!(error = %e, "Failed to forward RegistrationRequest to SessionManager");
             }

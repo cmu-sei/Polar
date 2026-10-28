@@ -31,7 +31,6 @@ mod credentials;
 mod support;
 
 use credentials::CredentialsAgent;
-use credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REPLIES_TOPIC;
 use proptest::prelude::*;
 use std::time::Duration;
 use support::{TestBroker, TestClient, pause, serial};
@@ -74,7 +73,7 @@ async fn a_session_ends_when_its_certificate_is_revoked_and_another_s_does_not()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_revoked_certificate_cannot_register_but_may_watch() {
+async fn a_revoked_certificate_cannot_register() {
     let _serial = serial().await;
     let broker = TestBroker::start().await;
     let credentials = CredentialsAgent::connect(&broker).await;
@@ -83,43 +82,10 @@ async fn a_revoked_certificate_cannot_register_but_may_watch() {
     credentials.revoke(&[broker.pki.serial_of(POD)]);
     closed(&first).await;
 
-    let again = TestClient::start_connecting(&broker, POD, None, false).await;
+    let again = TestClient::start_connecting(&broker, POD, None).await;
     closed(&again).await;
     pause().await;
     assert_eq!(again.registration_id(), None, "refused registration");
-
-    let watcher = TestClient::connect_watching(&broker, POD).await;
-    watcher.subscribe(AUTHORITY_SNAPSHOT_REPLIES_TOPIC);
-    watcher
-        .wait_for("the subscription", Duration::from_secs(10), |c| {
-            c.subscribed(AUTHORITY_SNAPSHOT_REPLIES_TOPIC)
-        })
-        .await;
-    broker.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_watcher_is_left_to_hear_its_own_revocation() {
-    let _serial = serial().await;
-    let broker = TestBroker::start().await;
-    let credentials = CredentialsAgent::connect(&broker).await;
-    let watcher = TestClient::connect_watching(&broker, POD).await;
-    watcher.subscribe(AUTHORITY_SNAPSHOT_REPLIES_TOPIC);
-    watcher
-        .wait_for("the subscription", Duration::from_secs(10), |c| {
-            c.subscribed(AUTHORITY_SNAPSHOT_REPLIES_TOPIC)
-        })
-        .await;
-    credentials.revoke(&[broker.pki.serial_of(POD)]);
-    assert_eq!(
-        watcher
-            .wait_for_messages(AUTHORITY_SNAPSHOT_REPLIES_TOPIC, 1)
-            .await
-            .len(),
-        1
-    );
-    pause().await;
-    assert!(!watcher.lost_its_connection());
     broker.stop().await;
 }
 
@@ -152,9 +118,9 @@ async fn the_identity_s_next_certificate_claims_what_the_revoked_one_s_session_h
     broker.stop().await;
 }
 
-/// Each of three identities: connected as an agent, a watcher, or both, and whether its certificate is revoked.
-fn a_cluster() -> impl Strategy<Value = Vec<(bool, bool, bool)>> {
-    proptest::collection::vec((any::<bool>(), any::<bool>(), any::<bool>()), 3)
+/// Each of three identities: whether it is connected, and whether its certificate is revoked.
+fn a_cluster() -> impl Strategy<Value = Vec<(bool, bool)>> {
+    proptest::collection::vec((any::<bool>(), any::<bool>()), 3)
 }
 
 const IDENTITIES: [&str; 3] = [
@@ -168,30 +134,24 @@ proptest! {
 
     /// Whatever is connected and whatever is revoked: once the broker holds the set, no agent's connection under a
     /// revoked certificate stays open, every other stays, and of the certificates that come after only the
-    /// unrevoked register as agents, while every one may watch.
+    /// unrevoked register.
     #[test]
     fn no_agent_s_connection_outlives_its_certificate_s_revocation(cluster in a_cluster()) {
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             let _serial = serial().await;
-            // The late watchers below replace the first of each identity at once: the watchers' tenure is not what is
-            // tested here.
-            let broker = TestBroker::start_with_tenure(Duration::ZERO).await;
+            let broker = TestBroker::start().await;
             let credentials = CredentialsAgent::connect(&broker).await;
             let mut agents = Vec::new();
-            let mut watchers = Vec::new();
-            for (identity, (agent, watching, _)) in IDENTITIES.iter().zip(&cluster) {
+            for (identity, (agent, _)) in IDENTITIES.iter().zip(&cluster) {
                 if *agent {
                     agents.push((identity, TestClient::connect(&broker, identity).await));
-                }
-                if *watching {
-                    watchers.push((identity, TestClient::connect_watching(&broker, identity).await));
                 }
             }
             let revoked: Vec<&str> = IDENTITIES
                 .iter()
                 .zip(&cluster)
-                .filter(|(_, (_, _, revoked))| *revoked)
+                .filter(|(_, (_, revoked))| *revoked)
                 .map(|(identity, _)| *identity)
                 .collect();
             credentials.revoke(&revoked.iter().map(|i| broker.pki.serial_of(i)).collect::<Vec<_>>());
@@ -208,12 +168,8 @@ proptest! {
             for (identity, client) in &agents {
                 assert_eq!(client.lost_its_connection(), revoked.contains(identity), "{identity}'s agent");
             }
-            for (identity, client) in &watchers {
-                assert!(!client.lost_its_connection(), "{identity}'s watcher");
-            }
             for identity in IDENTITIES {
-                let late = TestClient::start_connecting(&broker, identity, None, false).await;
-                let watcher = TestClient::connect_watching(&broker, identity).await;
+                let late = TestClient::start_connecting(&broker, identity, None).await;
                 if revoked.contains(&identity) {
                     closed(&late).await;
                     pause().await;
@@ -221,7 +177,6 @@ proptest! {
                 } else {
                     late.wait_for("a registration", Duration::from_secs(10), |c| c.registration_id().is_some()).await;
                 }
-                assert!(!watcher.lost_its_connection());
             }
             broker.stop().await;
         });

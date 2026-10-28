@@ -246,8 +246,6 @@ pub struct TestBroker {
     open: bool,
     /// How long a connection keeps a decision.
     cache: Duration,
-    /// How long a watcher holds its place; the broker's default when `None`.
-    tenure: Option<Duration>,
     /// The exit codes the broker asked the process to exit with.
     pub exits: Arc<Mutex<Vec<i32>>>,
 }
@@ -329,7 +327,6 @@ impl TestBroker {
             true,
             DEFAULT_CACHE,
             None,
-            None,
         )
         .await
     }
@@ -342,16 +339,7 @@ impl TestBroker {
 
     /// As `start_enforcing`, each connection keeping a decision for `cache` (none when zero).
     pub async fn start_enforcing_caching(cache: Duration) -> Self {
-        Self::start_full(
-            None,
-            Duration::from_secs(20),
-            None,
-            false,
-            cache,
-            None,
-            None,
-        )
-        .await
+        Self::start_full(None, Duration::from_secs(20), None, false, cache, None).await
     }
 
     /// As `start`, with the certificates `pki` holds: the custody daemon's server key, say.
@@ -363,21 +351,6 @@ impl TestBroker {
             true,
             DEFAULT_CACHE,
             Some(pki),
-            None,
-        )
-        .await
-    }
-
-    /// As `start`, a watcher holding its place for `tenure` (docs/architecture/cassini-broker.md, "Capping watchers").
-    pub async fn start_with_tenure(tenure: Duration) -> Self {
-        Self::start_full(
-            None,
-            Duration::from_secs(20),
-            None,
-            true,
-            DEFAULT_CACHE,
-            None,
-            Some(tenure),
         )
         .await
     }
@@ -389,7 +362,6 @@ impl TestBroker {
         open: bool,
         cache: Duration,
         pki: Option<Pki>,
-        tenure: Option<Duration>,
     ) -> Self {
         init_logging();
         clear_names().await;
@@ -410,7 +382,6 @@ impl TestBroker {
             &exits,
             token.clone(),
             cache,
-            tenure,
         )
         .await;
 
@@ -425,7 +396,6 @@ impl TestBroker {
                     retention_secs,
                     open,
                     cache,
-                    tenure,
                     exits,
                 };
                 if open {
@@ -447,7 +417,6 @@ impl TestBroker {
         exits: &Arc<Mutex<Vec<i32>>>,
         shutdown_auth_token: Option<String>,
         decision_cache: Duration,
-        watcher_tenure: Option<Duration>,
     ) -> (ActorRef<BrokerMessage>, Infrastructure) {
         // The builder's infrastructure as the broker gets it in the pod, except that the process
         // is not ended (the code it would have exited with is recorded in `exits`) and the
@@ -471,7 +440,6 @@ impl TestBroker {
                 ca_cert_file: pki.ca().to_string_lossy().into_owned(),
                 shutdown_auth_token,
                 decision_cache,
-                watcher_tenure,
                 configured,
             },
         )
@@ -495,7 +463,6 @@ impl TestBroker {
             &self.exits,
             self.shutdown_token.clone(),
             self.cache,
-            self.tenure,
         )
         .await;
         *self.broker.lock().unwrap() = broker;
@@ -681,36 +648,9 @@ impl TestClient {
         identity: &str,
         registration_id: Option<String>,
     ) -> Self {
-        let client = Self::start_connecting(broker, identity, registration_id, false).await;
+        let client = Self::start_connecting(broker, identity, registration_id).await;
         client
             .wait_for("a registration", Duration::from_secs(10), |c| {
-                c.registration_id().is_some()
-            })
-            .await;
-        client
-    }
-
-    /// Starts a watcher under the certificate and key at these paths, and returns at once. Like the custody daemon's,
-    /// it does not reconnect by itself: one replaced or refused stays gone.
-    pub async fn start_watching_with(broker: &TestBroker, cert: &Path, key: &Path) -> Self {
-        let config = TCPClientConfig::from_values(
-            broker.addr.clone(),
-            "localhost".to_string(),
-            broker.pki.ca().to_string_lossy().into_owned(),
-            cert.to_string_lossy().into_owned(),
-            key.to_string_lossy().into_owned(),
-        )
-        .as_watcher()
-        .with_reconnect(cassini_client::ReconnectMode::LeaveToSupervisor);
-        Self::spawn(config, None).await
-    }
-
-    /// Connects as `identity`'s watcher session (docs/architecture/key-custody.md, step 5), as the custody daemon
-    /// does, and waits until the broker has registered it.
-    pub async fn connect_watching(broker: &TestBroker, identity: &str) -> Self {
-        let client = Self::start_connecting(broker, identity, None, true).await;
-        client
-            .wait_for("a watcher's registration", Duration::from_secs(10), |c| {
                 c.registration_id().is_some()
             })
             .await;
@@ -728,12 +668,11 @@ impl TestClient {
         client
     }
 
-    /// Starts connecting as `identity`, a watcher or not, and returns at once: for a client the broker may turn away.
+    /// Starts connecting as `identity` and returns at once: for a client the broker may turn away.
     pub async fn start_connecting(
         broker: &TestBroker,
         identity: &str,
         registration_id: Option<String>,
-        watcher: bool,
     ) -> Self {
         let (cert, key) = broker.pki.client(identity);
         let config = TCPClientConfig::from_values(
@@ -743,14 +682,6 @@ impl TestClient {
             cert.to_string_lossy().into_owned(),
             key.to_string_lossy().into_owned(),
         );
-        // A watcher does not reconnect by itself, like the custody daemon's: one replaced or refused stays gone.
-        let config = if watcher {
-            config
-                .as_watcher()
-                .with_reconnect(cassini_client::ReconnectMode::LeaveToSupervisor)
-        } else {
-            config
-        };
         Self::spawn(config, registration_id).await
     }
 

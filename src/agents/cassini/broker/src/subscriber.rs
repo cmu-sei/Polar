@@ -381,8 +381,6 @@ impl SubscriberManager {
                         client_id: client_id.clone(),
                         trace_ctx: Some(span.context()),
                         peer_identity: None,
-                        peer_serial: None,
-                        watcher: false,
                     }) {
                         warn!(error = %e, "{REGISTRATION_REQ_FAILED_TXT}: {SUBSCRIBER_NOT_FOUND_TXT}");
                     }

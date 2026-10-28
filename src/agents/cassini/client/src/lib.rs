@@ -236,9 +236,6 @@ pub struct TCPClientConfig {
     pub client_key: ClientKey,
     /// What the transport does when the connection is lost.
     pub reconnect: ReconnectMode,
-    /// Whether it registers a watcher session (`ClientMessage::RegistrationRequest`), the custody daemon's: one that
-    /// hears the credentials agent's authority beside its identity's own session, and nothing else.
-    pub watcher: bool,
     /// A TLS configuration made in code, used as given in place of the CA, certificate and key files, which are then
     /// never read: the custody daemon's own, whose key is in its own memory (docs/architecture/key-custody.md, step 5).
     pub tls: Option<Arc<ClientConfig>>,
@@ -267,7 +264,6 @@ impl TCPClientConfig {
             client_certificate_path,
             client_key: ClientKey::File(client_key_path),
             reconnect: ReconnectMode::default(),
-            watcher: false,
             tls: None,
         }
     }
@@ -275,13 +271,6 @@ impl TCPClientConfig {
     /// This configuration, with the transport to do `reconnect` when the connection is lost.
     pub fn with_reconnect(mut self, reconnect: ReconnectMode) -> Self {
         self.reconnect = reconnect;
-        self
-    }
-
-    /// This configuration, registering a watcher session: it never resumes one, since the broker holds nothing for a
-    /// watcher that goes, and asks afresh each time it connects.
-    pub fn as_watcher(mut self) -> Self {
-        self.watcher = true;
         self
     }
 
@@ -332,7 +321,6 @@ impl TCPClientConfig {
             client_certificate_path,
             client_key,
             reconnect: ReconnectMode::default(),
-            watcher: false,
             tls: None,
         })
     }
@@ -357,7 +345,6 @@ impl TCPClientConfig {
             client_certificate_path,
             client_key,
             reconnect: ReconnectMode::default(),
-            watcher: false,
             tls: None,
         })
     }
@@ -544,7 +531,6 @@ pub struct TcpClientState {
     abort_handle: Option<AbortHandle>, // abort handle switch for the stream read loop
     reconnect: ReconnectMode,
     answers: Option<ActorRef<TcpClientMessage>>,
-    watcher: bool,
 }
 
 pub struct TcpClientArgs {
@@ -1086,7 +1072,6 @@ impl TcpClientActor {
         let envelope = ClientMessage::RegistrationRequest {
             registration_id: None,
             trace_ctx: Self::current_trace_ctx(),
-            watcher: state.watcher,
         };
         TcpClientActor::send_or_fail(myself, state, envelope).await
     }
@@ -1116,11 +1101,9 @@ impl TcpClientActor {
         state: &mut TcpClientState,
         registration_id: &str,
     ) -> Result<(), ActorProcessingErr> {
-        // A watcher's session ends with its connection, so there is none to resume.
         let envelope = ClientMessage::RegistrationRequest {
-            registration_id: (!state.watcher).then(|| registration_id.to_owned()),
+            registration_id: Some(registration_id.to_owned()),
             trace_ctx: Self::current_trace_ctx(),
-            watcher: state.watcher,
         };
         TcpClientActor::send_or_fail(myself, state, envelope).await
     }
@@ -1379,7 +1362,6 @@ impl Actor for TcpClientActor {
         // init_span ends when this function returns (no long-lived spawned tasks here)
         let state = TcpClientState {
             reconnect: args.config.reconnect,
-            watcher: args.config.watcher,
             bind_addr: args.config.broker_endpoint,
             server_name: args.config.server_name,
             reader: None,
@@ -2010,7 +1992,6 @@ mod registration_tests {
             },
             abort_handle: None,
             answers: None,
-            watcher: false,
         };
         (state, events)
     }

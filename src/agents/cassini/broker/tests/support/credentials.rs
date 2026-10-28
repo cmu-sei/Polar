@@ -21,7 +21,7 @@
    DM26-0670
 */
 
-//! The credentials agent, as the broker and the custody daemon hear it, for the tests of revocation and of watchers
+//! The credentials agent, as the broker and the custody daemon hear it, for the tests of revocation and of custody
 //! (docs/architecture/key-custody.md, step 5). Apart from `support`, which the cert-issuer server's tests share.
 //! Each test binary that includes it uses only some of it.
 #![allow(dead_code)]

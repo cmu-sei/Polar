@@ -140,12 +140,6 @@ pub enum BrokerMessage {
         /// ClientMessage::RegistrationRequest never carries this at
         /// all, since the client has no way to send it.
         peer_identity: Option<String>,
-        /// The serial of the connecting client's verified certificate, read by the broker as `peer_identity` is and
-        /// never client-supplied: a watcher replaces the older watcher of the same certificate
-        /// (docs/architecture/cassini-broker.md, "Capping watchers"). The listener fills it in.
-        peer_serial: Option<String>,
-        /// The client asked for a watcher session (`ClientMessage::RegistrationRequest`).
-        watcher: bool,
     },
     /// Reassign a session to a new client listener (used during reconnection)
     ReassignClient {
@@ -393,14 +387,11 @@ impl BrokerMessage {
             ClientMessage::RegistrationRequest {
                 registration_id,
                 trace_ctx,
-                watcher,
             } => BrokerMessage::RegistrationRequest {
                 registration_id,
                 client_id,
                 trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
                 peer_identity,
-                peer_serial: None,
-                watcher,
             },
             ClientMessage::PublishRequest {
                 topic,
@@ -539,10 +530,9 @@ pub struct SessionSummary {
     pub registration_id: String,
 }
 
-/// What the broker tells a revoked certificate that asks to register as anything but a watcher: the custody daemon's
-/// custodian reads its own revocation in it (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
-pub const REVOKED_REFUSAL: &str =
-    "the broker refused: this certificate is revoked, and may register only a watcher session";
+/// What the broker tells a revoked certificate that asks to register: the custody daemon's custodian reads its own
+/// revocation in it (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+pub const REVOKED_REFUSAL: &str = "the broker refused: this certificate is revoked";
 
 /// Events emitted by the client.
 #[derive(Clone, Debug)]
@@ -599,11 +589,6 @@ pub enum ClientMessage {
     RegistrationRequest {
         registration_id: Option<String>,
         trace_ctx: Option<WireTraceCtx>,
-        /// A watcher session (docs/architecture/key-custody.md, step 5): one kept beside its identity's session, which
-        /// neither supersedes nor is superseded by it, holds nothing when it goes, and may hear the credentials agent's
-        /// authority and ask for it, nothing else. The custody daemon's, so it hears of its own revocation whatever
-        /// the workload does.
-        watcher: bool,
     },
     /// Response to an attempt to register.
     /// Ok contains the value of the registration id,

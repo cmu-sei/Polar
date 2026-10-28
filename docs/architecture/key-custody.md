@@ -754,7 +754,7 @@ The plan:
 Recommended: (a).
 
 *Decided (the maintainer, 2026-10-27): (a), a watcher session of the daemon's own.*
-What a watcher is, its rules and its weak points: `cassini-broker.md`, "Watcher sessions"; how the daemon's
+What a watcher was, its rules and its weak points (retired 2026-10-28 for the custodian identity, below): `cassini-broker.md`, "Watcher sessions"; how the daemon's
 snapshots work: `authority-distribution.md`, "Snapshots".
 
 *Changed in building it (2026-10-27): refused at registration, not at accept.* Item 1 as planned closed every
@@ -1145,7 +1145,8 @@ item 2), the grants, the ledger record and cert-issuer's floor all stay where th
    superseded by it, by the rules every session already has. cert-issuer's floor gives custody identities the
    authority topics and the custody requests, and nothing else; the broker's watcher flag and the registration
    exception for a revoked certificate are no longer needed. The cap of one watcher per serial, with its tenure
-   ("Capping watchers"), becomes one session per custodian certificate, by the same rule. When X's certificate is
+   ("Capping watchers"), becomes one session per custodian certificate, by the same rule. (As built: one session per
+   custodian identity, the rule for every identity; a workload cannot sign as its custodian, so no cap is needed.) When X's certificate is
    revoked, the custodian's session is open and hears it; when the custodian's own certificate is revoked (the pod
    itself), the broker closes its session and refuses it at registration, the rule for every revoked certificate, and
    the daemon, refused as revoked, destroys every key and exits (`Custody::revoke`, which also checks the custodian's

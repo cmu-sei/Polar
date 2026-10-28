@@ -300,29 +300,21 @@ async fn the_daemon_watches_again_once_cassini_is_back() {
     broker.stop().await;
 }
 
+/// The custodian is its own identity: however many sessions a compromised workload opens under its certificate, each
+/// superseding the last, none touches the custodian's, which hears the revocation.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_watcher_the_workload_opens_against_its_daemon_s_does_not_keep_it_from_its_revocation() {
+async fn sessions_the_workload_opens_do_not_keep_its_custodian_from_its_revocation() {
     let _serial = serial().await;
-    let broker = TestBroker::start_with_tenure(Duration::from_secs(2)).await;
+    let broker = TestBroker::start().await;
     let credentials = Arc::new(CredentialsAgent::connect(&broker).await);
     credentials.revoke(&[]);
     credentials.answer_requests().await;
     let pod = pod(&broker).await;
-    // A compromised workload opens a watcher of its own under the pod's certificate, signing through the daemon, as
-    // it can, before the daemon's, and keeps coming back whenever it is closed.
-    let mut config = TCPClientConfig::from_values(
-        broker.addr.clone(),
-        "localhost".to_string(),
-        broker.pki.ca().to_string_lossy().into_owned(),
-        pod.certificate.to_string_lossy().into_owned(),
-        String::new(),
-    )
-    .as_watcher();
-    config.client_key = ClientKey::Custody(pod.socket.display().to_string());
-    let _hostile = TestClient::connect_configured(config).await;
     let mut told = watch(&broker, &pod).await;
-    // The two take turns, each a tenure at a time; the daemon hears in its turn.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    let mut sessions = Vec::new();
+    for _ in 0..3 {
+        sessions.push(workload(&broker, &pod).await);
+    }
     credentials.revoke(std::slice::from_ref(&pod.serial));
     assert_eq!(told_revoked(&mut told).await, vec![Slot::Client]);
     assert!(the_daemon_refuses_to_sign(&pod));
