@@ -70,6 +70,10 @@ Each with a recommendation; to be taken one at a time.
    matches it and `polar-init` asks. *Recommendation:* build the daemon first; `keeps_existing_bundle` then goes (the
    case it was made for, a pod restarted with its certificate still good, is a fresh key now). The other way round
    would mean teaching it to tell rejuvenation from a crash.
+   *Corrected 2026-10-28, read against the code:* it does not go. A certificate whose key is the daemon's never keeps
+   an old bundle already (`issue_custody_cert_from_cert_issuer`, `polar-init/src/main.rs`; through the observer the
+   custodian fetches it); a key-file certificate still does, and still needs to: Neo4j's StatefulSet, the `ace` job and
+   the unrendered agent charts, none of which rejuvenates, and Neo4j is the case it was written for (2026-10-25).
    **Decided (the maintainer, 2026-10-27): the custody daemon first, then the move.**
 5. **The ticket (`core-restarts.md`, step 5).** A credentials agent restarted in place is its own successor, under the
    same UID, so the outgoing one can name it: a one-use ticket for its identity and its UID, published before it exits.
@@ -90,8 +94,8 @@ Each with a recommendation; to be taken one at a time.
   `RestartAllContainers` fits). Moving the schema to 1.35 is a step of its own, every chart and the catalog rendered
   before and after.
 - **Init containers again in one pod.** `polar-init` writes its bundle atomically, file by file (`output.rs`,
-  `write_bundle`), so a second run replaces the first; the escrow key loaded again displaces the earlier one in the
-  keyring. Checked once more when built.
+  `write_bundle`), so a second run replaces the first. (The escrow key is the custody daemon's since custody step 9, and
+  the daemon restarts empty with the pod: there is no keyring entry to displace.) Checked once more when built.
 - **What goes.** The forced replacement of a changed Job (`infra/deploy-objects.nu:138`), since a Deployment changes in
   place; the digest check that restarts a Job by hand (`remaining-work.md`, 2026-10-14); Failed pods, so the Reaper
   stays only for clusters older than 1.36.
@@ -210,3 +214,38 @@ its certificate has expired is a follow-up (`remaining-work.md`).
 5. On a fresh sandbox-local: every agent restarts in place at rejuvenation, keeps its UID, is issued a new certificate,
    and leaves no Failed pod; the credentials agent's successor comes through its window; nothing runs twice.
 6. The ticket (`core-restarts.md`, step 5).
+
+## Step 3, the Dhall schema at 1.35: the plan (2026-10-28, for review)
+
+Why: step 4's restart rule is a container field, `restartPolicyRules`, which dhall-kubernetes 1.31 does not have and
+1.35 does (`Container.restartPolicyRules : Optional (List { action : Text, exitCodes : Optional { operator : Text,
+values : Optional (List Natural) } })`, read from the pinned package itself). The step changes the types and nothing
+rendered.
+
+What a dry run found (2026-10-28, in a scratch worktree at `cd3d2a86`, every target's catalog and charts rendered with
+1.31 and with 1.35):
+1. *Four pins, not one.* `infra/schema/kubernetes.dhall` names the package (URL and hash), and `agents.dhall`,
+   `constants.dhall` and `functions.dhall` import `./kubernetes.dhall` pinned by the same hash. Dhall resolves a
+   hash-pinned import from its cache by the hash, so with only the first changed those three still load 1.31, and every
+   render fails ("You can only append ❰List❱s with matching element types": a 1.35 `Volume` beside a 1.31 one). All
+   four move to `sha256:2086df21…`. `agents.dhall`'s own pin (`8458543a…`, in `constants.dhall` and
+   `functions.dhall`) does not change: nothing it exports depends on the Kubernetes types.
+2. *No download.* The same package at the same hash is already pinned by `src/deploy/types/kubernetes.dhall`, so it is
+   in the dev shell's built cache (`src/flake/dhall-cache.nix` collects every pin in the repository) and in the local
+   one; `infra` moves to the URL and hash already there.
+3. *One type change reaches the charts:* `StatefulSetSpec.serviceName` is `Optional Text` in 1.35 (`Text` in 1.31).
+   Neo4j's (`layers/2-services/neo4j/statefulset.dhall`) and Postgres's (`layers/2-services/postgres/statefulset.dhall`)
+   StatefulSets give it `Some`.
+4. *With those, nothing rendered changes:* `local-minimal`, `local` and `sandbox-local`, catalog and charts, byte for
+   byte the same; the agent charts no target renders (`layers/3-workloads/agents`) type-check on both.
+
+The plan:
+- *Test first* (`infra/tests/charts.nu`): a container with a `RestartAllContainers` rule renders from the schema's
+  types, its rule in the YAML. It fails on 1.31 (no such field) and passes on 1.35, and it is what step 4 builds on.
+- *The change:* the four pins, and the two `serviceName`s.
+- *Checked:* the renders before and after, byte for byte, for the three targets (the gitignored `cluster-inputs.nuon`
+  copied into the worktree, which the first comparison of 2026-10-28 lacked); `tests/charts.nu`, `rules.nu`,
+  `resolve.nu`; the unrendered agent charts type-checked. Mutation: one of the three local pins left at 1.31, which the
+  charts' render fails on (as the dry run did).
+- *Not here:* rendering any restart rule (step 4); the cluster, since nothing rendered changes, so no redeploy;
+  `src/deploy`, a tree `infra` does not render from (found reading for this, not touched).
