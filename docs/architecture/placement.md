@@ -23,7 +23,12 @@
 
 # Placement: Polar's workloads by node
 
-Status, 2026-10-28: the plan, for review. Nothing here is built.
+Status, 2026-10-28: the plan, cleared by the maintainer, and built ("Built", below); not yet on the cluster.
+
+*Where it is going (the maintainer, 2026-10-28):* Polar ships two kinds of exemplar target in `infra/targets`.
+`sandbox-local`, with Flux and the node pools, shows how a deployment on a cluster with placement marks should work.
+`local-minimal`, without Flux, is for development on a single-node cluster, where the pools mean little. So placement
+is declared in `sandbox-local` and nowhere else.
 
 ## Why
 
@@ -93,6 +98,28 @@ there: placement is the target's to declare.
   selectors and tolerations alone.
 - Mutations: the toleration left out (the pod would stay Pending); the selector rendered on a target that declares no
   placement; a pool the target lacks let through.
+
+## Built (2026-10-28)
+
+- *The rule* (`infra/rules.nu`): `POOL_KEY`, `placement_of` and `placement_problems`, beside the render's other rules,
+  so the resolver and Neo4j's chart share them (the plan had the key in `resolve.nu`).
+- *The catalog:* `pool:` on the fourteen entries of the mapping; none on the harness, the secret harness or
+  oci-registry-resolver, which are the open pool's (the last two are not in `sandbox-local`; a target that runs them on
+  pools would decide theirs).
+- *The resolver* (`infra/resolve.nu`): the record's `placement`, refused when the target lacks the pool, and refused
+  when a target sets a workload's `pool` itself; `resolve.nu placement` gives the target's declared pools, for
+  `render.nu` to hand Neo4j's chart.
+- *The templates:* `functions.placementOf` (`infra/schema/functions.dhall`) makes the selector and the toleration from
+  an `Optional Placement`; `agent.dhall`, `ca.dhall` (cert-issuer) and Neo4j's `statefulset.dhall` use it.
+- *The target:* `sandbox-local` declares `placement: { pools: ["core" "observers" "writers"] }`.
+- *Tests:* the rule (`tests/rules.nu`); under `sandbox-local` every workload in the mapping's pool and the open pool's
+  in none, under `local-minimal` none, a pool the target lacks refused, a target setting a pool refused, and the
+  rendered pod's selector and toleration in both templates (`tests/resolve.nu`, 60 of 61 pass: the one that fails, "workloads
+  still asking cert-issuer are listed as pending", fails the same way before this change); Neo4j's StatefulSet placed,
+  not placed, and refused (`tests/charts.nu`). Mutations caught: the toleration left out; placement on a target that
+  declares none; a pool the target lacks let through.
+- *Renders before and after:* `local` the same byte for byte; `local-minimal` the same; `sandbox-local` differs by the
+  fourteen pods' and Neo4j's selectors and tolerations alone.
 
 ## On the cluster
 
