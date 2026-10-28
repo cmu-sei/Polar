@@ -1314,6 +1314,19 @@ asked; Mullvad off for the run):** what was checked, how, and what was not.
   is asked for the escrow key and that has no daemon (`rules.nu`, `escrow_problems`, called from `resolve.nu`), saying
   why. A target with custody off leaves out its encryption agents (kube-consumer and git-repo-observer today), or its
   render names them.
+- *On the cluster* (2026-10-28, `up.nu sandbox-local --dev` over `u7c` at `3dc73a6b`, stopped at the browser step;
+  Mullvad off for the run): every pod running but jira-observer (the placeholder Jira, as before); every workload and
+  every daemon registered once, none refused, no decode error on either side; every custodian "has fetched
+  everything", and kube-consumer's and git-repo-observer's the escrow key.
+  - *The mismatch, once, as expected:* the old pods' daemons (the step-9 image) were refused as revoked about once a
+    second until their pods ended (git-repo-observer's, kube-observer's and jira-processor's for some 50 s,
+    git-repo-controller's for 18 s; 181 refusals), since they cannot read the new refusal.
+  - *A daemon of this image, replaced as Flux replaces a Job* (`kubectl replace --force` of kube-observer's): the old
+    pod's daemon heard its custodian's certificate revoked in the authority update within a second, destroyed every key
+    and exited; the broker refused it nothing. So the refusal's code was not the path there: it is the backstop for a
+    daemon whose session is closed before it hears the update, which is what the step-9 images met in both rollouts.
+    That path is shown by `broker/tests/custody_revocation.rs` (a real broker and the daemon's watcher), not on the
+    cluster.
 
 **Decided along the way (2026-10-27, the maintainer):** the custodian identity, instead of the token on a retrieval
 or a daemon-signed ephemeral (2a); X's certificates from the credentials agent, not from cert-issuer; forced
