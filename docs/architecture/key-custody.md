@@ -1041,9 +1041,9 @@ Decided item 3. Two keys are left outside a daemon, and they are not alike.
 
 ### Part A: the agents' escrow keys
 
-1. **A third slot, `Slot::Escrow`, RSA-4096, decryption only.** Held in the daemon's process keyring where the kernel
-   loads it (the raw private operation, OAEP unpadded in user space, as `polar-kernel-keyring::decrypt` does now), and in
-   its locked memory where not. Sealed like the others once it holds a key (`Refusal::Sealed`). A revocation
+1. **A third slot, `Slot::Escrow`, decryption only, of a new key type** (below, "The key type"). In the daemon's locked
+   memory: the kernel keyring is not used for it (the maintainer, 2026-10-27), and the kernel loads none of the
+   candidate key types in any case. Sealed like the others once it holds a key (`Refusal::Sealed`). A revocation
    (`Custody::revoke`) destroys it with the rest. Its copy in escrow is the credentials agent's, untouched: the next pod
    has it again only if the credentials agent agrees.
 2. **The bootstrap's key never leaves the daemon.** New requests, all the installer's (`polar-init`):
@@ -1100,11 +1100,42 @@ Decided item 3. Two keys are left outside a daemon, and they are not alike.
 - On the cluster: no escrow key in any user keyring, no `escrow-key.pem` in the credentials agent's workload, the
   authority published and accepted, a secret retrieved and decrypted.
 
-### Open
+### What polar-init sees, today and planned
 
-Which part first. A covers every agent with encryption and the polar-init bootstrap; B covers one pod but the root of every
-signature and secret. I recommend B first: it is the key on disk, the one a copy of which is worth the most, and it
-needs none of A.
+Today `polar-init` holds the agent's escrow key every time, not only at first install: on issuance its `CryptoActor`
+generates the key and has the PEM in memory (`generate_csr` returns `private_key_pem`, `polar-crypto/src/lib.rs:1157`),
+and on retrieval it opens the sealed PEM into its memory (`:1075`), before loading it into the keyring. Under the plan
+it never holds it: the daemon generates it on first install and opens a retrieval itself. The key does leave the
+daemon once, sealed to the credentials agent's key, since escrow is a second copy by design.
+
+### The key type (open)
+
+RSA was chosen for the kernel keyring, which this plan stops using, and it costs: RSA-4096 key generation takes
+seconds, a decryption milliseconds. The agents' key only decrypts (others encrypt to it), so its natural replacement is
+a KEM under HPKE (RFC 9180) in place of RSA-OAEP wrapping an AES key. The candidates:
+- *HPKE with DHKEM(P-256, HKDF-SHA256), AES-256-GCM.* Every part NIST-approved (SP 800-56A ECDH, SP 800-56C, FIPS 197),
+  though Polar uses no validated module (rustls runs on `ring`). The key can sign its own CSR (ECDSA), so issuance and
+  the X.509 escrow certificate stay as they are. Not post-quantum.
+- *HPKE with DHKEM(X25519).* The fastest and simplest; the retrieval ephemeral is X25519 already. Not in SP 800-56A.
+  It cannot sign, so the CSR needs another proof of possession (the daemon binding it with the pod's mTLS key, which it
+  holds).
+- *A hybrid with ML-KEM-768 (FIPS 203)*, with X25519 (X-Wing) or P-256. Escrow is the case post-quantum KEMs are for:
+  secrets kept for years, and ciphertexts on topics that can be recorded now and broken later. Costs: about 1.2 KB of
+  public key and 1.1 KB per encapsulation, young crates (RustCrypto `ml-kem`, `x-wing`), no CSR (a KEM cannot sign),
+  and X.509 for ML-KEM only in draft (`draft-ietf-lamps-kyber-certificates`), which rcgen does not produce.
+- *P-256 now, in a versioned envelope that names its suite*, so that a hybrid suite is added later as a second suite,
+  not a second migration.
+
+The credentials agent's key (part B) does two jobs, so it splits in two: a signing key (Ed25519, FIPS 186-5, or ECDSA
+P-256, both of which `polar-signing` already verifies) and a decryption key of the agents' type.
+
+Whatever the type, the same things change: everything that encrypts to an escrow key (the credentials agent sealing a
+retrieved secret, `polar-sign seal`, `EncryptForRecipient`) writes the new envelope; secrets stored under RSA stay
+readable until re-encrypted; and an agent whose escrowed key is RSA is issued a new key.
+
+### Decided
+
+- **Part A first** (the maintainer, 2026-10-27).
 
 ## Build order, each tests first
 
