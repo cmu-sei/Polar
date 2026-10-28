@@ -65,6 +65,9 @@ step says what it does, what you should see, and where you have a choice. The co
 maintainers use (a local single-node cluster, the dev container in the cluster, building from source); the variations
 follow each step, and the reference sections after the steps go into detail.
 
+> **On a Mac?** Go to **[On a Mac, with minikube](#on-a-mac-with-minikube)**: what your Mac needs, how to set up Docker
+> Desktop, and the same steps in order, for a Mac and the published images.
+
 ### At a glance
 
 ```bash
@@ -331,6 +334,77 @@ agents propose are signed documents pushed to the cluster's git server with `pol
 command, is [docs/operations/git-private-repository.md](docs/operations/git-private-repository.md), and the design is in
 [docs/architecture/signed-configuration.md](docs/architecture/signed-configuration.md). `infra/INFRA.md` explains the
 catalog, targets and images behind `up.nu`.
+
+### On a Mac, with minikube
+
+The steps above, for an Apple-silicon Mac running a minikube cluster in Docker Desktop, with the images that are published
+(nothing is built on your Mac). Each step points to the one above that says more.
+
+**What it needs.** Measured on a single-node cluster running `local-minimal` (2026-10-28): Polar itself used about 7 GB of
+memory and little CPU at rest, and about 9 GB of disk (6.6 GB of images, 1.9 GB of volumes). The dev container (step 3)
+asks the cluster for 2 CPUs and 8 GiB of memory, which the cluster must be able to give it, and adds about 2.7 GB of image
+and a 20 GiB volume. So, for the cluster:
+
+| | Minimum | Recommended |
+|---|---|---|
+| Memory | 16 GiB | 20–24 GiB |
+| CPUs | 4 | 6–8 (a bring-up is much busier than Polar at rest; this is an estimate) |
+| Disk | 40 GB | 60 GB or more |
+
+That memory is given to Docker Desktop's virtual machine, out of the Mac's own, so a Mac with 32 GB or more is the one to
+use. On your Mac: Docker Desktop, minikube **v1.39.0 or later** (`brew install minikube`), `kubectl`, `git`, `ssh` with
+your key in its agent (`ssh-add`), and Librewolf with NSS's tools for the certificate (`brew install nss`, for `certutil`
+and `pk12util`).
+
+**Docker Desktop.** In Settings, Resources, Advanced, give its virtual machine the CPUs, memory and disk above (a little more
+memory than you will give minikube), then Apply and restart. Leave Docker Desktop's own Kubernetes off: minikube is the
+cluster. (General Docker Desktop guidance, not tried on a Mac for this guide.)
+
+**The steps, in order:**
+
+1. **The cluster** (step 1). `--memory` must be under what Docker Desktop has:
+
+   ```bash
+   minikube start --driver=docker --cpus 6 --memory 20g --disk-size 60g --extra-config=kubelet.registry-pull-qps=0
+   kubectl version              # Server Version v1.36 or later (minikube v1.39.0 starts v1.37 by default)
+   kubectl get storageclass     # standard (default)
+   ```
+
+2. **Access to the secrets** (step 2): send your SSH public key to someone who can add it, pull, and check with `sops`.
+
+3. **Your dev container in the cluster** (step 3), from your clone of the repository:
+
+   ```bash
+   export POLAR_DEV_SOPS_KEY=~/.ssh/<your key>
+   bin/polar-dev up             # pulls the dev container for arm64; several minutes the first time
+   ```
+
+4. **Polar, from the published images** (step 4), in the dev container, from `/workspace`. Not `--dev`: that builds every
+   image from source, which takes hours on a Mac.
+
+   ```bash
+   nu infra/up.nu local-minimal --import-from docker.io/daveman1010220 --user <name> --email <email>
+   ```
+
+   It copies the `arm64` images into the cluster, then deploys. Run the same command again after a failure or a pause.
+
+5. **Your certificate in the browser** (step 5). When `up.nu` pauses at the browser step: on your Mac, close Librewolf, then
+
+   ```bash
+   bin/polar-dev cert <name>    # finds Librewolf's profile under ~/Library/Application Support/librewolf
+   ```
+
+   and press Enter in the dev container. With another Firefox-family browser, or several profiles, set `POLAR_NSS_DB` to
+   the profile's directory first.
+
+6. **Open it** (step 6):
+
+   ```bash
+   bin/polar-dev forward        # then https://localhost:7473 (Neo4j) and http://localhost:8050 (ACE)
+   ```
+
+   Step 6's checks are the same. Restart counts that grow, and `jira-observer` restarting when no Jira is set up, are
+   expected (**Things that look wrong and are not**).
 
 ### Working environments
 
