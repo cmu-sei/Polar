@@ -1108,7 +1108,7 @@ and on retrieval it opens the sealed PEM into its memory (`:1075`), before loadi
 it never holds it: the daemon generates it on first install and opens a retrieval itself. The key does leave the
 daemon once, sealed to the credentials agent's key, since escrow is a second copy by design.
 
-### The key type (open)
+### The key type (decided: HPKE with P-256, the maintainer, 2026-10-27)
 
 RSA was chosen for the kernel keyring, which this plan stops using, and it costs: RSA-4096 key generation takes
 seconds, a decryption milliseconds. The agents' key only decrypts (others encrypt to it), so its natural replacement is
@@ -1133,9 +1133,35 @@ Whatever the type, the same things change: everything that encrypts to an escrow
 retrieved secret, `polar-sign seal`, `EncryptForRecipient`) writes the new envelope; secrets stored under RSA stay
 readable until re-encrypted; and an agent whose escrowed key is RSA is issued a new key.
 
+### The crypto change, for HPKE with P-256
+
+Read for it: the envelope is `polar-escrow`'s `EscrowedSecret` (`polar-escrow/src/lib.rs:77`): AES-256-GCM over the
+payload, its key RSA-OAEP-wrapped to `encrypted_to_pem`, the binding context as AES-GCM associated data. The
+credentials agent's key stays RSA until part B, so for the whole of part A the envelope carries both.
+- *The envelope names its suite.* `EscrowedSecret` gains `suite`: `RsaOaep` (today's, and what a secret with no suite
+  is read as) or `HpkeP256` (RFC 9180, base mode, DHKEM(P-256, HKDF-SHA256), HKDF-SHA256, AES-256-GCM; the `hpke`
+  crate, on the `p256` already in the workspace). The recipient's public key decides it on encryption: an RSA key gives
+  `RsaOaep`, a P-256 key `HpkeP256`, anything else is refused. The two layers stay: HPKE seals the 32-byte AES key
+  (`encrypted_key` is the encapsulated key and that sealed key), with a Polar `info` string, so the daemon opens
+  32 bytes and never sees a payload, as the kernel keyring never did. The binding context stays the payload's
+  associated data.
+- *The daemon's request is `Unwrap { slot: Escrow, wrapped }`*, the HPKE open of a wrapped key. `DecryptOwnMessage`
+  (a raw RSA-OAEP block today, `polar-crypto/src/lib.rs:237`) takes the envelope instead, as `DecryptOwnEscrowed` does.
+- *Issuance.* The daemon's `EscrowCsr` makes a P-256 key; the key signs its own CSR, the proof of possession, as now.
+  cert-issuer's `Service` certificate gives `KeyAgreement` for an EC key where it gives `KeyEncipherment` for RSA
+  (`cert-issuer/server/src/ca.rs:299`), and `KeyAlgorithm::Rsa` stops being the escrow key's
+  (`polar-crypto/src/lib.rs:1158`).
+- *Every encrypter* (`EncryptForRecipient`, the credentials agent sealing a retrieved secret, `polar-sign seal`) goes
+  through `EscrowedSecret::encrypt`, which picks the suite from the key, so none changes by itself; their tests gain
+  the P-256 case.
+- Properties: a round trip for each suite, for any payload and context; a secret opens under no other key, no other
+  context and no other suite; a malformed or truncated envelope is refused, not a panic; the suite is decided by the key
+  and by nothing in the request.
+
 ### Decided
 
 - **Part A first** (the maintainer, 2026-10-27).
+- **HPKE with P-256** for the agents' escrow keys (the maintainer, 2026-10-27), and for part B's decryption key.
 
 ## Build order, each tests first
 
