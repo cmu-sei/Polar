@@ -41,3 +41,10 @@ pub fn serial_from_pem(pem: &str) -> Option<String> {
     let (_, cert) = x509_parser::parse_x509_certificate(&pem_block.contents).ok()?;
     Some(serial_from_cert(&cert))
 }
+
+/// When the certificate in `pem` stops being valid (its `notAfter`, Unix seconds), or `None` if it does not parse.
+pub fn not_after_from_pem(pem: &str) -> Option<i64> {
+    let (_, pem_block) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).ok()?;
+    let (_, cert) = x509_parser::parse_x509_certificate(&pem_block.contents).ok()?;
+    Some(cert.validity().not_after.timestamp())
+}

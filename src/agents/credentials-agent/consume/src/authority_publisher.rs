@@ -54,6 +54,8 @@ pub const REPUBLISH_AFTER: Duration = Duration::from_secs(30 * 60);
 /// The least time between two publications of the snapshot in answer to requests: it goes to everyone, so one
 /// serves all who asked.
 pub const SNAPSHOT_COALESCE: Duration = Duration::from_secs(5);
+/// How often what is published of the revoked set is looked at again, for a certificate that has ended.
+pub const PRUNE_EVERY: Duration = Duration::from_secs(10 * 60);
 
 /// Puts bytes on a Cassini topic.
 pub type Publish = Arc<dyn Fn(&str, Vec<u8>) + Send + Sync>;
@@ -270,6 +272,9 @@ impl Actor for AuthorityPublisher {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             PublisherMessage::Start => {
+                // A serial leaves what is published when its certificate has ended long enough ago, which nothing
+                // announces: look again from time to time. Only a higher version is published.
+                drop(myself.send_interval(PRUNE_EVERY, || PublisherMessage::RevocationsChanged));
                 // This agent's own authority actor listens to its own identity: give it the key, then say
                 // what is known (the revoked serials the ledger holds; the sections arrive as they replay).
                 state.give_the_local_actor_the_key();
@@ -304,13 +309,18 @@ impl Actor for AuthorityPublisher {
                 }
             }
             PublisherMessage::RevocationsChanged => {
-                let serials = ractor::call!(state.args.ledger, LedgerMessage::RevokedSerials)
-                    .map_err(|e| {
-                        ActorProcessingErr::from(format!("the ledger did not answer: {e}"))
-                    })?;
-                // The set only grows, so how many there are says which version it is; none is nothing to say.
-                if !serials.is_empty() {
-                    let version = serials.len() as u64;
+                // Without the serials whose certificates ended long enough ago, versioned so that a leaf takes the
+                // smaller set too (docs/architecture/authority-distribution.md, "Pruning the revoked set"); nothing
+                // ever revoked is nothing to say.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let (serials, version) = ractor::call!(state.args.ledger, |reply| {
+                    LedgerMessage::PublishedRevocations { now, reply }
+                })
+                .map_err(|e| ActorProcessingErr::from(format!("the ledger did not answer: {e}")))?;
+                if version > 0 {
                     state
                         .publish(
                             &myself,
@@ -760,6 +770,64 @@ mod tests {
         rig.change("groups", 1, json!({"memberships": "not a map"}));
         settle().await;
         assert!(rig.updates().is_empty());
+    }
+
+    /// A client certificate for a pod of alice's, whose life ends `ends_in` seconds from now (negative: ended).
+    fn issued_ending(pod: &str, serial: &str, ends_in: i64) -> CredentialsEvent {
+        let end = real_now() + ends_in;
+        let mut params = rcgen::CertificateParams::new(vec!["alice.test".to_string()]).unwrap();
+        params.not_before = time::OffsetDateTime::from_unix_timestamp(end - 3600).unwrap();
+        params.not_after = time::OffsetDateTime::from_unix_timestamp(end).unwrap();
+        CredentialsEvent::IssuanceCompleted {
+            identity: "alice.test".to_string(),
+            instance_binding: pod.to_string(),
+            serial: serial.to_string(),
+            timestamp: 2000,
+            cert_type: credentials_agent_common::issuance::WorkloadCertType::Client,
+            grant_key: None,
+            certificate_pem: params
+                .self_signed(&rcgen::KeyPair::generate().unwrap())
+                .unwrap()
+                .pem(),
+        }
+    }
+
+    // docs/architecture/authority-distribution.md, "Pruning the revoked set".
+    #[tokio::test(start_paused = true)]
+    async fn a_revoked_certificate_that_ended_long_enough_ago_is_left_out_with_a_higher_version() {
+        let rig = rig().await;
+        settle().await;
+        let append = |event: CredentialsEvent| {
+            let ledger = rig.ledger.clone();
+            async move {
+                ractor::call!(ledger, |reply| LedgerMessage::Append { event, reply })
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        // Superseded by the next pod's: revoked, and its certificate ended three hours ago.
+        append(issued_ending("pod-1", "0a", -3 * 3600)).await;
+        append(issued_ending("pod-2", "0b", 3600)).await;
+        // Revoked, its certificate never seen here: kept.
+        append(CredentialsEvent::Revoke {
+            serial: "0c".to_string(),
+            reason: RevocationReason::Compromised,
+            revoked_by: "admin".to_string(),
+            timestamp: 1,
+        })
+        .await;
+        rig.publisher
+            .cast(PublisherMessage::RevocationsChanged)
+            .unwrap();
+        settle().await;
+        let payload = verify(rig.updates().last().unwrap(), &rig.public_key()).unwrap();
+        assert_eq!(
+            payload.body,
+            AuthorityBody::Revoked {
+                serials: vec!["0c".into()]
+            }
+        );
+        assert_eq!(payload.version, 3, "two revoked, one of them ended");
     }
 
     #[tokio::test(start_paused = true)]

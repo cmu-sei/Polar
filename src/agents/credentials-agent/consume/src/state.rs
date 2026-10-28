@@ -25,7 +25,11 @@ use credentials_agent_common::events::{
     CredentialsEvent, GrantReason, ReportedCertificate, RevocationReason,
 };
 use credentials_agent_common::issuance::WorkloadCertType;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+/// How long after its certificate ends a revoked serial is still published: for verifiers whose clocks run behind. Two
+/// hours, twice the life of a client certificate (the maintainer, 2026-10-27).
+pub const REVOCATION_MARGIN_SECS: i64 = 2 * 3600;
 
 /// A grant currently available to be consumed by a matching issuance.
 #[derive(Debug, Clone, PartialEq)]
@@ -215,6 +219,10 @@ pub struct CredentialsState {
     /// The serial of every certificate the ledger has recorded, by any issuance or report: what a page of cert-issuer's
     /// record is checked against, so nothing is recorded twice.
     recorded_serials: BTreeSet<String>,
+    /// When each revoked serial's certificate ends, where the ledger knew the certificate as the serial was revoked
+    /// (docs/architecture/authority-distribution.md, "Pruning the revoked set"): kept here because the record that held
+    /// the certificate may be replaced since (a pod issued again in place).
+    revoked_until: BTreeMap<String, i64>,
     /// Where cert-issuer's record has been read to: its log, and its last entry read.
     record_cursor: Option<(String, u64)>,
 
@@ -268,6 +276,11 @@ impl CredentialsState {
                 record.revoked_at = Some(timestamp);
                 superseded.push(record.serial.clone());
                 self.revoked_serials.insert(record.serial.clone());
+                if let Some(end) =
+                    cert_issuer_common::serial::not_after_from_pem(&record.certificate_pem)
+                {
+                    self.revoked_until.insert(record.serial.clone(), end);
+                }
             }
         }
 
@@ -395,6 +408,46 @@ impl CredentialsState {
         self.revoked_serials.iter().cloned().collect()
     }
 
+    /// The certificate the ledger holds for `serial` now: a workload's, an account's or an agent's escrow certificate.
+    fn certificate_of(&self, serial: &str) -> Option<String> {
+        if let Some(key) = self.serial_index.get(serial)
+            && let Some(record) = self.valid_certificates.get(key)
+        {
+            return Some(record.certificate_pem.clone());
+        }
+        if let Some(account_id) = self.account_serial_index.get(serial)
+            && let Some(record) = self.account_certificates.get(account_id)
+            && record.serial == serial
+        {
+            return Some(record.certificate_pem.clone());
+        }
+        self.agent_escrow_certificates
+            .values()
+            .find(|record| record.serial == serial)
+            .map(|record| record.certificate_pem.clone())
+    }
+
+    /// The revoked set as it is published at `now` (Unix seconds), and its version
+    /// (docs/architecture/authority-distribution.md, "Pruning the revoked set"): every revoked serial but those whose
+    /// certificate ended more than `REVOCATION_MARGIN_SECS` ago, since every verifier refuses an expired certificate on
+    /// its own. The version is the serials ever revoked plus those ended: it rises with each and never falls while time
+    /// goes forward, and is never below the size, which was the version before.
+    pub fn published_revocations(&self, now: i64) -> (Vec<String>, u64) {
+        let published: Vec<String> = self
+            .revoked_serials
+            .iter()
+            .filter(|serial| {
+                self.revoked_until
+                    .get(*serial)
+                    .is_none_or(|end| now - end <= REVOCATION_MARGIN_SECS)
+            })
+            .cloned()
+            .collect();
+        let ended = self.revoked_serials.len() - published.len();
+        let version = (self.revoked_serials.len() + ended) as u64;
+        (published, version)
+    }
+
     /// The highest sequence number published to the agents; 0 before any.
     pub fn last_authority_sequence(&self) -> u64 {
         self.last_authority_sequence
@@ -496,6 +549,11 @@ impl CredentialsState {
                 timestamp,
             } => {
                 self.revoked_serials.insert(serial.clone());
+                if let Some(pem) = self.certificate_of(serial)
+                    && let Some(end) = cert_issuer_common::serial::not_after_from_pem(&pem)
+                {
+                    self.revoked_until.entry(serial.clone()).or_insert(end);
+                }
                 if let Some(key) = self.serial_index.get(serial)
                     && let Some(record) = self.valid_certificates.get_mut(key)
                 {
@@ -2404,5 +2462,198 @@ mod provisioning_count_tests {
                 .provisionings_made,
             1
         );
+    }
+}
+
+// docs/architecture/authority-distribution.md, "Pruning the revoked set".
+#[cfg(test)]
+mod pruning_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// A certificate whose life ends at `end` (Unix seconds).
+    fn certificate_ending(end: i64) -> String {
+        let mut params = rcgen::CertificateParams::new(vec!["pod.test".to_string()]).unwrap();
+        params.not_before = time::OffsetDateTime::from_unix_timestamp(end - 3600).unwrap();
+        params.not_after = time::OffsetDateTime::from_unix_timestamp(end).unwrap();
+        params
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap()
+            .pem()
+    }
+
+    fn issued_ending(identity: &str, pod: &str, serial: &str, end: i64) -> CredentialsEvent {
+        CredentialsEvent::IssuanceCompleted {
+            identity: identity.to_string(),
+            instance_binding: pod.to_string(),
+            serial: serial.to_string(),
+            timestamp: 2000,
+            cert_type: WorkloadCertType::Client,
+            grant_key: None,
+            certificate_pem: certificate_ending(end),
+        }
+    }
+
+    fn revoked(serial: &str) -> CredentialsEvent {
+        CredentialsEvent::Revoke {
+            serial: serial.to_string(),
+            reason: RevocationReason::Compromised,
+            revoked_by: "admin".to_string(),
+            timestamp: 3000,
+        }
+    }
+
+    const T: i64 = 1_800_000_000;
+
+    #[test]
+    fn a_superseded_serial_is_published_until_its_certificate_ended_more_than_the_margin_ago() {
+        let mut state = CredentialsState::new();
+        // A pod restarted in place: its record is replaced, and the old certificate's end still known.
+        state.apply(&issued_ending("alice", "pod-1", "0a", T));
+        state.apply(&issued_ending("alice", "pod-1", "0b", T + 3600));
+        assert_eq!(state.revoked_serials(), ["0a"]);
+        assert_eq!(state.published_revocations(T).0, ["0a"]);
+        assert_eq!(
+            state.published_revocations(T + REVOCATION_MARGIN_SECS).0,
+            ["0a"],
+            "not before the margin has passed"
+        );
+        assert!(
+            state
+                .published_revocations(T + REVOCATION_MARGIN_SECS + 1)
+                .0
+                .is_empty()
+        );
+        assert_eq!(state.revoked_serials(), ["0a"], "the ledger keeps it");
+    }
+
+    #[test]
+    fn an_explicitly_revoked_serial_ends_with_its_certificate_and_one_never_seen_is_kept() {
+        let mut state = CredentialsState::new();
+        state.apply(&issued_ending("alice", "pod-1", "0a", T));
+        state.apply(&revoked("0a"));
+        state.apply(&revoked("ff"));
+        let later = T + REVOCATION_MARGIN_SECS + 1;
+        assert_eq!(state.published_revocations(T).0, ["0a", "ff"]);
+        assert_eq!(state.published_revocations(later).0, ["ff"]);
+        assert_eq!(
+            state.published_revocations(later * 2).0,
+            ["ff"],
+            "no end known"
+        );
+    }
+
+    #[test]
+    fn the_version_rises_for_a_serial_revoked_and_for_one_ended_and_never_falls_below_the_count() {
+        let mut state = CredentialsState::new();
+        assert_eq!(state.published_revocations(T).1, 0);
+        state.apply(&issued_ending("alice", "pod-1", "0a", T));
+        state.apply(&issued_ending("alice", "pod-2", "0b", T + 7200));
+        let (_, v1) = state.published_revocations(T);
+        assert_eq!(v1, 1, "as the size was");
+        let (set, v2) = state.published_revocations(T + REVOCATION_MARGIN_SECS + 1);
+        assert!(set.is_empty());
+        assert_eq!(v2, 2, "one revoked, one ended");
+        state.apply(&revoked("ff"));
+        let (set, v3) = state.published_revocations(T + REVOCATION_MARGIN_SECS + 1);
+        assert_eq!(set, ["ff"]);
+        assert_eq!(v3, 3);
+    }
+
+    #[test]
+    fn a_replay_gives_the_same() {
+        let events = [
+            issued_ending("alice", "pod-1", "0a", T),
+            issued_ending("alice", "pod-1", "0b", T + 60),
+            revoked("0b"),
+            revoked("ff"),
+        ];
+        let fold = || {
+            let mut state = CredentialsState::new();
+            for e in &events {
+                state.apply(e);
+            }
+            state
+        };
+        for now in [
+            T,
+            T + REVOCATION_MARGIN_SECS + 1,
+            T + REVOCATION_MARGIN_SECS + 61,
+        ] {
+            assert_eq!(
+                fold().published_revocations(now),
+                fold().published_revocations(now)
+            );
+        }
+    }
+
+    /// A step: a pod of alice's issued (superseding the one before) with a certificate ending `ends` seconds after
+    /// T, a serial revoked explicitly (one known, or never seen), or time moving on.
+    #[derive(Debug, Clone)]
+    enum Step {
+        Issue { pod: u8, ends: i64 },
+        Revoke { known: bool, which: u8 },
+        Wait(i64),
+    }
+
+    fn step() -> impl Strategy<Value = Step> {
+        prop_oneof![
+            (0u8..3, 0i64..20_000).prop_map(|(pod, ends)| Step::Issue { pod, ends }),
+            (any::<bool>(), 0u8..8).prop_map(|(known, which)| Step::Revoke { known, which }),
+            (0i64..8000).prop_map(Step::Wait),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
+
+        /// For any sequence of issuances, revocations and time moving on: what is published is exactly the revoked
+        /// serials whose certificate has not ended by more than the margin (or has no known end), and its version rises
+        /// whenever that set changes and never falls. (It may rise with the set unchanged, a serial revoked after its
+        /// certificate had ended: an update that changes nothing, which a leaf takes harmlessly.)
+        #[test]
+        fn the_published_set_is_the_revoked_not_ended_and_its_version_rises_with_each_change(
+            steps in prop::collection::vec(step(), 1..12),
+        ) {
+            let mut state = CredentialsState::new();
+            let mut now = T;
+            // The model: each serial issued, with its certificate's end.
+            let mut ends: std::collections::BTreeMap<String, i64> = Default::default();
+            let mut revoked_ever: std::collections::BTreeSet<String> = Default::default();
+            let mut n = 0;
+            let (mut last_set, mut last_version) = state.published_revocations(now);
+            for step in steps {
+                match step {
+                    Step::Issue { pod, ends: e } => {
+                        n += 1;
+                        let serial = format!("{n:04x}");
+                        state.apply(&issued_ending("alice", &format!("pod-{pod}"), &serial, T + e));
+                        ends.insert(serial, T + e);
+                    }
+                    Step::Revoke { known, which } => {
+                        let serial = if known && !ends.is_empty() {
+                            ends.keys().nth(which as usize % ends.len()).unwrap().clone()
+                        } else {
+                            format!("ff{which:02x}")
+                        };
+                        state.apply(&revoked(&serial));
+                    }
+                    Step::Wait(seconds) => now += seconds,
+                }
+                revoked_ever.extend(state.revoked_serials());
+                let expected: Vec<String> = revoked_ever
+                    .iter()
+                    .filter(|s| ends.get(*s).is_none_or(|end| now - end <= REVOCATION_MARGIN_SECS))
+                    .cloned()
+                    .collect();
+                let (set, version) = state.published_revocations(now);
+                prop_assert_eq!(&set, &expected);
+                prop_assert!(version >= last_version, "the version fell");
+                prop_assert!(set == last_set || version > last_version, "the set changed and the version did not rise");
+                prop_assert!(version >= state.revoked_serials().len() as u64);
+                last_set = set;
+                last_version = version;
+            }
+        }
     }
 }

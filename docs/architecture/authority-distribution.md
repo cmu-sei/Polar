@@ -188,7 +188,7 @@ A snapshot is the credentials agent's whole current authority in one message. Li
     daemon has two (its workload and its daemon's watcher). Coalescing bounds the rate cluster-wide, not per asker;
     capping watchers bounds the subscribers (`cassini-broker.md`, "Capping watchers").
 
-## Pruning the revoked set: the plan (2026-10-27, for review)
+## Pruning the revoked set (planned, cleared and built 2026-10-27)
 
 What is there, read for this:
 - *The set only grows.* The ledger's `revoked_serials` (`credentials-agent/consume/src/state.rs`) takes every
@@ -226,6 +226,21 @@ The plan:
    not ended by the margin, and its version rises exactly when that set changes; the publisher sending the smaller set
    on its tick, with a higher version, and a leaf taking it.
 6. *Not changed:* the ledger's whole set, and `LedgerMessage::RevokedSerials` (the issuance tests read it).
+
+*Decided (the maintainer, 2026-10-27): a margin of two hours,* twice the life of a client certificate.
+
+*Built (2026-10-27), as planned.* `CredentialsState::revoked_until` keeps each revoked serial's end
+(`cert_issuer_common::serial::not_after_from_pem`), from the record it supersedes, or, for a `Revoke`, from the
+workload, account or escrow certificate the ledger holds for it (`certificate_of`). `published_revocations(now)` gives
+the set without the serials ended more than `REVOCATION_MARGIN_SECS` (two hours) ago, and the version (ever revoked
+plus ended); `LedgerMessage::PublishedRevocations` answers with it, and the publisher asks for it on each revocation and
+every ten minutes (`PRUNE_EVERY`), publishing only a higher version. One thing the property states as it is: the version
+can rise with the set unchanged, a serial revoked after its certificate had ended, an update a leaf takes harmlessly.
+Tests: each kind of revocation keeping its end, the margin to the second, a serial never seen kept, a replay giving the
+same, a property over sequences of issuances, revocations and time; the publisher leaving out an ended serial with a
+higher version. Mutations caught: each end not kept, no margin, the version as the size again, an unknown serial pruned,
+the publisher sending the whole set. The ten-minute look again is not tested (a certificate ending is wall-clock time,
+which the tests cannot move).
 
 ## Pinning the key to the CA (planned 2026-10-27; built 2026-10-27)
 

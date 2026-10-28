@@ -153,6 +153,11 @@ pub enum LedgerMessage {
     AuthoritySequence(RpcReplyPort<u64>),
     /// The serial of every certificate an explicit revocation named, in order.
     RevokedSerials(RpcReplyPort<Vec<String>>),
+    /// The revoked set as it is published at `now` (Unix seconds), and its version (`published_revocations`).
+    PublishedRevocations {
+        now: i64,
+        reply: RpcReplyPort<(Vec<String>, u64)>,
+    },
     /// The port on which a newly revoked serial is announced.
     RevocationChanges(RpcReplyPort<Arc<OutputPort<RevokedChanged>>>),
     /// The active grant for `identity`, if any.
@@ -390,6 +395,9 @@ impl Actor for LedgerActor {
             }
             LedgerMessage::RevokedSerials(reply) => {
                 let _ = reply.send(state.credentials_state.revoked_serials());
+            }
+            LedgerMessage::PublishedRevocations { now, reply } => {
+                let _ = reply.send(state.credentials_state.published_revocations(now));
             }
             LedgerMessage::RevocationChanges(reply) => {
                 let _ = reply.send(state.revocation_changes.clone());
