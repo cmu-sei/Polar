@@ -81,14 +81,17 @@ impl PolarAgent for CredentialsConsumer {
             credentials_agent_common::CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
             "a request for a stored secret, decided by policy",
         ),
+        // Since custody step 9 only a custodian asks for its workload's escrow keypair (docs/architecture/key-custody.md).
         TopicDecl::subscribe(
             credentials_agent_common::CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
-            "an agent's request for its own escrow keypair",
-        ),
+            "a custodian's request for its workload's escrow keypair",
+        )
+        .waiting("a custodian publishes it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_PUBLISHES)"),
         TopicDecl::subscribe(
             credentials_agent_common::CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
-            "an agent asking for an escrow keypair to be issued",
-        ),
+            "a custodian asking for its workload's escrow keypair to be issued",
+        )
+        .waiting("a custodian publishes it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_PUBLISHES)"),
         TopicDecl::subscribe(
             credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
             "a request for another agent's escrow public key",
@@ -176,12 +179,14 @@ impl PolarAgent for CredentialsConsumer {
             credentials_agent_common::CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
             "an agent's escrow keypair, or the refusal",
         )
-        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC)]),
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC)])
+        .waiting("a custodian reads it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_SUBSCRIBES)"),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
             "an issued escrow keypair, or why not",
         )
-        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC)]),
+        .because(&[Cause::Topic(credentials_agent_common::CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC)])
+        .waiting("a custodian reads it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_SUBSCRIBES)"),
         TopicDecl::publish(
             credentials_agent_common::CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
             "another agent's escrow public key",
