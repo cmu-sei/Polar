@@ -24,6 +24,7 @@
 # infra/layers/2-services/neo4j/main.nu
 
 use ../../../dhall-render.nu [dhall_yaml]
+use ../../../rules.nu [placement_of, placement_problems]
 
 def main [context_nuon: string] {
     let context    = ($context_nuon | from nuon)
@@ -36,6 +37,19 @@ def main [context_nuon: string] {
 
     let values_path = ($chart_dir | path join "values.dhall")
     let merged      = "((" + $values_path + ") // (" + $overrides + ").neo4j)"
+
+    # Its node pool, placed only where the target declares it, which render.nu hands over (docs/architecture/placement.md).
+    let pool_file = (mktemp --suffix ".dhall")
+    $"\(($merged)\).pool" | save --force $pool_file
+    let pool = (dhall_yaml $pool_file | from yaml)
+    rm $pool_file
+    let declared = ($context.placement? | default null)
+    let misplaced = (placement_problems $declared $pool "neo4j")
+    if ($misplaced | is-not-empty) { error make { msg: ($misplaced | str join "; ") } }
+    let placement = (match (placement_of $declared $pool) {
+        null => "None { key : Text, pool : Text }"
+        $p => $"Some { key = \"($p.key)\", pool = \"($p.pool)\" }"
+    })
 
     # TLS is always enabled via cert-issuer — always use the SSL conf
     let conf_file    = ($target_dir | path join "conf/neo4j-ssl.conf")
@@ -112,6 +126,7 @@ def main [context_nuon: string] {
         + ", nuInitImage        = v.nuInitImage"
         + ", certIssuerAudience = v.certIssuerAudience"
         + ", neo4jSans          = v.neo4jSans"
+        + ", placement          = " + $placement
         + "}"
     )
     $expr | save --force $tmp

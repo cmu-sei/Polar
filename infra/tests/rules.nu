@@ -78,6 +78,25 @@ def main [] {
             assert equal (escrow_problems false [{ name: "POLAR_INIT_CA_CERT", value: "true" }]) []
         }
 
+        # docs/architecture/placement.md: a workload goes to its pool's node only on a target that declares the pool,
+        # with both the selector and the toleration (nix-usernetes' contract); a pool the target lacks is refused.
+        "a workload is placed only where the target declares its pool": {
+            let declared = { pools: ["core" "observers" "writers"] }
+            assert equal (placement_of $declared "writers") { key: "polar.dev/pool", pool: "writers" }
+            assert equal (placement_problems $declared "writers" "kube-consumer") []
+            # the open pool's, and any workload on a target that declares no placement: nothing
+            assert equal (placement_of $declared null) null
+            assert equal (placement_problems $declared null "ace") []
+            assert equal (placement_of null "writers") null
+            assert equal (placement_problems null "writers" "kube-consumer") []
+            # a pool the target does not declare
+            let lacking = (placement_problems { pools: ["core"] } "writers" "kube-consumer")
+            assert equal ($lacking | length) 1
+            assert ($lacking.0 | str contains "kube-consumer") $lacking.0
+            assert ($lacking.0 | str contains "writers") $lacking.0
+            assert equal (placement_of { pools: ["core"] } "writers") null
+        }
+
         "a Job that replaces pods only after they are gone passes": {
             let docs = [{ kind: "Job", metadata: { name: "kube-consumer" }, spec: { podReplacementPolicy: "Failed" } }]
             assert equal (job_replacement_problems $docs) []

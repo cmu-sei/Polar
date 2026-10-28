@@ -31,7 +31,14 @@
   # The registry is in the cluster (infra/cluster-registry.nu), as is the deployment git server: the nodes pull from localhost:30500,
   # Flux's controllers included, and nothing on this machine runs a registry. This machine pushes through a port-forward on local 5001,
   # since the host registry (`just registry-up`) listens on 5000.
-  cluster: { issuance: { floor_enforced: true }, registry_in_cluster: { node_port: 30500, local_port: 5001 } }
+  cluster: {
+    issuance: { floor_enforced: true }
+    registry_in_cluster: { node_port: 30500, local_port: 5001 }
+    # The dedicated node pools its cluster has (nix-usernetes' u7c: a node each, labelled and tainted polar.dev/pool=<pool>),
+    # where each workload goes by its catalog entry's pool; the rest go to the open pool, services
+    # (docs/architecture/placement.md).
+    placement: { pools: ["core" "observers" "writers"] }
+  }
   workloads: {
     # cert-issuer, a catalog workload of kind `ca` (config/workloads/cert-issuer.nuon): the issuers it trusts and the
     # lifetimes that differ here. Written as values, and given to it as JSON.

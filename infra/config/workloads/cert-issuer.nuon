@@ -29,6 +29,8 @@
   {
     name: "cert-issuer"
     kind: "ca"
+    # Its node pool, where a target declares placement (docs/architecture/placement.md).
+    pool: "core"
     image: "cert-issuer"
     # It cannot be issued through the credentials agent: everything's certificate comes from it.
     bootstrap: true

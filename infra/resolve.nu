@@ -345,6 +345,18 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
 
     let custody = (custody_of $cluster $spec)
 
+    # Its node pool, the catalog's (docs/architecture/placement.md): what a workload is decides it, not the target, which
+    # declares only the pools its cluster has.
+    if ($ov.pool? | is-not-empty) {
+        error make { msg: $"($name): a workload's pool is its catalog entry's; a target declares only the pools it has \(cluster.placement.pools\)" }
+    }
+    let pool = ($entry.pool? | default null)
+    let declared = ($cluster.placement? | default null)
+    let misplaced = (placement_problems $declared $pool $name)
+    if ($misplaced | is-not-empty) {
+        error make { msg: $"($name): ($misplaced | str join '; ')" }
+    }
+
     # Services whose certificates the health check still watches but that polar-init does not wait
     # for before the workload starts: one that must be able to start, and serve, while they are down.
     let no_start_wait = (($entry.no_start_wait? | default []) ++ ($ov.no_start_wait? | default []))
@@ -613,6 +625,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         dep_checks: ($deps | where {|d| not ($d.service in $no_start_wait) } | get endpoint)
         certs: ($certs | get spec)
         custody: (if $custody { $CUSTODY | insert image (image_ref $images $cluster "polar-custody" $name) } else { null })
+        placement: (placement_of $declared $pool)
         resources: { cluster_roles: ($cluster_roles | reject from), sa_token_secrets: (if $sa_secret == null { [] } else { [$sa_secret] }), pvcs: $pvcs, services: $exposed }
         config_map: $config_map
         config_problems: $config_problems
@@ -1119,6 +1132,12 @@ def "main identity" [name: string, --target: string = $DEFAULT_TARGET] {
 }
 
 # Whether cert-issuer enforces the floor on this target (cluster.nuon, `issuance.floor_enforced`).
+# The node pools the target declares (docs/architecture/placement.md), as JSON: `{ pools: [...] }`, or null when it
+# declares none. render.nu hands it to the one hand chart placed, Neo4j's.
+def "main placement" [--target: string = $DEFAULT_TARGET] {
+    print ((load_cluster $target).placement? | default null | to json --raw)
+}
+
 def "main floor-enforced" [--target: string = $DEFAULT_TARGET] {
     print ((load_cluster $target).issuance?.floor_enforced? | default false)
 }

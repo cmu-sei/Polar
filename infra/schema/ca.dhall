@@ -166,8 +166,12 @@ let render =
                 ]
               # functions.ProxyMount v.proxy_ca_cert
 
+        let placed = functions.placementOf v.placement
+
         let podSpec =
               kubernetes.PodSpec::{
+              , nodeSelector = placed.nodeSelector
+              , tolerations = placed.tolerations
               , imagePullSecrets = Some v.pull_secrets
               , serviceAccountName = Some v.service_account
               -- The Kubernetes API token: it fetches the API server's keys to validate tokens.

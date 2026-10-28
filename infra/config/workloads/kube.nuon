@@ -27,6 +27,8 @@
   {
     name: "kube-observer"
     kind: "agent"
+    # Its node pool, where a target declares placement (docs/architecture/placement.md).
+    pool: "observers"
     image: "kube-observer"
     config: "document"
   }
@@ -34,6 +36,8 @@
   {
     name: "kube-consumer"
     kind: "agent"
+    # Its node pool, where a target declares placement (docs/architecture/placement.md).
+    pool: "writers"
     image: "kube-consumer"
     # The agent says what it needs and how long it needs to drain: `kube-consumer --scaffold`
     # prints it, and the resolver fills the rest from the catalog. Nothing is repeated here.

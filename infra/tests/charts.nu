@@ -119,6 +119,23 @@ def main [] {
             assert (((value_of $vars "POLAR_INIT_CERT_ISSUER_URL") | default "") == "")
         }
 
+        # docs/architecture/placement.md: Neo4j is the writers' (the maintainer, 2026-10-28), placed only on a target that
+        # declares the pool, with both the selector and the toleration; a target that lacks the pool refuses it.
+        "Neo4j goes to the writers' node where the target declares the pool, and nowhere in particular otherwise": {
+            let placed = (render neo4j { placement: { pools: ["core" "observers" "writers"] } })
+            let pod = (open ($placed | path join "neo4j-statefulset.yaml") | get spec.template.spec)
+            assert equal $pod.nodeSelector { "polar.dev/pool": "writers" }
+            assert equal $pod.tolerations [{ key: "polar.dev/pool", operator: "Equal", value: "writers", effect: "NoSchedule" }]
+            for extra in [{} { placement: null }] {
+                let plain = (open ((render neo4j $extra) | path join "neo4j-statefulset.yaml") | get spec.template.spec)
+                assert equal ($plain.nodeSelector? | default null) null
+                assert equal ($plain.tolerations? | default null) null
+            }
+            let refused = (try { render neo4j { placement: { pools: ["core"] } }; null } catch {|e| $e.msg })
+            assert ($refused != null) "a target without the writers' pool"
+            assert ($refused | str contains "writers") $refused
+        }
+
         "Neo4j still asks for the server certificate it did and runs no escrow bootstrap": {
             let out = (render neo4j {})
             let text = (open --raw ($out | path join "neo4j-statefulset.yaml"))

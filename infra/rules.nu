@@ -170,6 +170,30 @@ export def custody_cert_problems [specs: list<string>]: nothing -> list<string> 
     $two ++ $files
 }
 
+# The label and taint key of a node pool: nix-usernetes' (`cluster.dhall`, `poolKey`), where each worker is one pool,
+# labelled `polar.dev/pool=<pool>`, and a dedicated pool's node is also tainted `polar.dev/pool=<pool>:NoSchedule`
+# (docs/architecture/placement.md).
+export const POOL_KEY = "polar.dev/pool"
+
+# Where a workload of `pool` goes, as the pod's template takes it: `{ key, pool }` when the target declares the pool
+# (`declared` is its cluster's `placement`, `{ pools: [...] }`, or null), so the pod gets the pool's selector and the
+# toleration of its taint; null for the open pool's (`pool` null), on a target that declares no placement, or for a pool
+# the target lacks (which `placement_problems` reports).
+export def placement_of [declared: any, pool: any]: nothing -> any {
+    if $declared == null or $pool == null { return null }
+    if $pool in ($declared.pools? | default []) { { key: $POOL_KEY, pool: $pool } } else { null }
+}
+
+# What is wrong with `who`'s placement: on a target that declares placement, a pool it does not declare, which would
+# otherwise land on the open pool unseen.
+export def placement_problems [declared: any, pool: any, who: string]: nothing -> list<string> {
+    if $declared == null or $pool == null { return [] }
+    let pools = ($declared.pools? | default [])
+    if $pool in $pools { [] } else {
+        [$"($who) asks for the pool '($pool)', which this target does not declare \(it declares: ($pools | str join ', ')\)"]
+    }
+}
+
 # What is wrong with a pod whose polar-init is asked to fetch the escrow key (`POLAR_INIT_ESCROW_BOOTSTRAP`, from the
 # `encryption` capability) when it has no custody daemon: only the daemon's custodian fetches the escrow key
 # (docs/architecture/key-custody.md, step 9), and polar-init would stop at once. `custody` is whether the pod has the

@@ -276,7 +276,38 @@ let makePolarInitContainerWith =
 
 let makePolarInitContainer = makePolarInitContainerWith Constants.commonClientEnv
 
+-- Where a pod goes (docs/architecture/placement.md): with a placement, its pool's node, by the selector on the pool's
+-- label and the toleration of its taint, both of which nix-usernetes' contract needs (a selector alone leaves the pod
+-- Pending); without, nothing, and the scheduler puts it where it may.
+let Placement = { key : Text, pool : Text }
+
+let placementOf =
+      \(placement : Optional Placement) ->
+        { nodeSelector =
+            Prelude.Optional.map
+              Placement
+              (List { mapKey : Text, mapValue : Text })
+              (\(p : Placement) -> [ { mapKey = p.key, mapValue = p.pool } ])
+              placement
+        , tolerations =
+            Prelude.Optional.map
+              Placement
+              (List kubernetes.Toleration.Type)
+              ( \(p : Placement) ->
+                  [ kubernetes.Toleration::{
+                    , key = Some p.key
+                    , operator = Some "Equal"
+                    , value = Some p.pool
+                    , effect = Some "NoSchedule"
+                    }
+                  ]
+              )
+              placement
+        }
+
 in  { makeGraphEnv
+    , Placement
+    , placementOf
     , makeOpaqueSecret
     , makeDeployment
     , DockerRegistrySecret

@@ -30,6 +30,8 @@
   {
     name: "jira-observer"
     kind: "agent"
+    # Its node pool, where a target declares placement (docs/architecture/placement.md).
+    pool: "observers"
     image: "jira-observer"
     config: "document"
     # The agent declares JIRA_TOKEN as a secret, so it can only be given from a Secret.
@@ -41,6 +43,8 @@
   {
     name: "jira-processor"
     kind: "agent"
+    # Its node pool, where a target declares placement (docs/architecture/placement.md).
+    pool: "writers"
     image: "jira-processor"
     config: "document"
   }

@@ -28,6 +28,8 @@
   {
     name: "cassini"
     kind: "service"
+    # Its node pool, where a target declares placement (docs/architecture/placement.md).
+    pool: "core"
     image: "cassini"
     # The crate is not named for the image.
     scaffold_package: "cassini-broker"

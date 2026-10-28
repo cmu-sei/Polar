@@ -229,6 +229,66 @@ def main [] {
             }
         }
 
+        # docs/architecture/placement.md: sandbox-local declares the dedicated pools, and each workload goes to its own;
+        # the open pool's (services) is given nothing. The mapping is the maintainer's (2026-10-28).
+        "under sandbox-local every workload is placed in its pool, and the open pool's in none": {
+            let pools = {
+                core: [credentials-agent cert-issuer cassini git-repo-controller polar-git-server]
+                observers: [git-repo-observer jira-observer kube-observer polar-scheduler-observer credentials-agent-observer]
+                writers: [kube-consumer git-repo-processor jira-processor polar-scheduler]
+            }
+            let placed = ($pools | transpose pool names | each {|p| $p.names | each {|n| { name: $n, pool: $p.pool } } } | flatten)
+            let names = (^nu $RESOLVER names --target sandbox-local | from json)
+            for n in $names {
+                let r = (resolve_for sandbox-local $n)
+                let want = ($placed | where name == $n | get -o 0.pool)
+                if $want == null {
+                    assert equal $r.placement null $n
+                } else {
+                    assert equal $r.placement { key: "polar.dev/pool", pool: $want } $n
+                }
+            }
+            # every workload the mapping names runs there, so none of it is untested
+            for p in $placed { assert ($p.name in $names) $p.name }
+            # the harness is the open pool's
+            assert equal (resolve_for sandbox-local "harness-sink").placement null
+        }
+
+        "a target that declares no placement places nothing": {
+            for n in (^nu $RESOLVER names --target local-minimal | from json) {
+                assert equal (resolve_for local-minimal $n).placement null $n
+            }
+        }
+
+        "a target that declares placement refuses a workload whose pool it lacks": {
+            with_target { cluster: { placement: { pools: ["core"] } }, workloads: {} } {|t|
+                let r = (do { ^nu $RESOLVER json kube-consumer --target $t } | complete)
+                assert ($r.exit_code != 0) "kube-consumer asks for writers"
+                assert ($r.stderr | str contains "kube-consumer") $r.stderr
+                assert ($r.stderr | str contains "writers") $r.stderr
+                assert ((resolve_for $t "cassini").placement == { key: "polar.dev/pool", pool: "core" })
+            }
+            # and a target that would set a workload's pool itself: the pool is the catalog's
+            with_target { cluster: { placement: { pools: ["core" "writers"] } }, workloads: { cassini: { pool: "writers" } } } {|t|
+                let r = (do { ^nu $RESOLVER json cassini --target $t } | complete)
+                assert ($r.exit_code != 0) "the target set cassini's pool"
+                assert ($r.stderr | str contains "catalog") $r.stderr
+            }
+        }
+
+        # nix-usernetes' contract: the selector and the toleration both, or the pod stays Pending on a tainted node.
+        "a placed pod has the pool's selector and its toleration, in both templates": {
+            for n in [kube-consumer cert-issuer] {
+                let spec = (pod_of $n sandbox-local)
+                let pool = (if $n == "cert-issuer" { "core" } else { "writers" })
+                assert equal $spec.nodeSelector { "polar.dev/pool": $pool } $n
+                assert equal $spec.tolerations [{ key: "polar.dev/pool", operator: "Equal", value: $pool, effect: "NoSchedule" }] $n
+                let plain = (pod_of $n local-minimal)
+                assert equal ($plain.nodeSelector? | default null) null $n
+                assert equal ($plain.tolerations? | default null) null $n
+            }
+        }
+
         "a target with custody off renders every pod with key files, as before": {
             with_target { cluster: { custody: { enabled: false } }, workloads: {} } {|t|
                 let r = (resolve_for $t "kube-observer")

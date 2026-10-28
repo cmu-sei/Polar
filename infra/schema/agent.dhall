@@ -237,8 +237,12 @@ let render =
                 }
                 v.custody
 
+        let placed = functions.placementOf v.placement
+
         let podSpec =
               kubernetes.PodSpec::{
+              , nodeSelector = placed.nodeSelector
+              , tolerations = placed.tolerations
               , imagePullSecrets = Some v.pull_secrets
               , serviceAccountName = Some v.service_account
               , automountServiceAccountToken = v.automount_sa_token

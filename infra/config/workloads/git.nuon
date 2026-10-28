@@ -33,6 +33,8 @@
     # The Job and ServiceAccount keep the name the chart gave them.
     name: "git-repo-observer"
     kind: "agent"
+    # Its node pool, where a target declares placement (docs/architecture/placement.md).
+    pool: "observers"
     image: "git-observer"
     # The crate is not named for the image.
     scaffold_package: "git-repo-observer"
@@ -48,6 +50,8 @@
   {
     name: "git-repo-processor"
     kind: "agent"
+    # Its node pool, where a target declares placement (docs/architecture/placement.md).
+    pool: "writers"
     image: "git-processor"
     # The crate is not named for the image.
     scaffold_package: "git-repo-processor"
@@ -57,6 +61,8 @@
   {
     name: "git-repo-controller"
     kind: "agent"
+    # Its node pool, where a target declares placement (docs/architecture/placement.md).
+    pool: "core"
     image: "git-controller"
     # The crate is not named for the image.
     scaffold_package: "git-repo-controller"

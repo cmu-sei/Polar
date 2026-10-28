@@ -131,7 +131,8 @@ def main [
                     # Its own projected token is for this audience: it is signed its client certificate on it.
                     certIssuerAudience: $cert_issuer_audience
                 }
-                "neo4j" => { polarInitImage: $polar_init_image, credentialsObserverUrl: $credentials_observer_url, credentialsAgentIdentity: $credentials_agent_identity }
+                # The node pools the target declares, for its own (docs/architecture/placement.md).
+                "neo4j" => { polarInitImage: $polar_init_image, credentialsObserverUrl: $credentials_observer_url, credentialsAgentIdentity: $credentials_agent_identity, placement: (^nu ($infra_root | path join "resolve.nu") placement --target $target | from json) }
                 "gitlab" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "git"         => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }
                 "build-processor" => { neo4jBoltAddr: $neo4j_bolt_addr, certIssuerUrl: $cert_issuer_url, certIssuerAudience: $cert_issuer_audience, polarInitImage: $polar_init_image }

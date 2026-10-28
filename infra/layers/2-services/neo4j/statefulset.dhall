@@ -60,8 +60,11 @@ let render =
           , ports               : { http : Natural, https : Natural, bolt : Natural }
           , config              : { name : Text, path : Text }
           , volumes             : { data : VolumeSpec, logs : VolumeSpec, certs : VolumeSpec }
+          , placement           : Optional Functions.Placement
           }
       ) ->
+
+        let placed = Functions.placementOf v.placement
 
         let neo4jTlsVolume =
         kubernetes.Volume::{
@@ -166,6 +169,8 @@ let render =
                   , labels = Some [ { mapKey = "name", mapValue = v.name } ]
                   }
                 , spec = Some kubernetes.PodSpec::{
+                  , nodeSelector = placed.nodeSelector
+                  , tolerations = placed.tolerations
                   , serviceAccountName = Some v.serviceAccountName
                   , automountServiceAccountToken = Some False
                   , securityContext = Some kubernetes.PodSecurityContext::{

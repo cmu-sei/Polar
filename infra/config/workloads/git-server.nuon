@@ -29,6 +29,8 @@
   {
     name: "polar-git-server"
     kind: "agent"
+    # Its node pool, where a target declares placement (docs/architecture/placement.md).
+    pool: "core"
     image: "polar-git-server"
     config: "document"
     # The repositories are history that must survive the pod (persistent-data); the rest is its

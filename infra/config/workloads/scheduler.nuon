@@ -29,6 +29,8 @@
   {
     name: "polar-scheduler"
     kind: "agent"
+    # Its node pool, where a target declares placement (docs/architecture/placement.md).
+    pool: "writers"
     image: "scheduler-processor"
     # The crate is not named for the image.
     scaffold_package: "polar-scheduler"
@@ -38,6 +40,8 @@
   {
     name: "polar-scheduler-observer"
     kind: "agent"
+    # Its node pool, where a target declares placement (docs/architecture/placement.md).
+    pool: "observers"
     image: "scheduler-observer"
     # The crate is not named for the image.
     scaffold_package: "polar-scheduler-observer"

@@ -29,6 +29,9 @@
 -- startup via the polar-init init container.
 
 { name               = "polar-neo4j"
+-- Its node pool, where a target declares placement: beside the graph writers, its only writers, and off the observers'
+-- node (docs/architecture/placement.md; the maintainer, 2026-10-28).
+, pool               = "writers"
 -- The ServiceAccount, and so the certificate identity
 -- (<sa>.<ns>.serviceaccount.cluster.local). Deliberately not `name`: that
 -- names the StatefulSet, its pod labels and its pods, which the Service

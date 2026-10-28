@@ -115,6 +115,7 @@ let Spec =
       , dep_checks : List Text
       , certs : List Text
       , custody : Optional Custody
+      , placement : Optional { key : Text, pool : Text }
       }
 
 in  { Spec, EnvEntry, VolumeEntry, MountEntry, InitMountEntry, Probe, Custody }
