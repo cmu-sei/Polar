@@ -126,6 +126,26 @@ pub trait CaClient: Send + Sync {
     async fn issue(&self, req: CaIssueRequest) -> Result<IssuedCert, CaError>;
 }
 
+/// The key usage of an escrow certificate, by the kind of key a secret is sealed to (polar-escrow's `Suite`).
+fn escrow_key_usage(algorithm: &rcgen::SignatureAlgorithm) -> Result<KeyUsagePurpose, CaError> {
+    if algorithm == &rcgen::PKCS_ECDSA_P256_SHA256 {
+        Ok(KeyUsagePurpose::KeyAgreement)
+    } else if [
+        &rcgen::PKCS_RSA_SHA256,
+        &rcgen::PKCS_RSA_SHA384,
+        &rcgen::PKCS_RSA_SHA512,
+    ]
+    .contains(&algorithm)
+    {
+        Ok(KeyUsagePurpose::KeyEncipherment)
+    } else {
+        Err(CaError::Malformed(
+            "an escrow certificate is for a P-256 or an RSA key: no secret is sealed to this one"
+                .to_string(),
+        ))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // rcgen-backed implementation
 // ---------------------------------------------------------------------------
@@ -292,11 +312,10 @@ impl CaClient for RcgenCaClient {
             CertType::Client | CertType::Server | CertType::Signing => {
                 vec![KeyUsagePurpose::DigitalSignature]
             }
-            // This certificate's actual cryptographic purpose is
-            // RSA-OAEP key-wrapping (this project's own hybrid
-            // encryption scheme -- see credentials-agent-architecture.md's
-            // "Secret escrow"), not signing anything.
-            CertType::Service => vec![KeyUsagePurpose::KeyEncipherment],
+            // What a secret is sealed to, not anything that signs: by key agreement to a P-256 key (HPKE), or by
+            // wrapping its key to an RSA key (RSA-OAEP); see polar-escrow's `Suite`. A key no secret can be sealed
+            // to is no one's escrow key.
+            CertType::Service => vec![escrow_key_usage(csr.public_key.algorithm())?],
         };
         csr.params.not_before = not_before;
         csr.params.not_after = not_after;
@@ -1080,6 +1099,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_escrow_cert_is_for_encrypting_to_and_nothing_else() {
+        // make_csr's key is P-256: a secret is sealed to it by key agreement (HPKE), so keyAgreement is its use.
         let issued = make_client()
             .issue(escrow_request(
                 "git-observer.polar.serviceaccount.cluster.local",
@@ -1089,8 +1109,8 @@ mod tests {
         let der = parsed(&issued.certificate_pem);
         let (_, cert) = x509_parser::parse_x509_certificate(&der).expect("x509");
         let ku = cert.key_usage().expect("one").expect("KeyUsage present");
-        assert!(ku.value.key_encipherment());
-        assert_eq!(ku.value.flags, 1 << 2, "keyEncipherment and nothing else");
+        assert!(ku.value.key_agreement());
+        assert_eq!(ku.value.flags, 1 << 4, "keyAgreement and nothing else");
         let eku = cert
             .extended_key_usage()
             .expect("one")
@@ -1098,6 +1118,57 @@ mod tests {
         assert!(eku.value.email_protection);
         assert!(!eku.value.client_auth && !eku.value.server_auth && !eku.value.any);
         assert!(!eku.value.code_signing && eku.value.other.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_escrow_cert_for_an_rsa_key_is_for_key_encipherment_only() {
+        // A secret is sealed to an RSA key by wrapping its key (RSA-OAEP).
+        let identity = "git-observer.polar.serviceaccount.cluster.local";
+        let rsa = cert_issuer_common::keypair::generate_csr(
+            identity,
+            &cert_issuer_common::keypair::KeyAlgorithm::Rsa,
+            &[],
+        )
+        .unwrap();
+        let issued = make_client()
+            .issue(CaIssueRequest {
+                csr_pem: rsa.csr_pem,
+                ..escrow_request(identity)
+            })
+            .await
+            .unwrap();
+        let der = parsed(&issued.certificate_pem);
+        let (_, cert) = x509_parser::parse_x509_certificate(&der).expect("x509");
+        let ku = cert.key_usage().expect("one").expect("KeyUsage present");
+        assert_eq!(ku.value.flags, 1 << 2, "keyEncipherment and nothing else");
+    }
+
+    #[tokio::test]
+    async fn an_escrow_cert_is_refused_for_a_key_nothing_is_sealed_to() {
+        // An Ed25519 key only signs: no secret can be sealed to it, so it is no one's escrow key.
+        let identity = "git-observer.polar.serviceaccount.cluster.local";
+        let key_pair = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let csr_pem = RcgenParams::new(vec![identity.to_string()])
+            .unwrap()
+            .serialize_request(&key_pair)
+            .unwrap()
+            .pem()
+            .unwrap();
+        let refused = make_client()
+            .issue(CaIssueRequest {
+                csr_pem: csr_pem.clone(),
+                ..escrow_request(identity)
+            })
+            .await;
+        assert!(matches!(refused, Err(CaError::Malformed(_))), "{refused:?}");
+        // The same key is still a client's.
+        let client = make_client()
+            .issue(CaIssueRequest {
+                csr_pem,
+                ..sample_request(identity)
+            })
+            .await;
+        assert!(client.is_ok());
     }
 
     #[tokio::test]
