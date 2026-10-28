@@ -1190,6 +1190,39 @@ checks a recipient's escrow certificate before encrypting to its key. Today it t
 certificate must chain to the pinned CA, name the recipient, be a `Service` certificate, and hold that key. Encryption to
 another agent stays in the workload: it needs no key the daemon holds, and the custodian's authority is spent.
 
+**Built (2026-10-27), steps 1 to 7, each tests first, mutation-checked:**
+1. cert-issuer (`9fde5490`): `CertType::Custody` (client authentication only), named `custody.<X>` from the token on
+   `/issue`, vouched for by the credentials agent or, for a bootstrap service, on the token alone with nothing in it;
+   the custodians' space reserved (a dotted service account named like a custodian buys nothing; `/internal/issue`
+   signs no custodian and no name in the space; a `p:custody:` name only in a custodian's certificate, which carries
+   nothing else). `/internal/issue` takes the pod instance and an end (`expires_by`), and checks a server
+   certificate's names against the floor. `cert_issuer_common::custody` (the names, `custodian_of`) and
+   `identity::kubernetes_subject_of`, the inverse of the normalization, which a grant is looked up by.
+2. The credentials agent (`35c7ede2`, `73aeda50`): the custodian's certificate on the token path, recorded under
+   `custody.<X>`; `credentials-custodian-issuance-requests` for X's certificates; escrow retrieval, escrow issuance
+   (no token now: `AgentEscrowIssuanceRequest` lost its credential) and the store of `agent-escrow-keypair:<X>`
+   answered to `custody.X` alone, refused to X; that name never retrieved by name; the request gate admitting a
+   custodian on `CUSTODIAN_PUBLISHES`; a bootstrap service's held custodian vouched for as the service is. One pure
+   rule, `custodian::judge`, with a property. An escrow certificate's P-256 key is handed out
+   (`extract_escrow_public_key_pem`: the old extractor read RSA only, so a P-256 key would have been NotFound).
+   *A refinement of item 3 above:* "each kind once" is the renewal rule's (`call_admit`, the same five-minute bound
+   as the window), so no new ledger record; an escrow retrieval asked twice in the window gives the same key to the
+   same custodian, and the escrow certificate and its store are once by their own rules (one service certificate
+   per identity; the name never replaced).
+3. The floor (`fcdc4128`): a custodian's floor is `CUSTODIAN_PUBLISHES` and `CUSTODIAN_SUBSCRIBES`, implied by the
+   identity, nothing its certificate declares; the broker and every agent read it.
+4. The daemon (`7ff1953a`, `3202cdaf`, and `032f6f99` for the client's `RegistrationRefused` event):
+   `Slot::Custodian`, signing only the daemon's own handshake; `Bootstrap`, `Ready`, `Unwrap`; the escrow key
+   (`polar_custody::escrow`), sealed only to the key the daemon pinned; the custodian's session, an ordinary one now,
+   driving a pure state machine (`polar-custody/daemon/src/bootstrap.rs`); a registration refused as revoked
+   destroying every key. Through a broker enforcing its floor with no policy, a custodian fetches and installs its
+   workload's certificate (`cassini/broker/tests/custody_revocation.rs`).
+5. `polar-init` (`9d51ee7a`): the custodian's certificate through the observer (or, for a bootstrap service, from
+   cert-issuer with nothing in it), the plan, `Ready` within four minutes, the bundle from `Certificate`.
+6. `polar-crypto` (`37000c3e`): the daemon holder, one opening path, no bootstrap with a daemon; and the recipient's
+   key believed only for its certificate (`polar-crypto/src/recipient.rs`).
+7. The bootstrap pods: in 1, 2 and 5 (their custodian from cert-issuer, held and vouched for as the service is).
+
 **Decided along the way (2026-10-27, the maintainer):** the custodian identity, instead of the token on a retrieval
 or a daemon-signed ephemeral (2a); X's certificates from the credentials agent, not from cert-issuer; forced
 rejuvenation kept; the custodian's authority spent, not kept. **Decided here, by precedent:** a new certificate type
