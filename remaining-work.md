@@ -720,6 +720,11 @@ Principle: declare each environment variable once, with its type, default, docum
   a whole mode) holds for every agent but those with `encryption`. None is affected today (kube-consumer and
   git-repo-observer have daemons; the scheduler, on key files, does not encrypt), but a target with `custody` off would
   be. Either the render refuses that combination, or key-file mode gets an escrow path of its own; not decided.
+- [ ] A revoked custodian is told so by the refusal's text (found 2026-10-28, custody step 9, on the cluster): the
+  daemon reads its revocation by comparing `RegistrationResponse`'s reason to `cassini_types::REVOKED_REFUSAL`
+  (`polar-custody/daemon/src/watch.rs`), so a broker with a different text (part A changed it) leaves an older daemon
+  retrying, keys held, until its pod ends (53 s for git-repo-processor's in the rollout). A refusal code on the wire
+  would not depend on the wording. Harmless while every image deploys together.
 - [ ] The credentials agent's consumer logs "no handler for topic" for admin-action and account requests it has just
   handed to their actors (found 2026-10-28, custody step 8): those two dispatch branches fall through to the warning,
   as before this work. Misleading only.

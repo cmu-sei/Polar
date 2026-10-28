@@ -1272,6 +1272,16 @@ asked; Mullvad off for the run):** what was checked, how, and what was not.
 - *D, the topics*: the escrow keypair's retrieval and issuance are out of `polar_crypto::REQUEST_TOPICS` and
   `REPLY_TOPICS`, so an encryption agent's implied topics no longer name them; they stay the custodian's floor. The
   authority model fixture regenerated.
+- *On the cluster* (2026-10-28, `up.nu sandbox-local --dev` over the step-8 `u7c` at `d4dfa89f`, stopped at the
+  browser step as asked): every pod up but jira-observer (the placeholder Jira, as before); kube-consumer's and
+  git-repo-observer's polar-init with no `KUBERNETES_SA_TOKEN`, their custodians fetching the escrow key ("the escrow
+  key is the custody daemon's, fetched by its custodian"), the credentials agent counting two escrow retrievals (the
+  keys step 8 escrowed, so no issuance) and no refusal; no workload logging `NoEscrowKey` or a failed decrypt.
+- *Found on the cluster:* while the rollout replaced it, the old git-repo-processor pod's daemon (the step-8 image) was
+  refused as revoked once a second for 53 s and did not exit: its custodian's certificate was superseded, so revoked,
+  when the new pod's was issued, and the daemon reads its revocation by comparing the refusal's text to
+  `REVOKED_REFUSAL`, which part A changed. Only while two images overlap, and the pod was ending; a refusal code on
+  the wire instead of its text would remove it (`remaining-work.md`).
 - *What it leaves:* `polar-kernel-keyring`, used by nothing now (the maintainer to decide whether it goes); an agent
   with `encryption` cannot run without the daemon (`remaining-work.md`).
 
