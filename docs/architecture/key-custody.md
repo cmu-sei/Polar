@@ -1058,6 +1058,20 @@ Decided item 3. Two keys are left outside a daemon, and they are not alike.
      under the CA since "Pinning the key to the CA"), never to a key the caller names: otherwise any caller could have
      the key sealed to a key of its own. Once, and only for a key made by `EscrowCsr` and not yet sealed. Without a
      pinned authority yet it is refused (`NoAuthority`), and `polar-init` retries, as it retries the bootstrap now.
+2a. **Found while building (2026-10-27): the workload could still retrieve the key itself.** The credentials agent
+   answers a retrieval by the requester's broker identity alone (`credentials-agent/consume/src/
+   agent_escrow_keypair_bootstrap.rs`), and seals the key to whatever X25519 key the request names; the workload has
+   that identity too. So a compromised workload could publish its own `RetrieveAgentEscrowKeypairRequest` and have its
+   escrow key in plaintext, and the daemon would hold it to no end. Two ways to close it:
+   - *the service-account token on a retrieval* (recommended): the request carries it, and the credentials agent
+     validates it as it does on issuance, for the same identity. The token is readable only in `polar-init`
+     (`CryptoMessage::EnsureBootstrapped`'s doc); an agent whose workload mounts its own token (`kube-api-read`) could
+     still retrieve, and none with `encryption` does today;
+   - *the daemon vouching for its ephemeral*: it signs the X25519 public half with the pod's mTLS key, as nothing a
+     caller sends ever is (`Sign` takes a TLS 1.3 CertificateVerify input only), and the credentials agent checks it
+     against the requester's certificate. Holds even with a token in the workload, and asks the credentials agent to
+     know each requester's current certificate.
+   Open, for the maintainer.
 3. **The workload decrypts through the socket.** `Decrypt { slot: Escrow, ciphertext }`, the workload's, returns the
    plaintext (the same oracle the workload holds today with the key). Refused for the other slots. In `CryptoActor`, a
    third holder, `EscrowKeypairHandle::Daemon`, and the three decryption sites become one function over the holder. A
