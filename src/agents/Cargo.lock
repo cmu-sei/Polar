@@ -6021,6 +6021,7 @@ dependencies = [
  "polar-custody",
  "polar-env",
  "polar-health",
+ "proptest",
  "rcgen",
  "rsa 0.10.0-rc.18",
  "rustls",

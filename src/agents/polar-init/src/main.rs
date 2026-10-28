@@ -629,8 +629,8 @@ async fn issue_cert(
 // ---------------------------------------------------------------------------
 
 /// The daemon's client for the certificates whose key is its own: `None` when none is, and why not when one is and
-/// there is no socket, or two of one type ask for its one slot of that type, or the escrow key is asked for and there
-/// is no daemon's custodian to fetch it. Said before anything waits.
+/// there is no socket, or another has a key file, or two of one type ask for its one slot of that type, or the escrow
+/// key is asked for and there is no daemon's custodian to fetch it. Said before anything waits.
 fn custody_for(
     requests: &[CertRequest],
     socket: Option<&str>,
@@ -649,6 +649,18 @@ fn custody_for(
             ));
         }
         return Ok(None);
+    }
+    // With the daemon, the token buys only the custodian's certificate (docs/architecture/key-custody.md, "Part A's
+    // bootstrap: the custodian"); a certificate with a key file would be bought with it as well.
+    if let Some(file) = requests
+        .iter()
+        .find(|req| !matches!(req.key, KeyMaker::Custody))
+    {
+        return Err(format!(
+            "the {:?} cert into '{}' has a key file, and this pod's other keys are the custody daemon's: with the \
+             daemon, the token buys only its custodian's certificate, so every cert's key must be the daemon's",
+            file.cert_type, file.cert_dir
+        ));
     }
     for (i, req) in custody.iter().enumerate() {
         if custody[..i]
@@ -1954,7 +1966,7 @@ mod tests {
                 "none asked"
             );
 
-            let one = parse(&["client:/a:custody:", "client:/b:ecdsa-p256:"]);
+            let one = parse(&["client:/a:custody:"]);
             let why = custody_for(&one, None, false).unwrap_err();
             assert!(why.contains("POLAR_CUSTODY_SOCKET"), "{why}");
             assert!(custody_for(&one, Some("/s"), false).unwrap().is_some());
@@ -1982,6 +1994,77 @@ mod tests {
 
             let daemon = parse(&["client:/a:custody:"]);
             assert!(custody_for(&daemon, Some("/s"), true).unwrap().is_some());
+        }
+
+        /// With the daemon, the token buys only the custodian's certificate (docs/architecture/key-custody.md, "Part A's
+        /// bootstrap: the custodian"): a certificate with a key file beside the daemon's would be bought with it too, and
+        /// polar-init stops at once, naming it (the maintainer, 2026-10-28).
+        #[test]
+        fn with_the_daemon_no_cert_has_a_key_file() {
+            let parse = |certs: &[&str]| -> Vec<CertRequest> {
+                certs.iter().map(|c| c.parse().unwrap()).collect()
+            };
+            let mixed = parse(&["client:/a:custody:", "server:/b:ecdsa-p256:x.svc"]);
+            for escrow in [false, true] {
+                let why = custody_for(&mixed, Some("/s"), escrow).unwrap_err();
+                assert!(why.contains("'/b'"), "the key-file cert is named: {why}");
+                assert!(why.contains("custodian"), "{why}");
+            }
+        }
+
+        mod props {
+            use super::*;
+            use proptest::prelude::*;
+
+            /// One `--cert`: its type, client or server (the two `--cert` takes), and whether its key is the daemon's.
+            fn cert() -> impl Strategy<Value = (bool, bool)> {
+                (any::<bool>(), any::<bool>())
+            }
+
+            fn request(n: usize, (server, custody): (bool, bool)) -> CertRequest {
+                CertRequest {
+                    cert_type: if server {
+                        CertType::Server
+                    } else {
+                        CertType::Client
+                    },
+                    cert_dir: format!("/c{n}"),
+                    key: if custody {
+                        KeyMaker::Custody
+                    } else {
+                        KeyMaker::Here(keypair::KeyAlgorithm::EcdsaP256)
+                    },
+                    extra_sans: Vec::new(),
+                }
+            }
+
+            proptest! {
+                /// For any `--cert`s, escrow flag and socket: with no certificate of the daemon's, polar-init goes on
+                /// without it exactly when no escrow key is asked for; with one, it goes on with the daemon exactly when
+                /// every certificate is the daemon's, no two are of one type, and the socket is given.
+                #[test]
+                fn polar_init_goes_on_exactly_when_the_pod_s_keys_are_all_or_none_the_daemon_s(
+                    certs in prop::collection::vec(cert(), 0..5),
+                    escrow in any::<bool>(),
+                    socket in any::<bool>(),
+                ) {
+                    let requests: Vec<CertRequest> =
+                        certs.iter().enumerate().map(|(n, c)| request(n, *c)).collect();
+                    let daemon_s: Vec<bool> = certs.iter().filter(|c| c.1).map(|c| c.0).collect();
+                    let outcome = custody_for(&requests, socket.then_some("/s"), escrow);
+                    if daemon_s.is_empty() {
+                        prop_assert_eq!(outcome.as_ref().is_ok_and(|c| c.is_none()), !escrow, "{:?}", outcome.err());
+                        prop_assert_eq!(outcome.is_err(), escrow);
+                    } else {
+                        let all = daemon_s.len() == certs.len();
+                        let one_each = daemon_s.iter().filter(|s| **s).count() <= 1
+                            && daemon_s.iter().filter(|s| !**s).count() <= 1;
+                        let goes_on = all && one_each && socket;
+                        prop_assert_eq!(outcome.as_ref().is_ok_and(|c| c.is_some()), goes_on, "{:?}", outcome.err());
+                        prop_assert_eq!(outcome.is_err(), !goes_on);
+                    }
+                }
+            }
         }
 
         fn client_plan() -> CustodianPlan {

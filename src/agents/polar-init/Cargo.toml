@@ -43,6 +43,7 @@ tracing-subscriber = { workspace = true }
 rustls = { workspace = true }
 
 [dev-dependencies]
+proptest.workspace = true
 wiremock.workspace = true
 serde_json.workspace = true
 rsa.workspace = true
