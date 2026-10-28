@@ -39,15 +39,18 @@
 //! actually protects.
 //!
 //! Encryption scheme: a standard hybrid cryptosystem, using only
-//! FIPS-140-approved primitives -- RSA-OAEP (SHA-256) wraps a
-//! randomly-generated AES-256 key; AES-256-GCM encrypts the actual
-//! payload. RSA-OAEP alone is not used directly on the payload: it
-//! has a hard plaintext-size ceiling (roughly 440 bytes at
-//! 4096-bit/SHA-256-OAEP) that an arbitrary secret should not be
-//! assumed to fit under.
+//! FIPS-140-approved primitives -- a randomly-generated AES-256 key
+//! encrypts the payload with AES-256-GCM, and that key is wrapped to
+//! the recipient by one of two suites, which the recipient's public
+//! key decides (`Suite`): RSA-OAEP (SHA-256) for an RSA key, and HPKE
+//! (RFC 9180: DHKEM(P-256, HKDF-SHA256), HKDF-SHA256, AES-256-GCM) for
+//! a P-256 key. Either way only the 32-byte key is wrapped, so a holder
+//! that only unwraps (the custody daemon) never sees a payload
+//! (docs/architecture/key-custody.md, "The crypto change").
 
 use aes_gcm::aead::{Aead, Generate, Key as AesKey, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
+use hpke::{Deserializable as _, Serializable as _};
 use rkyv::{Archive, Deserialize, Serialize};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
@@ -63,21 +66,107 @@ pub enum EscrowError {
     KeyWrap(String),
     #[error("AES-GCM encryption failed")]
     Encryption,
-    #[error("RSA-OAEP key-unwrapping failed: {0}")]
+    #[error("key-unwrapping failed: {0}")]
     KeyUnwrap(String),
     #[error("AES-GCM decryption failed -- wrong key, or the ciphertext was tampered with")]
     Decryption,
     #[error("decrypted AES key had the wrong length -- corrupted or tampered ciphertext")]
     MalformedKey,
+    #[error("HPKE key-wrapping failed")]
+    HpkeWrap,
+    #[error("HPKE key-unwrapping failed -- wrong key, or a tampered or malformed wrapped key")]
+    HpkeUnwrap,
+    #[error("the secret is sealed under {secret:?}, and this key opens {holder:?}")]
+    WrongSuite { secret: Suite, holder: Suite },
+}
+
+/// How a secret's AES key is wrapped to its recipient. The recipient's public key decides it.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    Archive,
+    SerdeDeserialize,
+    SerdeSerialize,
+)]
+pub enum Suite {
+    /// RSA-OAEP with SHA-256, for an RSA key.
+    RsaOaep,
+    /// HPKE, base mode, DHKEM(P-256, HKDF-SHA256), HKDF-SHA256, AES-256-GCM, for a P-256 key.
+    HpkeP256,
+}
+
+type HpkeKem = hpke::kem::DhP256HkdfSha256;
+type HpkeKdf = hpke::kdf::HkdfSha256;
+type HpkeAead = hpke::aead::AesGcm256;
+
+/// HPKE's `info`: names what is wrapped, so a key wrapped here opens as nothing else.
+const HPKE_INFO: &[u8] = b"polar-escrow v1: a secret's AES-256 key";
+
+/// The length of the encapsulated key: an uncompressed P-256 point.
+const P256_ENCAPSULATED_LEN: usize = 65;
+
+/// The length of a P-256 wrapped key: the encapsulated key, then the AES key sealed (32 bytes and a 16-byte tag).
+pub const P256_WRAPPED_KEY_LEN: usize = P256_ENCAPSULATED_LEN + 32 + 16;
+
+fn wrap_p256(aes_key: &[u8], recipient: &p256::PublicKey) -> Result<Vec<u8>, EscrowError> {
+    use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+    let recipient =
+        <HpkeKem as hpke::Kem>::PublicKey::from_bytes(recipient.to_encoded_point(false).as_bytes())
+            .map_err(|e| EscrowError::InvalidPublicKey(e.to_string()))?;
+    let (encapsulated, sealed) = hpke::single_shot_seal::<HpkeAead, HpkeKdf, HpkeKem>(
+        &hpke::OpModeS::Base,
+        &recipient,
+        HPKE_INFO,
+        aes_key,
+        b"",
+    )
+    .map_err(|_| EscrowError::HpkeWrap)?;
+    let mut wrapped = encapsulated.to_bytes().to_vec();
+    wrapped.extend_from_slice(&sealed);
+    Ok(wrapped)
+}
+
+/// Unwraps a P-256 wrapped key (`EscrowedSecret::wrapped_key`) with the recipient's private key: what a holder that
+/// only unwraps does with the key it keeps. Anything not exactly a key wrapped to this private key is refused.
+pub fn unwrap_p256(
+    private_key: &p256::SecretKey,
+    wrapped: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, EscrowError> {
+    if wrapped.len() != P256_WRAPPED_KEY_LEN {
+        return Err(EscrowError::HpkeUnwrap);
+    }
+    let (encapsulated, sealed) = wrapped.split_at(P256_ENCAPSULATED_LEN);
+    let encapsulated = <HpkeKem as hpke::Kem>::EncappedKey::from_bytes(encapsulated)
+        .map_err(|_| EscrowError::HpkeUnwrap)?;
+    let scalar = Zeroizing::new(private_key.to_bytes());
+    let private = <HpkeKem as hpke::Kem>::PrivateKey::from_bytes(&scalar[..])
+        .map_err(|_| EscrowError::HpkeUnwrap)?;
+    hpke::single_shot_open::<HpkeAead, HpkeKdf, HpkeKem>(
+        &hpke::OpModeR::Base,
+        &private,
+        &encapsulated,
+        HPKE_INFO,
+        sealed,
+        b"",
+    )
+    .map(Zeroizing::new)
+    .map_err(|_| EscrowError::HpkeUnwrap)
 }
 
 #[derive(
     Debug, Clone, PartialEq, Deserialize, Serialize, Archive, SerdeDeserialize, SerdeSerialize,
 )]
 pub struct EscrowedSecret {
+    /// How `encrypted_key` is wrapped.
+    suite: Suite,
     ciphertext: Vec<u8>,
     nonce: [u8; 12],
-    /// The AES-256 key, RSA-OAEP-encrypted to `encrypted_to_pem`.
+    /// The AES-256 key, wrapped to `encrypted_to_pem` by `suite`.
     encrypted_key: Vec<u8>,
     /// The PEM-encoded public key this secret is encrypted to --
     /// metadata, not itself sensitive. Lets a holder confirm they
@@ -97,21 +186,44 @@ impl EscrowedSecret {
     /// for a reader who supplies the same bytes (`decrypt_bound`). The context is not stored in the secret.
     /// A signed document uses it to pin each secret field to its agent, section, field and version, so a
     /// ciphertext cannot be moved into another field or document. An empty context is the secret `encrypt`
-    /// has always made.
+    /// has always made. The key decides the suite: an RSA key `RsaOaep`, a P-256 key `HpkeP256`, and any
+    /// other is refused.
     pub fn encrypt_bound(
         plaintext: &[u8],
         recipient_public_key_pem: &str,
         context: &[u8],
     ) -> Result<Self, EscrowError> {
-        let recipient_public_key = RsaPublicKey::from_public_key_pem(recipient_public_key_pem)
-            .map_err(|e| EscrowError::InvalidPublicKey(e.to_string()))?;
-
-        Self::encrypt_to_parsed_key_bound(
-            plaintext,
-            &recipient_public_key,
-            recipient_public_key_pem,
-            context,
-        )
+        if let Ok(recipient_public_key) =
+            RsaPublicKey::from_public_key_pem(recipient_public_key_pem)
+        {
+            return Self::encrypt_to_parsed_key_bound(
+                plaintext,
+                &recipient_public_key,
+                recipient_public_key_pem,
+                context,
+            );
+        }
+        let recipient_public_key =
+            <p256::PublicKey as p256::pkcs8::DecodePublicKey>::from_public_key_pem(
+                recipient_public_key_pem,
+            )
+            .map_err(|_| {
+                EscrowError::InvalidPublicKey(
+                    "neither an RSA nor a P-256 public key in PEM".to_string(),
+                )
+            })?;
+        let SealedPayload {
+            ciphertext,
+            nonce,
+            aes_key,
+        } = seal_payload(plaintext, context)?;
+        Ok(Self {
+            suite: Suite::HpkeP256,
+            ciphertext,
+            nonce,
+            encrypted_key: wrap_p256(aes_key.as_slice(), &recipient_public_key)?,
+            encrypted_to_pem: recipient_public_key_pem.to_string(),
+        })
     }
 
     /// The same, real operation as `encrypt`, for callers that
@@ -150,19 +262,11 @@ impl EscrowedSecret {
         recipient_public_key_pem: &str,
         context: &[u8],
     ) -> Result<Self, EscrowError> {
-        let aes_key = AesKey::<Aes256Gcm>::generate();
-        let nonce = Nonce::generate();
-        let cipher = Aes256Gcm::new(&aes_key);
-
-        let ciphertext = cipher
-            .encrypt(
-                &nonce,
-                Payload {
-                    msg: plaintext,
-                    aad: context,
-                },
-            )
-            .map_err(|_| EscrowError::Encryption)?;
+        let SealedPayload {
+            ciphertext,
+            nonce,
+            aes_key,
+        } = seal_payload(plaintext, context)?;
 
         let mut rng = rand::rng();
         let encrypted_key = recipient_public_key
@@ -170,8 +274,9 @@ impl EscrowedSecret {
             .map_err(|e| EscrowError::KeyWrap(e.to_string()))?;
 
         Ok(Self {
+            suite: Suite::RsaOaep,
             ciphertext,
-            nonce: nonce.into(),
+            nonce,
             encrypted_key,
             encrypted_to_pem: recipient_public_key_pem.to_string(),
         })
@@ -196,6 +301,7 @@ impl EscrowedSecret {
         context: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, EscrowError> {
         self.decrypt_with_bound(
+            Suite::RsaOaep,
             |wrapped| {
                 private_key
                     .decrypt(Oaep::<Sha256>::new(), wrapped)
@@ -205,23 +311,57 @@ impl EscrowedSecret {
         )
     }
 
-    /// Decrypts when the private key cannot be handed over, as when it is held in the kernel keyring and
-    /// only the keyring can use it: `unwrap` is given the RSA-OAEP-wrapped AES key and returns it
-    /// unwrapped, and the rest happens here. The unwrapped key is wiped when this returns.
+    /// Decrypts with a P-256 private key, for a secret sealed with `HpkeP256`.
+    pub fn decrypt_p256(
+        &self,
+        private_key: &p256::SecretKey,
+    ) -> Result<Zeroizing<Vec<u8>>, EscrowError> {
+        self.decrypt_p256_bound(private_key, b"")
+    }
+
+    /// `decrypt_p256` for a secret made with `encrypt_bound`.
+    pub fn decrypt_p256_bound(
+        &self,
+        private_key: &p256::SecretKey,
+        context: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, EscrowError> {
+        self.decrypt_with_bound(
+            Suite::HpkeP256,
+            |wrapped| {
+                unwrap_p256(private_key, wrapped)
+                    .map(|key| key.to_vec())
+                    .map_err(|e| e.to_string())
+            },
+            context,
+        )
+    }
+
+    /// Decrypts when the private key cannot be handed over, as when another process holds it and only it can
+    /// use it: `unwrap` is given the wrapped AES key and returns it unwrapped, and the rest happens here.
+    /// `holder` is the suite the holder's key opens; a secret under another is refused before `unwrap` is
+    /// called. The unwrapped key is wiped when this returns.
     pub fn decrypt_with(
         &self,
+        holder: Suite,
         unwrap: impl FnOnce(&[u8]) -> Result<Vec<u8>, String>,
     ) -> Result<Zeroizing<Vec<u8>>, EscrowError> {
-        self.decrypt_with_bound(unwrap, b"")
+        self.decrypt_with_bound(holder, unwrap, b"")
     }
 
     /// `decrypt_with` for a secret made with `encrypt_bound`: the context is checked here, after the key is
     /// unwrapped, so a holder that only unwraps still cannot open a secret under the wrong context.
     pub fn decrypt_with_bound(
         &self,
+        holder: Suite,
         unwrap: impl FnOnce(&[u8]) -> Result<Vec<u8>, String>,
         context: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, EscrowError> {
+        if holder != self.suite {
+            return Err(EscrowError::WrongSuite {
+                secret: self.suite,
+                holder,
+            });
+        }
         let aes_key_bytes = unwrap(&self.encrypted_key).map_err(EscrowError::KeyUnwrap)?;
         let aes_key_bytes = Zeroizing::new(aes_key_bytes);
 
@@ -248,6 +388,43 @@ impl EscrowedSecret {
     pub fn encrypted_to_pem(&self) -> &str {
         &self.encrypted_to_pem
     }
+
+    /// How this secret's key is wrapped.
+    pub fn suite(&self) -> Suite {
+        self.suite
+    }
+
+    /// The wrapped AES key: what a holder that only unwraps is given.
+    pub fn wrapped_key(&self) -> &[u8] {
+        &self.encrypted_key
+    }
+}
+
+/// A payload encrypted under a new AES-256 key, and the key, for wrapping; the key is wiped on drop.
+struct SealedPayload {
+    ciphertext: Vec<u8>,
+    nonce: [u8; 12],
+    aes_key: Zeroizing<Vec<u8>>,
+}
+
+/// Encrypts the payload under a new AES-256 key, bound to `context`.
+fn seal_payload(plaintext: &[u8], context: &[u8]) -> Result<SealedPayload, EscrowError> {
+    let aes_key = AesKey::<Aes256Gcm>::generate();
+    let nonce = Nonce::generate();
+    let ciphertext = Aes256Gcm::new(&aes_key)
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad: context,
+            },
+        )
+        .map_err(|_| EscrowError::Encryption)?;
+    Ok(SealedPayload {
+        ciphertext,
+        nonce: nonce.into(),
+        aes_key: Zeroizing::new(aes_key.as_slice().to_vec()),
+    })
 }
 
 /// Why text is not a sealed secret as a signed document carries it.
@@ -499,7 +676,7 @@ mod tests {
         let secret = EscrowedSecret::encrypt(b"kept in custody", &public_key_pem).unwrap();
         let mut unwrapped_for = 0;
         let decrypted = secret
-            .decrypt_with(|wrapped| {
+            .decrypt_with(Suite::RsaOaep, |wrapped| {
                 unwrapped_for += wrapped.len();
                 private_key
                     .decrypt(Oaep::<Sha256>::new(), wrapped)
@@ -513,7 +690,7 @@ mod tests {
         );
         // And a custody that refuses is an unwrap failure, not a panic or a partial plaintext.
         assert!(matches!(
-            secret.decrypt_with(|_| Err("not today".into())),
+            secret.decrypt_with(Suite::RsaOaep, |_| Err("not today".into())),
             Err(EscrowError::KeyUnwrap(_))
         ));
     }
@@ -694,13 +871,13 @@ mod tests {
         };
         assert_eq!(
             secret
-                .decrypt_with_bound(unwrap, b"ctx-a")
+                .decrypt_with_bound(Suite::RsaOaep, unwrap, b"ctx-a")
                 .unwrap()
                 .as_slice(),
             b"in custody"
         );
         assert!(matches!(
-            secret.decrypt_with_bound(unwrap, b"ctx-b"),
+            secret.decrypt_with_bound(Suite::RsaOaep, unwrap, b"ctx-b"),
             Err(EscrowError::Decryption)
         ));
     }
@@ -713,5 +890,80 @@ mod tests {
             EscrowedSecret::encrypt_bound(b"x", &public_key_pem, b"agent|section|field|1").unwrap();
         let bytes = format!("{secret:?}");
         assert!(!bytes.contains("agent|section"));
+    }
+
+    fn p256_key() -> (p256::SecretKey, String) {
+        use p256::pkcs8::EncodePublicKey as _;
+        let private = loop {
+            if let Ok(key) = p256::SecretKey::from_bytes(&rand::random::<[u8; 32]>().into()) {
+                break key;
+            }
+        };
+        let pem = private
+            .public_key()
+            .to_public_key_pem(p256::pkcs8::LineEnding::LF)
+            .unwrap();
+        (private, pem)
+    }
+
+    #[test]
+    fn a_p256_key_seals_with_hpke_and_an_rsa_key_with_oaep() {
+        let (_, rsa_pem) = test_recipient_keypair();
+        let (_, p256_pem) = p256_key();
+        assert_eq!(
+            EscrowedSecret::encrypt(b"x", &rsa_pem).unwrap().suite(),
+            Suite::RsaOaep
+        );
+        assert_eq!(
+            EscrowedSecret::encrypt(b"x", &p256_pem).unwrap().suite(),
+            Suite::HpkeP256
+        );
+    }
+
+    #[test]
+    fn a_key_of_any_other_kind_is_refused() {
+        // RFC 8410's example Ed25519 public key: a well-formed key of a kind no suite takes.
+        let ed25519 = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=\n-----END PUBLIC KEY-----\n";
+        for pem in [ed25519, "not a key at all", ""] {
+            assert!(matches!(
+                EscrowedSecret::encrypt(b"x", pem),
+                Err(EscrowError::InvalidPublicKey(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_p256_holder_that_will_only_unwrap_the_key_opens_it_and_sees_only_the_wrapped_key() {
+        // As with the custody daemon: it is given the wrapped key, unwraps 32 bytes, and never sees the payload.
+        let (private, pem) = p256_key();
+        let secret = EscrowedSecret::encrypt_bound(b"kept by the daemon", &pem, b"ctx").unwrap();
+        let mut seen = Vec::new();
+        let opened = secret
+            .decrypt_with_bound(
+                Suite::HpkeP256,
+                |wrapped| {
+                    seen = wrapped.to_vec();
+                    unwrap_p256(&private, wrapped)
+                        .map(|key| key.to_vec())
+                        .map_err(|e| e.to_string())
+                },
+                b"ctx",
+            )
+            .unwrap();
+        assert_eq!(opened.as_slice(), b"kept by the daemon");
+        assert_eq!(seen.len(), P256_WRAPPED_KEY_LEN);
+        assert_eq!(seen, secret.wrapped_key());
+    }
+
+    #[test]
+    fn a_p256_secret_never_contains_the_plaintext_and_differs_each_time() {
+        let (_, pem) = p256_key();
+        let plaintext = b"a real secret, like a git access token";
+        let one = EscrowedSecret::encrypt(plaintext, &pem).unwrap();
+        let two = EscrowedSecret::encrypt(plaintext, &pem).unwrap();
+        assert_ne!(one, two);
+        assert_ne!(one.wrapped_key(), two.wrapped_key());
+        let text = format!("{one:?}");
+        assert!(!text.contains("a real secret"));
     }
 }

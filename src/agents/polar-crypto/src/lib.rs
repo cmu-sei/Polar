@@ -1577,6 +1577,7 @@ async fn handle_decrypt_own_escrowed(
         .expect("ensure_escrow_keypair_bootstrapped just populated this");
     escrowed
         .decrypt_with_bound(
+            credentials_agent_common::escrow_secret::Suite::RsaOaep,
             |wrapped| match handle {
                 EscrowKeypairHandle::KernelBacked(serial) => {
                     polar_kernel_keyring::decrypt(*serial, wrapped).map_err(|e| e.to_string())
@@ -1646,14 +1647,18 @@ async fn handle_retrieve_secret(
                 .as_ref()
                 .expect("ensure_escrow_keypair_bootstrapped just populated this");
             let plaintext = secret
-                .decrypt_with(|wrapped| match handle {
-                    EscrowKeypairHandle::KernelBacked(serial) => {
-                        polar_kernel_keyring::decrypt(*serial, wrapped).map_err(|e| e.to_string())
-                    }
-                    EscrowKeypairHandle::InMemory(private_key) => private_key
-                        .decrypt(rsa::Oaep::<sha2_011::Sha256>::new(), wrapped)
-                        .map_err(|e| e.to_string()),
-                })
+                .decrypt_with(
+                    credentials_agent_common::escrow_secret::Suite::RsaOaep,
+                    |wrapped| match handle {
+                        EscrowKeypairHandle::KernelBacked(serial) => {
+                            polar_kernel_keyring::decrypt(*serial, wrapped)
+                                .map_err(|e| e.to_string())
+                        }
+                        EscrowKeypairHandle::InMemory(private_key) => private_key
+                            .decrypt(rsa::Oaep::<sha2_011::Sha256>::new(), wrapped)
+                            .map_err(|e| e.to_string()),
+                    },
+                )
                 .map_err(|e| CryptoError::DecryptFailed(e.to_string()))?;
             Ok(Some(plaintext))
         }

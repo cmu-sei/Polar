@@ -1138,8 +1138,7 @@ readable until re-encrypted; and an agent whose escrowed key is RSA is issued a 
 Read for it: the envelope is `polar-escrow`'s `EscrowedSecret` (`polar-escrow/src/lib.rs:77`): AES-256-GCM over the
 payload, its key RSA-OAEP-wrapped to `encrypted_to_pem`, the binding context as AES-GCM associated data. The
 credentials agent's key stays RSA until part B, so for the whole of part A the envelope carries both.
-- *The envelope names its suite.* `EscrowedSecret` gains `suite`: `RsaOaep` (today's, and what a secret with no suite
-  is read as) or `HpkeP256` (RFC 9180, base mode, DHKEM(P-256, HKDF-SHA256), HKDF-SHA256, AES-256-GCM; the `hpke`
+- *The envelope names its suite.* `EscrowedSecret` gains `suite`: `RsaOaep` (today's) or `HpkeP256` (RFC 9180, base mode, DHKEM(P-256, HKDF-SHA256), HKDF-SHA256, AES-256-GCM; the `hpke`
   crate, on the `p256` already in the workspace). The recipient's public key decides it on encryption: an RSA key gives
   `RsaOaep`, a P-256 key `HpkeP256`, anything else is refused. The two layers stay: HPKE seals the 32-byte AES key
   (`encrypted_key` is the encapsulated key and that sealed key), with a Polar `info` string, so the daemon opens
@@ -1157,6 +1156,11 @@ credentials agent's key stays RSA until part B, so for the whole of part A the e
 - Properties: a round trip for each suite, for any payload and context; a secret opens under no other key, no other
   context and no other suite; a malformed or truncated envelope is refused, not a panic; the suite is decided by the key
   and by nothing in the request.
+  *Built 2026-10-27* (`polar-escrow`, `tests/props.rs`): the suite in the secret, `encrypt` choosing it from the key
+  (any other kind of key refused), `decrypt_p256`, `unwrap_p256` for a holder that only unwraps, and `decrypt_with`
+  taking the holder's suite (refused before the holder is asked). A changed byte of the encoding's padding decodes to
+  the same secret, and the tamper property says so. Breaking the suite check, the context binding, or the suite
+  recorded for a P-256 key is each caught.
 
 ### Decided
 
