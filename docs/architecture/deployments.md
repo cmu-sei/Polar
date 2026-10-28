@@ -263,3 +263,96 @@ The plan:
   `tests/charts.nu` (10 of 10), `rules.nu` (29 of 29), `resolve.nu` (60 of 61: the one failing, "workloads still
   asking cert-issuer are listed as pending", fails the same way without this change). Mutation caught: `functions.dhall`'s pin left at 1.31, six of
   the chart tests failing on it.
+
+## Step 4, the kinds as Deployments that restart in place: the plan (2026-10-28, for review)
+
+### What was read, and tried on the cluster
+
+- *What renders a workload:* `infra/schema/agent.dhall` (the `agent` and `service` kinds) and `ca.dhall` (`ca`,
+  cert-issuer) render a `Job` (`restartPolicy: Never`, `backoffLimit`, `podReplacementPolicy: Failed`,
+  `ttlSecondsAfterFinished`, from `config/kinds.nuon`). Their pods are labelled `name: <workload>`.
+- *What assumes a Job,* besides the templates:
+  - `infra/up.nu` waits on `job-name=<workload>` (cassini, the credentials agent and its observer, the git server, the
+    scheduler and its observer: lines 314-318, 645-648, 741), and on a changed manifest restarts its Jobs itself
+    (`job_verdict`, 179-230);
+  - `infra/apply.nu` (the targets without Flux) deletes and applies a changed Job again, its pod template being
+    immutable, and waits on `job-name=cassini`;
+  - `infra/deploy-objects.nu` forces every layer that holds a Job (`has_job`), and since Flux counts a Job healthy only
+    once complete, which an agent never is, checks an agent through the Endpoints of a Service that selects its pods
+    (`health_check`);
+  - `render.nu` checks every Job's `podReplacementPolicy` (`rules.nu`, `job_replacement_problems`).
+- *What must stay a Job:* the load harness's producer and sink, which `infra/load-harness.nu` copies into a run's Jobs,
+  each running to completion and logging one result; and `egress.nu`'s probe, a one-off.
+- *Tried on u7c (2026-10-28, a scratch namespace, since removed):* a Deployment of one, `Recreate`, its pod
+  `restartPolicy: Always`, a native sidecar, an init container, and a main container with `restartPolicy: Always` and
+  one rule, `RestartAllContainers` on `exitCodes: { operator: NotIn, values: [] }` (every exit code: the API server
+  takes it, and refuses a rule with no `exitCodes`):
+  - exit 1: the whole pod again, the sidecar started anew and the init container run again, in 3 s;
+  - exit 0: the same;
+  - *killed by its liveness probe: only the main container again,* some 31 s on, no sidecar restart and no init
+    container: a probe's kill is not an exit the rule acts on;
+  - one pod, one UID, throughout.
+
+### The change
+
+1. *The `agent`, `service` and `ca` kinds render a Deployment:* `replicas: 1`, `strategy: Recreate` (decided above: no
+   two pods of one identity), the selector the pods' `name` label, the pod `restartPolicy: Always`; the workload
+   container `restartPolicy: Always` with the one rule, `RestartAllContainers` on every exit. The custody daemon, a
+   native sidecar, restarts with the pod, empty, so the restarted pod's keys are new and `polar-init` buys their
+   certificates again (the renewal rule's five-minute bound admits a rejuvenation). The Job fields leave these kinds.
+2. *A kind for what runs to completion* (question 1): the load harness keeps its Jobs.
+3. *The scripts:* the `job-name=` waits become `name=` waits (the label the pods already carry); `apply.nu` applies a
+   Deployment in place, a changed one rolling out by `Recreate`; `deploy-objects.nu` forces only layers that still hold a
+   Job, and checks a Deployment as Flux does natively (available replicas) rather than through a Service's Endpoints;
+   `up.nu`'s Job restarts apply only to Jobs.
+4. *A rule beside `job_replacement_problems`:* every Deployment the catalog renders has one replica, `Recreate`, and the
+   restart rule on its workload container (`rules.nu`, checked by `render.nu`), so none can lose them unseen.
+5. *The hand charts after them:* the `ace` job (`layers/2-services/ace/job.dhall`) as a Deployment, the same way. Neo4j
+   and Postgres stay StatefulSets: Neo4j's server certificate lives a year (its identity's lifetime override), so it
+   does not rejuvenate. The agent charts no target renders are not changed.
+6. *What goes:* Failed pods at rejuvenation (an ending restarts the pod in place); the forced replacement of a changed
+   Job; the Endpoints health check for agents. The Reaper is left for what is still replaced (a deleted, evicted or lost
+   pod), as `pod-reaper.md` says.
+
+### For the maintainer
+
+1. *The load harness's Jobs.* A new kind, `run` (extending `agent`, keeping the Job fields and template), for the
+   producer and the sink; or a field on an entry (`runs_to_completion: true`) choosing the Job within a kind.
+   *Recommendation:* the kind. A kind already says a workload's shape (`agent`, `service`, `ca`), and what it renders as
+   is shape.
+2. *A pod killed by its liveness probe restarts only its workload container* (tried, above): no `polar-init`, the same
+   certificates, the daemon keeping its keys. Today the same kill fails the pod, and the Job makes a new one. The probe
+   is the fallback for a supervisor that no longer answers (the health actor decides the rest). *Recommendation:*
+   accept it. The restarted process starts from the same valid certificates and daemon, and its health actor
+   rejuvenates it, the whole pod then, when they near their end; a probe kill is not a renewal, and nothing is issued
+   for it.
+3. *Clusters older than 1.36,* where `RestartAllContainers` is not on by default: keep rendering Jobs for a target that
+   says its cluster is older, or require 1.36 or later for every target. *Recommendation:* require 1.36 or later. Every
+   cluster Polar runs on is 1.37, two paths would each need testing, and the Reaper's note on older clusters
+   (`pod-reaper.md`) then reads as not supported.
+
+### Tests first
+
+- `infra/tests/rules.nu`: the Deployment rule (one replica, `Recreate`, the restart rule; each missing refused).
+- `infra/tests/resolve.nu`: every catalog workload of `sandbox-local` and `local-minimal` renders a Deployment with
+  them, the load harness a Job (by question 1's answer); the rendered pod keeps its placement and its sidecar.
+- `infra/tests/charts.nu`: the `ace` Deployment.
+- The scripts' pure parts (`deploy-objects.nu`'s health check and `has_job`, `apply.nu`'s verdict) in
+  `infra/tests/*.nu`, for a Deployment and for a Job.
+- Mutations: the rule's `exitCodes` narrowed to exit 1 (exit 0 would then restart the container alone); `RollingUpdate`
+  in place of `Recreate`; the harness rendered as a Deployment.
+
+### On the cluster
+
+`up.nu sandbox-local --dev` over the running `u7c` (Flux applies the Deployments; the old Jobs go with their layers'
+`prune`), then, on a fresh `u7c` too, since a first bring-up and an upgrade differ:
+- every agent a Deployment's one pod, on its pool's node, and its custodian fetching as before;
+- *an ending restarts in place:* an agent made to end (its health verdict, by `cassini-shutdown`'s path or by waiting
+  out a rejuvenation) restarts with the same UID, its daemon empty and refilled, `polar-init` run again, a new
+  certificate issued and the old serial revoked, and no Failed pod;
+- the credentials agent restarted in place comes back through its successor window (`core-restarts.md`, step 4), its
+  ledger opened once;
+- a changed Deployment rolled out by `Recreate`, never two pods of one identity at once;
+- nothing waits forever in `up.nu`, and the health checks read a restarting pod as they should (the item "To read when
+  built", above).
+
