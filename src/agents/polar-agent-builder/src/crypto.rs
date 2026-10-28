@@ -310,6 +310,8 @@ mod tests {
     struct FakeCredentialsAgent {
         router: ActorRef<polar_router::RouterMessage>,
         recipient_public_key_pem: String,
+        /// The recipient's escrow certificate, which the key is believed for.
+        recipient_certificate_pem: String,
     }
 
     #[async_trait]
@@ -345,7 +347,7 @@ mod tests {
                     correlation_id: envelope.correlation_id,
                     payload: AgentEscrowKeyReply::Found {
                         public_key_pem: self.recipient_public_key_pem.clone(),
-                        certificate_pem: String::new(),
+                        certificate_pem: self.recipient_certificate_pem.clone(),
                     },
                 };
                 let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
@@ -393,11 +395,31 @@ mod tests {
             .await
             .unwrap();
 
+        // The recipient's key, in the escrow certificate the CA this agent pins signed for it.
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca_pem = ca_params.self_signed(&ca_key).unwrap().pem();
+        let issuer = rcgen::Issuer::new(ca_params, ca_key);
+        let mut params =
+            rcgen::CertificateParams::new(vec!["some-other-agent".to_string()]).unwrap();
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::EmailProtection];
+        let recipient_certificate_pem = params
+            .signed_by(
+                &rcgen::SubjectPublicKeyInfo::from_pem(&recipient_public_key_pem).unwrap(),
+                &issuer,
+            )
+            .unwrap()
+            .pem();
+        let ca_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(ca_file.path(), &ca_pem).unwrap();
+
         let (fake_agent, _) = Actor::spawn(
             None,
             FakeCredentialsAgent {
                 router: router.clone(),
                 recipient_public_key_pem,
+                recipient_certificate_pem,
             },
             (),
         )
@@ -414,6 +436,8 @@ mod tests {
                     own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
                     service_account_token_path: "/unused".to_string(),
                     escrow_key_handle_path: "/nonexistent/escrow-key-handle".to_string(),
+                    custody_socket: None,
+                    ca_cert_path: ca_file.path().to_string_lossy().into_owned(),
                 },
             ),
         )
@@ -521,6 +545,8 @@ mod tests {
                     own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
                     service_account_token_path: "/unused".to_string(),
                     escrow_key_handle_path: "/nonexistent/escrow-key-handle".to_string(),
+                    custody_socket: None,
+                    ca_cert_path: "/nonexistent/ca.pem".to_string(),
                 },
             ),
         )

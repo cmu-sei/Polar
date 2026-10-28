@@ -47,6 +47,9 @@ serde_json = { workspace = true }
 rsa.workspace = true
 x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
 cert-issuer-common = { version = "1.0.0", path = "../cert-issuer/common" }
+# The custody daemon holds the escrow key, which the actor asks to unwrap; and a recipient's certificate is checked.
+polar-custody.workspace = true
+x509-parser.workspace = true
 rand.workspace = true
 polar-kernel-keyring.workspace = true
 polar-router.workspace = true
@@ -58,6 +61,8 @@ polar-router.workspace = true
 sha2_011 = { package = "sha2", version = "0.11", default-features = false, features = ["oid"] }
 
 [dev-dependencies]
+# A P-256 recipient, as every agent's escrow key is now.
+p256 = { workspace = true, features = ["pem"] }
 wiremock.workspace = true
 rcgen.workspace = true
 polar-signing = { workspace = true, features = ["testing"] }

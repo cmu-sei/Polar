@@ -28,7 +28,7 @@
 //! certificate path is the same `TLS_CLIENT_CERT` the Cassini client reads, declared once by
 //! `cassini-client`; this crate declares only what is its own.
 
-use cassini_client::environment::TLS_CLIENT_CERT;
+use cassini_client::environment::{CUSTODY_SOCKET, TLS_CA_CERT, TLS_CLIENT_CERT};
 use polar_env::{Defaulted, Described, Env, Section};
 
 /// Where Kubernetes mounts the pod's service-account token.
@@ -68,6 +68,11 @@ pub struct CryptoSettings {
     pub service_account_token_path: String,
     /// Where the key number the init container left is looked for, and written.
     pub escrow_key_handle_path: String,
+    /// The custody daemon's socket, when the pod has one: it holds the escrow key, and unwraps for this actor
+    /// (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+    pub custody_socket: Option<String>,
+    /// The CA the pod pins, which a recipient's escrow certificate must chain to.
+    pub ca_cert_path: String,
 }
 
 impl CryptoSettings {
@@ -84,6 +89,14 @@ impl CryptoSettings {
         let own_certificate_path = take(TLS_CLIENT_CERT.read(env));
         let service_account_token_path = take(KUBERNETES_SA_TOKEN.read(env));
         let escrow_key_handle_path = take(ESCROW_KEY_HANDLE.read(env));
+        let ca_cert_path = take(TLS_CA_CERT.read(env));
+        let custody_socket = match CUSTODY_SOCKET.read(env) {
+            Ok(socket) => socket.filter(|s| !s.trim().is_empty()),
+            Err(error) => {
+                problems.push(error.to_string());
+                None
+            }
+        };
         if !problems.is_empty() {
             return Err(problems.join("; "));
         }
@@ -91,6 +104,8 @@ impl CryptoSettings {
             own_certificate_path,
             service_account_token_path,
             escrow_key_handle_path,
+            custody_socket,
+            ca_cert_path,
         })
     }
 }
@@ -109,17 +124,26 @@ mod tests {
 
     #[test]
     fn the_token_path_defaults_to_where_kubernetes_mounts_it() {
-        let s = CryptoSettings::from_env(&env(&[("TLS_CLIENT_CERT", "/c/cert.pem")])).unwrap();
+        let s = CryptoSettings::from_env(&env(&[
+            ("TLS_CLIENT_CERT", "/c/cert.pem"),
+            ("TLS_CA_CERT", "/c/ca.pem"),
+        ]))
+        .unwrap();
         assert_eq!(s.own_certificate_path, "/c/cert.pem");
         assert_eq!(s.service_account_token_path, KUBERNETES_SA_TOKEN_PATH);
     }
 
     #[test]
     fn the_key_handle_is_beside_the_certificates_unless_the_deployment_says() {
-        let s = CryptoSettings::from_env(&env(&[("TLS_CLIENT_CERT", "/c/cert.pem")])).unwrap();
+        let s = CryptoSettings::from_env(&env(&[
+            ("TLS_CLIENT_CERT", "/c/cert.pem"),
+            ("TLS_CA_CERT", "/c/ca.pem"),
+        ]))
+        .unwrap();
         assert_eq!(s.escrow_key_handle_path, DEFAULT_ESCROW_KEY_HANDLE_PATH);
         let s = CryptoSettings::from_env(&env(&[
             ("TLS_CLIENT_CERT", "/c/cert.pem"),
+            ("TLS_CA_CERT", "/c/ca.pem"),
             ("POLAR_ESCROW_KEY_HANDLE", "/run/handle"),
         ]))
         .unwrap();
@@ -130,10 +154,38 @@ mod tests {
     fn the_deployment_may_say_where_the_token_is() {
         let s = CryptoSettings::from_env(&env(&[
             ("TLS_CLIENT_CERT", "/c/cert.pem"),
+            ("TLS_CA_CERT", "/c/ca.pem"),
             ("KUBERNETES_SA_TOKEN", "/workspace/token"),
         ]))
         .unwrap();
         assert_eq!(s.service_account_token_path, "/workspace/token");
+    }
+
+    #[test]
+    fn the_custody_daemon_s_socket_and_the_pinned_ca_are_the_client_s_own_variables() {
+        let s = CryptoSettings::from_env(&env(&[
+            ("TLS_CLIENT_CERT", "/c/cert.pem"),
+            ("TLS_CA_CERT", "/c/ca.pem"),
+            ("POLAR_CUSTODY_SOCKET", "/run/custody/custody.sock"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            s.custody_socket.as_deref(),
+            Some("/run/custody/custody.sock")
+        );
+        assert_eq!(s.ca_cert_path, "/c/ca.pem");
+        let s = CryptoSettings::from_env(&env(&[
+            ("TLS_CLIENT_CERT", "/c/cert.pem"),
+            ("TLS_CA_CERT", "/c/ca.pem"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            s.custody_socket, None,
+            "no daemon: the actor holds the key, as before"
+        );
+        let error =
+            CryptoSettings::from_env(&env(&[("TLS_CLIENT_CERT", "/c/cert.pem")])).unwrap_err();
+        assert!(error.contains("TLS_CA_CERT"), "{error}");
     }
 
     #[test]

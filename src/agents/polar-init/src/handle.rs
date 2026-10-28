@@ -46,7 +46,8 @@ pub fn record_custody(path: &str, custody: Custody) -> Result<(), String> {
                 polar_kernel_keyring::unload_key(key);
             }
         }),
-        Custody::Memory => match std::fs::remove_file(path) {
+        // The daemon holds it, and no number is left either.
+        Custody::Memory | Custody::Daemon => match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(format!("cannot remove the stale key handle {path}: {e}")),

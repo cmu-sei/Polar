@@ -5838,7 +5838,9 @@ dependencies = [
  "cert-issuer-common",
  "credentials-agent-client",
  "credentials_agent_common",
+ "p256 0.13.2",
  "polar",
+ "polar-custody",
  "polar-env",
  "polar-kernel-keyring",
  "polar-router",
@@ -5859,6 +5861,7 @@ dependencies = [
  "uuid",
  "wiremock",
  "x25519-dalek",
+ "x509-parser",
  "zeroize",
 ]
 
