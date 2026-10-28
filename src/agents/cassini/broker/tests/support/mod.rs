@@ -731,6 +731,19 @@ impl TestClient {
             .count()
     }
 
+    /// The code and the words of the broker's refusal to register this client, if it refused.
+    pub fn registration_refusal(&self) -> Option<(cassini_types::RefusalCode, String)> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                ClientEvent::RegistrationRefused { code, reason } => Some((*code, reason.clone())),
+                _ => None,
+            })
+    }
+
     /// The id of the session the broker gave this client, once it has.
     pub fn registration_id(&self) -> Option<String> {
         self.events

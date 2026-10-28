@@ -299,13 +299,13 @@ fn test_client_message_registration_response() {
     );
 
     let msg = ClientMessage::RegistrationResponse {
-        result: Err("failed".to_string()),
+        result: Err(cassini_types::Refusal::other("failed")),
         trace_ctx: None,
     };
 
     assert_eq!(
         format!("{:?}", msg),
-        "RegistrationResponse { result: Err(\"failed\"), trace_ctx: None }"
+        "RegistrationResponse { result: Err(Refusal { code: Other, reason: \"failed\" }), trace_ctx: None }"
     );
 }
 
@@ -569,4 +569,15 @@ fn test_client_message_publish_request_ack() {
         }
         _ => panic!("Expected PublishRequestAck"),
     }
+}
+
+#[test]
+fn a_revoked_certificate_s_refusal_says_so_by_its_code_and_in_words() {
+    let refusal = cassini_types::Refusal::revoked();
+    assert_eq!(refusal.code, cassini_types::RefusalCode::Revoked);
+    assert_eq!(refusal.reason, cassini_types::REVOKED_REFUSAL);
+    assert_eq!(
+        cassini_types::Refusal::other("busy").code,
+        cassini_types::RefusalCode::Other
+    );
 }

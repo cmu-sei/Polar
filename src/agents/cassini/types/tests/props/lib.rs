@@ -133,3 +133,35 @@ proptest! {
         }
     }
 }
+
+// ==================== Registration refusal Property Tests ====================
+
+fn refusal_code() -> impl Strategy<Value = cassini_types::RefusalCode> {
+    prop_oneof![
+        Just(cassini_types::RefusalCode::Revoked),
+        Just(cassini_types::RefusalCode::Other),
+    ]
+}
+
+proptest! {
+    /// A refused registration comes off the wire with the code it was sent with, whatever its text: a reader acts on
+    /// the code, and the text, for people, cannot change what it means.
+    #[test]
+    fn a_registration_refusal_keeps_its_code_and_its_text_through_the_wire(
+        code in refusal_code(),
+        reason in any::<String>(),
+    ) {
+        use cassini_types::{ClientMessage, Refusal};
+        let sent = ClientMessage::RegistrationResponse {
+            result: Err(Refusal { code, reason: reason.clone() }),
+            trace_ctx: None,
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&sent).unwrap();
+        match rkyv::from_bytes::<ClientMessage, rkyv::rancor::Error>(&bytes).unwrap() {
+            ClientMessage::RegistrationResponse { result: Err(got), .. } => {
+                prop_assert_eq!(got, Refusal { code, reason });
+            }
+            other => prop_assert!(false, "not a refused registration: {other:?}"),
+        }
+    }
+}

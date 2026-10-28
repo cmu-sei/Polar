@@ -530,9 +530,46 @@ pub struct SessionSummary {
     pub registration_id: String,
 }
 
-/// What the broker tells a revoked certificate that asks to register: the custody daemon's custodian reads its own
-/// revocation in it (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+/// The words the broker gives a revoked certificate that asks to register, for people; its code, `RefusalCode::Revoked`,
+/// is what the custody daemon's custodian reads its own revocation by (docs/architecture/key-custody.md, "Part A's
+/// bootstrap: the custodian").
 pub const REVOKED_REFUSAL: &str = "the broker refused: this certificate is revoked";
+
+/// What a refused registration means. A reader acts on this, never on the refusal's text, which is for people and may
+/// change: an older daemon that matched the text did not hear its revocation once the text changed (2026-10-28,
+/// `remaining-work.md`).
+#[derive(Serialize, Deserialize, Archive, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalCode {
+    /// The certificate the connection presented is revoked; the broker closes the connection.
+    Revoked,
+    /// Any other refusal: the broker shutting down, or a session it could not find or make.
+    Other,
+}
+
+/// A refused registration: its code, and why in words.
+#[derive(Serialize, Deserialize, Archive, Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub code: RefusalCode,
+    pub reason: String,
+}
+
+impl Refusal {
+    /// The refusal of a revoked certificate.
+    pub fn revoked() -> Self {
+        Refusal {
+            code: RefusalCode::Revoked,
+            reason: REVOKED_REFUSAL.to_string(),
+        }
+    }
+
+    /// Any other refusal, `reason` saying why.
+    pub fn other(reason: impl Into<String>) -> Self {
+        Refusal {
+            code: RefusalCode::Other,
+            reason: reason.into(),
+        }
+    }
+}
 
 /// Events emitted by the client.
 #[derive(Clone, Debug)]
@@ -549,10 +586,11 @@ pub enum ClientEvent {
     TransportError {
         reason: String,
     },
-    /// The broker refused to register the session (`reason` says why) and closes the connection. The custody daemon's
-    /// custodian reads it: a refusal as revoked means its own certificate is revoked (docs/architecture/key-custody.md,
-    /// "Part A's bootstrap: the custodian").
+    /// The broker refused to register the session (`code` says what that means, `reason` why in words) and closes the
+    /// connection. The custody daemon's custodian reads it: `RefusalCode::Revoked` means its own certificate is revoked
+    /// (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
     RegistrationRefused {
+        code: RefusalCode,
         reason: String,
     },
     ControlResponse {
@@ -592,9 +630,9 @@ pub enum ClientMessage {
     },
     /// Response to an attempt to register.
     /// Ok contains the value of the registration id,
-    /// Err should contain an error message
+    /// Err the refusal: its code, and why in words
     RegistrationResponse {
-        result: Result<String, String>,
+        result: Result<String, Refusal>,
         trace_ctx: Option<WireTraceCtx>,
     },
     /// Publish request from the client.

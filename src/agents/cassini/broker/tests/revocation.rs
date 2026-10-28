@@ -86,6 +86,14 @@ async fn a_revoked_certificate_cannot_register() {
     closed(&again).await;
     pause().await;
     assert_eq!(again.registration_id(), None, "refused registration");
+    // Refused as revoked by its code, which is what a reader acts on; the words are for people.
+    assert_eq!(
+        again.registration_refusal(),
+        Some((
+            cassini_types::RefusalCode::Revoked,
+            cassini_types::REVOKED_REFUSAL.to_string()
+        ))
+    );
     broker.stop().await;
 }
 

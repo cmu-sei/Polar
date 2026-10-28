@@ -985,7 +985,7 @@ impl Actor for Listener {
                 if Self::is_revoked(state) {
                     warn!(identity = ?state.peer_identity, serial = ?state.peer_serial, "a revoked certificate asked to register: refused, and closed");
                     let msg = ClientMessage::RegistrationResponse {
-                        result: Err(crate::authority::REVOKED_REFUSAL.to_string()),
+                        result: Err(cassini_types::Refusal::revoked()),
                         trace_ctx: WireTraceCtx::from_current_span(),
                     };
                     if let Err(e) =
@@ -1161,7 +1161,7 @@ impl Listener {
             error!("{err_msg}");
 
             let msg = ClientMessage::RegistrationResponse {
-                result: Err(err_msg.clone()),
+                result: Err(cassini_types::Refusal::other(err_msg.clone())),
                 trace_ctx: WireTraceCtx::from_current_span(),
             };
 
@@ -1262,7 +1262,7 @@ impl Listener {
             Err(error) => {
                 let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {error}");
                 let msg = ClientMessage::RegistrationResponse {
-                    result: Err(err_msg.clone()),
+                    result: Err(cassini_types::Refusal::other(err_msg.clone())),
                     trace_ctx: WireTraceCtx::from_current_span(),
                 };
 

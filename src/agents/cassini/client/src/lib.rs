@@ -738,12 +738,18 @@ impl TcpClientActor {
                             .send_message(TcpClientMessage::RegistrationResponse(registration_id))
                             .expect("Could not forward message to {myself:?");
                     }
-                    Err(e) => {
-                        warn!("Failed to register session with the server. {e}");
+                    Err(refusal) => {
+                        warn!(
+                            code = ?refusal.code,
+                            "Failed to register session with the server. {}", refusal.reason
+                        );
                         // Said to whoever listens, as it is final for this connection: the broker closes it.
                         TcpClientActor::dispatch_event(
                             delivery,
-                            ClientEvent::RegistrationRefused { reason: e },
+                            ClientEvent::RegistrationRefused {
+                                code: refusal.code,
+                                reason: refusal.reason,
+                            },
                         );
                     }
                 }
@@ -1721,17 +1727,30 @@ mod process_client_message_tests {
     }
 
     #[tokio::test]
-    async fn a_refused_registration_is_said_with_the_broker_s_reason() {
-        let events = dispatched_for(ClientMessage::RegistrationResponse {
-            result: Err(cassini_types::REVOKED_REFUSAL.to_string()),
-            trace_ctx: None,
-        })
-        .await;
-        assert!(
-            matches!(events.as_slice(), [ClientEvent::RegistrationRefused { reason }]
-                if reason == cassini_types::REVOKED_REFUSAL),
-            "{events:?}"
-        );
+    async fn a_refused_registration_is_said_with_the_broker_s_code_and_reason() {
+        use cassini_types::{Refusal, RefusalCode};
+        // The code is passed on as it came, whatever the words: the revoked text under another code is not a
+        // revocation, and a revocation in other words is one.
+        for (code, words) in [
+            (RefusalCode::Revoked, cassini_types::REVOKED_REFUSAL),
+            (RefusalCode::Revoked, "said differently"),
+            (RefusalCode::Other, cassini_types::REVOKED_REFUSAL),
+            (RefusalCode::Other, "Broker is shutting down"),
+        ] {
+            let events = dispatched_for(ClientMessage::RegistrationResponse {
+                result: Err(Refusal {
+                    code,
+                    reason: words.to_string(),
+                }),
+                trace_ctx: None,
+            })
+            .await;
+            assert!(
+                matches!(events.as_slice(), [ClientEvent::RegistrationRefused { code: got, reason }]
+                    if *got == code && reason == words),
+                "{code:?} {words:?}: {events:?}"
+            );
+        }
     }
 
     #[tokio::test]

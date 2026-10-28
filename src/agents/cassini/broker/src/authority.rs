@@ -171,9 +171,6 @@ impl BrokerAuthority {
     }
 }
 
-/// What a revoked certificate is told when it asks to register.
-pub const REVOKED_REFUSAL: &str = cassini_types::REVOKED_REFUSAL;
-
 /// Counts the changes of authority, so that every Listener's cached decisions go stale at once without a lock or a
 /// message to each (docs/architecture/policy-enforcement.md, "Decisions": the cache is emptied on a change).
 struct ChangeCounter;

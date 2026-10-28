@@ -375,9 +375,11 @@ impl Actor for Watcher {
                 state.subscribed.insert(topic);
                 state.drive(None);
             }
-            WatcherMessage::Event(ClientEvent::RegistrationRefused { reason })
-                if reason == cassini_types::REVOKED_REFUSAL =>
-            {
+            // By its code: the words are for people, and an older broker's differ (`cassini_types::RefusalCode`).
+            WatcherMessage::Event(ClientEvent::RegistrationRefused {
+                code: cassini_types::RefusalCode::Revoked,
+                ..
+            }) => {
                 if let Some(slots) = state.refused_as_revoked() {
                     error!(
                         ?slots,
@@ -771,9 +773,98 @@ mod tests {
         );
     }
 
+    /// The watcher, as the daemon starts it, holding `custody` and with no broker to reach; what it is told once revoked
+    /// comes back on the channel.
+    async fn watcher_holding(
+        custody: Arc<RwLock<Custody>>,
+    ) -> (
+        ActorRef<WatcherMessage>,
+        tokio::sync::mpsc::UnboundedReceiver<Vec<Slot>>,
+    ) {
+        let (revoked, told) = tokio::sync::mpsc::unbounded_channel();
+        let (watcher, _) = Actor::spawn(
+            None,
+            Watcher,
+            WatcherArgs {
+                custody,
+                ca_pem: ca().1.clone(),
+                broker: "127.0.0.1:9".to_string(),
+                server_name: "cassini".to_string(),
+                publisher: CREDENTIALS.to_string(),
+                on_revoked: Arc::new(move |slots| {
+                    let _ = revoked.send(slots);
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        (watcher, told)
+    }
+
+    /// The broker's refusal of the custodian, heard by its watcher: whether every key went.
+    fn refused(code: cassini_types::RefusalCode, reason: &str) -> (bool, Option<Vec<Slot>>) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (custody, _) = installed();
+            let custody = Arc::new(custody);
+            let (watcher, mut told) = watcher_holding(custody.clone()).await;
+            watcher
+                .cast(WatcherMessage::Event(ClientEvent::RegistrationRefused {
+                    code,
+                    reason: reason.to_string(),
+                }))
+                .unwrap();
+            let slots = tokio::time::timeout(Duration::from_millis(300), told.recv())
+                .await
+                .ok()
+                .flatten();
+            watcher.stop(None);
+            (!signs(&custody), slots)
+        })
+    }
+
+    #[test]
+    fn refused_as_revoked_by_its_code_its_keys_go_and_by_its_words_alone_they_do_not() {
+        use cassini_types::RefusalCode;
+        assert_eq!(
+            refused(RefusalCode::Revoked, cassini_types::REVOKED_REFUSAL),
+            (true, Some(vec![Slot::Client]))
+        );
+        // The words an older broker used, or any, under the code: still a revocation.
+        assert_eq!(
+            refused(
+                RefusalCode::Revoked,
+                "the broker refused: this certificate is revoked, and may register only a watcher session"
+            ),
+            (true, Some(vec![Slot::Client]))
+        );
+        // The revoked words under another code are not one.
+        assert_eq!(
+            refused(RefusalCode::Other, cassini_types::REVOKED_REFUSAL),
+            (false, None)
+        );
+    }
+
     mod props {
         use super::*;
         use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 16, ..ProptestConfig::default() })]
+
+            /// For any refusal the broker gives the custodian, its keys go exactly when the code says revoked: the
+            /// words, for people, decide nothing.
+            #[test]
+            fn its_keys_go_exactly_when_the_refusal_s_code_is_revoked(
+                revoked in any::<bool>(),
+                reason in prop_oneof![Just(cassini_types::REVOKED_REFUSAL.to_string()), any::<String>()],
+            ) {
+                let code = if revoked { cassini_types::RefusalCode::Revoked } else { cassini_types::RefusalCode::Other };
+                let (destroyed, told) = refused(code, &reason);
+                prop_assert_eq!(destroyed, revoked);
+                prop_assert_eq!(told.is_some(), revoked);
+            }
+        }
 
         /// Something heard on an authority topic: from the credentials agent (its one key) or from another identity
         /// (either key), a snapshot or a live update, naming the daemon's own serial or not.
