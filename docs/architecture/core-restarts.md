@@ -446,7 +446,8 @@ step 4); attestation decides who gets through, when it exists (step 6).
   the decision ("the Job makes the new pod only once the old one has ended ... so the outgoing agent cannot name it"):
   the ticket now admits one pod, not any pod of the service account.
 - *What it does not close:* whoever can create a token for the credentials agent's service account bound to that pod
-  (`serviceaccounts/token`) can ask inside the ticket's minutes. Attestation (step 6) is what closes that, as decided.
+  (`serviceaccounts/token`) can ask inside the ticket's minutes. *Not Polar's to defend (the maintainer, 2026-10-28):*
+  such a token is signed by the Kubernetes API, which is Polar's trust base (`runtime-attestation.md`, "Not a gap").
 - *Where it would sit:* the outgoing side in the consumer's drain (`credentials-agent/consume/src/supervisor.rs`,
   `begin_drain`, on `PrepareShutdown`, before `ProceedWithShutdown`, while its Cassini session holds); the incoming side
   in cert-issuer's gate (`gate.rs`), beside the held requests (`held.rs`), whose topics show the precedent: published by

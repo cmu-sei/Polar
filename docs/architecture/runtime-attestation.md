@@ -181,20 +181,15 @@ outlined, to be planned when the first is built.
 - *How a question is asked over Cassini:* request and reply topics with a correlation id, as the credentials agent's own
   are (`cassini-request-reply-protocol.md`).
 
-### A finding: the instance check alone does not close the ticket's gap
+### Not a gap: a token Kubernetes signs for the real pod
 
-The check above answers "is the pod this token names the genuine one?". It does not answer "did this request come from
-that pod?". A token minted for the real pod (`serviceaccounts/token`, bound to its name and UID) names a genuine pod, and
-passes; it is exactly the gap the ticket leaves (`core-restarts.md`, "Step 5, the ticket": "whoever can create a token
-... bound to that pod ... can ask inside the ticket's minutes"). What ties a request to its pod is where it came from:
-the address it was sent from against the pod's IP. Who sees that first-hand:
-- *cert-issuer,* for every request made to it directly (the core's, the ticket's, the windows', the held ones);
-- *Cassini,* for every session (the custodian's fetches, the agents'), if the broker reports the publisher's address as it
-  reports its identity (`published_by`);
-- *not the credentials agent* for a workload's first request, which polar-init makes to the observer, the low-trust relay,
-  which could say any address. But since custody part A that request buys only the custodian's certificate, and the
-  custodian's own fetches come over Cassini, where the broker sees its address first-hand. So the chain holds: the
-  custodian's certificate alone can do nothing but fetch, and every fetch is checked against the pod's address.
+Raised in planning and set aside (the maintainer, 2026-10-28): a token minted for the real pod through the API
+(`serviceaccounts/token`, bound to its name and UID) passes the instance check, since the check confirms the pod a token
+names, not where the request came from. That is not Polar's to defend. Polar binds its root of trust to the platform it
+runs on: the Kubernetes control plane, its signed tokens and its API, is the first item of the trust base above, and
+whoever can make the API sign a token is already inside it. "What do you really expect me to do to defend against
+that?" So no request is checked against its pod's address for this, and the ticket's note in `core-restarts.md` is
+read the same way.
 
 ### Slice A, the plan: the attestor and the instance check at issuance
 
@@ -202,19 +197,16 @@ the address it was sent from against the pod's IP. Who sees that first-hand:
    core, started after it. It watches the pods of Polar's namespaces and the ReplicaSets and Deployments that own them
    (a Role in each: get, list, watch, nothing else), so an answer is read from what it already holds, not a call to the API.
 2. *The question and its answer,* over Cassini (`attestation-instance-requests`, `attestation-instance-replies`, a
-   correlation id): the identity, the pod UID the token was bound to, and the address the request came from; the answer
-   `Genuine`, or `NotGenuine` with why: no such pod, another owner than the catalog's for that identity, another service
-   account, a container whose digest the signed deployment does not name, an ephemeral container, or another address.
+   correlation id): the identity and the pod UID the token was bound to; the answer `Genuine`, or `NotGenuine` with why:
+   no such pod, another owner than the catalog's for that identity, another service account, a container whose digest
+   the signed deployment does not name, or an ephemeral container.
 3. *The askers:* the credentials agent in its three paths, before it vouches; cert-issuer in its gate, before a ticket or
    a window admits. A `NotGenuine` is a refusal, recorded and logged.
-4. *The address, first-hand:* cert-issuer passes the request's peer address; the broker gives a published message its
-   publisher's address beside `published_by`, and the credentials agent passes that for a custodian's fetch.
-5. *After the fact:* once up, the attestation agent attests every running pod against cert-issuer's record (each entry
+4. *After the fact:* once up, the attestation agent attests every running pod against cert-issuer's record (each entry
    carries its pod UID), and reports any that fail: the bootstrap's certificates, and anything signed while it was away.
-6. *Tests first,* as everywhere: the verdict a pure function of the pod, its owners, the catalog and the lock (a property
+5. *Tests first,* as everywhere: the verdict a pure function of the pod, its owners, the catalog and the lock (a property
    over pods that differ from the genuine one in each way, and only those genuine pass); the askers refusing on
-   `NotGenuine`; the address passed through; on the cluster, the ticket's impostor test of 2026-10-28 again, this time with
-   a token minted for the real pod, and refused.
+   `NotGenuine`; on the cluster, a pod of another image or owner running as a workload's service account, refused.
 
 ### Slice B, outlined: watching what was attested
 
@@ -229,19 +221,17 @@ as the sections above describe.
 
 ### For the maintainer
 
-1. *The address check* (the finding above). The instance check as decided confirms the pod, not the requester; without the
-   address, a token minted for the real pod passes. *Recommendation:* the address check in slice A, where it is seen
-   first-hand (cert-issuer directly, Cassini for every session), so the ticket's gap is closed by the slice that is meant
-   to close it.
+1. *The address check.* Raised and set aside: a token the API signs is inside the trust base ("Not a gap", above).
+   **Decided (the maintainer, 2026-10-28): not Polar's to defend.**
 2. *What the images are checked against on a target with no signed deployment.* `sandbox-local` has the signed lock;
-   `local-minimal` has none and runs `latest`. *Options:* (a) on such a target, check owner, account, address and no
-   ephemeral container, and report the images as not attested, without refusing; (b) refuse attestation on such a target
+   `local-minimal` has none and runs `latest`. *Options:* (a) on such a target, check owner, account and no ephemeral
+   container, and report the images as not attested, without refusing; (b) refuse attestation on such a target
    (so nothing there is issued once the attestation agent runs); (c) give `local-minimal` a lock too. *Recommendation:*
    (a): a development target stays usable, and says what it does not check.
 3. *When the attestation agent cannot be asked* (not yet up, restarting, Cassini down). Question 2's decision for
    cert-issuer was "whenever it is reachable" (`core-restarts.md`, question 2, B): sign without it, and attest after the
    fact. *Recommendation:* the same for the credentials agent's paths, every issuance made without it recorded as such
-   and attested once it is back (item 5). *Or:* once it has been heard, its absence holds requests, as a held request
+   and attested once it is back (item 4). *Or:* once it has been heard, its absence holds requests, as a held request
    waits for the credentials agent.
 4. *Its pool* on a cluster that places workloads (`placement.md`). It holds a read view of every Polar pod. *Recommendation:*
    `core`, beside the identities it guards; `observers` is the low-trust side. (The sensor of slice C runs on every node,
