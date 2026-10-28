@@ -44,23 +44,16 @@ thiserror.workspace = true
 # A secret and its binding are escrowed together as JSON, so a field added later does not break an old record.
 serde = { workspace = true }
 serde_json = { workspace = true }
-rsa.workspace = true
-x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
 cert-issuer-common = { version = "1.0.0", path = "../cert-issuer/common" }
 # The custody daemon holds the escrow key, which the actor asks to unwrap; and a recipient's certificate is checked.
 polar-custody.workspace = true
 x509-parser.workspace = true
-rand.workspace = true
-polar-kernel-keyring.workspace = true
 polar-router.workspace = true
-# Deliberately not the plain, workspace-managed sha2 (0.10.x) --
-# rsa::Oaep's own generic bounds require digest 0.11.x specifically,
-# matching our rsa fork's own real dependency. See polar-kernel-
-# keyring's and credentials_agent_common's own Cargo.toml for the
-# same, established pattern and full reasoning.
-sha2_011 = { package = "sha2", version = "0.11", default-features = false, features = ["oid"] }
 
 [dev-dependencies]
+# The credentials agent's escrow key, and a recipient's, RSA in the tests.
+rsa.workspace = true
+rand.workspace = true
 # A P-256 recipient, as every agent's escrow key is now.
 p256 = { workspace = true, features = ["pem"] }
 wiremock.workspace = true

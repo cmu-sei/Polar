@@ -260,24 +260,23 @@ mod tests {
 
     #[test]
     fn an_agent_that_encrypts_takes_the_crypto_settings_from_the_snapshot() {
-        let s = prepared(
-            &[("KUBERNETES_SA_TOKEN", "/workspace/token")],
-            &[Capability::Cassini, Capability::Encryption],
-        )
-        .unwrap();
+        let s = prepared(&[], &[Capability::Cassini, Capability::Encryption]).unwrap();
         let settings = polar_crypto::environment::CryptoSettings::from_env(&*s.config).unwrap();
-        assert_eq!(settings.service_account_token_path, "/workspace/token");
         assert_eq!(settings.own_certificate_path, "/c/cert.pem");
+        assert_eq!(settings.ca_cert_path, "/c/ca.pem");
     }
 
+    /// The workload no longer fetches its escrow key, so no agent reads a service-account token
+    /// (docs/architecture/key-custody.md, step 9): one an old pod still sets never enters the snapshot.
     #[test]
-    fn an_agent_that_does_not_encrypt_does_not_carry_the_token_path() {
-        let s = prepared(
-            &[("KUBERNETES_SA_TOKEN", "/workspace/token")],
-            &[Capability::Cassini],
-        )
-        .unwrap();
-        assert_eq!(s.config.var("KUBERNETES_SA_TOKEN"), None);
+    fn no_agent_carries_the_token_path() {
+        for required in [
+            &[Capability::Cassini][..],
+            &[Capability::Cassini, Capability::Encryption],
+        ] {
+            let s = prepared(&[("KUBERNETES_SA_TOKEN", "/workspace/token")], required).unwrap();
+            assert_eq!(s.config.var("KUBERNETES_SA_TOKEN"), None);
+        }
     }
 
     #[test]

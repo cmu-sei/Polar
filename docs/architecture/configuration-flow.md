@@ -65,8 +65,9 @@ clients).
 
 ![startup](sequences/general/configuration_startup.svg)
 
-The init container (`polar-init`) gets the agent's certificates and, for agents that encrypt,
-bootstraps the escrow key and leaves a handle to it for the workload. The agent's domain
+The init container (`polar-init`) gets the custody daemon's custodian its certificate, and the
+custodian fetches the agent's certificates and, for agents that encrypt, its escrow key, which the
+daemon keeps (`key-custody.md`). The agent's domain
 supervisor then builds its infrastructure with `AgentBuilder`: `configure()` takes the snapshot
 and judges it, reporting every problem at once and exiting non-zero if there are any, and
 `build()` spawns the infrastructure supervisor (health, router, subscriptions, the Cassini client,
@@ -150,13 +151,15 @@ graph
   GRAPH_CLIENT_KEY = /etc/tls/certs/key.pem  [env, static]
   GRAPH_CA_CERT = /etc/tls/certs/ca.pem  [env, static]
 crypto
-  KUBERNETES_SA_TOKEN = /var/run/secrets/kubernetes.io/serviceaccount/token  [default, static]
-  POLAR_ESCROW_KEY_HANDLE = /etc/tls/certs/escrow-key-handle  [default, static]
 ```
 
-Reading the two together shows what neither shows alone. Four variables are in the second and
+(Since 2026-10-28 the crypto section declares nothing of its own: `KUBERNETES_SA_TOKEN` and
+`POLAR_ESCROW_KEY_HANDLE`, in the output above when it was taken, went with the workload's own escrow
+bootstrap, `key-custody.md`, step 9.)
+
+Reading the two together shows what neither shows alone. Two variables are in the second and
 not the first: `POLAR_HEALTH_GRAPH_DEADLINE_SECS` and `POLAR_HEALTH_CASSINI_DEADLINE_SECS` (120 s
-each), `KUBERNETES_SA_TOKEN` and `POLAR_ESCROW_KEY_HANDLE`. They are the code's defaults, and the
+each). They are the code's defaults, and the
 manifest, and `explain`, do not mention them. So the pod runs with a 120 s Cassini deadline that
 nothing at the deployment layer says. This is the gap between the two views, listed below.
 

@@ -32,28 +32,17 @@
 //! agent's existing TcpClientActor rather than opening a second
 //! Cassini connection.
 //!
-//! Scope so far: general-secret store, and the complete agent
-//! escrow-keypair bootstrap flow -- retrieve-first, issuance-as-
-//! fallback, escrowing the newly-issued result, and now kernel-
-//! keyring custody, attempted transparently on first real use and
-//! cached as an opaque handle afterward. It also holds the secrets that reach the
-//! agent, each with the binding that says where it may go (`registry`), escrows them
-//! with the credentials agent, and performs named operations on them, so a caller
-//! gets the result of an operation and never the secret (`RegisterSecret`,
-//! `LoadSecret`, `GitCredential`). RetrieveOwnEscrowKeypair and
-//! EnsureOwnEscrowKeypair, this crate's own former, public messages
-//! for that flow, are deliberately no longer exposed at all: the
-//! whole point of a hard, single boundary for every key operation is
-//! that no caller outside this crate should ever hold a raw
-//! RsaPrivateKey, kernel-backed or not. DecryptOwnMessage opens a
-//! raw RSA-OAEP block addressed to this identity and DecryptOwnEscrowed opens a hybrid
-//! EscrowedSecret (bound to a context) -- ciphertext in, plaintext out, with no way to
-//! observe which custody mode produced it. See credentials-agent-
-//! architecture.md's own "Agent escrow bootstrap" section for the
-//! full, intended sequence, and polar-kernel-keyring's own crate for
-//! the real kernel-custody mechanics.
+//! Scope: general-secret store, encryption to another agent's escrow key (believed only for its
+//! certificate, `recipient`), and opening what is sealed to this agent's own escrow key. That key is
+//! the pod's custody daemon's, P-256, fetched by its custodian before the workload starts; the daemon
+//! unwraps a secret's AES key for this actor and the key never enters this process
+//! (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"). With no daemon there is no
+//! escrow key here, and nothing sealed to it opens (`CryptoError::NoEscrowKey`). The actor also holds
+//! the secrets that reach the agent, each with the binding that says where it may go (`registry`),
+//! escrows them with the credentials agent, and performs named operations on them, so a caller gets
+//! the result of an operation and never the secret (`RegisterSecret`, `LoadSecret`, `GitCredential`).
 //!
-//! Delivery: this actor registers its own five, real reply topics
+//! Delivery: this actor registers its own reply topics
 //! directly with a real, live polar_router::RouterActor -- the same,
 //! single, real RouterActor the consuming supervisor already spawned
 //! for its own topics, sharing one real Cassini connection rather
@@ -75,55 +64,40 @@ pub mod registry;
 pub mod workload_certificates;
 
 use cassini_client::TcpClientMessage;
-use cert_issuer_common::keypair::{KeyAlgorithm, KeypairError};
-use credentials_agent_common::agent_escrow_issuance::{
-    AgentEscrowIssuanceReply, AgentEscrowIssuanceRequest,
-};
 use credentials_agent_common::agent_escrow_key::{AgentEscrowKeyReply, AgentEscrowKeyRequest};
-use credentials_agent_common::agent_escrow_keypair_bootstrap::{
-    RetrieveAgentEscrowKeypairReply, RetrieveAgentEscrowKeypairRequest,
-    agent_escrow_keypair_secret_name,
-};
 use credentials_agent_common::escrow_key::EscrowKeyRequest;
 use credentials_agent_common::escrow_secret::EscrowedSecret;
 use credentials_agent_common::secret::{StoreRefusalReason, StoreSecretReply, StoreSecretRequest};
 use credentials_agent_common::{
-    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
-    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC, CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
-    CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC, CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC,
-    CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC, CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
-    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
+    CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC, CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
+    CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC, CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
     CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC, CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
     CREDENTIALS_STORE_SECRET_REPLIES_TOPIC, CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
 };
 use polar::request_reply::{Envelope, ReplyRouter};
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, async_trait};
-use rsa::RsaPrivateKey;
-use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
-use x25519_dalek::{EphemeralSecret, PublicKey};
 pub use zeroize::Zeroizing;
 
 /// The credentials agent's request topics the actor publishes to, one for each request it makes. An agent
 /// that encrypts uses them because of that need (docs/architecture/topics.md, "Implied topics").
-pub const REQUEST_TOPICS: [&str; 6] = [
+///
+/// Not the escrow keypair's retrieval or issuance: those are the custody daemon's custodian's, never the
+/// workload's (docs/architecture/key-custody.md, step 9).
+pub const REQUEST_TOPICS: [&str; 4] = [
     CREDENTIALS_ESCROW_KEY_REQUESTS_TOPIC,
     CREDENTIALS_STORE_SECRET_REQUESTS_TOPIC,
-    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
-    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
     CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
     CREDENTIALS_RETRIEVE_SECRET_REQUESTS_TOPIC,
 ];
 
 /// Their replies, which the actor subscribes to. They are shared by every crypto actor: each takes its own
 /// by correlation id.
-pub const REPLY_TOPICS: [&str; 6] = [
+pub const REPLY_TOPICS: [&str; 4] = [
     CREDENTIALS_ESCROW_KEY_REPLIES_TOPIC,
     CREDENTIALS_STORE_SECRET_REPLIES_TOPIC,
-    CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
-    CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC,
     CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC,
     CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC,
 ];
@@ -151,33 +125,24 @@ pub enum CryptoError {
     Refused(StoreRefusalReason),
     #[error("store request was valid but failed to persist: {0}")]
     StoreFailed(String),
-    #[error("retrieve refused: {0:?}")]
-    RetrieveRefused(
-        credentials_agent_common::agent_escrow_keypair_bootstrap::RetrieveAgentEscrowKeypairRefusalReason,
-    ),
     #[error("retrieve request was valid but failed: {0}")]
     RetrieveFailed(String),
-    #[error("the ephemeral key exchange itself failed: {0}")]
-    EphemeralExchange(#[from] credentials_agent_common::ephemeral_exchange::EphemeralExchangeError),
-    #[error("the retrieved escrow keypair's own private-key PEM failed to parse: {0}")]
-    InvalidRetrievedKey(String),
-    #[error("failed to read this pod's own Kubernetes service-account token: {0}")]
-    CredentialUnavailable(String),
-    #[error("CSR generation failed: {0}")]
-    CsrGeneration(#[from] KeypairError),
-    #[error("agent escrow-identity issuance refused: {0:?}")]
-    IssuanceRefused(
-        credentials_agent_common::agent_escrow_issuance::AgentEscrowIssuanceRefusalReason,
-    ),
-    #[error("failed to encode the newly-issued private key as PKCS8 PEM: {0}")]
+    #[error("{0}")]
     KeyEncoding(String),
+    #[error(
+        "this pod has no custody daemon, so it holds no escrow key and nothing sealed to it opens here \
+         (docs/architecture/key-custody.md)"
+    )]
+    NoEscrowKey,
     #[error("decrypt failed: {0}")]
     DecryptFailed(String),
     #[error("retrieving the secret was refused: {0:?}")]
     RetrieveSecretRefused(credentials_agent_common::retrieve_secret::RetrieveRefusalReason),
     #[error("policy does not let this agent have that secret: {0}")]
     RetrieveSecretDenied(String),
-    #[error("no usable escrow public key exists for identity {0:?} -- that agent may never have completed automated escrow-identity issuance")]
+    #[error(
+        "no usable escrow public key exists for identity {0:?} -- that agent may never have completed automated escrow-identity issuance"
+    )]
     RecipientKeyNotFound(String),
     #[error("no secret is registered under {0:?}")]
     SecretNotRegistered(String),
@@ -187,42 +152,9 @@ pub enum CryptoError {
     Record(#[from] registry::RecordError),
 }
 
-/// This actor's own, cached escrow keypair -- either a real, opaque
-/// kernel-keyring handle (the raw private key never entered this
-/// process's own memory after the initial load; see
-/// polar-kernel-keyring's own crate for the mechanics), or the raw
-/// key itself, held in ordinary process memory, when kernel custody
-/// genuinely wasn't available on this machine (confirmed via a real,
-/// empirical attempt, not assumed). Deliberately not exposed outside
-/// this crate at all -- see this crate's own, top-level doc comment
-/// for why.
-enum EscrowKeypairHandle {
-    KernelBacked(polar_kernel_keyring::KeyringSerial),
-    InMemory(RsaPrivateKey),
-    /// The custody daemon holds it, P-256, and unwraps for this actor: the workload never holds the key
-    /// (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
-    Daemon(Arc<polar_custody::client::CustodyClient>),
-}
-
-/// How an agent's escrow key is held once it has been bootstrapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Custody {
-    /// In the kernel keyring, under this key number. The process holds only the number.
-    Kernel { serial: i32 },
-    /// In this process's own memory, because the kernel could not hold it.
-    Memory,
-    /// In the custody daemon, which this process asks to unwrap.
-    Daemon,
-}
-
-/// Where the actor finds what it needs on disk: the service-account token, and the number of a
-/// key an init container loaded.
+/// What the actor read on disk at its start.
 #[derive(Debug, Clone)]
 struct KeyPaths {
-    service_account_token: String,
-    escrow_key_handle: String,
-    /// The custody daemon's socket, when the pod has one: then the daemon holds the escrow key.
-    custody_socket: Option<String>,
     /// The pinned CA, which a recipient's escrow certificate must chain to; none if it could not be read, and then
     /// nothing is encrypted to a recipient.
     pinned_ca: Option<String>,
@@ -238,27 +170,12 @@ pub enum CryptoMessage {
     ClientRegistered,
     /// A general secret to escrow -- e.g. an access token an observer
     /// holds and wants the Credentials Agent to store on its behalf.
-    /// Not the agent's own escrow private key -- see
-    /// DecryptOwnMessage, below, for that flow.
+    /// Not the agent's own escrow private key, which the custody
+    /// daemon holds and this actor never sees.
     StoreSecret {
         name: String,
         plaintext: Vec<u8>,
         reply: RpcReplyPort<Result<(), CryptoError>>,
-    },
-    /// Decrypts `ciphertext` -- something a peer encrypted with real,
-    /// standard OAEP to this identity's own escrow public key -- and
-    /// returns the real plaintext. This opens only a raw RSA-OAEP
-    /// block, which has a size ceiling of roughly 440 bytes; a hybrid
-    /// EscrowedSecret is opened with DecryptOwnEscrowed. Either way, no
-    /// message in this crate's own, public API
-    /// ever hands back a raw RsaPrivateKey, kernel-backed handle, or
-    /// anything else about how this identity's own key is actually
-    /// held. The full retrieve-first/issuance-fallback/escrow
-    /// sequence, and the empirical attempt at kernel-keyring custody,
-    /// all happen internally, transparently, on first real use.
-    DecryptOwnMessage {
-        ciphertext: Vec<u8>,
-        reply: RpcReplyPort<Result<Vec<u8>, CryptoError>>,
     },
     /// Encrypts `plaintext` to `recipient_identity`'s own, real
     /// escrow public key -- the one, sole way any other actor in
@@ -321,22 +238,6 @@ pub enum CryptoMessage {
         host: String,
         reply: RpcReplyPort<Result<registry::GitCredential, CryptoError>>,
     },
-    /// Runs this identity's own escrow-keypair bootstrap sequence --
-    /// retrieve-first, issuance-as-fallback, real, empirical kernel-
-    /// custody attempt -- as a pure side effect, with no ciphertext
-    /// and no reply payload beyond success/failure. This is the one,
-    /// real reason it exists: polar-init's own, brief lifetime is the
-    /// only point in this agent's entire lifecycle where the
-    /// Kubernetes service-account token (required for real issuance)
-    /// is ever readable at all -- the main, long-running agent
-    /// process never has it mounted. Sending this from polar-init
-    /// guarantees the main process's own, later CryptoActor instance
-    /// can always succeed via the retrieve path alone, the first time
-    /// DecryptOwnMessage or EncryptForRecipient is genuinely used,
-    /// without ever needing issuance itself.
-    EnsureBootstrapped {
-        reply: RpcReplyPort<Result<Custody, CryptoError>>,
-    },
     /// Asks the credentials agent for a secret by name. It comes back encrypted to this identity's own
     /// escrow public key and is decrypted here, with the key in custody, so the plaintext is only ever
     /// in this process. `Ok(None)` means nothing is stored under the name. Whether this identity may
@@ -368,15 +269,15 @@ pub struct CryptoActorArgs {
     pub tcp_client: ActorRef<TcpClientMessage>,
     /// The consuming supervisor's own, already-spawned RouterActor --
     /// the same one its own, real topics are already registered
-    /// with, not a second one. CryptoActor registers its own five,
-    /// real reply topics with it directly in pre_start, rather than
+    /// with, not a second one. CryptoActor registers its own
+    /// reply topics with it directly in pre_start, rather than
     /// subscribing to a broadcast-style OutputPort<ClientEvent> (the
     /// earlier, real design, before RouterActor existed) -- see this
     /// crate's own, top-level doc comment for the full reasoning.
     pub router: ActorRef<polar_router::RouterMessage>,
-    /// The certificate and token paths, already read and judged. The agent builder supplies
+    /// The certificate, CA and custody-socket paths, already read and judged. The agent builder supplies
     /// them from its snapshot of the environment. `None` is for agents not yet on the
-    /// builder (polar-init): the actor then reads the process, as it always did.
+    /// builder: the actor then reads the process.
     pub settings: Option<environment::CryptoSettings>,
     /// How long to wait before trying to escrow a registered secret again, and the most that wait grows to.
     pub escrow_retry: (Duration, Duration),
@@ -414,8 +315,6 @@ pub struct CryptoActorState {
     tcp_client: ActorRef<TcpClientMessage>,
     escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
     store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
-    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
-    agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
     agent_escrow_key_reply_router: Arc<ReplyRouter<AgentEscrowKeyReply>>,
     retrieve_secret_reply_router:
         Arc<ReplyRouter<credentials_agent_common::retrieve_secret::RetrieveSecretReply>>,
@@ -428,13 +327,9 @@ pub struct CryptoActorState {
     /// arm for why), so this needs to be mutable from outside the
     /// actor's own sequential mailbox loop.
     cached_credentials_agent_escrow_key: Arc<tokio::sync::Mutex<Option<String>>>,
-    /// This identity's own escrow keypair, populated lazily on first
-    /// real use of DecryptOwnMessage -- retrieve-first, issuance-
-    /// fallback, and the empirical kernel-custody attempt all happen
-    /// once, the first time this is genuinely needed, not at actor
-    /// startup. Same Arc<Mutex<_>> reasoning as
-    /// cached_credentials_agent_escrow_key, above.
-    escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
+    /// The pod's custody daemon, which holds this identity's escrow key and unwraps for this actor; `None` when the
+    /// pod has no daemon, and then there is no escrow key here at all.
+    escrow_key: Option<Arc<polar_custody::client::CustodyClient>>,
     /// Other identities' own, real escrow public keys, keyed by
     /// identity -- learned on first use of EncryptForRecipient for
     /// each specific recipient, and reused afterward, same caching
@@ -448,7 +343,7 @@ pub struct CryptoActorState {
     cached_recipient_public_keys:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
     own_identity: String,
-    /// Where the token and the key number are, from the settings the actor started with.
+    /// What the actor read on disk at its start.
     paths: KeyPaths,
     /// The secrets that reached this agent, by name, each with the binding that says where it may go
     /// (docs/architecture/credentials-agent-architecture.md, "Named operations on registered secrets").
@@ -546,20 +441,18 @@ impl Actor for CryptoActor {
             tcp_client: args.tcp_client,
             escrow_key_reply_router: Arc::new(ReplyRouter::new()),
             store_secret_reply_router: Arc::new(ReplyRouter::new()),
-            retrieve_agent_escrow_keypair_reply_router: Arc::new(ReplyRouter::new()),
-            agent_escrow_issuance_reply_router: Arc::new(ReplyRouter::new()),
             agent_escrow_key_reply_router: Arc::new(ReplyRouter::new()),
             retrieve_secret_reply_router: Arc::new(ReplyRouter::new()),
             cached_credentials_agent_escrow_key: Arc::new(tokio::sync::Mutex::new(None)),
-            escrow_keypair_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            escrow_key: settings
+                .custody_socket
+                .as_deref()
+                .map(|socket| Arc::new(polar_custody::client::CustodyClient::new(socket))),
             cached_recipient_public_keys: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
             own_identity,
             paths: KeyPaths {
-                service_account_token: settings.service_account_token_path,
-                escrow_key_handle: settings.escrow_key_handle_path,
-                custody_socket: settings.custody_socket,
                 pinned_ca: match std::fs::read_to_string(&settings.ca_cert_path) {
                     Ok(pem) => Some(pem),
                     Err(e) => {
@@ -578,9 +471,8 @@ impl Actor for CryptoActor {
     }
 
     /// The actor stops once, when the agent is going away: the Cassini client it talks to is
-    /// a stable front that keeps its own connection up, so nothing replaces this actor. So a key held in the kernel keyring is released here: revoked, and
-    /// unlinked from the user keyring, so it does not outlive the agent that used it. This is the
-    /// only holder of its number. A hard kill gets no cleanup; nothing runs.
+    /// a stable front that keeps its own connection up, so nothing replaces this actor. The secrets it
+    /// holds are wiped, and their escrow stopped. A hard kill gets no cleanup; nothing runs.
     async fn post_stop(
         &self,
         _myself: ActorRef<Self::Msg>,
@@ -590,12 +482,6 @@ impl Actor for CryptoActor {
             task.abort();
         }
         state.registry.lock().await.clear();
-        if let Some(EscrowKeypairHandle::KernelBacked(serial)) =
-            state.escrow_keypair_handle.lock().await.take()
-        {
-            info!("releasing escrow key {serial} from the kernel keyring");
-            polar_kernel_keyring::unload_key(serial);
-        }
         Ok(())
     }
 
@@ -660,36 +546,6 @@ impl Actor for CryptoActor {
                 }
             }
             CryptoMessage::RoutedReply { topic, payload }
-                if topic == CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC =>
-            {
-                match rkyv::from_bytes::<
-                    Envelope<RetrieveAgentEscrowKeypairReply>,
-                    rkyv::rancor::Error,
-                >(&payload)
-                {
-                    Ok(envelope) => state
-                        .retrieve_agent_escrow_keypair_reply_router
-                        .deliver(&envelope.correlation_id, envelope.payload),
-                    Err(e) => warn!(
-                        "CryptoActor failed to deserialize agent escrow-keypair retrieve reply: {e}"
-                    ),
-                }
-            }
-            CryptoMessage::RoutedReply { topic, payload }
-                if topic == CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC =>
-            {
-                match rkyv::from_bytes::<Envelope<AgentEscrowIssuanceReply>, rkyv::rancor::Error>(
-                    &payload,
-                ) {
-                    Ok(envelope) => state
-                        .agent_escrow_issuance_reply_router
-                        .deliver(&envelope.correlation_id, envelope.payload),
-                    Err(e) => {
-                        warn!("CryptoActor failed to deserialize agent escrow-issuance reply: {e}")
-                    }
-                }
-            }
-            CryptoMessage::RoutedReply { topic, payload }
                 if topic == CREDENTIALS_AGENT_ESCROW_KEY_REPLIES_TOPIC =>
             {
                 match rkyv::from_bytes::<Envelope<AgentEscrowKeyReply>, rkyv::rancor::Error>(
@@ -748,8 +604,8 @@ impl Actor for CryptoActor {
                 binding,
                 reply,
             } => {
-                // Spawned, not awaited inline, for the same reason as the arms around it: the first use
-                // bootstraps the key over the broker.
+                // Spawned, not awaited inline, for the same reason as the arms around it: the daemon is asked to
+                // unwrap, and the secret is escrowed over the broker.
                 let shared = state.shared();
                 tokio::spawn(async move {
                     let result =
@@ -805,37 +661,6 @@ impl Actor for CryptoActor {
                 };
                 let _ = reply.send(result);
             }
-            CryptoMessage::DecryptOwnMessage { ciphertext, reply } => {
-                // Same reasoning as StoreSecret's own arm above --
-                // spawned, not awaited inline.
-                let tcp_client = state.tcp_client.clone();
-                let retrieve_agent_escrow_keypair_reply_router =
-                    state.retrieve_agent_escrow_keypair_reply_router.clone();
-                let agent_escrow_issuance_reply_router =
-                    state.agent_escrow_issuance_reply_router.clone();
-                let escrow_key_reply_router = state.escrow_key_reply_router.clone();
-                let store_secret_reply_router = state.store_secret_reply_router.clone();
-                let cached_key = state.cached_credentials_agent_escrow_key.clone();
-                let escrow_keypair_handle = state.escrow_keypair_handle.clone();
-                let own_identity = state.own_identity.clone();
-                let paths = state.paths.clone();
-                tokio::spawn(async move {
-                    let result = handle_decrypt_own_message(
-                        tcp_client,
-                        retrieve_agent_escrow_keypair_reply_router,
-                        agent_escrow_issuance_reply_router,
-                        escrow_key_reply_router,
-                        store_secret_reply_router,
-                        cached_key,
-                        escrow_keypair_handle,
-                        own_identity,
-                        paths,
-                        ciphertext,
-                    )
-                    .await;
-                    let _ = reply.send(result);
-                });
-            }
             CryptoMessage::EncryptForRecipient {
                 recipient_identity,
                 plaintext,
@@ -864,59 +689,13 @@ impl Actor for CryptoActor {
                 // Spawned, not awaited inline, for the same reason as StoreSecret above.
                 let tcp_client = state.tcp_client.clone();
                 let retrieve_secret_reply_router = state.retrieve_secret_reply_router.clone();
-                let retrieve_agent_escrow_keypair_reply_router =
-                    state.retrieve_agent_escrow_keypair_reply_router.clone();
-                let agent_escrow_issuance_reply_router =
-                    state.agent_escrow_issuance_reply_router.clone();
-                let escrow_key_reply_router = state.escrow_key_reply_router.clone();
-                let store_secret_reply_router = state.store_secret_reply_router.clone();
-                let cached_key = state.cached_credentials_agent_escrow_key.clone();
-                let escrow_keypair_handle = state.escrow_keypair_handle.clone();
-                let own_identity = state.own_identity.clone();
-                let paths = state.paths.clone();
+                let escrow_key = state.escrow_key.clone();
                 tokio::spawn(async move {
                     let result = handle_retrieve_secret(
                         tcp_client,
                         retrieve_secret_reply_router,
-                        retrieve_agent_escrow_keypair_reply_router,
-                        agent_escrow_issuance_reply_router,
-                        escrow_key_reply_router,
-                        store_secret_reply_router,
-                        cached_key,
-                        escrow_keypair_handle,
-                        own_identity,
-                        paths,
+                        escrow_key,
                         name,
-                    )
-                    .await;
-                    let _ = reply.send(result);
-                });
-            }
-            CryptoMessage::EnsureBootstrapped { reply } => {
-                // Same reasoning as StoreSecret's own arm above --
-                // spawned, not awaited inline.
-                let tcp_client = state.tcp_client.clone();
-                let retrieve_agent_escrow_keypair_reply_router =
-                    state.retrieve_agent_escrow_keypair_reply_router.clone();
-                let agent_escrow_issuance_reply_router =
-                    state.agent_escrow_issuance_reply_router.clone();
-                let escrow_key_reply_router = state.escrow_key_reply_router.clone();
-                let store_secret_reply_router = state.store_secret_reply_router.clone();
-                let cached_key = state.cached_credentials_agent_escrow_key.clone();
-                let escrow_keypair_handle = state.escrow_keypair_handle.clone();
-                let own_identity = state.own_identity.clone();
-                let paths = state.paths.clone();
-                tokio::spawn(async move {
-                    let result = handle_ensure_bootstrapped(
-                        tcp_client,
-                        retrieve_agent_escrow_keypair_reply_router,
-                        agent_escrow_issuance_reply_router,
-                        escrow_key_reply_router,
-                        store_secret_reply_router,
-                        cached_key,
-                        escrow_keypair_handle,
-                        own_identity,
-                        paths,
                     )
                     .await;
                     let _ = reply.send(result);
@@ -1070,368 +849,29 @@ async fn publish_store_secret_request(
     .await
 }
 
-/// The retrieve half of the agent escrow-keypair bootstrap flow --
-/// see credentials-agent-architecture.md's own "Agent escrow
-/// bootstrap" section. A fresh, single-use X25519 ephemeral keypair
-/// is generated for this one call: its public half travels in the
-/// request, and its private half is consumed decrypting the reply
-/// (matching EphemeralSecret::diffie_hellman's own single-use
-/// semantics -- once used, it's gone, by construction, not just by
-/// convention).
-async fn handle_retrieve_own_escrow_keypair(
-    tcp_client: ActorRef<TcpClientMessage>,
-    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
-) -> Result<Option<RsaPrivateKey>, CryptoError> {
-    let my_ephemeral_secret = EphemeralSecret::random();
-    let my_ephemeral_public_key = PublicKey::from(&my_ephemeral_secret).to_bytes();
-
-    let reply = publish_retrieve_agent_escrow_keypair_request(
-        &tcp_client,
-        &retrieve_agent_escrow_keypair_reply_router,
-        RetrieveAgentEscrowKeypairRequest {
-            ephemeral_public_key: my_ephemeral_public_key,
-        },
-    )
-    .await?;
-
-    match reply {
-        RetrieveAgentEscrowKeypairReply::Found { payload } => {
-            let decrypted_pem = payload.decrypt(my_ephemeral_secret)?;
-            let private_key = RsaPrivateKey::from_pkcs8_pem(
-                std::str::from_utf8(&decrypted_pem)
-                    .map_err(|e| CryptoError::InvalidRetrievedKey(e.to_string()))?,
-            )
-            .map_err(|e| CryptoError::InvalidRetrievedKey(e.to_string()))?;
-            Ok(Some(private_key))
-        }
-        RetrieveAgentEscrowKeypairReply::NotFound => Ok(None),
-        RetrieveAgentEscrowKeypairReply::Refused { reason } => {
-            Err(CryptoError::RetrieveRefused(reason))
-        }
-        RetrieveAgentEscrowKeypairReply::Failed { detail } => {
-            Err(CryptoError::RetrieveFailed(detail))
-        }
-    }
-}
-
-async fn publish_retrieve_agent_escrow_keypair_request(
-    tcp_client: &ActorRef<TcpClientMessage>,
-    retrieve_agent_escrow_keypair_reply_router: &Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
-    request: RetrieveAgentEscrowKeypairRequest,
-) -> Result<RetrieveAgentEscrowKeypairReply, CryptoError> {
-    request_reply(
-        tcp_client,
-        retrieve_agent_escrow_keypair_reply_router,
-        CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC,
-        "retrieve own escrow keypair",
-        request,
-        REPLY_TIMEOUT,
-    )
-    .await
-}
-
-/// The complete agent escrow-keypair bootstrap sequence -- see
-/// CryptoMessage::EnsureOwnEscrowKeypair's own doc comment for the
-/// full, intended behavior.
-#[allow(clippy::too_many_arguments)]
-async fn handle_ensure_own_escrow_keypair(
-    tcp_client: ActorRef<TcpClientMessage>,
-    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
-    agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
-    escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
-    store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
-    cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
-    own_identity: String,
-    paths: KeyPaths,
-) -> Result<RsaPrivateKey, CryptoError> {
-    // Step 1: retrieve-first. A real Err here (broker unreachable,
-    // timeout, a genuine refusal) propagates directly -- issuance is
-    // only ever attempted when retrieve specifically, cleanly came
-    // back "nothing escrowed yet," not as a fallback for every other
-    // kind of failure too.
-    if let Some(existing_key) = handle_retrieve_own_escrow_keypair(
-        tcp_client.clone(),
-        retrieve_agent_escrow_keypair_reply_router,
-    )
-    .await?
-    {
-        return Ok(existing_key);
-    }
-
-    // Step 2: issuance fallback. Answered only to the workload's custodian since the custody daemon keeps the key
-    // (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"); this path is retired with it.
-    let _ = &paths.service_account_token;
-
-    // Step 3: generate a real CSR, RSA specifically -- this is the
-    // agent's own encryption-capable escrow identity, not a
-    // signing-only mTLS credential. See KeyAlgorithm::Rsa's own doc
-    // comment (cert-issuer-common) for the full reasoning.
-    let csr_output =
-        cert_issuer_common::keypair::generate_csr(&own_identity, &KeyAlgorithm::Rsa, &[])?;
-
-    // Step 4: the actual issuance request/reply round trip.
-    let issuance_reply = publish_agent_escrow_issuance_request(
-        &tcp_client,
-        &agent_escrow_issuance_reply_router,
-        AgentEscrowIssuanceRequest {
-            csr_pem: csr_output.csr_pem,
-        },
-    )
-    .await?;
-
-    let AgentEscrowIssuanceReply::Issued { .. } = &issuance_reply else {
-        let AgentEscrowIssuanceReply::Refused { reason } = issuance_reply else {
-            unreachable!("AgentEscrowIssuanceReply has exactly two variants");
-        };
-        return Err(CryptoError::IssuanceRefused(reason));
-    };
-
-    // Step 5: escrow the newly-issued private key, under the exact,
-    // well-known name the retrieve path (Step 1, above, and every
-    // future call from any pod instance of this same identity) looks
-    // it up under -- reusing handle_store_secret directly, the same
-    // mechanism CryptoMessage::StoreSecret already uses, rather than
-    // duplicating its own encrypt-and-publish logic here.
-    handle_store_secret(
-        tcp_client,
-        escrow_key_reply_router,
-        store_secret_reply_router,
-        cached_key,
-        agent_escrow_keypair_secret_name(&own_identity),
-        csr_output.private_key_pem.as_bytes(),
-        Default::default(),
-    )
-    .await?;
-
-    // Step 6: return the real, usable key -- parsed back from the
-    // exact same PEM just generated and escrowed above, matching how
-    // handle_retrieve_own_escrow_keypair already parses its own,
-    // retrieved PEM.
-    RsaPrivateKey::from_pkcs8_pem(&csr_output.private_key_pem)
-        .map_err(|e| CryptoError::KeyEncoding(e.to_string()))
-}
-
-/// The real, shared bootstrap logic behind both DecryptOwnMessage and
-/// EnsureBootstrapped -- populates `escrow_keypair_handle` exactly
-/// once (retrieve-first, issuance-as-fallback, then the real,
-/// empirical kernel-custody attempt), if it isn't already populated.
-/// Once set, the handle is never mutated again -- only ever read
-/// afterward -- so a caller re-locking the same mutex separately,
-/// after this returns, to read the now-stable value is genuinely
-/// safe, not a real race.
-#[allow(clippy::too_many_arguments)]
-async fn ensure_escrow_keypair_bootstrapped(
-    tcp_client: ActorRef<TcpClientMessage>,
-    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
-    agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
-    escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
-    store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
-    cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
-    escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
-    own_identity: String,
-    paths: KeyPaths,
-) -> Result<Custody, CryptoError> {
-    let mut handle_guard = escrow_keypair_handle.lock().await;
-
-    // With a custody daemon the key is its custodian's to fetch, and its own to hold: nothing is bootstrapped here.
-    if handle_guard.is_none()
-        && let Some(socket) = &paths.custody_socket
-    {
-        *handle_guard = Some(EscrowKeypairHandle::Daemon(Arc::new(
-            polar_custody::client::CustodyClient::new(socket),
-        )));
-    }
-
-    // An init container may already have loaded this agent's key into the kernel keyring and
-    // left its number: take that, and the key is never retrieved, never parsed and never in
-    // this process at all. Only when there is no such key, or it is not ours, or the kernel
-    // cannot use it, does the actor get the key itself, as before.
-    if handle_guard.is_none()
-        && let Some(adopted) = adopt_key_left_by_init(&paths.escrow_key_handle, &own_identity)
-    {
-        *handle_guard = Some(adopted);
-    }
-
-    if handle_guard.is_none() {
-        let private_key = handle_ensure_own_escrow_keypair(
-            tcp_client,
-            retrieve_agent_escrow_keypair_reply_router,
-            agent_escrow_issuance_reply_router,
-            escrow_key_reply_router,
-            store_secret_reply_router,
-            cached_key,
-            own_identity.clone(),
-            paths,
-        )
-        .await?;
-
-        let der_bytes = private_key
-            .to_pkcs8_der()
-            .map_err(|e| CryptoError::KeyEncoding(e.to_string()))?;
-
-        // A real, empirical attempt -- try_load_asymmetric_key itself
-        // makes the actual, real add_key/keyctl_pkey_query syscalls
-        // (see polar-kernel-keyring's own crate for the mechanics),
-        // rather than this crate assuming kernel support one way or
-        // the other. A genuine None here is an ordinary, expected
-        // fallback signal, not an error.
-        let new_handle = match polar_kernel_keyring::try_load_asymmetric_key(
-            &own_identity,
-            der_bytes.as_bytes(),
-        ) {
-            Some(serial) => EscrowKeypairHandle::KernelBacked(serial),
-            None => EscrowKeypairHandle::InMemory(private_key),
-        };
-
-        *handle_guard = Some(new_handle);
-    }
-
-    Ok(match handle_guard.as_ref().expect("populated just above") {
-        EscrowKeypairHandle::KernelBacked(serial) => Custody::Kernel {
-            serial: serial.get(),
-        },
-        EscrowKeypairHandle::InMemory(_) => Custody::Memory,
-        EscrowKeypairHandle::Daemon(_) => Custody::Daemon,
-    })
-}
-
-/// The key an init container loaded into the kernel keyring, if it left its number at `path`
-/// and the key is this identity's and usable. Anything less is `None`, and the caller takes
-/// the key itself.
-fn adopt_key_left_by_init(path: &str, own_identity: &str) -> Option<EscrowKeypairHandle> {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        info!("no escrow key handle at {path}: this process will hold the key itself");
-        return None;
-    };
-    let Ok(serial) = raw.trim().parse::<i32>() else {
-        warn!(
-            "the escrow key handle at {path} is not a key number: this process will hold the key itself"
-        );
-        return None;
-    };
-    match polar_kernel_keyring::adopt_asymmetric_key(serial, own_identity) {
-        Some(adopted) => {
-            info!(
-                "adopted escrow key {serial} from the kernel keyring: this process never holds the key"
-            );
-            Some(EscrowKeypairHandle::KernelBacked(adopted))
-        }
-        None => {
-            warn!(
-                "the key {serial} named in {path} is not this identity's or cannot be used: this process will hold the key itself"
-            );
-            None
-        }
-    }
-}
-
-/// The real handler behind CryptoMessage::DecryptOwnMessage -- see
-/// that variant's own doc comment for the complete, intended
-/// behavior. On first genuine use, runs the full retrieve/issuance-
-/// fallback sequence exactly once (handle_ensure_own_escrow_keypair,
-/// unchanged), then makes one, real, empirical attempt at kernel-
-/// keyring custody -- success caches an opaque KernelBacked handle;
-/// a genuine failure (kernel unavailable on this machine) caches the
-/// raw key itself, InMemory, as the real, correct fallback. Every
-/// later call reuses whichever was cached, without repeating any of
-/// this setup.
-#[allow(clippy::too_many_arguments)]
-async fn handle_decrypt_own_message(
-    tcp_client: ActorRef<TcpClientMessage>,
-    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
-    agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
-    escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
-    store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
-    cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
-    escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
-    own_identity: String,
-    paths: KeyPaths,
-    ciphertext: Vec<u8>,
-) -> Result<Vec<u8>, CryptoError> {
-    ensure_escrow_keypair_bootstrapped(
-        tcp_client,
-        retrieve_agent_escrow_keypair_reply_router,
-        agent_escrow_issuance_reply_router,
-        escrow_key_reply_router,
-        store_secret_reply_router,
-        cached_key,
-        escrow_keypair_handle.clone(),
-        own_identity,
-        paths,
-    )
-    .await?;
-
-    let handle_guard = escrow_keypair_handle.lock().await;
-    match handle_guard
-        .as_ref()
-        .expect("ensure_escrow_keypair_bootstrapped just populated this")
-    {
-        EscrowKeypairHandle::KernelBacked(serial) => {
-            polar_kernel_keyring::decrypt(*serial, &ciphertext)
-                .map_err(|e| CryptoError::DecryptFailed(e.to_string()))
-        }
-        EscrowKeypairHandle::InMemory(private_key) => private_key
-            .decrypt(rsa::Oaep::<sha2_011::Sha256>::new(), &ciphertext)
-            .map_err(|e| CryptoError::DecryptFailed(e.to_string())),
-        EscrowKeypairHandle::Daemon(_) => Err(CryptoError::DecryptFailed(
-            "a raw RSA-OAEP block opens under an RSA key, and this agent's escrow key is P-256, the custody \
-             daemon's: send an EscrowedSecret"
-                .to_string(),
-        )),
-    }
-}
-
-/// Opens `escrowed` under `context` with this identity's escrow key, wherever it is held: the daemon unwraps the
-/// secret's AES key and never sees the payload; a key held here (RSA) unwraps it here.
+/// Opens `escrowed` under `context` with this identity's escrow key, the custody daemon's: the daemon unwraps the
+/// secret's AES key and never sees the payload. With no daemon there is no key to open it with.
 async fn open_escrowed(
-    escrow_keypair_handle: &Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
+    escrow_key: &Option<Arc<polar_custody::client::CustodyClient>>,
     escrowed: &EscrowedSecret,
     context: &[u8],
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, CryptoError> {
     use credentials_agent_common::escrow_secret::Suite;
-    let handle_guard = escrow_keypair_handle.lock().await;
-    let handle = handle_guard
-        .as_ref()
-        .expect("ensure_escrow_keypair_bootstrapped just populated this");
-    match handle {
-        EscrowKeypairHandle::Daemon(daemon) => {
-            if escrowed.suite() != Suite::HpkeP256 {
-                return Err(CryptoError::DecryptFailed(format!(
-                    "sealed under {:?}, and this agent's escrow key is P-256",
-                    escrowed.suite()
-                )));
-            }
-            let (daemon, wrapped) = (daemon.clone(), escrowed.wrapped_key().to_vec());
-            drop(handle_guard);
-            let key = tokio::task::spawn_blocking(move || daemon.unwrap(&wrapped))
-                .await
-                .map_err(|e| CryptoError::DecryptFailed(e.to_string()))?
-                .map_err(|e| CryptoError::DecryptFailed(format!("the custody daemon: {e}")))?;
-            escrowed
-                .decrypt_with_bound(Suite::HpkeP256, |_| Ok(key.to_vec()), context)
-                .map_err(|e| CryptoError::DecryptFailed(e.to_string()))
-        }
-        EscrowKeypairHandle::KernelBacked(serial) => escrowed
-            .decrypt_with_bound(
-                Suite::RsaOaep,
-                |wrapped| {
-                    polar_kernel_keyring::decrypt(*serial, wrapped).map_err(|e| e.to_string())
-                },
-                context,
-            )
-            .map_err(|e| CryptoError::DecryptFailed(e.to_string())),
-        EscrowKeypairHandle::InMemory(private_key) => escrowed
-            .decrypt_with_bound(
-                Suite::RsaOaep,
-                |wrapped| {
-                    private_key
-                        .decrypt(rsa::Oaep::<sha2_011::Sha256>::new(), wrapped)
-                        .map_err(|e| e.to_string())
-                },
-                context,
-            )
-            .map_err(|e| CryptoError::DecryptFailed(e.to_string())),
+    let daemon = escrow_key.clone().ok_or(CryptoError::NoEscrowKey)?;
+    if escrowed.suite() != Suite::HpkeP256 {
+        return Err(CryptoError::DecryptFailed(format!(
+            "sealed under {:?}, and this agent's escrow key is P-256",
+            escrowed.suite()
+        )));
     }
+    let wrapped = escrowed.wrapped_key().to_vec();
+    let key = tokio::task::spawn_blocking(move || daemon.unwrap(&wrapped))
+        .await
+        .map_err(|e| CryptoError::DecryptFailed(e.to_string()))?
+        .map_err(|e| CryptoError::DecryptFailed(format!("the custody daemon: {e}")))?;
+    escrowed
+        .decrypt_with_bound(Suite::HpkeP256, |_| Ok(key.to_vec()), context)
+        .map_err(|e| CryptoError::DecryptFailed(e.to_string()))
 }
 
 /// What the tasks started for the registry need from the actor, cloned out of its state: they run outside the
@@ -1441,14 +881,11 @@ struct Shared {
     tcp_client: ActorRef<TcpClientMessage>,
     escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
     store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
-    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
-    agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
     retrieve_secret_reply_router:
         Arc<ReplyRouter<credentials_agent_common::retrieve_secret::RetrieveSecretReply>>,
     cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
-    escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
+    escrow_key: Option<Arc<polar_custody::client::CustodyClient>>,
     own_identity: String,
-    paths: KeyPaths,
     registry: Registry,
     escrow_tasks: EscrowTasks,
     escrow_retry: (Duration, Duration),
@@ -1460,15 +897,10 @@ impl CryptoActorState {
             tcp_client: self.tcp_client.clone(),
             escrow_key_reply_router: self.escrow_key_reply_router.clone(),
             store_secret_reply_router: self.store_secret_reply_router.clone(),
-            retrieve_agent_escrow_keypair_reply_router: self
-                .retrieve_agent_escrow_keypair_reply_router
-                .clone(),
-            agent_escrow_issuance_reply_router: self.agent_escrow_issuance_reply_router.clone(),
             retrieve_secret_reply_router: self.retrieve_secret_reply_router.clone(),
             cached_key: self.cached_credentials_agent_escrow_key.clone(),
-            escrow_keypair_handle: self.escrow_keypair_handle.clone(),
+            escrow_key: self.escrow_key.clone(),
             own_identity: self.own_identity.clone(),
-            paths: self.paths.clone(),
             registry: self.registry.clone(),
             escrow_tasks: self.escrow_tasks.clone(),
             escrow_retry: self.escrow_retry,
@@ -1494,20 +926,7 @@ async fn register_secret(
 ) -> Result<(), CryptoError> {
     binding.check()?;
     let binding_kind = binding.kind;
-    let plaintext = handle_decrypt_own_escrowed(
-        shared.tcp_client.clone(),
-        shared.retrieve_agent_escrow_keypair_reply_router.clone(),
-        shared.agent_escrow_issuance_reply_router.clone(),
-        shared.escrow_key_reply_router.clone(),
-        shared.store_secret_reply_router.clone(),
-        shared.cached_key.clone(),
-        shared.escrow_keypair_handle.clone(),
-        shared.own_identity.clone(),
-        shared.paths.clone(),
-        secret,
-        context,
-    )
-    .await?;
+    let plaintext = handle_decrypt_own_escrowed(&shared.escrow_key, secret, context).await?;
     // The form that is escrowed also proves the secret is text and the binding is whole.
     let record = registry::escrow_form(&binding, &plaintext)?;
     shared.registry.lock().await.insert(
@@ -1590,14 +1009,7 @@ async fn load_secret(shared: Shared, name: String, section: String) -> Result<bo
     let found = handle_retrieve_secret(
         shared.tcp_client.clone(),
         shared.retrieve_secret_reply_router.clone(),
-        shared.retrieve_agent_escrow_keypair_reply_router.clone(),
-        shared.agent_escrow_issuance_reply_router.clone(),
-        shared.escrow_key_reply_router.clone(),
-        shared.store_secret_reply_router.clone(),
-        shared.cached_key.clone(),
-        shared.escrow_keypair_handle.clone(),
-        shared.own_identity.clone(),
-        shared.paths.clone(),
+        shared.escrow_key.clone(),
         escrow_name(&shared.own_identity, &name),
     )
     .await?;
@@ -1616,77 +1028,36 @@ async fn load_secret(shared: Shared, name: String, section: String) -> Result<bo
     Ok(true)
 }
 
-/// Opens an `EscrowedSecret` addressed to this identity, for `register_secret`: read the bytes as one, make
-/// sure this identity's escrow key is in hand, and open the secret under `context` with that key, which
-/// never leaves its custody. Not a message: no caller has the plaintext of a registered secret.
-#[allow(clippy::too_many_arguments)]
+/// Opens an `EscrowedSecret` addressed to this identity, for `register_secret`: read the bytes as one, and open the
+/// secret under `context` with this identity's escrow key, which never leaves the custody daemon. Not a message: no
+/// caller has the plaintext of a registered secret.
 async fn handle_decrypt_own_escrowed(
-    tcp_client: ActorRef<TcpClientMessage>,
-    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
-    agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
-    escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
-    store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
-    cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
-    escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
-    own_identity: String,
-    paths: KeyPaths,
+    escrow_key: &Option<Arc<polar_custody::client::CustodyClient>>,
     secret: Vec<u8>,
     context: Vec<u8>,
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, CryptoError> {
-    // Read before the key is touched: bytes that are not a secret need no bootstrap to be refused.
+    // Read before the key is touched: bytes that are not a secret need no daemon to be refused.
     let escrowed = rkyv::from_bytes::<EscrowedSecret, rkyv::rancor::Error>(&secret)
         .map_err(|e| CryptoError::Serialization(e.to_string()))?;
-
-    ensure_escrow_keypair_bootstrapped(
-        tcp_client,
-        retrieve_agent_escrow_keypair_reply_router,
-        agent_escrow_issuance_reply_router,
-        escrow_key_reply_router,
-        store_secret_reply_router,
-        cached_key,
-        escrow_keypair_handle.clone(),
-        own_identity,
-        paths,
-    )
-    .await?;
-
-    open_escrowed(&escrow_keypair_handle, &escrowed, &context).await
+    open_escrowed(escrow_key, &escrowed, &context).await
 }
 
 /// The real handler behind CryptoMessage::RetrieveSecret: ask the credentials agent, and decrypt what
-/// comes back with this identity's own escrow key, which never leaves its custody. The key is bootstrapped
-/// first, because the reply is encrypted to the public half of the key the credentials agent holds a
-/// certificate for.
-#[allow(clippy::too_many_arguments)]
+/// comes back with this identity's own escrow key, which never leaves the custody daemon. With no daemon nothing is
+/// asked: what came back could not be opened.
 async fn handle_retrieve_secret(
     tcp_client: ActorRef<TcpClientMessage>,
     retrieve_secret_reply_router: Arc<
         ReplyRouter<credentials_agent_common::retrieve_secret::RetrieveSecretReply>,
     >,
-    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
-    agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
-    escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
-    store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
-    cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
-    escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
-    own_identity: String,
-    paths: KeyPaths,
+    escrow_key: Option<Arc<polar_custody::client::CustodyClient>>,
     name: String,
 ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, CryptoError> {
     use credentials_agent_common::retrieve_secret::{RetrieveSecretReply, RetrieveSecretRequest};
 
-    ensure_escrow_keypair_bootstrapped(
-        tcp_client.clone(),
-        retrieve_agent_escrow_keypair_reply_router,
-        agent_escrow_issuance_reply_router,
-        escrow_key_reply_router,
-        store_secret_reply_router,
-        cached_key,
-        escrow_keypair_handle.clone(),
-        own_identity,
-        paths,
-    )
-    .await?;
+    if escrow_key.is_none() {
+        return Err(CryptoError::NoEscrowKey);
+    }
 
     let reply = request_reply(
         &tcp_client,
@@ -1704,41 +1075,10 @@ async fn handle_retrieve_secret(
         RetrieveSecretReply::Denied { reason } => Err(CryptoError::RetrieveSecretDenied(reason)),
         RetrieveSecretReply::Failed { detail } => Err(CryptoError::RetrieveFailed(detail)),
         RetrieveSecretReply::Found { secret } => {
-            let plaintext = open_escrowed(&escrow_keypair_handle, &secret, b"").await?;
+            let plaintext = open_escrowed(&escrow_key, &secret, b"").await?;
             Ok(Some(plaintext))
         }
     }
-}
-
-/// The real handler behind CryptoMessage::EnsureBootstrapped -- see
-/// that variant's own doc comment for the complete, intended
-/// behavior. Genuinely just the setup half of DecryptOwnMessage,
-/// without the final decrypt dispatch -- no ciphertext, only the
-/// real, side-effecting bootstrap itself.
-#[allow(clippy::too_many_arguments)]
-async fn handle_ensure_bootstrapped(
-    tcp_client: ActorRef<TcpClientMessage>,
-    retrieve_agent_escrow_keypair_reply_router: Arc<ReplyRouter<RetrieveAgentEscrowKeypairReply>>,
-    agent_escrow_issuance_reply_router: Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
-    escrow_key_reply_router: Arc<ReplyRouter<credentials_agent_common::escrow_key::EscrowKeyReply>>,
-    store_secret_reply_router: Arc<ReplyRouter<StoreSecretReply>>,
-    cached_key: Arc<tokio::sync::Mutex<Option<String>>>,
-    escrow_keypair_handle: Arc<tokio::sync::Mutex<Option<EscrowKeypairHandle>>>,
-    own_identity: String,
-    paths: KeyPaths,
-) -> Result<Custody, CryptoError> {
-    ensure_escrow_keypair_bootstrapped(
-        tcp_client,
-        retrieve_agent_escrow_keypair_reply_router,
-        agent_escrow_issuance_reply_router,
-        escrow_key_reply_router,
-        store_secret_reply_router,
-        cached_key,
-        escrow_keypair_handle,
-        own_identity,
-        paths,
-    )
-    .await
 }
 
 /// The real handler behind CryptoMessage::EncryptForRecipient -- see
@@ -1833,22 +1173,6 @@ async fn publish_agent_escrow_key_request(
         agent_escrow_key_reply_router,
         CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC,
         "agent escrow key",
-        request,
-        REPLY_TIMEOUT,
-    )
-    .await
-}
-
-async fn publish_agent_escrow_issuance_request(
-    tcp_client: &ActorRef<TcpClientMessage>,
-    agent_escrow_issuance_reply_router: &Arc<ReplyRouter<AgentEscrowIssuanceReply>>,
-    request: AgentEscrowIssuanceRequest,
-) -> Result<AgentEscrowIssuanceReply, CryptoError> {
-    request_reply(
-        tcp_client,
-        agent_escrow_issuance_reply_router,
-        CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC,
-        "agent escrow issuance",
         request,
         REPLY_TIMEOUT,
     )
@@ -1965,11 +1289,8 @@ mod tests {
         /// happened (queried exactly once across N stores), not just
         /// "repeated calls didn't crash."
         escrow_key_queries: Arc<std::sync::atomic::AtomicUsize>,
-        /// If Some, RetrieveAgentEscrowKeypairRequests are answered
-        /// with a real Found reply, genuinely re-encrypted via the
-        /// ephemeral exchange to whatever ephemeral public key the
-        /// request itself carries. If None, answered with NotFound --
-        /// the "nothing escrowed yet" case.
+        /// The escrow key the actor's custody daemon holds (its PKCS#8), which a retrievable secret is encrypted
+        /// to, as the real agent does. If None, a retrieval finds nothing.
         stored_escrow_keypair_pem: Option<String>,
         /// Captures the most recently decrypted plaintext from a
         /// genuine StoreSecretRequest -- lets a test assert on its
@@ -1980,14 +1301,6 @@ mod tests {
         /// own, shared reference to read from after the actor's own
         /// handle() writes into it.
         last_stored_secret_plaintext: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
-        /// If true, AgentEscrowIssuanceRequests are answered with a
-        /// real Issued reply (a genuine, self-signed certificate
-        /// this test helper builds itself, plus the same escrow
-        /// public key PEM this fake agent already hands out for
-        /// ordinary escrow-key queries). If false, answered with
-        /// Refused -- lets a test exercise the "issuance itself was
-        /// refused" path too.
-        issue_agent_escrow_certificates: bool,
         /// If Some, AgentEscrowKeyRequests are answered with a real
         /// Found reply carrying this PEM -- a real, distinct
         /// recipient identity's own public key, standing in for
@@ -2152,22 +1465,11 @@ mod tests {
                     } else if let (Some((_, plaintext)), Some(pem)) =
                         (found, &self.stored_escrow_keypair_pem)
                     {
-                        // To the actor's own escrow key, as the real agent does: RSA, or P-256, the custody daemon's.
-                        let public = match RsaPrivateKey::from_pkcs8_pem(pem) {
-                            Ok(key) => rsa::pkcs8::EncodePublicKey::to_public_key_pem(
-                                &key.to_public_key(),
-                                rsa::pkcs8::LineEnding::LF,
-                            )
-                            .unwrap(),
-                            Err(_) => {
-                                use p256::pkcs8::{DecodePrivateKey as _, EncodePublicKey as _};
-                                p256::SecretKey::from_pkcs8_pem(pem)
-                                    .unwrap()
-                                    .public_key()
-                                    .to_public_key_pem(p256::pkcs8::LineEnding::LF)
-                                    .unwrap()
-                            }
-                        };
+                        // To the actor's own escrow key, as the real agent does: P-256, the custody daemon's.
+                        let public = polar_custody::escrow::EscrowKey::from_pkcs8_pem(pem)
+                            .unwrap()
+                            .public_key_pem()
+                            .unwrap();
                         RetrieveSecretReply::Found {
                             secret: EscrowedSecret::encrypt(plaintext, &public).unwrap(),
                         }
@@ -2182,71 +1484,6 @@ mod tests {
                         .unwrap()
                         .to_vec();
                     route(CREDENTIALS_RETRIEVE_SECRET_REPLIES_TOPIC, bytes);
-                }
-            } else if topic == CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REQUESTS_TOPIC {
-                if let Ok(envelope) = rkyv::from_bytes::<
-                    Envelope<RetrieveAgentEscrowKeypairRequest>,
-                    rkyv::rancor::Error,
-                >(&payload)
-                {
-                    let reply_payload = match &self.stored_escrow_keypair_pem {
-                        Some(pem) => {
-                            let encrypted = credentials_agent_common::ephemeral_exchange::EphemeralEncryptedPayload::encrypt(
-                                pem.as_bytes(),
-                                &envelope.payload.ephemeral_public_key,
-                            )
-                            .unwrap();
-                            RetrieveAgentEscrowKeypairReply::Found { payload: encrypted }
-                        }
-                        None => RetrieveAgentEscrowKeypairReply::NotFound,
-                    };
-                    let reply = Envelope {
-                        correlation_id: envelope.correlation_id,
-                        payload: reply_payload,
-                    };
-                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
-                        .unwrap()
-                        .to_vec();
-                    route(
-                        CREDENTIALS_RETRIEVE_AGENT_ESCROW_KEYPAIR_REPLIES_TOPIC,
-                        bytes,
-                    );
-                }
-            } else if topic == CREDENTIALS_AGENT_ESCROW_ISSUANCE_REQUESTS_TOPIC {
-                if let Ok(envelope) = rkyv::from_bytes::<
-                    Envelope<AgentEscrowIssuanceRequest>,
-                    rkyv::rancor::Error,
-                >(&payload)
-                {
-                    let reply_payload = if self.issue_agent_escrow_certificates {
-                        AgentEscrowIssuanceReply::Issued {
-                            // A real, well-formed certificate isn't
-                            // needed here -- CryptoActor's own
-                            // issuance-fallback logic never actually
-                            // parses this string, only the two other
-                            // fields it goes on to use directly.
-                            certificate_pem:
-                                "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"
-                                    .to_string(),
-                            ca_chain_pem:
-                                "-----BEGIN CERTIFICATE-----\nfake-ca\n-----END CERTIFICATE-----\n"
-                                    .to_string(),
-                            escrow_public_key_pem: self.escrow_public_key_pem.clone(),
-                        }
-                    } else {
-                        AgentEscrowIssuanceReply::Refused {
-                            reason:
-                                credentials_agent_common::agent_escrow_issuance::AgentEscrowIssuanceRefusalReason::SigningFailed,
-                        }
-                    };
-                    let reply = Envelope {
-                        correlation_id: envelope.correlation_id,
-                        payload: reply_payload,
-                    };
-                    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&reply)
-                        .unwrap()
-                        .to_vec();
-                    route(CREDENTIALS_AGENT_ESCROW_ISSUANCE_REPLIES_TOPIC, bytes);
                 }
             } else if topic == CREDENTIALS_AGENT_ESCROW_KEY_REQUESTS_TOPIC
                 && let Ok(envelope) = rkyv::from_bytes::<
@@ -2301,17 +1538,10 @@ mod tests {
     #[derive(Default)]
     struct FakeCredentialsAgentConfig {
         stored_escrow_keypair_pem: Option<String>,
-        issue_agent_escrow_certificates: bool,
         recipient_public_key_pem: Option<String>,
         forge_recipient_certificate: bool,
-        /// The custody daemon's socket, when the actor's pod has one.
+        /// The custody daemon's socket, when the actor's pod has one: without it the actor has no escrow key.
         custody_socket: Option<String>,
-        /// Where the actor looks for the service-account token. Tests that reach the
-        /// issuance path give it a real file; the others never read it.
-        service_account_token_path: Option<String>,
-        /// Where the actor looks for a key number the init container left. None means a path
-        /// where there is nothing, as in a pod whose init container passed no key.
-        escrow_key_handle_path: Option<String>,
         /// The identity in the actor's certificate; unique per actor when not given.
         identity: Option<String>,
         /// Secrets the fake credentials agent will hand back, by name.
@@ -2321,13 +1551,6 @@ mod tests {
         stored: Option<StoreLog>,
         failing_stores: Option<Arc<std::sync::atomic::AtomicBool>>,
         store_script: Vec<StoreScript>,
-    }
-
-    /// A temporary file standing in for the in-cluster, mounted service-account token.
-    fn write_test_service_account_token() -> tempfile::NamedTempFile {
-        let token_file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(token_file.path(), "fake-k8s-service-account-token\n").unwrap();
-        token_file
     }
 
     /// pre_start now derives its own identity by reading a real,
@@ -2410,14 +1633,6 @@ mod tests {
         Arc<std::sync::Mutex<Option<Vec<u8>>>>,
         Arc<std::sync::atomic::AtomicUsize>,
     ) {
-        let service_account_token_path = config
-            .service_account_token_path
-            .clone()
-            .unwrap_or_else(|| environment::KUBERNETES_SA_TOKEN_PATH.to_string());
-        let escrow_key_handle_path = config
-            .escrow_key_handle_path
-            .clone()
-            .unwrap_or_else(|| "/nonexistent/escrow-key-handle".to_string());
         let (private_key, public_key_pem) = test_credentials_agent_keypair();
         let escrow_key_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let agent_escrow_key_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2436,7 +1651,6 @@ mod tests {
                 escrow_key_queries: escrow_key_queries.clone(),
                 stored_escrow_keypair_pem: config.stored_escrow_keypair_pem,
                 last_stored_secret_plaintext: last_stored_secret_plaintext.clone(),
-                issue_agent_escrow_certificates: config.issue_agent_escrow_certificates,
                 recipient_public_key_pem: config.recipient_public_key_pem,
                 forge_recipient_certificate: config.forge_recipient_certificate,
                 agent_escrow_key_queries: agent_escrow_key_queries.clone(),
@@ -2451,8 +1665,7 @@ mod tests {
         .await
         .unwrap();
 
-        // Each actor gets an identity of its own: keys loaded into the one real keyring under
-        // the same description replace each other, which tests running side by side would hit.
+        // Each actor gets an identity of its own, so the names its secrets are escrowed under are its own.
         let identity = config
             .identity
             .clone()
@@ -2465,8 +1678,6 @@ mod tests {
             CryptoActorArgs::new(fake_agent, router)
                 .with_settings(environment::CryptoSettings {
                     own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
-                    service_account_token_path: service_account_token_path.clone(),
-                    escrow_key_handle_path: escrow_key_handle_path.clone(),
                     custody_socket: config.custody_socket.clone(),
                     ca_cert_path: test_ca_file().to_string_lossy().into_owned(),
                 })
@@ -2490,8 +1701,7 @@ mod tests {
         )
     }
 
-    /// Stops the actor and waits for it, so its `post_stop` releases the kernel key it loaded:
-    /// the machine's keyring is shared with the dev cluster's node, and nothing else unloads it.
+    /// Stops the actor and waits for it, so its `post_stop` has wiped what it held before the test ends.
     async fn stop_and_release_key(actor: &ActorRef<CryptoMessage>) {
         actor
             .stop_and_wait(None, Some(std::time::Duration::from_secs(5)))
@@ -2499,51 +1709,27 @@ mod tests {
             .unwrap();
     }
 
-    async fn crypto_actor_holding_an_escrow_key(
-        secrets: &[(&str, &[u8])],
-        deny_retrieval: bool,
-    ) -> ActorRef<CryptoMessage> {
-        let mut rng = rand::rng();
-        let key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let pem =
-            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&key, rsa::pkcs8::LineEnding::LF).unwrap();
-        let ((crypto_actor, _), _, _) =
-            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
-                stored_escrow_keypair_pem: Some(pem.to_string()),
-                issue_agent_escrow_certificates: false,
-                retrievable_secrets: secrets
-                    .iter()
-                    .map(|(n, v)| (n.to_string(), v.to_vec()))
-                    .collect(),
-                deny_retrieval,
-                ..Default::default()
-            })
-            .await;
-        crypto_actor
-    }
-
-    /// docs/architecture/key-custody.md, "Part A's bootstrap: the custodian": with a custody daemon, the escrow key is
-    /// its, P-256; a secret retrieved is opened through it, and the actor never holds the key.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn with_a_custody_daemon_a_retrieved_secret_is_opened_through_it_and_a_raw_block_is_refused()
-     {
+    /// A custody daemon on a socket in a directory of its own, as a pod's is, whose custodian has fetched the escrow
+    /// key: P-256, as every agent's is (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian"). The
+    /// directory is returned to be kept for as long as the socket is used; the key's PKCS#8 is what the fake
+    /// credentials agent encrypts a retrievable secret to, as the real one encrypts to the escrow certificate's key.
+    fn custody_daemon_holding_an_escrow_key() -> CustodyDaemon {
         use polar_custody::custody::{Custody as Daemon, Roles};
         use polar_custody::protocol::{Reply, Request, Slot};
         use polar_custody::server::{Callers, bind, serve};
         use std::os::unix::fs::MetadataExt as _;
-        // The daemon, its custodian's certificate installed with escrow named, and the escrow key it fetched held.
         let (issuer, ca_pem) = new_ca();
         let mut custody = Daemon::new(&ca_pem).unwrap();
         let installer = Roles {
             installer: true,
             workload: false,
         };
-        let custodian = "custody.test-agent-daemon.polar.serviceaccount.cluster.local";
+        let workload = "test-agent-daemon.polar.serviceaccount.cluster.local";
         let Reply::Csr(csr) = custody.handle(
             installer,
             Request::MakeCsr {
                 slot: Slot::Custodian,
-                identity: custodian.to_string(),
+                identity: format!("custody.{workload}"),
                 names: vec![],
             },
             0,
@@ -2575,7 +1761,7 @@ mod tests {
             custody.handle(
                 installer,
                 Request::Bootstrap {
-                    identity: "test-agent-daemon.polar.serviceaccount.cluster.local".to_string(),
+                    identity: workload.to_string(),
                     client: false,
                     server: None,
                     escrow: true,
@@ -2584,17 +1770,14 @@ mod tests {
             ),
             Reply::Installed
         );
-        let escrow_key = polar_custody::escrow::EscrowKey::generate().unwrap();
-        let recipient = rsa::RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
-        let pkcs8 = String::from_utf8(
-            escrow_key
-                .sealed_to(&recipient.to_public_key())
-                .unwrap()
-                .decrypt(&recipient)
-                .unwrap()
-                .to_vec(),
-        )
-        .unwrap();
+        // A P-256 key, as the custodian would have fetched.
+        let pkcs8 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+            .unwrap()
+            .serialize_pem();
+        let public_pem = polar_custody::escrow::EscrowKey::from_pkcs8_pem(&pkcs8)
+            .unwrap()
+            .public_key_pem()
+            .unwrap();
         custody.hold_retrieved_escrow(&pkcs8).unwrap();
         custody.set_ready();
         let dir = tempfile::TempDir::new().unwrap();
@@ -2608,14 +1791,51 @@ mod tests {
                 workload_uids: vec![uid],
             }),
         ));
+        CustodyDaemon {
+            _dir: dir,
+            socket: socket.display().to_string(),
+            pkcs8,
+            public_pem,
+        }
+    }
+
+    /// A custody daemon serving, for as long as this is kept.
+    struct CustodyDaemon {
+        _dir: tempfile::TempDir,
+        socket: String,
+        pkcs8: String,
+        public_pem: String,
+    }
+
+    /// An actor whose escrow key its custody daemon holds, beside a credentials agent holding `secrets` for it.
+    async fn crypto_actor_holding_an_escrow_key(
+        secrets: &[(&str, &[u8])],
+        deny_retrieval: bool,
+    ) -> (ActorRef<CryptoMessage>, CustodyDaemon) {
+        let daemon = custody_daemon_holding_an_escrow_key();
         let ((crypto_actor, _), _, _) =
             spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
-                stored_escrow_keypair_pem: Some(pkcs8),
-                retrievable_secrets: vec![("github-sei".to_string(), b"a token".to_vec())],
-                custody_socket: Some(socket.display().to_string()),
+                stored_escrow_keypair_pem: Some(daemon.pkcs8.clone()),
+                custody_socket: Some(daemon.socket.clone()),
+                retrievable_secrets: secrets
+                    .iter()
+                    .map(|(n, v)| (n.to_string(), v.to_vec()))
+                    .collect(),
+                deny_retrieval,
                 ..Default::default()
             })
             .await;
+        (crypto_actor, daemon)
+    }
+
+    /// docs/architecture/key-custody.md, "Part A's bootstrap: the custodian": the escrow key is the custody daemon's,
+    /// P-256; a secret retrieved is opened through it, the actor never holding the key, and a secret sealed under
+    /// RSA-OAEP, to a key no agent holds now, is refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_a_custody_daemon_a_retrieved_secret_is_opened_through_it_and_an_rsa_sealed_one_is_refused()
+     {
+        let (crypto_actor, _daemon) =
+            crypto_actor_holding_an_escrow_key(&[("github-sei", b"a token")], false).await;
         let opened = ractor::call!(crypto_actor, |reply| CryptoMessage::RetrieveSecret {
             name: "github-sei".to_string(),
             reply,
@@ -2625,27 +1845,100 @@ mod tests {
             opened.unwrap().as_deref().map(|v| v.as_slice()),
             Some(&b"a token"[..])
         );
-        let raw = ractor::call!(crypto_actor, |reply| CryptoMessage::DecryptOwnMessage {
-            ciphertext: vec![0; 256],
+        let rsa = RsaPrivateKey::new(&mut rand::rng(), 2048).unwrap();
+        let rsa_public = rsa::pkcs8::EncodePublicKey::to_public_key_pem(
+            &rsa.to_public_key(),
+            rsa::pkcs8::LineEnding::LF,
+        )
+        .unwrap();
+        let sealed = rkyv::to_bytes::<rkyv::rancor::Error>(
+            &EscrowedSecret::encrypt_bound(b"a token", &rsa_public, b"ctx").unwrap(),
+        )
+        .unwrap()
+        .to_vec();
+        let refused = ractor::call!(crypto_actor, |reply| CryptoMessage::RegisterSecret {
+            name: "old".to_string(),
+            section: "s".to_string(),
+            secret: sealed,
+            context: b"ctx".to_vec(),
+            binding: token_binding("github.com"),
             reply,
         })
         .unwrap();
-        assert!(matches!(raw, Err(CryptoError::DecryptFailed(why)) if why.contains("P-256")));
-        let bootstrapped = ractor::call!(crypto_actor, |reply| CryptoMessage::EnsureBootstrapped {
-            reply
-        })
-        .unwrap();
-        assert_eq!(
-            bootstrapped.unwrap(),
-            Custody::Daemon,
-            "nothing bootstrapped here"
+        assert!(
+            matches!(&refused, Err(CryptoError::DecryptFailed(why)) if why.contains("P-256")),
+            "{refused:?}"
         );
         crypto_actor.stop_and_wait(None, None).await.unwrap();
     }
 
+    /// With no custody daemon there is no escrow key (docs/architecture/key-custody.md, step 9): nothing sealed to it
+    /// opens, the actor says why at once, and it never asks the credentials agent for the key itself, which only the
+    /// custodian may (a request it asked would wait out its reply timeout, unanswered).
+    #[tokio::test]
+    async fn without_a_custody_daemon_nothing_sealed_to_the_escrow_key_opens_and_the_key_is_never_asked_for()
+     {
+        let daemon = custody_daemon_holding_an_escrow_key();
+        let ((crypto_actor, _), _, _) =
+            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
+                stored_escrow_keypair_pem: Some(daemon.pkcs8.clone()),
+                // Nothing held: a retrieval asked would come back NotFound, not refused.
+                ..Default::default()
+            })
+            .await;
+        let at_once = std::time::Duration::from_secs(5);
+        let retrieved = tokio::time::timeout(at_once, async {
+            ractor::call!(crypto_actor, |reply| CryptoMessage::RetrieveSecret {
+                name: "github-sei".to_string(),
+                reply,
+            })
+        })
+        .await
+        .expect("refused at once")
+        .unwrap();
+        assert!(
+            matches!(retrieved, Err(CryptoError::NoEscrowKey)),
+            "{retrieved:?}"
+        );
+        let sealed = rkyv::to_bytes::<rkyv::rancor::Error>(
+            &EscrowedSecret::encrypt_bound(b"a token", &daemon.public_pem, b"ctx").unwrap(),
+        )
+        .unwrap()
+        .to_vec();
+        let registered = tokio::time::timeout(at_once, async {
+            ractor::call!(crypto_actor, |reply| CryptoMessage::RegisterSecret {
+                name: "github-sei".to_string(),
+                section: "s".to_string(),
+                secret: sealed,
+                context: b"ctx".to_vec(),
+                binding: token_binding("github.com"),
+                reply,
+            })
+        })
+        .await
+        .expect("refused at once")
+        .unwrap();
+        assert!(
+            matches!(registered, Err(CryptoError::NoEscrowKey)),
+            "{registered:?}"
+        );
+        let git = ractor::call!(crypto_actor, |reply| CryptoMessage::GitCredential {
+            name: "github-sei".to_string(),
+            host: "github.com".to_string(),
+            reply,
+        })
+        .unwrap();
+        assert!(
+            matches!(git, Err(CryptoError::SecretNotRegistered(_))),
+            "nothing registered"
+        );
+        stop_and_release_key(&crypto_actor).await;
+    }
+
     #[tokio::test]
     async fn retrieve_secret_returns_what_the_credentials_agent_encrypted_to_the_escrow_key() {
-        let crypto = crypto_actor_holding_an_escrow_key(&[("github-sei", b"a token")], false).await;
+        let (crypto, _daemon) =
+            crypto_actor_holding_an_escrow_key(&[("github-sei", b"a token")], false).await;
         let result = ractor::call!(crypto, |reply| CryptoMessage::RetrieveSecret {
             name: "github-sei".to_string(),
             reply,
@@ -2660,7 +1953,8 @@ mod tests {
 
     #[tokio::test]
     async fn retrieve_secret_for_a_name_never_stored_is_none() {
-        let crypto = crypto_actor_holding_an_escrow_key(&[("github-sei", b"a token")], false).await;
+        let (crypto, _daemon) =
+            crypto_actor_holding_an_escrow_key(&[("github-sei", b"a token")], false).await;
         let result = ractor::call!(crypto, |reply| CryptoMessage::RetrieveSecret {
             name: "other".to_string(),
             reply,
@@ -2672,7 +1966,8 @@ mod tests {
 
     #[tokio::test]
     async fn retrieve_secret_that_policy_denies_is_an_error_that_says_so() {
-        let crypto = crypto_actor_holding_an_escrow_key(&[("github-sei", b"a token")], true).await;
+        let (crypto, _daemon) =
+            crypto_actor_holding_an_escrow_key(&[("github-sei", b"a token")], true).await;
         let result = ractor::call!(crypto, |reply| CryptoMessage::RetrieveSecret {
             name: "github-sei".to_string(),
             reply,
@@ -2725,115 +2020,15 @@ mod tests {
         );
         stop_and_release_key(&crypto_actor).await;
     }
-    #[tokio::test]
-    async fn decrypt_own_message_falls_back_to_real_issuance_when_nothing_is_escrowed_yet() {
-        // The actor reads the token from disk each time it asks for an escrow keypair, so
-        // it is given a real file standing in for the mounted service-account token.
-        let token_file = write_test_service_account_token();
-        let ((crypto_actor, _), last_stored_secret_plaintext, _) =
-            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
-                service_account_token_path: Some(token_file.path().to_string_lossy().into_owned()),
-                stored_escrow_keypair_pem: None,
-                issue_agent_escrow_certificates: true,
-                ..Default::default()
-            })
-            .await;
-
-        // The real proof this is a genuine issuance, not a stub:
-        // encrypt to the *newly-issued* key's own public half
-        // (extracted from what was actually escrowed, since
-        // DecryptOwnMessage never hands the key itself back to any
-        // caller), then confirm CryptoActor genuinely decrypts it
-        // correctly through the same, brand-new identity.
-        let plaintext = b"a real secret, addressed to a freshly-issued escrow identity";
-        let mut rng = rand::rng();
-
-        // We can't encrypt until issuance has genuinely happened --
-        // trigger it via a first DecryptOwnMessage call (whose own
-        // ciphertext here is deliberately garbage; only the
-        // bootstrap side effect, the real issuance and escrow, is
-        // what this first call is genuinely for).
-        let _ = ractor::call!(crypto_actor, |reply| {
-            CryptoMessage::DecryptOwnMessage {
-                ciphertext: vec![0u8; 32],
-                reply,
-            }
-        })
-        .unwrap();
-
-        let escrowed_pem = last_stored_secret_plaintext
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("a real StoreSecretRequest must have genuinely been submitted");
-        let issued_key = RsaPrivateKey::from_pkcs8_pem(std::str::from_utf8(&escrowed_pem).unwrap())
-            .expect("the escrowed plaintext must itself be a genuine, valid PKCS8 RSA private key");
-
-        let ciphertext = issued_key
-            .to_public_key()
-            .encrypt(&mut rng, rsa::Oaep::<sha2_011::Sha256>::new(), plaintext)
-            .expect("real OAEP encryption to the newly-issued public half must succeed");
-
-        let result = ractor::call!(crypto_actor, |reply| {
-            CryptoMessage::DecryptOwnMessage { ciphertext, reply }
-        })
-        .unwrap();
-
-        match result {
-            Ok(decrypted) => assert_eq!(decrypted, plaintext),
-            other => panic!("expected Ok(_), got {other:?}"),
-        }
-        stop_and_release_key(&crypto_actor).await;
-    }
-
-    #[tokio::test]
-    async fn decrypt_own_message_genuinely_round_trips_a_real_message_when_a_key_is_already_escrowed()
-     {
-        let mut rng = rand::rng();
-        let previously_escrowed_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let previously_escrowed_key_pem = rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(
-            &previously_escrowed_key,
-            rsa::pkcs8::LineEnding::LF,
-        )
-        .unwrap();
-
-        let ((crypto_actor, _), _, _) =
-            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
-                stored_escrow_keypair_pem: Some(previously_escrowed_key_pem.to_string()),
-                // Deliberately false -- if DecryptOwnMessage
-                // genuinely, correctly retrieves the already-escrowed
-                // key, it should never even attempt issuance, let
-                // alone need it to succeed.
-                issue_agent_escrow_certificates: false,
-                ..Default::default()
-            })
-            .await;
-
-        let plaintext = b"a real secret, addressed to an already-escrowed identity";
-        let ciphertext = previously_escrowed_key
-            .to_public_key()
-            .encrypt(&mut rng, rsa::Oaep::<sha2_011::Sha256>::new(), plaintext)
-            .expect("real OAEP encryption to the existing public half must succeed");
-
-        let result = ractor::call!(crypto_actor, |reply| {
-            CryptoMessage::DecryptOwnMessage { ciphertext, reply }
-        })
-        .unwrap();
-
-        match result {
-            Ok(decrypted) => assert_eq!(decrypted, plaintext),
-            other => panic!("expected Ok(_), got {other:?}"),
-        }
-        stop_and_release_key(&crypto_actor).await;
-    }
-
     // ---- registered secrets, and what is done with them ---------------------------------------------------------
 
     use registry::{GitCredential, RecordError, SecretBinding, SecretKind, UseRefusal};
 
-    /// An actor holding an escrow key a test can encrypt to, beside a credentials agent that records every store.
+    /// An actor whose custody daemon holds an escrow key a test can encrypt to, beside a credentials agent that records
+    /// every store.
     struct Rig {
         actor: ActorRef<CryptoMessage>,
+        _daemon: CustodyDaemon,
         public_pem: String,
         identity: String,
         stored: StoreLog,
@@ -2847,15 +2042,8 @@ mod tests {
         held: Vec<(&str, Vec<u8>)>,
         deny_retrieval: bool,
     ) -> Rig {
-        let mut rng = rand::rng();
-        let key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let pem =
-            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&key, rsa::pkcs8::LineEnding::LF).unwrap();
-        let public_pem = rsa::pkcs8::EncodePublicKey::to_public_key_pem(
-            &key.to_public_key(),
-            rsa::pkcs8::LineEnding::LF,
-        )
-        .unwrap();
+        let daemon = custody_daemon_holding_an_escrow_key();
+        let public_pem = daemon.public_pem.clone();
         let identity = format!("test-agent-{}", uuid::Uuid::new_v4());
         let stored = Arc::new(std::sync::Mutex::new(Vec::new()));
         let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2865,8 +2053,8 @@ mod tests {
             .collect();
         let ((actor, key_queries), _, _) =
             spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
-                stored_escrow_keypair_pem: Some(pem.to_string()),
-                issue_agent_escrow_certificates: false,
+                stored_escrow_keypair_pem: Some(daemon.pkcs8.clone()),
+                custody_socket: Some(daemon.socket.clone()),
                 identity: Some(identity.clone()),
                 retrievable_secrets,
                 deny_retrieval,
@@ -2878,6 +2066,7 @@ mod tests {
             .await;
         Rig {
             actor,
+            _daemon: daemon,
             public_pem,
             identity,
             stored,
@@ -3560,93 +2749,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decrypt_own_message_fails_with_issuance_refused_when_nothing_is_escrowed_and_issuance_itself_is_refused()
-     {
-        // read_kubernetes_sa_token() genuinely reads from disk before the fake agent's own
-        // refusal is ever reached, so the actor is given a real, valid token file, or this
-        // would fail with CredentialUnavailable instead of the real thing this test means to
-        // prove.
-        let token_file = write_test_service_account_token();
-        let ((crypto_actor, _), _, _) =
-            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
-                service_account_token_path: Some(token_file.path().to_string_lossy().into_owned()),
-                stored_escrow_keypair_pem: None,
-                // Deliberately false -- issuance genuinely gets
-                // attempted (nothing is escrowed yet), and this is
-                // what makes it fail, as an observable, real outcome
-                // through DecryptOwnMessage's own, sole interface --
-                // there's no other way left to distinguish "nothing
-                // escrowed" from any other failure now that the
-                // retrieve half is no longer separately exposed.
-                issue_agent_escrow_certificates: false,
-                ..Default::default()
-            })
-            .await;
-
-        let result = ractor::call!(crypto_actor, |reply| {
-            CryptoMessage::DecryptOwnMessage {
-                ciphertext: vec![0u8; 32],
-                reply,
-            }
-        })
-        .unwrap();
-
-        match result {
-            Err(CryptoError::IssuanceRefused(_)) => {}
-            other => panic!("expected Err(IssuanceRefused(_)), got {other:?}"),
-        }
-        stop_and_release_key(&crypto_actor).await;
-    }
-
-    #[tokio::test]
-    async fn ensure_bootstrapped_genuinely_issues_and_escrows_a_real_keypair_as_a_pure_side_effect()
-    {
-        // The actor reads the token from disk each time it asks for an escrow keypair, so
-        // it is given a real file standing in for the mounted service-account token.
-        let token_file = write_test_service_account_token();
-        let ((crypto_actor, _), last_stored_secret_plaintext, _) =
-            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
-                service_account_token_path: Some(token_file.path().to_string_lossy().into_owned()),
-                stored_escrow_keypair_pem: None,
-                issue_agent_escrow_certificates: true,
-                ..Default::default()
-            })
-            .await;
-
-        let result = ractor::call!(crypto_actor, |reply| {
-            CryptoMessage::EnsureBootstrapped { reply }
-        })
-        .unwrap();
-
-        assert!(result.is_ok(), "expected Ok(()), got {result:?}");
-
-        // The real proof this is a genuine bootstrap, not a no-op:
-        // a real StoreSecretRequest was actually submitted, escrowing
-        // a real, newly-issued private key -- exactly the side effect
-        // polar-init depends on.
-        let escrowed_pem = last_stored_secret_plaintext
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("a real StoreSecretRequest must have genuinely been submitted");
-        RsaPrivateKey::from_pkcs8_pem(std::str::from_utf8(&escrowed_pem).unwrap())
-            .expect("the escrowed plaintext must itself be a genuine, valid PKCS8 RSA private key");
-
-        // A second call must genuinely reuse the already-bootstrapped
-        // handle, not attempt issuance again -- proven by simply not
-        // needing the token file (removed above) to still succeed.
-        let second_result = ractor::call!(crypto_actor, |reply| {
-            CryptoMessage::EnsureBootstrapped { reply }
-        })
-        .unwrap();
-        assert!(
-            second_result.is_ok(),
-            "expected Ok(()), got {second_result:?}"
-        );
-        stop_and_release_key(&crypto_actor).await;
-    }
-
-    #[tokio::test]
     async fn encrypt_for_recipient_genuinely_round_trips_a_real_message_to_a_real_recipient_public_key()
      {
         let mut rng = rand::rng();
@@ -3822,184 +2924,5 @@ mod tests {
             other => panic!("expected Err(RecipientKeyNotFound(_)), got {other:?}"),
         }
         stop_and_release_key(&crypto_actor).await;
-    }
-
-    // -- a key the init container loaded into the kernel keyring ---------------------------
-
-    /// Loads a key into the real kernel keyring under `description`, as the init container
-    /// does, and returns its number with the public half to encrypt to.
-    fn load_key_as_the_init_container_would(
-        description: &str,
-    ) -> (polar_kernel_keyring::KeyringSerial, rsa::RsaPublicKey) {
-        let mut rng = rand::rng();
-        let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let der = private_key.to_pkcs8_der().unwrap();
-        let serial = polar_kernel_keyring::try_load_asymmetric_key(description, der.as_bytes())
-            .expect("this machine must support kernel-keyring asymmetric keys for this test");
-        (serial, private_key.to_public_key())
-    }
-
-    fn write_handle(serial: i32) -> tempfile::NamedTempFile {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), format!("{serial}\n")).unwrap();
-        file
-    }
-
-    #[tokio::test]
-    async fn a_key_the_init_container_loaded_is_adopted_and_never_asked_for() {
-        let identity = format!("test-agent-{}", uuid::Uuid::new_v4());
-        let (serial, public_key) = load_key_as_the_init_container_would(&identity);
-        let handle = write_handle(serial.get());
-
-        // The credentials agent refuses everything: nothing escrowed, no issuance. If the
-        // actor tried to retrieve or issue a key, this would fail.
-        let ((crypto_actor, _), _, _) =
-            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
-                stored_escrow_keypair_pem: None,
-                issue_agent_escrow_certificates: false,
-                escrow_key_handle_path: Some(handle.path().to_string_lossy().into_owned()),
-                identity: Some(identity.clone()),
-                ..Default::default()
-            })
-            .await;
-
-        let custody = ractor::call!(crypto_actor, |reply| CryptoMessage::EnsureBootstrapped {
-            reply
-        })
-        .unwrap()
-        .expect("adopting the passed key needs nothing from the credentials agent");
-        assert_eq!(
-            custody,
-            Custody::Kernel {
-                serial: serial.get()
-            }
-        );
-
-        let mut rng = rand::rng();
-        let ciphertext = public_key
-            .encrypt(
-                &mut rng,
-                rsa::Oaep::<sha2_011::Sha256>::new(),
-                b"addressed to the adopted key",
-            )
-            .unwrap();
-        let decrypted = ractor::call!(crypto_actor, |reply| CryptoMessage::DecryptOwnMessage {
-            ciphertext,
-            reply
-        })
-        .unwrap()
-        .unwrap();
-        assert_eq!(decrypted, b"addressed to the adopted key");
-
-        polar_kernel_keyring::unload_key(serial);
-    }
-
-    #[tokio::test]
-    async fn a_key_loaded_under_another_identity_is_not_adopted() {
-        let (stranger, _) = load_key_as_the_init_container_would("someone-else");
-        let handle = write_handle(stranger.get());
-
-        let mut rng = rand::rng();
-        let escrowed = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let escrowed_pem =
-            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&escrowed, rsa::pkcs8::LineEnding::LF)
-                .unwrap();
-        let ((crypto_actor, _), _, _) =
-            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
-                stored_escrow_keypair_pem: Some(escrowed_pem.to_string()),
-                escrow_key_handle_path: Some(handle.path().to_string_lossy().into_owned()),
-                ..Default::default()
-            })
-            .await;
-
-        let custody = ractor::call!(crypto_actor, |reply| CryptoMessage::EnsureBootstrapped {
-            reply
-        })
-        .unwrap()
-        .expect("falls back to retrieving the escrowed key");
-        assert_ne!(
-            custody,
-            Custody::Kernel {
-                serial: stranger.get()
-            },
-            "someone else's key is never taken"
-        );
-
-        polar_kernel_keyring::unload_key(stranger);
-        if let Custody::Kernel { serial } = custody
-            && let Some(own) = polar_kernel_keyring::KeyringSerial::new(serial)
-        {
-            polar_kernel_keyring::unload_key(own);
-        }
-    }
-
-    #[tokio::test]
-    async fn a_handle_file_that_is_not_a_number_falls_back_to_the_existing_path() {
-        let handle = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(handle.path(), "not a key number").unwrap();
-
-        let mut rng = rand::rng();
-        let escrowed = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let escrowed_pem =
-            rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&escrowed, rsa::pkcs8::LineEnding::LF)
-                .unwrap();
-        let ((crypto_actor, _), _, _) =
-            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
-                stored_escrow_keypair_pem: Some(escrowed_pem.to_string()),
-                escrow_key_handle_path: Some(handle.path().to_string_lossy().into_owned()),
-                ..Default::default()
-            })
-            .await;
-
-        let custody = ractor::call!(crypto_actor, |reply| CryptoMessage::EnsureBootstrapped {
-            reply
-        })
-        .unwrap();
-        assert!(custody.is_ok(), "{custody:?}");
-        if let Ok(Custody::Kernel { serial }) = custody
-            && let Some(own) = polar_kernel_keyring::KeyringSerial::new(serial)
-        {
-            polar_kernel_keyring::unload_key(own);
-        }
-    }
-
-    // -- the actor stops once, when the agent is going away ----------------------------------
-
-    #[tokio::test]
-    async fn stopping_the_actor_unloads_the_key_it_adopted() {
-        let identity = format!("test-agent-{}", uuid::Uuid::new_v4());
-        let (serial, _) = load_key_as_the_init_container_would(&identity);
-        let handle = write_handle(serial.get());
-        let ((crypto_actor, _), _, _) =
-            spawn_crypto_actor_with_fake_credentials_agent_configured(FakeCredentialsAgentConfig {
-                escrow_key_handle_path: Some(handle.path().to_string_lossy().into_owned()),
-                identity: Some(identity.clone()),
-                ..Default::default()
-            })
-            .await;
-        let custody = ractor::call!(crypto_actor, |reply| CryptoMessage::EnsureBootstrapped {
-            reply
-        })
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            custody,
-            Custody::Kernel {
-                serial: serial.get()
-            }
-        );
-        assert!(polar_kernel_keyring::adopt_asymmetric_key(serial.get(), &identity).is_some());
-
-        // The actor is stopped once, when the agent is going away, so the key goes with it.
-        crypto_actor
-            .stop_and_wait(None, Some(std::time::Duration::from_secs(5)))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            polar_kernel_keyring::adopt_asymmetric_key(serial.get(), &identity),
-            None,
-            "the key does not outlive the agent that used it"
-        );
     }
 }

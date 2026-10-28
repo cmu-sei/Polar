@@ -212,8 +212,8 @@ in the graph and passed over topics as it is.
   (`StoreSecret`).
 - *An item for any other agent*: encrypted to that agent's own escrow public key
   (`AgentEscrowKeyRequest`). The agent's CryptoActor decrypts it (the private
-  key stays in custody; the secret is a hybrid `EscrowedSecret`, so it is opened with `DecryptOwnEscrowed`,
-  since `DecryptOwnMessage` opens only a raw RSA-OAEP block), uses it, then **closes the loop** by escrowing it with the credentials agent
+  key stays in the pod's custody daemon, which unwraps the secret's AES key; the secret is a hybrid
+  `EscrowedSecret`, registered with `RegisterSecret`), uses it, then **closes the loop** by escrowing it with the credentials agent
   (`StoreSecret`) so it can be retrieved later (`RetrieveSecret`, re-encrypted to the agent's own
   certificate). Closing the loop is retried until the credentials agent acknowledges it, and so depends on
   the agent receiving the document again if it restarts first (the scheduler's reconciliation item).

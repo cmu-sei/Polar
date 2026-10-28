@@ -399,6 +399,12 @@ directly, not through the observer or the agent meant to, could do. Read from th
 | `credentials-retrieve-agent-escrow-keypair-requests` | polar-init | the publisher, which names the keypair (`agent_escrow_keypair_bootstrap.rs:65`) | yes | only its own keypair |
 | `credentials-decrypt-on-behalf-of-requests` | encryption agents | the publisher, and Cedar | yes | only what it may itself |
 
+*Since 2026-10-27 and 2026-10-28* (`key-custody.md`, steps 2 and 9): the escrow keypair's issuance and retrieval, and
+the store of `agent-escrow-keypair:<X>`, are answered to X's custodian alone (`custody.<X>`, whose certificate names
+`p:custody:escrow`, within its five-minute window, `custodian::judge`); the issuance request carries no token now.
+Neither `polar-init` nor a crypto actor publishes on those two topics: they are the custodian's floor
+(`CUSTODIAN_PUBLISHES`), and an encryption agent's implied topics no longer name them.
+
 Thirteen of the sixteen prove themselves, or carry the broker's publisher and Cedar. **The first three prove nothing.** A
 message on any of them is read as a `CredentialsEvent` and appended to the ledger as it is (`supervisor.rs`, the
 fall-through of `deserialize_and_dispatch`; `ledger.rs:319`, `AppendNoReply`): no signature, no publisher, and any kind of

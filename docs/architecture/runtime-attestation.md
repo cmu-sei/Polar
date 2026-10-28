@@ -167,8 +167,8 @@ The plan for the move, with these settled one at a time: `deployments.md`.
 - The protocol's topics and messages, and how often an agent is challenged.
 - How cert-issuer hears the attestation agent while Cassini is down (Cassini's own restart): a direct mTLS path, with
   `core-restarts.md`, question 2.
-- The mTLS key in the kernel keyring: today `polar-init` writes `key.pem` to the shared `emptyDir`; the escrow key's
-  handle (`POLAR_ESCROW_KEY_HANDLE`) is the precedent.
+- The mTLS key in the kernel keyring: done otherwise (2026-10-27/28): the pod's custody daemon holds the mTLS keys and
+  the escrow key, and the workload signs and unwraps through its socket (`key-custody.md`); no kernel keyring.
 - Cassini's binding of a session to the attested pod's address.
 - The seccomp and Landlock profiles the builder applies, and which agents need more (the nushell agents run other
   programs).

@@ -5842,7 +5842,6 @@ dependencies = [
  "polar",
  "polar-custody",
  "polar-env",
- "polar-kernel-keyring",
  "polar-router",
  "polar-signing",
  "ractor",
@@ -5852,7 +5851,6 @@ dependencies = [
  "rsa 0.10.0-rc.18",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tempfile",
  "thiserror 1.0.69",
  "time",
@@ -5860,7 +5858,6 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
- "x25519-dalek",
  "x509-parser",
  "zeroize",
 ]

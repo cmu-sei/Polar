@@ -25,7 +25,8 @@
 
 Status, 2026-10-27: cleared by the maintainer, with the four recommendations below. Built: steps 1 to 5, each recorded
 in its section below; step 6, the speed gate, closed; step 7 done on a fresh sandbox-local (`u7c`), revocation seen end
-to end.
+to end. 2026-10-28: the escrow keys into the daemon, part A (the custodian identity), built, seen on a fresh `u7c`
+(step 8) and the old paths removed (step 9); part B, the credentials agent's own root key, still to do.
 
 ## Why
 
@@ -37,8 +38,8 @@ workload reads it: the Cassini client (`cassini/client/src/lib.rs:1312`, `Privat
 be the agent from anywhere, for as long as the certificate lives, and nothing Polar does at the broker can tell the
 copy from the agent. On record since 2026-10-08 (`remaining-work.md`, "Harden the mTLS client key").
 
-What exists is the escrow key's custody, not this one: `polar-init` loads the escrow key into the kernel keyring and
-leaves the workload only its number (`polar-init/src/handle.rs`, `polar_crypto::Custody`, `POLAR_ESCROW_KEY_HANDLE`).
+What existed (until 2026-10-28, step 9) was the escrow key's custody, not this one: `polar-init` loaded the escrow key into the kernel keyring and
+left the workload only its number (`polar-init/src/handle.rs`, `polar_crypto::Custody`, `POLAR_ESCROW_KEY_HANDLE`).
 Doing the same for the mTLS key ran into the kernel (probed on 7.2.9, 2026-10-08): an ECDSA P-256 key does not load
 (`ENOPKG`), the kernel signs RSA with PKCS#1 v1.5 only where TLS 1.3 needs RSA-PSS, and rustls calls its signer
 synchronously in the handshake. And the escrow key sits in the *user* keyring, which any process under the same UID
@@ -1253,6 +1254,26 @@ asked; Mullvad off for the run):** what was checked, how, and what was not.
   logs "no handler for topic" for admin-action and account requests it has just handed to their actors (those two
   branches fall through to the warning, as before this work); jira-observer fails on the target's placeholder Jira, as
   before; the container tests (Neo4j, the registry) do not start on the host's new kernel (netavark's DNAT).
+
+**Step 9, the cleanup (2026-10-28), each tests first, mutation-checked:** what the custodian made unneeded, removed.
+- *A, the broker* (`3eb25808`): watcher sessions, their cap and tenure, and the exception that let a revoked
+  certificate register one (`cassini-broker.md`, "Watcher sessions", now a note of what replaced them). A revoked
+  certificate is refused and closed whoever holds it; the custodian's session is an ordinary one.
+- *B, polar-init* (`96d902ad`): its own escrow bootstrap (a Cassini client, a `CryptoActor` holding the key in the
+  kernel keyring, the handle file), with `handle.rs` and `goodbye.rs`. `POLAR_INIT_ESCROW_BOOTSTRAP` is now only what
+  the custodian's plan asks for, and set with no certificate of the daemon's it stops polar-init at once
+  (`custody_for`). The render no longer gives polar-init `KUBERNETES_SA_TOKEN`.
+- *C, polar-crypto*: the kernel-keyring holder and the in-memory one, adopting a key by its handle, and the workload's
+  own retrieve-or-issue bootstrap, with `EnsureBootstrapped`, `DecryptOwnMessage` (a raw RSA-OAEP block, which no
+  agent's key opens now) and `Custody`; `KUBERNETES_SA_TOKEN` and `POLAR_ESCROW_KEY_HANDLE`, so the crypto section
+  declares nothing of its own. The escrow key is the daemon's or there is none: with no daemon, what is sealed to it
+  is refused at once (`CryptoError::NoEscrowKey`) and nothing asks for the key. The builder's `CryptoClient` lost the
+  two methods. Its tests now run against an in-process daemon holding a P-256 key.
+- *D, the topics*: the escrow keypair's retrieval and issuance are out of `polar_crypto::REQUEST_TOPICS` and
+  `REPLY_TOPICS`, so an encryption agent's implied topics no longer name them; they stay the custodian's floor. The
+  authority model fixture regenerated.
+- *What it leaves:* `polar-kernel-keyring`, used by nothing now (the maintainer to decide whether it goes); an agent
+  with `encryption` cannot run without the daemon (`remaining-work.md`).
 
 **Decided along the way (2026-10-27, the maintainer):** the custodian identity, instead of the token on a retrieval
 or a daemon-signed ephemeral (2a); X's certificates from the credentials agent, not from cert-issuer; forced

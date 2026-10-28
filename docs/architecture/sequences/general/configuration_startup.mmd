@@ -31,9 +31,10 @@ sequenceDiagram
     participant DS as Domain supervisor
 
     KL->>PI: start, with --cert and --check-dep-cert arguments
-    PI->>PI: wait for the dependencies' certificates, get this agent's certificates
+    PI->>PI: wait for the dependencies' certificates, get the custody daemon's custodian its certificate
+    PI->>PI: the custodian fetches this agent's certificates into the daemon, which keeps their keys
     opt the agent needs encryption (POLAR_INIT_ESCROW_BOOTSTRAP)
-        PI->>PI: escrow key bootstrap, leave a kernel key handle for the workload
+        PI->>PI: the custodian also fetches the escrow key, which the daemon keeps
     end
     PI-->>KL: exit 0
     KL->>AG: start, with the environment the resolver derived

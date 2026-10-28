@@ -150,9 +150,6 @@ mod tests {
         ) -> Result<(), CryptoError> {
             Ok(())
         }
-        async fn decrypt_own_message(&self, ciphertext: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
-            Ok(ciphertext)
-        }
         async fn encrypt_for_recipient(
             &self,
             _recipient_identity: String,
@@ -164,9 +161,6 @@ mod tests {
             let mut result = b"FAKE-ENCRYPTED:".to_vec();
             result.extend(plaintext);
             Ok(result)
-        }
-        async fn ensure_bootstrapped(&self) -> Result<(), CryptoError> {
-            Ok(())
         }
         async fn retrieve_secret(
             &self,

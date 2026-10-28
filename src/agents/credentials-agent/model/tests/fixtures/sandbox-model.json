@@ -10,6 +10,144 @@
       "topics": []
     },
     {
+      "workload": "cert-issuer",
+      "identity": "cert-issuer.polar.serviceaccount.cluster.local",
+      "issuer": "cert-issuer",
+      "bootstrap": true,
+      "groups": [
+        "cassini-client"
+      ],
+      "topics": [
+        {
+          "name": "agent.cert-issuer.command",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "agent.cert-issuer.configuration",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "cert-issuer-held-replies",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the credentials agent's answers to the requests it holds"
+        },
+        {
+          "name": "cert-issuer-held-requests",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "a bootstrap service's request it holds, offered to the credentials agent to vouch for",
+          "causes": [
+            {
+              "kind": "http",
+              "name": "/issue"
+            },
+            {
+              "kind": "topic",
+              "name": "cert-issuer-record-requests"
+            }
+          ]
+        },
+        {
+          "name": "cert-issuer-record-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "a page of the record, in answer",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "cert-issuer-record-requests"
+            }
+          ]
+        },
+        {
+          "name": "cert-issuer-record-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "the credentials agent asking for the record, after the last entry it holds"
+        },
+        {
+          "name": "polar-authority-snapshot-replies",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "answers": [
+            {
+              "kind": "registered"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-snapshot-requests",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "topic",
+              "name": "polar-authority-updates"
+            }
+          ]
+        },
+        {
+          "name": "polar-authority-updates",
+          "access": "subscribe",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "polar-command-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.cert-issuer.command"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-outcome",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "agent.cert-issuer.configuration"
+            }
+          ]
+        },
+        {
+          "name": "polar-configuration-replay",
+          "access": "publish",
+          "from": "implied",
+          "rule": "agent",
+          "why": "every agent that is a Cassini client",
+          "causes": [
+            {
+              "kind": "registered"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "workload": "credentials-agent",
       "identity": "credentials-agent.polar.serviceaccount.cluster.local",
       "issuer": "cert-issuer",
@@ -32,6 +170,45 @@
           "from": "implied",
           "rule": "agent",
           "why": "every agent that is a Cassini client"
+        },
+        {
+          "name": "cert-issuer-held-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "this agent's answer to a request cert-issuer holds: vouched for, or refused",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "cert-issuer-held-requests"
+            }
+          ]
+        },
+        {
+          "name": "cert-issuer-held-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a bootstrap service's request cert-issuer holds, from cert-issuer alone"
+        },
+        {
+          "name": "cert-issuer-record-replies",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a page of cert-issuer's record, from cert-issuer alone"
+        },
+        {
+          "name": "cert-issuer-record-requests",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "asking cert-issuer for its record, after the last entry the ledger holds",
+          "causes": [
+            {
+              "kind": "registered"
+            },
+            {
+              "kind": "timer",
+              "name": "record"
+            }
+          ]
         },
         {
           "name": "credentials-account-replies",
@@ -124,6 +301,26 @@
           "from": "declared",
           "purpose": "a certificate lookup",
           "waits": "nothing in the catalog publishes it yet"
+        },
+        {
+          "name": "credentials-custodian-issuance-replies",
+          "access": "publish",
+          "from": "declared",
+          "purpose": "a custodian's workload's certificate, or why not",
+          "waits": "a custodian reads it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_SUBSCRIBES)",
+          "causes": [
+            {
+              "kind": "topic",
+              "name": "credentials-custodian-issuance-requests"
+            }
+          ]
+        },
+        {
+          "name": "credentials-custodian-issuance-requests",
+          "access": "subscribe",
+          "from": "declared",
+          "purpose": "a custodian asking for one of its workload's certificates",
+          "waits": "a custodian publishes it, and custodians are not catalog workloads: their topics are their identity's (CUSTODIAN_PUBLISHES)"
         },
         {
           "name": "credentials-decrypt-on-behalf-of-replies",
@@ -886,21 +1083,6 @@
           "why": "every agent that is a Cassini client"
         },
         {
-          "name": "credentials-agent-escrow-issuance-replies",
-          "access": "subscribe",
-          "from": "implied",
-          "rule": "encryption",
-          "why": "the agent needs encryption (its crypto actor)"
-        },
-        {
-          "name": "credentials-agent-escrow-issuance-requests",
-          "access": "publish",
-          "from": "implied",
-          "rule": "encryption",
-          "why": "the agent needs encryption (its crypto actor)",
-          "unprompted": "its crypto actor asks the credentials agent when the agent encrypts or decrypts"
-        },
-        {
           "name": "credentials-agent-escrow-key-replies",
           "access": "subscribe",
           "from": "implied",
@@ -924,21 +1106,6 @@
         },
         {
           "name": "credentials-escrow-key-requests",
-          "access": "publish",
-          "from": "implied",
-          "rule": "encryption",
-          "why": "the agent needs encryption (its crypto actor)",
-          "unprompted": "its crypto actor asks the credentials agent when the agent encrypts or decrypts"
-        },
-        {
-          "name": "credentials-retrieve-agent-escrow-keypair-replies",
-          "access": "subscribe",
-          "from": "implied",
-          "rule": "encryption",
-          "why": "the agent needs encryption (its crypto actor)"
-        },
-        {
-          "name": "credentials-retrieve-agent-escrow-keypair-requests",
           "access": "publish",
           "from": "implied",
           "rule": "encryption",
@@ -1959,21 +2126,6 @@
           "why": "every agent that is a Cassini client"
         },
         {
-          "name": "credentials-agent-escrow-issuance-replies",
-          "access": "subscribe",
-          "from": "implied",
-          "rule": "encryption",
-          "why": "the agent needs encryption (its crypto actor)"
-        },
-        {
-          "name": "credentials-agent-escrow-issuance-requests",
-          "access": "publish",
-          "from": "implied",
-          "rule": "encryption",
-          "why": "the agent needs encryption (its crypto actor)",
-          "unprompted": "its crypto actor asks the credentials agent when the agent encrypts or decrypts"
-        },
-        {
           "name": "credentials-agent-escrow-key-replies",
           "access": "subscribe",
           "from": "implied",
@@ -1997,21 +2149,6 @@
         },
         {
           "name": "credentials-escrow-key-requests",
-          "access": "publish",
-          "from": "implied",
-          "rule": "encryption",
-          "why": "the agent needs encryption (its crypto actor)",
-          "unprompted": "its crypto actor asks the credentials agent when the agent encrypts or decrypts"
-        },
-        {
-          "name": "credentials-retrieve-agent-escrow-keypair-replies",
-          "access": "subscribe",
-          "from": "implied",
-          "rule": "encryption",
-          "why": "the agent needs encryption (its crypto actor)"
-        },
-        {
-          "name": "credentials-retrieve-agent-escrow-keypair-requests",
           "access": "publish",
           "from": "implied",
           "rule": "encryption",

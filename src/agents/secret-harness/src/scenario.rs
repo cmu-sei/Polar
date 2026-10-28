@@ -301,18 +301,12 @@ mod tests {
         ) -> Result<polar_crypto::registry::GitCredential, CryptoError> {
             Err(CryptoError::NoReply)
         }
-        async fn decrypt_own_message(&self, _: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
-            Err(CryptoError::NoReply)
-        }
         async fn encrypt_for_recipient(
             &self,
             _: String,
             _: Vec<u8>,
         ) -> Result<Vec<u8>, CryptoError> {
             Err(CryptoError::NoReply)
-        }
-        async fn ensure_bootstrapped(&self) -> Result<(), CryptoError> {
-            Ok(())
         }
     }
 

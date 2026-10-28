@@ -374,7 +374,15 @@ to eventually help operators detect. What this defends against
 specifically is key *extraction*: a compromise that reads the raw
 private key out of process memory and carries it elsewhere.
 
-**Primary mechanism: the Linux kernel keyring, when the init container
+**Superseded (2026-10-28): the custody daemon holds the escrow key.** The two
+paragraphs below describe the kernel-keyring custody built on 2026-10-07 and
+retired in `key-custody.md`, step 9. Now the pod's custody daemon holds the
+escrow key (P-256, HPKE), fetched by its custodian (`custody.<X>`) before the
+workload starts; `CryptoActor` asks the daemon to unwrap a secret's AES key and
+never holds the key. Neither `polar-init` nor `CryptoActor` retrieves or issues
+it any more, and a pod with no daemon has no escrow key (`CryptoError::NoEscrowKey`).
+
+**Primary mechanism (until 2026-10-28): the Linux kernel keyring, when the init container
 can set it up.** The init container performs the retrieve-or-issue-
 then-escrow sequence above and, if the pod's own container-runtime
 configuration supports it, adds the resulting private key to the
@@ -987,13 +995,13 @@ type, and a superseded certificate is now published as revoked, like an explicit
 Several items above were listed as deferred and have been built (checked against the code, 2026-10-14):
 
 - the general secret-retrieve flow: `RetrieveSecret` (`retrieve_secret.rs`, with the policy check);
-- `CryptoActor` (`polar-crypto`), with kernel-keyring custody and an in-memory fallback, and its cache of other
-  agents' escrow public keys;
+- `CryptoActor` (`polar-crypto`), with kernel-keyring custody and an in-memory fallback (both retired 2026-10-28:
+  the custody daemon holds the key, `key-custody.md`, step 9), and its cache of other agents' escrow public keys;
 - the agent escrow-identity issuance flow and the agent escrow-key query (`agent_escrow_issuance`,
   `agent_escrow_key`);
 - the ephemeral key exchange for the first retrieval of one's own escrow keypair (`ephemeral_exchange`);
 - the init container's escrow-key bootstrap and hand-off of a key handle to the workload (`EnsureBootstrapped`,
-  `POLAR_ESCROW_KEY_HANDLE`).
+  `POLAR_ESCROW_KEY_HANDLE`; retired 2026-10-28 for the custodian, `key-custody.md`, step 9).
 
 ## See also
 

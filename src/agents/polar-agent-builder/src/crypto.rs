@@ -22,7 +22,7 @@
 */
 
 //! CryptoHandle -- wraps a real, live polar_crypto::CryptoActor's
-//! own ActorRef<CryptoMessage>, exposing its four, real messages as
+//! own ActorRef<CryptoMessage>, exposing its messages as
 //! direct, ordinary async methods instead of requiring every, real
 //! caller to construct a CryptoMessage and call ractor::call! by
 //! hand. The real, sole reason this crate exists: hiding every
@@ -44,18 +44,12 @@ pub trait CryptoClient: Send + Sync {
     /// See CryptoMessage::StoreSecret's own doc comment.
     async fn store_secret(&self, name: String, plaintext: Vec<u8>) -> Result<(), CryptoError>;
 
-    /// See CryptoMessage::DecryptOwnMessage's own doc comment.
-    async fn decrypt_own_message(&self, ciphertext: Vec<u8>) -> Result<Vec<u8>, CryptoError>;
-
     /// See CryptoMessage::EncryptForRecipient's own doc comment.
     async fn encrypt_for_recipient(
         &self,
         recipient_identity: String,
         plaintext: Vec<u8>,
     ) -> Result<Vec<u8>, CryptoError>;
-
-    /// See CryptoMessage::EnsureBootstrapped's own doc comment.
-    async fn ensure_bootstrapped(&self) -> Result<(), CryptoError>;
 
     /// See CryptoMessage::RetrieveSecret's own doc comment. `Ok(None)` is a name nothing is stored
     /// under; a secret this agent may not have is an error that says policy refused it.
@@ -141,14 +135,6 @@ impl CryptoClient for CryptoHandle {
         flatten_call_result(result)
     }
 
-    async fn decrypt_own_message(&self, ciphertext: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
-        let result = ractor::call!(self.actor, |reply| CryptoMessage::DecryptOwnMessage {
-            ciphertext,
-            reply,
-        });
-        flatten_call_result(result)
-    }
-
     async fn encrypt_for_recipient(
         &self,
         recipient_identity: String,
@@ -224,16 +210,6 @@ impl CryptoClient for CryptoHandle {
             host,
             reply,
         });
-        flatten_call_result(result)
-    }
-
-    async fn ensure_bootstrapped(&self) -> Result<(), CryptoError> {
-        // How the key ended up held matters to the init container, which reports it to the
-        // workload; here the bootstrap is only needed to have happened.
-        let result = ractor::call!(self.actor, |reply| CryptoMessage::EnsureBootstrapped {
-            reply,
-        })
-        .map(|outcome| outcome.map(|_custody| ()));
         flatten_call_result(result)
     }
 }
@@ -434,8 +410,6 @@ mod tests {
             polar_crypto::CryptoActorArgs::new(fake_agent, router).with_settings(
                 polar_crypto::environment::CryptoSettings {
                     own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
-                    service_account_token_path: "/unused".to_string(),
-                    escrow_key_handle_path: "/nonexistent/escrow-key-handle".to_string(),
                     custody_socket: None,
                     ca_cert_path: ca_file.path().to_string_lossy().into_owned(),
                 },
@@ -543,8 +517,6 @@ mod tests {
             polar_crypto::CryptoActorArgs::new(fake_agent, router).with_settings(
                 polar_crypto::environment::CryptoSettings {
                     own_certificate_path: own_cert_file.path().to_string_lossy().into_owned(),
-                    service_account_token_path: "/unused".to_string(),
-                    escrow_key_handle_path: "/nonexistent/escrow-key-handle".to_string(),
                     custody_socket: None,
                     ca_cert_path: "/nonexistent/ca.pem".to_string(),
                 },

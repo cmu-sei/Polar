@@ -170,13 +170,13 @@ What each agent's publishes are caused by, as declared:
 
 Request/reply is a payload convention (`cassini-request-reply-protocol.md`): `Envelope { correlation_id, payload }` on
 `<subject>-requests`, the answer on `<subject>-replies`. **Reply topics are shared:** every crypto actor subscribes to all
-six crypto replies and filters by correlation id, so a topic rule cannot make a reply private; the payloads are encrypted
+four crypto replies (six before 2026-10-28) and filters by correlation id, so a topic rule cannot make a reply private; the payloads are encrypted
 to the requester where it matters.
 
 | Subject | Requested by | Requester identity from |
 |---|---|---|
-| `credentials-retrieve-agent-escrow-keypair` | polar-init, a crypto actor | `published_by` |
-| `credentials-agent-escrow-issuance` | polar-init, a crypto actor | the ServiceAccount token in the request |
+| `credentials-retrieve-agent-escrow-keypair` | a workload's custodian (`custody.<X>`; polar-init and a crypto actor until 2026-10-28) | `published_by`, a custodian's certificate naming `p:custody:escrow` |
+| `credentials-agent-escrow-issuance` | a workload's custodian (`custody.<X>`; polar-init and a crypto actor until 2026-10-28) | `published_by`, as above (the ServiceAccount token in the request until 2026-10-27) |
 | `credentials-escrow-key` | polar-init, a crypto actor | (the agent's public key, to anyone) |
 | `credentials-store-secret` | polar-init, a crypto actor | `published_by` (anonymous refused) |
 | `credentials-retrieve-secret` | a crypto actor (only secret-harness calls it today) | `published_by`, then Cedar |

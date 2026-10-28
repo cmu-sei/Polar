@@ -865,6 +865,40 @@ mod tests {
         );
     }
 
+    /// An encryption agent's escrow key is fetched by its custody daemon's custodian, never by the workload
+    /// (docs/architecture/key-custody.md, step 9): the escrow keypair's retrieval and issuance are the custodian's
+    /// topics, and encryption does not bring them.
+    #[test]
+    fn encryption_does_not_bring_the_escrow_keypair_s_retrieval_or_issuance() {
+        let set = TopicSet::compute(
+            &Facts {
+                encryption: true,
+                ..agent("kube-consumer")
+            },
+            &[],
+        );
+        for (topic, access) in [
+            (
+                "credentials-retrieve-agent-escrow-keypair-requests",
+                Access::Publish,
+            ),
+            (
+                "credentials-retrieve-agent-escrow-keypair-replies",
+                Access::Subscribe,
+            ),
+            (
+                "credentials-agent-escrow-issuance-requests",
+                Access::Publish,
+            ),
+            (
+                "credentials-agent-escrow-issuance-replies",
+                Access::Subscribe,
+            ),
+        ] {
+            assert!(!set.allows(topic, access), "{topic}");
+        }
+    }
+
     #[test]
     fn a_service_that_is_not_a_cassini_client_has_no_implied_topics() {
         let facts = Facts {
