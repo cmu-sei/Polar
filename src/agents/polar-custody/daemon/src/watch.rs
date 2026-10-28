@@ -21,20 +21,22 @@
    DM26-0670
 */
 
-//! The daemon watches for its own revocation (docs/architecture/key-custody.md, step 5).
+//! The daemon's custodian session (docs/architecture/key-custody.md, step 5 and "Part A's bootstrap: the custodian").
 //!
-//! Once its client slot holds a certificate, it connects to Cassini as the pod, its handshake signed in process
-//! (`polar_custody::own`), and registers a *watcher* session: one the broker keeps beside the workload's own, which
-//! hears the credentials agent's authority and nothing else, and which the broker leaves open under a revoked
-//! certificate. It keeps that authority by the rules every agent keeps (`AuthorityCore`): believed only from the
-//! credentials agent's identity, under the key pinned from its first snapshot. When a set it believes names a
-//! certificate it holds, every key is destroyed and the daemon is to exit; the kubelet restarts it empty, and the
-//! workload's health actor rejuvenates the pod (step 4, item 6).
+//! Once its custodian slot holds a certificate, it connects to Cassini as the custodian, `custody.<X>`, its handshake
+//! signed in process (`polar_custody::own`): a session of its own, beside the workload's, which the broker's floor
+//! gives the custodian's requests and the authority and nothing else. Over it the custodian fetches what `polar-init`
+//! planned (`bootstrap`), and keeps the credentials agent's authority by the rules every agent keeps
+//! (`AuthorityCore`): believed only from the credentials agent's identity, under the key pinned from its first
+//! snapshot. When a set it believes names a certificate it holds, or the broker refuses it as revoked, every key is
+//! destroyed and the daemon is to exit; the kubelet restarts it empty, and the workload's health actor rejuvenates
+//! the pod (step 4, item 6).
 //!
 //! It signs for the workload meanwhile, before its session is up and while Cassini is away: otherwise the credentials
 //! agent's own pod could never start, its daemon waiting on the credentials agent. A revocation published while it
 //! was away is in the snapshot it asks for when it is back.
 
+use crate::bootstrap::{Bootstrap, Progress, REPLY_TOPICS};
 use cassini_client::{
     DeliveryMode, ReconnectMode, TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage,
 };
@@ -81,6 +83,11 @@ impl Watch {
     /// Whether the credentials agent's key is pinned.
     pub fn has_key(&self) -> bool {
         self.core.has_key()
+    }
+
+    /// The credentials agent's key, once pinned under the CA.
+    pub fn pinned_key(&self) -> Option<&rsa::RsaPublicKey> {
+        self.core.pinned_key()
     }
 
     /// What `payload`, published on `topic` by `published_by`, means for `custody` at `now` (Unix seconds); a revoked
@@ -194,6 +201,11 @@ pub struct WatcherState {
     watch: Watch,
     client: Option<ActorRef<TcpClientMessage>>,
     last_ask: Option<Instant>,
+    /// What the custodian is fetching, once `polar-init` has planned it.
+    bootstrap: Option<Bootstrap>,
+    /// The reply topics the broker has taken this session's subscription to: no request goes before its reply can
+    /// be heard.
+    subscribed: std::collections::BTreeSet<String>,
     revoked: bool,
 }
 
@@ -241,7 +253,6 @@ impl WatcherState {
             String::new(),
         )
         .with_tls(tls)
-        .as_watcher()
         // Its supervisor is this actor: a lost connection ends the transport, and the next tick makes another.
         .with_reconnect(ReconnectMode::LeaveToSupervisor);
         let events = Arc::new(OutputPort::default());
@@ -259,9 +270,59 @@ impl WatcherState {
         )
         .await
         {
-            Ok((client, _)) => self.client = Some(client),
-            Err(e) => warn!("the watcher's connection could not start: {e}"),
+            Ok((client, _)) => {
+                self.client = Some(client);
+                self.subscribed.clear();
+            }
+            Err(e) => warn!("the custodian's connection could not start: {e}"),
         }
+    }
+
+    /// The custodian's next step, if its plan is given and its replies can be heard: published.
+    fn drive(&mut self, progress: Option<Progress>) {
+        let progress = match progress {
+            Some(progress) => progress,
+            None => {
+                if self.bootstrap.is_none() {
+                    let plan = self.args.custody.read().ok().and_then(|c| c.plan());
+                    self.bootstrap = plan.map(|plan| Bootstrap::new(&plan));
+                }
+                let ready_to_ask = REPLY_TOPICS.iter().all(|t| self.subscribed.contains(*t));
+                match (&mut self.bootstrap, ready_to_ask) {
+                    (Some(bootstrap), true) if !bootstrap.is_finished() => bootstrap.next(
+                        &self.args.custody,
+                        self.watch.pinned_key(),
+                        Instant::now().into_std(),
+                    ),
+                    _ => return,
+                }
+            }
+        };
+        if let (Progress::Send(outgoing), Some(client)) = (progress, &self.client) {
+            let _ = client.cast(TcpClientMessage::publish(
+                outgoing.topic.to_string(),
+                outgoing.payload,
+                None,
+            ));
+        }
+    }
+
+    /// The broker refused this session as revoked: the custodian's own certificate is. Every key goes.
+    fn refused_as_revoked(&mut self) -> Option<Vec<Slot>> {
+        let serials: Vec<String> = {
+            let custody = self.args.custody.read().ok()?;
+            [Slot::Custodian, Slot::Client, Slot::Server]
+                .into_iter()
+                .filter_map(|slot| custody.serial(slot))
+                .collect()
+        };
+        let revoked = self
+            .args
+            .custody
+            .write()
+            .expect("the custody is never held across a panic")
+            .revoke(&serials);
+        (!revoked.is_empty()).then_some(revoked)
     }
 }
 
@@ -284,6 +345,8 @@ impl Actor for Watcher {
             args,
             client: None,
             last_ask: None,
+            bootstrap: None,
+            subscribed: Default::default(),
             revoked: false,
         })
     }
@@ -301,14 +364,55 @@ impl Actor for Watcher {
             WatcherMessage::Tick => {
                 if state.client.is_none() {
                     state.connect(&myself).await;
-                } else if !state.watch.has_key() {
-                    state.ask(ASK_WITHOUT_KEY);
+                } else {
+                    if !state.watch.has_key() {
+                        state.ask(ASK_WITHOUT_KEY);
+                    }
+                    state.drive(None);
+                }
+            }
+            WatcherMessage::Event(ClientEvent::ClientSubscribed { topic }) => {
+                state.subscribed.insert(topic);
+                state.drive(None);
+            }
+            WatcherMessage::Event(ClientEvent::RegistrationRefused { reason })
+                if reason == cassini_types::REVOKED_REFUSAL =>
+            {
+                if let Some(slots) = state.refused_as_revoked() {
+                    error!(
+                        ?slots,
+                        "the broker refuses this custodian as revoked: every key it held is destroyed"
+                    );
+                    state.revoked = true;
+                    if let Some(client) = state.client.take() {
+                        client.stop(None);
+                    }
+                    (state.args.on_revoked)(slots);
+                }
+            }
+            WatcherMessage::Event(ClientEvent::MessagePublished { topic, payload, .. })
+                if REPLY_TOPICS.contains(&topic.as_str()) =>
+            {
+                let progress = state.bootstrap.as_mut().map(|bootstrap| {
+                    bootstrap.on_reply(
+                        &topic,
+                        &payload,
+                        &state.args.custody,
+                        state.watch.pinned_key(),
+                        Instant::now().into_std(),
+                    )
+                });
+                if let Some(progress) = progress {
+                    state.drive(Some(progress));
                 }
             }
             WatcherMessage::Event(ClientEvent::Registered { registration_id }) => {
-                info!(%registration_id, "watching for this pod's revocation");
+                info!(%registration_id, "the custodian's session is up");
                 if let Some(client) = &state.client {
-                    for topic in [AUTHORITY_UPDATES_TOPIC, AUTHORITY_SNAPSHOT_REPLIES_TOPIC] {
+                    for topic in [AUTHORITY_UPDATES_TOPIC, AUTHORITY_SNAPSHOT_REPLIES_TOPIC]
+                        .into_iter()
+                        .chain(REPLY_TOPICS)
+                    {
                         let _ = client.cast(TcpClientMessage::Subscribe {
                             topic: topic.to_string(),
                             trace_ctx: None,

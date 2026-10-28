@@ -172,6 +172,19 @@ impl Pki {
     }
 
     /// What cert-issuer gives a pod's CSR: a client certificate under this CA, as polar-init has it certified.
+    /// What cert-issuer signs for a custodian: `csr_pem`, a client certificate carrying `uris`.
+    pub fn certify_client_csr_carrying(&self, csr_pem: &str, uris: &[String]) -> String {
+        let mut request = rcgen::CertificateSigningRequestParams::from_pem(csr_pem).unwrap();
+        for uri in uris {
+            request
+                .params
+                .subject_alt_names
+                .push(rcgen::SanType::URI(uri.clone().try_into().unwrap()));
+        }
+        request.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        request.signed_by(&self.issuer).unwrap().pem()
+    }
+
     pub fn certify_client_csr(&self, csr_pem: &str) -> String {
         let mut request = rcgen::CertificateSigningRequestParams::from_pem(csr_pem).unwrap();
         request.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];

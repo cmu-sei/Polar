@@ -57,6 +57,15 @@ impl CredentialsAgent {
                     "p:sub:{}",
                     credentials_agent_common::authority_update::AUTHORITY_SNAPSHOT_REQUESTS_TOPIC
                 ),
+                // A custodian's requests for its workload's certificates, and the answers.
+                format!(
+                    "p:sub:{}",
+                    credentials_agent_common::CREDENTIALS_CUSTODIAN_ISSUANCE_REQUESTS_TOPIC
+                ),
+                format!(
+                    "p:pub:{}",
+                    credentials_agent_common::CREDENTIALS_CUSTODIAN_ISSUANCE_REPLIES_TOPIC
+                ),
                 "g:cassini-client".to_string(),
             ],
         );

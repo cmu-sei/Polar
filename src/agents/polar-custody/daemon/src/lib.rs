@@ -21,10 +21,13 @@
    DM26-0670
 */
 
-//! The custody daemon beyond its socket (docs/architecture/key-custody.md, step 5): it watches, as its pod, for its
-//! own revocation, and destroys its keys when it sees it.
+//! The custody daemon beyond its socket (docs/architecture/key-custody.md, step 5 and "Part A's bootstrap: the
+//! custodian"): as its custodian, `custody.<X>`, it fetches what its workload needs and watches for revocation, and
+//! destroys its keys when it sees one of its certificates revoked.
 //!
-//! - [`watch`]: what the credentials agent's authority means for the keys held, and the actor that hears it through a
-//!   watcher session of the daemon's own.
+//! - [`bootstrap`]: what the custodian fetches, and what each reply means for the custody.
+//! - [`watch`]: what the credentials agent's authority means for the keys held, and the actor that is the custodian's
+//!   session.
 
+pub mod bootstrap;
 pub mod watch;

@@ -5896,9 +5896,11 @@ dependencies = [
  "cert-issuer-common",
  "credentials_agent_common",
  "libc",
+ "polar",
  "polar-agent-builder",
  "polar-custody",
  "polar-env",
+ "polar-escrow",
  "polar-signing",
  "proptest",
  "ractor",
@@ -5910,6 +5912,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

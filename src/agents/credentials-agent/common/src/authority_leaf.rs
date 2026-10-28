@@ -110,6 +110,13 @@ impl AuthorityCore {
         self.key.is_some()
     }
 
+    /// The credentials agent's key, as pinned from its first snapshot under the CA: what the custody daemon seals a
+    /// new escrow key to, and nothing a caller names (docs/architecture/key-custody.md, "Part A's bootstrap: the
+    /// custodian").
+    pub fn pinned_key(&self) -> Option<&RsaPublicKey> {
+        self.key.as_ref()
+    }
+
     pub fn state(&self) -> &AuthorityState {
         &self.state
     }
