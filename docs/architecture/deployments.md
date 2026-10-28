@@ -354,6 +354,30 @@ once, and the rule restarts the whole pod.
   Deployment and not for a `run` Job. On the cluster: the probe made to fail on one agent, and the whole pod restarted,
   `polar-init` run again.
 
+### Built (2026-10-28), before the cluster
+
+- *The marker* (`992a2612`): `polar-init` leaves it at `POLAR_INIT_START_MARKER` at the end of every run; the builder
+  takes it at `POLAR_START_MARKER` before anything starts (`polar-agent-builder/src/start_marker.rs`, from `start`), and
+  exits 1 without it. Neither is set unless the deployment sets it.
+- *The kinds* (`config/kinds.nuon`): `job: null` for `agent`, `service` and `ca`; `run` extends `agent` with the Job's
+  fields, and the load harness's two entries are `run`. `render-catalog.nu` renders `run` with the agent template.
+- *The templates:* `functions.workloadOf` makes the Deployment (one replica, `Recreate`, the `name` label as its
+  selector) or, with a `job`, the Job; `functions.restartOf` gives the workload container `restartPolicy: Always` and
+  `Constants.RestartAllContainersOnEveryExit` (`NotIn []`), or nothing in a Job. `agent.dhall`, `ca.dhall` and the
+  `ace` chart use them.
+- *The resolver:* the record's `restart_policy` follows from `job`; for a Deployment with `polar-init` (not cert-issuer,
+  which has none, nor a `run`), the marker's two variables and `polar-init`'s mount of the health volume.
+- *The rule* (`rules.nu`, `in_place_problems`, run by `render.nu`): a Deployment whose pod runs `polar-init` has one
+  replica, `Recreate`, and the every-exit rule on each container.
+- *The scripts:* `up.nu`'s and `apply.nu`'s waits on the pods' `name` label (so Flux checks the Deployment itself,
+  `deploy-objects.nu` unchanged); a Deployment whose image was rebuilt under its tag is rolled out, as a stale Job was
+  restarted (`workload_needs_restart`); `harness.nu` finds the secret harness by its label.
+- *Tests:* `rules.nu` 30, `charts.nu` 11, `apply.nu` 30, `deploy-objects.nu` 10 pass; the builder's 357 and
+  `polar-init`'s 45. `resolve.nu`: the new tests pass; three that run the agents' own `--check` on the cluster fail
+  until its images are rebuilt (the images there do not declare `POLAR_START_MARKER`; today's binaries accept the
+  documents), and the cert-issuer one fails as before. Mutations caught: start ignoring a missing marker; the rule on
+  exit 1 alone; `RollingUpdate`; the harness rendered as a Deployment.
+
 ### Tests first
 
 - `infra/tests/rules.nu`: the Deployment rule (one replica, `Recreate`, the restart rule; each missing refused).
