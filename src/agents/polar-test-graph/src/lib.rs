@@ -106,13 +106,19 @@ extern "C" fn cleanup_neo4j_container() {
     // genuinely available on any given machine this runs on.
     for cli in ["podman", "docker"] {
         if std::process::Command::new(cli)
-            .args(["rm", "-f", &id])
+            .args(removal_args(&id))
             .status()
             .is_ok_and(|status| status.success())
         {
             break;
         }
     }
+}
+
+/// The arguments that remove the container `id` and its anonymous volumes, the same for podman and docker. The Neo4j
+/// image declares `/data` and `/logs` as volumes, and without `-v` each run left those two behind (2026-10-28).
+fn removal_args(id: &str) -> [&str; 4] {
+    ["rm", "-f", "-v", id]
 }
 
 struct Neo4jFixture {
@@ -265,4 +271,21 @@ pub async fn clear_graph(graph: &Graph) {
         .run(neo4rs::Query::new("MATCH (n) DETACH DELETE n".to_string()))
         .await
         .expect("failed to clear graph between tests");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_container_is_removed_with_its_anonymous_volumes() {
+        let args = removal_args("abc123");
+        assert_eq!(args[0], "rm");
+        assert!(args.contains(&"-f"), "{args:?}");
+        assert!(
+            args.contains(&"-v"),
+            "its /data and /logs volumes go with it: {args:?}"
+        );
+        assert_eq!(args.last(), Some(&"abc123"));
+    }
 }
