@@ -741,6 +741,13 @@ Principle: declare each environment variable once, with its type, default, docum
   `infra/INFRA.md` (the template, the waits, Flux's health checks, `Recreate` and a Job's replacement policy, the keyring
   gone) and `README.md` (minikube, Kubernetes 1.36, restarts in place). What records how things were (dated readings and
   decisions, `core-restarts.md`'s and `INFRA.md`'s among them) is kept, with a dated note where it no longer holds.
+- [ ] The browser certificate install supports Librewolf alone (found 2026-10-28, writing the Mac steps; the maintainer:
+  "the browser certificate installation script(s) probably need rewritten to support normies"):
+  `infra/user-cert-install.sh` (run by `bin/polar-dev cert`, `just user-cert-install`, and `up.nu`'s browser step on the
+  user's own machine) imports into a Librewolf profile's NSS store. Most people use Safari, Chrome or Edge, which read the
+  operating system's store (the macOS Keychain; on Linux, Chrome's `~/.pki/nssdb`; Windows' own), or Firefox's profile.
+  Until it is rewritten, the README gives the steps by hand (**On a Mac, with minikube**, step 5), and `up.nu`'s browser
+  check (`infra/browser.nu`) still looks at Librewolf.
 - [ ] Publishing images for another architecture is emulated, and slow (found 2026-10-28, publishing for `arm64` from
   `x86_64`): `images.nu publish --arch arm64` builds `.#packages.aarch64-linux…`, whose `rustc` runs under the builder's
   binfmt emulation of aarch64, and each agent's image compiles the shared workspace crates again; image 1 took about

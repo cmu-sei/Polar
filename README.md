@@ -277,7 +277,8 @@ bin/polar-dev cert <name>
 and press Enter in the dev container. It copies your certificate out of the dev container and imports it, with the
 cluster's CA, into Librewolf's certificate store, replacing any Polar certificate from before (it needs NSS's `certutil`
 and `pk12util`: from Nix, or your package manager). `up.nu` then checks the Neo4j password and goes on. For another
-browser, import `~/.config/polar-admin/<name>.crt`, its key and `ca.pem` yourself.
+browser, import `~/.config/polar-admin/<name>.crt`, its key and `ca.pem` yourself: **On a Mac, with minikube**, step 5, has
+the commands for the macOS Keychain (Safari, Chrome, Edge) and for Firefox.
 
 *On your own machine* (the variations of step 3), `up.nu` does this itself when it pauses at "Close Librewolf"
 (`just user-cert-install <name>` does the same by hand).
@@ -353,8 +354,7 @@ and a 20 GiB volume. So, for the cluster:
 
 That memory is given to Docker Desktop's virtual machine, out of the Mac's own, so a Mac with 32 GB or more is the one to
 use. On your Mac: Docker Desktop, minikube **v1.39.0 or later** (`brew install minikube`), `kubectl`, `git`, `ssh` with
-your key in its agent (`ssh-add`), and Librewolf with NSS's tools for the certificate (`brew install nss`, for `certutil`
-and `pk12util`).
+your key in its agent (`ssh-add`), and a browser (Safari, Chrome or Edge, which use the macOS Keychain; Firefox works too).
 
 **Docker Desktop.** In Settings, Resources, Advanced, give its virtual machine the CPUs, memory and disk above (a little more
 memory than you will give minikube), then Apply and restart. Leave Docker Desktop's own Kubernetes off: minikube is the
@@ -388,14 +388,25 @@ cluster. (General Docker Desktop guidance, not tried on a Mac for this guide.)
 
    It copies the `arm64` images into the cluster, then deploys. Run the same command again after a failure or a pause.
 
-5. **Your certificate in the browser** (step 5). When `up.nu` pauses at the browser step: on your Mac, close Librewolf, then
+5. **Your certificate in the browser** (step 5), by hand: `bin/polar-dev cert` installs it into Librewolf alone. When `up.nu`
+   pauses at the browser step, on your Mac:
 
    ```bash
-   bin/polar-dev cert <name>    # finds Librewolf's profile under ~/Library/Application Support/librewolf
+   bin/polar-dev sync           # copies ~/.config/polar-admin out of the dev container: <name>.crt, <name>.key, ca.pem
+   cd ~/.config/polar-admin
+   # Your certificate and key as one file the Keychain takes; it asks for a password to protect it, which the import asks for.
+   # (macOS's own openssl. With Homebrew's OpenSSL 3, add -legacy, or the Keychain cannot read it.)
+   openssl pkcs12 -export -in <name>.crt -inkey <name>.key -certfile ca.pem -name "Polar <name>" -out <name>.p12
+   security import <name>.p12 -k ~/Library/Keychains/login.keychain-db
+   # The cluster's CA, trusted, so the browser believes Polar's servers (it asks for your login password).
+   security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db ca.pem
    ```
 
-   and press Enter in the dev container. With another Firefox-family browser, or several profiles, set `POLAR_NSS_DB` to
-   the profile's directory first.
+   Then quit and reopen the browser, and press Enter in the dev container. Safari, Chrome and Edge read the Keychain; when
+   Neo4j's page asks which certificate to use, choose "Polar `<name>`". **Firefox** keeps its own store instead: in its
+   Settings, Privacy & Security, Certificates, View Certificates, import `<name>.p12` under Your Certificates and `ca.pem`
+   under Authorities, trusting it to identify websites. A rebuilt cluster has a new CA: remove the old "Polar Internal CA"
+   from Keychain Access (or Firefox) and do this again. (Standard macOS commands, not run on a Mac for this guide.)
 
 6. **Open it** (step 6):
 
