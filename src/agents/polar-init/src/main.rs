@@ -87,6 +87,10 @@ const POLL_INTERVAL_SECS: u64 = 5;
 /// issued, for an escrow request that never reached the credentials agent).
 const ESCROW_BOOTSTRAP_DEADLINE: Duration = Duration::from_secs(120);
 
+/// How long the custodian has to fetch what it is asked to (docs/architecture/key-custody.md, "Part A's bootstrap: the
+/// custodian"): inside its own five-minute window, after which the credentials agent answers it nothing.
+const CUSTODIAN_DEADLINE: Duration = Duration::from_secs(240);
+
 /// `work`, or why it did not finish within `deadline`.
 async fn within<T>(
     deadline: Duration,
@@ -368,6 +372,22 @@ async fn main() {
                 )
                 .await;
             }
+            // A bootstrap service's custodian, for its daemon's own session: it fetches nothing, since the service's
+            // certificates come from cert-issuer as above.
+            if let Some(daemon) = &custody {
+                if settings.escrow.is_some() {
+                    stop(
+                        "a bootstrap service escrows no key: its escrow key would be its custodian's to fetch, \
+                         from the credentials agent it comes up before"
+                            .to_string(),
+                    );
+                }
+                if let Err(why) =
+                    custodian_from_cert_issuer(&client, &sa_token, &dns_identity, daemon).await
+                {
+                    stop(why);
+                }
+            }
         }
         environment::Issuance::Observer {
             url,
@@ -389,7 +409,10 @@ async fn main() {
                 ))
             });
             let observer = credentials_agent_client::ObserverClient::new(url.clone());
-            for req in &cert_requests {
+            for req in cert_requests
+                .iter()
+                .filter(|req| !matches!(req.key, KeyMaker::Custody))
+            {
                 if let Err(why) = issue_cert_via_observer(
                     &observer,
                     &sa_token,
@@ -398,6 +421,34 @@ async fn main() {
                     &pinned_ca,
                     &offers,
                     custody.as_ref(),
+                )
+                .await
+                {
+                    stop(why);
+                }
+            }
+            // The token buys the custodian's certificate and nothing else: the custodian fetches the rest
+            // (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian").
+            if let Some(daemon) = &custody {
+                let plan = custodian_plan(&cert_requests, settings.escrow.is_some());
+                if let Err(why) = custodian_via_observer(
+                    &observer,
+                    &sa_token,
+                    &dns_identity,
+                    &plan,
+                    &offers,
+                    daemon,
+                )
+                .await
+                {
+                    stop(why);
+                }
+                if let Err(why) = what_the_custodian_fetched(
+                    daemon,
+                    &cert_requests,
+                    &pinned_ca,
+                    Duration::from_secs(POLL_INTERVAL_SECS),
+                    CUSTODIAN_DEADLINE,
                 )
                 .await
                 {
@@ -421,6 +472,10 @@ async fn main() {
             "{} is not true: this workload escrows no keypair",
             environment::ESCROW_BOOTSTRAP.name()
         ),
+        // The custodian has fetched it, and holds it.
+        Some(_) if custody.is_some() => {
+            tracing::info!("the escrow key is the custody daemon's, fetched by its custodian")
+        }
         Some(escrow) => {
             if let Err(why) = within(
                 ESCROW_BOOTSTRAP_DEADLINE,
@@ -1131,18 +1186,12 @@ async fn issue_cert_via_observer(
     };
     let algorithm = match (&req.key, custody) {
         (KeyMaker::Here(algorithm), _) => algorithm,
-        (KeyMaker::Custody, Some(daemon)) => {
-            return issue_custody_cert_via_observer(
-                observer,
-                sa_token,
-                dns_identity,
-                req,
-                cert_type,
-                pinned_ca,
-                offers,
-                daemon,
-            )
-            .await;
+        // The custodian fetches it (`custodian_via_observer`); it never comes here.
+        (KeyMaker::Custody, Some(_)) => {
+            return Err(format!(
+                "the {:?} cert into '{}' is the custodian's to fetch",
+                req.cert_type, req.cert_dir
+            ));
         }
         (KeyMaker::Custody, None) => return Err(no_daemon(req)),
     };
@@ -1202,55 +1251,205 @@ async fn issue_cert_via_observer(
     }
 }
 
-/// A certificate from the credentials agent whose key is the daemon's: its CSR sealed and sent as any other, the
-/// certificate judged against the pinned CA and the CSR's key, then installed. No old bundle is kept (as for
-/// cert-issuer's, above).
-#[allow(clippy::too_many_arguments)]
-async fn issue_custody_cert_via_observer(
+// ---------------------------------------------------------------------------
+// The custodian (docs/architecture/key-custody.md, "Part A's bootstrap: the custodian")
+// ---------------------------------------------------------------------------
+
+/// What the custodian is to fetch: the `--cert`s whose key is the daemon's, and the escrow key if the workload escrows
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CustodianPlan {
+    client: bool,
+    server: Option<Vec<String>>,
+    escrow: bool,
+}
+
+fn custodian_plan(requests: &[CertRequest], escrow: bool) -> CustodianPlan {
+    let ours = |cert_type: CertType| {
+        requests
+            .iter()
+            .find(|req| matches!(req.key, KeyMaker::Custody) && req.cert_type == cert_type)
+    };
+    CustodianPlan {
+        client: ours(CertType::Client).is_some(),
+        server: ours(CertType::Server).map(|req| req.extra_sans.clone()),
+        escrow,
+    }
+}
+
+/// The custody names the custodian's certificate is asked for with: what it may then ask for, and no more.
+fn custody_names(plan: &CustodianPlan) -> Vec<String> {
+    use cert_issuer_common::custody::CustodyPermission;
+    [
+        (plan.client, CustodyPermission::Client),
+        (plan.server.is_some(), CustodyPermission::Server),
+        (plan.escrow, CustodyPermission::Escrow),
+    ]
+    .into_iter()
+    .filter(|(wanted, _)| *wanted)
+    .map(|(_, permission)| permission.to_san_string())
+    .collect()
+}
+
+/// The daemon's CSR for its custodian's own key, named `custody.<X>`.
+async fn custodian_csr(
+    daemon: &Arc<CustodyClient>,
+    dns_identity: &str,
+    delay: Duration,
+) -> Result<String, String> {
+    let custodian = cert_issuer_common::custody::custodian_identity(dns_identity);
+    of_the_daemon(daemon, "make the custodian's CSR", delay, move |daemon| {
+        daemon.make_csr(Slot::Custodian, &custodian, &[])
+    })
+    .await
+}
+
+/// The custodian's certificate installed (the daemon judges it: its key, its name, the pinned CA), and the plan given.
+async fn install_custodian(
+    daemon: &Arc<CustodyClient>,
+    dns_identity: &str,
+    certificate_pem: &str,
+    plan: &CustodianPlan,
+    delay: Duration,
+) -> Result<(), String> {
+    let chain = vec![certificate_pem.to_string()];
+    of_the_daemon(
+        daemon,
+        "install the custodian's certificate",
+        delay,
+        move |daemon| daemon.install(Slot::Custodian, chain.clone()),
+    )
+    .await?;
+    let (identity, given) = (dns_identity.to_string(), plan.clone());
+    of_the_daemon(daemon, "take the custodian's plan", delay, move |daemon| {
+        daemon.bootstrap(&identity, given.client, given.server.clone(), given.escrow)
+    })
+    .await?;
+    tracing::info!(
+        ?plan,
+        "the custodian's certificate is installed, and its plan given"
+    );
+    Ok(())
+}
+
+/// The custodian's certificate, bought with the token through the observer, as any workload's certificate is.
+async fn custodian_via_observer(
     observer: &credentials_agent_client::ObserverClient,
     sa_token: &str,
     dns_identity: &str,
-    req: &CertRequest,
-    cert_type: WorkloadCertType,
-    pinned_ca: &str,
+    plan: &CustodianPlan,
     offers: &credentials_agent_common::session_offer::OfferCheck,
     daemon: &Arc<CustodyClient>,
 ) -> Result<(), String> {
     use polar_crypto::workload_certificates::request_certificate_with_csr;
-    tracing::info!(
-        "requesting {:?} cert into '{}' from the credentials agent, its key the custody daemon's (names: {:?})",
-        req.cert_type,
-        req.cert_dir,
-        req.extra_sans,
-    );
     let delay = Duration::from_secs(POLL_INTERVAL_SECS);
-    let csr = custody_csr(daemon, req, dns_identity, delay).await?;
+    let names = custody_names(plan);
+    tracing::info!(
+        "requesting the custodian's certificate from the credentials agent (names: {names:?})"
+    );
+    let csr = custodian_csr(daemon, dns_identity, delay).await?;
     let issued = observer_patiently(delay, || {
-        request_certificate_with_csr(observer, sa_token, cert_type, &req.extra_sans, &csr, offers)
+        request_certificate_with_csr(
+            observer,
+            sa_token,
+            WorkloadCertType::Custody,
+            &names,
+            &csr,
+            offers,
+        )
     })
     .await?;
-    judged_for_csr(
-        req,
-        dns_identity,
-        &issued.certificate_pem,
-        &csr,
-        pinned_ca.as_bytes(),
-    )
-    .map_err(|why| {
-        format!(
-            "refusing the {:?} cert the credentials agent's observer handed over: {why}",
-            req.cert_type
-        )
-    })?;
-    install_and_write(
+    install_custodian(daemon, dns_identity, &issued.certificate_pem, plan, delay).await
+}
+
+/// A bootstrap service's custodian, from cert-issuer on the token alone: it carries nothing, and fetches nothing.
+async fn custodian_from_cert_issuer(
+    client: &handshake::HandshakeClient,
+    sa_token: &str,
+    dns_identity: &str,
+    daemon: &Arc<CustodyClient>,
+) -> Result<(), String> {
+    let delay = Duration::from_secs(POLL_INTERVAL_SECS);
+    let csr = custodian_csr(daemon, dns_identity, delay).await?;
+    let request = CertRequest {
+        cert_type: CertType::Custody,
+        cert_dir: String::new(),
+        key: KeyMaker::Custody,
+        extra_sans: Vec::new(),
+    };
+    let response = obtain_from_cert_issuer(client, sa_token, &csr, &request, delay).await?;
+    let plan = CustodianPlan {
+        client: false,
+        server: None,
+        escrow: false,
+    };
+    install_custodian(
         daemon,
-        req,
         dns_identity,
-        &issued.certificate_pem,
-        pinned_ca,
+        &response.certificate_pem,
+        &plan,
         delay,
     )
     .await
+}
+
+/// Once the custodian is ready, each certificate it fetched written for the workload with the pinned CA, and no key;
+/// its failure, or no readiness by `deadline`, stops polar-init, and the pod starts again.
+async fn what_the_custodian_fetched(
+    daemon: &Arc<CustodyClient>,
+    requests: &[CertRequest],
+    pinned_ca: &str,
+    delay: Duration,
+    deadline: Duration,
+) -> Result<(), String> {
+    within(deadline, "the custodian's fetching", async {
+        loop {
+            match of_the_daemon(daemon, "say whether it is ready", delay, |daemon| {
+                daemon.ready()
+            })
+            .await
+            {
+                Ok(true) => return Ok(()),
+                Ok(false) => tokio::time::sleep(Duration::from_millis(500)).await,
+                Err(why) => return Err(why),
+            }
+        }
+    })
+    .await
+    .map_err(|why| format!("{why}; exiting so the pod starts again"))??;
+    for req in requests
+        .iter()
+        .filter(|req| matches!(req.key, KeyMaker::Custody))
+    {
+        let slot = slot_of(&req.cert_type);
+        let chain = of_the_daemon(daemon, "give the certificate", delay, move |daemon| {
+            daemon.certificate(slot)
+        })
+        .await?;
+        let leaf = chain
+            .first()
+            .ok_or_else(|| format!("the custodian fetched no {:?} certificate", req.cert_type))?;
+        loop {
+            match output::write_certificate(std::path::Path::new(&req.cert_dir), leaf, pinned_ca) {
+                Ok(()) => {
+                    tracing::info!(
+                        "the {:?} cert the custodian fetched is written into '{}', its key the daemon's",
+                        req.cert_type,
+                        req.cert_dir
+                    );
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to write the cert to '{}': {e}, retrying...",
+                        req.cert_dir
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1502,6 +1701,14 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
             let csr = body["csr_pem"].as_str().unwrap();
             let mut csr = rcgen::CertificateSigningRequestParams::from_pem(csr).unwrap();
+            // A custodian's custody names, as the credentials agent and cert-issuer write them.
+            for name in body["names"].as_array().into_iter().flatten() {
+                if let Some(name) = name.as_str().filter(|n| n.starts_with("p:custody:")) {
+                    csr.params
+                        .subject_alt_names
+                        .push(rcgen::SanType::URI(name.to_string().try_into().unwrap()));
+                }
+            }
             csr.params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
             let now = time::OffsetDateTime::now_utc();
             csr.params.not_before = now - time::Duration::hours(1);
@@ -1790,19 +1997,75 @@ mod tests {
             ca_pem: &str,
             installer: bool,
         ) -> std::path::PathBuf {
+            serve_daemon_holding(dir, ca_pem, installer).0
+        }
+
+        /// As `serve_daemon`, and what the daemon holds, for a test to play its custodian's part.
+        fn serve_daemon_holding(
+            dir: &std::path::Path,
+            ca_pem: &str,
+            installer: bool,
+        ) -> (
+            std::path::PathBuf,
+            Arc<std::sync::RwLock<polar_custody::custody::Custody>>,
+        ) {
             use polar_custody::custody::Custody;
             use polar_custody::server::{Callers, bind, serve};
             let uid = std::fs::metadata(dir).unwrap().uid();
             let socket = dir.join("custody.sock");
+            let custody = Arc::new(std::sync::RwLock::new(Custody::new(ca_pem).unwrap()));
             tokio::spawn(serve(
                 bind(&socket).unwrap(),
-                Arc::new(std::sync::RwLock::new(Custody::new(ca_pem).unwrap())),
+                custody.clone(),
                 Arc::new(Callers {
                     installer_uid: if installer { uid } else { uid + 1 },
                     workload_uids: vec![uid],
                 }),
             ));
-            socket
+            (socket, custody)
+        }
+
+        /// The custodian's part, played here: once polar-init has given the plan, its client certificate made, signed
+        /// by `ca`, installed, and ready said; or `fails` said instead.
+        fn play_the_custodian(
+            custody: Arc<std::sync::RwLock<polar_custody::custody::Custody>>,
+            ca: &TestCa,
+            fails: Option<&str>,
+        ) {
+            let (params, key) = (ca.params.clone(), ca.key.serialize_pem());
+            let fails = fails.map(str::to_string);
+            tokio::spawn(async move {
+                let key = rcgen::KeyPair::from_pem(&key).unwrap();
+                loop {
+                    if custody.read().unwrap().plan().is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                let mut held = custody.write().unwrap();
+                if let Some(why) = fails {
+                    held.set_failed(why);
+                    return;
+                }
+                let csr = held.workload_csr(Slot::Client, vec![]).unwrap();
+                let mut request = rcgen::CertificateSigningRequestParams::from_pem(&csr).unwrap();
+                request.params.extended_key_usages =
+                    vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+                let now = time::OffsetDateTime::now_utc();
+                request.params.not_before = now - time::Duration::hours(1);
+                request.params.not_after = now + time::Duration::hours(1);
+                let certificate = request
+                    .signed_by(&rcgen::Issuer::from_params(&params, &key))
+                    .unwrap()
+                    .pem();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+                held.install_workload(Slot::Client, vec![certificate], now)
+                    .unwrap();
+                held.set_ready();
+            });
         }
 
         fn daemon_at(socket: &std::path::Path) -> Arc<CustodyClient> {
@@ -1858,31 +2121,102 @@ mod tests {
             assert!(why.contains("one"), "one slot per type: {why}");
         }
 
+        fn client_plan() -> CustodianPlan {
+            CustodianPlan {
+                client: true,
+                server: None,
+                escrow: false,
+            }
+        }
+
+        #[test]
+        fn the_plan_and_the_custody_names_are_what_the_daemon_s_certs_and_the_escrow_key_ask_for() {
+            let parse = |certs: &[&str]| -> Vec<CertRequest> {
+                certs.iter().map(|c| c.parse().unwrap()).collect()
+            };
+            let plan = custodian_plan(
+                &parse(&[
+                    "client:/a:custody:",
+                    "server:/b:custody:x.svc,y.svc",
+                    "client:/c:ecdsa-p256:",
+                ]),
+                true,
+            );
+            assert_eq!(
+                plan,
+                CustodianPlan {
+                    client: true,
+                    server: Some(vec!["x.svc".to_string(), "y.svc".to_string()]),
+                    escrow: true
+                }
+            );
+            assert_eq!(
+                custody_names(&plan),
+                vec!["p:custody:client", "p:custody:server", "p:custody:escrow"]
+            );
+            // A cert whose key is made here is not the custodian's to fetch.
+            let plan = custodian_plan(&parse(&["client:/c:ecdsa-p256:"]), false);
+            assert_eq!(
+                plan,
+                CustodianPlan {
+                    client: false,
+                    server: None,
+                    escrow: false
+                }
+            );
+            assert!(custody_names(&plan).is_empty());
+        }
+
+        /// docs/architecture/key-custody.md, "Part A's bootstrap: the custodian": the token buys the custodian's
+        /// certificate and nothing else; what the custodian fetches is written with the pinned CA, and no key.
         #[tokio::test(flavor = "multi_thread")]
-        async fn through_the_observer_the_daemon_holds_the_certificate_and_no_key_is_written() {
+        async fn the_token_buys_the_custodian_s_certificate_and_what_it_fetches_is_written_with_no_key()
+         {
             let ours = test_ca();
             let pinned = ours.pem.clone();
             let offers = offers_under(&ours);
             let offer = an_offer_signed_by(&ours, CREDENTIALS_AGENT);
             let sockets = tempfile::TempDir::new().unwrap();
-            let daemon = daemon_at(&serve_daemon(sockets.path(), &ours.pem, true));
+            let (socket, custody) = serve_daemon_holding(sockets.path(), &ours.pem, true);
+            let daemon = daemon_at(&socket);
+            play_the_custodian(custody.clone(), &ours, None);
             let server = an_observer_signing_with(ours, "NOT A CA".to_string(), offer).await;
             let observer = credentials_agent_client::ObserverClient::new(server.uri());
             let dir = tempfile::TempDir::new().unwrap();
             std::fs::write(dir.path().join("key.pem"), "a key from before").unwrap();
 
-            issue_cert_via_observer(
-                &observer,
-                "token",
-                ME,
-                &a_custody_request_into(&dir),
+            custodian_via_observer(&observer, "token", ME, &client_plan(), &offers, &daemon)
+                .await
+                .unwrap();
+            what_the_custodian_fetched(
+                &daemon,
+                &[a_custody_request_into(&dir)],
                 &pinned,
-                &offers,
-                Some(&daemon),
+                MILLISECOND,
+                Duration::from_secs(10),
             )
             .await
             .unwrap();
 
+            // What the token bought: a custodian's certificate, asking for a client certificate and nothing more.
+            let asked: Vec<serde_json::Value> = server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.url.path() == "/workload/issue")
+                .map(|r| serde_json::from_slice(&r.body).unwrap())
+                .collect();
+            assert_eq!(asked.len(), 1);
+            assert_eq!(asked[0]["cert_type"], "custody");
+            assert_eq!(asked[0]["names"], serde_json::json!(["p:custody:client"]));
+            let custodian =
+                tokio::task::block_in_place(|| daemon.certificate(Slot::Custodian)).unwrap();
+            assert_eq!(
+                cert_issuer_common::permission::extract_own_identity(&custodian[0]).unwrap(),
+                cert_issuer_common::custody::custodian_identity(ME)
+            );
+            // What the custodian fetched, written with the pinned CA, and no key.
             let cert = std::fs::read_to_string(dir.path().join("cert.pem")).unwrap();
             assert_eq!(
                 std::fs::read_to_string(dir.path().join("ca.pem")).unwrap(),
@@ -1893,31 +2227,78 @@ mod tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        async fn a_certificate_another_ca_signed_is_neither_installed_nor_written() {
+        async fn a_custodian_s_certificate_another_ca_signed_is_not_installed_and_nothing_is_planned()
+         {
             let (ours, theirs) = (test_ca(), test_ca());
             let offer = an_offer_signed_by(&ours, CREDENTIALS_AGENT);
             let sockets = tempfile::TempDir::new().unwrap();
-            let daemon = daemon_at(&serve_daemon(sockets.path(), &ours.pem, true));
+            let (socket, custody) = serve_daemon_holding(sockets.path(), &ours.pem, true);
+            let daemon = daemon_at(&socket);
             let server = an_observer_signing_with(theirs, String::new(), offer).await;
             let observer = credentials_agent_client::ObserverClient::new(server.uri());
-            let dir = tempfile::TempDir::new().unwrap();
-            let why = issue_cert_via_observer(
+            let why = custodian_via_observer(
                 &observer,
                 "token",
                 ME,
-                &a_custody_request_into(&dir),
-                &ours.pem,
+                &client_plan(),
                 &offers_under(&ours),
-                Some(&daemon),
+                &daemon,
             )
             .await
             .unwrap_err();
-            assert!(why.contains("not signed by the pinned CA"), "{why}");
-            assert!(!dir.path().join("cert.pem").exists());
+            assert!(why.contains("pinned CA"), "{why}");
+            assert!(custody.read().unwrap().plan().is_none());
             assert!(matches!(
-                held(&daemon).await,
+                tokio::task::block_in_place(|| daemon.certificate(Slot::Custodian)),
                 Err(ClientError::Refused(Refusal::NoCertificate))
             ));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_custodian_that_cannot_fetch_stops_polar_init_and_nothing_is_written() {
+            let ours = test_ca();
+            let offer = an_offer_signed_by(&ours, CREDENTIALS_AGENT);
+            let sockets = tempfile::TempDir::new().unwrap();
+            let (socket, custody) = serve_daemon_holding(sockets.path(), &ours.pem, true);
+            let daemon = daemon_at(&socket);
+            play_the_custodian(custody, &ours, Some("the credentials agent refused"));
+            let pinned = ours.pem.clone();
+            let offers = offers_under(&ours);
+            let server = an_observer_signing_with(ours, String::new(), offer).await;
+            let observer = credentials_agent_client::ObserverClient::new(server.uri());
+            custodian_via_observer(&observer, "token", ME, &client_plan(), &offers, &daemon)
+                .await
+                .unwrap();
+            let dir = tempfile::TempDir::new().unwrap();
+            let why = what_the_custodian_fetched(
+                &daemon,
+                &[a_custody_request_into(&dir)],
+                &pinned,
+                MILLISECOND,
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap_err();
+            assert!(why.contains("the credentials agent refused"), "{why}");
+            assert!(!dir.path().join("cert.pem").exists());
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_custodian_never_ready_stops_polar_init_at_its_deadline() {
+            let ours = test_ca();
+            let sockets = tempfile::TempDir::new().unwrap();
+            let daemon = daemon_at(&serve_daemon(sockets.path(), &ours.pem, true));
+            let dir = tempfile::TempDir::new().unwrap();
+            let why = what_the_custodian_fetched(
+                &daemon,
+                &[a_custody_request_into(&dir)],
+                &ours.pem,
+                MILLISECOND,
+                Duration::from_millis(300),
+            )
+            .await
+            .unwrap_err();
+            assert!(why.contains("did not finish within"), "{why}");
         }
 
         /// cert-issuer, signing whatever CSR it is sent with `ca`.
@@ -1945,6 +2326,33 @@ mod tests {
                     expires_at: now + time::Duration::hours(1),
                 })
             }
+        }
+
+        /// A bootstrap service's custodian, from cert-issuer on the token alone: its custodian's certificate, with
+        /// nothing in it to ask for, after the service's own certificates; ready at once.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_bootstrap_service_s_custodian_comes_from_cert_issuer_with_nothing_to_fetch() {
+            let ca = test_ca();
+            let sockets = tempfile::TempDir::new().unwrap();
+            let daemon = daemon_at(&serve_daemon(sockets.path(), &ca.pem, true));
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/issue"))
+                .respond_with(CertIssuerSigns(ca))
+                .mount(&server)
+                .await;
+            let client = handshake::HandshakeClient::new(server.uri());
+            custodian_from_cert_issuer(&client, "token", ME, &daemon)
+                .await
+                .unwrap();
+            let asked: serde_json::Value =
+                serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+            assert_eq!(asked["cert_type"], "CUSTODY");
+            assert_eq!(asked["extra_sans"], serde_json::json!([]));
+            assert!(
+                tokio::task::block_in_place(|| daemon.ready()).unwrap(),
+                "nothing to fetch"
+            );
         }
 
         // A pod whose init container runs again keeps its emptyDir, and with it the bundle from before; the daemon's
