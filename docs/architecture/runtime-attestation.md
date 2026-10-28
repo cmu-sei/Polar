@@ -23,7 +23,8 @@
 
 # Runtime attestation
 
-Status, 2026-10-26: the shape, decided with the maintainer. Nothing here is built. What Polar already had on the topic
+Status, 2026-10-26: the shape, decided with the maintainer. Nothing here is built. 2026-10-28: the plan, for review
+("The plan"). What Polar already had on the topic
 (the original Attestation Service, cert-issuer's deferred "v2" items, the image attestation ladder) is in
 `core-restarts.md`, question 1, "Runtime attestation: what Polar has on it".
 
@@ -157,6 +158,94 @@ to be settled before the move:
 - *Init containers must be reentrant*: `polar-init` and the escrow bootstrap, run again in the same pod.
 
 The plan for the move, with these settled one at a time: `deployments.md`.
+
+## The plan (2026-10-28, for review)
+
+Built in three slices, each tested and seen on a cluster before the next. This plans the first in full; the other two are
+outlined, to be planned when the first is built.
+
+### What was read for it
+
+- *What it attests against:* a pod's owner chain and service account (the API); its containers' digests, the kubelet's
+  `imageID` (`kubernetes/consume/src/lib.rs`, the attestation ladder: never the spec's tag); and the signed deployment's
+  image lock (`infra/images.lock.nuon`, written into the signed `provenance.json` the deployment repository holds,
+  `infra/deploy-repo.nu:407`). Only `sandbox-local` pins its images by digest (`pin_images`); `local-minimal` runs `latest`
+  tags and has no signed deployment.
+- *Who would ask, and where:* the credentials agent in its three vouching paths (workload issuance, between the renewal
+  rule and the signing, `credentials-agent/consume/src/issuance.rs` steps 5 and 6; the held-request voucher,
+  `held_voucher.rs`, `decide`; a custodian's fetches, `custodian.rs`, `handle`), and cert-issuer in its gate, for a
+  ticket or a window (`cert-issuer/server/src/handler.rs`, `gate_on_token`).
+- *How Kubernetes is read today:* kube-observer's `cluster_roles` capability grants get, list and watch on everything
+  (`infra/config/capabilities.nuon:129`); the attestation agent needs far less (pods, and the ReplicaSets and Deployments
+  that own them, in Polar's namespaces).
+- *How a question is asked over Cassini:* request and reply topics with a correlation id, as the credentials agent's own
+  are (`cassini-request-reply-protocol.md`).
+
+### A finding: the instance check alone does not close the ticket's gap
+
+The check above answers "is the pod this token names the genuine one?". It does not answer "did this request come from
+that pod?". A token minted for the real pod (`serviceaccounts/token`, bound to its name and UID) names a genuine pod, and
+passes; it is exactly the gap the ticket leaves (`core-restarts.md`, "Step 5, the ticket": "whoever can create a token
+... bound to that pod ... can ask inside the ticket's minutes"). What ties a request to its pod is where it came from:
+the address it was sent from against the pod's IP. Who sees that first-hand:
+- *cert-issuer,* for every request made to it directly (the core's, the ticket's, the windows', the held ones);
+- *Cassini,* for every session (the custodian's fetches, the agents'), if the broker reports the publisher's address as it
+  reports its identity (`published_by`);
+- *not the credentials agent* for a workload's first request, which polar-init makes to the observer, the low-trust relay,
+  which could say any address. But since custody part A that request buys only the custodian's certificate, and the
+  custodian's own fetches come over Cassini, where the broker sees its address first-hand. So the chain holds: the
+  custodian's certificate alone can do nothing but fetch, and every fetch is checked against the pod's address.
+
+### Slice A, the plan: the attestor and the instance check at issuance
+
+1. *The attestation agent* (`attestation/agent`, with `attestation/common` for the protocol): a catalog `agent`, not in the
+   core, started after it. It watches the pods of Polar's namespaces and the ReplicaSets and Deployments that own them
+   (a Role in each: get, list, watch, nothing else), so an answer is read from what it already holds, not a call to the API.
+2. *The question and its answer,* over Cassini (`attestation-instance-requests`, `attestation-instance-replies`, a
+   correlation id): the identity, the pod UID the token was bound to, and the address the request came from; the answer
+   `Genuine`, or `NotGenuine` with why: no such pod, another owner than the catalog's for that identity, another service
+   account, a container whose digest the signed deployment does not name, an ephemeral container, or another address.
+3. *The askers:* the credentials agent in its three paths, before it vouches; cert-issuer in its gate, before a ticket or
+   a window admits. A `NotGenuine` is a refusal, recorded and logged.
+4. *The address, first-hand:* cert-issuer passes the request's peer address; the broker gives a published message its
+   publisher's address beside `published_by`, and the credentials agent passes that for a custodian's fetch.
+5. *After the fact:* once up, the attestation agent attests every running pod against cert-issuer's record (each entry
+   carries its pod UID), and reports any that fail: the bootstrap's certificates, and anything signed while it was away.
+6. *Tests first,* as everywhere: the verdict a pure function of the pod, its owners, the catalog and the lock (a property
+   over pods that differ from the genuine one in each way, and only those genuine pass); the askers refusing on
+   `NotGenuine`; the address passed through; on the cluster, the ticket's impostor test of 2026-10-28 again, this time with
+   a token minted for the real pod, and refused.
+
+### Slice B, outlined: watching what was attested
+
+A pod that changes after it was attested: an ephemeral container added (`kubectl debug`), a container restarted on another
+digest. The attestation agent reports it, and the credentials agent, as body guard, stops renewing and may revoke.
+
+### Slice C, outlined: the node sensor and the process
+
+`attestation/sensor` (a DaemonSet, host PID visibility, no Kubernetes credential), the runtime challenges answered by a
+builder actor, the builder's seccomp and Landlock lock, and Cassini binding each session to the attested pod's address,
+as the sections above describe.
+
+### For the maintainer
+
+1. *The address check* (the finding above). The instance check as decided confirms the pod, not the requester; without the
+   address, a token minted for the real pod passes. *Recommendation:* the address check in slice A, where it is seen
+   first-hand (cert-issuer directly, Cassini for every session), so the ticket's gap is closed by the slice that is meant
+   to close it.
+2. *What the images are checked against on a target with no signed deployment.* `sandbox-local` has the signed lock;
+   `local-minimal` has none and runs `latest`. *Options:* (a) on such a target, check owner, account, address and no
+   ephemeral container, and report the images as not attested, without refusing; (b) refuse attestation on such a target
+   (so nothing there is issued once the attestation agent runs); (c) give `local-minimal` a lock too. *Recommendation:*
+   (a): a development target stays usable, and says what it does not check.
+3. *When the attestation agent cannot be asked* (not yet up, restarting, Cassini down). Question 2's decision for
+   cert-issuer was "whenever it is reachable" (`core-restarts.md`, question 2, B): sign without it, and attest after the
+   fact. *Recommendation:* the same for the credentials agent's paths, every issuance made without it recorded as such
+   and attested once it is back (item 5). *Or:* once it has been heard, its absence holds requests, as a held request
+   waits for the credentials agent.
+4. *Its pool* on a cluster that places workloads (`placement.md`). It holds a read view of every Polar pod. *Recommendation:*
+   `core`, beside the identities it guards; `observers` is the low-trust side. (The sensor of slice C runs on every node,
+   tolerating every pool's taint.)
 
 ## Open, to be settled when it is built
 
