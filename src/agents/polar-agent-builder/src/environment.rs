@@ -64,6 +64,13 @@ pub static AUTHORITY_PUBLISHER: Defaulted<String> = Defaulted::text(
     "credentials-agent.polar.serviceaccount.cluster.local",
 );
 
+/// Where `polar-init` leaves the one-use marker the agent takes as it starts (docs/architecture/deployments.md, step 4):
+/// set by the deployment for a pod that restarts in place; unset, nothing is checked.
+pub const START_MARKER: Optional<String> = Optional::text(
+    "POLAR_START_MARKER",
+    "where polar-init leaves the marker this agent takes as it starts; with none there, its container was restarted without polar-init, and it exits so that the pod restarts whole (unset: nothing is checked)",
+);
+
 fn parse_budget(raw: &str) -> Result<u64, String> {
     raw.trim()
         .parse::<u64>()
@@ -72,7 +79,12 @@ fn parse_budget(raw: &str) -> Result<u64, String> {
         .ok_or_else(|| "must be a whole number of seconds, at least 1".to_string())
 }
 
-static VARIABLES: &[&dyn Described] = &[&CAPABILITIES, &SHUTDOWN_BUDGET_SECS, &AUTHORITY_PUBLISHER];
+static VARIABLES: &[&dyn Described] = &[
+    &CAPABILITIES,
+    &SHUTDOWN_BUDGET_SECS,
+    &AUTHORITY_PUBLISHER,
+    &START_MARKER,
+];
 
 /// The variables the builder itself reads.
 pub static BUILDER: Section = Section {

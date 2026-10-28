@@ -87,6 +87,13 @@ pub const ESCROW_BOOTSTRAP: Defaulted<bool> = Defaulted::flag(
     "false",
 );
 
+/// Where polar-init leaves the one-use marker its workload takes as it starts (docs/architecture/deployments.md, step 4):
+/// set for a pod that restarts in place, at the path the workload is told (`POLAR_START_MARKER`).
+pub const START_MARKER: Optional<String> = Optional::text(
+    "POLAR_INIT_START_MARKER",
+    "where to leave, at the end of every run, the marker the workload takes as it starts, so that a workload container restarted without polar-init knows it and exits for its pod to restart whole (unset: none is left)",
+);
+
 static VARIABLES: &[&dyn Described] = &[
     &ISSUER,
     &CERT_ISSUER_URL,
@@ -95,6 +102,7 @@ static VARIABLES: &[&dyn Described] = &[
     &CA_CERT,
     &CREDENTIALS_AGENT_IDENTITY,
     &ESCROW_BOOTSTRAP,
+    &START_MARKER,
 ];
 
 /// What polar-init reads of its own.
@@ -166,6 +174,8 @@ pub struct InitSettings {
     /// The custody daemon's socket, through which a certificate whose key is the daemon's is made and installed
     /// (docs/architecture/key-custody.md, step 3). The Cassini client's variable: the daemon is the pod's.
     pub custody_socket: Option<String>,
+    /// Where to leave the start marker at the end of every run, if anywhere (docs/architecture/deployments.md, step 4).
+    pub start_marker: Option<String>,
 }
 
 /// The one snapshot of the process polar-init runs on: its own variables and the Cassini
@@ -216,6 +226,7 @@ impl InitSettings {
             cassini_client::environment::CUSTODY_SOCKET.read(env),
             &mut note,
         );
+        let start_marker = optional(START_MARKER.read(env), &mut note);
         // Said once, whatever else is wrong: which address a mode needs.
         for problem in issuer_is_consistent(env) {
             note(problem);
@@ -247,6 +258,7 @@ impl InitSettings {
             token_path,
             escrow,
             custody_socket,
+            start_marker,
         })
     }
 }
@@ -279,6 +291,25 @@ mod tests {
 
     /// Asks for the bootstrap, as the `encryption` capability's init footprint does.
     const ESCROW: &[(&str, &str)] = &[("POLAR_INIT_ESCROW_BOOTSTRAP", "true")];
+
+    /// docs/architecture/deployments.md, step 4: where polar-init leaves the marker its workload takes as it starts.
+    #[test]
+    fn the_start_marker_is_left_only_where_the_deployment_says() {
+        let s = InitSettings::from_env(&with(&[OWN])).unwrap();
+        assert_eq!(s.start_marker, None);
+        let s = InitSettings::from_env(&with(&[
+            OWN,
+            &[(
+                "POLAR_INIT_START_MARKER",
+                "/var/run/polar-health/started-by-polar-init",
+            )],
+        ]))
+        .unwrap();
+        assert_eq!(
+            s.start_marker.as_deref(),
+            Some("/var/run/polar-health/started-by-polar-init")
+        );
+    }
 
     #[test]
     fn with_nothing_said_there_is_no_bootstrap_and_nothing_of_the_client_is_read() {

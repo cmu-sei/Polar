@@ -457,7 +457,19 @@ async fn main() {
         tracing::info!("the escrow key is the custody daemon's, fetched by its custodian");
     }
 
+    // Last, once everything the workload needs is in place: the marker it takes as it starts, so that a workload
+    // container restarted without this run knows it (docs/architecture/deployments.md, step 4).
+    if let Some(marker) = &settings.start_marker {
+        leave_start_marker(marker).unwrap_or_else(|why| stop(why));
+    }
+
     tracing::info!("polar-init complete, handing off to main container");
+}
+
+/// Leaves the one-use start marker at `path`, for the workload to take as it starts; one already there (not taken) is
+/// left as it is.
+fn leave_start_marker(path: &str) -> Result<(), String> {
+    std::fs::write(path, b"").map_err(|e| format!("cannot leave the start marker at '{path}': {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -2065,6 +2077,25 @@ mod tests {
                     }
                 }
             }
+        }
+
+        /// docs/architecture/deployments.md, step 4: every run leaves the marker, the second in one pod included, since
+        /// the workload took the first as it started.
+        #[test]
+        fn every_run_leaves_the_start_marker() {
+            let dir = tempfile::tempdir().unwrap();
+            let marker = dir.path().join("started-by-polar-init");
+            let path = marker.display().to_string();
+            leave_start_marker(&path).unwrap();
+            assert!(marker.exists());
+            std::fs::remove_file(&marker).unwrap();
+            leave_start_marker(&path).unwrap();
+            assert!(marker.exists(), "left again on the second run");
+            leave_start_marker(&path).unwrap();
+            assert!(marker.exists(), "and a marker not taken is no problem");
+            let missing = dir.path().join("no-such-dir/started-by-polar-init");
+            let why = leave_start_marker(&missing.display().to_string()).unwrap_err();
+            assert!(why.contains("start marker"), "{why}");
         }
 
         fn client_plan() -> CustodianPlan {

@@ -978,6 +978,17 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
             return 1;
         }
     };
+    // Before anything is started: a container restarted alone, without polar-init, exits so that its pod restarts
+    // whole (start_marker).
+    if let Err(why) = crate::start_marker::take(
+        startup
+            .config
+            .var(crate::environment::START_MARKER.name())
+            .as_deref(),
+    ) {
+        eprintln!("ERROR: {why}");
+        return 1;
+    }
     let bad_commands = surface_problems::<A>();
     if !bad_commands.is_empty() {
         for problem in &bad_commands {
@@ -1806,6 +1817,71 @@ mod tests {
             status, 1,
             "an agent that ends has failed, even when it returned Ok"
         );
+    }
+
+    /// An agent that notes that it was started, for the fresh-start marker's tests alone.
+    static MARKED_STARTED: AtomicBool = AtomicBool::new(false);
+
+    struct Marked;
+
+    impl PolarAgent for Marked {
+        const NAME: &'static str = "marked-agent";
+        const PURPOSE: &'static str = "Notes that it was started";
+        const NEEDS: &'static [Capability] = &[Capability::Cassini];
+        const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+        async fn start(_: Configured) -> Result<(), StartError> {
+            MARKED_STARTED.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// `Marked`'s document, sound, with POLAR_START_MARKER at `marker`, and the process environment that points to it.
+    fn marked_process(name: &str, marker: &std::path::Path) -> impl Env + 'static {
+        let mut doc = scaffold_document::<Marked>();
+        for variable in doc
+            .document
+            .sections
+            .iter_mut()
+            .flat_map(|s| s.variables.iter_mut())
+        {
+            if variable.name == "POLAR_START_MARKER" {
+                variable.value = Some(DocValue::Literal(marker.display().to_string()));
+            } else if variable.name == "POLAR_CAPABILITIES" {
+                variable.value = Some(DocValue::Literal("cassini".into()));
+            } else if let Some((_, value)) = CASSINI_ENV.iter().find(|(n, _)| *n == variable.name) {
+                variable.value = Some(DocValue::Literal(value.to_string()));
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("polar-agent-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+        let config = path.display().to_string();
+        move |var: &str| (var == "POLAR_CONFIG").then(|| config.clone())
+    }
+
+    /// docs/architecture/deployments.md, step 4: an agent's container restarted alone (its liveness probe's kill) finds
+    /// no marker, since polar-init has not run, and exits 1, so the pod's restart rule restarts the whole pod.
+    #[test]
+    fn an_agent_started_without_polar_init_having_run_exits_one_and_is_not_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started-by-polar-init");
+        MARKED_STARTED.store(false, Ordering::SeqCst);
+        let status = run_with::<Marked>(&[], marked_process("unmarked", &marker));
+        assert_eq!(status, 1);
+        assert!(!MARKED_STARTED.load(Ordering::SeqCst), "it was not started");
+    }
+
+    #[test]
+    fn an_agent_started_after_polar_init_takes_the_marker_and_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started-by-polar-init");
+        std::fs::write(&marker, b"").unwrap();
+        MARKED_STARTED.store(false, Ordering::SeqCst);
+        let status = run_with::<Marked>(&[], marked_process("marked", &marker));
+        assert!(MARKED_STARTED.load(Ordering::SeqCst), "it was started");
+        assert!(!marker.exists(), "the marker is used once");
+        assert_eq!(status, 1, "and, ending, it exits 1 as every agent does");
     }
 
     #[test]

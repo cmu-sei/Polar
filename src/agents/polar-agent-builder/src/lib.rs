@@ -75,6 +75,7 @@ pub use runtime::{RuntimeChanged, RuntimeSection, RuntimeValue};
 pub mod selftest;
 pub mod shutdown;
 pub mod signed;
+mod start_marker;
 pub use signed::{Rejection, UpdateVerifier};
 pub(crate) mod own_name;
 pub(crate) mod startup;
