@@ -27,7 +27,8 @@
 //! addition: the stored AgentEscrowCertificateRecord only carries a
 //! certificate PEM, not a standalone public-key PEM, so this handler
 //! extracts the key from the certificate itself via
-//! cert_issuer_common::public_key::extract_public_key_pem.
+//! cert_issuer_common::public_key::extract_escrow_public_key_pem: P-256
+//! since the custody daemon holds an agent's escrow key, or RSA.
 
 use crate::ledger::LedgerMessage;
 use credentials_agent_common::agent_escrow_key::{AgentEscrowKeyReply, AgentEscrowKeyRequest};
@@ -55,7 +56,8 @@ impl AgentEscrowKeyHandler {
             return AgentEscrowKeyReply::NotFound;
         };
 
-        match cert_issuer_common::public_key::extract_public_key_pem(&record.certificate_pem) {
+        match cert_issuer_common::public_key::extract_escrow_public_key_pem(&record.certificate_pem)
+        {
             Ok(public_key_pem) => AgentEscrowKeyReply::Found {
                 public_key_pem,
                 certificate_pem: record.certificate_pem,
@@ -147,6 +149,50 @@ mod tests {
             .await;
 
         assert!(matches!(reply, AgentEscrowKeyReply::NotFound));
+    }
+
+    /// The escrow key is P-256 since the custody daemon holds it (docs/architecture/key-custody.md, "The crypto
+    /// change"): its certificate's key is what is handed out, as it was made.
+    #[tokio::test]
+    async fn a_p256_escrow_certificate_s_key_is_handed_out() {
+        let ledger = spawn_test_ledger().await;
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let certificate_pem = rcgen::CertificateParams::new(vec!["git-observer".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap()
+            .pem();
+        crate::issuance::call_append(
+            &ledger,
+            CredentialsEvent::AgentEscrowIssuanceCompleted {
+                identity: "git-observer".to_string(),
+                instance_binding: "pod-uid-1".to_string(),
+                serial: "service-serial-1".to_string(),
+                timestamp: 2000,
+                certificate_pem: certificate_pem.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let reply = AgentEscrowKeyHandler { ledger }
+            .handle(AgentEscrowKeyRequest {
+                identity: "git-observer".to_string(),
+            })
+            .await;
+        match reply {
+            AgentEscrowKeyReply::Found { public_key_pem, .. } => {
+                assert_eq!(public_key_pem, key.public_key_pem());
+                // And a secret seals to it.
+                assert!(
+                    credentials_agent_common::escrow_secret::EscrowedSecret::encrypt(
+                        b"x",
+                        &public_key_pem
+                    )
+                    .is_ok()
+                );
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
     }
 
     #[tokio::test]

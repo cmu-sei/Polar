@@ -68,6 +68,37 @@ pub fn extract_public_key_pem(certificate_pem: &str) -> Result<String, PublicKey
         .map_err(|e| PublicKeyExtractionError::Reencoding(e.to_string()))
 }
 
+/// As [`extract_public_key_pem`], for an agent's escrow certificate (`CertType::Service`), whose key is P-256 since
+/// the custody daemon holds it (docs/architecture/key-custody.md, "The crypto change"), or RSA: the certificate's own
+/// SubjectPublicKeyInfo, re-encoded as a standalone public-key PEM. Any other key is refused.
+pub fn extract_escrow_public_key_pem(
+    certificate_pem: &str,
+) -> Result<String, PublicKeyExtractionError> {
+    const EC_PUBLIC_KEY: &str = "1.2.840.10045.2.1";
+    const PRIME256V1: &str = "1.2.840.10045.3.1.7";
+    let (_, pem) = x509_parser::pem::parse_x509_pem(certificate_pem.as_bytes())
+        .map_err(|e| PublicKeyExtractionError::InvalidPem(e.to_string()))?;
+    let (_, cert) = x509_parser::parse_x509_certificate(&pem.contents)
+        .map_err(|e| PublicKeyExtractionError::InvalidDer(e.to_string()))?;
+    let spki = &cert.tbs_certificate.subject_pki;
+    let curve = spki
+        .algorithm
+        .parameters
+        .as_ref()
+        .and_then(|p| p.as_oid().ok())
+        .map(|oid| oid.to_id_string());
+    if spki.algorithm.algorithm.to_id_string() == EC_PUBLIC_KEY {
+        if curve.as_deref() != Some(PRIME256V1) {
+            return Err(PublicKeyExtractionError::InvalidPublicKey(
+                "an EC key on a curve other than P-256".to_string(),
+            ));
+        }
+        return rsa::pkcs8::der::pem::encode_string("PUBLIC KEY", LineEnding::LF, spki.raw)
+            .map_err(|e| PublicKeyExtractionError::Reencoding(e.to_string()));
+    }
+    extract_public_key_pem(certificate_pem)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +133,42 @@ mod tests {
             result,
             Err(PublicKeyExtractionError::InvalidPem(_))
         ));
+    }
+
+    #[test]
+    fn an_escrow_certificate_s_p256_key_is_extracted_as_it_was_made_and_an_rsa_one_as_before() {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let cert =
+            rcgen::CertificateParams::new(vec!["x.polar.serviceaccount.cluster.local".to_string()])
+                .unwrap()
+                .self_signed(&key)
+                .unwrap()
+                .pem();
+        assert_eq!(
+            extract_escrow_public_key_pem(&cert).unwrap(),
+            key.public_key_pem()
+        );
+        // Not a P-256 key the RSA extractor would take.
+        assert!(extract_public_key_pem(&cert).is_err());
+        let p384 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let other = rcgen::CertificateParams::new(vec!["x".to_string()])
+            .unwrap()
+            .self_signed(&p384)
+            .unwrap()
+            .pem();
+        assert!(
+            extract_escrow_public_key_pem(&other).is_err(),
+            "another curve"
+        );
+        let ed = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let ed = rcgen::CertificateParams::new(vec!["x".to_string()])
+            .unwrap()
+            .self_signed(&ed)
+            .unwrap()
+            .pem();
+        assert!(
+            extract_escrow_public_key_pem(&ed).is_err(),
+            "a key nothing is sealed to"
+        );
     }
 }
