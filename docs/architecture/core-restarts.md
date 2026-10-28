@@ -535,6 +535,18 @@ ticket, with no hold, under the same UID, the ticket and both signings in the re
 credentials agent's service account with another UID, asking inside the five minutes, not admitted by the ticket; the
 pod deleted instead (a new UID): the window, as today.
 
+*Done (2026-10-28), on the five-node `u7c`* (`up.nu sandbox-local --dev` at `20c5972e`):
+- *A rejuvenation's successor, through its ticket:* the credentials agent sent SIGTERM at 19:37:11; its ticket was taken
+  at 19:37:14 (bound to its pod, `5f3d19e6…`); the successor, the same pod, was signed at its first ask at 19:37:22,
+  client and custodian both "admitted on its token against the credentials agent's successor ticket", and ready at
+  19:37:23. Twelve seconds, against a minute with 45 s held before the ticket (`deployments.md`, "On the cluster").
+- *Another pod of the service account, inside the ticket's minutes:* a bare pod running polar-init as the credentials
+  agent (`zz-ticket-impostor`, UID `5ba9d08b…`, a key-file certificate), asking every 5 s, then the credentials agent
+  ended again: the impostor asked twice between the ticket and the successor's signing, with the types unused, and
+  was held both times; held 13 times in all, signed never; the successor came through the ticket again.
+- *A pod deleted* (a new UID, so no ticket of its): held 11 times, admitted once the crash window opened, 56 s on, as
+  before.
+
 ## Open questions
 
 To be taken one at a time, after the certificate record (`cert-issuer-isolation.md`, 2026-10-23), which the rest
