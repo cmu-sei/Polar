@@ -1223,6 +1223,36 @@ another agent stays in the workload: it needs no key the daemon holds, and the c
    key believed only for its certificate (`polar-crypto/src/recipient.rs`).
 7. The bootstrap pods: in 1, 2 and 5 (their custodian from cert-issuer, held and vouched for as the service is).
 
+**Step 8, on a fresh u7c (2026-10-28, `up.nu sandbox-local --dev` at `44766117`, stopped at the browser step as
+asked; Mullvad off for the run):** what was checked, how, and what was not.
+- *Every pod with a daemon bought only its custodian's certificate, and its custodian fetched the rest:* each
+  polar-init logged the custodian's certificate installed and its plan; each daemon logged its session up and "the
+  custodian has fetched everything". Plans: an empty one for Cassini, the credentials agent and its observer
+  (bootstrap services, their own certificates from cert-issuer); a client certificate for each agent; the git server's
+  server certificate with its name; the escrow key for kube-consumer and git-repo-observer. kube-consumer's took about
+  six seconds from the custodian's certificate to Ready.
+- *Escrow:* the credentials agent's own count: two retrievals (NotFound on a fresh cluster), two escrow issuances, two
+  stores, and no refusal in its log.
+- *No key and no token in a workload:* `ls /etc/tls/certs` in each workload container: `ca.pem` and `cert.pem` only,
+  except cert-issuer (its key in process, decision 4) and polar-scheduler-observer, which has no daemon at all (a
+  finding below). A service-account token is mounted in kube-observer's workload (its `kube-api-read`, by design) and
+  cert-issuer's, nowhere else. No asymmetric key in `/proc/keys` in kube-consumer, on the node, or on the host.
+- *X revoked:* kube-observer's client certificate (`2ddce4d1…`) revoked with the admin tool at 04:00:48.334: its daemon
+  destroyed the key at .379 (`slots=[Client]`) and exited; the health actor entered rejuvenation at 04:01:04 ("the
+  custody daemon holds no certificate"), and the pod ended at 04:03:04 (the Cassini-unreachable verdict at its 120 s
+  deadline: the broker had closed the revoked session). Its replacement bought a new custodian and had its new client
+  certificate (`236d746a…`) one second later.
+- *The custodian revoked:* git-repo-processor's custodian (`27ccd6b5…`, read from the ledger) at 04:05:38.816: the
+  daemon destroyed every key at .861 (`slots=[Custodian]`) and exited; the workload drained and ended through its
+  health actor at 04:09:07; the replacement bought a new custodian and had its certificate at 04:10:18.
+- *Not checked on the cluster, only in tests:* the workload refused its own escrow key (no client in a workload image
+  to ask with), a custodian refused a second certificate or after its window (nothing in a pod asks twice), and a secret
+  opened through the daemon (nothing in sandbox-local opens one; the secret harness is not in the target).
+- *Findings, not chased:* polar-scheduler-observer has no custody daemon and holds `key.pem`; the consumer's dispatch
+  logs "no handler for topic" for admin-action and account requests it has just handed to their actors (those two
+  branches fall through to the warning, as before this work); jira-observer fails on the target's placeholder Jira, as
+  before; the container tests (Neo4j, the registry) do not start on the host's new kernel (netavark's DNAT).
+
 **Decided along the way (2026-10-27, the maintainer):** the custodian identity, instead of the token on a retrieval
 or a daemon-signed ephemeral (2a); X's certificates from the credentials agent, not from cert-issuer; forced
 rejuvenation kept; the custodian's authority spent, not kept. **Decided here, by precedent:** a new certificate type
