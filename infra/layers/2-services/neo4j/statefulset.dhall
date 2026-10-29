@@ -97,6 +97,8 @@ let render =
               , kubernetes.VolumeMount::{ name = v.volumes.logs.name,  mountPath = v.volumes.logs.mountPath        }
               , kubernetes.VolumeMount::{ name = v.volumes.certs.name, mountPath = v.volumes.certs.mountPath       }
               , kubernetes.VolumeMount::{ name = "tmp",                mountPath = "/tmp"                          }
+              -- server.directories.run: /var/lib/neo4j is root's in the image, and the PID file goes here
+              , kubernetes.VolumeMount::{ name = "run",                mountPath = "/var/lib/neo4j/run"            }
               ]
 
         let initVolumeMounts =
@@ -144,6 +146,7 @@ let render =
                 }
               , kubernetes.Volume::{ name = v.configVolume, emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
               , kubernetes.Volume::{ name = "tmp",          emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
+              , kubernetes.Volume::{ name = "run",          emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
               , kubernetes.Volume::{
                 , name      = "neo4j-init-script"
                 , configMap = Some kubernetes.ConfigMapVolumeSource::{

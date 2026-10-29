@@ -191,6 +191,20 @@ def main [] {
             }
         }
 
+        # In the image /var/lib/neo4j is root's and has no run directory, so Neo4j said "Failed to write PID file" at every
+        # start. An emptyDir is its group's, the pod's fsGroup, which Neo4j runs in.
+        "Neo4j's run directory, where its configuration puts it, is an emptyDir of its own": {
+            let out = (render neo4j {})
+            let conf = (open --raw ($out | path join "neo4j-configmap.yaml") | from yaml | get data | get "neo4j.conf")
+            let run = ($conf | lines | where {|l| $l | str starts-with "server.directories.run=" } | first | str replace "server.directories.run=" "")
+            let pod = (open ($out | path join "neo4j-statefulset.yaml") | get spec.template.spec)
+            let mount = (($pod.containers | first).volumeMounts | where mountPath == $run)
+            assert equal ($mount | length) 1 $"a mount at ($run)"
+            let volume = ($pod.volumes | where name == $mount.0.name | first)
+            assert (($volume.emptyDir? | default null) != null) $"($volume.name) is an emptyDir"
+            assert equal $pod.securityContext.fsGroup ($pod.containers | first).securityContext.runAsGroup
+        }
+
         "Neo4j still asks for the server certificate it did and runs no escrow bootstrap": {
             let out = (render neo4j {})
             let text = (open --raw ($out | path join "neo4j-statefulset.yaml"))
