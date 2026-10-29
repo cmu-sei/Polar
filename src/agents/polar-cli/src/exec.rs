@@ -1,0 +1,459 @@
+//! Running a plan.
+//!
+//! Within a stage the order is always the same, so a plan reads the way it runs: the CRD if asked
+//! for, then the secrets, then the objects, then the waits. The next stage starts when the waits of
+//! this one have passed. `down` is the same plan backwards, and never removes the CRD.
+//!
+//! Written against [`Cluster`] and reporting through a callback, so the order, the waits and the
+//! reports are tested with no cluster and no terminal.
+
+use crate::cluster::{Applied, Cluster, Deleted};
+use crate::plan::{Id, Plan, Stage, Wait};
+use crate::secrets::{self, Action};
+use anyhow::{Result, bail};
+use serde_json::Value as Json;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
+use tokio::time::{Instant, sleep};
+
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// Optional stages to run as well.
+    pub with: Vec<String>,
+    /// Run exactly these stages.
+    pub only: Vec<String>,
+    /// Ask the cluster to judge each change without making it, and do not wait.
+    pub dry_run: bool,
+    /// How often a wait looks.
+    pub poll: Duration,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { with: Vec::new(), only: Vec::new(), dry_run: false, poll: Duration::from_secs(2) }
+    }
+}
+
+/// The text at a dotted path, for comparing: strings as they are, numbers and booleans as they print.
+/// A number in the path selects from a list.
+pub fn field_value(object: &Json, path: &str) -> Option<String> {
+    let mut at = object;
+    for step in path.split('.') {
+        at = match at {
+            Json::Array(items) => items.get(step.parse::<usize>().ok()?)?,
+            _ => at.get(step)?,
+        };
+    }
+    match at {
+        Json::String(text) => Some(text.clone()),
+        Json::Number(number) => Some(number.to_string()),
+        Json::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+/// What the operator recorded about a PolarAgent, in words: why it is not running.
+pub fn explain_agent(agent: &Json) -> Vec<String> {
+    let status = &agent["status"];
+    let mut lines = Vec::new();
+    if let Some(phase) = status["phase"].as_str() {
+        match status["message"].as_str().filter(|m| !m.is_empty()) {
+            Some(message) => lines.push(format!("the operator reports phase {phase}: {message}")),
+            None => lines.push(format!("the operator reports phase {phase}")),
+        }
+    }
+    let started = status["instancesStarted"].as_u64().unwrap_or(0);
+    let failures = status["consecutiveFailures"].as_u64().unwrap_or(0);
+    if started > 0 {
+        lines.push(format!(
+            "{started} instance(s) started; {failures} ending(s) in a row soon after starting"
+        ));
+    }
+    let ending = &status["lastEnding"];
+    if ending.is_object() {
+        let kind = ending["kind"].as_str().unwrap_or("ended");
+        let exit = ending["exitCode"].as_i64().map(|c| format!(", exit {c}")).unwrap_or_default();
+        let ran = ending["ranSecs"].as_i64().map(|s| format!(" after {s}s")).unwrap_or_default();
+        lines.push(format!("last ending: {kind}{exit}{ran}"));
+        if let Some(message) = ending["message"].as_str().filter(|m| !m.is_empty()) {
+            lines.push(format!("the instance said: {}", message.trim()));
+        }
+    }
+    lines
+}
+
+fn say(out: &mut dyn FnMut(String), line: impl Into<String>) {
+    out(line.into());
+}
+
+pub async fn up<C: Cluster>(
+    cluster: &C,
+    plan: &Plan,
+    options: &Options,
+    random: &mut dyn FnMut(usize) -> Vec<u8>,
+    out: &mut dyn FnMut(String),
+) -> Result<()> {
+    let problems = plan.problems();
+    if !problems.is_empty() {
+        bail!("plan '{}' cannot be run:\n  - {}", plan.name, problems.join("\n  - "));
+    }
+    let stages = plan.select(&options.with, &options.only)?;
+    say(out, format!("plan {}{}", plan.name, if options.dry_run { " (dry run: nothing is changed)" } else { "" }));
+    for stage in stages {
+        run_stage(cluster, stage, options, random, out).await?;
+    }
+    Ok(())
+}
+
+async fn run_stage<C: Cluster>(
+    cluster: &C,
+    stage: &Stage,
+    options: &Options,
+    random: &mut dyn FnMut(usize) -> Vec<u8>,
+    out: &mut dyn FnMut(String),
+) -> Result<()> {
+    let dry = options.dry_run;
+    say(out, format!("\n== {}{}", stage.name, stage.description.as_ref().map(|d| format!(" - {d}")).unwrap_or_default()));
+
+    if stage.install_crd {
+        cluster.install_crd(dry).await?;
+        say(out, "   installed the PolarAgent CRD");
+    }
+
+    if !stage.secrets.is_empty() {
+        let mut present = BTreeSet::new();
+        for secret in &stage.secrets {
+            if cluster.secret(&secret.namespace, &secret.name).await?.is_some() {
+                present.insert((secret.namespace.clone(), secret.name.clone()));
+            }
+        }
+        let mut copies = BTreeMap::new();
+        for source in secrets::copy_sources(&stage.secrets) {
+            if let Some(held) = cluster.secret(&source.namespace, &source.name).await?
+                && let Some(value) = held.get(&source.key)
+            {
+                copies.insert(source, value.clone());
+            }
+        }
+        for action in secrets::decide(&stage.secrets, &present, &copies, random)? {
+            match action {
+                Action::Exists { .. } => say(out, format!("   secret {} exists", action.name())),
+                Action::Create { namespace, name, data } => {
+                    cluster.create_secret(&namespace, &name, &data, dry).await?;
+                    let keys = data.keys().cloned().collect::<Vec<_>>().join(", ");
+                    say(out, format!("   secret {namespace}/{name} {} ({keys})", if dry { "would be created" } else { "created" }));
+                }
+            }
+        }
+    }
+
+    for object in &stage.objects {
+        let id = object.id().expect("a validated plan's objects have identities");
+        match cluster.apply(object, dry).await? {
+            Applied::Done => say(out, format!("   {} {id}", if dry { "would apply" } else { "applied" })),
+            Applied::UnknownKind => say(
+                out,
+                format!("   would apply {id} (its kind is installed by an earlier stage; a dry run cannot see it)"),
+            ),
+        }
+    }
+
+    for wait in &stage.waits {
+        if dry {
+            say(out, format!("   would wait for {} until {} = {}", wait.target(), wait.field, wait.equals));
+        } else {
+            wait_for(cluster, wait, options.poll, out).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn wait_for<C: Cluster>(
+    cluster: &C,
+    wait: &Wait,
+    poll: Duration,
+    out: &mut dyn FnMut(String),
+) -> Result<()> {
+    let id = wait.target();
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(wait.timeout_secs);
+    say(out, format!("   waiting for {id}: {} = {}", wait.field, wait.equals));
+    loop {
+        let current = cluster.get(&id).await?;
+        if let Some(object) = &current
+            && field_value(object, &wait.field).as_deref() == Some(wait.equals.as_str())
+        {
+            say(out, format!("   ready: {id} ({}s)", started.elapsed().as_secs()));
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let mut message = format!(
+                "timed out after {}s waiting for {id} to have {} = {}",
+                wait.timeout_secs, wait.field, wait.equals
+            );
+            match &current {
+                None => message.push_str("\n  it does not exist on the cluster"),
+                Some(object) => {
+                    let has = field_value(object, &wait.field).unwrap_or_else(|| "nothing".to_string());
+                    message.push_str(&format!("\n  it has {} = {has}", wait.field));
+                    if id.kind == "PolarAgent" {
+                        for line in explain_agent(object) {
+                            message.push_str(&format!("\n  {line}"));
+                        }
+                    }
+                }
+            }
+            bail!("{message}");
+        }
+        sleep(poll).await;
+    }
+}
+
+/// The plan backwards: each stage's objects, then its secrets, last stage first. The CRD stays.
+pub async fn down<C: Cluster>(cluster: &C, plan: &Plan, out: &mut dyn FnMut(String)) -> Result<()> {
+    say(out, format!("plan {} (taking it down)", plan.name));
+    for stage in plan.stages.iter().rev() {
+        say(out, format!("\n== {}", stage.name));
+        for object in stage.objects.iter().rev() {
+            let Some(id) = object.id() else { continue };
+            report_delete(out, &id.to_string(), cluster.delete(&id).await?);
+        }
+        for secret in stage.secrets.iter().rev() {
+            let name = format!("secret {}/{}", secret.namespace, secret.name);
+            report_delete(out, &name, cluster.delete_secret(&secret.namespace, &secret.name).await?);
+        }
+    }
+    say(out, "\nthe PolarAgent CRD is left in place: it may be shared, and removing it deletes every PolarAgent");
+    Ok(())
+}
+
+fn report_delete(out: &mut dyn FnMut(String), what: &str, result: Deleted) {
+    match result {
+        Deleted::Removed => say(out, format!("   deleted {what}")),
+        Deleted::Absent => say(out, format!("   {what} was not there")),
+    }
+}
+
+/// For callers that want the identity of a wait's target without building a plan.
+pub fn target(wait: &Wait) -> Id {
+    wait.target()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cluster::fake::Fake;
+    use crate::plan::Plan;
+    use serde_json::json;
+
+    const PLAN: &str = r#"
+name: demo
+stages:
+  - name: operator
+    installCrd: true
+    objects:
+      - { apiVersion: v1, kind: Namespace, metadata: { name: ops } }
+      - { apiVersion: apps/v1, kind: Deployment, metadata: { name: operator, namespace: ops } }
+    waits:
+      - { apiVersion: apps/v1, kind: Deployment, namespace: ops, name: operator, field: status.readyReplicas, equals: "1", timeoutSecs: 30 }
+  - name: platform
+    secrets:
+      - { namespace: demo, name: token, keys: { token: { random: 4 } } }
+    objects:
+      - { apiVersion: v1, kind: Namespace, metadata: { name: demo } }
+      - { apiVersion: polar.sei.cmu.edu/v1alpha1, kind: PolarAgent, metadata: { name: cassini, namespace: demo } }
+    waits:
+      - { apiVersion: polar.sei.cmu.edu/v1alpha1, kind: PolarAgent, namespace: demo, name: cassini, field: status.phase, equals: Running, timeoutSecs: 20 }
+  - name: graph
+    optional: true
+    objects:
+      - { apiVersion: v1, kind: Namespace, metadata: { name: graph } }
+"#;
+
+    fn counting() -> impl FnMut(usize) -> Vec<u8> {
+        let mut next = 0u8;
+        move |n| (0..n).map(|_| { next += 1; next }).collect()
+    }
+
+    fn ready() -> Box<dyn Fn(&Id, usize) -> Option<Json>> {
+        Box::new(|id, _| {
+            Some(match id.kind.as_str() {
+                "Deployment" => json!({ "status": { "readyReplicas": 1 } }),
+                _ => json!({ "status": { "phase": "Running" } }),
+            })
+        })
+    }
+
+    async fn run(cluster: &Fake, options: Options) -> (Result<()>, Vec<String>) {
+        let plan = Plan::from_yaml(PLAN).unwrap();
+        let mut lines = Vec::new();
+        let result = up(cluster, &plan, &options, &mut counting(), &mut |l| lines.push(l)).await;
+        (result, lines)
+    }
+
+    fn fast() -> Options {
+        Options { poll: Duration::from_millis(10), ..Options::default() }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stage_runs_crd_then_secrets_then_objects_then_waits_and_the_next_waits_for_it() {
+        let cluster = Fake { crd_kinds: vec!["PolarAgent".into()], ..Fake::default() }.with_script(ready());
+        let (result, _) = run(&cluster, fast()).await;
+        result.unwrap();
+        assert_eq!(
+            cluster.calls(),
+            [
+                "crd",
+                "apply Namespace ops",
+                "apply Deployment ops/operator",
+                "get Deployment ops/operator",
+                "secret demo/token [token]",
+                "apply Namespace demo",
+                "apply PolarAgent demo/cassini",
+                "get PolarAgent demo/cassini",
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_optional_stage_runs_only_when_asked_for() {
+        let cluster = Fake::default().with_script(ready());
+        run(&cluster, fast()).await.0.unwrap();
+        assert!(!cluster.calls().iter().any(|c| c.contains("Namespace graph")));
+
+        let cluster = Fake::default().with_script(ready());
+        run(&cluster, Options { with: vec!["graph".into()], ..fast() }).await.0.unwrap();
+        assert!(cluster.calls().iter().any(|c| c == "apply Namespace graph"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn running_it_again_makes_no_second_secret() {
+        let cluster = Fake::default().with_script(ready());
+        run(&cluster, fast()).await.0.unwrap();
+        let (result, lines) = run(&cluster, fast()).await;
+        result.unwrap();
+        assert_eq!(cluster.calls().iter().filter(|c| c.starts_with("secret demo/token")).count(), 1);
+        assert!(lines.iter().any(|l| l.contains("secret demo/token exists")), "{lines:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_looks_again_until_the_field_has_its_value() {
+        let cluster = Fake::default().with_script(Box::new(|id, n| {
+            Some(match id.kind.as_str() {
+                "Deployment" if n < 3 => json!({ "status": { "readyReplicas": 0 } }),
+                "Deployment" => json!({ "status": { "readyReplicas": 1 } }),
+                _ => json!({ "status": { "phase": "Running" } }),
+            })
+        }));
+        run(&cluster, fast()).await.0.unwrap();
+        let looks = cluster.calls().iter().filter(|c| *c == "get Deployment ops/operator").count();
+        assert_eq!(looks, 4, "three looks that were not ready, then one that was");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_that_times_out_says_what_the_operator_recorded() {
+        let cluster = Fake::default().with_script(Box::new(|id, _| {
+            Some(match id.kind.as_str() {
+                "Deployment" => json!({ "status": { "readyReplicas": 1 } }),
+                _ => json!({ "status": {
+                    "phase": "BackingOff",
+                    "message": "waiting out the backoff",
+                    "instancesStarted": 3,
+                    "consecutiveFailures": 3,
+                    "lastEnding": { "kind": "Exited", "exitCode": 1, "ranSecs": 4, "message": "no certificate: the issuer refused the token" }
+                } }),
+            })
+        }));
+        let (result, _) = run(&cluster, fast()).await;
+        let error = result.unwrap_err().to_string();
+        for expected in [
+            "timed out after 20s waiting for PolarAgent demo/cassini",
+            "it has status.phase = BackingOff",
+            "the operator reports phase BackingOff: waiting out the backoff",
+            "3 instance(s) started; 3 ending(s) in a row",
+            "last ending: Exited, exit 1 after 4s",
+            "the instance said: no certificate: the issuer refused the token",
+        ] {
+            assert!(error.contains(expected), "missing {expected:?} in:\n{error}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_wait_on_something_that_never_appears_says_so() {
+        let cluster = Fake::default().with_script(Box::new(|id, _| {
+            (id.kind == "Deployment").then(|| json!({ "status": { "readyReplicas": 1 } }))
+        }));
+        let error = run(&cluster, fast()).await.0.unwrap_err().to_string();
+        assert!(error.contains("it does not exist on the cluster"), "{error}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dry_run_changes_nothing_waits_for_nothing_and_says_what_it_cannot_see() {
+        let cluster = Fake { crd_kinds: vec!["PolarAgent".into()], ..Fake::default() };
+        let (result, lines) = run(&cluster, Options { dry_run: true, ..fast() }).await;
+        result.unwrap();
+        assert!(cluster.objects.borrow().is_empty() && cluster.secrets.borrow().is_empty());
+        assert!(!cluster.calls().iter().any(|c| c.starts_with("get ")), "a dry run waits for nothing");
+        let said = lines.join("\n");
+        assert!(said.contains("would apply Namespace ops"), "{said}");
+        assert!(said.contains("would apply PolarAgent demo/cassini (its kind is installed by an earlier stage"), "{said}");
+        assert!(said.contains("would wait for Deployment ops/operator"), "{said}");
+        assert!(said.contains("secret demo/token would be created"), "{said}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_plan_with_problems_is_refused_before_anything_is_touched() {
+        let cluster = Fake::default();
+        let mut plan = Plan::from_yaml(PLAN).unwrap();
+        plan.stages[1].waits[0].name = "nothing".into();
+        let error = up(&cluster, &plan, &fast(), &mut counting(), &mut |_| {}).await.unwrap_err().to_string();
+        assert!(error.contains("cannot be run") && error.contains("nothing"), "{error}");
+        assert!(cluster.calls().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_secret_value_reaches_the_output() {
+        let cluster = Fake::default().with_script(ready());
+        let (result, lines) = run(&cluster, fast()).await;
+        result.unwrap();
+        let held = cluster.secrets.borrow().values().next().unwrap().values().next().unwrap().clone();
+        assert_eq!(held, "01020304");
+        assert!(!lines.join("\n").contains(&held));
+        assert!(!cluster.calls().join("\n").contains(&held));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn down_is_the_plan_backwards_and_leaves_the_crd() {
+        let cluster = Fake::default().with_script(ready());
+        run(&cluster, Options { with: vec!["graph".into()], ..fast() }).await.0.unwrap();
+        cluster.calls.borrow_mut().clear();
+
+        let plan = Plan::from_yaml(PLAN).unwrap();
+        let mut lines = Vec::new();
+        down(&cluster, &plan, &mut |l| lines.push(l)).await.unwrap();
+        assert_eq!(
+            cluster.calls(),
+            [
+                "delete Namespace graph",
+                "delete PolarAgent demo/cassini",
+                "delete Namespace demo",
+                "delete secret demo/token",
+                "delete Deployment ops/operator",
+                "delete Namespace ops",
+            ]
+        );
+        assert!(lines.join("\n").contains("CRD is left in place"));
+        assert!(!cluster.calls().iter().any(|c| c.contains("crd")));
+    }
+
+    #[test]
+    fn a_field_is_found_by_its_dotted_path_and_compared_as_text() {
+        let object = json!({ "status": { "phase": "Running", "readyReplicas": 1, "ok": true, "list": [{ "name": "a" }] } });
+        assert_eq!(field_value(&object, "status.phase").as_deref(), Some("Running"));
+        assert_eq!(field_value(&object, "status.readyReplicas").as_deref(), Some("1"));
+        assert_eq!(field_value(&object, "status.ok").as_deref(), Some("true"));
+        assert_eq!(field_value(&object, "status.list.0.name").as_deref(), Some("a"));
+        assert_eq!(field_value(&object, "status.missing"), None);
+        assert_eq!(field_value(&object, "status"), None, "an object is not a value");
+    }
+}

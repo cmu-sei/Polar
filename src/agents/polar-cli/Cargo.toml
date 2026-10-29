@@ -1,0 +1,32 @@
+[package]
+name = "polar-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+# `polar`: administer a Polar deployment. It runs a plan the consumer declares in Dhall (see
+# src/deploy/types/plan.dhall) and reports on the agents the operator keeps alive. It knows nothing
+# about what is being deployed.
+[dependencies]
+anyhow.workspace = true
+clap = { workspace = true, features = ["env"] }
+k8s-openapi.workspace = true
+kube.workspace = true
+polar-operator-common.workspace = true
+rand.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+
+[lib]
+name = "polar_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "polar"
+path = "src/main.rs"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

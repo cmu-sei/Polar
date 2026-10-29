@@ -59,6 +59,7 @@ members = [
     "polar-health",
     "polar-healthcheck",
     "polar-init",
+    "polar-cli",
     "policy-config",
     "resolver",
     "build-processor",
