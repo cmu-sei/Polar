@@ -19,7 +19,7 @@ pub struct Plan {
     pub stages: Vec<Stage>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Stage {
     pub name: String,
@@ -28,6 +28,10 @@ pub struct Stage {
     /// Runs only when asked for (`--with <stage>`).
     #[serde(default)]
     pub optional: bool,
+    /// Belongs to every plan that includes it (the core): applied once however many plans have it,
+    /// and left in place by `down` unless asked.
+    #[serde(default)]
+    pub shared: bool,
     /// First install the PolarAgent CustomResourceDefinition, which the tool carries.
     #[serde(default)]
     pub install_crd: bool,
@@ -41,7 +45,7 @@ pub struct Stage {
 
 /// A Kubernetes object, as the plan wrote it. Kept as JSON: the tool applies what it is given and
 /// does not need to know every kind.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(transparent)]
 pub struct Object(pub Json);
 
@@ -100,7 +104,7 @@ impl fmt::Display for Id {
 }
 
 /// A Secret to make if it is absent.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Secret {
     pub namespace: String,
@@ -112,7 +116,7 @@ pub struct Secret {
 }
 
 /// Where a key gets its value. Told apart by field name: the Dhall union renders untagged.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum Value {
     Literal(Literal),
@@ -121,14 +125,14 @@ pub enum Value {
     Copy(Copy),
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Literal {
     pub literal: String,
 }
 
 /// Random bytes, as lower-case hex, optionally named so that a template can use the same value.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Random {
     pub random: usize,
@@ -137,14 +141,14 @@ pub struct Random {
 }
 
 /// Text with `{id}` replaced by the random value of that name.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Template {
     pub template: String,
 }
 
 /// The value of a key of a Secret that already exists.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Copy {
     pub copy: Source,
@@ -172,7 +176,7 @@ impl fmt::Debug for Value {
 }
 
 /// Wait until a field of an object has a value.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Wait {
     pub api_version: String,
@@ -244,6 +248,7 @@ impl Plan {
         let mut created: BTreeSet<Id> = BTreeSet::new();
         let mut secret_names: BTreeSet<(String, String)> = BTreeSet::new();
         let mut group_stage: BTreeMap<String, String> = BTreeMap::new();
+        let mut operator_installed = false;
 
         for stage in &self.stages {
             let at = format!("stage '{}'", stage.name);
@@ -254,6 +259,18 @@ impl Plan {
             }
             if stage.install_crd && stage.optional {
                 problems.push(format!("{at} installs the CRD and is optional: stages that need it would fail without it"));
+            }
+
+            // The operator is not optional: a PolarAgent is run by it, so a plan that has one must
+            // install the operator (the stage with `installCrd`) in this stage or an earlier one.
+            if stage.install_crd {
+                operator_installed = true;
+            }
+            if !operator_installed && stage.objects.iter().any(is_polar_agent) {
+                problems.push(format!(
+                    "{at} applies PolarAgents but no stage up to here installs the operator (a stage with installCrd). \
+                     A plan includes the core, which does"
+                ));
             }
 
             for object in &stage.objects {
@@ -387,6 +404,19 @@ impl Plan {
             .collect())
     }
 
+    /// Like [`Plan::select`], for one of several plans given names that may belong to any of them: a
+    /// name this plan does not have is simply not for it.
+    pub fn select_among(&self, with: &[String], only: &[String]) -> anyhow::Result<Vec<&Stage>> {
+        let mine = |names: &[String]| -> Vec<String> {
+            names.iter().filter(|n| self.stages.iter().any(|s| &s.name == *n)).cloned().collect()
+        };
+        // `--only` runs just the named stages: a plan with none of them has nothing to do.
+        if !only.is_empty() && mine(only).is_empty() {
+            return Ok(Vec::new());
+        }
+        self.select(&mine(with), &mine(only))
+    }
+
     /// Every object of every stage, in order, for reading a plan as data.
     pub fn objects(&self) -> impl Iterator<Item = &Object> {
         self.stages.iter().flat_map(|s| s.objects.iter())
@@ -397,6 +427,9 @@ impl Plan {
         let mut out = format!("plan {} ({} stages)\n", self.name, self.stages.len());
         for stage in &self.stages {
             out.push_str(&format!("\n== {}", stage.name));
+            if stage.shared {
+                out.push_str("  [shared]");
+            }
             if stage.optional {
                 out.push_str("  [optional: --with ");
                 out.push_str(&stage.name);
@@ -432,6 +465,11 @@ impl Plan {
         }
         out
     }
+}
+
+fn is_polar_agent(object: &Object) -> bool {
+    object.kind() == Some("PolarAgent")
+        && object.api_version().is_some_and(|v| v.starts_with("polar.sei.cmu.edu/"))
 }
 
 fn scope(group: &Option<String>) -> String {
@@ -574,6 +612,29 @@ stages:
         assert!(placeholders("}").is_err());
         assert!(placeholders("{}").is_err());
         assert!(placeholders("{a b}").is_err());
+    }
+
+    #[test]
+    fn a_plan_with_polar_agents_must_install_the_operator_first() {
+        let agents = "      - { apiVersion: polar.sei.cmu.edu/v1alpha1, kind: PolarAgent, metadata: { name: a, namespace: n } }\n";
+        let without = plan(&format!("name: p\nstages:\n  - name: s\n    objects:\n{agents}"));
+        let text = without.problems().join("\n");
+        assert!(text.contains("applies PolarAgents but no stage up to here installs the operator"), "{text}");
+
+        // After is no better than never: the operator must be there first.
+        let late = plan(&format!(
+            "name: p\nstages:\n  - name: s\n    objects:\n{agents}  - name: operator\n    installCrd: true\n"
+        ));
+        assert!(!late.problems().is_empty());
+
+        let with = plan(&format!(
+            "name: p\nstages:\n  - name: operator\n    installCrd: true\n  - name: s\n    objects:\n{agents}"
+        ));
+        assert_eq!(with.problems(), Vec::<String>::new());
+
+        // Plain objects need no operator.
+        let plain = plan("name: p\nstages:\n  - name: s\n    objects:\n      - { apiVersion: v1, kind: Namespace, metadata: { name: n } }\n");
+        assert_eq!(plain.problems(), Vec::<String>::new());
     }
 
     #[test]

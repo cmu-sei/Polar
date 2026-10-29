@@ -87,6 +87,7 @@ fn say(out: &mut dyn FnMut(String), line: impl Into<String>) {
     out(line.into());
 }
 
+/// Run one plan. See [`up_all`].
 pub async fn up<C: Cluster>(
     cluster: &C,
     plan: &Plan,
@@ -94,17 +95,66 @@ pub async fn up<C: Cluster>(
     random: &mut dyn FnMut(usize) -> Vec<u8>,
     out: &mut dyn FnMut(String),
 ) -> Result<()> {
-    let problems = plan.problems();
-    if !problems.is_empty() {
-        bail!("plan '{}' cannot be run:\n  - {}", plan.name, problems.join("\n  - "));
+    up_all(cluster, std::slice::from_ref(plan), options, random, out).await
+}
+
+/// Judge every plan before touching anything, then run them in order.
+///
+/// A stage that is `shared` (the core every application comes with) is applied once however many of
+/// the plans have it; the same name with different content in two plans is an error that names both,
+/// found before anything has been changed.
+pub async fn up_all<C: Cluster>(
+    cluster: &C,
+    plans: &[Plan],
+    options: &Options,
+    random: &mut dyn FnMut(usize) -> Vec<u8>,
+    out: &mut dyn FnMut(String),
+) -> Result<()> {
+    for plan in plans {
+        let problems = plan.problems();
+        if !problems.is_empty() {
+            bail!("plan '{}' cannot be run:\n  - {}", plan.name, problems.join("\n  - "));
+        }
     }
-    let stages = plan.select(&options.with, &options.only)?;
-    say(out, format!("plan {}{}", plan.name, if options.dry_run { " (dry run: nothing is changed)" } else { "" }));
-    // The namespaces this plan creates, so that a dry run, which creates none, can tell a namespace
+    let selected: Vec<Vec<&Stage>> =
+        plans.iter().map(|p| p.select_among(&options.with, &options.only)).collect::<Result<_>>()?;
+
+    // Shared stages by name: which plan has them first, and what they hold.
+    let mut shared: BTreeMap<&str, (&str, &Stage)> = BTreeMap::new();
+    for (plan, stages) in plans.iter().zip(&selected) {
+        for stage in stages.iter().filter(|s| s.shared) {
+            match shared.get(stage.name.as_str()) {
+                Some((first, held)) if *held != *stage => bail!(
+                    "the shared stage '{}' is in plan '{}' and in plan '{}' with different contents; \
+                     a shared stage is one thing, so the plans must agree on it",
+                    stage.name,
+                    first,
+                    plan.name
+                ),
+                Some(_) => {}
+                None => {
+                    shared.insert(&stage.name, (&plan.name, stage));
+                }
+            }
+        }
+    }
+
+    // The namespaces the plans create, so that a dry run, which creates none, can tell a namespace
     // that is missing because the plan has not got there from one that is missing by mistake.
     let mut planned = BTreeSet::new();
-    for stage in stages {
-        run_stage(cluster, stage, options, random, out, &mut planned).await?;
+    let mut applied: BTreeMap<&str, &str> = BTreeMap::new();
+    for (plan, stages) in plans.iter().zip(&selected) {
+        say(out, format!("plan {}{}", plan.name, if options.dry_run { " (dry run: nothing is changed)" } else { "" }));
+        for stage in stages {
+            if stage.shared {
+                if let Some(first) = applied.get(stage.name.as_str()) {
+                    say(out, format!("\n== {} - already applied by plan {first}", stage.name));
+                    continue;
+                }
+                applied.insert(&stage.name, &plan.name);
+            }
+            run_stage(cluster, stage, options, random, out, &mut planned).await?;
+        }
     }
     Ok(())
 }
@@ -267,9 +317,15 @@ async fn wait_for<C: Cluster>(
 }
 
 /// The plan backwards: each stage's objects, then its secrets, last stage first. The CRD stays.
-pub async fn down<C: Cluster>(cluster: &C, plan: &Plan, out: &mut dyn FnMut(String)) -> Result<()> {
+///
+/// A shared stage belongs to every plan that includes it, so it stays unless `core` is asked for.
+pub async fn down<C: Cluster>(cluster: &C, plan: &Plan, core: bool, out: &mut dyn FnMut(String)) -> Result<()> {
     say(out, format!("plan {} (taking it down)", plan.name));
     for stage in plan.stages.iter().rev() {
+        if stage.shared && !core {
+            say(out, format!("\n== {} - shared, left in place (--core takes it down too)", stage.name));
+            continue;
+        }
         say(out, format!("\n== {}", stage.name));
         for object in stage.objects.iter().rev() {
             let Some(id) = object.id() else { continue };
@@ -541,7 +597,7 @@ stages:
 
         let plan = Plan::from_yaml(PLAN).unwrap();
         let mut lines = Vec::new();
-        down(&cluster, &plan, &mut |l| lines.push(l)).await.unwrap();
+        down(&cluster, &plan, true, &mut |l| lines.push(l)).await.unwrap();
         assert_eq!(
             cluster.calls(),
             [
@@ -555,6 +611,90 @@ stages:
         );
         assert!(lines.join("\n").contains("CRD is left in place"));
         assert!(!cluster.calls().iter().any(|c| c.contains("crd")));
+    }
+
+    const CORE: &str = r#"
+name: {name}
+stages:
+  - name: operator
+    shared: true
+    installCrd: true
+    objects:
+      - { apiVersion: v1, kind: Namespace, metadata: { name: ops } }
+  - name: broker
+    shared: true
+    secrets:
+      - { namespace: core, name: token, keys: { token: { random: 4 } } }
+    objects:
+      - { apiVersion: v1, kind: Namespace, metadata: { name: core } }
+      - { apiVersion: polar.sei.cmu.edu/v1alpha1, kind: PolarAgent, metadata: { name: cassini, namespace: core } }
+  - name: app
+    objects:
+      - { apiVersion: polar.sei.cmu.edu/v1alpha1, kind: PolarAgent, metadata: { name: {name}-agent, namespace: core } }
+"#;
+
+    fn core_plan(name: &str) -> Plan {
+        Plan::from_yaml(&CORE.replace("{name}", name)).unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn two_plans_that_share_the_core_apply_it_once() {
+        let cluster = Fake { crd_kinds: vec!["PolarAgent".into()], ..Fake::default() };
+        let plans = [core_plan("blitz"), core_plan("ace")];
+        let mut lines = Vec::new();
+        up_all(&cluster, &plans, &fast(), &mut counting(), &mut |l| lines.push(l)).await.unwrap();
+
+        let calls = cluster.calls();
+        let count = |what: &str| calls.iter().filter(|c| *c == what).count();
+        assert_eq!(count("crd"), 1, "the core is installed once");
+        assert_eq!(count("apply PolarAgent core/cassini"), 1);
+        assert_eq!(count("apply PolarAgent core/blitz-agent"), 1);
+        assert_eq!(count("apply PolarAgent core/ace-agent"), 1, "each application's own stage runs");
+        let said = lines.join("\n");
+        assert!(said.contains("== operator - already applied by plan blitz"), "{said}");
+        assert!(said.contains("== broker - already applied by plan blitz"), "{said}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn plans_that_disagree_about_a_shared_stage_are_refused_before_anything_is_touched() {
+        let cluster = Fake::default();
+        let mut other = core_plan("ace");
+        other.stages[1].secrets[0].keys.clear();
+        other.stages[1].secrets[0].keys.insert(
+            "token".into(),
+            crate::plan::Plan::from_yaml("name: x\nstages:\n  - name: s\n    secrets:\n      - { namespace: n, name: a, keys: { token: { random: 9 } } }\n")
+                .unwrap()
+                .stages
+                .remove(0)
+                .secrets
+                .remove(0)
+                .keys
+                .remove("token")
+                .unwrap(),
+        );
+        let error = up_all(&cluster, &[core_plan("blitz"), other], &fast(), &mut counting(), &mut |_| {})
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("shared stage 'broker'") && error.contains("'blitz'") && error.contains("'ace'"), "{error}");
+        assert!(cluster.calls().is_empty(), "{:?}", cluster.calls());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn down_leaves_the_shared_stages_unless_the_core_is_asked_for() {
+        let cluster = Fake::default().with_script(ready());
+        let plan = core_plan("blitz");
+        up(&cluster, &plan, &fast(), &mut counting(), &mut |_| {}).await.unwrap();
+        cluster.calls.borrow_mut().clear();
+
+        let mut lines = Vec::new();
+        down(&cluster, &plan, false, &mut |l| lines.push(l)).await.unwrap();
+        assert_eq!(cluster.calls(), ["delete PolarAgent core/blitz-agent"], "only the application goes");
+        assert!(lines.join("\n").contains("shared, left in place"));
+
+        cluster.calls.borrow_mut().clear();
+        down(&cluster, &plan, true, &mut |_| {}).await.unwrap();
+        assert!(cluster.calls().iter().any(|c| c == "delete Namespace ops"), "{:?}", cluster.calls());
     }
 
     #[test]

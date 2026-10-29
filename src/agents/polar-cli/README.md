@@ -3,10 +3,10 @@
 Administer a Polar deployment from one place.
 
 ```sh
-polar plan  platform.yaml blitz.yaml                       # what would happen; needs no cluster
-polar up    platform.yaml blitz.yaml --context my-cluster  # do it, stage by stage, waiting for each
+polar plan  platform.yaml app.yaml                       # what would happen; needs no cluster
+polar up    platform.yaml app.yaml --context my-cluster  # do it, stage by stage, waiting for each
 polar status --context my-cluster                          # every agent, and why one is not running
-polar down  platform.yaml blitz.yaml --context my-cluster  # backwards; never the CRD
+polar down  platform.yaml app.yaml --context my-cluster  # backwards; never the CRD
 polar render plan.dhall -o out/                            # Dhall to YAML
 ```
 
@@ -69,7 +69,7 @@ creates.
 
 ## Several plans
 
-`polar up platform.yaml blitz.yaml` runs them in the order given; `down` takes them down in the reverse
+`polar up platform.yaml app.yaml` runs them in the order given; `down` takes them down in the reverse
 order. `--with` and `--only` apply to whichever plan has a stage of that name; a name no plan has is an
 error.
 

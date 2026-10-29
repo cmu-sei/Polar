@@ -60,6 +60,9 @@ enum Command {
         plans: Vec<PathBuf>,
         #[arg(long, env = "POLAR_CONTEXT")]
         context: String,
+        /// Also take down the shared stages (the core): other applications may stand on them
+        #[arg(long)]
+        core: bool,
     },
     /// Every PolarAgent: phase, instance, and why one is not running
     Status {
@@ -131,29 +134,17 @@ async fn run(cli: Cli) -> Result<()> {
             check_names(&loaded, &with, &only)?;
             let cluster = KubeCluster::connect(&context).await?;
             println!("using kube context: {context}");
-            for plan in &loaded {
-                let options = Options {
-                    with: names_in(plan, &with),
-                    only: names_in(plan, &only),
-                    dry_run,
-                    ..Options::default()
-                };
-                // `--only` runs just the named stages: a plan with none of them has nothing to do.
-                if !only.is_empty() && options.only.is_empty() {
-                    continue;
-                }
-                exec::up(&cluster, plan, &options, &mut |n| random_bytes(n), &mut print).await?;
-            }
-            Ok(())
+            let options = Options { with, only, dry_run, ..Options::default() };
+            exec::up_all(&cluster, &loaded, &options, &mut |n| random_bytes(n), &mut print).await
         }
-        Command::Down { plans, context } => {
+        Command::Down { plans, context, core } => {
             let mut loaded = load_all(&plans)?;
             let cluster = KubeCluster::connect(&context).await?;
             println!("using kube context: {context}");
             // Last plan first: a plan may stand on the one before it.
             loaded.reverse();
             for plan in &loaded {
-                exec::down(&cluster, plan, &mut print).await?;
+                exec::down(&cluster, plan, core, &mut print).await?;
             }
             Ok(())
         }
@@ -169,11 +160,6 @@ fn load_all(paths: &[PathBuf]) -> Result<Vec<Plan>> {
         bail!("name at least one plan");
     }
     paths.iter().map(|p: &PathBuf| load_plan(Path::new(p))).collect()
-}
-
-/// The names that belong to this plan, for `--with` and `--only` across several plans.
-fn names_in(plan: &Plan, names: &[String]) -> Vec<String> {
-    names.iter().filter(|n| plan.stages.iter().any(|s| &s.name == *n)).cloned().collect()
 }
 
 /// A stage name that no plan has is a mistake, however many plans there are.
