@@ -124,6 +124,10 @@ The broker runs without the rest of Polar, as documented there and checked step 
   (`lib/src/logging.rs`). Run without a collector, the client logs an export error.
 - [ ] **It does not subscribe**, so there is no tool to watch a topic; the tests and the in-cluster harness are the only
   subscribers.
+- [ ] **A guide to running an agent on its own** (asked by the maintainer, 2026-10-28; not urgent), beside the broker's:
+  for example the Kubernetes flow without a cluster, an agent pointed at a standalone broker and messages pushed through
+  it with `cassini-client`. To be worked out when it is written: what each agent needs besides the broker (the
+  consumer's Neo4j, the observer's Kubernetes API), the certificates and their topics, and the messages to push.
 - [ ] **Two warnings at every broker start**, harmless: the supervisor's "Received unexpected message!
   SetTopicManagerRef" (`subscriber.rs:197`) and the topic manager's "PublishRequest missing reply_to" for the broker's
   own authority snapshot request (`topic.rs:772`).
