@@ -244,7 +244,7 @@
 
   # Where the workload sends its traces: Jaeger's OTLP HTTP port. Every workload has it, from its
   # kind. How much it sends is its own: the `logging` section every agent declares (RUST_LOG for
-  # the console, POLAR_TRACE_FILTER for what is exported, both info unless a workload says more).
+  # the console, info, and POLAR_TRACE_FILTER for what is exported, warn, unless a workload says more).
   tracing: {
     pod: {
       env: [

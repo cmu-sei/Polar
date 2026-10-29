@@ -33,6 +33,11 @@
 use polar_env::{Config, ConfigError, Defaulted, Described, Optional, Section};
 
 pub const DEFAULT_FILTER: &str = "info";
+/// What is exported as traces when the deployment does not say. Only warnings: an `info` span the
+/// broker opens for each publish, exported, was 40% of its CPU and held 256 B messages to about
+/// 11,000 a second; at `warn` it carried 13,000 to 19,000 (docs/architecture/broker-baseline.md,
+/// 2026-10-29). A deployment raises it, per workload, when it wants more.
+pub const DEFAULT_TRACE_FILTER: &str = "warn";
 pub const DEFAULT_ENDPOINT: &str = "http://localhost:4318/v1/traces";
 
 pub static CONSOLE_FILTER: Defaulted<String> = Defaulted::text(
@@ -47,7 +52,7 @@ pub static TRACE_FILTER: Defaulted<String> = Defaulted::text(
     "POLAR_TRACE_FILTER",
     "which spans and events are exported as traces, in tracing's filter syntax; keep it narrow, \
      since every span it admits is sent",
-    DEFAULT_FILTER,
+    DEFAULT_TRACE_FILTER,
 )
 .dynamic();
 
@@ -302,10 +307,10 @@ mod tests {
     }
 
     #[test]
-    fn nothing_set_logs_at_info_and_exports_nothing() {
+    fn nothing_set_logs_at_info_admits_only_warnings_to_traces_and_exports_nothing() {
         let settings = LoggingSettings::read(&config(&[])).unwrap();
         assert_eq!(settings.console_filter, "info");
-        assert_eq!(settings.trace_filter, "info");
+        assert_eq!(settings.trace_filter, "warn");
         assert_eq!(settings.otlp_endpoint, None);
         assert!(config(&[]).check().is_empty());
     }

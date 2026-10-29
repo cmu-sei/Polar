@@ -326,6 +326,17 @@ Each fix was made test first, the test failing before it.
    four-producer, four-sink runs were four pods of one workload, each taking the others' sessions over as it registered;
    their one-second latency tails (the client's reconnection backoff), missing acknowledgements and losses were that. The
    baseline measures one connection until pods can have identities of their own.
+7. **Every publish's span was exported** (2026-10-29, u7c). The listener opens an `info` span for each publish
+   (`listener.rs`, `cassini.request.publish_request`) and carries it through the actors that handle the message; the
+   trace filter, `info` by default, admitted it, and every span it admits is recorded and batched for export, whether
+   or not a collector answers. Profiled with `perf record` on the broker's process, 256 B messages as fast as the
+   window allows (1,000,000 of them, Jaeger scaled to 0): tracing was 37 to 42% of the broker's CPU, on glibc and on
+   the musl branch's Scudo build alike, and no thread was busy (about 1.2 cores over seven workers; the work on a
+   message is close to serial, so a message's CPU sets the rate). With `POLAR_TRACE_FILTER` at `warn`, one run each:
+   glibc from 11,580 to 19,027 a second (96 to 50 µs of CPU a message), Scudo from 10,984 to 13,151 (108 to 70 µs).
+   The default is `warn` for every agent now (`polar::logging::DEFAULT_TRACE_FILTER`), raised per workload when more
+   is wanted. Tracing is still about a quarter of the CPU at `warn`: the console filter, `info`, still admits the span,
+   so it is still created and entered in each actor.
 
 Also fixed on the way: `polar-init`'s escrow bootstrap had no deadline, and one pod waited in its init container for
 eleven minutes (`8030abdd`); the harness keeps a failed run's logs and goes on (`87a643cf`); a resources file of one
