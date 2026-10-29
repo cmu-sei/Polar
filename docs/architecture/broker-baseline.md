@@ -336,8 +336,29 @@ some row. Read plainly, two kinds of "worse" are in that count:
   understate the noise; most of V2 to V4's "worse" rows are under 5%, and the 256 B saturated row, where V0 itself moved
   by 1,200, carries most of the rest.
 
-*Memory is where they differ most*, the other way round: the hardened allocators give memory back (V1 ends at about 20 MB,
-V5 at about 37, against glibc's 290 to 360 and jemalloc's 360 to 440); mimalloc holds about half what glibc does.
+*Memory is where they differ most*, the other way round. (Corrected 2026-10-29: this said "mimalloc holds about half what
+glibc does", which is true only after the heaviest runs.) The broker's working set after each run, in MB, rounds 1 and 2,
+from the records' `broker_usage` (selected rows):
+
+| load | V0 glibc | V1 mallocng | V2 musl, mimalloc | V3 jemalloc | V4 glibc, mimalloc | V5 Scudo |
+|---|---|---|---|---|---|---|
+| 256 B at 100/s | 14, 15 | 13, 13 | 75, 98 | 175, 176 | 130, 78 | 20, 22 |
+| 4 KiB at 1,000/s | 24, 28 | 16, 17 | 129, 117 | 179, 184 | 115, 100 | 26, 27 |
+| 64 KiB at 10,000/s | 42, 36 | 18, 20 | 142, 139 | 207, 202 | 128, 143 | 34, 35 |
+| 1 MiB at 100/s | 70, 63 | 21, 20 | 159, 159 | 214, 216 | 132, 146 | 37, 37 |
+| 1 MiB at 10,000/s | 160, 344 | 20, 20 | 152, 157 | 496, 424 | 140, 152 | 38, 38 |
+| 1 MiB saturated | 293, 362 | 20, 21 | 159, 181 | 437, 364 | 149, 165 | 36, 38 |
+
+And the peak, cAdvisor's `container_memory_max_usage_bytes`, the most the container has used since it started (so it only
+rises through a round): after the small-message rows V0 39, 37; V1 28, 29; V2 142, 144; V3 191, 197; V4 147, 119; V5
+37, 40. After every row: V0 366, 521; V1 233, 42; V2 323, 523; V3 552, 481; V4 374, 331; V5 51, 53.
+
+So mimalloc holds three to six times what glibc does under light load, and peaks no lower under heavy load; Scudo stays
+between 20 and 38 MB at every load and never passes 53. Part of Scudo's low peak is its lower throughput (fewer large
+messages in flight at once), but where every variant carries the same load (64 KiB at 10,000 a second, 1 MiB at 100) it
+is still at or below glibc. The broker is memory-bound where it will be installed (the maintainer, 2026-10-29: people will
+run it on machines with little memory, and less memory under heavy load is a stability gain), so memory, not throughput,
+decides.
 
 *The maintainer's prediction* ("all in the noise; it won't matter which configuration we use") holds for the fast
 allocators on musl or glibc: V2, V3 and V4 do not differ from glibc in what the broker carries. It does not hold for the
@@ -358,6 +379,42 @@ hardened ones, which cost large messages half their throughput, or for memory.
 
 *Not decided here:* which build the broker uses. One more candidate the results suggest: mimalloc's secure mode (guard
 pages, encrypted free lists), hardened at what its authors put at about 10%, which would be V6.
+
+## The second set: Scudo from LLVM 23, and smalloc (2026-10-29)
+
+*Why.* Memory decides (above), and on memory Scudo is the best of the first set; it cost large messages half their
+throughput. The `scudo` crates (0.1.3 and 0.2.2, the last releases, 2022-10-24) carry the Scudo of that year, with
+upstream's generic configuration fixed in. nixpkgs' LLVM 23.1.0 carries the current one, which takes a configuration of
+its own (`SCUDO_USE_CUSTOM_CONFIG`, the fields in `allocator_config.def`) and options at run time (`mallopt`:
+`M_CACHE_SIZE_MAX`, `M_CACHE_COUNT_MAX`, `M_DECAY_TIME`, `M_PURGE`, `M_TSDS_COUNT_MAX`). The likely cost of large messages
+is the large-block cache: upstream's default keeps no freed block over 512 KiB (`DefaultMaxEntrySize = 1UL << 19`), so
+every 1 MiB message is a fresh `mmap`, its page faults and a `munmap`; musl's mallocng maps large blocks the same way, and
+V1 fell to the same rate. The maintainer asked for Scudo's tunables to be tried, to bring it near mimalloc and glibc, and
+for smalloc (crates.io `smmalloc` 7.6.13, pure Rust, a slab a thread, no global lock) to be measured as it is.
+
+*The builds.* Every Polar binary is musl with mimalloc now (`99d41b81`), so the control is the broker every bring-up runs.
+
+| | build | allocator |
+|---|---|---|
+| V0 | glibc | its own malloc (the reference) |
+| V2 | musl | mimalloc (the control) |
+| S0 | musl | Scudo of LLVM 23.1.0, upstream's default configuration (`polar-scudo/configs/default`) |
+| S1 | musl | S0 with the large-block cache keeping blocks to 4 MiB, the quarantine compiled out (`configs/cache`) |
+| S2 | musl | S1 with thread caches shared (at most 8, as Android), freed memory released after 1 s, the futex condition variable (`configs/lean`) |
+| M0 | musl | smalloc as published |
+
+Scudo is compiled from nixpkgs' source by `polar-scudo` (build.rs: upstream's sources and flags, without exceptions, RTTI
+or the C++ library, the wrappers named `polar_scudo_*` so musl's own malloc keeps its name). Its tests run on it as their
+global allocator: alignment, zeroing and `realloc` as property tests, threads freeing each other's blocks, and which
+options each configuration takes; four mutants of the allocator were each caught. Where the source comes from for good
+(vendored, or nixpkgs) is decided only if Scudo is chosen. `cassini/experiment.nix` builds the six images.
+
+*The procedure.* As the first set's, on u7c with every other Polar binary on musl and mimalloc: both `polar-agents` and
+`polar-cassini` suspended, each variant set on the broker's Deployment and checked (its image running, the agents'
+sessions back, nothing refused), the baseline plan's 16 runs, two rounds, V0 S0 S1 S2 M0 V2 and again. No acceptance rule
+this time: every row's numbers are read as in the first set, memory first, then what S1 and S2 recover of throughput and
+CPU against V2 and V0. If smalloc shows an obvious lever (it has no options; its source is about 700 lines), a tuned M1
+is a later set.
 
 ## What measuring it found
 

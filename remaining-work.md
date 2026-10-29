@@ -602,6 +602,8 @@ NOTHING IS OPEN for path 1 now: steps 4 to 6 wait for the go-ahead. Path 2 (prop
   `submit` returns an error, which is the configuration handle's 5 s call timeout (`CALL_TIMEOUT`,
   `polar-agent-builder/src/configuration.rs:65`) running out while the suite's property tests load the machine. Seen
   2026-10-27, and as often at `1b00dfa1`, before that day's changes, so it is not theirs. Not fixed, and not weakened.
+  *2026-10-29:* it now fails every full run of the package, on glibc (3 of 3, at `eace0b00` plus the musl branch) and
+  built for musl (5 of 5); alone it passes, in 4.9 s on glibc and 5.6 to 5.9 s on musl, against the 5 s call timeout.
 
 - [x] The two credentials charts carry their shutdown numbers by hand (`infra/layers/2-services/credentials-agent/deployment.dhall`: consumer budget 50 s, grace 60 s; `observer.dhall`: observer 40 s and 50 s), until they move to the catalog, where both numbers are derived from one place. Until then nothing ties them to what the Rust code declares (`SHUTDOWN_BUDGET` in each supervisor) except the builder's startup check, which fails the pod, not the render. The catalog entries in the credentials pair remove the problem; a preflight check (see the health-rules item under the hygiene section) would also catch it before then. Found 2026-10-07. DONE 2026-10-09: the charts are gone; both numbers come from the agents' scaffolds (consumer 50 s, observer 40 s) and the grace period is derived
 - [ ] Admin `reissue` action: revoke old cert, return account to pending with the same `account_id`, holder reruns `claim` (provisioning an existing username is refused today: `AccountAlreadyExists`)
