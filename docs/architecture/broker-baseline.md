@@ -250,8 +250,8 @@ the most figures. Nothing is decided by this plan; it measures.
 | V1 | musl | mallocng | musl as it comes, hardened |
 | V2 | musl | mimalloc | fast, multi-threaded |
 | V3 | musl | jemalloc (`tikv-jemallocator`) | fast, multi-threaded |
-| V4 | glibc | mimalloc | optional: tells the libc's effect from the allocator's |
-| V5 | musl | Scudo | optional: a hardened allocator built for threads, if its crate builds on musl |
+| V4 | glibc | mimalloc | tells the libc's effect from the allocator's |
+| V5 | musl | Scudo | a hardened allocator built for threads (if its crate does not build on musl, that is the finding) |
 
 *How they are built,* on an experiment branch, not merged unless a variant is chosen:
 - The musl build of `cassini-server` as `polar-tools` already builds its static tools (`src/agents/polar-tools/package.nix`:
@@ -278,8 +278,9 @@ before the harness runs.
 *The procedure:* this document's, on precisionws and the five-node `u7c` with `sandbox-local`, once the arm64 publish has
 ended (its emulated builds would load the CPU through every run). The broker is on `core`, the harness's pods on
 `services` (`placement.md`), so `one_node` is false: the nodes are containers on one host, sharing its clock, to be
-confirmed before the latencies are read as one clock's. The order interleaved, two rounds, V0 V1 V2 V3 then V0 V1 V2 V3
-(and V4, V5 if run), so a drift through the session is not read as a difference: about four hours for the four.
+confirmed before the latencies are read as one clock's. The order interleaved, two rounds, V0 to V5 and
+then V0 to V5 again, so a drift through the session is not read as a difference: about six hours for the six.
+V4 and V5 are in (the maintainer, 2026-10-28).
 
 *Read with a rule set before the figures* (the maintainer to clear it):
 - A row's spread is the difference between V0's two runs of it.
