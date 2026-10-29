@@ -8,8 +8,8 @@
 use crate::crd::{Ending, EndingKind, PodOverlay, PolarAgent, PolarAgentSpec};
 use crate::lifecycle::{Instance, InstanceState};
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, ContainerStatus, EmptyDirVolumeSource, EnvVar, Pod, PodSpec,
-    SeccompProfile, SecurityContext, Volume, VolumeMount,
+    Capabilities, Container, ContainerStatus, EmptyDirVolumeSource, EnvVar, Pod, PodSecurityContext,
+    PodSpec, SeccompProfile, SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::{Resource, ResourceExt};
@@ -58,6 +58,13 @@ pub fn overlay_problems(spec: &PolarAgentSpec) -> Vec<String> {
 
     if overlay.run_as_user == Some(0) {
         problems.push("pod.runAsUser is 0: an agent never runs as root".to_string());
+    }
+    if let Some(policy) = &overlay.image_pull_policy
+        && !["Always", "IfNotPresent", "Never"].contains(&policy.as_str())
+    {
+        problems.push(format!(
+            "pod.imagePullPolicy is '{policy}': expected Always, IfNotPresent or Never"
+        ));
     }
 
     let mut volumes: Vec<&str> = vec![TMP_VOLUME];
@@ -144,6 +151,10 @@ pub fn build(agent: &PolarAgent, pod_name: &str, hash: &str) -> Pod {
         spec: Some(PodSpec {
             restart_policy: Some("Never".into()),
             service_account_name: Some(service_account(agent)),
+            security_context: overlay.fs_group.map(|group| PodSecurityContext {
+                fs_group: Some(group),
+                ..Default::default()
+            }),
             automount_service_account_token: Some(false),
             termination_grace_period_seconds: Some(
                 (spec.shutdown_budget_secs + GRACE_MARGIN_SECS).into(),
@@ -153,6 +164,7 @@ pub fn build(agent: &PolarAgent, pod_name: &str, hash: &str) -> Pod {
             containers: vec![Container {
                 name: CONTAINER.into(),
                 image: Some(spec.image.clone()),
+                image_pull_policy: overlay.image_pull_policy.clone(),
                 command: non_empty(&spec.command),
                 args: non_empty(&spec.args),
                 env: Some(env),
@@ -373,6 +385,8 @@ mod tests {
     fn overlay() -> PodOverlay {
         PodOverlay {
             run_as_user: Some(1000),
+            fs_group: Some(1000),
+            image_pull_policy: Some("IfNotPresent".into()),
             init_containers: vec![Container {
                 name: "polar-init".into(),
                 image: Some("polar-init:1".into()),
@@ -469,6 +483,8 @@ mod tests {
         assert_eq!(context.run_as_non_root, Some(true));
         assert_eq!(context.read_only_root_filesystem, Some(true));
         assert_eq!(spec.automount_service_account_token, Some(false));
+        assert_eq!(container.image_pull_policy.as_deref(), Some("IfNotPresent"));
+        assert_eq!(spec.security_context.as_ref().unwrap().fs_group, Some(1000));
     }
 
     #[test]
@@ -491,6 +507,7 @@ mod tests {
     fn every_problem_with_an_overlay_is_named() {
         let mut bad = overlay();
         bad.run_as_user = Some(0);
+        bad.image_pull_policy = Some("Sometimes".into());
         bad.volumes.push(Volume {
             name: "tmp".into(),
             ..Default::default()
@@ -530,6 +547,7 @@ mod tests {
         let problems = overlay_problems(&with_overlay(bad).spec).join("\n");
         for expected in [
             "runAsUser is 0",
+            "imagePullPolicy is 'Sometimes'",
             "a volume 'tmp'",
             "names 'certs' twice",
             "at /tmp",

@@ -59,13 +59,13 @@ let Platform =
           , polarInitImage : Text
           , polarInitEnv : List kubernetes.EnvVar.Type
           , tokenExpirySecs : Natural
-          , imageTag : Optional Text
+          , imagePullPolicy : Optional Text
           }
       , default =
         { audience = C.certIssuerAudience
         , polarInitEnv = [] : List kubernetes.EnvVar.Type
         , tokenExpirySecs = C.certTokenExpiry
-        , imageTag = None Text
+        , imagePullPolicy = None Text
         }
       }
 
@@ -124,6 +124,8 @@ let BuilderAgent =
 --| `PodOverlay`).
 let PodOverlay =
       { runAsUser : Natural
+      , fsGroup : Optional Natural
+      , imagePullPolicy : Optional Text
       , initContainers : List kubernetes.Container.Type
       , volumes : List kubernetes.Volume.Type
       , volumeMounts : List kubernetes.VolumeMount.Type
@@ -197,6 +199,7 @@ let polarInit
         kubernetes.Container::{
         , name = "polar-init"
         , image = Some platform.polarInitImage
+        , imagePullPolicy = platform.imagePullPolicy
         , args = Some
           [ "--check-dep-cert"
           , "${platform.cassiniAddr}:${Natural/show agent.health.depTtlSecs}"
@@ -260,6 +263,9 @@ let makePolarAgent
           , serviceAccount = agent.serviceAccount
           , pod =
             { runAsUser = agent.runAsUser
+            -- The group owns the volumes, so a claim is writable by the user the agent runs as.
+            , fsGroup = Some agent.runAsUser
+            , imagePullPolicy = platform.imagePullPolicy
             , initContainers = [ polarInit platform agent ]
             , volumes =
                   [ kubernetes.Volume::{

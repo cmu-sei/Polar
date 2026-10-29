@@ -78,6 +78,14 @@ pub struct PodOverlay {
     /// (65532). Never 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_as_user: Option<i64>,
+    /// The group that owns the pod's volumes, so that an agent running as a user other than root
+    /// can write to a claim it was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_group: Option<i64>,
+    /// `Always`, `IfNotPresent` or `Never`, for the agent's image. Left alone, Kubernetes pulls
+    /// a `latest` tag every time, which an image loaded into a node by hand cannot survive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_pull_policy: Option<String>,
     /// Containers that run to completion before the agent starts, such as the one that obtains
     /// its certificate. Each brings its own security context.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

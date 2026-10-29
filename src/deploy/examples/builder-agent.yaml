@@ -33,6 +33,7 @@ spec:
           secretKeyRef:
             key: password
             name: example-secret
+    fsGroup: 1000
     initContainers:
       - args:
           - "--check-dep-cert"
