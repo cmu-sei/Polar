@@ -1,14 +1,15 @@
 //! Running a plan.
 //!
 //! Within a stage the order is always the same, so a plan reads the way it runs: the CRD if asked
-//! for, then the secrets, then the objects, then the waits. The next stage starts when the waits of
+//! for, then the namespaces (everything else lives in one), then the secrets, then the other objects,
+//! then the waits. The next stage starts when the waits of
 //! this one have passed. `down` is the same plan backwards, and never removes the CRD.
 //!
 //! Written against [`Cluster`] and reporting through a callback, so the order, the waits and the
 //! reports are tested with no cluster and no terminal.
 
 use crate::cluster::{Applied, Cluster, Deleted};
-use crate::plan::{Id, Plan, Stage, Wait};
+use crate::plan::{Id, Object, Plan, Stage, Wait};
 use crate::secrets::{self, Action};
 use anyhow::{Result, bail};
 use serde_json::Value as Json;
@@ -99,10 +100,32 @@ pub async fn up<C: Cluster>(
     }
     let stages = plan.select(&options.with, &options.only)?;
     say(out, format!("plan {}{}", plan.name, if options.dry_run { " (dry run: nothing is changed)" } else { "" }));
+    // The namespaces this plan creates, so that a dry run, which creates none, can tell a namespace
+    // that is missing because the plan has not got there from one that is missing by mistake.
+    let mut planned = BTreeSet::new();
     for stage in stages {
-        run_stage(cluster, stage, options, random, out).await?;
+        run_stage(cluster, stage, options, random, out, &mut planned).await?;
     }
     Ok(())
+}
+
+fn is_namespace(object: &Object) -> bool {
+    object.api_version() == Some("v1") && object.kind() == Some("Namespace")
+}
+
+/// In a dry run: is this namespace one the plan creates and the cluster does not have yet? Then
+/// nothing in it can be judged by the cluster, and the tool says so instead of failing.
+async fn pending<C: Cluster>(cluster: &C, namespace: &str, planned: &BTreeSet<String>) -> Result<bool> {
+    if !planned.contains(namespace) {
+        return Ok(false);
+    }
+    let id = Id {
+        api_version: "v1".to_string(),
+        kind: "Namespace".to_string(),
+        namespace: None,
+        name: namespace.to_string(),
+    };
+    Ok(cluster.get(&id).await?.is_none())
 }
 
 async fn run_stage<C: Cluster>(
@@ -111,13 +134,22 @@ async fn run_stage<C: Cluster>(
     options: &Options,
     random: &mut dyn FnMut(usize) -> Vec<u8>,
     out: &mut dyn FnMut(String),
+    planned: &mut BTreeSet<String>,
 ) -> Result<()> {
     let dry = options.dry_run;
     say(out, format!("\n== {}{}", stage.name, stage.description.as_ref().map(|d| format!(" - {d}")).unwrap_or_default()));
 
     if stage.install_crd {
         cluster.install_crd(dry).await?;
-        say(out, "   installed the PolarAgent CRD");
+        say(out, if dry { "   would install the PolarAgent CRD" } else { "   installed the PolarAgent CRD" });
+    }
+
+    // Namespaces first: the secrets and most objects of the stage live in them.
+    for object in stage.objects.iter().filter(|o| is_namespace(o)) {
+        if let Some(name) = object.name() {
+            planned.insert(name.to_string());
+        }
+        apply_one(cluster, object, dry, None, out).await?;
     }
 
     if !stage.secrets.is_empty() {
@@ -139,23 +171,25 @@ async fn run_stage<C: Cluster>(
             match action {
                 Action::Exists { .. } => say(out, format!("   secret {} exists", action.name())),
                 Action::Create { namespace, name, data } => {
-                    cluster.create_secret(&namespace, &name, &data, dry).await?;
                     let keys = data.keys().cloned().collect::<Vec<_>>().join(", ");
+                    if dry && pending(cluster, &namespace, planned).await? {
+                        say(out, format!("   secret {namespace}/{name} would be created ({keys}); its namespace is created by this plan"));
+                        continue;
+                    }
+                    cluster.create_secret(&namespace, &name, &data, dry).await?;
                     say(out, format!("   secret {namespace}/{name} {} ({keys})", if dry { "would be created" } else { "created" }));
                 }
             }
         }
     }
 
-    for object in &stage.objects {
-        let id = object.id().expect("a validated plan's objects have identities");
-        match cluster.apply(object, dry).await? {
-            Applied::Done => say(out, format!("   {} {id}", if dry { "would apply" } else { "applied" })),
-            Applied::UnknownKind => say(
-                out,
-                format!("   would apply {id} (its kind is installed by an earlier stage; a dry run cannot see it)"),
-            ),
-        }
+    for object in stage.objects.iter().filter(|o| !is_namespace(o)) {
+        let namespace = if dry { object.namespace() } else { None };
+        let held_back = match namespace {
+            Some(ns) => pending(cluster, ns, planned).await?,
+            None => false,
+        };
+        apply_one(cluster, object, dry, held_back.then_some("its namespace is created by this plan"), out).await?;
     }
 
     for wait in &stage.waits {
@@ -164,6 +198,29 @@ async fn run_stage<C: Cluster>(
         } else {
             wait_for(cluster, wait, options.poll, out).await?;
         }
+    }
+    Ok(())
+}
+
+/// Apply one object and say what came of it. `hold_back` is why a dry run cannot ask the cluster.
+async fn apply_one<C: Cluster>(
+    cluster: &C,
+    object: &Object,
+    dry: bool,
+    hold_back: Option<&str>,
+    out: &mut dyn FnMut(String),
+) -> Result<()> {
+    let id = object.id().expect("a validated plan's objects have identities");
+    if let Some(why) = hold_back {
+        say(out, format!("   would apply {id} ({why}; a dry run cannot judge it)"));
+        return Ok(());
+    }
+    match cluster.apply(object, dry).await? {
+        Applied::Done => say(out, format!("   {} {id}", if dry { "would apply" } else { "applied" })),
+        Applied::UnknownKind => say(
+            out,
+            format!("   would apply {id} (its kind is installed by an earlier stage; a dry run cannot see it)"),
+        ),
     }
     Ok(())
 }
@@ -307,12 +364,61 @@ stages:
                 "apply Namespace ops",
                 "apply Deployment ops/operator",
                 "get Deployment ops/operator",
-                "secret demo/token [token]",
                 "apply Namespace demo",
+                "secret demo/token [token]",
                 "apply PolarAgent demo/cassini",
                 "get PolarAgent demo/cassini",
             ]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stages_namespaces_come_before_its_secrets_whatever_order_the_plan_lists_them() {
+        // The secret's namespace is an object of the same stage, listed after everything else.
+        let plan = Plan::from_yaml(
+            r#"
+name: p
+stages:
+  - name: s
+    secrets:
+      - { namespace: late, name: pw, keys: { k: { random: 2 } } }
+    objects:
+      - { apiVersion: apps/v1, kind: Deployment, metadata: { name: web, namespace: late } }
+      - { apiVersion: v1, kind: Namespace, metadata: { name: late } }
+"#,
+        )
+        .unwrap();
+        let cluster = Fake::default();
+        up(&cluster, &plan, &fast(), &mut counting(), &mut |_| {}).await.unwrap();
+        assert_eq!(cluster.calls(), ["apply Namespace late", "secret late/pw [k]", "apply Deployment late/web"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dry_run_does_not_fail_on_a_namespace_the_plan_has_yet_to_create() {
+        let plan = Plan::from_yaml(
+            r#"
+name: p
+stages:
+  - name: s
+    secrets:
+      - { namespace: later, name: pw, keys: { k: { random: 2 } } }
+    objects:
+      - { apiVersion: v1, kind: Namespace, metadata: { name: later } }
+      - { apiVersion: apps/v1, kind: Deployment, metadata: { name: web, namespace: later } }
+      - { apiVersion: apps/v1, kind: Deployment, metadata: { name: other, namespace: elsewhere } }
+"#,
+        )
+        .unwrap();
+        let cluster = Fake::default();
+        let mut lines = Vec::new();
+        up(&cluster, &plan, &Options { dry_run: true, ..fast() }, &mut counting(), &mut |l| lines.push(l)).await.unwrap();
+        let said = lines.join("\n");
+        assert!(said.contains("secret later/pw would be created (k); its namespace is created by this plan"), "{said}");
+        assert!(said.contains("would apply Deployment later/web (its namespace is created by this plan"), "{said}");
+        // A namespace the plan does not create is the cluster's to judge, as before.
+        let calls = cluster.calls();
+        assert!(calls.contains(&"apply Deployment elsewhere/other (dry run)".to_string()), "{calls:?}");
+        assert!(!calls.iter().any(|c| c.starts_with("secret ") || c.contains("later/web")), "{calls:?}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -393,10 +499,15 @@ stages:
         let (result, lines) = run(&cluster, Options { dry_run: true, ..fast() }).await;
         result.unwrap();
         assert!(cluster.objects.borrow().is_empty() && cluster.secrets.borrow().is_empty());
-        assert!(!cluster.calls().iter().any(|c| c.starts_with("get ")), "a dry run waits for nothing");
+        // It may look at whether a namespace exists yet; it never looks at anything it would wait for.
+        assert!(
+            !cluster.calls().iter().any(|c| c.starts_with("get ") && !c.starts_with("get Namespace")),
+            "a dry run waits for nothing"
+        );
         let said = lines.join("\n");
         assert!(said.contains("would apply Namespace ops"), "{said}");
-        assert!(said.contains("would apply PolarAgent demo/cassini (its kind is installed by an earlier stage"), "{said}");
+        assert!(said.contains("would apply PolarAgent demo/cassini (its namespace is created by this plan"), "{said}");
+        assert!(said.contains("would install the PolarAgent CRD"), "{said}");
         assert!(said.contains("would wait for Deployment ops/operator"), "{said}");
         assert!(said.contains("secret demo/token would be created"), "{said}");
     }

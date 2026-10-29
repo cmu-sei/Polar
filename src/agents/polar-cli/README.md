@@ -49,8 +49,9 @@ stages:
     objects: [ ... ]
 ```
 
-Within a stage the order is always the same, so a plan reads the way it runs: the CRD, the secrets, the
-objects, then the waits. The next stage starts when the waits have passed.
+Within a stage the order is always the same, so a plan reads the way it runs: the CRD, the namespaces
+(everything else lives in one), the secrets, the other objects, then the waits. The next stage starts
+when the waits have passed.
 
 | | |
 |---|---|
@@ -58,6 +59,9 @@ objects, then the waits. The next stage starts when the waits have passed.
 | **Secrets** | Made only when absent. A key's value is `{literal}`, `{random: bytes, id?}` (hex), `{template: "..{id}.."}` or `{copy: {namespace, name, key}}`. Secrets in one `group` are made together, sharing the random values they name, or not at all: a group that is partly there is an error that names both halves. Nothing prints a value |
 | **Waits** | Until `field` (a dotted path) of an object equals `equals`. When a wait on a `PolarAgent` times out, the tool prints what the operator recorded: the phase, its message, and how the last instance ended and what it said |
 | **Optional** | A stage with `optional: true` runs only with `--with <stage>`; `--only <stage>` runs just that one |
+
+`polar up --dry-run` has the API server judge each change without making it. Objects in a namespace the
+plan has yet to create are reported as such, not failed, since a dry run creates nothing.
 
 `polar plan` judges a plan without a cluster and names every problem at once: an object with no
 identity, a duplicate, a template that uses an id nothing defines, a wait on something the plan never

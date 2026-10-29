@@ -6,7 +6,8 @@
   consumer's own plan, and not decided by the library or the tool.
 
     Plan    a name and stages, run in order
-    Stage   secrets, then objects, then waits; the next stage starts when the waits have passed
+    Stage   the CRD if asked for, the namespaces, the secrets, the other objects, then the waits;
+            the next stage starts when the waits have passed
     Object  any Kubernetes object, or a PolarAgent, applied server-side so that running it again is
             a no-op
     Secret  made only when it is absent, with values that are never printed. Secrets in one `group`
