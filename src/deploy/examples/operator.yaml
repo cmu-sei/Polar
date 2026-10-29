@@ -85,6 +85,8 @@ spec:
       containers:
         - args:
             - run
+          command:
+            - polar-operator
           env: []
           image: registry.example/polar-operator:latest
           name: operator

@@ -154,7 +154,12 @@ let
       inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
       crateArgs = individualCrateArgs;
     };
+
+    polarOperator = import ./polar-operator/package.nix {
+      inherit pkgs craneLib workspaceFileset nix-container-lib inputs system;
+      crateArgs = individualCrateArgs;
+    };
 in
 {
-    inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor buildOrchestrator certIssuer nuInit gitServer polarInit;
+    inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor buildOrchestrator certIssuer nuInit gitServer polarInit polarOperator;
 }

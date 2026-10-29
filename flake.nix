@@ -197,6 +197,7 @@
           nuInitImage = polarPkgs.nuInit.image;
           gitServerImage = polarPkgs.gitServer.image;
           polarInitImage = polarPkgs.polarInit.image;
+          polarOperatorImage = polarPkgs.polarOperator.image;
         };
 
         devShells.default = container.devShell.overrideAttrs (old: {

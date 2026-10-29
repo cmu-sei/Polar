@@ -116,6 +116,11 @@ WHERE e.ran_secs < 30 AND e.exit_code <> 0
 RETURN a.name, d.name, e.exit_code, e.message, count(*) AS times
 ```
 
+## Image
+
+`nix build .#polarOperatorImage` (the image names its binary as a default command, not an entrypoint, so
+a Deployment gives `command` as well as `args`). `src/deploy/types/operator.dhall` renders the Deployment.
+
 ## Running it
 
 Only the operator, with no broker (lifecycle only):

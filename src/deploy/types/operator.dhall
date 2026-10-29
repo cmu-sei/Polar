@@ -121,6 +121,9 @@ let makeOperator
                         [ kubernetes.Container::{
                           , name = "operator"
                           , image = Some operator.image
+                          -- The image names its binary as a default command, not an entrypoint, so
+                          -- giving only `args` would replace it. Name both.
+                          , command = Some [ "polar-operator" ]
                           , args = Some [ "run" ]
                           , env = Some operator.env
                           , securityContext = Some kubernetes.SecurityContext::{
