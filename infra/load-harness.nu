@@ -32,7 +32,8 @@
 # per sink and per producer, each reading a copy of its workload's configuration document with the run's HARNESS_*
 # values in it, so the identity, image, certificate and topics stay the catalog's. The sinks start first; the producers
 # start once every sink has logged that the broker acknowledged its subscription. Each pod logs one result line; the
-# script keeps them, with the run, the commit, the broker's image and the nodes, in
+# script keeps them, with the run, the commit, the broker's image, the nodes and the broker's CPU and memory over the run
+# (from its node's kubelet), in
 # ~/.cache/polar/harness/<plan>-<time>.nuon (they hold only for the machine that made them), and deletes the Jobs.
 #
 # The pure parts are exported and tested (infra/tests/load-harness.nu); the rest asks the cluster.
@@ -43,6 +44,7 @@ const READY_MARK = "HARNESS LOAD READY"
 const RUN_LABEL = "polar.harness/run"
 # The broker's pods: a Deployment's, labelled with its name (docs/architecture/deployments.md, step 4).
 export const BROKER_SELECTOR = "name=cassini"
+const BROKER_CONTAINER = "cassini"
 # How many times a run's Job replaces a pod that failed.
 export const RETRIES = 2
 const ROOT = path self ..
@@ -185,6 +187,43 @@ export def is_ready [logs: string]: nothing -> bool {
     $logs | ansi strip | str contains $READY_MARK
 }
 
+# The broker's usage as the kubelet reports it: from its node's summary (`/stats/summary`), the cumulative CPU and the
+# memory now of the broker's container in pod `pod`, with when they were sampled (every 10 to 15 seconds); from cAdvisor's
+# metrics, the most memory its cgroup has held since the container started. Null when the summary has no such container.
+export def broker_usage_of [summary: record, metrics: string, pod: string]: nothing -> any {
+    let container = ($summary.pods? | default []
+        | where {|p| $p.podRef.namespace == $NAMESPACE and $p.podRef.name == $pod }
+        | get -o 0.containers | default [] | where name == $BROKER_CONTAINER | get -o 0)
+    if $container == null { return null }
+    let peak = ($metrics | lines
+        | where {|l| ($l | str starts-with "container_memory_max_usage_bytes{") and ($l | str contains $'container="($BROKER_CONTAINER)"') and ($l | str contains $'pod="($pod)"') }
+        | get -o 0 | default "" | split row "} " | get -o 1 | default "" | split row " " | first)
+    {
+        pod: $pod
+        at: ($container.cpu.time | into datetime)
+        cpu_ns: $container.cpu.usageCoreNanoSeconds
+        working_set: $container.memory.workingSetBytes
+        rss: $container.memory.rssBytes
+        peak: (if ($peak | is-empty) { null } else { $peak | into float | into int })
+    }
+}
+
+# What the broker used over one run, from a sample before it and one after: the CPU between them (seconds, and
+# microseconds a message received), and its memory at the end, in MB. Null unless both are samples of one container.
+export def run_usage [before: any, after: any, received: int]: nothing -> any {
+    if $before == null or $after == null { return null }
+    if $before.pod != $after.pod or $after.cpu_ns < $before.cpu_ns { return null }
+    let cpu_ns = ($after.cpu_ns - $before.cpu_ns)
+    let mb = {|b| if $b == null { null } else { $b / 1000000 | math round --precision 1 } }
+    {
+        cpu_s: ($cpu_ns / 1000000000 | math round --precision 2)
+        us_per_msg: (if $received > 0 { $cpu_ns / $received / 1000 | math round --precision 1 } else { null })
+        working_set_mb: (do $mb $after.working_set)
+        rss_mb: (do $mb $after.rss)
+        peak_mb: (do $mb $after.peak)
+    }
+}
+
 # One row per run: what was asked, what the producers reached, what the sinks received, the worst sink's latencies, and
 # what was lost or refused.
 export def summarise [records: list]: nothing -> list<record> {
@@ -210,6 +249,10 @@ export def summarise [records: list]: nothing -> list<record> {
             refused: (do $total $producers refused)
             reported: $"($r.results | length)/($r.run.producers + $r.run.sinks)"
             broker: ($r.run.broker? | default {} | transpose name value | each {|v| $"($v.name)=($v.value)" } | str join " ")
+            broker_cpu_s: ($r.broker_usage?.cpu_s? | default null)
+            broker_us_per_msg: ($r.broker_usage?.us_per_msg? | default null)
+            broker_ws_mb: ($r.broker_usage?.working_set_mb? | default null)
+            broker_peak_mb: ($r.broker_usage?.peak_mb? | default null)
             one_node: $r.one_node
             error: ($r.error? | default "")
         }
@@ -287,6 +330,31 @@ def broker_image [] {
     | each {|p| $p.status.containerStatuses? | default [] | get imageID } | flatten | first
 }
 
+# The broker's usage now, from its node's kubelet (the summary and cAdvisor), or null when it cannot be read: a run goes
+# on without it.
+def broker_usage [] {
+    try {
+        let pod = (kube get pods -l $BROKER_SELECTOR -o json | from json | get items
+            | where {|p| ($p.status.phase? | default "") == "Running" } | first)
+        let base = $"/api/v1/nodes/($pod.spec.nodeName)/proxy"
+        let summary = (^kubectl get --raw $"($base)/stats/summary" | from json)
+        let metrics = (^kubectl get --raw $"($base)/metrics/cadvisor")
+        broker_usage_of $summary $metrics $pod.metadata.name
+    } catch { null }
+}
+
+# A sample of the broker's usage taken after `since`: the kubelet samples every 10 to 15 seconds, so the last seconds of a
+# run are in only a later sample. Null after a minute without one.
+def broker_usage_after [since: datetime] {
+    let deadline = ((date now) + 1min)
+    loop {
+        let u = (broker_usage)
+        if $u != null and $u.at > $since { return $u }
+        if (date now) > $deadline { return null }
+        sleep 3sec
+    }
+}
+
 # Restarts the broker reading `document` in its ConfigMap `config_map`, and waits for it to be ready. Only with Flux
 # suspended, as the procedure has it for measuring (docs/architecture/broker-baseline.md), or Flux would put the
 # rendered one back; resuming it does, after a run that failed before it could.
@@ -325,6 +393,7 @@ def run_one [run: record, templates: record, kept: string] {
     }
     let container = {|p| $"harness-($p.role)" }
     try {
+        let before = (broker_usage)
         let sinks = ($parts | where role == "sink")
         $sinks | each {|p| do $start $p } | ignore
         wait_for "every sink to be ready" 10min {||
@@ -333,10 +402,14 @@ def run_one [run: record, templates: record, kept: string] {
         $parts | where role == "producer" | each {|p| do $start $p } | ignore
         let longest = ($run.idle_secs + $run.first_wait_secs + ($run.count // ([$run.rate 1] | math max)) + 300)
         wait_for "every producer and sink to finish" ($longest * 1sec) {|| $parts | all {|p| finished $p.name } }
+        let ended = (date now)
         let results = ($parts | each {|p| parse_results (logs_of $p.name (do $container $p)) } | flatten)
         let nodes = ($parts | each {|p| node_of $p.name } | uniq)
         remove_run $run.id
-        { run: $run, results: $results, nodes: $nodes, one_node: (($nodes | length) == 1) }
+        let received = ($results | where role == "sink" | reduce --fold 0 {|r, acc| $acc + $r.received })
+        let usage = (run_usage $before (broker_usage_after $ended) $received)
+        if $usage == null { print -e "  the broker's usage could not be read for this run" }
+        { run: $run, results: $results, nodes: $nodes, one_node: (($nodes | length) == 1), broker_usage: $usage }
     } catch {|e|
         let dir = ($kept | path join $run.id)
         try { keep_failed $run.id $parts $dir } catch {|k| print -e $"  could not keep the failed run's logs: ($k.msg)" }

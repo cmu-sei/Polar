@@ -221,6 +221,57 @@ def main [] {
                 assert equal [$failed.p99_ms $failed.lost $failed.reported $failed.error] [0 0 "0/4" "timed out"]
             }
         }
+        {
+            name: "the broker's usage is its own container's, from its node's summary and cAdvisor's peak"
+            body: {
+                let container = {|name, cpu, ws|
+                    { name: $name, cpu: { time: "2026-10-28T20:00:15Z", usageCoreNanoSeconds: $cpu },
+                      memory: { time: "2026-10-28T20:00:15Z", workingSetBytes: $ws, rssBytes: ($ws - 1000) } }
+                }
+                let summary = { pods: [
+                    { podRef: { namespace: "other", name: "cassini-a" }, containers: [(do $container "cassini" 1 1)] }
+                    { podRef: { namespace: "polar", name: "cassini-a" }, containers: [(do $container "polar-custody" 5 50) (do $container "cassini" 30000000000 32000000)] }
+                ] }
+                let metrics = ([
+                    "# TYPE container_memory_max_usage_bytes gauge"
+                    'container_memory_max_usage_bytes{container="polar-custody",namespace="polar",pod="cassini-a"} 9e+06 1793236689246'
+                    'container_memory_max_usage_bytes{container="cassini",namespace="polar",pod="cassini-b"} 7e+07 1793236689246'
+                    'container_memory_max_usage_bytes{container="cassini",id="/k8s.io/x",namespace="polar",pod="cassini-a"} 4.4920832e+07 1793236689246'
+                ] | str join "\n")
+                let u = (broker_usage_of $summary $metrics "cassini-a")
+                assert equal $u { pod: "cassini-a", at: ("2026-10-28T20:00:15Z" | into datetime), cpu_ns: 30000000000, working_set: 32000000, rss: 31999000, peak: 44920832 }
+                assert equal (broker_usage_of $summary $metrics "cassini-z") null
+                assert equal (broker_usage_of $summary "" "cassini-a").peak null
+            }
+        }
+        {
+            name: "a run's broker usage is the CPU between two samples of one container, a message received, and its memory at the end"
+            body: {
+                let at = {|s| $"2026-10-28T20:00:($s)Z" | into datetime }
+                let before = { pod: "cassini-a", at: (do $at "00"), cpu_ns: 1000000000, working_set: 30000000, rss: 29000000, peak: 40000000 }
+                let after = { pod: "cassini-a", at: (do $at "45"), cpu_ns: 3500000000, working_set: 33000000, rss: 31000000, peak: 52000000 }
+                assert equal (run_usage $before $after 10000) { cpu_s: 2.5, us_per_msg: 250.0, working_set_mb: 33.0, rss_mb: 31.0, peak_mb: 52.0 }
+                assert equal (run_usage $before $after 0).us_per_msg null
+                assert equal (run_usage null $after 10) null
+                assert equal (run_usage $before null 10) null
+                # Another container, or the same one restarted (its counter begins again): not one run's CPU.
+                assert equal (run_usage $before ($after | update pod "cassini-b") 10) null
+                assert equal (run_usage $before ($after | update cpu_ns 10) 10) null
+                assert equal (run_usage $before ($after | update peak null) 10).peak_mb null
+            }
+        }
+        {
+            name: "a summary shows the broker's usage when the run has it, and nothing when it has not"
+            body: {
+                let run = ((expand { name: "p", runs: [{ producers: 1, sinks: 1, lanes: 1 }] }) | first)
+                let record = { run: $run, results: [(sink_result 0 0 3000000 10.0) (producer_result 0 0)], nodes: ["n1"], one_node: true }
+                let usage = { cpu_s: 2.5, us_per_msg: 250.0, working_set_mb: 33.0, rss_mb: 31.0, peak_mb: 52.0 }
+                let s = (summarise [($record | insert broker_usage $usage)] | first)
+                assert equal [$s.broker_cpu_s $s.broker_us_per_msg $s.broker_ws_mb $s.broker_peak_mb] [2.5 250.0 33.0 52.0]
+                let old = (summarise [$record] | first)
+                assert equal [$old.broker_cpu_s $old.broker_us_per_msg $old.broker_ws_mb $old.broker_peak_mb] [null null null null]
+            }
+        }
     ]
 
     let results = ($tests | each {|t|
