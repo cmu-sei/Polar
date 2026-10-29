@@ -75,6 +75,7 @@ use tools.nu
 use runtime.nu [container_runtime]
 use plan.nu [build_forwards, build_plan, deployed_charts, needs_runtime]
 use agent-pods.nu [delete_stale_namespaces]
+use preflight.nu [kubernetes_problem, openssl_problem]
 use cluster-registry.nu
 use registry.nu [node_registry]
 use apply.nu [any_pod_ready, changed_configmaps, changed_lines, config_users, gate_after, job_verdict, jobs_in, stale_images, stale_pod_images, stale_pod_report, workload_needs_restart]
@@ -340,6 +341,14 @@ def step_preflight [config: record, runtime_needed: bool] {
         fail $"cluster not reachable: ($nodes.stderr | str trim)"
     }
     ok $"cluster reachable, ($nodes.stdout | lines | length) node\(s\)"
+    let server = (do { ^kubectl version -o json } | complete)
+    let git_version = (try { $server.stdout | from json | get serverVersion.gitVersion } catch { "" })
+    let too_old = (kubernetes_problem $git_version)
+    if $too_old != null { fail $too_old }
+    ok $"Kubernetes ($git_version)"
+    let ssl = (do { ^openssl version } | complete)
+    let no_ext = (openssl_problem (if $ssl.exit_code == 0 { $ssl.stdout | str trim } else { "" }))
+    if $no_ext != null { fail $no_ext }
     if $runtime_needed {
         let rt = (try { container_runtime } catch {|e| fail $e.msg })
         ok $"container runtime: ($rt)"

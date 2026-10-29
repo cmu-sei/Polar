@@ -60,7 +60,7 @@ below).
 
 | # | Step | Script | Makes |
 |---|---|---|---|
-| 1 | preflight | `up.nu` | nothing. Checks the cluster answers and namespaces can be made, a container runtime exists when a step starts a container here (`--dev`, the deployment host), the SOPS files decrypt; deletes scratch namespaces an interrupted run left behind |
+| 1 | preflight | `up.nu` | nothing. Checks the cluster answers, runs Kubernetes 1.36 or later, and namespaces can be made, this machine's `openssl` is OpenSSL 1.1.1 or later (not macOS's LibreSSL; `infra/preflight.nu`), a container runtime exists when a step starts a container here (`--dev`, the deployment host), the SOPS files decrypt; deletes scratch namespaces an interrupted run left behind |
 | 1b | registry (`cluster.registry_in_cluster`) | `cluster-registry.nu ensure` | for a target whose registry is in its cluster: the storage chart (provisioner from upstream), namespace `polar-registry` with the registry (upstream image by digest, a claim on the target's class, a NodePort the nodes pull from at `localhost:<port>`), and the port-forward this machine pushes through. Applied by `up.nu`, never by Flux: everything Flux runs, its controllers included, is pulled from it |
 | 1c | import (`--import-from`) | `images.nu import` | the published images, Neo4j included, copied into the registry |
 | 2 | agent images (`--dev`) | `just registry-host-up`, `resolve.nu document-images`, `images.nu sync`, `nix build`, `skopeo` | the registry container; `result/IMAGE` archives; images in the registry |
