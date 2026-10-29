@@ -416,6 +416,76 @@ this time: every row's numbers are read as in the first set, memory first, then 
 CPU against V2 and V0. If smalloc shows an obvious lever (it has no options; its source is about 700 lines), a tuned M1
 is a later set.
 
+## The second set: the results (2026-10-29)
+
+*How it was run.* precisionws and `u7c`, `sandbox-local` brought up from `99d41b81` (every binary musl and mimalloc); the
+six brokers built from `e97f7708` and pushed as `cassini:exp2-<variant>`. Two rounds, V0 S0 S1 S2 M0 V2 and again, 06:23
+to 10:03. Every check passed (the right image running, 23 to 28 sessions back, nothing refused), every run ended on the
+broker it began with, and nothing was lost. Records: `~/.cache/polar/harness/baseline-20261029T062600.nuon` to
+`baseline-20261029T094452.nuon`, one a variant and round. Rounds 1 and 2 are given in that order throughout.
+
+| | V0 glibc | S0 Scudo, default | S1 Scudo, cache | S2 Scudo, lean | M0 smalloc | V2 musl, mimalloc |
+|---|---|---|---|---|---|---|
+| working set at the end | 63, 95 MB | 30, 42 MB | 65, 56 MB | **46, 47 MB** | 1,910, 2,063 MB | 179, 159 MB |
+| peak after the small-message rows | 45, 60 MB | 37, 47 MB | 37, 49 MB | **33, 45 MB** | 1,090, 1,199 MB | 123, 156 MB |
+| peak after every row | 139, 152 MB | 97, 59 MB | 85, 76 MB | **58, 69 MB** | 1,917, 2,074 MB | 223, 193 MB |
+| 1 MiB at 10,000/s, received | 1,672, 1,800 | 798, 779 | 1,616, 1,697 | 1,695, 1,789 | 1,384, 1,519 | 1,697, 1,524 |
+| 1 MiB saturated, received | 1,736, 1,736 | 813, 744 | 1,539, 1,693 | 1,669, 1,503 | 1,379, 1,451 | 1,639, 1,606 |
+| 1 MiB, CPU a message | 1.2 to 1.4 ms | 2.0 to 2.1 ms | 1.3 to 1.7 ms | 1.3 to 1.5 ms | 1.4 to 1.7 ms | 1.3 to 1.8 ms |
+| 1 MiB saturated, p99 | 50, 56 ms | 130, 159 ms | 59, 51 ms | 52, 52 ms | 57, 56 ms | 56, 78 ms |
+| 256 B saturated, received | 13,430, 12,075 | 10,971, 12,939 | 10,247, 11,887 | 10,143, 10,509 | 12,423, 12,639 | 12,519, 12,763 |
+| 256 B at 10,000/s, CPU a message | 104, 101 µs | 121, 118 µs | 122, 125 µs | 125, 134 µs | 149, 155 µs | 113, 118 µs |
+| messages lost | 0 | 0 | 0 | 0 | 0 | 0 |
+
+The working set after each run, in MB (selected rows, as the first set's):
+
+| load | V0 glibc | S0 | S1 | S2 | M0 smalloc | V2 mimalloc |
+|---|---|---|---|---|---|---|
+| 256 B at 100/s | 17, 33 | 20, 28 | 19, 26 | 17, 26 | 985, 1,126 | 98, 95 |
+| 4 KiB at 1,000/s | 30, 46 | 24, 34 | 23, 32 | 23, 32 | 1,072, 1,179 | 107, 134 |
+| 64 KiB at 10,000/s | 43, 54 | 28, 41 | 35, 38 | 24, 34 | 1,342, 1,471 | 132, 168 |
+| 1 MiB at 100/s | 70, 74 | 30, 41 | 40, 45 | 23, 35 | 1,508, 1,585 | 167, 171 |
+| 1 MiB at 10,000/s | 70, 75 | 31, 41 | 52, 68 | 41, 56 | 1,801, 1,910 | 175, 160 |
+| 1 MiB saturated | 63, 95 | 30, 42 | 65, 56 | 46, 47 | 1,910, 2,063 | 179, 159 |
+
+(Every row, for received, p99, CPU and working set, is in the records; the script that tabulates them is not kept.)
+
+*Memory.* S2 holds the least of any build at every load: 17 to 56 MB after each run, a peak of 58 and 69 MB, under half
+glibc's (139, 152) and about a third of mimalloc's (223, 193). S0 holds less still in its working set (30 to 42 MB), but
+peaks higher (97 in round 1), and carries half the large messages. S1 sits between them.
+
+*The large-block cache is the lever.* S0 repeats V5 of the first set: about 780 to 810 1 MiB messages a second, 2.0 ms
+of CPU each, a p99 of 130 to 159 ms when saturated. Keeping freed blocks to 4 MiB (S1, S2) brings each back to the fast
+builds: S2 carries 1,503 to 1,789 a second at 1.3 to 1.5 ms (V0 1,672 to 1,800 at 1.2 to 1.4; V2 1,524 to 1,697 at
+1.3 to 1.8), with V0's p99 (52 ms). Sharing the thread caches and releasing freed memory after a second (S2 against S1)
+costs large messages nothing and takes the peak down by about a fifth.
+
+*What it still costs: small messages.* At the set rates every build keeps up (received equals offered up to 10,000 a
+second at every size). Saturated with 256 B messages, S2 carries 10,143 and 10,509 a second against V0's 13,430 and
+12,075 and V2's 12,519 and 12,763, 15 to 20% fewer; and small messages cost 10 to 30% more CPU than on glibc (256 B at
+10,000 a second: 125, 134 µs against 104, 101, and V2's 113, 118). S0 and S1, whose thread caches are not shared, cost
+the same (118 to 125 µs), so the sharing is not the cause; most likely it is Scudo's own work on each allocation (the
+chunk header's checksum among it), which was not measured apart. The broker is already faster than it needs to be by a
+wide margin (the maintainer, 2026-10-29), so this is the cost to weigh against the memory.
+
+*smalloc: no.* It holds 985 and 1,126 MB after the first and lightest run (256 B at 100 a second) and 1.9 and 2.1 GB by
+the end, ten times mimalloc and thirty times S2, and carries fewer large messages (1,379 to 1,519 a second). On Linux it
+maps one region of about 70 TB of address space at start (`src/i/plat.rs`, `mmap` with `NORESERVE`) and has no
+`madvise` or `munmap`: memory it has touched is never given back. It has no options; nothing in it is a lever on that
+short of changing its design, so there is no M1.
+
+*Between the sets.* V0 held less here than in the first set (63 and 95 MB at the end against 293 and 362) and carried more
+1 MiB messages (1,672 to 1,800 against 1,254 to 1,352), on a cluster brought up afresh with every other binary on musl;
+V2's numbers moved less (179, 159 against 159, 181). glibc's malloc is the one that moved; why is not looked into. Only
+numbers from the same set are compared above.
+
+*Found on the way:* `polar-scheduler-observer` restarts whenever the broker does (12 times in the set, against its
+neighbours' 3, their hourly renewals): its health actor ends it on "cassini disconnected" where the other agents
+reconnect. Its own item.
+
+*Not decided here:* which build the broker uses. On memory, S2; on throughput of large messages, S2 is level with glibc and
+mimalloc; the price is 15 to 20% of small-message throughput at saturation and 10 to 30% of the CPU they cost.
+
 ## What measuring it found
 
 Each fix was made test first, the test failing before it.
