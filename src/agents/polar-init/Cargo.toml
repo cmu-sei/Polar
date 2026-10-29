@@ -27,6 +27,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+mimalloc.workspace = true
 cassini-client = { workspace = true }
 cert-issuer-common = { path = "../cert-issuer/common" }
 clap = { workspace = true }

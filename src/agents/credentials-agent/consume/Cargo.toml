@@ -25,6 +25,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+mimalloc.workspace = true
 cassini-backoff.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true

@@ -117,6 +117,9 @@ indexmap = "2.13"                                        # used in jira/common
 k8s-openapi = { version = "0.27", features = ["v1_35", "schemars"] }
 kube = { version = "3.1.0", default-features = false, features = ["client", "rustls-tls", "runtime", "derive"] }
 log = "0.4.29"                                            # used in jira/observe
+# Every binary's allocator (docs/architecture/broker-baseline.md, "musl and the allocators"): musl's own costs the
+# broker half its throughput on large messages; mimalloc carries what glibc does, in about half the memory.
+mimalloc = "0.1.52"
 notify = "7"
 # Our own fork, v0.9.0-rc.10 (the latest release) and one commit (branch `polar-v0.9.0-rc.10`): a connection can
 # take a rustls client configuration the caller made (`ConfigBuilder::with_rustls_config`), so a graph writer shows

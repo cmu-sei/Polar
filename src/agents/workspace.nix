@@ -23,8 +23,24 @@
 
 let
 
+    # Every binary is static, for musl on the architecture of `system`, as polar-tools always was
+    # (polar-tools/package.nix): crane with the musl target, pkgsStatic's cc as linker and C compiler, OpenSSL linked
+    # in. Each binary allocates with mimalloc (docs/architecture/broker-baseline.md, "musl and the allocators").
+    triple =
+        if system == "aarch64-linux" then "aarch64-unknown-linux-musl"
+        else "x86_64-unknown-linux-musl";
+
+    # cargo's spelling of the triple in variable names
+    tripleUnderscore = builtins.replaceStrings [ "-" ] [ "_" ] triple;
+    tripleUpper = lib.toUpper tripleUnderscore;
+
+    staticCC = pkgs.pkgsStatic.stdenv.cc;
+    staticCCBin = "${staticCC}/bin/${staticCC.targetPrefix}cc";
+    staticSsl = pkgs.pkgsStatic.openssl;
+
     craneLib = (crane.mkLib pkgs).overrideToolchain (p: p.rust-bin.nightly.latest.default.override {
         extensions = [ "rust-src" "rust-std" ];
+        targets = [ triple ];
     });
 
     src = craneLib.cleanCargoSource ./.;
@@ -37,14 +53,19 @@ let
         buildInputs = [ ];
 
         nativeBuildInputs = [
-        pkgs.openssl
         pkgs.pkg-config
         pkgs.cmake
-        pkgs.libgcc
-        pkgs.libclang
+        staticCC
         ];
 
-        PKG_CONFIG_PATH= "${pkgs.openssl.dev}/lib/pkgconfig";
+        CARGO_BUILD_TARGET = triple;
+        CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
+        "CARGO_TARGET_${tripleUpper}_LINKER" = staticCCBin;
+        "CC_${tripleUnderscore}" = staticCCBin;
+
+        OPENSSL_STATIC = "1";
+        OPENSSL_LIB_DIR = "${staticSsl.out}/lib";
+        OPENSSL_INCLUDE_DIR = "${staticSsl.dev}/include";
     };
 
     # Build *just* the cargo dependencies (of the entire workspace),

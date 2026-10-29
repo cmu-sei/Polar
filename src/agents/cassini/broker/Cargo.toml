@@ -26,6 +26,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+mimalloc.workspace = true
 rkyv = { workspace = true }
 polar = { path = "../../lib" }
 polar-health = { workspace = true }

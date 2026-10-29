@@ -28,6 +28,7 @@ description = "Observer agent for Jira — polls APIs, publishes updates via Cas
 
 [dependencies]
 base64.workspace = true
+mimalloc.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
 jira_common.workspace = true

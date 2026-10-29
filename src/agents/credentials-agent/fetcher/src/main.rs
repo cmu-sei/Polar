@@ -154,3 +154,7 @@ async fn run(args: Args) -> i32 {
     eprintln!("error: exhausted {MAX_ATTEMPTS} attempts, last error: {last_error}");
     2
 }
+
+// Every Polar binary allocates with mimalloc (docs/architecture/broker-baseline.md, "musl and the allocators").
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

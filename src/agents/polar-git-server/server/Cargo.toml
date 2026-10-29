@@ -26,6 +26,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+mimalloc.workspace = true
 polar-custody.workspace = true
 async-trait.workspace = true
 axum = "0.7"

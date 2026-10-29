@@ -26,6 +26,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+mimalloc.workspace = true
 cassini-types.workspace = true
 harness-common.workspace = true
 polar-agent-builder.workspace = true

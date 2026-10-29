@@ -337,3 +337,7 @@ fn mint_token(kid: &str, key: &rsa::RsaPrivateKey, subject: &str) -> String {
 
     encode(&header, &claims, &encoding_key).expect("encode JWT")
 }
+
+// Every Polar binary allocates with mimalloc (docs/architecture/broker-baseline.md, "musl and the allocators").
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

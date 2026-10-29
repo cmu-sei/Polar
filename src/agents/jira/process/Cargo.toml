@@ -26,6 +26,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+mimalloc.workspace = true
 async-global-executor = "3.1.0"
 cassini-types.workspace = true
 futures-lite.workspace = true

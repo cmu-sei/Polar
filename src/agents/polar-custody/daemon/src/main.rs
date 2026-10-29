@@ -223,3 +223,7 @@ mod tests {
         );
     }
 }
+
+// Every Polar binary allocates with mimalloc (docs/architecture/broker-baseline.md, "musl and the allocators").
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

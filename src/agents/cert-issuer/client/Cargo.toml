@@ -27,6 +27,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+mimalloc.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true
