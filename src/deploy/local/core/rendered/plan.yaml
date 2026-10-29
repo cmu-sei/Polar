@@ -7,13 +7,13 @@ stages:
       - apiVersion: v1
         kind: Namespace
         metadata:
-          name: polar-operator
+          name: polar
       - apiVersion: v1
         automountServiceAccountToken: true
         kind: ServiceAccount
         metadata:
           name: polar-operator
-          namespace: polar-operator
+          namespace: polar
       - apiVersion: rbac.authorization.k8s.io/v1
         kind: ClusterRole
         metadata:
@@ -69,12 +69,12 @@ stages:
         subjects:
           - kind: ServiceAccount
             name: polar-operator
-            namespace: polar-operator
+            namespace: polar
       - apiVersion: apps/v1
         kind: Deployment
         metadata:
           name: polar-operator
-          namespace: polar-operator
+          namespace: polar
         spec:
           replicas: 1
           selector:
@@ -116,16 +116,12 @@ stages:
         field: status.readyReplicas
         kind: Deployment
         name: polar-operator
-        namespace: polar-operator
+        namespace: polar
         timeoutSecs: 300
-  - description: "the polar namespace, the secrets, and the certificate issuer"
+  - description: "the secrets, and the certificate issuer"
     installCrd: false
     name: issuer
     objects:
-      - apiVersion: v1
-        kind: Namespace
-        metadata:
-          name: polar
       - apiVersion: v1
         automountServiceAccountToken: true
         kind: ServiceAccount

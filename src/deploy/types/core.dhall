@@ -15,6 +15,8 @@
   include the same core; its stages are `shared`, so they are applied once and are not taken down with
   one application.
 
+  Everything is in one namespace, `polar`, the operator included: the first stage creates it.
+
   The stages are in the order the core needs, each waiting on the one before: the operator and its CRD;
   the issuer, which every pod's init container asks for a certificate; Cassini; the credentials agent and
   its observer; the graph.
@@ -193,25 +195,17 @@ let core
         in  { platform = platform v
             , stages =
               [ P.operatorStage
-                  { namespace = "polar-operator"
+                  -- Beside everything else: the core lives in one namespace, the operator in it.
+                  { namespace = ns
                   , image = v.images.operator
                   , imagePullPolicy = v.imagePullPolicy
                   }
               , P.Stage::{
                 , name = "issuer"
-                , description = Some "the polar namespace, the secrets, and the certificate issuer"
+                , description = Some "the secrets, and the certificate issuer"
                 , shared = True
                 , secrets = [ P.randomSecret ns "cassini-shutdown-token" "token" 24 ] # graphSecrets
-                , objects =
-                      P.k8s
-                        (   [ kubernetes.Resource.Namespace
-                                kubernetes.Namespace::{
-                                , metadata = kubernetes.ObjectMeta::{ name = Some ns }
-                                }
-                            ]
-                          # issuer.resources
-                        )
-                    # P.agents [ issuer.agent ]
+                , objects = P.k8s issuer.resources # P.agents [ issuer.agent ]
                 , waits = [ P.waitForAgent ns "cert-issuer" ]
                 }
               , P.Stage::{

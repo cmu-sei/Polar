@@ -147,7 +147,8 @@ let randomSecret
           ]
         }
 
---| The stage that installs the operator: the CRD, then its namespace, access and Deployment.
+--| The stage that installs the operator: the CRD, then its namespace (created here, since it is the
+--| first stage), access and Deployment.
 let operatorStage
     : { namespace : Text, image : Text, imagePullPolicy : Optional Text } → Stage.Type
     = λ(v : { namespace : Text, image : Text, imagePullPolicy : Optional Text }) →

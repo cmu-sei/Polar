@@ -36,7 +36,7 @@ stages:
     installCrd: true                  # the PolarAgent CRD, which this tool carries
     objects: [ ... ]                  # applied server-side, so running it again changes nothing
     waits:
-      - { apiVersion: apps/v1, kind: Deployment, namespace: polar-operator, name: polar-operator,
+      - { apiVersion: apps/v1, kind: Deployment, namespace: polar, name: polar-operator,
           field: status.readyReplicas, equals: "1", timeoutSecs: 300 }
   - name: issuer
     secrets:                          # made only when absent; values never printed

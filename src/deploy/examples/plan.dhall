@@ -44,7 +44,7 @@ let example =
 in  { name = "example"
     , stages =
       [ P.operatorStage
-          { namespace = "polar-operator"
+          { namespace = "polar"
           , image = "registry.example/polar-operator:latest"
           , imagePullPolicy = None Text
           }

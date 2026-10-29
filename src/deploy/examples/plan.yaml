@@ -7,13 +7,13 @@ stages:
       - apiVersion: v1
         kind: Namespace
         metadata:
-          name: polar-operator
+          name: polar
       - apiVersion: v1
         automountServiceAccountToken: true
         kind: ServiceAccount
         metadata:
           name: polar-operator
-          namespace: polar-operator
+          namespace: polar
       - apiVersion: rbac.authorization.k8s.io/v1
         kind: ClusterRole
         metadata:
@@ -69,12 +69,12 @@ stages:
         subjects:
           - kind: ServiceAccount
             name: polar-operator
-            namespace: polar-operator
+            namespace: polar
       - apiVersion: apps/v1
         kind: Deployment
         metadata:
           name: polar-operator
-          namespace: polar-operator
+          namespace: polar
         spec:
           replicas: 1
           selector:
@@ -108,13 +108,14 @@ stages:
               serviceAccountName: polar-operator
     optional: false
     secrets: []
+    shared: true
     waits:
       - apiVersion: apps/v1
         equals: '1'
         field: status.readyReplicas
         kind: Deployment
         name: polar-operator
-        namespace: polar-operator
+        namespace: polar
         timeoutSecs: 300
   - description: the example agent and the secret it reads
     installCrd: false
@@ -238,6 +239,7 @@ stages:
             random: 16
         name: example-secret
         namespace: example
+    shared: false
     waits:
       - apiVersion: polar.sei.cmu.edu/v1alpha1
         equals: Running

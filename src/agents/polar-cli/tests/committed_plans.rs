@@ -46,7 +46,7 @@ fn the_core_runs_nothing_but_the_operator_as_a_plain_workload() {
             workloads.push(object.id().unwrap().to_string());
         }
     }
-    assert_eq!(workloads, ["Deployment polar-operator/polar-operator"], "everything else is a PolarAgent");
+    assert_eq!(workloads, ["Deployment polar/polar-operator"], "everything else is a PolarAgent");
 }
 
 #[test]
