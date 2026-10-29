@@ -41,6 +41,8 @@ const NAMESPACE = "polar"
 const RESULT_MARK = "HARNESS LOAD RESULT"
 const READY_MARK = "HARNESS LOAD READY"
 const RUN_LABEL = "polar.harness/run"
+# The broker's pods: a Deployment's, labelled with its name (docs/architecture/deployments.md, step 4).
+export const BROKER_SELECTOR = "name=cassini"
 # How many times a run's Job replaces a pod that failed.
 export const RETRIES = 2
 const ROOT = path self ..
@@ -281,7 +283,7 @@ def node_of [job: string] {
 }
 
 def broker_image [] {
-    kube get pods -l "job-name=cassini" -o json | from json | get items
+    kube get pods -l $BROKER_SELECTOR -o json | from json | get items
     | each {|p| $p.status.containerStatuses? | default [] | get imageID } | flatten | first
 }
 
@@ -294,11 +296,11 @@ def set_broker [config_map: record, document: record] {
     if not $suspended {
         error make { msg: "the broker's settings are changed for a run only with Flux's polar-agents suspended" }
     }
-    let before = (kube get pods -l "job-name=cassini" -o json | from json | get items | get metadata.name)
+    let before = (kube get pods -l $BROKER_SELECTOR -o json | from json | get items | get metadata.name)
     kube patch configmap $config_map.metadata.name --type merge -p ({ data: { "config.json": ($document | to json) } } | to json --raw) | ignore
-    kube delete pod -l "job-name=cassini" --wait=false | ignore
+    kube delete pod -l $BROKER_SELECTOR --wait=false | ignore
     wait_for "the broker to come back" 5min {||
-        kube get pods -l "job-name=cassini" -o json | from json | get items
+        kube get pods -l $BROKER_SELECTOR -o json | from json | get items
         | where {|p| not ($p.metadata.name in $before) }
         | any {|p| $p.status.conditions? | default [] | any {|c| $c.type == "Ready" and $c.status == "True" } }
     }

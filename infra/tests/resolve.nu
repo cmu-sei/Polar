@@ -305,6 +305,18 @@ def main [] {
         # Flux waits on what each layer's wait_for names, as deploy-objects.nu turns it into a health check; one that names
         # nothing the render makes fails the publish (2026-10-28: the targets still waited on Jobs that had become
         # Deployments). So every wait of the exemplar targets is checked against their render.
+        # The load harness finds the broker by its pods' labels, to read its image and restart it with a run's settings
+        # (2026-10-28: it still asked for job-name=cassini, which a Deployment's pods do not carry).
+        "the load harness's broker selector names the pods of the broker's rendered Deployment": {
+            use ../load-harness.nu [BROKER_SELECTOR]
+            let broker = (object_of "cassini" "sandbox-local")
+            assert equal $broker.kind "Deployment"
+            let labels = $broker.spec.template.metadata.labels
+            for kv in ($BROKER_SELECTOR | split row "," | each {|p| $p | split row "=" }) {
+                assert equal ($labels | get -o $kv.0) $kv.1 $"the broker's pods are not labelled ($kv.0)=($kv.1)"
+            }
+        }
+
         "every wait of a target's layers names a workload its render makes": {
             use ../deploy-objects.nu [health_check, documents, BOOTSTRAP_LAYERS]
             for t in [sandbox-local local-minimal] {
