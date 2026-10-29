@@ -942,6 +942,7 @@ dependencies = [
  "polar-health",
  "polar-policy",
  "polar-router",
+ "polar-scudo",
  "polar-signing",
  "proptest",
  "ractor",
@@ -950,6 +951,7 @@ dependencies = [
  "rkyv",
  "rsa 0.10.0-rc.18",
  "rustls",
+ "smmalloc",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -4567,6 +4569,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
+name = "mach-sys"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48460c2e82a3a0de197152fdf8d2c2d5e43adc501501553e439bf2156e6f87c7"
+dependencies = [
+ "fastrand",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6203,6 +6214,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "polar-scudo"
+version = "1.0.0"
+dependencies = [
+ "cc",
+ "proptest",
+]
+
+[[package]]
 name = "polar-sign"
 version = "1.0.0"
 dependencies = [
@@ -7701,6 +7720,17 @@ name = "smallvec"
 version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
+
+[[package]]
+name = "smmalloc"
+version = "7.6.13+59fa8012bfa1f62b849e83515f1be695230c3fd3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacde5607ba73f0f6094d1e9acf3723e113db43d11bbfad00f7f395eefc818c8"
+dependencies = [
+ "mach-sys",
+ "rustix",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "smol_str"

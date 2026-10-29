@@ -97,6 +97,7 @@ let
       ./Cargo.toml
       ./Cargo.lock
       ./gitlab/schema/src/gitlab.graphql
+      ./polar-scudo/configs
     ]);
 
     workspaceFileset = crate: lib.fileset.toSource {
@@ -214,11 +215,19 @@ let
       crateArgs = individualCrateArgs;
     };
 
+    # The allocator experiment's brokers (cassini/experiment.nix), on its branch only.
+    cassiniExperiment = import ./cassini/experiment.nix {
+      inherit pkgs crane craneLib workspaceFileset nix-container-lib inputs system;
+      crateArgs = individualCrateArgs;
+      healthcheckDrv = healthcheck;
+      cassiniImage = cassini.cassiniImage;
+    };
+
     polarTools = import ./polar-tools/package.nix {
       inherit pkgs crane workspaceFileset system;
       crateArgs = individualCrateArgs;
     };
 in
 {
-        inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer polarGitServer polarInit polarCustody polarTools healthcheck credentialsAgent secretHarness;
+        inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer polarGitServer polarInit polarCustody polarTools healthcheck credentialsAgent secretHarness cassiniExperiment;
 }

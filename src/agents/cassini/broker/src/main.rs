@@ -32,6 +32,23 @@ fn main() -> ExitCode {
     polar_agent_builder::run::<CassiniBroker>()
 }
 
-// Every Polar binary allocates with mimalloc (docs/architecture/broker-baseline.md, "musl and the allocators").
+// Every Polar binary allocates with mimalloc (docs/architecture/broker-baseline.md, "musl and the allocators"); the
+// broker's other allocators are for the experiment, one at a time (Cargo.toml's features).
+#[cfg(any(
+    all(feature = "alloc-mimalloc", feature = "alloc-scudo"),
+    all(feature = "alloc-mimalloc", feature = "alloc-smalloc"),
+    all(feature = "alloc-scudo", feature = "alloc-smalloc"),
+))]
+compile_error!("choose one allocator feature; the others need --no-default-features");
+
+#[cfg(feature = "alloc-mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(feature = "alloc-scudo")]
+#[global_allocator]
+static GLOBAL: polar_scudo::Scudo = polar_scudo::Scudo;
+
+#[cfg(feature = "alloc-smalloc")]
+#[global_allocator]
+static GLOBAL: smalloc::Smalloc = smalloc::Smalloc::new();

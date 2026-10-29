@@ -199,6 +199,9 @@
           cassiniImage         = polarPkgs.cassini.cassiniImage;
           cassiniProducerImage = polarPkgs.cassini.producerImage;
           cassiniSinkImage     = polarPkgs.cassini.sinkImage;
+          # The allocator experiment's brokers (src/agents/cassini/experiment.nix): .v0, .v2, .s0 to .s2 and .m0 are
+          # images, .servers the binaries.
+          cassiniExperiment    = polarPkgs.cassiniExperiment;
 
           # ── GitLab agent ─────────────────────────────────────────────────────
           gitlabObserverImage  = polarPkgs.gitlabAgent.observerImage;
