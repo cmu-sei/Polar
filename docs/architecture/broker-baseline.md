@@ -299,6 +299,66 @@ use." Where a difference would show first, if anywhere: CPU per message at the s
 the rate, the work to reach it is not), then the small-message "max" rows; the large-message "max" rows are the window
 over the rate, as above, and would hide an allocator.
 
+## musl and the allocators: the results (2026-10-28 and 29)
+
+*How it was run.* precisionws and the five-node `u7c`, `sandbox-local`, the experiment branch at `9d008b6e` (clean); the
+six brokers of `src/agents/cassini/experiment.nix`, all release builds, pushed as `cassini:exp-v0` to `exp-v5`. Two
+rounds of the baseline plan, V0 to V5 and V0 to V5 again, 23:05 to 02:25, each variant set on the broker's Deployment and
+checked first (the right image running, the agents' sessions back, nothing refused); every check passed, and every run
+ended on the broker it began with. Records: `~/.cache/polar/harness/baseline-20261028T230839.nuon` to
+`baseline-20261029T021055.nuon`, one a variant and round. Producer and sink both on `services`, the broker on `core`.
+
+*A first attempt was discarded.* The broker belongs to Flux's `polar-cassini`, not `polar-agents`, and the procedure above
+suspends only `polar-agents`: `polar-cassini` put the rendered broker back every ten minutes, partway through runs. The
+second attempt suspended both. (The harness's own guard in `set_broker` checks only `polar-agents` too: to fix.)
+
+| | V0 glibc | V1 musl, mallocng | V2 musl, mimalloc | V3 musl, jemalloc | V4 glibc, mimalloc | V5 musl, Scudo |
+|---|---|---|---|---|---|---|
+| 1 MiB at 10,000/s, received | 1,352, 1,254 | 775, 737 | 1,610, 1,555 | 1,601, 1,565 | 1,605, 1,620 | 751, 750 |
+| 1 MiB, CPU a message | 1.3 to 1.6 ms | 2.2 to 2.4 ms | 1.3 to 1.5 ms | 1.3 to 1.5 ms | 1.2 to 1.4 ms | 2.1 ms |
+| 256 B saturated, received | 13,889, 12,689 | 12,166, 10,960 | 12,022, 13,424 | 11,047, 11,014 | 13,479, 11,059 | 12,846, 10,917 |
+| working set at the end | 293, 362 MB | 20, 21 MB | 159, 181 MB | 437, 364 MB | 149, 165 MB | 36, 38 MB |
+| peak | 366, 521 MB | 233, 42 MB | 323, 523 MB | 552, 481 MB | 374, 331 MB | 51, 53 MB |
+| messages lost | 0 | **167,751, in two stalls** | 0 | 0 | 0 | 0 |
+| rows by the rule: same, better, worse (of 48) | | 12, 9, 27 | 23, 10, 15 | 24, 10, 14 | 26, 12, 10 | 17, 5, 26 |
+
+(The full per-row verdicts, with each row's spread, are in `~/.cache/polar/harness/exp-verdicts.nuon` beside the
+records.)
+
+*The rule, as cleared, applied as written:* no variant is acceptable, since each is worse than V0 beyond V0's spread on
+some row. Read plainly, two kinds of "worse" are in that count:
+- **Real, and large:** the two hardened allocators, V1 and V5, give up about half the throughput of 1 MiB messages
+  (about 750 a second against 1,250 to 1,625), cost 40 to 70% more CPU a message on large messages and 10 to 40% on
+  small ones, and V1 stalled twice. The fast allocators, V2 to V4, are within a few percent of V0 on throughput and CPU
+  almost everywhere.
+- **The rule's, with two runs:** where V0's two runs agreed almost exactly (the set rates' throughput, 1,000.1 and
+  1,000.1), any difference is "beyond the spread": V2 at 998.8 a second for 64 KiB at 1,000 is "worse" by 0.1%. Two runs
+  understate the noise; most of V2 to V4's "worse" rows are under 5%, and the 256 B saturated row, where V0 itself moved
+  by 1,200, carries most of the rest.
+
+*Memory is where they differ most*, the other way round: the hardened allocators give memory back (V1 ends at about 20 MB,
+V5 at about 37, against glibc's 290 to 360 and jemalloc's 360 to 440); mimalloc holds about half what glibc does.
+
+*The maintainer's prediction* ("all in the noise; it won't matter which configuration we use") holds for the fast
+allocators on musl or glibc: V2, V3 and V4 do not differ from glibc in what the broker carries. It does not hold for the
+hardened ones, which cost large messages half their throughput, or for memory.
+
+*Found on the way, each its own item:*
+- **V1's stalls.** Twice a producer's acknowledgements stopped mid-run (4 KiB at 10,000 a second in round 1, 4 KiB
+  saturated in round 2), with nothing refused, nothing logged and the broker up; the producer gave up after its 30 s
+  stall timeout. In round 2, two revocations ("every cached decision is stale") came within the producer's first second,
+  with kube-consumer rejuvenating. The broker decides each publish before reading the next (`listener.rs:694`), and after
+  a revocation asks the policy actor with no deadline (`ractor::rpc::call(..., None)`, `polar-agent-builder/src/authority.rs:367`):
+  a policy actor that is slow or stuck holds the connection silently. A likely mechanism, not a cause found; it may be
+  a race every variant has, at odds mallocng's slowness raises. To reproduce, test first, before anything is changed.
+- **Rejuvenations land in runs.** Six or eight agents renew together every 58 minutes or so (their pods began together);
+  each time they re-register with the broker inside some run. Small, and in every baseline before this one too.
+- **In the broker's log:** a client retrying every second with an expired certificate; handshakes with no certificate at
+  all; `kubernetes.cluster.consumer.Pod` and `polar.provenance.discovery` queueing with nobody subscribed.
+
+*Not decided here:* which build the broker uses. One more candidate the results suggest: mimalloc's secure mode (guard
+pages, encrypted free lists), hardened at what its authors put at about 10%, which would be V6.
+
 ## What measuring it found
 
 Each fix was made test first, the test failing before it.
