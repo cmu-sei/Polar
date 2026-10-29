@@ -25,14 +25,17 @@ a local cluster, and `plan.dhall` the core by itself. `rendered/plan.yaml` is th
 | `broker` | Cassini | the operator |
 | `credentials` | The credentials agent and its observer | the operator |
 | `graph` | A graph with a password; development grade (no TLS, so no certificate to go stale) | the operator (a `ServiceAgent`) |
+| `git` | The configuration git server (mTLS), which makes the `polar-schedules` repository and seeds it from its image | the operator |
+| `scheduler` | The scheduler's processor (records schedules in the graph) and its observer (watches the repository). Started after the git server: the observer ends if the server is not there | the operator |
 
 Secrets are made by `polar up`, when absent, with random values: `cassini-shutdown-token`, and
 `polar-graph-pw` with `neo4j-secret` (one password in two forms, made together).
 
 Cassini, the credentials agent and its observer take their certificates from the issuer directly and skip
 the escrow bootstrap, since they are what it travels through; every other agent is vouched for by the
-credentials agent. The issuer's issuance floor is off. The scheduler and the git server it needs are not in
-yet.
+credentials agent, the git server and the scheduler among them. The issuer's issuance floor is off. The git
+server answers only to the identities its access list names: the scheduler's observer, to read, which is why
+that agent's ServiceAccount is named `polar-scheduler-observer`.
 
 ## Do not run this beside another deployment of the same namespace
 

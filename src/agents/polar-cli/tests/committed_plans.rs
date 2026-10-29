@@ -15,7 +15,7 @@ fn the_core_plan_is_sound_and_has_the_stages_the_core_needs() {
     assert_eq!(plan.problems(), Vec::<String>::new());
 
     let names: Vec<_> = plan.stages.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names, ["operator", "issuer", "broker", "credentials", "graph"]);
+    assert_eq!(names, ["operator", "issuer", "broker", "credentials", "graph", "git", "scheduler"]);
     assert!(plan.stages[0].install_crd, "the first stage installs the operator and its CRD");
     assert!(plan.stages.iter().all(|s| s.shared), "everything in the core is shared");
     assert!(plan.stages.iter().all(|s| !s.optional), "the core is not optional");

@@ -42,6 +42,9 @@ let CoreValues =
               , credentialsAgent : Text
               , credentialsAgentObserver : Text
               , neo4j : Text
+              , gitServer : Text
+              , schedulerProcessor : Text
+              , schedulerObserver : Text
               }
           , imagePullPolicy : Optional Text
           , storageClass : Optional Text
@@ -162,6 +165,15 @@ let core
                    ]
                  }
 
+        -- The graph, as an agent that writes to it reads its settings. No certificate settings: the
+        -- development graph has no TLS.
+        let graphSettings =
+              [ setting "GRAPH_ENDPOINT" "bolt://polar-db-svc.${ns}.svc.cluster.local:7687"
+              , setting "GRAPH_DB" "neo4j"
+              , setting "GRAPH_USER" "neo4j"
+              , secretSetting "GRAPH_PASSWORD" "polar-graph-pw" "secret"
+              ]
+
         let credentialsAgent =
                 coreAgent
               // { name = "credentials-agent"
@@ -175,11 +187,8 @@ let core
                    [ setting "CREDENTIALS_AGENT_CERT_ISSUER_URL" certIssuerUrl
                    -- The graph is a projection of the ledger, and the agent runs without it; its
                    -- settings are required all the same.
-                   , setting "GRAPH_ENDPOINT" "bolt://polar-db-svc.${ns}.svc.cluster.local:7687"
-                   , setting "GRAPH_DB" "neo4j"
-                   , setting "GRAPH_USER" "neo4j"
-                   , secretSetting "GRAPH_PASSWORD" "polar-graph-pw" "secret"
                    ]
+                   # graphSettings
                  }
 
         let observer =
@@ -189,6 +198,83 @@ let core
                  , shutdownBudgetSecs = 40
                  , port = Some 8080
                  }
+
+        -- The configuration git server: smart HTTP over mTLS, a client certificate required of everyone.
+        -- It makes and seeds the repository itself, once, from a seed baked into its image, and answers
+        -- only to the identities its access list names: here, the scheduler's observer, to read.
+        let gitServerDns = "polar-git-server.${ns}.svc.cluster.local"
+
+        let gitServerDir = "/home/polar/git-server"
+
+        let schedulerObserverIdentity = "polar-scheduler-observer.${ns}.serviceaccount.cluster.local"
+
+        let gitServer =
+              Builder.BuilderAgent::{
+              , name = "polar-git-server"
+              , namespace = ns
+              , image = v.images.gitServer
+              , shutdownBudgetSecs = 45
+              , port = Some 8443
+              , data = Some
+                { claim = "polar-git-server-data"
+                , mountPath = "/var/lib/polar-git-server"
+                }
+              -- Its server certificate, besides the client certificate it uses to reach Cassini.
+              , extraCerts =
+                [ { name = "git-server-tls"
+                  , kind = Builder.CertKind.Server gitServerDns
+                  , dir = gitServerDir
+                  }
+                ]
+              , settings =
+                [ setting "POLAR_GIT_SERVER_CERT" "${gitServerDir}/cert.pem"
+                , setting "POLAR_GIT_SERVER_KEY" "${gitServerDir}/key.pem"
+                , setting "POLAR_GIT_SERVER_CA_CERT" "${gitServerDir}/ca.pem"
+                , setting "POLAR_GIT_SERVER_REPO_ROOT" "/var/lib/polar-git-server/repos"
+                , setting "POLAR_GIT_SERVER_PORT" "8443"
+                , setting
+                    "POLAR_GIT_SERVER_REPOS"
+                    "{\"admins\":[],\"repos\":[{\"name\":\"polar-schedules\",\"readers\":[\"${schedulerObserverIdentity}\"],\"writers\":[],\"seed\":\"polar-schedules\"}]}"
+                ]
+              }
+
+        -- The scheduler. The processor records schedules in the graph and tells the agents they affect;
+        -- the observer watches the schedules repository and publishes what changes in it.
+        let schedulerProcessor =
+              Builder.BuilderAgent::{
+              , name = "polar-scheduler-processor"
+              , namespace = ns
+              , image = v.images.schedulerProcessor
+              , provides = [ "cassini", "graph-write" ]
+              , shutdownBudgetSecs = 50
+              , settings = graphSettings
+              }
+
+        let schedulerObserver =
+              Builder.BuilderAgent::{
+              , name = "polar-scheduler-observer"
+              , namespace = ns
+              , image = v.images.schedulerObserver
+              , shutdownBudgetSecs = 20
+              -- The checkout of the schedules repository does not outlive the pod: it is cloned again.
+              , scratch =
+                [ { name = "checkout", mountPath = "/var/lib/polar-scheduler-observer" } ]
+              , settings =
+                [ setting
+                    "POLAR_SCHEDULER_REMOTE_URL"
+                    "https://${gitServerDns}:8443/polar-schedules.git"
+                , setting
+                    "POLAR_SCHEDULER_LOCAL_PATH"
+                    "/var/lib/polar-scheduler-observer/polar-schedules"
+                -- Its own certificate, the one it reaches Cassini with, is what the git server checks.
+                , setting "POLAR_SCHEDULER_GIT_CA_CERT" C.certPaths.ca
+                , setting "POLAR_SCHEDULER_GIT_CLIENT_CERT" C.certPaths.cert
+                , setting "POLAR_SCHEDULER_GIT_CLIENT_KEY" C.certPaths.key
+                , setting "POLAR_SCHEDULER_SYNC_INTERVAL" "300"
+                -- git wants a home to write to, and only /tmp is writable.
+                , setting "HOME" "/tmp"
+                ]
+              }
 
         let account = λ(name : Text) → kubernetes.Resource.ServiceAccount (Builder.makeServiceAccount ns name)
 
@@ -249,6 +335,38 @@ let core
                 , shared = True
                 , objects = P.k8s graph.resources # P.agents [ graph.agent ]
                 , waits = [ P.waitForAgent ns "polar-neo4j" ]
+                }
+              , P.Stage::{
+                , name = "git"
+                , description = Some "the configuration git server, which makes and seeds the schedules repository"
+                , shared = True
+                , objects =
+                      P.k8s
+                        [ account "polar-git-server"
+                        , kubernetes.Resource.PersistentVolumeClaim
+                            (Builder.makePvc ns "polar-git-server-data" "1Gi" v.storageClass)
+                        , kubernetes.Resource.Service (Builder.makeService ns "polar-git-server" 8443)
+                        ]
+                    # P.agents [ Builder.makePolarAgent (platform v) gitServer ]
+                , waits = [ P.waitForAgent ns "polar-git-server" ]
+                }
+              -- After the git server, and not with it: the observer ends if the server is not there,
+              -- and the operator holds an agent that ends too often too soon.
+              , P.Stage::{
+                , name = "scheduler"
+                , description = Some "the scheduler: its processor, and the observer that watches the schedules repository"
+                , shared = True
+                , objects =
+                      P.k8s
+                        [ account "polar-scheduler-processor", account "polar-scheduler-observer" ]
+                    # P.agents
+                        [ Builder.makePolarAgent (platform v) schedulerProcessor
+                        , Builder.makePolarAgent (platform v) schedulerObserver
+                        ]
+                , waits =
+                  [ P.waitForAgent ns "polar-scheduler-processor"
+                  , P.waitForAgent ns "polar-scheduler-observer"
+                  ]
                 }
               ]
             }

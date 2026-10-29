@@ -689,15 +689,25 @@ mod tests {
     }
 
     /// The core's own agents (`src/deploy/local/core`) and an ordinary one differ in exactly the ways the
-    /// core needs: the core's builder agents take their certificates from the issuer directly and do not
-    /// bootstrap an escrow key (Cassini is what the bootstrap travels through, the credentials agent is
-    /// what it asks); an ordinary agent does bootstrap, with the environment that needs. The core's
-    /// services (the issuer, the graph) are not builder agents and get none of it.
+    /// core needs: the agents the chain of trust stands on (Cassini and the credentials agents) take
+    /// their certificates from the issuer directly and do not bootstrap an escrow key (Cassini is what
+    /// the bootstrap travels through, the credentials agent is what it asks); the rest of the core (the
+    /// git server and the scheduler) are ordinary agents, vouched for and bootstrapping, like an
+    /// application's. The core's services (the issuer, the graph) are not builder agents and get none
+    /// of it.
     #[test]
     fn the_cores_agents_differ_from_an_ordinary_one_where_they_must() {
         // The least each agent's own `--scaffold` says it needs to drain.
-        let least_budget = [("cassini", 20), ("credentials-agent", 50), ("credentials-agent-observer", 40)];
+        let least_budget = [
+            ("cassini", 20),
+            ("credentials-agent", 50),
+            ("credentials-agent-observer", 40),
+            ("polar-git-server", 40),
+            ("polar-scheduler-processor", 45),
+            ("polar-scheduler-observer", 10),
+        ];
         let mut builder = 0;
+        let mut ordinary = Vec::new();
         let mut services = Vec::new();
         for mut agent in agents_in(include_str!("../../../../deploy/local/core/rendered/plan.yaml")) {
             agent.metadata.uid = Some("uid".into());
@@ -718,6 +728,13 @@ mod tests {
             assert!(agent.spec.shutdown_budget_secs >= least, "{name}: budget below what the agent declares");
             assert_eq!(init.command, Some(vec!["polar-init".to_string()]), "{name}: args alone would replace the image's command");
             let init_env: Vec<_> = init.env.as_ref().unwrap().iter().map(|e| (e.name.as_str(), e.value.as_deref())).collect();
+            if !["cassini", "credentials-agent", "credentials-agent-observer"].contains(&name.as_str()) {
+                assert!(init_env.iter().any(|(n, _)| *n == "POLAR_INIT_OBSERVER_URL"), "{name} is vouched for");
+                assert!(init_env.iter().any(|(n, _)| *n == "KUBERNETES_SA_TOKEN"), "{name} bootstraps its escrow key");
+                assert!(!init_env.iter().any(|(n, _)| *n == "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP"), "{name}");
+                ordinary.push((name, agent, pod));
+                continue;
+            }
             assert!(init_env.contains(&("POLAR_INIT_ISSUER", Some("cert-issuer"))), "{name} asks the issuer directly");
             assert!(init_env.contains(&("POLAR_INIT_SKIP_ESCROW_BOOTSTRAP", Some("true"))), "{name} skips the escrow bootstrap");
             assert!(!init_env.iter().any(|(n, _)| *n == "KUBERNETES_SA_TOKEN"), "{name} needs no escrow environment");
@@ -731,6 +748,30 @@ mod tests {
             builder += 1;
         }
         assert_eq!(builder, 3);
+
+        // The rest of the core. The git server has a second certificate, the one it answers clients
+        // with, named for its Service; the scheduler's observer is the identity the git server reads to.
+        let names: Vec<_> = ordinary.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, ["polar-git-server", "polar-scheduler-processor", "polar-scheduler-observer"]);
+        let (_, server, server_pod) = &ordinary[0];
+        let server_args = server_pod.init_containers.as_ref().unwrap()[0].args.as_ref().unwrap();
+        assert!(
+            server_args.iter().any(|a| a.starts_with("server:") && a.ends_with(":polar-git-server.polar.svc.cluster.local")),
+            "the git server's own certificate"
+        );
+        let repos = server_pod.containers[0]
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|e| e.name == "POLAR_GIT_SERVER_REPOS")
+            .and_then(|e| e.value.clone())
+            .expect("the repositories it serves");
+        let (_, observer, _) = &ordinary[2];
+        let reader = format!("{}.polar.serviceaccount.cluster.local", observer.metadata.name.clone().unwrap());
+        assert!(repos.contains(&format!("\"readers\":[\"{reader}\"]")), "the observer may read: {repos}");
+        assert_eq!(service_account(observer), "polar-scheduler-observer", "the identity the git server reads to");
+        assert!(server.spec.shutdown_budget_secs >= 40);
 
         // The services: the issuer and the graph.
         let names: Vec<_> = services.iter().map(|(n, _, _)| n.as_str()).collect();

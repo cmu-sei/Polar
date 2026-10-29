@@ -19,6 +19,9 @@ let values
         , credentialsAgent = "credentials-agent-consumer:latest"
         , credentialsAgentObserver = "credentials-agent-observer:latest"
         , neo4j = "neo4j:5.26.2"
+        , gitServer = "polar-git-server:latest"
+        , schedulerProcessor = "scheduler-processor:latest"
+        , schedulerObserver = "scheduler-observer:latest"
         }
       , imagePullPolicy = Some "IfNotPresent"
       , storageClass = None Text
