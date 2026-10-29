@@ -6,4 +6,6 @@
     ./cassini.dhall
 , functions =
     ./functions.dhall
+, operator =
+    ./operator.dhall
 }

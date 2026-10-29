@@ -126,6 +126,11 @@ Unlike the older functions, these take the namespace as a parameter; nothing her
 `polar`. Order of deployment, differences between environments and secrets are not the library's:
 a secret is only ever referenced, by name, through an `EnvVarSource` in `settings`.
 
+`types/operator.dhall` (exported as `Polar.operator`) renders the polar-operator itself: its
+ServiceAccount, a ClusterRole holding exactly what it calls on the API, and a one-replica
+`Recreate` Deployment. Its CustomResourceDefinition is generated from the operator's own types
+(`polar-operator crd`) and applied first. See `examples/operator.dhall`.
+
 ## Local Development
 
 ### Prerequisites
