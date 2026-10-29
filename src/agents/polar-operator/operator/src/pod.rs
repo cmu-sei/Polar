@@ -633,6 +633,7 @@ mod tests {
             );
 
             let init = &pod.init_containers.as_ref().unwrap()[0];
+            assert_eq!(init.command, Some(vec!["polar-init".to_string()]), "{name}: args alone would replace the image's command");
             let init_env: Vec<_> = init.env.as_ref().unwrap().iter().map(|e| (e.name.as_str(), e.value.as_deref())).collect();
             assert!(init_env.contains(&("POLAR_INIT_ISSUER", Some("cert-issuer"))), "{name} asks the issuer directly");
             assert!(init_env.contains(&("POLAR_INIT_SKIP_ESCROW_BOOTSTRAP", Some("true"))), "{name} skips the escrow bootstrap");
@@ -654,6 +655,7 @@ mod tests {
         let agent: PolarAgent = serde_yaml::from_str(example).unwrap();
         let pod = build(&agent, "example-1", &spec_hash(&agent.spec)).spec.unwrap();
         let init = &pod.init_containers.as_ref().unwrap()[0];
+        assert_eq!(init.command, Some(vec!["polar-init".to_string()]));
         let env: Vec<_> = init.env.as_ref().unwrap().iter().map(|e| e.name.as_str()).collect();
         for needed in ["POLAR_INIT_OBSERVER_URL", "KUBERNETES_SA_TOKEN", "TLS_CLIENT_CERT", "BROKER_ADDR", "CASSINI_SERVER_NAME"] {
             assert!(env.contains(&needed), "an ordinary agent's init container needs {needed}");

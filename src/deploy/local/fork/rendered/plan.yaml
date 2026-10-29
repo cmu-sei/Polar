@@ -395,6 +395,8 @@ stages:
               - args:
                   - "--cert"
                   - server:/home/polar/certs:ecdsa-p256:cassini-ip-svc.polar.svc.cluster.local
+                command:
+                  - polar-init
                 env:
                   - name: POLAR_INIT_ISSUER
                     value: cert-issuer
@@ -491,6 +493,8 @@ stages:
               - args:
                   - "--cert"
                   - client:/home/polar/certs:ecdsa-p256
+                command:
+                  - polar-init
                 env:
                   - name: POLAR_INIT_ISSUER
                     value: cert-issuer
@@ -578,6 +582,8 @@ stages:
               - args:
                   - "--cert"
                   - client:/home/polar/certs:ecdsa-p256
+                command:
+                  - polar-init
                 env:
                   - name: POLAR_INIT_ISSUER
                     value: cert-issuer

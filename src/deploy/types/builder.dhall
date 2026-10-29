@@ -286,6 +286,9 @@ let polarInit
         kubernetes.Container::{
         , name = "polar-init"
         , image = Some platform.polarInitImage
+        -- The image names its binary as a default command, not an entrypoint, so giving only
+        -- `args` would replace it and Kubernetes would try to run "--cert".
+        , command = Some [ "polar-init" ]
         , imagePullPolicy = platform.imagePullPolicy
         , args = Some
             (   ( if    agent.waitForBroker

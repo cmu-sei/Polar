@@ -169,6 +169,8 @@ stages:
                   - cassini-ip-svc.polar.svc.cluster.local:8080:300
                   - "--cert"
                   - client:/home/polar/certs:ecdsa-p256
+                command:
+                  - polar-init
                 env:
                   - name: POLAR_INIT_ISSUER
                     value: credentials-agent
