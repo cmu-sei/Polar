@@ -233,7 +233,7 @@ connection, so nothing it does is in these figures, as expected (`key-custody.md
 the other. One p99 stands out, 10 ms at 256 B and 100 a second: one slow message in 1,900, a p99 that is nearly the
 maximum. No duplicates, no messages out of order, in any run.
 
-## musl and the allocators: the plan (2026-10-28, for review)
+## musl and the allocators: the plan (2026-10-28, cleared)
 
 *Why:* static musl binaries are on the maintainer's list, for both amd64 and arm64, and they are what a seccomp filter
 applied at load needs (no dynamic loader mapping libraries executable at start; `runtime-attestation.md`). musl's own
@@ -292,6 +292,12 @@ V4 and V5 are in (the maintainer, 2026-10-28).
   arm64 node runs it (the tester's MacBook, as a smoke test, not a measurement).
 
 *Then:* the figures here, a recommendation, and the maintainer's decision; the agents follow the broker only after it.
+
+*Cleared (the maintainer, 2026-10-28):* the plan, with V4 and V5, and the rule as written. *The maintainer's prediction,*
+on record before any figure: "it's all 'in the noise' and for our purposes, it won't matter which configuration we
+use." Where a difference would show first, if anywhere: CPU per message at the set rates (the throughput is held by
+the rate, the work to reach it is not), then the small-message "max" rows; the large-message "max" rows are the window
+over the rate, as above, and would hide an allocator.
 
 ## What measuring it found
 
