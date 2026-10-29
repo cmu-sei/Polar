@@ -22,7 +22,8 @@ let observerUrl = "http://credentials-agent-observer.${namespace}.svc.cluster.lo
 
 in  { namespace
     , images =
-      { certIssuer = "cert-issuer:latest"
+      { operator = "polar-operator:latest"
+      , certIssuer = "cert-issuer:latest"
       , polarInit = "polar-init:latest"
       , cassini = "cassini:latest"
       , credentialsAgent = "credentials-agent-consumer:latest"

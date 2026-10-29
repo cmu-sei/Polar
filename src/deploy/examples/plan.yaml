@@ -1,0 +1,246 @@
+name: example
+stages:
+  - description: the PolarAgent CRD and the operator that keeps agents alive
+    installCrd: true
+    name: operator
+    objects:
+      - apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: polar-operator
+      - apiVersion: v1
+        automountServiceAccountToken: true
+        kind: ServiceAccount
+        metadata:
+          name: polar-operator
+          namespace: polar-operator
+      - apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: polar-operator
+        rules:
+          - apiGroups:
+              - polar.sei.cmu.edu
+            resources:
+              - polaragents
+            verbs:
+              - get
+              - list
+              - watch
+          - apiGroups:
+              - polar.sei.cmu.edu
+            resources:
+              - polaragents/status
+            verbs:
+              - get
+              - patch
+              - update
+          - apiGroups:
+              - ''
+            resources:
+              - pods
+            verbs:
+              - get
+              - list
+              - watch
+              - create
+              - delete
+          - apiGroups:
+              - ''
+            resources:
+              - serviceaccounts
+            verbs:
+              - get
+              - create
+          - apiGroups:
+              - ''
+            resources:
+              - namespaces
+            verbs:
+              - get
+      - apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: polar-operator
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: polar-operator
+        subjects:
+          - kind: ServiceAccount
+            name: polar-operator
+            namespace: polar-operator
+      - apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: polar-operator
+          namespace: polar-operator
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: polar-operator
+          strategy:
+            type: Recreate
+          template:
+            metadata:
+              labels:
+                app: polar-operator
+              name: polar-operator
+            spec:
+              containers:
+                - args:
+                    - run
+                  command:
+                    - polar-operator
+                  env: []
+                  image: registry.example/polar-operator:latest
+                  name: operator
+                  securityContext:
+                    allowPrivilegeEscalation: false
+                    capabilities:
+                      drop:
+                        - ALL
+                    readOnlyRootFilesystem: true
+                    runAsGroup: 65532
+                    runAsNonRoot: true
+                    runAsUser: 65532
+              serviceAccountName: polar-operator
+    optional: false
+    secrets: []
+    waits:
+      - apiVersion: apps/v1
+        equals: '1'
+        field: status.readyReplicas
+        kind: Deployment
+        name: polar-operator
+        namespace: polar-operator
+        timeoutSecs: 300
+  - description: the example agent and the secret it reads
+    installCrd: false
+    name: example
+    objects:
+      - apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: example
+      - apiVersion: v1
+        automountServiceAccountToken: false
+        kind: ServiceAccount
+        metadata:
+          name: example
+          namespace: example
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        kind: PolarAgent
+        metadata:
+          name: example
+          namespace: example
+        spec:
+          image: registry.example/example:latest
+          needs:
+            - cassini
+          pod:
+            env:
+              - name: TLS_CA_CERT
+                value: /home/polar/certs/ca.pem
+              - name: TLS_CLIENT_CERT
+                value: /home/polar/certs/cert.pem
+              - name: TLS_CLIENT_KEY
+                value: /home/polar/certs/key.pem
+              - name: BROKER_ADDR
+                value: cassini-ip-svc.polar.svc.cluster.local:8080
+              - name: CASSINI_SERVER_NAME
+                value: cassini.polar.serviceaccount.cluster.local
+              - name: POLAR_HEALTH_FILE
+                value: /tmp/polar-health.json
+              - name: POLAR_HEALTH_CERTS
+                value: /home/polar/certs/cert.pem
+              - name: POLAR_HEALTH_DEP_ENDPOINTS
+                value: cassini-ip-svc.polar.svc.cluster.local:8080:300
+              - name: EXAMPLE_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    key: password
+                    name: example-secret
+            fsGroup: 1000
+            initContainers:
+              - args:
+                  - "--check-dep-cert"
+                  - cassini-ip-svc.polar.svc.cluster.local:8080:300
+                  - "--cert"
+                  - client:/home/polar/certs:ecdsa-p256
+                env:
+                  - name: POLAR_INIT_ISSUER
+                    value: credentials-agent
+                  - name: POLAR_INIT_OBSERVER_URL
+                    value: http://credentials-agent-observer.polar.svc.cluster.local:8080
+                  - name: POLAR_INIT_TOKEN_PATH
+                    value: /workspace/token
+                  - name: TLS_CA_CERT
+                    value: /home/polar/certs/ca.pem
+                  - name: TLS_CLIENT_CERT
+                    value: /home/polar/certs/cert.pem
+                  - name: TLS_CLIENT_KEY
+                    value: /home/polar/certs/key.pem
+                  - name: BROKER_ADDR
+                    value: cassini-ip-svc.polar.svc.cluster.local:8080
+                  - name: CASSINI_SERVER_NAME
+                    value: cassini.polar.serviceaccount.cluster.local
+                  - name: KUBERNETES_SA_TOKEN
+                    value: /workspace/token
+                image: registry.example/polar-init:latest
+                name: polar-init
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                      - ALL
+                  runAsGroup: 1000
+                  runAsNonRoot: true
+                  runAsUser: 1000
+                volumeMounts:
+                  - mountPath: /workspace
+                    name: sa-token
+                    readOnly: true
+                  - mountPath: /home/polar/certs
+                    name: polar-certs
+            livenessProbe:
+              exec:
+                command:
+                  - polar-healthcheck
+              failureThreshold: 2
+              initialDelaySeconds: 150
+              periodSeconds: 30
+              timeoutSeconds: 5
+            ports: []
+            runAsUser: 1000
+            volumeMounts:
+              - mountPath: /home/polar/certs
+                name: polar-certs
+                readOnly: true
+            volumes:
+              - name: sa-token
+                projected:
+                  sources:
+                    - serviceAccountToken:
+                        audience: polar-cert-issuer.local
+                        expirationSeconds: 3600
+                        path: token
+              - emptyDir: {}
+                name: polar-certs
+          shutdownBudgetSecs: 20
+    optional: false
+    secrets:
+      - keys:
+          password:
+            random: 16
+        name: example-secret
+        namespace: example
+    waits:
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        equals: Running
+        field: status.phase
+        kind: PolarAgent
+        name: example
+        namespace: example
+        timeoutSecs: 300

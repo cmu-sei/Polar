@@ -10,4 +10,6 @@
     ./operator.dhall
 , platform =
     ./platform.dhall
+, plan =
+    ./plan.dhall
 }

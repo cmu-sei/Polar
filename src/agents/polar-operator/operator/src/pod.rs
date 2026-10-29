@@ -607,10 +607,19 @@ mod tests {
     fn the_platforms_agents_differ_from_an_ordinary_one_where_they_must() {
         // The least each agent's own `--scaffold` says it needs to drain.
         let least_budget = [("cassini", 20), ("credentials-agent", 50), ("credentials-agent-observer", 40)];
-        let rendered = include_str!("../../../../deploy/local/fork/rendered/30-agents.yaml");
+        let rendered = include_str!("../../../../deploy/local/fork/rendered/plan.yaml");
+        let plan: serde_yaml::Value = serde_yaml::from_str(rendered).unwrap();
+        // The PolarAgents among the plan's objects: the plan is what `polar up` applies.
+        let agents: Vec<PolarAgent> = plan["stages"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .flat_map(|stage| stage["objects"].as_sequence().cloned().unwrap_or_default())
+            .filter(|object| object["kind"] == "PolarAgent")
+            .map(|object| serde_yaml::from_value(object).unwrap())
+            .collect();
         let mut seen = 0;
-        for document in serde_yaml::Deserializer::from_str(rendered) {
-            let mut agent = <PolarAgent as serde::Deserialize>::deserialize(document).unwrap();
+        for mut agent in agents {
             agent.metadata.uid = Some("uid".into());
             let name = agent.metadata.name.clone().unwrap();
             assert!(overlay_problems(&agent.spec).is_empty(), "{name}");

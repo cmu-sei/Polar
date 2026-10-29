@@ -509,5 +509,7 @@ in  { Issuer
     , makePvc
     , makeServiceAccount
     , agentLabel
+    , apiVersion
+    , kind
     , optionalList
     }

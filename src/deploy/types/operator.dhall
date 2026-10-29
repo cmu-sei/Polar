@@ -29,9 +29,13 @@ let Operator =
           , name : Text
           , env : List kubernetes.EnvVar.Type
           , runAsUser : Natural
+          -- A `latest` tag is pulled every time unless told otherwise, which an image loaded into a
+          -- node by hand cannot survive.
+          , imagePullPolicy : Optional Text
           }
       , default =
         { name = "polar-operator"
+        , imagePullPolicy = None Text
         , env = [] : List kubernetes.EnvVar.Type
         , runAsUser = 65532
         }
@@ -121,6 +125,7 @@ let makeOperator
                         [ kubernetes.Container::{
                           , name = "operator"
                           , image = Some operator.image
+                          , imagePullPolicy = operator.imagePullPolicy
                           -- The image names its binary as a default command, not an entrypoint, so
                           -- giving only `args` would replace it. Name both.
                           , command = Some [ "polar-operator" ]
