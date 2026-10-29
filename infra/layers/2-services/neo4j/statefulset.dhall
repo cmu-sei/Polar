@@ -27,6 +27,9 @@
 --      writes cert.pem, key.pem, ca.pem to the neo4j-tls emptyDir.
 --   2. neo4j-init: reads certs from neo4j-tls, writes them into the
 --      neo4j certificate directory structure, and copies neo4j.conf.
+--   3. neo4j-cacerts: the internal CA into Java's trust store.
+--   4. neo4j-volumes: the data, logs and certificate volumes to 7474:7474, the user Neo4j runs as. The pod's fsGroup
+--      does not reach a host-path volume (local-path, as minikube has it), whose folder stays as it was made.
 
 let kubernetes = ../../../schema/kubernetes.dhall
 let Constants  = ../../../schema/constants.dhall
@@ -222,6 +225,25 @@ let render =
                       , volumeMounts = Some
                         [ kubernetes.VolumeMount::{ name = v.configVolume,       mountPath = "/var/lib/neo4j/conf"        }
                         , kubernetes.VolumeMount::{ name = v.volumes.certs.name, mountPath = v.volumes.certs.mountPath     }
+                        ]
+                      }
+                    , kubernetes.Container::{
+                      , name            = "neo4j-volumes"
+                      , image           = Some v.image
+                      , imagePullPolicy = Some v.imagePullPolicy
+                      , securityContext = Some kubernetes.SecurityContext::{
+                        , runAsUser    = Some 0
+                        , runAsGroup   = Some 0
+                        , runAsNonRoot = Some False
+                        }
+                      , command = Some [ "/bin/sh", "-c" ]
+                      , args = Some
+                      [ "chown -R 7474:7474 ${v.volumes.data.mountPath} ${v.volumes.logs.mountPath} ${v.volumes.certs.mountPath}"
+                      ]
+                      , volumeMounts = Some
+                        [ kubernetes.VolumeMount::{ name = v.volumes.data.name,  mountPath = v.volumes.data.mountPath  }
+                        , kubernetes.VolumeMount::{ name = v.volumes.logs.name,  mountPath = v.volumes.logs.mountPath  }
+                        , kubernetes.VolumeMount::{ name = v.volumes.certs.name, mountPath = v.volumes.certs.mountPath }
                         ]
                       }
                     ]

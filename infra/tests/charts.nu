@@ -171,6 +171,26 @@ def main [] {
             assert ($refused | str contains "writers") $refused
         }
 
+        # The pod's fsGroup does not reach a volume on host-path storage (local-path, as minikube has it): Kubernetes
+        # leaves the folder as the provisioner made it, and Neo4j, which is not root, cannot write there. The last init
+        # container, as root, gives each of its claimed volumes to the user Neo4j runs as, after the others wrote theirs.
+        "Neo4j's volumes belong to the user it runs as before it starts": {
+            let pod = (open ((render neo4j {}) | path join "neo4j-statefulset.yaml") | get spec.template.spec)
+            let neo4j = ($pod.containers | first)
+            let owner = $"($neo4j.securityContext.runAsUser):($neo4j.securityContext.runAsGroup)"
+            let claimed = ($pod.volumes | where {|v| $v.persistentVolumeClaim? != null } | get name)
+            let mounts = ($neo4j.volumeMounts | where name in $claimed)
+            assert equal ($mounts | length) 3 "data, logs and certificates"
+            let last = ($pod.initContainers | last)
+            assert equal $last.securityContext.runAsUser 0
+            let script = ([...($last.command? | default []) ...($last.args? | default [])] | str join " ")
+            for m in $mounts {
+                assert (($last.volumeMounts | where name == $m.name and mountPath == $m.mountPath) | is-not-empty) $"($m.name) at ($m.mountPath)"
+                assert ($script | str contains $"chown -R ($owner) ") $script
+                assert ($script | str contains $m.mountPath) $"($m.mountPath) in: ($script)"
+            }
+        }
+
         "Neo4j still asks for the server certificate it did and runs no escrow bootstrap": {
             let out = (render neo4j {})
             let text = (open --raw ($out | path join "neo4j-statefulset.yaml"))
