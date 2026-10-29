@@ -1329,7 +1329,7 @@ impl Listener {
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
     ) -> Result<(), ActorProcessingErr> {
-        let span = info_span!("cassini.request.publish_request", client_id = %state.client_id, %registration_id, topic = ?topic, payload_bytes = payload.len());
+        let span = debug_span!("cassini.request.publish_request", client_id = %state.client_id, %registration_id, topic = ?topic, payload_bytes = payload.len());
         try_set_parent_otel(&span, trace_ctx.clone());
         let entered = span.enter();
         trace!("Listener received publish request");
