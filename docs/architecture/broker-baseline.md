@@ -486,6 +486,64 @@ reconnect. Its own item.
 *Not decided here:* which build the broker uses. On memory, S2; on throughput of large messages, S2 is level with glibc and
 mimalloc; the price is 15 to 20% of small-message throughput at saturation and 10 to 30% of the CPU they cost.
 
+## Where the small-message time goes: a profile (2026-10-29, u7c)
+
+The maintainer, 2026-10-29: the CPU is not what matters (Polar's uses are rarely compute-bound), the throughput is. To
+see what holds S2's 256 B messages back, the broker was profiled under them: the scratch plan `profile-256` (256 B as fast
+as the window allows, 1,000,000 messages), `perf record -e cpu-clock` on the broker's process from inside podman's user
+namespace (the broker runs as a sub-uid; the hardware counters do not open from there), S2 and V0, one run each.
+
+*No thread is busy.* Both builds spread about 1.2 cores over seven tokio workers, none above 16%; a message's CPU (about
+100 µs) times the rate is the 1.2 cores. The work on a message is close to serial, through the listener, session,
+topic and subscriber actors in turn, so a message's CPU sets the rate: whatever is taken out of it comes back as
+throughput.
+
+| share of the broker's CPU | S2 | V0 |
+| --- | --- | --- |
+| tracing (the registry, the OpenTelemetry layer, the filters) | 37% | 42% |
+| the allocator | 15% | 7.5% |
+| `memcpy` (musl's, glibc's) | 5.2% | 2.3% |
+| tokio, syscalls | 23% | 28% |
+| the broker's and ractor's own code | 10% | 11% |
+
+*Tracing was the most of it,* whatever the allocator: the `info` span each publish opened was exported. Fixed on
+`feat/ace-integration` (item 7 below; `5c68724f`, the trace filter `warn` by default, and `022a249e`, the span at
+`debug`), and cherry-picked here. With the filter at `warn` alone, one run each: V0 from 11,580 to 19,027 a second (96 to
+50 µs a message), S2 from 10,984 to 13,151 (108 to 70 µs). With tracing out of the way, Scudo's share is larger:
+
+- *The shared thread caches' lock:* `HybridMutex::tryLock` and `unlock`, 7.8% of S2's CPU at `warn`, about 5 µs a
+  message. S2's caches are shared (`TSDRegistrySharedT`), so every allocation and free takes one; S1's, one a thread,
+  take none, at about a quarter more memory at the peak (85 and 76 MB against 58 and 69, above).
+- *The chunk header's checksum,* on every allocation and free, among the hottest instructions of `allocate` and
+  `deallocate`. It was the BSD checksum in software: Scudo chooses the hardware CRC at start only if
+  `computeHardwareCRC32` is linked, its reference is weak, and a weak reference does not take `crc32_hw.cpp`'s object out
+  of its archive (S0 to S2 have no CRC instruction). `POLAR_SCUDO_CRC32=everywhere` (`757fbe30`) compiles every source
+  with the CRC flag, so the checksum is the instruction, inline.
+- *Refilling and draining the thread caches:* 0.3%. A larger cache (the "MaxBytesCachedLog" option) would not help.
+- *musl's `memcpy`,* about 2.6 µs a message more than glibc's, in every musl build (V2's as well). Not taken up here.
+
+## The third set: S3 and S4, with tracing at warn (2026-10-29)
+
+*Cleared (the maintainer, 2026-10-29):* the full baseline, two rounds. Every build from this branch with the two tracing
+commits, so tracing is at `warn` with the span at `debug`, as the broker will be:
+
+- V0, glibc (the reference); V2, musl with mimalloc (the control);
+- S2, as in the second set;
+- S3, S2 with the CRC instruction everywhere;
+- S4, S3 with one thread cache a thread (`polar-scudo/configs/exclusive`).
+
+S3 against S2 is the checksum; S4 against S3, the lock, and its memory. The procedure is the second set's (scratch driver
+`exp-driver4.nu`), with u7c holding only what the harness needs: the broker, cert-issuer, the two credentials agents and
+Neo4j (the credentials agent writes to it). Flux's `polar-agents` and `polar-data` are suspended and their workloads
+scaled to 0 (ace, the git, jira, kube and scheduler agents, the git server, Jaeger, Keycloak, Postgres), at the
+maintainer's request: about 12 GB of the host's memory, eleven of it custody daemons at 1.06 GiB each, before the
+`MCL_ONFAULT` fix reached them. The check counts the three clients left (cert-issuer and the credentials agents), not
+ten. Numbers from this set are compared only with each other.
+
+*The machine:* the maintainer's development host is tuned for interactive use (2026-10-29), so what the broker carries
+here is what it carries at the least; on production hardware it does better. The comparisons between builds hold; the
+absolute figures are a floor.
+
 ## What measuring it found
 
 Each fix was made test first, the test failing before it.
