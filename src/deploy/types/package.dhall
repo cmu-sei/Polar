@@ -8,8 +8,12 @@
     ./functions.dhall
 , operator =
     ./operator.dhall
+, core =
+    ./core.dhall
 , platform =
     ./platform.dhall
+, service =
+    ./service.dhall
 , plan =
     ./plan.dhall
 }

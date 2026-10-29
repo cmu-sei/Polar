@@ -1,13 +1,18 @@
 {-
-  types/platform.dhall — the platform Polar agents run on, as far as it is not itself an agent: the
-  certificate issuer and a graph.
+  types/platform.dhall — the units of the core that are not builder agents: the certificate issuer and
+  a graph. Both follow the agent contract without being built on polar-agent-builder, so each is a
+  `ServiceAgent` (service.dhall) kept alive by the operator like everything else; there is no Deployment
+  here. `core.dhall` assembles them with Cassini, the credentials agent and the rest.
 
-  Cassini, the credentials agent and its observer are agents, and are written with `builder.dhall`
-  (see local/fork/). What is here is what they stand on:
-
-    makeCertIssuer   the issuer: its identity, its CA's claim, its configuration document, its Service
-                     and a Deployment that never overlaps itself (the CA is on a ReadWriteOnce claim)
-    makeNeo4j        a graph with a password, for development: no TLS, no client certificates
+    makeCertIssuer   the issuer: its identity, its CA's claim, its configuration document, its Service,
+                     and the PolarAgent that runs it. No polar-init (it is the issuer); the
+                     service-account token, because it reads the API server's signing keys with it; and
+                     no fsGroup, because its CA key must stay mode 0600 and a pod-level group adds
+                     group bits to every file on the volume
+    makeNeo4j        a graph with a password, for development: no TLS, no client certificates, so there
+                     is no certificate to go stale. Its image starts as root and drops to its own user, so
+                     it runs as that user directly with its volume owned by that group, and writes outside
+                     its volumes, so its root filesystem is writable: a visible exception
 
   The issuer's configuration is a typed record rendered to JSON, so a field that is missing or
   misnamed fails when the manifests are rendered, not when the issuer starts. The names are the
@@ -20,7 +25,9 @@ let kubernetes = ./kubernetes.dhall
 
 let C = ./lib-constants.dhall
 
-let F = ./functions.dhall
+let Builder = ./builder.dhall
+
+let Service = ./service.dhall
 
 let JSON =
       https://prelude.dhall-lang.org/JSON/package.dhall
@@ -140,9 +147,9 @@ let certIssuerConfig
               )
           )
 
---| The issuer: ServiceAccount, configuration, claim for its CA, Service and Deployment.
+--| The issuer: ServiceAccount, configuration, claim for its CA, Service, and the PolarAgent that runs it.
 let makeCertIssuer
-    : CertIssuer.Type → List kubernetes.Resource
+    : CertIssuer.Type → { resources : List kubernetes.Resource, agent : Builder.PolarAgentResource }
     = λ(v : CertIssuer.Type) →
         let metadata =
               λ(objectName : Text) →
@@ -151,122 +158,101 @@ let makeCertIssuer
                 , namespace = Some v.namespace
                 }
 
-        in  [ kubernetes.Resource.ServiceAccount
-                kubernetes.ServiceAccount::{
-                , metadata = metadata name
-                -- It reads the API server's keys with its own token.
-                , automountServiceAccountToken = Some True
-                }
-            , kubernetes.Resource.ConfigMap
-                kubernetes.ConfigMap::{
-                , metadata = metadata "${name}-config"
-                , data = Some
-                  [ { mapKey = configFile, mapValue = certIssuerConfig v } ]
-                }
-            , kubernetes.Resource.PersistentVolumeClaim
-                kubernetes.PersistentVolumeClaim::{
-                , metadata = metadata "${name}-ca"
-                , spec = Some kubernetes.PersistentVolumeClaimSpec::{
-                  , accessModes = Some [ "ReadWriteOnce" ]
-                  , storageClassName = v.storageClass
-                  , resources = Some kubernetes.VolumeResourceRequirements::{
-                    , requests = Some [ { mapKey = "storage", mapValue = v.caSize } ]
+        in  { resources =
+              [ kubernetes.Resource.ServiceAccount
+                  kubernetes.ServiceAccount::{
+                  , metadata = metadata name
+                  -- It reads the API server's keys with its own token.
+                  , automountServiceAccountToken = Some True
+                  }
+              , kubernetes.Resource.ConfigMap
+                  kubernetes.ConfigMap::{
+                  , metadata = metadata "${name}-config"
+                  , data = Some
+                    [ { mapKey = configFile, mapValue = certIssuerConfig v } ]
+                  }
+              , kubernetes.Resource.PersistentVolumeClaim
+                  kubernetes.PersistentVolumeClaim::{
+                  , metadata = metadata "${name}-ca"
+                  , spec = Some kubernetes.PersistentVolumeClaimSpec::{
+                    , accessModes = Some [ "ReadWriteOnce" ]
+                    , storageClassName = v.storageClass
+                    , resources = Some kubernetes.VolumeResourceRequirements::{
+                      , requests = Some [ { mapKey = "storage", mapValue = v.caSize } ]
+                      }
                     }
                   }
-                }
-            , kubernetes.Resource.Service
-                kubernetes.Service::{
-                , metadata = metadata name
-                , spec = Some kubernetes.ServiceSpec::{
-                  , selector = Some (toMap { name })
-                  , type = Some "ClusterIP"
-                  , ports = Some
-                    [ kubernetes.ServicePort::{
-                      , name = Some "https"
-                      , port
-                      , targetPort = Some (kubernetes.NatOrString.Nat port)
+              , kubernetes.Resource.Service
+                  kubernetes.Service::{
+                  , metadata = metadata name
+                  , spec = Some kubernetes.ServiceSpec::{
+                    , selector = Some [ { mapKey = Builder.agentLabel, mapValue = name } ]
+                    , type = Some "ClusterIP"
+                    , ports = Some
+                      [ kubernetes.ServicePort::{
+                        , name = Some "https"
+                        , port
+                        , targetPort = Some (kubernetes.NatOrString.Nat port)
+                        }
+                      ]
+                    }
+                  }
+              ]
+            , agent =
+                Service.makeServiceAgent
+                  Service.ServiceAgent::{
+                  , name
+                  , namespace = v.namespace
+                  , image = v.image
+                  , imagePullPolicy = v.imagePullPolicy
+                  , port = Some port
+                  , env =
+                    [ kubernetes.EnvVar::{
+                      , name = "CERT_ISSUER_CONFIG"
+                      , value = Some "${configDir}/${configFile}"
+                      }
+                    , kubernetes.EnvVar::{
+                      , name = "RUST_LOG"
+                      , value = Some "info,cert_issuer=debug"
+                      }
+                    , kubernetes.EnvVar::{
+                      , name = "KUBERNETES_CA_CERT"
+                      , value = Some "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
                       }
                     ]
-                  }
-                }
-            , kubernetes.Resource.Deployment
-                ( F.makeDeploymentIn
-                    v.namespace
-                    name
-                    kubernetes.PodSpec::{
-                    , serviceAccountName = Some name
-                    , automountServiceAccountToken = Some True
-                    , securityContext = Some kubernetes.PodSecurityContext::{
-                      , fsGroup = Some 1000
+                  , volumes =
+                    [ kubernetes.Volume::{
+                      , name = "ca"
+                      , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
+                        , claimName = "${name}-ca"
+                        }
                       }
-                    , volumes = Some
-                      [ kubernetes.Volume::{
-                        , name = "ca"
-                        , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
-                          , claimName = "${name}-ca"
-                          }
+                    , kubernetes.Volume::{
+                      , name = "config"
+                      , configMap = Some kubernetes.ConfigMapVolumeSource::{
+                        , name = Some "${name}-config"
                         }
-                      , kubernetes.Volume::{
-                        , name = "config"
-                        , configMap = Some kubernetes.ConfigMapVolumeSource::{
-                          , name = Some "${name}-config"
-                          }
-                        }
-                      ]
-                    , containers =
-                      [ kubernetes.Container::{
-                        , name
-                        , image = Some v.image
-                        , imagePullPolicy = v.imagePullPolicy
-                        -- The image names uid 10000; the claim and the chart say 1000.
-                        , securityContext = Some kubernetes.SecurityContext::{
-                          , runAsUser = Some 1000
-                          , runAsGroup = Some 1000
-                          , runAsNonRoot = Some True
-                          , allowPrivilegeEscalation = Some False
-                          , capabilities = Some kubernetes.Capabilities::{
-                            , drop = Some [ "ALL" ]
-                            }
-                          }
-                        , env = Some
-                          [ kubernetes.EnvVar::{
-                            , name = "CERT_ISSUER_CONFIG"
-                            , value = Some "${configDir}/${configFile}"
-                            }
-                          , kubernetes.EnvVar::{
-                            , name = "RUST_LOG"
-                            , value = Some "info,cert_issuer=debug"
-                            }
-                          , kubernetes.EnvVar::{
-                            , name = "KUBERNETES_CA_CERT"
-                            , value = Some "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-                            }
-                          ]
-                        , ports = Some
-                          [ kubernetes.ContainerPort::{
-                            , containerPort = port
-                            , name = Some "https"
-                            }
-                          ]
-                        , readinessProbe = Some kubernetes.Probe::{
-                          , tcpSocket = Some kubernetes.TCPSocketAction::{
-                            , port = kubernetes.NatOrString.Nat port
-                            }
-                          , periodSeconds = Some 5
-                          }
-                        , volumeMounts = Some
-                          [ kubernetes.VolumeMount::{ name = "ca", mountPath = caDir }
-                          , kubernetes.VolumeMount::{
-                            , name = "config"
-                            , mountPath = configDir
-                            , readOnly = Some True
-                            }
-                          ]
-                        }
-                      ]
+                      }
+                    ]
+                  , mounts =
+                    [ kubernetes.VolumeMount::{ name = "ca", mountPath = caDir }
+                    , kubernetes.VolumeMount::{
+                      , name = "config"
+                      , mountPath = configDir
+                      , readOnly = Some True
+                      }
+                    ]
+                  , probe = Some kubernetes.Probe::{
+                    , tcpSocket = Some kubernetes.TCPSocketAction::{
+                      , port = kubernetes.NatOrString.Nat port
+                      }
+                    , initialDelaySeconds = Some 20
+                    , periodSeconds = Some 10
+                    , failureThreshold = Some 3
                     }
-                )
-            ]
+                  , serviceAccountToken = True
+                  }
+            }
 
 --| What a deployer states about the graph.
 let Neo4j =
@@ -295,7 +281,7 @@ let Neo4j =
 --| A graph with a password and nothing else, for development. The fork's own sets up TLS and
 --| client certificates, which neither Blitz nor the credentials agent's graph section needs.
 let makeNeo4j
-    : Neo4j.Type → List kubernetes.Resource
+    : Neo4j.Type → { resources : List kubernetes.Resource, agent : Builder.PolarAgentResource }
     = λ(v : Neo4j.Type) →
         let metadata =
               λ(objectName : Text) →
@@ -304,86 +290,87 @@ let makeNeo4j
                 , namespace = Some v.namespace
                 }
 
-        in  [ kubernetes.Resource.PersistentVolumeClaim
-                kubernetes.PersistentVolumeClaim::{
-                , metadata = metadata "polar-db-data"
-                , spec = Some kubernetes.PersistentVolumeClaimSpec::{
-                  , accessModes = Some [ "ReadWriteOnce" ]
-                  , storageClassName = v.storageClass
-                  , resources = Some kubernetes.VolumeResourceRequirements::{
-                    , requests = Some [ { mapKey = "storage", mapValue = v.size } ]
+        let envValue =
+              λ(n : Text) →
+              λ(value : Text) →
+                kubernetes.EnvVar::{ name = n, value = Some value }
+
+        in  { resources =
+              [ kubernetes.Resource.PersistentVolumeClaim
+                  kubernetes.PersistentVolumeClaim::{
+                  , metadata = metadata "polar-db-data"
+                  , spec = Some kubernetes.PersistentVolumeClaimSpec::{
+                    , accessModes = Some [ "ReadWriteOnce" ]
+                    , storageClassName = v.storageClass
+                    , resources = Some kubernetes.VolumeResourceRequirements::{
+                      , requests = Some [ { mapKey = "storage", mapValue = v.size } ]
+                      }
                     }
                   }
-                }
-            , kubernetes.Resource.Service
-                kubernetes.Service::{
-                , metadata = metadata v.serviceName
-                , spec = Some kubernetes.ServiceSpec::{
-                  , selector = Some (toMap { name = "polar-neo4j" })
-                  , type = Some "ClusterIP"
-                  , ports = Some
-                    [ kubernetes.ServicePort::{
-                      , name = Some "bolt"
-                      , port = 7687
-                      , targetPort = Some (kubernetes.NatOrString.Nat 7687)
-                      }
-                    ]
+              , kubernetes.Resource.Service
+                  kubernetes.Service::{
+                  , metadata = metadata v.serviceName
+                  , spec = Some kubernetes.ServiceSpec::{
+                    , selector = Some [ { mapKey = Builder.agentLabel, mapValue = "polar-neo4j" } ]
+                    , type = Some "ClusterIP"
+                    , ports = Some
+                      [ kubernetes.ServicePort::{
+                        , name = Some "bolt"
+                        , port = 7687
+                        , targetPort = Some (kubernetes.NatOrString.Nat 7687)
+                        }
+                      ]
+                    }
                   }
-                }
-            , kubernetes.Resource.Deployment
-                ( F.makeDeploymentIn
-                    v.namespace
-                    "polar-neo4j"
-                    kubernetes.PodSpec::{
-                    , volumes = Some
-                      [ kubernetes.Volume::{
-                        , name = "data"
-                        , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
-                          , claimName = "polar-db-data"
+              ]
+            , agent =
+                Service.makeServiceAgent
+                  Service.ServiceAgent::{
+                  , name = "polar-neo4j"
+                  , namespace = v.namespace
+                  , image = v.image
+                  , imagePullPolicy = v.imagePullPolicy
+                  , port = Some 7687
+                  -- The image's own user, so that its entrypoint does not need to start as root to
+                  -- drop to it; the claim is owned by that group.
+                  , runAsUser = 7474
+                  , fsGroup = Some 7474
+                  -- It writes its configuration and run state outside /data and /logs.
+                  , writableRoot = True
+                  , env =
+                    [ kubernetes.EnvVar::{
+                      , name = "NEO4J_AUTH"
+                      , valueFrom = Some kubernetes.EnvVarSource::{
+                        , secretKeyRef = Some kubernetes.SecretKeySelector::{
+                          , name = Some v.authSecret
+                          , key = v.authKey
                           }
                         }
-                      ]
-                    , containers =
-                      [ kubernetes.Container::{
-                        , name = "neo4j"
-                        , image = Some v.image
-                        , imagePullPolicy = v.imagePullPolicy
-                        , env = Some
-                          [ kubernetes.EnvVar::{
-                            , name = "NEO4J_AUTH"
-                            , valueFrom = Some kubernetes.EnvVarSource::{
-                              , secretKeyRef = Some kubernetes.SecretKeySelector::{
-                                , name = Some v.authSecret
-                                , key = v.authKey
-                                }
-                              }
-                            }
-                          -- Small enough for a laptop; the image's defaults are not.
-                          , kubernetes.EnvVar::{
-                            , name = "NEO4J_server_memory_heap_initial__size"
-                            , value = Some "512m"
-                            }
-                          , kubernetes.EnvVar::{
-                            , name = "NEO4J_server_memory_heap_max__size"
-                            , value = Some "512m"
-                            }
-                          , kubernetes.EnvVar::{
-                            , name = "NEO4J_server_memory_pagecache_size"
-                            , value = Some "256m"
-                            }
-                          ]
-                        , ports = Some
-                          [ kubernetes.ContainerPort::{ containerPort = 7687 } ]
-                        , volumeMounts = Some
-                          [ kubernetes.VolumeMount::{
-                            , name = "data"
-                            , mountPath = "/data"
-                            }
-                          ]
+                      }
+                    -- Small enough for a laptop; the image's defaults are not.
+                    , envValue "NEO4J_server_memory_heap_initial__size" "512m"
+                    , envValue "NEO4J_server_memory_heap_max__size" "512m"
+                    , envValue "NEO4J_server_memory_pagecache_size" "256m"
+                    ]
+                  , volumes =
+                    [ kubernetes.Volume::{
+                      , name = "data"
+                      , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
+                        , claimName = "polar-db-data"
                         }
-                      ]
+                      }
+                    ]
+                  , mounts =
+                    [ kubernetes.VolumeMount::{ name = "data", mountPath = "/data" } ]
+                  , probe = Some kubernetes.Probe::{
+                    , tcpSocket = Some kubernetes.TCPSocketAction::{
+                      , port = kubernetes.NatOrString.Nat 7687
+                      }
+                    , initialDelaySeconds = Some 90
+                    , periodSeconds = Some 15
+                    , failureThreshold = Some 5
                     }
-                )
-            ]
+                  }
+            }
 
 in  { CertIssuer, makeCertIssuer, certIssuerConfig, Neo4j, makeNeo4j }

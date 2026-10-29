@@ -625,40 +625,47 @@ mod tests {
         assert!(env.iter().any(|e| e.name == "POLAR_CAPABILITIES" && e.value.as_deref() == Some("cassini")));
     }
 
-    /// The platform's own agents (`src/deploy/local/fork`) and an ordinary one differ in exactly the
-    /// ways the platform needs: they take their certificates from the issuer directly and do not
-    /// bootstrap an escrow key (Cassini is what the bootstrap travels through, the credentials agent is
-    /// what it asks); an ordinary agent does bootstrap, with the environment that needs.
-    #[test]
-    fn the_platforms_agents_differ_from_an_ordinary_one_where_they_must() {
-        // The least each agent's own `--scaffold` says it needs to drain.
-        let least_budget = [("cassini", 20), ("credentials-agent", 50), ("credentials-agent-observer", 40)];
-        let rendered = include_str!("../../../../deploy/local/fork/rendered/plan.yaml");
-        let plan: serde_yaml::Value = serde_yaml::from_str(rendered).unwrap();
-        // The PolarAgents among the plan's objects: the plan is what `polar up` applies.
-        let agents: Vec<PolarAgent> = plan["stages"]
+    /// Every PolarAgent in a rendered plan, as the operator will read it.
+    fn agents_in(plan: &str) -> Vec<PolarAgent> {
+        let plan: serde_yaml::Value = serde_yaml::from_str(plan).unwrap();
+        plan["stages"]
             .as_sequence()
             .unwrap()
             .iter()
             .flat_map(|stage| stage["objects"].as_sequence().cloned().unwrap_or_default())
             .filter(|object| object["kind"] == "PolarAgent")
             .map(|object| serde_yaml::from_value(object).unwrap())
-            .collect();
-        let mut seen = 0;
-        for mut agent in agents {
+            .collect()
+    }
+
+    /// The core's own agents (`src/deploy/local/core`) and an ordinary one differ in exactly the ways the
+    /// core needs: the core's builder agents take their certificates from the issuer directly and do not
+    /// bootstrap an escrow key (Cassini is what the bootstrap travels through, the credentials agent is
+    /// what it asks); an ordinary agent does bootstrap, with the environment that needs. The core's
+    /// services (the issuer, the graph) are not builder agents and get none of it.
+    #[test]
+    fn the_cores_agents_differ_from_an_ordinary_one_where_they_must() {
+        // The least each agent's own `--scaffold` says it needs to drain.
+        let least_budget = [("cassini", 20), ("credentials-agent", 50), ("credentials-agent-observer", 40)];
+        let mut builder = 0;
+        let mut services = Vec::new();
+        for mut agent in agents_in(include_str!("../../../../deploy/local/core/rendered/plan.yaml")) {
             agent.metadata.uid = Some("uid".into());
             let name = agent.metadata.name.clone().unwrap();
             assert!(overlay_problems(&agent.spec).is_empty(), "{name}");
             let pod = build(&agent, &format!("{name}-1"), &spec_hash(&agent.spec)).spec.unwrap();
-
-            let least = least_budget.iter().find(|(n, _)| *n == name).expect("a platform agent").1;
-            assert!(agent.spec.shutdown_budget_secs >= least, "{name}: budget below what the agent declares");
             assert_eq!(
                 pod.termination_grace_period_seconds,
                 Some(agent.spec.shutdown_budget_secs as i64 + GRACE_MARGIN_SECS as i64)
             );
 
-            let init = &pod.init_containers.as_ref().unwrap()[0];
+            let Some(init) = pod.init_containers.as_ref().map(|i| &i[0]) else {
+                // A service: no polar-init, no certificate, no health file.
+                services.push((name, agent, pod));
+                continue;
+            };
+            let least = least_budget.iter().find(|(n, _)| *n == name).expect("a core builder agent").1;
+            assert!(agent.spec.shutdown_budget_secs >= least, "{name}: budget below what the agent declares");
             assert_eq!(init.command, Some(vec!["polar-init".to_string()]), "{name}: args alone would replace the image's command");
             let init_env: Vec<_> = init.env.as_ref().unwrap().iter().map(|e| (e.name.as_str(), e.value.as_deref())).collect();
             assert!(init_env.contains(&("POLAR_INIT_ISSUER", Some("cert-issuer"))), "{name} asks the issuer directly");
@@ -671,9 +678,30 @@ mod tests {
             } else {
                 assert!(args.iter().any(|a| a.starts_with("client:")));
             }
-            seen += 1;
+            builder += 1;
         }
-        assert_eq!(seen, 3);
+        assert_eq!(builder, 3);
+
+        // The services: the issuer and the graph.
+        let names: Vec<_> = services.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, ["cert-issuer", "polar-neo4j"]);
+        for (name, agent, pod) in &services {
+            assert!(pod.init_containers.is_none(), "{name} is not an agent that asks for a certificate");
+            let container = &pod.containers[0];
+            assert!(container.liveness_probe.is_some(), "{name} is probed");
+            assert!(agent.spec.needs.is_empty());
+        }
+        let (_, issuer, issuer_pod) = &services[0];
+        // The issuer reads the API server's signing keys with its token, and its CA key must stay 0600,
+        // which a pod-level group would undo.
+        assert_eq!(issuer_pod.automount_service_account_token, Some(true));
+        assert!(issuer_pod.security_context.is_none(), "no fsGroup on the issuer");
+        assert_eq!(issuer_pod.containers[0].security_context.as_ref().unwrap().read_only_root_filesystem, Some(true));
+        assert!(issuer.spec.pod.as_ref().unwrap().fs_group.is_none());
+        // The graph's image writes outside its volumes: a visible exception, and the only one.
+        let (_, _, graph_pod) = &services[1];
+        assert_eq!(graph_pod.containers[0].security_context.as_ref().unwrap().read_only_root_filesystem, Some(false));
+        assert_eq!(graph_pod.automount_service_account_token, Some(false));
 
         // An ordinary agent (the library's own example): vouched for, and it bootstraps its escrow key,
         // which needs the client environment and its token in the init container.

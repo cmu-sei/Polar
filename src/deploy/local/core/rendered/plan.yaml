@@ -1,4 +1,4 @@
-name: polar-platform
+name: polar-core
 stages:
   - description: the PolarAgent CRD and the operator that keeps agents alive
     installCrd: true
@@ -109,6 +109,7 @@ stages:
               serviceAccountName: polar-operator
     optional: false
     secrets: []
+    shared: true
     waits:
       - apiVersion: apps/v1
         equals: '1'
@@ -117,7 +118,7 @@ stages:
         name: polar-operator
         namespace: polar-operator
         timeoutSecs: 300
-  - description: the polar namespace and the certificate issuer
+  - description: "the polar namespace, the secrets, and the certificate issuer"
     installCrd: false
     name: issuer
     objects:
@@ -212,69 +213,50 @@ stages:
               port: 8443
               targetPort: 8443
           selector:
-            name: cert-issuer
+            polar.sei.cmu.edu/agent: cert-issuer
           type: ClusterIP
-      - apiVersion: apps/v1
-        kind: Deployment
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        kind: PolarAgent
         metadata:
           name: cert-issuer
           namespace: polar
         spec:
-          replicas: 1
-          selector:
-            matchLabels:
-              name: cert-issuer
-          strategy:
-            type: Recreate
-          template:
-            metadata:
-              labels:
-                name: cert-issuer
-              name: cert-issuer
-            spec:
-              automountServiceAccountToken: true
-              containers:
-                - env:
-                    - name: CERT_ISSUER_CONFIG
-                      value: /etc/cert-issuer/cert-issuer.json
-                    - name: RUST_LOG
-                      value: "info,cert_issuer=debug"
-                    - name: KUBERNETES_CA_CERT
-                      value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-                  image: cert-issuer:latest
-                  imagePullPolicy: IfNotPresent
-                  name: cert-issuer
-                  ports:
-                    - containerPort: 8443
-                      name: https
-                  readinessProbe:
-                    periodSeconds: 5
-                    tcpSocket:
-                      port: 8443
-                  securityContext:
-                    allowPrivilegeEscalation: false
-                    capabilities:
-                      drop:
-                        - ALL
-                    runAsGroup: 1000
-                    runAsNonRoot: true
-                    runAsUser: 1000
-                  volumeMounts:
-                    - mountPath: /home/polar
-                      name: ca
-                    - mountPath: /etc/cert-issuer
-                      name: config
-                      readOnly: true
-              securityContext:
-                fsGroup: 1000
-              serviceAccountName: cert-issuer
-              volumes:
-                - name: ca
-                  persistentVolumeClaim:
-                    claimName: cert-issuer-ca
-                - configMap:
-                    name: cert-issuer-config
-                  name: config
+          image: cert-issuer:latest
+          needs: []
+          pod:
+            automountServiceAccountToken: true
+            env:
+              - name: CERT_ISSUER_CONFIG
+                value: /etc/cert-issuer/cert-issuer.json
+              - name: RUST_LOG
+                value: "info,cert_issuer=debug"
+              - name: KUBERNETES_CA_CERT
+                value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+            imagePullPolicy: IfNotPresent
+            initContainers: []
+            livenessProbe:
+              failureThreshold: 3
+              initialDelaySeconds: 20
+              periodSeconds: 10
+              tcpSocket:
+                port: 8443
+            ports:
+              - containerPort: 8443
+            runAsUser: 1000
+            volumeMounts:
+              - mountPath: /home/polar
+                name: ca
+              - mountPath: /etc/cert-issuer
+                name: config
+                readOnly: true
+            volumes:
+              - name: ca
+                persistentVolumeClaim:
+                  claimName: cert-issuer-ca
+              - configMap:
+                  name: cert-issuer-config
+                name: config
+          shutdownBudgetSecs: 20
     optional: false
     secrets:
       - keys:
@@ -295,17 +277,18 @@ stages:
             template: "neo4j/{password}"
         name: neo4j-secret
         namespace: polar
+    shared: true
     waits:
-      - apiVersion: apps/v1
-        equals: '1'
-        field: status.readyReplicas
-        kind: Deployment
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        equals: Running
+        field: status.phase
+        kind: PolarAgent
         name: cert-issuer
         namespace: polar
         timeoutSecs: 300
-  - description: "Cassini, the credentials agent and its observer"
+  - description: "Cassini, the message broker"
     installCrd: false
-    name: platform
+    name: broker
     objects:
       - apiVersion: v1
         automountServiceAccountToken: false
@@ -313,29 +296,6 @@ stages:
         metadata:
           name: cassini
           namespace: polar
-      - apiVersion: v1
-        automountServiceAccountToken: false
-        kind: ServiceAccount
-        metadata:
-          name: credentials-agent
-          namespace: polar
-      - apiVersion: v1
-        automountServiceAccountToken: false
-        kind: ServiceAccount
-        metadata:
-          name: credentials-agent-observer
-          namespace: polar
-      - apiVersion: v1
-        kind: PersistentVolumeClaim
-        metadata:
-          name: credentials-agent-data
-          namespace: polar
-        spec:
-          accessModes:
-            - ReadWriteOnce
-          resources:
-            requests:
-              storage: "1Gi"
       - apiVersion: v1
         kind: Service
         metadata:
@@ -348,19 +308,6 @@ stages:
               targetPort: 8080
           selector:
             polar.sei.cmu.edu/agent: cassini
-          type: ClusterIP
-      - apiVersion: v1
-        kind: Service
-        metadata:
-          name: credentials-agent-observer
-          namespace: polar
-        spec:
-          ports:
-            - name: http
-              port: 8080
-              targetPort: 8080
-          selector:
-            polar.sei.cmu.edu/agent: credentials-agent-observer
           type: ClusterIP
       - apiVersion: polar.sei.cmu.edu/v1alpha1
         kind: PolarAgent
@@ -449,6 +396,57 @@ stages:
               - emptyDir: {}
                 name: polar-certs
           shutdownBudgetSecs: 20
+    optional: false
+    secrets: []
+    shared: true
+    waits:
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        equals: Running
+        field: status.phase
+        kind: PolarAgent
+        name: cassini
+        namespace: polar
+        timeoutSecs: 300
+  - description: the credentials agent and its observer
+    installCrd: false
+    name: credentials
+    objects:
+      - apiVersion: v1
+        automountServiceAccountToken: false
+        kind: ServiceAccount
+        metadata:
+          name: credentials-agent
+          namespace: polar
+      - apiVersion: v1
+        automountServiceAccountToken: false
+        kind: ServiceAccount
+        metadata:
+          name: credentials-agent-observer
+          namespace: polar
+      - apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: credentials-agent-data
+          namespace: polar
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: "1Gi"
+      - apiVersion: v1
+        kind: Service
+        metadata:
+          name: credentials-agent-observer
+          namespace: polar
+        spec:
+          ports:
+            - name: http
+              port: 8080
+              targetPort: 8080
+          selector:
+            polar.sei.cmu.edu/agent: credentials-agent-observer
+          type: ClusterIP
       - apiVersion: polar.sei.cmu.edu/v1alpha1
         kind: PolarAgent
         metadata:
@@ -638,14 +636,8 @@ stages:
           shutdownBudgetSecs: 40
     optional: false
     secrets: []
+    shared: true
     waits:
-      - apiVersion: polar.sei.cmu.edu/v1alpha1
-        equals: Running
-        field: status.phase
-        kind: PolarAgent
-        name: cassini
-        namespace: polar
-        timeoutSecs: 300
       - apiVersion: polar.sei.cmu.edu/v1alpha1
         equals: Running
         field: status.phase
@@ -660,7 +652,7 @@ stages:
         name: credentials-agent-observer
         namespace: polar
         timeoutSecs: 300
-  - description: "a graph with a password, for the investigation engine"
+  - description: "the graph, with a password (development grade: no TLS)"
     installCrd: false
     name: graph
     objects:
@@ -686,58 +678,58 @@ stages:
               port: 7687
               targetPort: 7687
           selector:
-            name: polar-neo4j
+            polar.sei.cmu.edu/agent: polar-neo4j
           type: ClusterIP
-      - apiVersion: apps/v1
-        kind: Deployment
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        kind: PolarAgent
         metadata:
           name: polar-neo4j
           namespace: polar
         spec:
-          replicas: 1
-          selector:
-            matchLabels:
-              name: polar-neo4j
-          strategy:
-            type: Recreate
-          template:
-            metadata:
-              labels:
-                name: polar-neo4j
-              name: polar-neo4j
-            spec:
-              containers:
-                - env:
-                    - name: NEO4J_AUTH
-                      valueFrom:
-                        secretKeyRef:
-                          key: secret
-                          name: neo4j-secret
-                    - name: NEO4J_server_memory_heap_initial__size
-                      value: "512m"
-                    - name: NEO4J_server_memory_heap_max__size
-                      value: "512m"
-                    - name: NEO4J_server_memory_pagecache_size
-                      value: "256m"
-                  image: neo4j:5.26.2
-                  imagePullPolicy: IfNotPresent
-                  name: neo4j
-                  ports:
-                    - containerPort: 7687
-                  volumeMounts:
-                    - mountPath: /data
-                      name: data
-              volumes:
-                - name: data
-                  persistentVolumeClaim:
-                    claimName: polar-db-data
-    optional: true
+          image: neo4j:5.26.2
+          needs: []
+          pod:
+            env:
+              - name: NEO4J_AUTH
+                valueFrom:
+                  secretKeyRef:
+                    key: secret
+                    name: neo4j-secret
+              - name: NEO4J_server_memory_heap_initial__size
+                value: "512m"
+              - name: NEO4J_server_memory_heap_max__size
+                value: "512m"
+              - name: NEO4J_server_memory_pagecache_size
+                value: "256m"
+            fsGroup: 7474
+            imagePullPolicy: IfNotPresent
+            initContainers: []
+            livenessProbe:
+              failureThreshold: 5
+              initialDelaySeconds: 90
+              periodSeconds: 15
+              tcpSocket:
+                port: 7687
+            ports:
+              - containerPort: 7687
+            readOnlyRootFilesystem: false
+            runAsUser: 7474
+            volumeMounts:
+              - mountPath: /data
+                name: data
+            volumes:
+              - name: data
+                persistentVolumeClaim:
+                  claimName: polar-db-data
+          shutdownBudgetSecs: 20
+    optional: false
     secrets: []
+    shared: true
     waits:
-      - apiVersion: apps/v1
-        equals: '1'
-        field: status.readyReplicas
-        kind: Deployment
+      - apiVersion: polar.sei.cmu.edu/v1alpha1
+        equals: Running
+        field: status.phase
+        kind: PolarAgent
         name: polar-neo4j
         namespace: polar
         timeoutSecs: 300

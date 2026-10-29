@@ -14,7 +14,9 @@
             are made together, sharing the random values they name, or not at all
     Wait    until a field of an object has a value: a Deployment's readiness, a PolarAgent's phase
 
-  A stage that is `optional` runs only when asked for (`polar up --with <stage>`). A stage with
+  A stage that is `optional` runs only when asked for (`polar up --with <stage>`). A stage that is
+  `shared` belongs to every plan that includes it (the core): `polar down` leaves it in place unless
+  asked, and plans that share it apply it once. A stage with
   `installCrd` first installs the PolarAgent CustomResourceDefinition, which the tool carries (it is
   generated from the operator's own types, so it cannot disagree with them).
 
@@ -70,6 +72,9 @@ let Stage =
           { name : Text
           , description : Optional Text
           , optional : Bool
+          -- Belongs to more than one plan (the core every application comes with): `polar down` leaves
+          -- it alone, and plans that share it apply it once.
+          , shared : Bool
           , installCrd : Bool
           , secrets : List Secret.Type
           , objects : List Object
@@ -78,6 +83,7 @@ let Stage =
       , default =
         { description = None Text
         , optional = False
+        , shared = False
         , installCrd = False
         , secrets = [] : List Secret.Type
         , objects = [] : List Object
@@ -151,6 +157,7 @@ let operatorStage
         , name = "operator"
         , description = Some "the PolarAgent CRD and the operator that keeps agents alive"
         , installCrd = True
+        , shared = True
         , objects =
             k8s
               (   [ kubernetes.Resource.Namespace

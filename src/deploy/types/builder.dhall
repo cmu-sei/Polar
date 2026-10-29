@@ -33,6 +33,10 @@ let kubernetes = ./kubernetes.dhall
 
 let C = ./lib-constants.dhall
 
+let Prelude =
+      https://prelude.dhall-lang.org/package.dhall
+        sha256:931cbfae9d746c4611b07633ab1e547637ab4ba138b16bf65ef1b9ad66a60b7f
+
 -- The API group and version of the operator's resource (polar-operator-common::crd).
 let apiVersion = "polar.sei.cmu.edu/v1alpha1"
 
@@ -104,6 +108,13 @@ let Health =
 --| A volume the agent keeps its state on: an existing claim, mounted where the agent expects it.
 let Data = { claim : Text, mountPath : Text }
 
+--| Another certificate the agent is given, in a directory of its own: the git server presents a server
+--| certificate on its own port besides the client certificate it uses to reach Cassini.
+let ExtraCert = { name : Text, kind : CertKind, dir : Text }
+
+--| Space that does not outlive the pod, writable, for an agent whose root filesystem is read-only.
+let Scratch = { name : Text, mountPath : Text }
+
 --| What a consumer says about one agent.
 let BuilderAgent =
       { Type =
@@ -124,6 +135,8 @@ let BuilderAgent =
           , client : Bool
           , waitForBroker : Bool
           , skipEscrow : Bool
+          , extraCerts : List ExtraCert
+          , scratch : List Scratch
           }
       , default =
         { agent = None Text
@@ -144,6 +157,8 @@ let BuilderAgent =
         , client = True
         , waitForBroker = True
         , skipEscrow = False
+        , extraCerts = [] : List ExtraCert
+        , scratch = [] : List Scratch
         }
       }
 
@@ -158,7 +173,9 @@ let PodOverlay =
       , volumeMounts : List kubernetes.VolumeMount.Type
       , env : List kubernetes.EnvVar.Type
       , ports : List kubernetes.ContainerPort.Type
-      , livenessProbe : kubernetes.Probe.Type
+      , livenessProbe : Optional kubernetes.Probe.Type
+      , automountServiceAccountToken : Optional Bool
+      , readOnlyRootFilesystem : Optional Bool
       }
 
 let PolarAgentSpec =
@@ -167,6 +184,8 @@ let PolarAgentSpec =
       , needs : List Text
       , shutdownBudgetSecs : Natural
       , serviceAccount : Optional Text
+      , command : Optional (List Text)
+      , args : Optional (List Text)
       , pod : PodOverlay
       }
 
@@ -269,14 +288,44 @@ let escrowEnv
         else    tlsEnv platform
               # [ envValue "KUBERNETES_SA_TOKEN" tokenPath ]
 
-let certArgument
-    : CertKind → Text
+let certArgumentIn
+    : CertKind → Text → Text
     = λ(kind : CertKind) →
+      λ(dir : Text) →
         merge
-          { Client = "client:${C.certDir}:ecdsa-p256"
-          , Server = λ(san : Text) → "server:${C.certDir}:ecdsa-p256:${san}"
+          { Client = "client:${dir}:ecdsa-p256"
+          , Server = λ(san : Text) → "server:${dir}:ecdsa-p256:${san}"
           }
           kind
+
+let certArgument
+    : CertKind → Text
+    = λ(kind : CertKind) → certArgumentIn kind C.certDir
+
+let extraCertArguments
+    : List ExtraCert → List Text
+    = λ(certs : List ExtraCert) →
+        Prelude.List.concatMap
+          ExtraCert
+          Text
+          (λ(c : ExtraCert) → [ "--cert", certArgumentIn c.kind c.dir ])
+          certs
+
+let extraCertVolume
+    : ExtraCert → kubernetes.Volume.Type
+    = λ(c : ExtraCert) →
+        kubernetes.Volume::{
+        , name = c.name
+        , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
+        }
+
+let scratchVolume
+    : Scratch → kubernetes.Volume.Type
+    = λ(s : Scratch) →
+        kubernetes.Volume::{
+        , name = s.name
+        , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
+        }
 
 --| The init container that obtains the pod's certificate.
 let polarInit
@@ -298,6 +347,7 @@ let polarInit
                   else  [] : List Text
                 )
               # [ "--cert", certArgument agent.cert ]
+              # extraCertArguments agent.extraCerts
             )
         , env = Some
             (   issuerEnv
@@ -310,7 +360,7 @@ let polarInit
               # platform.polarInitEnv
             )
         , volumeMounts = Some
-          [ kubernetes.VolumeMount::{
+          ( [ kubernetes.VolumeMount::{
             , name = tokenVolumeName
             , mountPath = tokenDir
             , readOnly = Some True
@@ -320,6 +370,14 @@ let polarInit
             , mountPath = C.certDir
             }
           ]
+          # Prelude.List.map
+              ExtraCert
+              kubernetes.VolumeMount.Type
+              ( λ(c : ExtraCert) →
+                  kubernetes.VolumeMount::{ name = c.name, mountPath = c.dir }
+              )
+              agent.extraCerts
+          )
         , securityContext = Some (nonRootDropAll agent.runAsUser)
         }
 
@@ -358,8 +416,12 @@ let makePolarAgent
           , needs = agent.provides
           , shutdownBudgetSecs = agent.shutdownBudgetSecs
           , serviceAccount = agent.serviceAccount
+          , command = None (List Text)
+          , args = None (List Text)
           , pod =
-            { runAsUser = agent.runAsUser
+            { automountServiceAccountToken = None Bool
+            , readOnlyRootFilesystem = None Bool
+            , runAsUser = agent.runAsUser
             -- The group owns the volumes, so a claim is writable by the user the agent runs as.
             , fsGroup = Some agent.runAsUser
             , imagePullPolicy = platform.imagePullPolicy
@@ -384,6 +446,8 @@ let makePolarAgent
                     , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
                     }
                   ]
+                # Prelude.List.map ExtraCert kubernetes.Volume.Type extraCertVolume agent.extraCerts
+                # Prelude.List.map Scratch kubernetes.Volume.Type scratchVolume agent.scratch
                 # merge
                     { Some =
                         λ(d : Data) →
@@ -404,6 +468,24 @@ let makePolarAgent
                     , readOnly = Some True
                     }
                   ]
+                # Prelude.List.map
+                    ExtraCert
+                    kubernetes.VolumeMount.Type
+                    ( λ(c : ExtraCert) →
+                        kubernetes.VolumeMount::{
+                        , name = c.name
+                        , mountPath = c.dir
+                        , readOnly = Some True
+                        }
+                    )
+                    agent.extraCerts
+                # Prelude.List.map
+                    Scratch
+                    kubernetes.VolumeMount.Type
+                    ( λ(s : Scratch) →
+                        kubernetes.VolumeMount::{ name = s.name, mountPath = s.mountPath }
+                    )
+                    agent.scratch
                 # merge
                     { Some =
                         λ(d : Data) →
@@ -424,7 +506,7 @@ let makePolarAgent
                   , None = [] : List kubernetes.ContainerPort.Type
                   }
                   agent.port
-            , livenessProbe = livenessProbe agent
+            , livenessProbe = Some (livenessProbe agent)
             }
           }
         }
@@ -499,6 +581,8 @@ let makeServiceAccount
 
 in  { Issuer
     , CertKind
+    , ExtraCert
+    , Scratch
     , Platform
     , Health
     , Data
