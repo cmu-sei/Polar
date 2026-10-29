@@ -544,6 +544,53 @@ ten. Numbers from this set are compared only with each other.
 here is what it carries at the least; on production hardware it does better. The comparisons between builds hold; the
 absolute figures are a floor.
 
+## The third set: the results (2026-10-29)
+
+Run 14:55 to 17:38, rounds in the order V0, S2, S3, S4, V2, twice; scratch `exp-driver4.nu`, `exp4-analyse.nu`,
+records `baseline-20261029T145837.nuon` to `baseline-20261029T172405.nuon`. Every check passed (6 or 7 sessions, nothing
+refused), the broker held through every run, and no message was lost. Two checks recorded a client's restart, as the
+driver records and does not wait on (above): cert-issuer before S4's first round, the credentials agent's observer
+before S3's second, each by its pod's restart-all-containers rule. u7s was stopped for the set
+(the maintainer, 2026-10-29). Each cell is round 1, round 2.
+
+| | V0 glibc | S2 | S3 | S4 | V2 mimalloc |
+| --- | --- | --- | --- | --- | --- |
+| 256 B saturated, received a second | 84,586, 75,375 | 60,978, 60,887 | 60,835, 63,616 | 76,906, 78,246 | 77,098, 76,364 |
+| 256 B saturated, CPU a message | 51, 57 µs | 87, 81 | 83, 77 | 58, 53 | 60, 62 |
+| 4 KiB saturated, received a second | 62,155, 63,607 | 53,842, 50,404 | 52,990, 52,464 | 57,407, 57,143 | 57,647, 57,602 |
+| 64 KiB saturated, received a second | 19,691, 24,469 | 22,547, 22,022 | 21,742, 15,831 | 14,329, 22,617 | 14,811, 23,544 |
+| 1 MiB saturated, received a second | 1,893, 1,879 | 1,781, 1,664 | 1,789, 1,560 | 1,622, 1,683 | 1,611, 1,511 |
+| working set, 256 B at 10,000/s | 8, 8 MB | 10, 10 | 10, 10 | 11, 12 | 54, 54 |
+| working set at the end | 72, 88 MB | 50, 38 | 40, 33 | 47, 50 | 82, 83 |
+| peak after the small-message rows | 36, 34 MB | 26, 27 | 27, 26 | 28, 29 | 82, 76 |
+| peak after every row | 150, 119 MB | 58, 50 | 51, 63 | 54, 77 | 122, 122 |
+
+At the set rates every build kept up (received equals offered at every size, up to 10,000 a second), and the 1 MiB CPU
+is level (0.9 to 1.2 ms a message in every build).
+
+*The shared caches' lock was the lever.* S4, one thread cache a thread, carries as many small messages as mimalloc
+(76,906 and 78,246 a second at 256 B against V2's 77,098 and 76,364; 4 KiB level too) at the CPU mimalloc spends (53 to
+58 µs a message against 60 to 62), and is within V0's spread at 256 B (75,375 to 84,586) and about 9% below it at 4 KiB.
+S2 and S3, whose caches are shared, carry about a fifth fewer at 256 B, at 77 to 87 µs.
+
+*The inline CRC did nothing measurable:* S3 is S2 in every row. The checksum is hot in a profile but small beside the
+rest.
+
+*S4's memory is still Scudo's:* a peak of 54 and 77 MB against mimalloc's 122 and 122 and glibc's 150 and 119; at the
+end 47 and 50 MB against 82 and 83. Under small messages it holds 11 to 15 MB, where mimalloc holds 51 to 58. One cache
+a thread costs a little against S2 (the peak 54 and 77 against 58 and 50; 1 to 4 MB more under small messages), far less
+than the second set's S1 against S2 suggested.
+
+*The 64 KiB saturated row is noise here:* every build moves by up to 9,000 a second between rounds (S4 14,329 then
+22,617; V2 14,811 then 23,544).
+
+*Against the second set,* three things changed at once (the tracing commits, the cluster pared down to what the harness
+needs, u7s stopped), so its figures are not compared with these. The profile's run at `warn` alone (above) puts the
+most of the change on tracing.
+
+*Not decided here:* which build the broker uses. S4 carries what V2, every binary's current build, carries, with about
+half its peak memory and a quarter of its working set under small messages.
+
 ## What measuring it found
 
 Each fix was made test first, the test failing before it.
