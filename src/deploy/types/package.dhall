@@ -1,5 +1,7 @@
 { agents =
     ./agents.dhall
+, builder =
+    ./builder.dhall
 , cassini =
     ./cassini.dhall
 , functions =

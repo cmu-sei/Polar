@@ -103,6 +103,29 @@ let cassini : Cassini.Type =
       Cassini.defaults // { image = "cassini:abc1234", certClient = Agent.CertClientConfig.default }
 ```
 
+## Agents built on polar-agent-builder
+
+`types/builder.dhall` (exported as `Polar.builder`) renders an agent that follows the agent contract
+as a `PolarAgent` resource, for the polar-operator to keep alive. The consumer states what is theirs
+(`BuilderAgent`: name, namespace, image, the capabilities the deployment provides, a shutdown budget,
+its settings, a port, a volume) and the cluster's facts once (`Platform`: where the broker and the
+certificate issuer are, the `polar-init` image). The library supplies the rest: the `polar-init` init
+container that obtains the pod's client certificate, the TLS and broker variables, the
+`POLAR_HEALTH_*` variables and the `polar-healthcheck` liveness probe.
+
+```dhall
+let B = Polar.builder
+in  [ B.makePolarAgent platform B.BuilderAgent::{ name = "my-agent", namespace = "mine", image = "..." } ]
+```
+
+A `PolarAgent` is a custom resource that `kubernetes.Resource` does not list, so agents render in a
+file of their own (`dhall-to-yaml --documents`), and the `makeServiceAccount`, `makeService` and
+`makePvc` objects that go with them in another. `examples/` has both, with the rendered output.
+
+Unlike the older functions, these take the namespace as a parameter; nothing here closes over
+`polar`. Order of deployment, differences between environments and secrets are not the library's:
+a secret is only ever referenced, by name, through an `EnvVarSource` in `settings`.
+
 ## Local Development
 
 ### Prerequisites

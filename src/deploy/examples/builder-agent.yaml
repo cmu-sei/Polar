@@ -1,0 +1,93 @@
+---
+apiVersion: polar.sei.cmu.edu/v1alpha1
+kind: PolarAgent
+metadata:
+  name: example
+  namespace: example
+spec:
+  image: registry.example/example:latest
+  needs:
+    - cassini
+  pod:
+    env:
+      - name: TLS_CA_CERT
+        value: /home/polar/certs/ca.pem
+      - name: TLS_CLIENT_CERT
+        value: /home/polar/certs/cert.pem
+      - name: TLS_CLIENT_KEY
+        value: /home/polar/certs/key.pem
+      - name: BROKER_ADDR
+        value: cassini-ip-svc.polar.svc.cluster.local:8080
+      - name: CASSINI_SERVER_NAME
+        value: cassini.polar.serviceaccount.cluster.local
+      - name: POLAR_HEALTH_FILE
+        value: /tmp/polar-health.json
+      - name: POLAR_HEALTH_CERTS
+        value: /home/polar/certs/cert.pem
+      - name: POLAR_HEALTH_DEP_ENDPOINTS
+        value: cassini-ip-svc.polar.svc.cluster.local:8080:300
+      - name: EXAMPLE_REALM
+        value: demo
+      - name: EXAMPLE_PASSWORD
+        valueFrom:
+          secretKeyRef:
+            key: password
+            name: example-secret
+    initContainers:
+      - args:
+          - "--check-dep-cert"
+          - cassini-ip-svc.polar.svc.cluster.local:8080:300
+          - "--cert"
+          - client:/home/polar/certs:ecdsa-p256
+        env:
+          - name: POLAR_INIT_CERT_ISSUER_URL
+            value: http://cert-issuer.polar.svc.cluster.local:8443
+          - name: POLAR_INIT_TOKEN_PATH
+            value: /workspace/token
+        image: registry.example/polar-init:latest
+        name: polar-init
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          runAsGroup: 1000
+          runAsNonRoot: true
+          runAsUser: 1000
+        volumeMounts:
+          - mountPath: /workspace
+            name: sa-token
+            readOnly: true
+          - mountPath: /home/polar/certs
+            name: polar-certs
+    livenessProbe:
+      exec:
+        command:
+          - polar-healthcheck
+      failureThreshold: 2
+      initialDelaySeconds: 150
+      periodSeconds: 30
+      timeoutSeconds: 5
+    ports:
+      - containerPort: 8080
+    runAsUser: 1000
+    volumeMounts:
+      - mountPath: /home/polar/certs
+        name: polar-certs
+        readOnly: true
+      - mountPath: /data
+        name: data
+    volumes:
+      - name: sa-token
+        projected:
+          sources:
+            - serviceAccountToken:
+                audience: polar-cert-issuer.local
+                expirationSeconds: 3600
+                path: token
+      - emptyDir: {}
+        name: polar-certs
+      - name: data
+        persistentVolumeClaim:
+          claimName: example-data
+  shutdownBudgetSecs: 30
