@@ -54,7 +54,7 @@ export def ensure_observer_forward [] {
     print "  -- the observer's port-forward is running but does not answer; restarting it"
     restart_forward "credentials-agent-observer" "observer"
     if not (do $wait 10).ok {
-        error make { msg: $"the credentials agent's observer does not answer at ($OBSERVER_LOCAL_URL) after restarting its port-forward: is the pod running? \(kubectl -n polar get pods -l job-name=credentials-agent-observer\)" }
+        error make { msg: $"the credentials agent's observer does not answer at ($OBSERVER_LOCAL_URL) after restarting its port-forward: is the pod running? \(kubectl -n polar get pods -l name=credentials-agent-observer\)" }
     }
     print "  ok: the observer's port-forward answers again"
 }
