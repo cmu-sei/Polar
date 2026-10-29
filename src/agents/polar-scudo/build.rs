@@ -90,7 +90,7 @@ fn main() {
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let crc = match arch.as_str() {
         "x86_64" => "-mcrc32",
-        "aarch64" => "-mcrc",
+        "aarch64" => "-march=armv8-a+crc",
         _ => "",
     };
     let mut hw = build(&src, &config);
@@ -100,9 +100,19 @@ fn main() {
     }
     hw.compile("polar_scudo_crc32");
 
+    // POLAR_SCUDO_CRC32=everywhere compiles every source with the CRC instructions, so the chunk header's checksum is
+    // the instruction inline (chunk.h, computeChecksum) and no host without them can run the binary. Otherwise, as
+    // upstream, Scudo chooses at start, and the hardware CRC is found only if computeHardwareCRC32 is linked: its
+    // reference is weak, and a weak reference does not take crc32_hw.cpp out of its archive, so the checksum is the
+    // BSD one in software (found 2026-10-29: S0 to S2 had no CRC instruction).
+    println!("cargo:rerun-if-env-changed=POLAR_SCUDO_CRC32");
+    let everywhere = env::var("POLAR_SCUDO_CRC32").is_ok_and(|v| v == "everywhere");
     let mut lib = build(&src, &config);
     for f in SOURCES {
         lib.file(src.join(f));
+    }
+    if everywhere && !crc.is_empty() {
+        lib.flag(crc);
     }
     lib.compile("polar_scudo");
     // The tests run on the allocator, so only when it was compiled.

@@ -28,6 +28,8 @@
 #   s0  musl, Scudo from nixpkgs' LLVM, upstream's default configuration
 #   s1  s0 with the large-block cache to 4 MiB and the quarantine compiled out
 #   s2  s1 with shared thread caches, a 1 s release interval and the futex condition variable
+#   s3  s2 with every source compiled with the CRC instructions, so the chunk header's checksum is the instruction
+#   s4  s3 with one thread cache a thread (s1's), not shared ones that lock on every allocation and free
 #   m0  musl, smalloc as published
 #
 # The Scudo configurations are polar-scudo/configs/<name>; the allocator is a feature of the broker
@@ -65,11 +67,11 @@ let
   tripleUnderscore = builtins.replaceStrings [ "-" ] [ "_" ] crateArgs.CARGO_BUILD_TARGET;
   staticCC = pkgs.pkgsStatic.stdenv.cc;
 
-  scudo = name: config: musl name "alloc-scudo" {
+  scudo = name: config: extra: musl name "alloc-scudo" ({
     SCUDO_SRC = scudoSrc;
     POLAR_SCUDO_CONFIG = config;
     "CXX_${tripleUnderscore}" = "${staticCC}/bin/${staticCC.targetPrefix}c++";
-  };
+  } // extra);
 
   # The reference, on glibc as every binary was before the musl build: its own toolchain and dependencies.
   craneGlibc = (crane.mkLib pkgs).overrideToolchain (p: p.rust-bin.nightly.latest.default.override {
@@ -100,9 +102,11 @@ let
 
   servers = {
     v0 = glibc;
-    s0 = scudo "s0" "default";
-    s1 = scudo "s1" "cache";
-    s2 = scudo "s2" "lean";
+    s0 = scudo "s0" "default" { };
+    s1 = scudo "s1" "cache" { };
+    s2 = scudo "s2" "lean" { };
+    s3 = scudo "s3" "lean" { POLAR_SCUDO_CRC32 = "everywhere"; };
+    s4 = scudo "s4" "exclusive" { POLAR_SCUDO_CRC32 = "everywhere"; };
     m0 = musl "m0" "alloc-smalloc" { };
   };
 in
