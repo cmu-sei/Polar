@@ -52,6 +52,7 @@ scripts that do.
 | 5 failures in a row hold the agent in `CrashLoop`; changing the spec releases it | rule 4 |
 | A changed spec stops the running instance (SIGTERM, then its grace period) and starts the new one once it is gone | rule 5 |
 | Every pod is hardened: non-root, read-only root, no capabilities, RuntimeDefault seccomp, no service-account token, a writable `/tmp` only | `pod.rs` |
+| A spec's `pod` overlay (init containers, volumes, mounts, secret-backed variables, ports, a liveness probe, the user) is merged over those defaults; a spec that cannot make a pod is refused in its status, with every problem named, and nothing is started or stopped | `pod.rs` `overlay_problems`, `controller.rs` |
 | Every agent gets its own ServiceAccount (its identity) unless the spec names one | `controller.rs` |
 | `POLAR_CAPABILITIES`, `POLAR_SHUTDOWN_BUDGET_SECS` and `POLAR_AGENT_NAME` are given to every instance; the grace period is the budget plus 10 s | `pod.rs` |
 
@@ -147,15 +148,17 @@ Clean up with `kubectl delete ns polar-demo` and
 
 ## Not yet
 
-- Certificates: `polar-init` as an init container, so an instance gets its mTLS identity.
-  Until then, the scheduler's half of the boundary above has nothing to attest.
+- Certificates are the spec's business, not the operator's: `polar-init` arrives as an init container
+  in the `pod` overlay, which the Dhall library (`src/deploy/types/builder.dhall`) renders. The operator
+  has not yet run one against a cluster that issues certificates, so the scheduler's half of the
+  boundary above still has nothing it has seen attested.
 - A deleted `PolarAgent` is recorded by the kube consumer (a `Deleted` state on the
   deployment), but the operator sends no event for it: that needs a finalizer.
 - `spec.agent` is set by hand; for a builder agent the operator could read it from the
   image's `--scaffold`, along with the rest of what the agent declares about itself.
 - For builder agents, a pre-flight before a rollout: the new image's `--check` on its config.
 - Capabilities that become RBAC and NetworkPolicy, as the catalog's facets do.
-- Pod fields beyond the contract: resources, volumes, node selection.
+- Pod fields beyond the contract and the overlay: resources, node selection.
 - In a cluster, the kube observer's ClusterRole must allow `get`, `list` and `watch` on
   `polaragents.polar.sei.cmu.edu`.
 - An instance stopped by hand (`kubectl delete pod`) within 30 s of starting counts as a

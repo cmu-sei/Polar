@@ -5,7 +5,7 @@
 //! writable `/tmp` is the only scratch space. An agent that needs more asks for it in its
 //! spec (not yet expressible: that is the catalog's capabilities, later).
 
-use crate::crd::{Ending, EndingKind, PolarAgent, PolarAgentSpec};
+use crate::crd::{Ending, EndingKind, PodOverlay, PolarAgent, PolarAgentSpec};
 use crate::lifecycle::{Instance, InstanceState};
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, ContainerStatus, EmptyDirVolumeSource, EnvVar, Pod, PodSpec,
@@ -19,6 +19,12 @@ use std::collections::BTreeMap;
 
 /// The agent's container, by name, in every pod.
 pub const CONTAINER: &str = "agent";
+/// The operator's own scratch volume, mounted at [`TMP_PATH`]. An overlay cannot reuse the name or
+/// the path.
+pub const TMP_VOLUME: &str = "tmp";
+pub const TMP_PATH: &str = "/tmp";
+/// The user and group an agent runs as unless its overlay names another.
+pub const DEFAULT_UID: i64 = 65532;
 /// Added to the shutdown budget for the pod's grace period, so Kubernetes never kills an
 /// agent that is still inside its budget.
 pub const GRACE_MARGIN_SECS: u32 = 10;
@@ -42,9 +48,74 @@ pub fn service_account(agent: &PolarAgent) -> String {
         .unwrap_or_else(|| agent.name_any())
 }
 
+/// What is wrong with a spec's overlay, in words for the person who wrote it, or nothing. The
+/// operator refuses to start a pod from a spec that has any of these, and says so in the status.
+pub fn overlay_problems(spec: &PolarAgentSpec) -> Vec<String> {
+    let Some(overlay) = &spec.pod else {
+        return Vec::new();
+    };
+    let mut problems = Vec::new();
+
+    if overlay.run_as_user == Some(0) {
+        problems.push("pod.runAsUser is 0: an agent never runs as root".to_string());
+    }
+
+    let mut volumes: Vec<&str> = vec![TMP_VOLUME];
+    for volume in &overlay.volumes {
+        if volume.name == TMP_VOLUME {
+            problems.push(format!(
+                "pod.volumes names a volume '{TMP_VOLUME}', which is the operator's scratch space"
+            ));
+        } else if volumes.contains(&volume.name.as_str()) {
+            problems.push(format!("pod.volumes names '{}' twice", volume.name));
+        } else {
+            volumes.push(&volume.name);
+        }
+    }
+    for mount in &overlay.volume_mounts {
+        if mount.mount_path == TMP_PATH {
+            problems.push(format!(
+                "pod.volumeMounts mounts '{}' at {TMP_PATH}, which is the operator's scratch space",
+                mount.name
+            ));
+        }
+        if !volumes.contains(&mount.name.as_str()) {
+            problems.push(format!(
+                "pod.volumeMounts mounts '{}', which is not one of pod.volumes",
+                mount.name
+            ));
+        }
+    }
+
+    let mut inits: Vec<&str> = Vec::new();
+    for init in &overlay.init_containers {
+        if init.name.is_empty() {
+            problems.push("an entry of pod.initContainers has no name".to_string());
+        } else if init.name == CONTAINER || inits.contains(&init.name.as_str()) {
+            problems.push(format!(
+                "pod.initContainers names '{}', which is already a container of the pod",
+                init.name
+            ));
+        } else {
+            inits.push(&init.name);
+        }
+        for mount in init.volume_mounts.iter().flatten() {
+            if !volumes.contains(&mount.name.as_str()) {
+                problems.push(format!(
+                    "init container '{}' mounts '{}', which is not one of pod.volumes",
+                    init.name, mount.name
+                ));
+            }
+        }
+    }
+    problems
+}
+
 pub fn build(agent: &PolarAgent, pod_name: &str, hash: &str) -> Pod {
     let spec = &agent.spec;
     let name = agent.name_any();
+    let overlay = spec.pod.clone().unwrap_or_else(PodOverlay::default);
+    let uid = overlay.run_as_user.unwrap_or(DEFAULT_UID);
 
     let mut env = vec![
         var("POLAR_AGENT_NAME", &agent.agent_name()),
@@ -55,6 +126,7 @@ pub fn build(agent: &PolarAgent, pod_name: &str, hash: &str) -> Pod {
         ),
     ];
     env.extend(spec.env.iter().map(|e| var(&e.name, &e.value)));
+    env.extend(overlay.env.iter().cloned());
 
     let labels = BTreeMap::from([
         (AGENT_LABEL.to_string(), name.clone()),
@@ -76,6 +148,8 @@ pub fn build(agent: &PolarAgent, pod_name: &str, hash: &str) -> Pod {
             termination_grace_period_seconds: Some(
                 (spec.shutdown_budget_secs + GRACE_MARGIN_SECS).into(),
             ),
+            init_containers: (!overlay.init_containers.is_empty())
+                .then(|| overlay.init_containers.clone()),
             containers: vec![Container {
                 name: CONTAINER.into(),
                 image: Some(spec.image.clone()),
@@ -85,30 +159,40 @@ pub fn build(agent: &PolarAgent, pod_name: &str, hash: &str) -> Pod {
                 // An agent that writes no termination message still says something: the
                 // tail of its log becomes the message.
                 termination_message_policy: Some("FallbackToLogsOnError".into()),
-                security_context: Some(hardened()),
-                volume_mounts: Some(vec![VolumeMount {
-                    name: "tmp".into(),
-                    mount_path: "/tmp".into(),
-                    ..Default::default()
-                }]),
+                security_context: Some(hardened(uid)),
+                ports: (!overlay.ports.is_empty()).then(|| overlay.ports.clone()),
+                liveness_probe: overlay.liveness_probe.clone(),
+                volume_mounts: Some(
+                    std::iter::once(VolumeMount {
+                        name: TMP_VOLUME.into(),
+                        mount_path: TMP_PATH.into(),
+                        ..Default::default()
+                    })
+                    .chain(overlay.volume_mounts.iter().cloned())
+                    .collect(),
+                ),
                 ..Default::default()
             }],
-            volumes: Some(vec![Volume {
-                name: "tmp".into(),
-                empty_dir: Some(EmptyDirVolumeSource::default()),
-                ..Default::default()
-            }]),
+            volumes: Some(
+                std::iter::once(Volume {
+                    name: TMP_VOLUME.into(),
+                    empty_dir: Some(EmptyDirVolumeSource::default()),
+                    ..Default::default()
+                })
+                .chain(overlay.volumes.iter().cloned())
+                .collect(),
+            ),
             ..Default::default()
         }),
         status: None,
     }
 }
 
-fn hardened() -> SecurityContext {
+fn hardened(uid: i64) -> SecurityContext {
     SecurityContext {
         run_as_non_root: Some(true),
-        run_as_user: Some(65532),
-        run_as_group: Some(65532),
+        run_as_user: Some(uid),
+        run_as_group: Some(uid),
         read_only_root_filesystem: Some(true),
         allow_privilege_escalation: Some(false),
         capabilities: Some(Capabilities {
@@ -249,6 +333,7 @@ mod tests {
                 shutdown_budget_secs: 20,
                 service_account: None,
                 suspend: false,
+                pod: None,
             },
         );
         agent.metadata.namespace = Some("polar".into());
@@ -283,6 +368,217 @@ mod tests {
         let owner = &pod.metadata.owner_references.unwrap()[0];
         assert_eq!(owner.kind, "PolarAgent");
         assert_eq!(owner.controller, Some(true));
+    }
+
+    fn overlay() -> PodOverlay {
+        PodOverlay {
+            run_as_user: Some(1000),
+            init_containers: vec![Container {
+                name: "polar-init".into(),
+                image: Some("polar-init:1".into()),
+                volume_mounts: Some(vec![VolumeMount {
+                    name: "certs".into(),
+                    mount_path: "/certs".into(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }],
+            volumes: vec![Volume {
+                name: "certs".into(),
+                empty_dir: Some(EmptyDirVolumeSource::default()),
+                ..Default::default()
+            }],
+            volume_mounts: vec![VolumeMount {
+                name: "certs".into(),
+                mount_path: "/certs".into(),
+                read_only: Some(true),
+                ..Default::default()
+            }],
+            env: vec![EnvVar {
+                name: "SECRET".into(),
+                value: None,
+                value_from: Some(k8s_openapi::api::core::v1::EnvVarSource {
+                    secret_key_ref: Some(k8s_openapi::api::core::v1::SecretKeySelector {
+                        name: "s".into(),
+                        key: "k".into(),
+                        optional: None,
+                    }),
+                    ..Default::default()
+                }),
+            }],
+            ports: vec![k8s_openapi::api::core::v1::ContainerPort {
+                container_port: 8080,
+                ..Default::default()
+            }],
+            liveness_probe: Some(k8s_openapi::api::core::v1::Probe::default()),
+        }
+    }
+
+    fn with_overlay(overlay: PodOverlay) -> PolarAgent {
+        let mut agent = agent();
+        agent.spec.pod = Some(overlay);
+        agent
+    }
+
+    #[test]
+    fn a_spec_without_an_overlay_is_the_pod_it_always_was() {
+        let pod = build(&agent(), "demo-1", "h");
+        let spec = pod.spec.unwrap();
+        assert!(spec.init_containers.is_none());
+        assert_eq!(spec.volumes.unwrap().len(), 1);
+        let container = &spec.containers[0];
+        assert!(container.liveness_probe.is_none() && container.ports.is_none());
+        let context = container.security_context.as_ref().unwrap();
+        assert_eq!(context.run_as_user, Some(DEFAULT_UID));
+        // A spec written before overlays existed hashes as it did: no running agent is
+        // restarted by an upgrade of the operator.
+        assert!(!serde_json::to_string(&agent().spec).unwrap().contains("\"pod\""));
+    }
+
+    #[test]
+    fn an_overlay_is_merged_over_the_hardened_defaults() {
+        let pod = build(&with_overlay(overlay()), "demo-1", "h");
+        let spec = pod.spec.unwrap();
+
+        assert_eq!(spec.init_containers.as_ref().unwrap()[0].name, "polar-init");
+        let volumes: Vec<_> = spec.volumes.unwrap().into_iter().map(|v| v.name).collect();
+        assert_eq!(volumes, ["tmp", "certs"], "the scratch volume stays first");
+
+        let container = &spec.containers[0];
+        let mounts: Vec<_> = container
+            .volume_mounts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|m| m.mount_path.as_str())
+            .collect();
+        assert_eq!(mounts, ["/tmp", "/certs"]);
+        assert_eq!(container.ports.as_ref().unwrap()[0].container_port, 8080);
+        assert!(container.liveness_probe.is_some());
+
+        // The contract's own variables come first; the overlay's follow `spec.env`.
+        let env = container.env.as_ref().unwrap();
+        assert_eq!(env[0].name, "POLAR_AGENT_NAME");
+        assert_eq!(env.last().unwrap().name, "SECRET");
+        assert!(env.last().unwrap().value_from.is_some());
+
+        // Still hardened; only the user moved, and it moved for the group too.
+        let context = container.security_context.as_ref().unwrap();
+        assert_eq!(context.run_as_user, Some(1000));
+        assert_eq!(context.run_as_group, Some(1000));
+        assert_eq!(context.run_as_non_root, Some(true));
+        assert_eq!(context.read_only_root_filesystem, Some(true));
+        assert_eq!(spec.automount_service_account_token, Some(false));
+    }
+
+    #[test]
+    fn an_overlay_is_part_of_what_identifies_a_spec() {
+        let plain = spec_hash(&agent().spec);
+        let overlaid = spec_hash(&with_overlay(overlay()).spec);
+        assert_ne!(plain, overlaid);
+        let mut other = overlay();
+        other.run_as_user = Some(1001);
+        assert_ne!(overlaid, spec_hash(&with_overlay(other).spec));
+    }
+
+    #[test]
+    fn a_sound_overlay_has_no_problems() {
+        assert!(overlay_problems(&agent().spec).is_empty());
+        assert!(overlay_problems(&with_overlay(overlay()).spec).is_empty());
+    }
+
+    #[test]
+    fn every_problem_with_an_overlay_is_named() {
+        let mut bad = overlay();
+        bad.run_as_user = Some(0);
+        bad.volumes.push(Volume {
+            name: "tmp".into(),
+            ..Default::default()
+        });
+        bad.volumes.push(Volume {
+            name: "certs".into(),
+            ..Default::default()
+        });
+        bad.volume_mounts.push(VolumeMount {
+            name: "tmp".into(),
+            mount_path: "/tmp".into(),
+            ..Default::default()
+        });
+        bad.volume_mounts.push(VolumeMount {
+            name: "missing".into(),
+            mount_path: "/missing".into(),
+            ..Default::default()
+        });
+        bad.init_containers.push(Container {
+            name: String::new(),
+            ..Default::default()
+        });
+        bad.init_containers.push(Container {
+            name: CONTAINER.into(),
+            ..Default::default()
+        });
+        bad.init_containers.push(Container {
+            name: "late".into(),
+            volume_mounts: Some(vec![VolumeMount {
+                name: "nowhere".into(),
+                mount_path: "/x".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+
+        let problems = overlay_problems(&with_overlay(bad).spec).join("\n");
+        for expected in [
+            "runAsUser is 0",
+            "a volume 'tmp'",
+            "names 'certs' twice",
+            "at /tmp",
+            "'missing', which is not one of pod.volumes",
+            "has no name",
+            "'agent', which is already a container",
+            "init container 'late' mounts 'nowhere'",
+        ] {
+            assert!(problems.contains(expected), "missing {expected:?} in:\n{problems}");
+        }
+    }
+
+    /// The Dhall library and the operator are two programs that must agree on a shape. This is
+    /// the library's own rendered example (`src/deploy/examples`), read by the operator.
+    #[test]
+    fn what_the_library_renders_is_a_spec_the_operator_runs() {
+        let rendered = include_str!("../../../../deploy/examples/builder-agent.yaml");
+        let mut agent: PolarAgent = serde_yaml::from_str(rendered).expect("the library's output is a PolarAgent");
+        agent.metadata.uid = Some("uid-1".into());
+        assert!(overlay_problems(&agent.spec).is_empty());
+
+        let pod = build(&agent, "example-1", &spec_hash(&agent.spec));
+        let spec = pod.spec.unwrap();
+        // 30 s budget, plus the margin.
+        assert_eq!(spec.termination_grace_period_seconds, Some(40));
+
+        let init = &spec.init_containers.as_ref().unwrap()[0];
+        assert_eq!(init.name, "polar-init");
+        let args = init.args.as_ref().unwrap();
+        assert!(args.contains(&"--check-dep-cert".to_string()) && args.contains(&"--cert".to_string()));
+
+        let volumes: Vec<_> = spec.volumes.as_ref().unwrap().iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(volumes, ["tmp", "sa-token", "polar-certs", "data"]);
+
+        let container = &spec.containers[0];
+        let context = container.security_context.as_ref().unwrap();
+        assert_eq!(context.run_as_user, Some(1000));
+        assert_eq!(container.ports.as_ref().unwrap()[0].container_port, 8080);
+        let probe = container.liveness_probe.as_ref().unwrap();
+        assert_eq!(probe.exec.as_ref().unwrap().command, Some(vec!["polar-healthcheck".to_string()]));
+
+        let env = container.env.as_ref().unwrap();
+        let broker = env.iter().find(|e| e.name == "BROKER_ADDR").expect("the broker address");
+        assert_eq!(broker.value.as_deref(), Some("cassini-ip-svc.polar.svc.cluster.local:8080"));
+        let secret = env.iter().find(|e| e.name == "EXAMPLE_PASSWORD").expect("the secret reference");
+        assert!(secret.value.is_none() && secret.value_from.is_some(), "a secret is a reference, never a value");
+        // The operator's own variables are still there and still the operator's.
+        assert!(env.iter().any(|e| e.name == "POLAR_SHUTDOWN_BUDGET_SECS" && e.value.as_deref() == Some("30")));
+        assert!(env.iter().any(|e| e.name == "POLAR_CAPABILITIES" && e.value.as_deref() == Some("cassini")));
     }
 
     #[test]

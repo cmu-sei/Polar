@@ -4,6 +4,7 @@
 //! agent's own declaration (`--scaffold`), and the agent refuses to start when the two
 //! disagree; the operator does not repeat that judgement, it records the refusal.
 
+use k8s_openapi::api::core::v1::{Container, ContainerPort, EnvVar, Probe, Volume, VolumeMount};
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,45 @@ pub struct PolarAgentSpec {
     /// Stop the agent and start nothing until this is cleared.
     #[serde(default)]
     pub suspend: bool,
+    /// What the pod needs beyond the contract: how it gets its certificate, what it mounts, how
+    /// it is probed. The operator does not know what any of it is for; it only merges it over its
+    /// hardened defaults. The Dhall library (`src/deploy/types/builder.dhall`) renders it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod: Option<PodOverlay>,
+}
+
+/// Pod additions, in Kubernetes' own shapes so that nothing is translated on the way.
+///
+/// Anything the operator sets for the contract (the `/tmp` scratch volume, the hardened security
+/// context, the grace period, the variables it derives) is not replaceable from here: a conflict
+/// is reported against the resource instead of producing a pod that does not match what was asked.
+#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PodOverlay {
+    /// The user and group the agent runs as, when its image is not built for the default
+    /// (65532). Never 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_as_user: Option<i64>,
+    /// Containers that run to completion before the agent starts, such as the one that obtains
+    /// its certificate. Each brings its own security context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub init_containers: Vec<Container>,
+    /// Volumes, besides the operator's `tmp`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<Volume>,
+    /// Where the agent container mounts them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volume_mounts: Vec<VolumeMount>,
+    /// Variables for the agent container that need more than a value: a reference to a Secret.
+    /// They follow `spec.env`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<EnvVar>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<ContainerPort>,
+    /// The liveness probe. An agent ends itself when it wants replacing; the probe is the
+    /// dead-man's switch for one that stopped saying anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness_probe: Option<Probe>,
 }
 
 impl PolarAgent {

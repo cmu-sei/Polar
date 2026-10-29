@@ -250,6 +250,7 @@ mod tests {
                 shutdown_budget_secs: 5,
                 service_account: None,
                 suspend: false,
+                pod: None,
             },
         );
         agent.metadata.namespace = Some("polar-demo".into());

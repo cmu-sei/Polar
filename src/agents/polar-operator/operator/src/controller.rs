@@ -131,6 +131,25 @@ async fn reconcile(agent: Arc<PolarAgent>, ctx: Arc<Context>) -> Result<Action, 
     let instances: Vec<_> = listed.items.iter().map(pod::view).collect();
     let hash = pod::spec_hash(&agent.spec);
     let remembered = agent.status.clone().unwrap_or_default();
+
+    // A spec that cannot make a pod is reported against the resource, not discovered as a
+    // rejected pod on every attempt. Nothing is started, stopped or recorded until it is fixed,
+    // and fixing it is a change that brings the agent back here.
+    let problems = pod::overlay_problems(&agent.spec);
+    if !problems.is_empty() {
+        let message = format!("the spec cannot be run: {}", problems.join("; "));
+        if remembered.message.as_deref() != Some(message.as_str()) {
+            warn!(agent = %name, "{message}");
+            agents
+                .patch_status(
+                    &name,
+                    &PatchParams::apply(MANAGER),
+                    &Patch::Merge(json!({ "status": { "message": message } })),
+                )
+                .await?;
+        }
+        return Ok(Action::await_change());
+    }
     let agent_name = agent.agent_name();
     let deployment = events::deployment_ref(&agent, &ctx.cluster_uid);
     let now_ms = chrono::Utc::now().timestamp_millis();
