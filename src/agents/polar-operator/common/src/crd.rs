@@ -115,6 +115,11 @@ pub struct PodOverlay {
     /// dead-man's switch for one that stopped saying anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liveness_probe: Option<Probe>,
+    /// The readiness probe. With one, the agent is `Starting` until the probe passes (and again
+    /// whenever it stops passing), and a Service sends it requests only while it does. Without one, an
+    /// instance is `Running` as soon as its container is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness_probe: Option<Probe>,
 }
 
 impl PolarAgent {

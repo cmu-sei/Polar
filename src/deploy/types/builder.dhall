@@ -174,6 +174,7 @@ let PodOverlay =
       , env : List kubernetes.EnvVar.Type
       , ports : List kubernetes.ContainerPort.Type
       , livenessProbe : Optional kubernetes.Probe.Type
+      , readinessProbe : Optional kubernetes.Probe.Type
       , automountServiceAccountToken : Optional Bool
       , readOnlyRootFilesystem : Optional Bool
       }
@@ -507,6 +508,7 @@ let makePolarAgent
                   }
                   agent.port
             , livenessProbe = Some (livenessProbe agent)
+            , readinessProbe = None kubernetes.Probe.Type
             }
           }
         }

@@ -32,7 +32,10 @@ let ServiceAgent =
           , port : Optional Natural
           , volumes : List kubernetes.Volume.Type
           , mounts : List kubernetes.VolumeMount.Type
+          -- Alive: the operator replaces the instance when it fails.
           , probe : Optional kubernetes.Probe.Type
+          -- Ready: the agent is `Starting` until it passes, so a plan that waits for it waits for this.
+          , readiness : Optional kubernetes.Probe.Type
           , runAsUser : Natural
           -- Off unless a volume must be owned by a group: a pod-level group changes the mode of
           -- every file on the volume, which a key file that must stay 0600 cannot survive.
@@ -51,6 +54,7 @@ let ServiceAgent =
         , volumes = [] : List kubernetes.Volume.Type
         , mounts = [] : List kubernetes.VolumeMount.Type
         , probe = None kubernetes.Probe.Type
+        , readiness = None kubernetes.Probe.Type
         , runAsUser = 1000
         , fsGroup = None Natural
         , serviceAccount = None Text
@@ -94,6 +98,7 @@ let makeServiceAgent
                   }
                   service.port
             , livenessProbe = service.probe
+            , readinessProbe = service.readiness
             , automountServiceAccountToken =
                 if    service.serviceAccountToken
                 then  Some True

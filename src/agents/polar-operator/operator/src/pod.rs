@@ -190,6 +190,7 @@ pub fn build(agent: &PolarAgent, pod_name: &str, hash: &str) -> Pod {
                 security_context: Some(hardened(uid, overlay.read_only_root_filesystem.unwrap_or(true))),
                 ports: (!overlay.ports.is_empty()).then(|| overlay.ports.clone()),
                 liveness_probe: overlay.liveness_probe.clone(),
+                readiness_probe: overlay.readiness_probe.clone(),
                 volume_mounts: Some(
                     std::iter::once(VolumeMount {
                         name: TMP_VOLUME.into(),
@@ -247,6 +248,12 @@ fn non_empty(list: &[String]) -> Option<Vec<String>> {
     (!list.is_empty()).then(|| list.to_vec())
 }
 
+fn has_readiness_probe(pod: &Pod) -> bool {
+    pod.spec
+        .as_ref()
+        .is_some_and(|s| s.containers.iter().any(|c| c.name == CONTAINER && c.readiness_probe.is_some()))
+}
+
 /// What a pod says about its instance.
 pub fn view(pod: &Pod) -> Instance {
     let name = pod.name_any();
@@ -287,6 +294,11 @@ pub fn view(pod: &Pod) -> Instance {
                     .map(|f| f.to_string())
                     .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
             })
+        }
+        // With a readiness probe the container is running before it is ready, and an instance that
+        // is not ready is still starting (or has stopped being ready): its phase says so.
+        Some(s) if s.running.is_some() && !container.is_some_and(|c| c.ready) && has_readiness_probe(pod) => {
+            InstanceState::Waiting { reason: Some("waiting for the readiness probe".into()) }
         }
         Some(s) if s.running.is_some() => InstanceState::Running,
         Some(s) => InstanceState::Waiting {
@@ -482,6 +494,7 @@ mod tests {
                 ..Default::default()
             }],
             liveness_probe: Some(k8s_openapi::api::core::v1::Probe::default()),
+            readiness_probe: None,
         }
     }
 
@@ -857,6 +870,43 @@ mod tests {
         assert_eq!(ending.kind, EndingKind::Exited);
         let said = ending.message.unwrap();
         assert!(said.contains("init container polar-init failed") && said.contains("InvalidToken"), "{said}");
+    }
+
+    /// A pod whose agent container is running, ready or not, from an overlay that may ask for a probe.
+    fn running_pod(readiness: bool, ready: bool) -> Pod {
+        use k8s_openapi::api::core::v1::{ContainerState, ContainerStateRunning, PodStatus};
+        let mut overlay = overlay();
+        overlay.readiness_probe = readiness.then(k8s_openapi::api::core::v1::Probe::default);
+        let mut pod = build(&with_overlay(overlay), "demo-1", "h");
+        pod.status = Some(PodStatus {
+            phase: Some("Running".into()),
+            container_statuses: Some(vec![ContainerStatus {
+                name: CONTAINER.into(),
+                ready,
+                state: Some(ContainerState { running: Some(ContainerStateRunning::default()), ..Default::default() }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        pod
+    }
+
+    #[test]
+    fn with_a_readiness_probe_an_instance_is_running_only_once_it_is_ready() {
+        let pod = running_pod(true, false);
+        assert!(pod.spec.as_ref().unwrap().containers[0].readiness_probe.is_some());
+        let InstanceState::Waiting { reason } = view(&pod).state else { panic!("not ready is still starting") };
+        assert_eq!(reason.as_deref(), Some("waiting for the readiness probe"));
+
+        assert!(matches!(view(&running_pod(true, true)).state, InstanceState::Running));
+    }
+
+    #[test]
+    fn without_a_readiness_probe_a_running_container_is_a_running_instance() {
+        // The container's `ready` reads false for a moment after it starts; no probe, no waiting.
+        let pod = running_pod(false, false);
+        assert!(pod.spec.as_ref().unwrap().containers[0].readiness_probe.is_none());
+        assert!(matches!(view(&pod).state, InstanceState::Running));
     }
 
     #[test]

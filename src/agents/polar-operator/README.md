@@ -52,7 +52,7 @@ scripts that do.
 | 5 failures in a row hold the agent in `CrashLoop`; changing the spec releases it | rule 4 |
 | A changed spec stops the running instance (SIGTERM, then its grace period) and starts the new one once it is gone | rule 5 |
 | Every pod is hardened: non-root, read-only root, no capabilities, RuntimeDefault seccomp, no service-account token, a writable `/tmp` only | `pod.rs` |
-| A spec's `pod` overlay (init containers, volumes, mounts, secret-backed variables, ports, a liveness probe, the user) is merged over those defaults; a spec that cannot make a pod is refused in its status, with every problem named, and nothing is started or stopped | `pod.rs` `overlay_problems`, `controller.rs` |
+| A spec's `pod` overlay (init containers, volumes, mounts, secret-backed variables, ports, a liveness probe, a readiness probe, the user) is merged over those defaults; a spec that cannot make a pod is refused in its status, with every problem named, and nothing is started or stopped | `pod.rs` `overlay_problems`, `controller.rs` |
 | Every agent gets its own ServiceAccount (its identity) unless the spec names one | `controller.rs` |
 | `POLAR_CAPABILITIES`, `POLAR_SHUTDOWN_BUDGET_SECS` and `POLAR_AGENT_NAME` are given to every instance; the grace period is the budget plus 10 s | `pod.rs` |
 
