@@ -86,6 +86,15 @@ pub struct PodOverlay {
     /// a `latest` tag every time, which an image loaded into a node by hand cannot survive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_pull_policy: Option<String>,
+    /// Mount the pod's service-account token. Off unless asked for: an agent has no business with the
+    /// Kubernetes API, and the one that does (the certificate issuer reads the API server's signing
+    /// keys) says so here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automount_service_account_token: Option<bool>,
+    /// Whether the agent's root filesystem is read-only. It is unless this says `false`: a visible,
+    /// per-service exception for third-party software that writes outside its volumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_root_filesystem: Option<bool>,
     /// Containers that run to completion before the agent starts, such as the one that obtains
     /// its certificate. Each brings its own security context.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
