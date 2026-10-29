@@ -164,8 +164,19 @@ pub fn build(agent: &PolarAgent, pod_name: &str, hash: &str) -> Pod {
             termination_grace_period_seconds: Some(
                 (spec.shutdown_budget_secs + GRACE_MARGIN_SECS).into(),
             ),
-            init_containers: (!overlay.init_containers.is_empty())
-                .then(|| overlay.init_containers.clone()),
+            init_containers: (!overlay.init_containers.is_empty()).then(|| {
+                overlay
+                    .init_containers
+                    .iter()
+                    .cloned()
+                    .map(|mut init| {
+                        // Like the agent: a failure that wrote no message still says something.
+                        init.termination_message_policy
+                            .get_or_insert_with(|| "FallbackToLogsOnError".to_string());
+                        init
+                    })
+                    .collect()
+            }),
             containers: vec![Container {
                 name: CONTAINER.into(),
                 image: Some(spec.image.clone()),
@@ -246,6 +257,14 @@ pub fn view(pod: &Pod) -> Instance {
         .and_then(|s| s.container_statuses.as_ref())
         .and_then(|cs| cs.iter().find(|c| c.name == CONTAINER));
 
+    // An init container that failed ends the instance. The pod never restarts (restartPolicy Never), so
+    // it is Failed for good while its agent container still reads "waiting": read as it stands, the
+    // instance would be alive for ever and never replaced. This is what happens to an agent whose
+    // `polar-init` could not get a certificate.
+    if let Some(ending) = failed_init(pod) {
+        return Instance { pod: name, spec_hash, terminating, state: InstanceState::Ended(ending) };
+    }
+
     let state = match container.and_then(|c| c.state.as_ref()) {
         Some(s) if s.terminated.is_some() => {
             let t = s.terminated.as_ref().unwrap();
@@ -306,6 +325,37 @@ pub fn view(pod: &Pod) -> Instance {
         terminating,
         state,
     }
+}
+
+/// The ending of an instance whose init container failed, in the init container's own words.
+fn failed_init(pod: &Pod) -> Option<Ending> {
+    let status = pod.status.as_ref()?;
+    let (init, t) = status.init_container_statuses.as_ref()?.iter().find_map(|c| {
+        let t = c.state.as_ref()?.terminated.as_ref()?;
+        (t.exit_code != 0).then_some((c, t))
+    })?;
+    let started = t.started_at.as_ref().map(|t| t.0);
+    let finished = t.finished_at.as_ref().map(|t| t.0);
+    let reason = t.reason.clone().unwrap_or_default();
+    let said = t.message.as_deref().and_then(trimmed);
+    Some(Ending {
+        pod: pod.name_any(),
+        pod_uid: pod.metadata.uid.clone(),
+        kind: classify(t.exit_code, &reason),
+        exit_code: t.exit_code,
+        reason,
+        message: Some(match said {
+            Some(said) => format!("init container {} failed: {said}", init.name),
+            None => format!("init container {} failed", init.name),
+        }),
+        ran_secs: match (started, finished) {
+            (Some(s), Some(f)) => f.as_second() - s.as_second(),
+            _ => 0,
+        },
+        finished_at: finished
+            .map(|f| f.to_string())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+    })
 }
 
 /// How an instance ended, from its exit code and Kubernetes' reason.
@@ -715,6 +765,71 @@ mod tests {
             assert!(env.contains(&needed), "an ordinary agent's init container needs {needed}");
         }
         assert!(!env.contains(&"POLAR_INIT_SKIP_ESCROW_BOOTSTRAP"));
+    }
+
+    fn pod_with(init_exit: Option<i32>, agent_waiting: bool) -> Pod {
+        use k8s_openapi::api::core::v1::{
+            ContainerState, ContainerStateTerminated, ContainerStateWaiting, PodStatus,
+        };
+        let terminated = |code: i32, message: &str| ContainerState {
+            terminated: Some(ContainerStateTerminated {
+                exit_code: code,
+                reason: Some("Error".into()),
+                message: Some(message.into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut pod = build(&with_overlay(overlay()), "demo-1", "h");
+        pod.status = Some(PodStatus {
+            phase: Some(if init_exit.is_some() { "Failed" } else { "Pending" }.into()),
+            init_container_statuses: Some(vec![ContainerStatus {
+                name: "polar-init".into(),
+                state: Some(match init_exit {
+                    Some(code) => terminated(code, "cert issuer rejected request: InvalidToken"),
+                    None => ContainerState::default(),
+                }),
+                ..Default::default()
+            }]),
+            container_statuses: Some(vec![ContainerStatus {
+                name: CONTAINER.into(),
+                state: agent_waiting.then(|| ContainerState {
+                    waiting: Some(ContainerStateWaiting {
+                        reason: Some("PodInitializing".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        pod
+    }
+
+    #[test]
+    fn an_instance_whose_init_container_failed_has_ended_and_says_why() {
+        // Before: the agent container reads "waiting" for ever, so the instance was alive for ever.
+        let instance = view(&pod_with(Some(1), true));
+        let InstanceState::Ended(ending) = instance.state else { panic!("a failed init container is an ending") };
+        assert_eq!(ending.exit_code, 1);
+        assert_eq!(ending.kind, EndingKind::Exited);
+        let said = ending.message.unwrap();
+        assert!(said.contains("init container polar-init failed") && said.contains("InvalidToken"), "{said}");
+    }
+
+    #[test]
+    fn an_init_container_still_running_is_an_instance_still_starting() {
+        assert!(matches!(view(&pod_with(None, true)).state, InstanceState::Waiting { .. }));
+    }
+
+    #[test]
+    fn the_init_containers_report_their_failures_as_the_agent_does() {
+        let pod = build(&with_overlay(overlay()), "demo-1", "h").spec.unwrap();
+        assert_eq!(
+            pod.init_containers.unwrap()[0].termination_message_policy.as_deref(),
+            Some("FallbackToLogsOnError")
+        );
     }
 
     #[test]
