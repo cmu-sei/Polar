@@ -156,6 +156,11 @@ pub fn build(agent: &PolarAgent, pod_name: &str, hash: &str) -> Pod {
                 ..Default::default()
             }),
             automount_service_account_token: Some(false),
+            // Kubernetes puts a variable for every Service of the namespace into every pod (the old
+            // Docker-link scheme: a Service `credentials-agent-observer` becomes
+            // `CREDENTIALS_AGENT_OBSERVER_PORT=tcp://10.0.0.1:8080`), which collides with an agent's own
+            // settings of the same name. An agent is told where things are, explicitly.
+            enable_service_links: Some(false),
             termination_grace_period_seconds: Some(
                 (spec.shutdown_budget_secs + GRACE_MARGIN_SECS).into(),
             ),
@@ -483,6 +488,7 @@ mod tests {
         assert_eq!(context.run_as_non_root, Some(true));
         assert_eq!(context.read_only_root_filesystem, Some(true));
         assert_eq!(spec.automount_service_account_token, Some(false));
+        assert_eq!(spec.enable_service_links, Some(false), "no variable per Service in the namespace");
         assert_eq!(container.image_pull_policy.as_deref(), Some("IfNotPresent"));
         assert_eq!(spec.security_context.as_ref().unwrap().fs_group, Some(1000));
     }
