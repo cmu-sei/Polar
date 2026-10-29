@@ -1,0 +1,155 @@
+---
+apiVersion: v1
+automountServiceAccountToken: true
+kind: ServiceAccount
+metadata:
+  name: cert-issuer
+  namespace: polar
+---
+apiVersion: v1
+data:
+  cert-issuer.json: |
+    {
+      "bind_addr": "0.0.0.0:8443",
+      "ca": {
+        "ca_cert_path": "/home/polar/ca/ca.crt",
+        "ca_key_path": "/home/polar/ca/ca.key",
+        "default_lifetime": {
+          "nanos": 0,
+          "secs": 3600
+        },
+        "identity_lifetime_overrides": {},
+        "provisioning": "self_bootstrap",
+        "server_lifetime": {
+          "nanos": 0,
+          "secs": 3600
+        },
+        "user_lifetime": {
+          "nanos": 0,
+          "secs": 31536000
+        }
+      },
+      "issuers": [
+        {
+          "allowed_algorithms": [
+            "RS256",
+            "ES256",
+            "EdDSA"
+          ],
+          "audience": [ "polar-cert-issuer.local" ],
+          "identity_normalization": {
+            "cluster_domain": "cluster.local",
+            "strategy": "kubernetes_service_account"
+          },
+          "identity_scope_claim": null,
+          "instance_binding_claim": "kubernetes.io/pod/uid",
+          "issuer": "https://kubernetes.default.svc.cluster.local",
+          "jwks_cache_ttl_max": {
+            "nanos": 0,
+            "secs": 3600
+          },
+          "jwks_cache_ttl_min": {
+            "nanos": 0,
+            "secs": 30
+          },
+          "jwks_uri": "https://kubernetes.default.svc.cluster.local/openid/v1/jwks",
+          "workload_identity_claim": "sub"
+        }
+      ],
+      "mtls": {
+        "internal_callers": [ "credentials-agent.polar.serviceaccount.cluster.local" ],
+        "server_identity": "cert-issuer.polar.svc.cluster.local"
+      }
+    }
+kind: ConfigMap
+metadata:
+  name: cert-issuer-config
+  namespace: polar
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cert-issuer-ca
+  namespace: polar
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cert-issuer
+  namespace: polar
+spec:
+  ports:
+    - name: https
+      port: 8443
+      targetPort: 8443
+  selector:
+    name: cert-issuer
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cert-issuer
+  namespace: polar
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: cert-issuer
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        name: cert-issuer
+      name: cert-issuer
+    spec:
+      automountServiceAccountToken: true
+      containers:
+        - env:
+            - name: CERT_ISSUER_CONFIG
+              value: /etc/cert-issuer/cert-issuer.json
+            - name: RUST_LOG
+              value: "info,cert_issuer=debug"
+            - name: KUBERNETES_CA_CERT
+              value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          image: cert-issuer:latest
+          imagePullPolicy: IfNotPresent
+          name: cert-issuer
+          ports:
+            - containerPort: 8443
+              name: https
+          readinessProbe:
+            periodSeconds: 5
+            tcpSocket:
+              port: 8443
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
+          volumeMounts:
+            - mountPath: /home/polar
+              name: ca
+            - mountPath: /etc/cert-issuer
+              name: config
+              readOnly: true
+      securityContext:
+        fsGroup: 1000
+      serviceAccountName: cert-issuer
+      volumes:
+        - name: ca
+          persistentVolumeClaim:
+            claimName: cert-issuer-ca
+        - configMap:
+            name: cert-issuer-config
+          name: config

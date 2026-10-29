@@ -1,0 +1,61 @@
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  name: cassini
+  namespace: polar
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  name: credentials-agent
+  namespace: polar
+---
+apiVersion: v1
+automountServiceAccountToken: false
+kind: ServiceAccount
+metadata:
+  name: credentials-agent-observer
+  namespace: polar
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: credentials-agent-data
+  namespace: polar
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cassini-ip-svc
+  namespace: polar
+spec:
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  selector:
+    polar.sei.cmu.edu/agent: cassini
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: credentials-agent-observer
+  namespace: polar
+spec:
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  selector:
+    polar.sei.cmu.edu/agent: credentials-agent-observer
+  type: ClusterIP

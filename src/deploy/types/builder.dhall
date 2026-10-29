@@ -48,13 +48,26 @@ let tokenPath = "${tokenDir}/token"
 
 let healthFile = "/tmp/polar-health.json"
 
+--| Where a pod's certificates come from.
+--|
+--| `CertIssuer url`: polar-init presents the pod's service-account token to the issuer directly. Only
+--| for workloads the platform has to start before anything else (the issuer's own bootstrap identities,
+--| or any workload while its issuance floor is off).
+--| `CredentialsAgent url`: polar-init asks the credentials agent's observer, which vouches for the
+--| request. The way for everything else, and the only way a certificate ends up in the agent's ledger,
+--| which the escrow bootstrap needs.
+let Issuer = < CertIssuer : Text | CredentialsAgent : Text >
+
+--| The kind of certificate a pod asks for. A server certificate carries the DNS name clients dial.
+let CertKind = < Client | Server : Text >
+
 --| What the platform gives every agent, stated once by the consumer. These are facts about the
 --| cluster, not about any agent.
 let Platform =
       { Type =
           { cassiniAddr : Text
           , cassiniServerName : Text
-          , certIssuerUrl : Text
+          , issuer : Issuer
           , audience : Text
           , polarInitImage : Text
           , polarInitEnv : List kubernetes.EnvVar.Type
@@ -106,6 +119,11 @@ let BuilderAgent =
           , port : Optional Natural
           , data : Optional Data
           , health : Health.Type
+          , cert : CertKind
+          , issuer : Optional Issuer
+          , client : Bool
+          , waitForBroker : Bool
+          , skipEscrow : Bool
           }
       , default =
         { agent = None Text
@@ -117,6 +135,15 @@ let BuilderAgent =
         , port = None Natural
         , data = None Data
         , health = Health.default
+        -- A Cassini client that waits for the broker's certificate before it starts and registers
+        -- its own escrow key with the credentials agent. The platform's own pieces turn these off.
+        , cert = CertKind.Client
+        -- Overrides the platform's issuer for this agent: the platform's own pieces take their
+        -- certificates from the issuer directly, since they are what the credentials agent runs on.
+        , issuer = None Issuer
+        , client = True
+        , waitForBroker = True
+        , skipEscrow = False
         }
       }
 
@@ -174,24 +201,84 @@ let nonRootDropAll =
           }
         }
 
---| The five variables every Cassini client reads, plus what the health actor watches.
-let clientEnv
-    : Platform.Type → BuilderAgent.Type → List kubernetes.EnvVar.Type
+--| The five variables every Cassini client reads.
+let tlsEnv
+    : Platform.Type → List kubernetes.EnvVar.Type
     = λ(platform : Platform.Type) →
-      λ(agent : BuilderAgent.Type) →
         [ envValue "TLS_CA_CERT" C.certPaths.ca
         , envValue "TLS_CLIENT_CERT" C.certPaths.cert
         , envValue "TLS_CLIENT_KEY" C.certPaths.key
         , envValue "BROKER_ADDR" platform.cassiniAddr
         , envValue "CASSINI_SERVER_NAME" platform.cassiniServerName
-        , envValue "POLAR_HEALTH_FILE" healthFile
-        , envValue "POLAR_HEALTH_CERTS" C.certPaths.cert
-        , envValue
-            "POLAR_HEALTH_DEP_ENDPOINTS"
-            "${platform.cassiniAddr}:${Natural/show agent.health.depTtlSecs}"
         ]
 
---| The init container that obtains the pod's client certificate.
+--| What the agent's health actor watches: its own certificate, and the broker's while the agent
+--| depends on it.
+let healthEnv
+    : Platform.Type → BuilderAgent.Type → List kubernetes.EnvVar.Type
+    = λ(platform : Platform.Type) →
+      λ(agent : BuilderAgent.Type) →
+          [ envValue "POLAR_HEALTH_FILE" healthFile
+          , envValue "POLAR_HEALTH_CERTS" C.certPaths.cert
+          ]
+        # ( if    agent.waitForBroker
+            then  [ envValue
+                      "POLAR_HEALTH_DEP_ENDPOINTS"
+                      "${platform.cassiniAddr}:${Natural/show agent.health.depTtlSecs}"
+                  ]
+            else  [] : List kubernetes.EnvVar.Type
+          )
+
+let clientEnv
+    : Platform.Type → BuilderAgent.Type → List kubernetes.EnvVar.Type
+    = λ(platform : Platform.Type) →
+      λ(agent : BuilderAgent.Type) →
+          ( if    agent.client
+            then  tlsEnv platform
+            else  [] : List kubernetes.EnvVar.Type
+          )
+        # healthEnv platform agent
+
+--| The environment that says where polar-init gets certificates.
+let issuerEnv
+    : Issuer → List kubernetes.EnvVar.Type
+    = λ(issuer : Issuer) →
+        merge
+          { CertIssuer =
+              λ(url : Text) →
+                [ envValue "POLAR_INIT_ISSUER" "cert-issuer"
+                , envValue "POLAR_INIT_CERT_ISSUER_URL" url
+                ]
+          , CredentialsAgent =
+              λ(url : Text) →
+                [ envValue "POLAR_INIT_ISSUER" "credentials-agent"
+                , envValue "POLAR_INIT_OBSERVER_URL" url
+                ]
+          }
+          issuer
+
+--| After issuing, polar-init registers an escrow keypair with the credentials agent over Cassini,
+--| using the certificate it just obtained, so it needs the client environment and its token. The
+--| platform's own pieces skip it: they are what it travels through.
+let escrowEnv
+    : Platform.Type → BuilderAgent.Type → List kubernetes.EnvVar.Type
+    = λ(platform : Platform.Type) →
+      λ(agent : BuilderAgent.Type) →
+        if    agent.skipEscrow
+        then  [ envValue "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP" "true" ]
+        else    tlsEnv platform
+              # [ envValue "KUBERNETES_SA_TOKEN" tokenPath ]
+
+let certArgument
+    : CertKind → Text
+    = λ(kind : CertKind) →
+        merge
+          { Client = "client:${C.certDir}:ecdsa-p256"
+          , Server = λ(san : Text) → "server:${C.certDir}:ecdsa-p256:${san}"
+          }
+          kind
+
+--| The init container that obtains the pod's certificate.
 let polarInit
     : Platform.Type → BuilderAgent.Type → kubernetes.Container.Type
     = λ(platform : Platform.Type) →
@@ -201,15 +288,22 @@ let polarInit
         , image = Some platform.polarInitImage
         , imagePullPolicy = platform.imagePullPolicy
         , args = Some
-          [ "--check-dep-cert"
-          , "${platform.cassiniAddr}:${Natural/show agent.health.depTtlSecs}"
-          , "--cert"
-          , "client:${C.certDir}:ecdsa-p256"
-          ]
+            (   ( if    agent.waitForBroker
+                  then  [ "--check-dep-cert"
+                        , "${platform.cassiniAddr}:${Natural/show agent.health.depTtlSecs}"
+                        ]
+                  else  [] : List Text
+                )
+              # [ "--cert", certArgument agent.cert ]
+            )
         , env = Some
-            (   [ envValue "POLAR_INIT_CERT_ISSUER_URL" platform.certIssuerUrl
-                , envValue "POLAR_INIT_TOKEN_PATH" tokenPath
-                ]
+            (   issuerEnv
+                  ( merge
+                      { Some = λ(own : Issuer) → own, None = platform.issuer }
+                      agent.issuer
+                  )
+              # [ envValue "POLAR_INIT_TOKEN_PATH" tokenPath ]
+              # escrowEnv platform agent
               # platform.polarInitEnv
             )
         , volumeMounts = Some
@@ -332,19 +426,21 @@ let makePolarAgent
           }
         }
 
---| The Service for an agent that answers requests. It selects the pods the operator labels.
-let makeService
-    : Text → Text → Natural → kubernetes.Service.Type
+--| The Service for an agent that answers requests, under a name of its own: some are dialled by a
+--| name other than the agent's (Cassini is `cassini-ip-svc`). It selects the pods the operator labels.
+let makeServiceFor
+    : Text → Text → Text → Natural → kubernetes.Service.Type
     = λ(namespace : Text) →
-      λ(name : Text) →
+      λ(serviceName : Text) →
+      λ(agentName : Text) →
       λ(port : Natural) →
         kubernetes.Service::{
         , metadata = kubernetes.ObjectMeta::{
-          , name = Some name
+          , name = Some serviceName
           , namespace = Some namespace
           }
         , spec = Some kubernetes.ServiceSpec::{
-          , selector = Some [ { mapKey = agentLabel, mapValue = name } ]
+          , selector = Some [ { mapKey = agentLabel, mapValue = agentName } ]
           , type = Some "ClusterIP"
           , ports = Some
             [ kubernetes.ServicePort::{
@@ -355,6 +451,14 @@ let makeService
             ]
           }
         }
+
+--| The Service for an agent that answers requests, named for the agent.
+let makeService
+    : Text → Text → Natural → kubernetes.Service.Type
+    = λ(namespace : Text) →
+      λ(name : Text) →
+      λ(port : Natural) →
+        makeServiceFor namespace name name port
 
 --| A claim for an agent's state. `storageClass` is the cluster's to choose, so it is a parameter.
 let makePvc
@@ -390,7 +494,9 @@ let makeServiceAccount
         , automountServiceAccountToken = Some False
         }
 
-in  { Platform
+in  { Issuer
+    , CertKind
+    , Platform
     , Health
     , Data
     , BuilderAgent
@@ -399,6 +505,7 @@ in  { Platform
     , PolarAgentResource
     , makePolarAgent
     , makeService
+    , makeServiceFor
     , makePvc
     , makeServiceAccount
     , agentLabel

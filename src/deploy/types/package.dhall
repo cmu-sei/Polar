@@ -8,4 +8,6 @@
     ./functions.dhall
 , operator =
     ./operator.dhall
+, platform =
+    ./platform.dhall
 }

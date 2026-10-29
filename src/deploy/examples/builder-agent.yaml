@@ -41,9 +41,23 @@ spec:
           - "--cert"
           - client:/home/polar/certs:ecdsa-p256
         env:
-          - name: POLAR_INIT_CERT_ISSUER_URL
-            value: http://cert-issuer.polar.svc.cluster.local:8443
+          - name: POLAR_INIT_ISSUER
+            value: credentials-agent
+          - name: POLAR_INIT_OBSERVER_URL
+            value: http://credentials-agent-observer.polar.svc.cluster.local:8080
           - name: POLAR_INIT_TOKEN_PATH
+            value: /workspace/token
+          - name: TLS_CA_CERT
+            value: /home/polar/certs/ca.pem
+          - name: TLS_CLIENT_CERT
+            value: /home/polar/certs/cert.pem
+          - name: TLS_CLIENT_KEY
+            value: /home/polar/certs/key.pem
+          - name: BROKER_ADDR
+            value: cassini-ip-svc.polar.svc.cluster.local:8080
+          - name: CASSINI_SERVER_NAME
+            value: cassini.polar.serviceaccount.cluster.local
+          - name: KUBERNETES_SA_TOKEN
             value: /workspace/token
         image: registry.example/polar-init:latest
         name: polar-init

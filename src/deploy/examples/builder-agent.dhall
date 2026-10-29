@@ -18,7 +18,10 @@ let platform =
       B.Platform::{
       , cassiniAddr = "cassini-ip-svc.polar.svc.cluster.local:8080"
       , cassiniServerName = "cassini.polar.serviceaccount.cluster.local"
-      , certIssuerUrl = "http://cert-issuer.polar.svc.cluster.local:8443"
+      -- Certificates are asked of the credentials agent, which vouches for the request.
+      , issuer =
+          B.Issuer.CredentialsAgent
+            "http://credentials-agent-observer.polar.svc.cluster.local:8080"
       , polarInitImage = "registry.example/polar-init:latest"
       }
 

@@ -599,6 +599,59 @@ mod tests {
         assert!(env.iter().any(|e| e.name == "POLAR_CAPABILITIES" && e.value.as_deref() == Some("cassini")));
     }
 
+    /// The platform's own agents (`src/deploy/local/fork`) and an ordinary one differ in exactly the
+    /// ways the platform needs: they take their certificates from the issuer directly and do not
+    /// bootstrap an escrow key (Cassini is what the bootstrap travels through, the credentials agent is
+    /// what it asks); an ordinary agent does bootstrap, with the environment that needs.
+    #[test]
+    fn the_platforms_agents_differ_from_an_ordinary_one_where_they_must() {
+        // The least each agent's own `--scaffold` says it needs to drain.
+        let least_budget = [("cassini", 20), ("credentials-agent", 50), ("credentials-agent-observer", 40)];
+        let rendered = include_str!("../../../../deploy/local/fork/rendered/30-agents.yaml");
+        let mut seen = 0;
+        for document in serde_yaml::Deserializer::from_str(rendered) {
+            let mut agent = <PolarAgent as serde::Deserialize>::deserialize(document).unwrap();
+            agent.metadata.uid = Some("uid".into());
+            let name = agent.metadata.name.clone().unwrap();
+            assert!(overlay_problems(&agent.spec).is_empty(), "{name}");
+            let pod = build(&agent, &format!("{name}-1"), &spec_hash(&agent.spec)).spec.unwrap();
+
+            let least = least_budget.iter().find(|(n, _)| *n == name).expect("a platform agent").1;
+            assert!(agent.spec.shutdown_budget_secs >= least, "{name}: budget below what the agent declares");
+            assert_eq!(
+                pod.termination_grace_period_seconds,
+                Some(agent.spec.shutdown_budget_secs as i64 + GRACE_MARGIN_SECS as i64)
+            );
+
+            let init = &pod.init_containers.as_ref().unwrap()[0];
+            let init_env: Vec<_> = init.env.as_ref().unwrap().iter().map(|e| (e.name.as_str(), e.value.as_deref())).collect();
+            assert!(init_env.contains(&("POLAR_INIT_ISSUER", Some("cert-issuer"))), "{name} asks the issuer directly");
+            assert!(init_env.contains(&("POLAR_INIT_SKIP_ESCROW_BOOTSTRAP", Some("true"))), "{name} skips the escrow bootstrap");
+            assert!(!init_env.iter().any(|(n, _)| *n == "KUBERNETES_SA_TOKEN"), "{name} needs no escrow environment");
+            let args = init.args.as_ref().unwrap();
+            assert!(!args.contains(&"--check-dep-cert".to_string()), "{name} does not wait for the broker");
+            if name == "cassini" {
+                assert!(args.iter().any(|a| a.starts_with("server:") && a.ends_with(":cassini-ip-svc.polar.svc.cluster.local")));
+            } else {
+                assert!(args.iter().any(|a| a.starts_with("client:")));
+            }
+            seen += 1;
+        }
+        assert_eq!(seen, 3);
+
+        // An ordinary agent (the library's own example): vouched for, and it bootstraps its escrow key,
+        // which needs the client environment and its token in the init container.
+        let example = include_str!("../../../../deploy/examples/builder-agent.yaml");
+        let agent: PolarAgent = serde_yaml::from_str(example).unwrap();
+        let pod = build(&agent, "example-1", &spec_hash(&agent.spec)).spec.unwrap();
+        let init = &pod.init_containers.as_ref().unwrap()[0];
+        let env: Vec<_> = init.env.as_ref().unwrap().iter().map(|e| e.name.as_str()).collect();
+        for needed in ["POLAR_INIT_OBSERVER_URL", "KUBERNETES_SA_TOKEN", "TLS_CLIENT_CERT", "BROKER_ADDR", "CASSINI_SERVER_NAME"] {
+            assert!(env.contains(&needed), "an ordinary agent's init container needs {needed}");
+        }
+        assert!(!env.contains(&"POLAR_INIT_SKIP_ESCROW_BOOTSTRAP"));
+    }
+
     #[test]
     fn endings_are_classified() {
         assert_eq!(classify(1, "Error"), EndingKind::Exited);
