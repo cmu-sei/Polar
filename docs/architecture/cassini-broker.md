@@ -47,25 +47,32 @@ Registry names are in `broker/src/lib.rs:41-46`.
 
 ## Identity
 
-The handshake is mutual TLS (`WebPkiClientVerifier`, `listener.rs:183-197`). Right after it, before the stream is split,
-`extract_peer_identity` takes the leaf's **first DNS SAN** (`listener.rs:89-116, 283`). It fails open: no SAN gives
-`None`. The certificate itself is then dropped, so its `p:` and `c:` URI SANs are never seen past that point. To read
-them, the leaf has to be kept at that line and carried in `ListenerArguments`/`ListenerState` (595-615); the extractors
-exist (`cert-issuer/common/src/permission.rs:185`, `capability.rs:134`), and `PolicyMessage::CheckAuthorization` takes the
-certificate as PEM.
+*Brought up to date 2026-10-28; it described the broker before stage 5b, when the certificate was dropped after the
+handshake.*
+
+The handshake is mutual TLS: the client's certificate must chain to `TLS_CA_CERT` (`WebPkiClientVerifier`,
+`listener.rs:215`). Right after it, before the stream is split, the Listener reads three things from the leaf, once
+(`listener.rs:317-319`):
+- **the identity,** its first DNS SAN (`extract_peer_identity`, `listener.rs:93`), `None` when it has none;
+- **the serial,** as the credentials agent's ledger writes it, so a revoked certificate's sessions are refused and ended
+  (`extract_peer_serial`, `listener.rs:125`);
+- **the floor,** what the certificate admits where no policy speaks: its declared topics (`p:pub:`/`p:sub:` URI SANs)
+  and those its workload and `g:` groups imply (`extract_peer_floor`, `listener.rs:136`). A certificate that cannot be
+  read gives a reason, and every publish and subscribe on that connection is refused with it.
 
 | Where | Has the client's identity |
 |---|---|
-| Listener | yes, `state.peer_identity`, in `handle_subscribe_request` (1279) and `handle_publish_request` (1119); unused |
-| SessionManager | as `Session.identity` (56); a SessionAgent's state has none (781-786) |
+| Listener | yes, `state.peer_identity` and `state.floor`; every publish and subscribe is decided there (`decide`, `listener.rs:694`, from `handle_publish_request` and `handle_subscribe_request`) |
+| SessionManager | as `Session.identity` (`session.rs:56`) |
 | Broker, TopicManager, SubscriberManager | no: a subscribe carries the registration id and topic; a publish carries `published_by` only when the publisher shares it |
 
 `published_by` is the verified identity, stamped by the broker on a publish when the client sets `share_identity` (the
-default) (`types/src/lib.rs:367-405`). Receivers check it where it matters (`AuthorityCore`'s publisher check).
+default). Receivers check it where it matters (`AuthorityCore`'s publisher check; the broker believes authority only
+from `POLAR_AUTHORITY_PUBLISHER`).
 
-**A flaw:** resuming a session with an existing registration id does not compare the new connection's identity with the
-session's (`session.rs:595-622`), so a registration id works as a bearer token. A decision must use the connection's
-identity (the Listener's), not the session's.
+*Resuming a session* is the identity's alone: a connection asking to resume a session of another identity is given a new
+one (`may_resume`, `session.rs:1537`, used at `:631`), so a registration id is not a bearer token. (The flaw this section
+used to record, fixed.)
 
 ## The flows
 
@@ -225,9 +232,17 @@ check but no `AuthorityHandle`: no PolicyActor, no PermissionsActor, no authorit
 certificate). `AuthorityHandle::spawn` is public, so the broker can start one itself and feed it the authority topics'
 publishes in process, with the publisher's identity from its own Listener.
 
+## Running it on its own
+
+The broker needs no other part of Polar to start and route: three PEM files from any CA and a shutdown token. With no
+credentials agent there is no policy, so each client gets its certificate's floor and nothing more; the steps, checked
+2026-10-28, and the ways past the floor are in `src/agents/cassini/broker/readme.md`, "Running it on its own".
+
 ## Testing
 
-`broker/tests/support/mod.rs` runs the real broker on loopback with a throwaway CA (`Pki`, 54-108; one DNS SAN per client
-certificate; a URI SAN variant would follow `permission.rs:531-538`), `TestBroker` (163-222) and `TestClient` (412-595),
-which collects `ClientEvent`s. A refused subscribe or publish is invisible to it until the client turns refusals into
-events. `shutdown.rs:151` is the model for a "refused, and told so" test.
+`broker/tests/support/mod.rs` runs the real broker on loopback with a throwaway CA (`Pki`, 54; client certificates
+with `p:` and `g:` URI SANs from `issue_client_carrying`, 208), `TestBroker` (238) and `TestClient` (634), which collects
+`ClientEvent`s and the broker's refusals (`refusals`, 884). Most tests start the broker with an open policy put straight
+into its policy actor (`OPEN_POLICY`, 230; `set_policy`, 477), which the binary has no way to do; `start_enforcing`
+(336) starts it with none, as a broker without the credentials agent runs, and `tests/enforcement.rs` plays the
+credentials agent with a signed snapshot. *(Updated 2026-10-28.)*

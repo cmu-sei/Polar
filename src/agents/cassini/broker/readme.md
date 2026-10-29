@@ -71,59 +71,119 @@ The goal of the project is to provide a reliable, scalable, and secure messaging
 
 ---
 
-## Getting Started
+## Running it on its own
 
-### Prerequisites
-- **Rust**: Install Rust using [rustup](https://rustup.rs/).
-- **Certificates**: Generate a root CA, server, and client certificates for mTLS using tools like OpenSSL or [tls-gen](https://github.com/rabbitmq/tls-gen).
-- **Dependencies**: Install the required Rust crates (`ractor`, `tokio`, `tokio-rustls`, `serde`, etc.).
+The broker needs nothing else of Polar to start, accept mTLS clients and route messages: no cert-issuer, credentials
+agent, `polar-init`, custody daemon or Kubernetes. It needs three PEM files from a CA of your choosing and a shutdown
+token. Checked 2026-10-28 by the steps below.
 
----
-Ensure the following environment variables are set before trying to run cassini
+### What it reads
+
+| Variable | | What it is |
+|---|---|---|
+| `TLS_SERVER_CERT_CHAIN` | required | the broker's certificate, then the CA that signed it, in PEM |
+| `TLS_SERVER_KEY` | one of these two | the broker's private key, in PEM |
+| `POLAR_CUSTODY_SOCKET` | | the custody daemon's socket instead, which holds the key (`docs/architecture/key-custody.md`); leave it unset here |
+| `TLS_CA_CERT` | required | the CA every client's certificate must chain to (its first certificate is used) |
+| `CASSINI_SHUTDOWN_TOKEN` | required, secret | the token an orderly shutdown asks with |
+| `CASSINI_BIND_ADDR` | default `0.0.0.0:8080` | where it listens |
+| `CASSINI_DECISION_CACHE_SECS` | default `5` | how long a connection keeps a publish or subscribe decision; `0` decides every one |
+| `RUST_LOG` | default `info` | what is written to the console |
+| `JAEGER_OTLP_ENDPOINT` | optional | where traces are exported over OTLP HTTP; none are exported when it is unset |
+
+`POLAR_START_MARKER` is set only in a cluster pod (by `polar-init`); leave it unset, or the broker exits 1 at once for
+want of the marker. `cassini-server --help` lists the broker's own variables with what each is for; `--scaffold` gives
+the whole configuration document (the builder's and the health actor's variables too), every value empty, as JSON.
+
+### Who may do what, with no credentials agent
+
+The broker decides every publish and subscribe: the policy first, then the certificate's floor
+(`docs/architecture/cassini-broker.md`, "Policy in the broker"). The policy reaches it only as the credentials agent's
+signed authority, over Cassini itself; with no credentials agent there is none, and nothing turns enforcement off or
+loads a policy from a file. So on its own the broker gives each client what its certificate admits and refuses the rest:
+
+- **Topics named in the certificate**, as URI SANs: `p:pub:<topic>` to publish, `p:sub:<topic>` to subscribe. This is the
+  simple way, and the one below.
+- **Topics a workload implies**: an identity (the first DNS SAN) of the form `<workload>.<namespace>.serviceaccount.<domain>`,
+  with `g:<group>` URI SANs, is given the topics its workload and groups imply (`cert-issuer/common/src/topics.rs`).
+- **A policy, by playing the credentials agent**: a client whose first DNS SAN is `POLAR_AUTHORITY_PUBLISHER`
+  (`credentials-agent.polar.serviceaccount.cluster.local` by default) and whose certificate admits publishing
+  `polar-authority-snapshot-replies` can publish a signed `AuthoritySnapshot`, signed by a document-signing key whose
+  certificate chains to `TLS_CA_CERT`. `tests/enforcement.rs` does this; there is no tool for it.
+
+A client whose certificate names no topics, and implies none, may use none.
+
+### Step by step
+
+From a scratch directory, with `openssl`, and the workspace built (`cargo build --bin cassini-server --bin
+cassini-client` in `src/agents`; the binaries are in `src/agents/target/debug`). P-256 keys, as cert-issuer issues.
+
+1. A CA, the broker's certificate (named `localhost`, which the client checks), and a client's certificate carrying the
+   topic it may use:
+
+   ```bash
+   openssl req -x509 -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 -keyout ca.key -out ca.pem -days 30 \
+     -subj "/CN=cassini-dev-ca" -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
+
+   openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 -keyout server.key -out server.csr -subj "/CN=localhost"
+   openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out server.pem -days 30 \
+     -extfile <(printf "subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature")
+   cat server.pem ca.pem > server-chain.pem
+
+   openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 -keyout client.key -out client.csr -subj "/CN=demo-client"
+   openssl x509 -req -in client.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out client.pem -days 30 \
+     -extfile <(printf "subjectAltName=DNS:demo-client,URI:p:pub:demo.hello,URI:p:sub:demo.hello\nextendedKeyUsage=clientAuth\nkeyUsage=critical,digitalSignature")
+   ```
+
+   The client's identity is its first DNS SAN (`demo-client`); the URI SANs are what it may use.
+
+2. The broker, in one terminal. The `env -u` clears what a Polar dev shell may already export:
+
+   ```bash
+   env -u POLAR_START_MARKER -u POLAR_CUSTODY_SOCKET -u JAEGER_OTLP_ENDPOINT \
+     CASSINI_BIND_ADDR=127.0.0.1:8080 \
+     TLS_CA_CERT=$PWD/ca.pem TLS_SERVER_CERT_CHAIN=$PWD/server-chain.pem TLS_SERVER_KEY=$PWD/server.key \
+     CASSINI_SHUTDOWN_TOKEN="$(head -c 24 /dev/urandom | base64)" \
+     cassini-server
+   ```
+
+   It logs `Broker startup complete` and `Server running on 127.0.0.1:8080`. It also asks, once, for the credentials
+   agent's authority (`polar-authority-snapshot-requests`): nobody answers, and it goes on without.
+
+3. A client, in another. The command-line client reads its own variables, and writes its results to its log, which
+   `CASSINI_LOG` (not `RUST_LOG`) filters; `RUST_LOG=off` keeps it from exporting traces to `localhost:4318`:
+
+   ```bash
+   export BROKER_ADDR=127.0.0.1:8080 CASSINI_SERVER_NAME=localhost \
+     TLS_CA_CERT=$PWD/ca.pem TLS_CLIENT_CERT=$PWD/client.pem TLS_CLIENT_KEY=$PWD/client.key \
+     CASSINI_LOG=info RUST_LOG=off
+   unset POLAR_CUSTODY_SOCKET CASSINI_DAEMON_SOCK
+
+   cassini-client publish demo.hello "hello"     # Published to topic=demo.hello
+   cassini-client list-topics                    # demo.hello, polar-authority-snapshot-requests
+   cassini-client publish demo.other "x"         # refused: not among its declared or implied topics
+   ```
+
+   The refusal is logged at once ("The broker refused a publish on demo.other ... no policy permits it"); the command
+   then waits out its publish timeout (10 s, `--publish-timeout`) and fails.
+
+4. Stop the broker with Ctrl-C (SIGTERM). It shuts down in order and exits 1: a broker that ends has failed, by design,
+   so that its pod restarts.
+
+The command-line client publishes and asks the broker about itself; it does not subscribe. To watch messages arrive,
+the broker's tests (`tests/`, with a throwaway CA in `tests/support/mod.rs`) and the in-cluster load harness
+(`../test/README.md`, `infra/load-harness.nu`) are where subscribers are.
+
+### Traces
+
+To see spans in Jaeger, run one and point the broker at it:
+
 ```bash
-# The address the broker server will bind and listen for connections to
-# for example  127.0.0.1:8080 to listen on your host system's local port 8080
-export CASSINI_BIND_ADDR=""
-
-# The absolute file path to the ca_certificates.pem file created by TLS_GEN.
-# Used by the Rust binaries to recognize eachother through TLS
-export TLS_CA_CERT=""
-
-# The absolute file path to the certificate chain containing the server certificate,followed by the root ca certificate used to sign it
-# optionally, followed by the server key, if one was set - MUST BE IN PEM FORMAT
-export TLS_SERVER_CERT_CHAIN=""
-# The server key file, or leave it unset and set POLAR_CUSTODY_SOCKET to the custody daemon's socket, which then holds
-# the key and signs the broker's TLS 1.3 handshakes (docs/architecture/key-custody.md): one or the other
-export TLS_SERVER_KEY=""
-
-### These must also be set anywhere the TcpClient actor is in use, for example, the cassini integration tests the TLS_CA_CERT must also be provided.
-#The absolute file path to the client certificate - MUST BE IN PEM FORMAT
-#export TLS_CLIENT_CERT=""
-# The absolute file path to the client key - MUST BE IN PEM FORMAT
-#export TLS_CLIENT_KEY=""
-# Cassini and other agents rely on the RUST_LOG variable to configure logging verbosity
-export RUST_LOG="info"
-
-# OTLP endpoint to export logs to the jaeger UI service, if desired.
-# The broker will default to using this endpoint even if this value is unset.
-export JAEGER_OTLP_ENDPOINT="http://localhost:4318/v1/traces"
-
+podman run --rm --name jaeger -p 16686:16686 -p 4318:4318 -e COLLECTOR_OTLP_ENABLED=true cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
+JAEGER_OTLP_ENDPOINT=http://localhost:4318/v1/traces   # in the broker's environment
 ```
 
+## Testing
 
-## Example Usage
-
-**Jaeger Log Tracing**
-If you'd like to visualize logs using the Jaeger UI. Run a local container image using the command below. (feel free to use Podamn or some other preferred container runtime).
-
-If not, no worries, the broker will run without it and spill logs to stdout.
-
-```bash
-podman run --rm --name jaeger -p 16686:16686 -p 4317:4317 -p 4318:4318 -p 5778:5778 -p 9411:9411 -e COLLECTOR_OTLP_ENABLED=true cr.jaegertracing.io/jaegertracing/jaeger:2.11.0
-```
-
-
-Run the broker server with `cargo run --bin cassini-server`
-
-### Testing
-[Check out the README for our test harness](..test/README.md)
+The broker's own tests run it in process, with a throwaway CA: `cargo test -p cassini-broker` in `src/agents`. The load
+harness runs in the cluster: [its README](../test/README.md).

@@ -108,6 +108,26 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
   so a large Cargo `target` directory tainted the node with disk pressure and evicted every pod (2026-10-21). f2fs grows
   only unmounted. A volume of its own for the node's state would stop builds evicting the cluster.
 
+## Found running Cassini on its own, 2026-10-28 (`src/agents/cassini/broker/readme.md`)
+
+The broker runs without the rest of Polar, as documented there and checked step by step. The command-line client
+(`cassini-client`) has rough edges a person meets first:
+- [ ] **A refused publish waits out its timeout.** The broker's refusal reaches the client at once and is logged ("The
+  broker refused a publish on demo.other ..."), but `publish` goes on waiting for an acknowledgement and fails 10 s later
+  with "Timed out waiting for publish ack". The refusal should end the command, with the refusal as its error.
+- [ ] **Its results are log lines.** `Published to topic=...` and the topic and session lists are `info!` events, shown
+  only with `CASSINI_LOG=info` (its console filter defaults to `warn`, `cassini-tracing`), so by default a successful
+  command prints nothing. Results belong on stdout.
+- [ ] **It reads its log variables unlike every agent.** `cassini-tracing` filters the console with `CASSINI_LOG` and the
+  exported traces with `RUST_LOG`, and exports to `localhost:4318` when `JAEGER_OTLP_ENDPOINT` is unset; the agents use
+  `RUST_LOG` for the console, `POLAR_TRACE_FILTER` for traces, and export nothing without an endpoint
+  (`lib/src/logging.rs`). Run without a collector, the client logs an export error.
+- [ ] **It does not subscribe**, so there is no tool to watch a topic; the tests and the in-cluster harness are the only
+  subscribers.
+- [ ] **Two warnings at every broker start**, harmless: the supervisor's "Received unexpected message!
+  SetTopicManagerRef" (`subscriber.rs:197`) and the topic manager's "PublishRequest missing reply_to" for the broker's
+  own authority snapshot request (`topic.rs:772`).
+
 ## Done 2026-10-16, and what it leaves open
 
 - **polar-tools image.** `polar-sign`, `polar-admin-grant`, `cassini-c2`, `cassini-client`, `user-cert-fetcher`,
