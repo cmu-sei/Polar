@@ -31,3 +31,17 @@
 
 pub mod bootstrap;
 pub mod watch;
+
+/// Locks the process's memory, so that no key it holds reaches swap: every page mapped now and every page mapped later,
+/// each as it is first touched (`MCL_ONFAULT`). Without that the kernel backs a mapping the moment it is made, and an
+/// allocator's untouched reservation (mimalloc's arena is 1 GiB) becomes resident memory that can never be reclaimed.
+pub fn lock_memory() -> std::io::Result<()> {
+    // SAFETY: mlockall takes no pointers; it changes only this process.
+    let locked =
+        unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE | libc::MCL_ONFAULT) };
+    if locked == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}

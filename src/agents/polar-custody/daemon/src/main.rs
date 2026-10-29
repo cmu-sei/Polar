@@ -136,7 +136,7 @@ fn settings() -> Result<Settings, Vec<String>> {
 /// Not dumpable, so no core file and no ptrace by its own UID; its memory locked, so no key reaches swap. Each is
 /// logged where it cannot be had: the daemon still runs, with less.
 fn harden() {
-    // SAFETY: prctl and mlockall take no pointers here; they change only this process.
+    // SAFETY: prctl takes no pointers here; it changes only this process.
     let dumpable = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
     if dumpable != 0 {
         warn!(
@@ -144,12 +144,8 @@ fn harden() {
             std::io::Error::last_os_error()
         );
     }
-    let locked = unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) };
-    if locked != 0 {
-        warn!(
-            "cannot lock the process's memory: {}",
-            std::io::Error::last_os_error()
-        );
+    if let Err(e) = polar_custody_daemon::lock_memory() {
+        warn!("cannot lock the process's memory: {e}");
     }
 }
 
