@@ -567,7 +567,7 @@ cluster-status:
 
 # Start detached, auto-restarting port-forwards for local dev (neo4j
 # browser/bolt, keycloak admin console, ace dashboard, jaeger traces/UI,
-# credentials-agent observer). Fully detached via setsid -- survives
+# credentials-agent observer). Fully detached via setsid (nohup without it, on macOS) -- survives
 # terminal close, does not appear in `jobs`. Logs go to /tmp/pf-*.log; stop
 # with `just port-forwards-down`.
 #
@@ -589,7 +589,13 @@ port-forwards-up *only:
     start_pf() {
         local name="$1" ns="$2" svc="$3" ports="$4" logfile="$5"
         want "$name" || return 0
-        setsid bash -c "while true; do kubectl port-forward -n $ns svc/$svc $ports > $logfile 2>&1; sleep 1; done" < /dev/null > /dev/null 2>&1 &
+        local loop="while true; do kubectl port-forward -n $ns svc/$svc $ports > $logfile 2>&1; sleep 1; done"
+        # macOS has no setsid; nohup keeps the loop past the terminal's hangup there.
+        if command -v setsid > /dev/null; then
+            setsid bash -c "$loop" < /dev/null > /dev/null 2>&1 &
+        else
+            nohup bash -c "$loop" < /dev/null > /dev/null 2>&1 &
+        fi
         disown
         echo "  forward started: $name ($ports)"
     }

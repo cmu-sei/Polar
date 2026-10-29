@@ -67,9 +67,18 @@ export def ensure_observer_forward [] {
 # there: counting it as running made a service look down (docs/architecture/key-custody.md, step 7, finding 1). A
 # forward is live only when it runs under this shell's KUBECONFIG, and the others are stopped, by their pids.
 
+# The KUBECONFIG in a process's environment as /proc/<pid>/environ has it: "" when none is set, null when the environment
+# could not be read (macOS has no /proc).
+export def kubeconfig_in [environ: any]: nothing -> any {
+    if $environ == null { return null }
+    $environ | split row (char nul)
+    | where {|v| $v | str starts-with "KUBECONFIG=" }
+    | each {|v| $v | str replace "KUBECONFIG=" "" } | get -o 0 | default ""
+}
+
 # The processes of the forward to `svc` in `ns` (the loop and its kubectl), each with the KUBECONFIG it runs under ("" when
-# none, or when it cannot be read).
-export def processes [ns: string, svc: string]: nothing -> list<record<pid: int, kubeconfig: string>> {
+# none, null when it cannot be read).
+export def processes [ns: string, svc: string]: nothing -> list<record<pid: int, kubeconfig: any>> {
     # The loop's command line or its kubectl's, from its start (either by a path or by name): not every process that
     # mentions the service (a shell running a command that names it, say).
     let pattern = $"^\([^ ]*bash -c while true; do \)?\([^ ]*/\)?kubectl port-forward -n ($ns) svc/($svc) "
@@ -77,23 +86,20 @@ export def processes [ns: string, svc: string]: nothing -> list<record<pid: int,
     if $found.exit_code != 0 { return [] }
     $found.stdout | lines | where {|l| $l | str trim | is-not-empty } | each {|p|
         let pid = ($p | into int)
-        let kubeconfig = (try {
-            open --raw $"/proc/($pid)/environ" | split row (char nul)
-            | where {|v| $v | str starts-with "KUBECONFIG=" }
-            | each {|v| $v | str replace "KUBECONFIG=" "" } | first
-        } catch { "" })
-        { pid: $pid, kubeconfig: ($kubeconfig | default "") }
+        let environ = (try { open --raw $"/proc/($pid)/environ" } catch { null })
+        { pid: $pid, kubeconfig: (kubeconfig_in $environ) }
     }
 }
 
-# The pids among `found` that reach another cluster than the one `current` names.
+# The pids among `found` that reach another cluster than the one `current` names. One whose cluster cannot be read is
+# not among them: it is left running, and whether it answers is checked where it is used.
 export def stale [found: list, current: string]: nothing -> list<int> {
-    $found | where kubeconfig != $current | get pid
+    $found | where {|p| $p.kubeconfig != null and $p.kubeconfig != $current } | get pid
 }
 
-# Whether any of `found` reaches the cluster `current` names.
+# Whether any of `found` reaches the cluster `current` names, or might (its cluster cannot be read).
 export def live [found: list, current: string]: nothing -> bool {
-    $found | any {|p| $p.kubeconfig == $current }
+    $found | any {|p| $p.kubeconfig == null or $p.kubeconfig == $current }
 }
 
 # Whether the forward to `svc` in `ns` runs for the cluster `current` names (this shell's KUBECONFIG by default).

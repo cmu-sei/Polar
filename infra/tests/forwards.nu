@@ -26,6 +26,7 @@
 
 use std/assert
 use ../forwards.nu *
+use ../retry.nu [with_retries]
 
 def main [] {
     let tests = [
@@ -48,6 +49,48 @@ def main [] {
                 assert equal (stale [{ pid: 12, kubeconfig: "" }] "") []
                 assert (live [{ pid: 12, kubeconfig: "" }] "")
                 assert (not (live [] "/clusters/u7c"))
+            }
+        }
+        {
+            # macOS has no /proc: which cluster a forward reaches cannot be read there. It is left running and counted as
+            # running; whether it answers is checked where it is used (the registry's and the observer's are restarted
+            # when they do not).
+            name: "a forward whose environment cannot be read is not stopped, and counts as running"
+            body: {
+                let found = [{ pid: 13, kubeconfig: null }]
+                assert equal (stale $found "/clusters/u7c") []
+                assert (live $found "/clusters/u7c")
+                assert (live $found "")
+            }
+        }
+        {
+            name: "a process's KUBECONFIG is read from its environment: none set is \"\", none readable is null"
+            body: {
+                assert equal (kubeconfig_in $"PATH=/bin(char nul)KUBECONFIG=/clusters/u7c(char nul)HOME=/h(char nul)") "/clusters/u7c"
+                assert equal (kubeconfig_in $"PATH=/bin(char nul)HOME=/h(char nul)") ""
+                assert equal (kubeconfig_in null) null
+            }
+        }
+        {
+            # macOS has no setsid: the forward's loop, started in the background, failed there and the recipe still said it
+            # had started it, so up.nu's step 2 waited for a registry nothing forwarded to.
+            name: "just port-forwards-up starts its forward where there is no setsid"
+            body: {
+                let root = ($env.FILE_PWD | path dirname | path dirname)
+                let just = (which just | get 0.path)
+                # A PATH with only what the recipe and the Justfile's own variables run, and a kubectl that says who ran it.
+                let bin = (mktemp --directory)
+                for tool in [bash sh nohup sleep uname] { ^ln -s (which -a $tool | where type == external | get 0.path) ($bin | path join $tool) }
+                let seen = ($bin | path join "seen")
+                $"#!/bin/sh\necho \"$PPID $$\" > ($seen)\nexec sleep 30\n" | save ($bin | path join "kubectl")
+                ^chmod +x ($bin | path join "kubectl")
+                let r = (with-env { PATH: [$bin] } { do { cd $root; ^$just port-forwards-up ace } | complete })
+                let started = (with_retries 20 250ms {|n| { ok: ($seen | path exists), final: false, detail: "no kubectl was run" } })
+                # The loop and its kubectl, by the pids the kubectl wrote: nothing else is stopped.
+                if ($seen | path exists) { ^kill ...(open --raw $seen | str trim | split row " ") }
+                rm -rf $bin
+                assert equal $r.exit_code 0 $r.stderr
+                assert $started.ok "the forward's loop never ran kubectl"
             }
         }
         {
