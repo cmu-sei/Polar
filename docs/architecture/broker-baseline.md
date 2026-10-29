@@ -233,6 +233,65 @@ connection, so nothing it does is in these figures, as expected (`key-custody.md
 the other. One p99 stands out, 10 ms at 256 B and 100 a second: one slow message in 1,900, a p99 that is nearly the
 maximum. No duplicates, no messages out of order, in any run.
 
+## musl and the allocators: the plan (2026-10-28, for review)
+
+*Why:* static musl binaries are on the maintainer's list, for both amd64 and arm64, and they are what a seccomp filter
+applied at load needs (no dynamic loader mapping libraries executable at start; `runtime-attestation.md`). musl's own
+allocator (mallocng) is small and hardened, not built for many threads allocating at once, and the broker allocates on
+every message (each frame, each payload's `Arc`, each ractor message, each message queued for a subscriber). The
+maintainer: tests before deciding anything, starting with Cassini, the most performance-critical part and the one with
+the most figures. Nothing is decided by this plan; it measures.
+
+*The variants,* the broker alone changed; the producer and the sink stay as built today, so a run differs by one thing:
+
+| | libc | allocator | why |
+|---|---|---|---|
+| V0 | glibc | glibc's malloc | the baseline, as deployed |
+| V1 | musl | mallocng | musl as it comes, hardened |
+| V2 | musl | mimalloc | fast, multi-threaded |
+| V3 | musl | jemalloc (`tikv-jemallocator`) | fast, multi-threaded |
+| V4 | glibc | mimalloc | optional: tells the libc's effect from the allocator's |
+| V5 | musl | Scudo | optional: a hardened allocator built for threads, if its crate builds on musl |
+
+*How they are built,* on an experiment branch, not merged unless a variant is chosen:
+- The musl build of `cassini-server` as `polar-tools` already builds its static tools (`src/agents/polar-tools/package.nix`:
+  the triple from `system`, crane with the musl target, `pkgsStatic`'s `cc`, OpenSSL linked in). The broker's own TLS is
+  rustls with `ring`; OpenSSL reaches it only through `reqwest`'s default `native-tls` (`credentials-agent-client`, the
+  `polar` crate), off the hot path, and links static as it does for the tools.
+- The allocator as a `#[global_allocator]` behind a cargo feature of the server binary (`alloc-mimalloc`,
+  `alloc-jemalloc`, `alloc-scudo`), one per image. The dependencies stay on the branch.
+- Each image pushed to the in-cluster registry under its own tag (`cassini:exp-v<n>`) and set on the broker's Deployment
+  with Flux's `polar-agents` suspended, as the procedure already has it; the harness records the image digest it ran.
+
+*Correctness first:* Cassini's tests pass on the musl target (the broker, the client and the local load tests) before
+any musl broker is measured, and a musl broker registers every agent and serves every subscription on the cluster
+before the harness runs.
+
+*What is measured:*
+- The harness's figures, per run (`infra/load-plans/baseline.nuon`, 16 runs, about 30 minutes a variant).
+- The broker's CPU seconds and memory (working set at each run's end, and its peak) per run, from the kubelet's summary
+  (`/api/v1/nodes/<node>/proxy/stats/summary`, no exec into the broker). The harness does not record these yet: an
+  addition to `infra/load-harness.nu`, tested first in `infra/tests/load-harness.nu`. CPU per message received is the
+  figure where allocators differ most when the rate is set and the throughput cannot.
+- The image's size, incidentally.
+
+*The procedure:* this document's, on precisionws and the five-node `u7c` with `sandbox-local`, once the arm64 publish has
+ended (its emulated builds would load the CPU through every run). The broker is on `core`, the harness's pods on
+`services` (`placement.md`), so `one_node` is false: the nodes are containers on one host, sharing its clock, to be
+confirmed before the latencies are read as one clock's. The order interleaved, two rounds, V0 V1 V2 V3 then V0 V1 V2 V3
+(and V4, V5 if run), so a drift through the session is not read as a difference: about four hours for the four.
+
+*Read with a rule set before the figures* (the maintainer to clear it):
+- A row's spread is the difference between V0's two runs of it.
+- A variant is *no worse* on a row when the mean of its two runs is within that spread of V0's mean, for throughput and
+  for p99; *acceptable* when it is no worse on every row, and its CPU per message and memory are no worse by the same
+  rule.
+- A variant is *better* where it is beyond the spread: the saturated rows ("max", and 10,000 a second), CPU per message.
+- Nothing is decided from one machine: the chosen variant is measured again on whitey, and arm64 is seen only where an
+  arm64 node runs it (the tester's MacBook, as a smoke test, not a measurement).
+
+*Then:* the figures here, a recommendation, and the maintainer's decision; the agents follow the broker only after it.
+
 ## What measuring it found
 
 Each fix was made test first, the test failing before it.
