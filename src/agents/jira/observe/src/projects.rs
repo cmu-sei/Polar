@@ -66,6 +66,7 @@ impl JiraProjectObserver {
             JIRA_PROJECTS_CONSUMER_TOPIC,
             &JiraData::Projects(projects),
         )
+        .await
     }
 }
 

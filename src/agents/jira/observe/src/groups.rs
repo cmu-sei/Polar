@@ -98,6 +98,7 @@ impl JiraGroupObserver {
             JIRA_GROUPS_CONSUMER_TOPIC,
             &JiraData::Groups(all_groups),
         )
+        .await
     }
 }
 

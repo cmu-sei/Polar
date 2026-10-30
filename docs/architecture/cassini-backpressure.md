@@ -23,8 +23,8 @@
 
 # Backpressure for the Cassini broker and client
 
-Status: **cleared 2026-10-30; the broker's side built the same day** (cassini-broker.md, "The bounds, as built"); the
-client's side is not built yet (the decisions are at the end). What the broker and client bound today is in cassini-broker.md ("Bounds
+Status: **cleared and built 2026-10-30** ("As built", below; the decisions are at the end). Not built: the
+domain-deferred acknowledgement, the offline file and deduplication. What the broker and client bound today is in cassini-broker.md ("Bounds
 and flow control") and cassini-client-reliability.md ("As built, 2026-10-30"); in short, nothing, except the session
 retention `R`. The measurement that started this: at 64 KiB saturated, a sink that drained about 11% slower than the
 broker accepted left 46 to 176 MB of payload in the broker's heap within a second (broker-baseline.md, the fourth set).
@@ -124,6 +124,55 @@ rule stay.
    and stall rule are as in phase 1. Not in this build: the offline file (step 3) and deduplication (step 4); delivery
    stays at-least-once across a reconnect, which the handlers' MERGE-style writes tolerate (reliability doc, 5a). The
    wire format changes, so the broker and every agent move together (one artifact per target).
+
+## As built (2026-10-30)
+
+Both phases together, as decided. Paths relative to `src/agents/`. Commits in order: the frame cap (cherry-picked,
+its author's), its tests and the client's refusal; the numbered publishes and the outbox; the acknowledged deliveries;
+the broker's bounds; the client's bounds; the harness's slow sink.
+
+- **The frame limit, 64 MiB:** cassini-broker.md, "The bounds, as built" (and `cassini/types/src/lib.rs`,
+  `MAX_FRAME_BYTES`, `MAX_PAYLOAD_BYTES`).
+- **The credit on the wire:** the client's outbox of unacknowledged messages and per-message acknowledgements
+  (cassini-client-reliability.md, "Step 2, as built"); the subscriber's delivery outbox and `PublishResponseAck`
+  ("Step 5's acknowledged deliveries, as built").
+- **The broker's bounds** (budget, window, high water, stall rule, holders, alarm, report): cassini-broker.md, "The
+  bounds, as built". The per-subscriber measure is the delivery outbox, delivered and not acknowledged (phase 2's,
+  not phase 1's "not yet written").
+- **The client's bounds** (`cassini/client/src/credit.rs`): the outbox is the credit, 1,000 messages or 64 MiB
+  (`outbox::DEFAULT_OUTBOX_LIMITS`), and the buffer behind it 1,000 or 64 MiB (`DEFAULT_BUFFER_LIMITS`, `credit.rs:40`).
+  A publish takes its room before it is handed to the facade (`Credit::take`, `credit.rs:118`): in the outbox when
+  there is room and nothing waits in the buffer; otherwise its `OfflineBehavior` decides. `Queue` takes room in the
+  buffer, and when that is full the newest is refused, with `CassiniClientError::BufferFull` to the caller and
+  `ClientEvent::PublishDropped` to the agent (no more silent drop-oldest); `Fail` is refused with
+  `CassiniClientError::Busy`; `Drop` is discarded and counted (`Credit::dropped`). `TcpClient::publish` decides so
+  synchronously (`lib/src/cassini.rs:382`); `TcpClient::publish_when_ready(..).await` waits for room in the outbox
+  (`lib/src/cassini.rs:364`, `Credit::wait_for_outbox`). Offline, `Fail` and `Drop` answer as before. A `Publish`
+  cast to the facade by an agent that holds its address takes room there, as `Queue` (`facade.rs`, `admit` 290,
+  `refuse_newest` 335); the facade gives room back as the broker acknowledges or refuses, and moves what waits in the
+  buffer into the room made (`promote` 348).
+- **The call sites** (cassini-client-reliability.md, "As built"): jira-observer's `publish_data` and kube-observer's
+  `emit_event` await `publish_when_ready` (`jira/observe/src/lib.rs:485`, `kubernetes/observe/src/lib.rs:329`);
+  git-repo-observer's walk only collects (`observe_refs`, `git/observe/src/lib.rs:835`), and what it found is
+  published after it, a ref at a time, moving that ref's `last_seen` only once all its events were accepted
+  (`publish_observed`, `git/observe/src/lib.rs:537`, through `git_agent_common::publish_event_when_ready`). The
+  gitlab observer and the other agents that hold a `TcpClientActor` itself (the CLI daemon, cassini-c2, the custody
+  daemon's watcher, openapi, provenance's `polar::lib`) need no change: the transport numbers what it is given in an
+  epoch of its own and acknowledges deliveries itself; they have no outbox (nothing is resent) and no credit. The
+  scheduler pair, which casts to the facade's address, is bounded as a `Queue` caller and told of a refusal by
+  `PublishDropped`.
+- **Tests:** `credit.rs`'s own; the facade's (`the_buffer_is_bounded_and_refuses_the_newest_and_says_so`, which
+  replaces the test that asserted the oldest was dropped; a publish kept where it took room and its room given back);
+  `lib/src/cassini.rs`'s `at_the_bound_each_offline_behavior_decides` and
+  `publish_when_ready_waits_for_room_and_goes_when_the_broker_acknowledges`; git-repo-observer's
+  `an_event_the_client_refused_leaves_its_ref_s_last_seen_where_it_was`.
+- **Not done:** the domain-deferred acknowledgement (a consumer acknowledging after its graph write; the hand-off
+  is acknowledged, `TcpClientActor::delivery_handed_off`, the one call to move); the offline file (reliability step 3:
+  a facade that ends loses its outbox and buffer); deduplication (step 4: a message resent after a lost
+  acknowledgement, or a delivery resent on resume, arrives twice); an outbox entry older than `R` is not dropped
+  (5a). The harness's slow sink slows its handling, not its acknowledgements, so until the acknowledgement is the
+  domain's its backlog waits in the sink, not the broker; the broker side of a slow reader is what
+  `cassini/broker/tests/backpressure.rs` tests.
 
 The choices the decisions settled are kept below for the record.
 

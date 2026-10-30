@@ -186,6 +186,37 @@ where
         .map_err(|e| e.to_string())
 }
 
+/// As [`publish_event`], waiting while the client's outbox is full (docs/architecture/cassini-backpressure.md), for a
+/// caller that can await: the broker's pressure slows it instead of failing it.
+pub async fn publish_event_when_ready<T>(
+    client: &polar::cassini::TcpClient,
+    topic: &str,
+    event: &T,
+) -> Result<(), String>
+where
+    T: for<'a> rkyv::Serialize<
+            rkyv::api::high::HighSerializer<
+                rkyv::util::AlignedVec,
+                rkyv::ser::allocator::ArenaHandle<'a>,
+                rkyv::rancor::Error,
+            >,
+        >,
+{
+    let payload = rkyv::to_bytes::<rkyv::rancor::Error>(event)
+        .map_err(|e| e.to_string())?
+        .to_vec();
+    client
+        .publish_when_ready(cassini_client::PublishRequest {
+            topic: topic.to_string(),
+            payload,
+            trace_ctx: None,
+            offline_behavior: cassini_client::OfflineBehavior::default(),
+            share_identity: true,
+        })
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

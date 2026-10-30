@@ -693,6 +693,13 @@ pub enum ClientEvent {
         topic: String,
         reason: String,
     },
+    /// The client itself refused a publish on `topic` before sending it (`reason` says why): its outbox and its
+    /// buffer were full, and it refuses the newest rather than drop an older one (docs/architecture/
+    /// cassini-backpressure.md, phase 1, client side). Nothing was sent; a caller that queued is told with an error too.
+    PublishDropped {
+        topic: String,
+        reason: String,
+    },
 }
 /// External Messages for client comms
 /// These messages are serialized/deserialized to/from JSON

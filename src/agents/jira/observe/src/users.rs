@@ -98,6 +98,7 @@ impl JiraUserObserver {
             JIRA_USERS_CONSUMER_TOPIC,
             &JiraData::Users(all_users),
         )
+        .await
     }
 }
 

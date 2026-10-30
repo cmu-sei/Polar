@@ -25,6 +25,7 @@ pub use cassini_tracing::{init_tracing, shutdown_tracing};
 pub use cassini_tracing::{try_set_parent_otel, try_set_parent_wire};
 pub use polar_custody::client::ClientKey;
 mod connect;
+pub mod credit;
 pub mod environment;
 pub mod facade;
 pub mod outbox;
@@ -478,6 +479,21 @@ pub enum TcpClientMessage {
     AcknowledgeDelivery {
         delivery_id: u64,
     },
+    /// To the facade: a publish that has already taken room in `slot` of the client's credit (`credit.rs`), as
+    /// `TcpClient::publish` and `publish_when_ready` send it. A `Publish` cast to the facade takes its room there.
+    PublishWith {
+        topic: String,
+        payload: Vec<u8>,
+        trace_ctx: Option<WireTraceCtx>,
+        share_identity: bool,
+        slot: credit::Slot,
+    },
+    /// To the facade: a publish on `topic` was refused before it was sent (`reason`); the agent is told
+    /// (`ClientEvent::PublishDropped`).
+    NotSent {
+        topic: String,
+        reason: String,
+    },
 }
 
 impl TcpClientMessage {
@@ -507,6 +523,8 @@ impl TcpClientMessage {
             TcpClientMessage::Acknowledged { .. } => "Acknowledged",
             TcpClientMessage::Refused { .. } => "Refused",
             TcpClientMessage::AcknowledgeDelivery { .. } => "AcknowledgeDelivery",
+            TcpClientMessage::PublishWith { .. } => "PublishWith",
+            TcpClientMessage::NotSent { .. } => "NotSent",
         }
     }
 

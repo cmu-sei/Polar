@@ -22,9 +22,9 @@
 */
 
 use async_trait::async_trait;
+use cassini_client::credit::{Credit, NoRoom, Slot};
 use cassini_client::facade::{
-    Backoff, DEFAULT_OFFLINE_BUFFER, FacadeArgs, RefusalWatch, TcpClientFacade,
-    TlsTransportSpawner, TopicGate,
+    Backoff, FacadeArgs, RefusalWatch, TcpClientFacade, TlsTransportSpawner, TopicGate,
 };
 pub use cassini_client::{MessageQueue, OfflineBehavior, PublishRequest, QueueEntry};
 use cassini_client::{TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage};
@@ -73,6 +73,16 @@ pub enum CassiniClientError {
     /// connection on it.
     #[error("the payload is {bytes} bytes, over the {max} a frame carries")]
     TooLarge { bytes: usize, max: usize },
+
+    /// The client's outbox is full (the broker has not acknowledged what it holds) and the caller asked to fail rather
+    /// than wait (`OfflineBehavior::Fail`).
+    #[error("the client is busy: its outbox is full")]
+    Busy,
+
+    /// The client's outbox and buffer are full: the publish, the newest, is refused rather than an older one dropped
+    /// (`OfflineBehavior::Queue`). The agent is also told with `ClientEvent::PublishDropped`.
+    #[error("the client's outbox and buffer are full: the publish was refused")]
+    BufferFull,
 }
 
 /// Abstraction over the Cassini client operations
@@ -108,6 +118,9 @@ pub struct TcpClient {
     /// tracking it (the stable front the agent builder starts). `None` for a client that is the
     /// connection itself, which has no such state to read.
     online: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// The room in the front's outbox and buffer, which a publish takes before it is handed over (`credit.rs`).
+    /// `None` for a client that is the connection itself, or a stand-in.
+    credit: Option<std::sync::Arc<Credit>>,
 }
 
 impl TcpClient {
@@ -144,6 +157,7 @@ impl TcpClient {
             inner,
             queue,
             online: None,
+            credit: None,
         })
     }
 
@@ -217,6 +231,7 @@ impl TcpClient {
         // The agent holds the stable front, which keeps the connection up. See
         // cassini_client::facade.
         let online = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let credit = std::sync::Arc::new(Credit::default());
         let (inner, _) = Actor::spawn_linked(
             Some(format!("{service_name}.tcp")),
             TcpClientFacade,
@@ -226,8 +241,7 @@ impl TcpClient {
                 transport_name: format!("{service_name}.tcp.transport"),
                 spawner: std::sync::Arc::new(TlsTransportSpawner),
                 online: online.clone(),
-                buffer_limit: DEFAULT_OFFLINE_BUFFER,
-                outbox: cassini_client::outbox::OutboxLimits::default(),
+                credit: credit.clone(),
                 backoff: Backoff::default(),
                 gate,
                 watch,
@@ -242,6 +256,7 @@ impl TcpClient {
             inner,
             queue,
             online: Some(online),
+            credit: Some(credit),
         })
     }
 
@@ -269,6 +284,7 @@ impl TcpClient {
             inner,
             queue: None,
             online: None,
+            credit: None,
         }
     }
 
@@ -282,18 +298,38 @@ impl TcpClient {
             inner,
             queue: None,
             online: Some(online),
+            credit: None,
         }
     }
-}
 
-#[async_trait]
-impl CassiniClient for TcpClient {
-    fn publish(&self, req: PublishRequest) -> Result<(), CassiniClientError> {
+    /// As [`from_actor_ref_with_state`](Self::from_actor_ref_with_state), for a front whose outbox and buffer are
+    /// counted in `credit`, so each publish takes its room before it is handed over.
+    pub fn from_actor_ref_with_credit(
+        inner: ActorRef<TcpClientMessage>,
+        online: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        credit: std::sync::Arc<Credit>,
+    ) -> Self {
+        Self {
+            inner,
+            queue: None,
+            online: Some(online),
+            credit: Some(credit),
+        }
+    }
+
+    /// The front's outbox and buffer, as counted, when it has them.
+    pub fn credit(&self) -> Option<std::sync::Arc<Credit>> {
+        self.credit.clone()
+    }
+
+    /// Whether `req` is to be decided before it is handed over: too large for a frame, or offline when the caller
+    /// would rather fail or drop. `Some` is the answer.
+    fn decided_offline(&self, req: &PublishRequest) -> Option<Result<(), CassiniClientError>> {
         if req.payload.len() > cassini_types::MAX_PAYLOAD_BYTES {
-            return Err(CassiniClientError::TooLarge {
+            return Some(Err(CassiniClientError::TooLarge {
                 bytes: req.payload.len(),
                 max: cassini_types::MAX_PAYLOAD_BYTES,
-            });
+            }));
         }
         // The front is always there, so a cast to it always succeeds. Whether the connection is
         // up is what decides these two: `Queue` is handed to the front, which holds it.
@@ -301,10 +337,76 @@ impl CassiniClient for TcpClient {
             && !online.load(std::sync::atomic::Ordering::SeqCst)
         {
             match req.offline_behavior {
-                OfflineBehavior::Fail => return Err(CassiniClientError::BrokerUnavailable),
-                OfflineBehavior::Drop => return Ok(()),
+                OfflineBehavior::Fail => return Some(Err(CassiniClientError::BrokerUnavailable)),
+                OfflineBehavior::Drop => return Some(Ok(())),
                 OfflineBehavior::Queue => {}
             }
+        }
+        None
+    }
+
+    fn hand_over(&self, req: PublishRequest, slot: Slot) -> Result<(), CassiniClientError> {
+        self.inner
+            .send_message(TcpClientMessage::PublishWith {
+                topic: req.topic,
+                payload: req.payload,
+                trace_ctx: req.trace_ctx,
+                share_identity: req.share_identity,
+                slot,
+            })
+            .map_err(|_| CassiniClientError::Disconnected)
+    }
+
+    /// Publishes, waiting while the client's outbox is full (the broker has not yet acknowledged what it holds), so
+    /// pressure slows the caller instead of failing it (docs/architecture/cassini-backpressure.md). A publish too
+    /// large for a frame, or one made offline by a caller that would rather fail or drop, is answered at once as
+    /// `publish` answers it. For callers that can await; `publish` is for those that cannot.
+    pub async fn publish_when_ready(&self, req: PublishRequest) -> Result<(), CassiniClientError> {
+        if let Some(decided) = self.decided_offline(&req) {
+            return decided;
+        }
+        let Some(credit) = &self.credit else {
+            return self.publish(req);
+        };
+        credit.wait_for_outbox(req.payload.len()).await;
+        self.hand_over(req, Slot::Outbox)
+    }
+}
+
+#[async_trait]
+impl CassiniClient for TcpClient {
+    /// Publishes without waiting. With a front that counts its outbox (the agent builder's), the publish takes room
+    /// in the outbox, or, when the outbox is full, its `OfflineBehavior` decides: `Queue` takes room in the buffer and
+    /// is refused, the newest, with `BufferFull` when that is full too; `Fail` is refused with `Busy`; `Drop` is
+    /// discarded and counted (`Credit::dropped`).
+    fn publish(&self, req: PublishRequest) -> Result<(), CassiniClientError> {
+        if let Some(decided) = self.decided_offline(&req) {
+            return decided;
+        }
+        if let Some(credit) = &self.credit {
+            let queue = matches!(req.offline_behavior, OfflineBehavior::Queue);
+            return match credit.take(req.payload.len(), queue) {
+                Ok(slot) => self.hand_over(req, slot),
+                Err(NoRoom::Busy) => match req.offline_behavior {
+                    OfflineBehavior::Drop => {
+                        credit.count_dropped();
+                        tracing::debug!(topic = %req.topic, "the outbox is full: a publish the caller would drop is dropped");
+                        Ok(())
+                    }
+                    _ => Err(CassiniClientError::Busy),
+                },
+                Err(NoRoom::BufferFull) => {
+                    let reason =
+                        "the Cassini client's outbox and buffer are full: the newest is refused"
+                            .to_string();
+                    tracing::warn!(topic = %req.topic, "{reason}");
+                    let _ = self.inner.send_message(TcpClientMessage::NotSent {
+                        topic: req.topic,
+                        reason,
+                    });
+                    Err(CassiniClientError::BufferFull)
+                }
+            };
         }
 
         let result = self.inner.send_message(TcpClientMessage::Publish {
@@ -523,6 +625,92 @@ mod tests {
         largest.payload = vec![0; cassini_types::MAX_PAYLOAD_BYTES];
         client.publish(largest).unwrap();
         assert_eq!(sent(&received).await, 1, "only the one that fits is sent");
+    }
+
+    /// A client whose front's outbox holds one message and its buffer one, online.
+    async fn bounded_client() -> (TcpClient, Arc<Credit>, Arc<Mutex<Vec<TcpClientMessage>>>) {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (inner, _) = Actor::spawn(
+            None,
+            Recorder {
+                received: received.clone(),
+            },
+            (),
+        )
+        .await
+        .unwrap();
+        let one = cassini_client::outbox::OutboxLimits {
+            messages: 1,
+            bytes: usize::MAX,
+        };
+        let credit = Arc::new(Credit::new(one, one));
+        let client = TcpClient::from_actor_ref_with_credit(
+            inner,
+            Arc::new(AtomicBool::new(true)),
+            credit.clone(),
+        );
+        (client, credit, received)
+    }
+
+    /// What the front was handed: each publish with the room it took, and each refusal it is to tell the agent of.
+    async fn handed(received: &Arc<Mutex<Vec<TcpClientMessage>>>) -> Vec<String> {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| match m {
+                TcpClientMessage::PublishWith { slot, .. } => format!("{slot:?}"),
+                TcpClientMessage::NotSent { .. } => "NotSent".to_string(),
+                other => other.kind().to_string(),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn at_the_bound_each_offline_behavior_decides() {
+        let (client, credit, received) = bounded_client().await;
+        client.publish(publish(OfflineBehavior::Fail)).unwrap();
+        // The outbox is full: Fail is busy, Drop is discarded and counted, Queue waits in the buffer...
+        assert!(matches!(
+            client.publish(publish(OfflineBehavior::Fail)),
+            Err(CassiniClientError::Busy)
+        ));
+        client.publish(publish(OfflineBehavior::Drop)).unwrap();
+        assert_eq!(credit.dropped(), 1);
+        client.publish(publish(OfflineBehavior::Queue)).unwrap();
+        // ... and the buffer full, the newest is refused, and the agent is to be told.
+        assert!(matches!(
+            client.publish(publish(OfflineBehavior::Queue)),
+            Err(CassiniClientError::BufferFull)
+        ));
+        assert_eq!(handed(&received).await, ["Outbox", "Buffer", "NotSent"]);
+        assert_eq!(credit.refused(), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_when_ready_waits_for_room_and_goes_when_the_broker_acknowledges() {
+        let (client, credit, received) = bounded_client().await;
+        client
+            .publish_when_ready(publish(OfflineBehavior::Queue))
+            .await
+            .unwrap();
+        let waiting = tokio::spawn(async move {
+            client
+                .publish_when_ready(publish(OfflineBehavior::Fail))
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!waiting.is_finished(), "it waits rather than fail");
+        assert_eq!(handed(&received).await, ["Outbox"]);
+        // The broker acknowledges the first: the facade gives its room back.
+        credit.settle(1);
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("woken by the room made")
+            .unwrap()
+            .unwrap();
+        assert_eq!(handed(&received).await, ["Outbox", "Outbox"]);
     }
 
     #[tokio::test]

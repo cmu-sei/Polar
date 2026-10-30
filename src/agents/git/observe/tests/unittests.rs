@@ -254,6 +254,95 @@ fn force_push_emits_ref_updated_with_old_and_new_tips() {
     assert!(new_oids.contains(&new_tip));
     assert!(!new_oids.contains(&old_tip));
 }
+/// Takes every event but those of one ref past the first, as a client that has no room left would refuse them.
+struct RefusingSink {
+    refuse_on: &'static str,
+    accepted: std::sync::Mutex<Vec<String>>,
+}
+
+impl EventSink for RefusingSink {
+    async fn publish(&self, event: &git_agent_common::GitRepositoryMessage) -> Result<(), String> {
+        let ref_name = match event {
+            git_agent_common::GitRepositoryMessage::CommitDiscovered { ref_name, .. }
+            | git_agent_common::GitRepositoryMessage::RefUpdated { ref_name, .. } => {
+                ref_name.clone()
+            }
+        };
+        let mut accepted = self.accepted.lock().unwrap();
+        if ref_name == self.refuse_on && accepted.contains(&ref_name) {
+            return Err("the client's outbox and buffer are full".to_string());
+        }
+        accepted.push(ref_name);
+        Ok(())
+    }
+}
+
+/// A ref with an event the client did not accept keeps the `last_seen` it had, so its commits are walked, and
+/// published, again; a ref all of whose events were accepted moves on. Until 2026-10-30 a refused publish was logged
+/// and dropped inside the walk, and `last_seen` moved past it: the commit was lost.
+#[tokio::test]
+async fn an_event_the_client_refused_leaves_its_ref_s_last_seen_where_it_was() {
+    init_logging();
+    let (_dir, repo) = bare_repo();
+    let main_commits = linear_history(&repo, "refs/heads/main", 2);
+    let dev_commits = linear_history(&repo, "refs/heads/dev", 3);
+    let config = dummy_config(vec!["refs/heads/main".into(), "refs/heads/dev".into()]);
+    let provider = noop_provider();
+    let mut last_seen = HashMap::new();
+    let mut found = Vec::new();
+    let mut moved = Vec::new();
+    let tips = GitRepoWorker::observe_refs(
+        &repo,
+        &provider,
+        &config,
+        None,
+        &last_seen,
+        |r, c| {
+            found.push((
+                r.to_string(),
+                git_agent_common::GitRepositoryMessage::CommitDiscovered {
+                    ref_name: r.to_string(),
+                    observed_at: String::new(),
+                    repo: RepoId::from_url("local"),
+                    oid: c.id().to_string(),
+                    committer: String::new(),
+                    time: 0,
+                    message: String::new(),
+                    parents: Vec::new(),
+                },
+            ))
+        },
+        |r, old, new| {
+            moved.push((
+                r.to_string(),
+                git_agent_common::GitRepositoryMessage::RefUpdated {
+                    repo: RepoId::from_url("local"),
+                    ref_name: r.to_string(),
+                    old: old.map(|o| o.to_string()),
+                    new: new.to_string(),
+                    observed_at: String::new(),
+                },
+            ))
+        },
+    )
+    .unwrap();
+    assert!(last_seen.is_empty(), "the walk alone moves nothing");
+    found.extend(moved);
+    let sink = RefusingSink {
+        refuse_on: "refs/heads/dev",
+        accepted: Default::default(),
+    };
+    let left_behind = publish_observed(&sink, found, tips, &mut last_seen).await;
+    assert_eq!(left_behind, 1);
+    assert_eq!(last_seen.get("refs/heads/main"), main_commits.last());
+    assert_eq!(
+        last_seen.get("refs/heads/dev"),
+        None,
+        "dev's second event was refused: dev stays where it was ({:?})",
+        dev_commits.last()
+    );
+}
+
 // One repository that cannot be started (an unreachable host, bad credentials) must not end the
 // supervisor of all the others: its failure is logged and the supervisor carries on.
 #[test]

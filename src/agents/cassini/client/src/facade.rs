@@ -44,7 +44,8 @@
 //! What is published while the outbox is full waits in the buffer, in order. There is no offline
 //! file (step 3) and no deduplication (step 4): a message sent again may be delivered twice.
 
-use crate::outbox::{Entry, Outbox, OutboxLimits};
+use crate::credit::{Credit, Slot};
+use crate::outbox::{Entry, Outbox};
 use crate::refused::{RefusedTopics, StandingRefusal};
 use crate::{
     DeliveryMode, ReconnectMode, TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage,
@@ -177,9 +178,9 @@ pub struct FacadeArgs {
     /// True while a transport is registered with the broker. Shared with the handle, so a caller
     /// can ask without a message.
     pub online: Arc<AtomicBool>,
-    pub buffer_limit: usize,
-    /// How much the outbox holds before publishes wait in the buffer.
-    pub outbox: OutboxLimits,
+    /// What the outbox and the buffer hold, and their bounds, shared with whoever publishes through the facade
+    /// (`credit.rs`).
+    pub credit: Arc<Credit>,
     pub backoff: Backoff,
     /// Asked before each publish and subscribe; none admits everything.
     pub gate: Option<TopicGate>,
@@ -283,8 +284,9 @@ impl TcpClientFacade {
         }
     }
 
-    /// Takes a publish: into the outbox if there is room and nothing waits before it, sent at once if a transport
-    /// is registered; otherwise into the buffer, behind what already waits.
+    /// Takes a publish that took no room before it came (an agent that casts to the facade): into the outbox if
+    /// there is room and nothing waits before it, otherwise into the buffer; when the buffer is full too the newest,
+    /// this one, is refused, and the agent is told.
     fn admit(state: &mut FacadeState, publish: TcpClientMessage) {
         let TcpClientMessage::Publish {
             topic,
@@ -295,29 +297,57 @@ impl TcpClientFacade {
         else {
             return;
         };
-        if state.buffer.is_empty() && state.outbox.has_room(payload.len()) {
-            let entry = state
-                .outbox
-                .push(topic, Arc::new(payload), trace_ctx, share_identity)
-                .clone();
-            Self::transmit(state, &entry);
-        } else {
-            Self::hold(
-                state,
-                TcpClientMessage::Publish {
-                    topic,
-                    payload,
-                    trace_ctx,
-                    share_identity,
-                },
-            );
+        match state.args.credit.take(payload.len(), true) {
+            Ok(slot) => Self::keep(state, slot, topic, payload, trace_ctx, share_identity),
+            Err(_) => Self::refuse_newest(state, topic),
         }
+    }
+
+    /// Keeps a publish where it took room: numbered into the outbox and sent at once if a transport is registered, or
+    /// into the buffer, behind what already waits.
+    fn keep(
+        state: &mut FacadeState,
+        slot: Slot,
+        topic: String,
+        payload: Vec<u8>,
+        trace_ctx: Option<cassini_types::WireTraceCtx>,
+        share_identity: bool,
+    ) {
+        match slot {
+            Slot::Outbox => {
+                let entry = state
+                    .outbox
+                    .push(topic, Arc::new(payload), trace_ctx, share_identity)
+                    .clone();
+                Self::transmit(state, &entry);
+            }
+            Slot::Buffer => state.buffer.push_back(TcpClientMessage::Publish {
+                topic,
+                payload,
+                trace_ctx,
+                share_identity,
+            }),
+        }
+    }
+
+    /// The buffer is full: the newest publish is refused, never sent, and the agent is told
+    /// (`ClientEvent::PublishDropped`), instead of the oldest being dropped with only a warning.
+    fn refuse_newest(state: &FacadeState, topic: String) {
+        let reason = format!(
+            "the Cassini client's outbox and buffer are full ({} publishes wait): the newest is refused",
+            state.buffer.len()
+        );
+        warn!(%topic, "{reason}");
+        TcpClientActor::dispatch_event(
+            &state.delivery,
+            ClientEvent::PublishDropped { topic, reason },
+        );
     }
 
     /// Moves what waits in the buffer into the outbox, oldest first, while it has room.
     fn promote(state: &mut FacadeState) {
         while let Some(TcpClientMessage::Publish { payload, .. }) = state.buffer.front() {
-            if !state.outbox.has_room(payload.len()) {
+            if !state.args.credit.promote(payload.len()) {
                 break;
             }
             let Some(TcpClientMessage::Publish {
@@ -335,17 +365,6 @@ impl TcpClientFacade {
                 .clone();
             Self::transmit(state, &entry);
         }
-    }
-
-    fn hold(state: &mut FacadeState, message: TcpClientMessage) {
-        if state.buffer.len() >= state.args.buffer_limit {
-            state.buffer.pop_front();
-            warn!(
-                "the Cassini offline buffer is full ({} publishes): the oldest was dropped",
-                state.args.buffer_limit
-            );
-        }
-        state.buffer.push_back(message);
     }
 
     /// Tells the watch what stands refused now.
@@ -404,7 +423,7 @@ impl Actor for TcpClientFacade {
         args: FacadeArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         let delivery = observe(args.delivery.clone(), myself.clone());
-        let outbox = Outbox::new(crate::new_epoch(), args.outbox);
+        let outbox = Outbox::new(crate::new_epoch(), args.credit.outbox_limits());
         let mut state = FacadeState {
             args,
             delivery,
@@ -445,7 +464,10 @@ impl Actor for TcpClientFacade {
         }
         if let Some(gate) = &state.args.gate {
             let asked = match &message {
-                TcpClientMessage::Publish { topic, .. } => Some((TopicUse::Publish, topic.clone())),
+                TcpClientMessage::Publish { topic, .. }
+                | TcpClientMessage::PublishWith { topic, .. } => {
+                    Some((TopicUse::Publish, topic.clone()))
+                }
                 TcpClientMessage::Subscribe { topic, .. } => {
                     Some((TopicUse::Subscribe, topic.clone()))
                 }
@@ -463,6 +485,10 @@ impl Actor for TcpClientFacade {
                     TopicUse::Subscribe => ClientEvent::SubscribeRefused { topic, reason },
                 };
                 TcpClientActor::dispatch_event(&state.delivery, event);
+                // Refused before it was kept: the room it took is given back.
+                if let TcpClientMessage::PublishWith { slot, payload, .. } = &message {
+                    state.args.credit.release(*slot, payload.len());
+                }
                 return Ok(());
             }
         }
@@ -479,7 +505,8 @@ impl Actor for TcpClientFacade {
                 Self::promote(state);
             }
             TcpClientMessage::Acknowledged { id } | TcpClientMessage::Refused { id } => {
-                if state.outbox.settle(id).is_some() {
+                if let Some(entry) = state.outbox.settle(id) {
+                    state.args.credit.settle(entry.payload.len());
                     Self::promote(state);
                 }
             }
@@ -518,6 +545,19 @@ impl Actor for TcpClientFacade {
                 }
             }
             publish @ TcpClientMessage::Publish { .. } => Self::admit(state, publish),
+            TcpClientMessage::PublishWith {
+                topic,
+                payload,
+                trace_ctx,
+                share_identity,
+                slot,
+            } => Self::keep(state, slot, topic, payload, trace_ctx, share_identity),
+            TcpClientMessage::NotSent { topic, reason } => {
+                TcpClientActor::dispatch_event(
+                    &state.delivery,
+                    ClientEvent::PublishDropped { topic, reason },
+                );
+            }
             TcpClientMessage::GetRegistrationId(reply) => match &state.transport {
                 Some(transport) if state.registered => {
                     let _ = transport.send_message(TcpClientMessage::GetRegistrationId(reply));
@@ -587,6 +627,7 @@ impl Actor for TcpClientFacade {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outbox::OutboxLimits;
     use cassini_types::MessageId;
     use std::sync::Mutex;
 
@@ -691,7 +732,14 @@ mod tests {
         )
     }
 
+    impl Rig {
+        fn credit(&self) -> Arc<Credit> {
+            self.credit.clone()
+        }
+    }
+
     struct Rig {
+        credit: Arc<Credit>,
         facade: ActorRef<TcpClientMessage>,
         spawner: Arc<FakeSpawner>,
         online: Arc<AtomicBool>,
@@ -723,6 +771,13 @@ mod tests {
         let spawner = Arc::new(FakeSpawner::default());
         let online = Arc::new(AtomicBool::new(false));
         let events = Arc::new(ractor::OutputPort::default());
+        let credit = Arc::new(Credit::new(
+            outbox,
+            OutboxLimits {
+                messages: buffer_limit,
+                bytes: usize::MAX,
+            },
+        ));
         let (facade, _) = Actor::spawn(
             Some(format!("facade-{}", uuid::Uuid::new_v4())),
             TcpClientFacade,
@@ -732,8 +787,7 @@ mod tests {
                 transport_name: format!("transport-{}", uuid::Uuid::new_v4()),
                 spawner: spawner.clone(),
                 online: online.clone(),
-                buffer_limit,
-                outbox,
+                credit: credit.clone(),
                 backoff: Backoff::default(),
                 gate,
                 watch,
@@ -742,6 +796,7 @@ mod tests {
         .await
         .unwrap();
         Rig {
+            credit,
             facade,
             spawner,
             online,
@@ -1026,8 +1081,10 @@ mod tests {
         assert_eq!(rig.spawner.count(), 2);
     }
 
+    /// The buffer is bounded, and when it is full the newest is refused, and the agent told: nothing already waiting
+    /// is dropped (until 2026-10-30 the oldest was, with only a warning).
     #[tokio::test(start_paused = true)]
-    async fn the_buffer_is_bounded_and_the_oldest_goes_first() {
+    async fn the_buffer_is_bounded_and_refuses_the_newest_and_says_so() {
         // An outbox of one, so everything after the first waits in the buffer.
         let rig = bounded_rig(
             3,
@@ -1039,6 +1096,7 @@ mod tests {
             None,
         )
         .await;
+        let dropped = dropped(&rig).await;
         for t in ["1", "2", "3", "4", "5"] {
             rig.facade.cast(publish(t)).unwrap();
         }
@@ -1050,7 +1108,93 @@ mod tests {
             acknowledge(&rig, id);
             settle().await;
         }
-        assert_eq!(topics(&rig.spawner.latest().1), ["1", "3", "4", "5"]);
+        assert_eq!(topics(&rig.spawner.latest().1), ["1", "2", "3", "4"]);
+        assert_eq!(
+            *dropped.lock().unwrap(),
+            ["5"],
+            "the newest, refused, and the agent told"
+        );
+    }
+
+    type Dropped = Arc<Mutex<Vec<String>>>;
+
+    /// Stands for the agent: notes each publish it is told was refused before it was sent.
+    struct DropListener {
+        seen: Dropped,
+    }
+
+    #[async_trait]
+    impl Actor for DropListener {
+        type Msg = ClientEvent;
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            _args: (),
+        ) -> Result<Self::State, ActorProcessingErr> {
+            Ok(())
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<Self::Msg>,
+            event: Self::Msg,
+            _state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            if let ClientEvent::PublishDropped { topic, .. } = event {
+                self.seen.lock().unwrap().push(topic);
+            }
+            Ok(())
+        }
+    }
+
+    async fn dropped(rig: &Rig) -> Dropped {
+        let seen: Dropped = Arc::default();
+        let (listener, _) = Actor::spawn(None, DropListener { seen: seen.clone() }, ())
+            .await
+            .unwrap();
+        rig.events.subscribe(listener, Some);
+        seen
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_publish_that_took_its_room_is_kept_where_it_took_it_and_its_room_given_back_when_settled()
+     {
+        let rig = bounded_rig(
+            10,
+            OutboxLimits {
+                messages: 1,
+                bytes: usize::MAX,
+            },
+            None,
+            None,
+        )
+        .await;
+        registered(&rig, "reg-1");
+        settle().await;
+        let credit = rig.credit();
+        for (topic, slot) in [("a", Slot::Outbox), ("b", Slot::Buffer)] {
+            assert_eq!(credit.take(1, true), Ok(slot));
+            rig.facade
+                .cast(TcpClientMessage::PublishWith {
+                    topic: topic.to_string(),
+                    payload: b"x".to_vec(),
+                    trace_ctx: None,
+                    share_identity: true,
+                    slot,
+                })
+                .unwrap();
+        }
+        settle().await;
+        assert_eq!(topics(&rig.spawner.latest().1), ["a"]);
+        assert_eq!(credit.held(), (1, 1, 1, 1));
+        let (_, a) = sent(&rig.spawner.latest().1)[0].clone();
+        acknowledge(&rig, a);
+        settle().await;
+        assert_eq!(topics(&rig.spawner.latest().1), ["a", "b"]);
+        assert_eq!(credit.held(), (1, 1, 0, 0), "b moved into the room a left");
     }
 
     // -- the outbox (docs/architecture/cassini-client-reliability.md, build step 2) ---------------------------------

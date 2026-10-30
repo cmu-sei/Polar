@@ -472,12 +472,8 @@ pub struct GitRepoWorkerArgs {
     proxy: Option<String>,
 }
 
-fn on_commit(
-    repo_id: RepoId,
-    ref_name: &str,
-    commit: &git2::Commit,
-    tcp_client: TcpClient,
-) -> Result<(), ActorProcessingErr> {
+/// The event a commit found on `ref_name` is published as.
+fn commit_event(repo_id: RepoId, ref_name: &str, commit: &git2::Commit) -> GitRepositoryMessage {
     debug!("Found commit for ref_name {ref_name} in repo {repo_id:?}");
 
     let observed_at = std::time::SystemTime::now()
@@ -485,7 +481,7 @@ fn on_commit(
         .unwrap()
         .as_millis();
 
-    let event = GitRepositoryMessage::CommitDiscovered {
+    GitRepositoryMessage::CommitDiscovered {
         ref_name: ref_name.to_string(),
         observed_at: observed_at.to_string(),
         repo: repo_id,
@@ -494,33 +490,75 @@ fn on_commit(
         time: git_time_to_epoch_ms(&commit.time()), // convert to ms to keep in line with other timestamps
         message: commit.message().unwrap_or_default().to_string(),
         parents: commit.parent_ids().map(|id| id.to_string()).collect(),
-    };
-
-    send_event(tcp_client, event, GIT_REPOSITORY_EVENTS.to_string())?;
-    Ok(())
+    }
 }
 
-fn emit_ref_update(
+/// The event a ref's move from `old` to `new` is published as.
+fn ref_update_event(
     repo_id: RepoId,
     ref_name: &str,
     old: Option<Oid>,
     new: Oid,
-    tcp_client: TcpClient,
-) -> Result<(), ActorProcessingErr> {
+) -> GitRepositoryMessage {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
 
-    let event = GitRepositoryMessage::RefUpdated {
+    GitRepositoryMessage::RefUpdated {
         repo: repo_id,
         ref_name: ref_name.to_string(),
         old: old.map(|o| o.to_string()),
         new: new.to_string(),
         observed_at: now.to_string(),
-    };
+    }
+}
 
-    send_event(tcp_client, event, GIT_REPOSITORY_EVENTS.to_string())
+/// Where an observation's events go: the agent's client, or a test's stand-in.
+pub trait EventSink: Sync {
+    /// Publishes `event` on the repository events topic, waiting while the client has no room; `Err` if it was not
+    /// accepted.
+    fn publish(
+        &self,
+        event: &GitRepositoryMessage,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
+}
+
+impl EventSink for TcpClient {
+    async fn publish(&self, event: &GitRepositoryMessage) -> Result<(), String> {
+        git_agent_common::publish_event_when_ready(self, GIT_REPOSITORY_EVENTS, event).await
+    }
+}
+
+/// Publishes what a walk found, a ref at a time and in order, and moves `last_seen` to a ref's tip only once every
+/// event of that ref was accepted. A ref with an event refused keeps the `last_seen` it had, so the next attempt walks
+/// it again from there (what was accepted before the refusal is published again: the consumers' writes are
+/// MERGE-style, docs/architecture/cassini-client-reliability.md, 5a). Returns how many refs were left behind.
+pub async fn publish_observed(
+    sink: &impl EventSink,
+    found: Vec<(String, GitRepositoryMessage)>,
+    tips: Vec<(String, Oid)>,
+    last_seen: &mut HashMap<String, Oid>,
+) -> usize {
+    let mut left_behind = 0;
+    for (ref_name, tip) in tips {
+        let mut accepted = true;
+        for (_, event) in found.iter().filter(|(r, _)| *r == ref_name) {
+            if let Err(e) = sink.publish(event).await {
+                error!(
+                    "{ref_name}: an event was not accepted ({e}); the ref is walked again from where it was next time"
+                );
+                accepted = false;
+                break;
+            }
+        }
+        if accepted {
+            last_seen.insert(ref_name, tip);
+        } else {
+            left_behind += 1;
+        }
+    }
+    left_behind
 }
 
 impl GitRepoWorker {
@@ -710,34 +748,38 @@ impl GitRepoWorker {
         let Some(repo) = state.repo.as_ref() else {
             return Outcome::CloneFailed("no clone".into());
         };
-        let observed = Self::observe_repository(
+        // The walk only collects: what it found is published after it, where a publish may wait for room, and a ref's
+        // `last_seen` moves only once all it found was accepted.
+        let mut found: Vec<(String, GitRepositoryMessage)> = Vec::new();
+        let mut moved: Vec<(String, GitRepositoryMessage)> = Vec::new();
+        let repo_id = state.config.repo_id.clone();
+        let observed = Self::observe_refs(
             repo,
             &provider,
             &state.config,
             state.proxy.as_deref(),
-            &mut state.last_seen,
+            &state.last_seen,
             |ref_name, commit| {
-                on_commit(
-                    state.config.repo_id.clone(),
-                    ref_name,
-                    commit,
-                    state.tcp_client.clone(),
-                )
-                .map_err(|e| error!("commit emission failed: {e}"))
-                .ok();
+                found.push((
+                    ref_name.to_string(),
+                    commit_event(repo_id.clone(), ref_name, commit),
+                ))
             },
             |ref_name, old, new| {
-                emit_ref_update(
-                    state.config.repo_id.clone(),
-                    ref_name,
-                    old,
-                    new,
-                    state.tcp_client.clone(),
-                )
-                .map_err(|e| error!("ref update emission failed: {e}"))
-                .ok();
+                moved.push((
+                    ref_name.to_string(),
+                    ref_update_event(repo_id.clone(), ref_name, old, new),
+                ))
             },
         );
+        let observed = match observed {
+            Ok(tips) => {
+                found.extend(moved);
+                publish_observed(&state.tcp_client, found, tips, &mut state.last_seen).await;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        };
         match observed {
             Ok(()) => {
                 state.waiting = false;
@@ -762,18 +804,47 @@ impl GitRepoWorker {
         }
     }
 
+    /// As [`observe_refs`](Self::observe_refs), moving `last_seen` to every tip at once.
     pub fn observe_repository<F>(
         repo: &Repository,
         credential_provider: &Arc<dyn GitCredentialProvider>,
         obs_config: &RepoObservationConfig,
         proxy: Option<&str>,
         last_seen: &mut HashMap<String, Oid>,
-        mut on_commit: F,
-        mut on_ref_update: impl FnMut(&str, Option<Oid>, Oid),
+        on_commit: F,
+        on_ref_update: impl FnMut(&str, Option<Oid>, Oid),
     ) -> Result<(), git2::Error>
     where
         F: FnMut(&str, &git2::Commit),
     {
+        let tips = Self::observe_refs(
+            repo,
+            credential_provider,
+            obs_config,
+            proxy,
+            last_seen,
+            on_commit,
+            on_ref_update,
+        )?;
+        last_seen.extend(tips);
+        Ok(())
+    }
+
+    /// Fetches, then walks each ref from its `last_seen`, calling `on_commit` for each commit found and
+    /// `on_ref_update` for the ref, and returns each ref's tip, for `last_seen` once what was found is published.
+    pub fn observe_refs<F>(
+        repo: &Repository,
+        credential_provider: &Arc<dyn GitCredentialProvider>,
+        obs_config: &RepoObservationConfig,
+        proxy: Option<&str>,
+        last_seen: &HashMap<String, Oid>,
+        mut on_commit: F,
+        mut on_ref_update: impl FnMut(&str, Option<Oid>, Oid),
+    ) -> Result<Vec<(String, Oid)>, git2::Error>
+    where
+        F: FnMut(&str, &git2::Commit),
+    {
+        let mut tips = Vec::new();
         Self::fetch_with_optional_depth(
             repo,
             credential_provider.clone(),
@@ -809,10 +880,10 @@ impl GitRepoWorker {
             })?;
 
             on_ref_update(ref_name, prev, tip);
-            last_seen.insert(ref_name.to_string(), tip);
+            tips.push((ref_name.to_string(), tip));
         }
 
-        Ok(())
+        Ok(tips)
     }
 }
 

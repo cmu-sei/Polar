@@ -29,9 +29,7 @@
 #![allow(dead_code)]
 
 use cassini_broker::broker::{Broker, BrokerArgs};
-use cassini_client::facade::{
-    Backoff, DEFAULT_OFFLINE_BUFFER, FacadeArgs, TcpClientFacade, TlsTransportSpawner,
-};
+use cassini_client::facade::{Backoff, FacadeArgs, TcpClientFacade, TlsTransportSpawner};
 use cassini_client::{
     DeliveryMode, TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage,
 };
@@ -1051,8 +1049,7 @@ impl FacadeClient {
                 online: online.clone(),
                 gate: None,
                 watch: None,
-                buffer_limit: DEFAULT_OFFLINE_BUFFER,
-                outbox: cassini_client::outbox::OutboxLimits::default(),
+                credit: Arc::new(cassini_client::credit::Credit::default()),
                 backoff: Backoff {
                     first: Duration::from_millis(200),
                     last: Duration::from_secs(1),

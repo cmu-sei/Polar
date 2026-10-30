@@ -192,7 +192,8 @@ impl JiraIssueObserver {
 
                     let res: Value = state.get_json(url.as_str()).await?;
                     let fetched =
-                        publish_issues(&res, &names, updated_id.as_deref(), &state.tcp_client)?;
+                        publish_issues(&res, &names, updated_id.as_deref(), &state.tcp_client)
+                            .await?;
                     let total = res["total"].as_u64().unwrap_or(0) as usize;
 
                     start_at += fetched;
@@ -228,7 +229,7 @@ impl JiraIssueObserver {
                     debug!("{url}");
 
                     let res: Value = state.get_json(url.as_str()).await?;
-                    publish_issues(&res, &names, updated_id.as_deref(), &state.tcp_client)?;
+                    publish_issues(&res, &names, updated_id.as_deref(), &state.tcp_client).await?;
 
                     if res["isLast"].as_bool().unwrap_or(true) {
                         break;
@@ -442,7 +443,7 @@ pub fn mark_updated(issue: &mut Value, updated_id: Option<&str>) {
 /// issues the page held, which is what pagination advances by. An issue
 /// without a fields object is logged and skipped rather than failing the
 /// whole pull.
-fn publish_issues(
+async fn publish_issues(
     res: &Value,
     names: &HashMap<String, String>,
     updated_id: Option<&str>,
@@ -466,7 +467,8 @@ fn publish_issues(
             &JiraData::Issues(JsonString {
                 json: issue.to_string(),
             }),
-        )?;
+        )
+        .await?;
     }
     Ok(items.len())
 }

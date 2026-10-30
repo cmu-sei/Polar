@@ -35,7 +35,7 @@ use cassini_client::facade::Backoff;
 use cassini_client::{OfflineBehavior, PublishRequest};
 use cassini_types::WireTraceCtx;
 use jira_common::types::JiraData;
-use polar::cassini::{CassiniClient, TcpClient};
+use polar::cassini::TcpClient;
 use ractor::concurrency::Duration;
 use ractor::{ActorProcessingErr, ActorRef};
 use reqwest::{Client, RequestBuilder, StatusCode, Url};
@@ -524,8 +524,10 @@ pub struct JiraObserverArgs {
 
 /// Publishes one JiraData value on a topic through the agent's client.
 /// The payload is the serialized JiraData and nothing else: the client
-/// actor adds the broker framing and the registration itself.
-pub fn publish_data(
+/// actor adds the broker framing and the registration itself. It waits
+/// while the client's outbox is full, so a broker that falls behind slows
+/// the pull instead of failing it (docs/architecture/cassini-backpressure.md).
+pub async fn publish_data(
     tcp_client: &TcpClient,
     topic: &str,
     data: &JiraData,
@@ -535,13 +537,14 @@ pub fn publish_data(
         .into_vec();
 
     tcp_client
-        .publish(PublishRequest {
+        .publish_when_ready(PublishRequest {
             topic: topic.to_string(),
             trace_ctx: WireTraceCtx::from_current_span(),
             payload,
             offline_behavior: OfflineBehavior::default(),
             share_identity: true,
         })
+        .await
         .map_err(|e| ActorProcessingErr::from(format!("failed to publish on {topic}: {e:?}")))
 }
 

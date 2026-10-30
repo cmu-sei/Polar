@@ -95,7 +95,8 @@ async fn test_client_event_forwarder_mailbox() -> Result<(), ActorProcessingErr>
             CassiniClientEvent::ClientSubscribed { .. } => None,
             CassiniClientEvent::RegistrationRefused { .. } => None,
             CassiniClientEvent::SubscribeRefused { topic, reason }
-            | CassiniClientEvent::PublishRefused { topic, reason } => Some(MockMessage {
+            | CassiniClientEvent::PublishRefused { topic, reason }
+            | CassiniClientEvent::PublishDropped { topic, reason } => Some(MockMessage {
                 payload: format!("refused:{topic}:{reason}"),
             }),
         });
@@ -157,7 +158,8 @@ async fn test_client_event_forwarder_multiple_events() -> Result<(), ActorProces
             CassiniClientEvent::ClientSubscribed { .. } => None,
             CassiniClientEvent::RegistrationRefused { .. } => None,
             CassiniClientEvent::SubscribeRefused { topic, reason }
-            | CassiniClientEvent::PublishRefused { topic, reason } => Some(MockMessage {
+            | CassiniClientEvent::PublishRefused { topic, reason }
+            | CassiniClientEvent::PublishDropped { topic, reason } => Some(MockMessage {
                 payload: format!("refused:{topic}:{reason}"),
             }),
         });

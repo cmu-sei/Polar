@@ -39,7 +39,7 @@ use kube_common::{
     RESOURCE_DELETED_ACTION, RawKubeEvent,
 };
 
-use polar::cassini::{CassiniClient, TcpClient};
+use polar::cassini::TcpClient;
 use ractor::ActorProcessingErr;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -321,21 +321,23 @@ where
 }
 /// Serializes and publishes a RawKubeEvent.
 ///
-/// This function is intentionally small and synchronous from a
-/// lifecycle standpoint — it does not retry or buffer.
-/// Backpressure must be handled at the TCP client layer.
+/// It does not retry or buffer. It waits while the client's outbox is
+/// full (docs/architecture/cassini-backpressure.md), so a broker that
+/// falls behind slows the watch instead of failing it.
 ///
 /// Failures propagate upward.
 async fn emit_event(tcp_client: &TcpClient, ev: RawKubeEvent) -> Result<(), ActorProcessingErr> {
     let payload = to_vec(&ev)?;
     trace!("Emitting event {ev:?}");
-    tcp_client.publish(PublishRequest {
-        topic: KUBERNETES_CONSUMER.to_string(),
-        trace_ctx: None,
-        payload,
-        offline_behavior: OfflineBehavior::default(),
-        share_identity: true,
-    })?;
+    tcp_client
+        .publish_when_ready(PublishRequest {
+            topic: KUBERNETES_CONSUMER.to_string(),
+            trace_ctx: None,
+            payload,
+            offline_behavior: OfflineBehavior::default(),
+            share_identity: true,
+        })
+        .await?;
 
     Ok(())
 }
