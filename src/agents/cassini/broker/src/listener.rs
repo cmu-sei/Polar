@@ -49,7 +49,10 @@ use rustls::{
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf, split},
+    io::{
+        AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufWriter, ReadHalf, WriteHalf,
+        split,
+    },
     net::{TcpListener, TcpStream},
     sync::Mutex,
     task::JoinHandle,
@@ -151,6 +154,123 @@ async fn admit(
     Some((credit, charge))
 }
 
+/// Why a connection's reader stops.
+enum Gone {
+    /// The connection was cut from outside; its writer says why.
+    Cut,
+    /// The client closed it.
+    Closed,
+    /// A read failed, or the client sent what ends the connection.
+    Failed(String),
+}
+
+impl Gone {
+    fn reason(self, writer: &ConnWriter) -> DisconnectReason {
+        match self {
+            Gone::Cut => DisconnectReason::TransportError(writer.why()),
+            Gone::Closed => DisconnectReason::RemoteClosed,
+            Gone::Failed(why) => DisconnectReason::TransportError(why),
+        }
+    }
+}
+
+/// A frame read while a publish waited for its admission, to go on with once it is admitted.
+enum Next {
+    /// A frame too large to read before it is admitted: only its length was read.
+    Header(usize),
+    /// A frame read and decoded, and its length.
+    Frame(usize, ClientMessage),
+}
+
+/// Reads a frame's length; 0 is a keepalive. A length over the frame limit ends the connection before anything is
+/// allocated for it.
+async fn read_header<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    cut: &CancellationToken,
+    client_id: &str,
+    peer_identity: &Option<String>,
+) -> Result<usize, Gone> {
+    // Length header is u32 BE.
+    let header = tokio::select! {
+        header = reader.read_u32() => header,
+        _ = cut.cancelled() => return Err(Gone::Cut),
+    };
+    let len = match header {
+        Ok(v) => v as usize,
+        // This is the normal exit path on remote close too.
+        Err(e) => {
+            return Err(match e.kind() {
+                std::io::ErrorKind::UnexpectedEof => Gone::Closed,
+                _ => Gone::Failed(e.to_string()),
+            });
+        }
+    };
+    if len == 0 {
+        // Treat as keepalive/no-op and avoid log spam.
+        let n = ZERO_LEN_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Log at most once every 5 seconds with a counter.
+        let t = now_ms();
+        let last = ZERO_LEN_LAST_LOG_MS.load(Ordering::Relaxed);
+        if t.saturating_sub(last) > 5000 {
+            ZERO_LEN_LAST_LOG_MS.store(t, Ordering::Relaxed);
+            debug!(client_id = %client_id, zero_len_seen = n, "Zero-length frames received (suppressed)");
+        }
+        return Ok(0);
+    }
+    // guard against oversized, potentially insane message size
+    if len > MAX_FRAME_BYTES {
+        warn!(
+            client_id = %client_id,
+            identity = ?peer_identity,
+            len,
+            max = MAX_FRAME_BYTES,
+            "Oversized frame; disconnecting before allocating"
+        );
+        return Err(Gone::Failed(format!(
+            "frame length {len} exceeds max {MAX_FRAME_BYTES} bytes"
+        )));
+    }
+    Ok(len)
+}
+
+/// Reads a frame's `len` bytes and decodes them; `None` if they do not decode (said in the log).
+async fn read_body<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    len: usize,
+    cut: &CancellationToken,
+    span: &tracing::Span,
+) -> Result<Option<ClientMessage>, Gone> {
+    let mut buffer = vec![0u8; len];
+    let body = tokio::select! {
+        body = reader.read_exact(&mut buffer).instrument(span.clone()) => body,
+        _ = cut.cancelled() => return Err(Gone::Cut),
+    };
+    if let Err(e) = body {
+        warn!(error = %e, "Failed reading frame body");
+        return Err(Gone::Failed(e.to_string()));
+    }
+    let _g = span.enter();
+    Ok(
+        match rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]) {
+            Ok(archived) => match deserialize::<ClientMessage, Error>(archived) {
+                Ok(deserialized) => {
+                    trace!(msg = ?deserialized, "Decoded client message");
+                    Some(deserialized)
+                }
+                Err(e) => {
+                    warn!(error = ?e, "Failed to deserialize archived message");
+                    None
+                }
+            },
+            Err(e) => {
+                warn!(error = ?e, "Failed to parse archived message");
+                None
+            }
+        },
+    )
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -242,7 +362,10 @@ fn charged(message: BrokerMessage, (credit, charge): (WindowCharge, Charge)) -> 
         } => BrokerMessage::PublishRequest {
             registration_id,
             topic,
-            payload: Payload::charged(payload.bytes().clone(), Hold::new(charge)),
+            payload: {
+                let weight = charge.bytes();
+                Payload::charged(payload.bytes().clone(), Hold::new(charge), weight)
+            },
             reply_to,
             trace_ctx,
             published_by,
@@ -996,8 +1119,12 @@ impl Actor for Listener {
         // A frame larger than `SMALL_FRAME` is admitted before it is read: its bytes are taken from this connection's
         // window and from the broker's budget, and while either cannot give them nothing more is read, so TCP pushes
         // back on the client. A smaller one is read first, so acknowledgements and subscriptions are never stuck
-        // behind the frames they make room for; a publish among them is admitted before it goes on. A publish carries
-        // its charge (the payload's) and its window credit (released when its topic accepts it).
+        // behind the frames they make room for; a publish among them is admitted before it goes on, and while it waits
+        // the reader goes on reading: acknowledgements after it are passed on at once, and the first other frame is
+        // kept until the publish is admitted (a large one's body is not read). A publish carries its charge (the
+        // frame's) and its window credit (released when its topic accepts it). What still waits (a large frame, or a
+        // frame behind the one kept) is bounded by the stall bound: the budget's watchdog ends the connections of the
+        // subscribers that hold the budget and make no progress (budget.rs, `spawn_watchdog`).
         let window = Window::new(state.bounds.window);
         let budget = state.bounds.budget.clone();
         let writer = state.writer.clone();
@@ -1015,25 +1142,23 @@ impl Actor for Listener {
                     });
                 };
 
+                // A frame read while a publish waited for admission, to go on with.
+                let mut next: Option<Next> = None;
                 loop {
-                    // Length header is u32 BE.
-                    let header = tokio::select! {
-                        header = buf_reader.read_u32() => header,
-                        _ = cut.cancelled() => {
-                            disconnect(DisconnectReason::TransportError(writer.why()));
-                            return;
-                        }
-                    };
-                    let len = match header {
-                        Ok(v) => v as usize,
-                        Err(e) => {
-                            // This is the normal exit path on remote close too.
-                            let reason = match e.kind() {
-                                std::io::ErrorKind::UnexpectedEof => DisconnectReason::RemoteClosed,
-                                _ => DisconnectReason::TransportError(e.to_string()),
-                            };
-                            disconnect(reason);
-                            return;
+                    let (len, read) = match next.take() {
+                        Some(Next::Header(len)) => (len, None),
+                        Some(Next::Frame(len, message)) => (len, Some(message)),
+                        None => {
+                            match read_header(&mut buf_reader, &cut, &client_id, &peer_identity)
+                                .await
+                            {
+                                Ok(0) => continue,
+                                Ok(len) => (len, None),
+                                Err(gone) => {
+                                    disconnect(gone.reason(&writer));
+                                    return;
+                                }
+                            }
                         }
                     };
 
@@ -1043,86 +1168,31 @@ impl Actor for Listener {
                         frame_len = len
                     );
 
-                    if len == 0 {
-                        // Treat as keepalive/no-op and avoid log spam.
-                        let n = ZERO_LEN_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-
-                        // Log at most once every 5 seconds with a counter.
-                        let t = now_ms();
-                        let last = ZERO_LEN_LAST_LOG_MS.load(Ordering::Relaxed);
-                        if t.saturating_sub(last) > 5000 {
-                            ZERO_LEN_LAST_LOG_MS.store(t, Ordering::Relaxed);
-                            debug!(client_id = %client_id, zero_len_seen = n, "Zero-length frames received (suppressed)");
-                        }
-
-                        continue;
-                    }
-
-                    // guard against oversized, potentially insane message size
-                    if len > MAX_FRAME_BYTES {
-                        warn!(
-                            client_id = %client_id,
-                            identity = ?peer_identity,
-                            len,
-                            max = MAX_FRAME_BYTES,
-                            "Oversized frame; disconnecting before allocating"
-                        );
-                        disconnect(DisconnectReason::TransportError(format!(
-                            "frame length {len} exceeds max {MAX_FRAME_BYTES} bytes"
-                        )));
-                        return;
-                    }
-
                     let mut admitted = None;
-                    if len > SMALL_FRAME {
-                        match admit(&window, &budget, len, &cut)
-                            .instrument(frame_span.clone())
-                            .await
-                        {
-                            Some(admission) => admitted = Some(admission),
-                            None => {
-                                disconnect(DisconnectReason::TransportError(writer.why()));
-                                return;
+                    let deserialized = match read {
+                        Some(message) => message,
+                        None => {
+                            if len > SMALL_FRAME {
+                                match admit(&window, &budget, len, &cut)
+                                    .instrument(frame_span.clone())
+                                    .await
+                                {
+                                    Some(admission) => admitted = Some(admission),
+                                    None => {
+                                        disconnect(Gone::Cut.reason(&writer));
+                                        return;
+                                    }
+                                }
+                            }
+                            match read_body(&mut buf_reader, len, &cut, &frame_span).await {
+                                Ok(Some(message)) => message,
+                                Ok(None) => continue,
+                                Err(gone) => {
+                                    disconnect(gone.reason(&writer));
+                                    return;
+                                }
                             }
                         }
-                    }
-
-                    let mut buffer = vec![0u8; len];
-                    let body = tokio::select! {
-                        body = buf_reader.read_exact(&mut buffer).instrument(frame_span.clone()) => body,
-                        _ = cut.cancelled() => {
-                            disconnect(DisconnectReason::TransportError(writer.why()));
-                            return;
-                        }
-                    };
-                    if let Err(e) = body {
-                        warn!(error = %e, "Failed reading frame body");
-                        disconnect(DisconnectReason::TransportError(e.to_string()));
-                        return;
-                    }
-
-                    let decoded = {
-                        let _g = frame_span.enter();
-                        match rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]) {
-                            Ok(archived) => match deserialize::<ClientMessage, Error>(archived) {
-                                Ok(deserialized) => {
-                                    trace!(msg = ?deserialized, "Decoded client message");
-                                    Some(deserialized)
-                                }
-                                Err(e) => {
-                                    warn!(error = ?e, "Failed to deserialize archived message");
-                                    None
-                                }
-                            },
-                            Err(e) => {
-                                warn!(error = ?e, "Failed to parse archived message");
-                                None
-                            }
-                        }
-                    };
-                    drop(buffer);
-                    let Some(deserialized) = decoded else {
-                        continue;
                     };
 
                     let is_publish = matches!(deserialized, ClientMessage::PublishRequest { .. });
@@ -1135,16 +1205,77 @@ impl Actor for Listener {
                     if is_publish {
                         let admission = match admitted.take() {
                             Some(admission) => admission,
-                            None => match admit(&window, &budget, len, &cut)
-                                .instrument(frame_span.clone())
-                                .await
-                            {
-                                Some(admission) => admission,
-                                None => {
-                                    disconnect(DisconnectReason::TransportError(writer.why()));
-                                    return;
+                            // A small publish waits for its admission while what follows it is read: an
+                            // acknowledgement goes on at once (it may be what makes the room), and the first frame
+                            // that is not one is kept for after, when reading stops until the publish is admitted.
+                            None => {
+                                let mut admission = std::pin::pin!(
+                                    admit(&window, &budget, len, &cut)
+                                        .instrument(frame_span.clone())
+                                );
+                                loop {
+                                    tokio::select! {
+                                        biased;
+                                        admission = &mut admission => match admission {
+                                            Some(admission) => break admission,
+                                            None => {
+                                                disconnect(Gone::Cut.reason(&writer));
+                                                return;
+                                            }
+                                        },
+                                        filled = async { buf_reader.fill_buf().await.map(|b| b.is_empty()) },
+                                            if next.is_none() =>
+                                        {
+                                            match filled {
+                                                Ok(false) => {}
+                                                Ok(true) => {
+                                                    disconnect(DisconnectReason::RemoteClosed);
+                                                    return;
+                                                }
+                                                Err(e) => {
+                                                    disconnect(DisconnectReason::TransportError(e.to_string()));
+                                                    return;
+                                                }
+                                            }
+                                            let following = match read_header(&mut buf_reader, &cut, &client_id, &peer_identity).await {
+                                                Ok(0) => continue,
+                                                Ok(following) => following,
+                                                Err(gone) => {
+                                                    disconnect(gone.reason(&writer));
+                                                    return;
+                                                }
+                                            };
+                                            if following > SMALL_FRAME {
+                                                next = Some(Next::Header(following));
+                                                continue;
+                                            }
+                                            let span = trace_span!(
+                                                "cassini.listener.read_frame",
+                                                client_id = %client_id,
+                                                frame_len = following
+                                            );
+                                            match read_body(&mut buf_reader, following, &cut, &span).await {
+                                                Ok(Some(ClientMessage::PublishResponseAck { delivery_id })) => {
+                                                    let ack = BrokerMessage::from_client_message(
+                                                        ClientMessage::PublishResponseAck { delivery_id },
+                                                        client_id.clone(),
+                                                        peer_identity.clone(),
+                                                    );
+                                                    if let Err(e) = myself.send_message(ack) {
+                                                        warn!(error = %e, "Failed forwarding an acknowledgement to listener actor");
+                                                    }
+                                                }
+                                                Ok(Some(message)) => next = Some(Next::Frame(following, message)),
+                                                Ok(None) => {}
+                                                Err(gone) => {
+                                                    disconnect(gone.reason(&writer));
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
-                            },
+                            }
                         };
                         converted = charged(converted, admission);
                     }

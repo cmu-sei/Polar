@@ -413,6 +413,7 @@ impl Actor for Broker {
 
             info!("Broker startup complete");
             crate::budget_report::spawn(args.bounds.budget.clone(), myself.clone());
+            crate::budget::spawn_watchdog(args.bounds.clone(), myself.clone());
 
             Ok::<BrokerState, ActorProcessingErr>(BrokerState {
                 listener_mgr: Some(listener_mgr),

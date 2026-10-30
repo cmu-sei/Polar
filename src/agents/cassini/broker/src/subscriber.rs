@@ -465,7 +465,11 @@ impl SubscriberManager {
 
         let subscriber_id = get_subscriber_name(&registration_id, &topic);
         // What its client has not acknowledged, which its topic reads.
-        let backlog = Arc::new(Backlog::new(subscriber_id.clone(), state.bounds.high_water));
+        let backlog = Arc::new(Backlog::subscriber(
+            &registration_id,
+            &topic,
+            state.bounds.high_water,
+        ));
         state.bounds.budget.register(&backlog);
 
         // Get the session ref from the session manager
@@ -807,7 +811,7 @@ impl Actor for SubscriberAgent {
             }
             BrokerMessage::PublishResponseAck { delivery_id } => {
                 if let Some(delivery) = state.outbox.acknowledge(delivery_id)
-                    && state.backlog.remove(delivery.payload.len())
+                    && state.backlog.remove(delivery.payload.weight())
                 {
                     Self::resume_topic(state);
                 }
@@ -851,7 +855,8 @@ impl SubscriberAgent {
         }
         let bytes = state.outbox.bytes();
         let shed = state.outbox.take();
-        state.backlog.remove(bytes);
+        // All it was owed, as it was counted (its frames' bytes; the outbox counts payloads).
+        state.backlog.remove(state.backlog.bytes());
         state.bounds.budget.count_refused(shed.len() as u64);
         warn!(
             subscriber = state.backlog.name(),
@@ -952,7 +957,7 @@ impl SubscriberAgent {
         }
         // Held from now until the client acknowledges it, whether it is sent now or later.
         let delivery_id = next_delivery_id();
-        state.backlog.add(payload.len());
+        state.backlog.add(payload.weight());
         let delivery = HeldDelivery {
             payload,
             published_by,

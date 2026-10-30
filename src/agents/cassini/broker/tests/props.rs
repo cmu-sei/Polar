@@ -95,7 +95,7 @@ proptest! {
                     if let Some(charge) = budget.try_charge(size) {
                         let id = sizes.len();
                         sizes.insert(id, size);
-                        in_flight.push((id, Payload::charged(Arc::new(vec![0; size]), Hold::new(charge))));
+                        in_flight.push((id, Payload::charged(Arc::new(vec![0; size]), Hold::new(charge), size)));
                     }
                 }
                 Event::FanOut { nth, holders: to } => {

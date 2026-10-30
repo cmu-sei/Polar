@@ -33,6 +33,9 @@ use support::{RawConnection, TestClient, with_broker_bounded};
 
 /// The smallest budget a broker takes: one frame. Its high water is an eighth of it, 8 MiB.
 const BUDGET: usize = MAX_FRAME_BYTES;
+/// A budget that what one subscriber holds back never exhausts: 256 MiB, with a high water of 32 MiB and a window of
+/// 64 MiB a connection.
+const ROOMY: usize = 4 * MAX_FRAME_BYTES;
 const MESSAGE: usize = 256 * 1024;
 
 /// Polls `value` until it stops changing for `quiet`, and returns it, or the last value at `within`.
@@ -64,11 +67,14 @@ async fn a_subscriber_that_stops_reading_holds_back_small_messages_too() {
     stops_reading(16 * 1024).await;
 }
 
-/// A subscriber stops reading while a publisher sends 100 MiB in messages of `size` bytes.
+/// A subscriber stops reading while a publisher sends 160 MiB in messages of `size` bytes: more than the subscriber's
+/// high water and the publisher's window together, and less than the budget, so it is the subscriber's high water
+/// that holds the topic back, not the budget's alarm.
 async fn stops_reading(size: usize) {
-    let stall = Duration::from_secs(2);
-    with_broker_bounded(BUDGET, stall, |broker| async move {
+    let stall = Duration::from_secs(4);
+    with_broker_bounded(ROOMY, stall, |broker| async move {
         let budget = broker.budget();
+        let high_water = broker.bounds().high_water;
 
         // Subscribes, then keeps its socket open and reads nothing.
         let mut silent = RawConnection::open(&broker, "silent.test", Some(4096)).await;
@@ -76,14 +82,15 @@ async fn stops_reading(size: usize) {
         silent.subscribe(&session, "news").await;
 
         let publisher = TestClient::connect(&broker, "publisher.test").await;
-        let count = 100 * 1024 * 1024 / size; // more than the budget and more than the window
+        let count = 160 * 1024 * 1024 / size;
         for n in 0..count {
             let mut payload = vec![0u8; size];
             payload[..4].copy_from_slice(&(n as u32).to_be_bytes());
             publisher.publish("news", &payload);
         }
 
-        // The acknowledgements stop short of the end, and the budget holds no more than its limit.
+        // The acknowledgements stop short of the end: the subscriber is above its high water, and its topic waits for
+        // it, with the budget's alarm never raised.
         let began = Instant::now();
         let stopped_at = settled(stall * 3 / 4, Duration::from_millis(400), || {
             publisher.acknowledged("news")
@@ -97,13 +104,23 @@ async fn stops_reading(size: usize) {
             began.elapsed() < stall,
             "they stopped before the stall bound"
         );
-        let stats = budget.stats();
+        let owed = budget
+            .holders()
+            .into_iter()
+            .find(|b| b.owner().is_some_and(|(_, topic)| topic == "news"))
+            .expect("the subscriber's backlog");
         assert!(
-            stats.peak <= BUDGET && stats.used <= BUDGET,
-            "the budget never holds more than its limit: {stats:?}"
+            owed.holds_back() && owed.bytes() > high_water,
+            "the subscriber is above its high water ({} of {high_water} bytes) and holds its topic back",
+            owed.bytes()
+        );
+        let stats = budget.stats();
+        assert_eq!(
+            stats.alarms, 0,
+            "the subscriber's high water held the topic back, not the budget: {stats:?}"
         );
         assert!(
-            stats.peak >= broker.bounds().high_water,
+            stats.peak >= high_water,
             "what the subscriber was owed was counted against the budget: {stats:?}"
         );
 
@@ -119,7 +136,7 @@ async fn stops_reading(size: usize) {
             .await;
         let stats = budget.stats();
         assert!(stats.slow_disconnections >= 1, "{stats:?}");
-        assert!(stats.peak <= BUDGET, "{stats:?}");
+        assert_eq!(stats.alarms, 0, "{stats:?}");
         assert!(
             broker.has_session(&session).await,
             "its session is kept for the retention window, as after any lost connection"
@@ -170,7 +187,53 @@ async fn a_slow_subscriber_within_the_stall_bound_receives_everything_in_order()
             .await;
         let stats = budget.stats();
         assert_eq!(stats.slow_disconnections, 0, "{stats:?}");
-        assert!(stats.peak <= BUDGET, "{stats:?}");
+    })
+    .await;
+}
+
+/// What a subscriber is owed counts each message's whole frame, not only its payload: small messages on a long topic
+/// to a subscriber that stops reading take it above its high water as their frames do, though their payloads come to a
+/// small part of it (review finding 1).
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_subscriber_is_owed_counts_each_message_s_frame_not_only_its_payload() {
+    let stall = Duration::from_secs(20);
+    with_broker_bounded(BUDGET, stall, |broker| async move {
+        let budget = broker.budget();
+        let high_water = broker.bounds().high_water;
+        // Each publish's frame is some 4 KiB, of which its payload is 16 bytes.
+        let topic = "n".repeat(4096);
+        let mut silent = RawConnection::open(&broker, "silent.test", Some(4096)).await;
+        let session = silent.register().await;
+        silent.subscribe(&session, &topic).await;
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        let count = 2 * high_water / 4096; // twice its high water in frames, an eighth of a MiB in payloads
+        for n in 0..count {
+            let mut payload = vec![0u8; 16];
+            payload[..4].copy_from_slice(&(n as u32).to_be_bytes());
+            publisher.publish(&topic, &payload);
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let held_back = loop {
+            let above = budget
+                .holders()
+                .iter()
+                .any(|b| b.owner().is_some_and(|(_, t)| t == topic) && b.holds_back());
+            if above || Instant::now() >= deadline {
+                break above;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert!(
+            held_back,
+            "the subscriber's frames take it above its high water: {:?}",
+            budget.largest_holders(3)
+        );
+        assert!(
+            publisher.acknowledged(&topic) < count,
+            "its topic waits for it"
+        );
+        assert_eq!(budget.stats().alarms, 0, "{:?}", budget.stats());
+        drop(silent);
     })
     .await;
 }
@@ -230,6 +293,283 @@ async fn a_subscriber_back_from_away_is_given_the_stall_bound_to_catch_up() {
         assert_eq!(received, (0..held + more).collect::<Vec<_>>());
         let stats = budget.stats();
         assert_eq!(stats.slow_disconnections, 0, "{stats:?}");
+    })
+    .await;
+}
+
+/// A client that both publishes and subscribes (a processor), sending more than the budget holds to a topic it reads
+/// itself: its acknowledgements do not wait behind its publishes, so what it is owed is let go as it reads, and the
+/// broker is not left stopped, whether or not the budget's alarm rose on the way
+/// (docs/architecture/cassini-backpressure.md, review finding 1).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_publishes_and_subscribes_under_an_exhausted_budget_recovers() {
+    let stall = Duration::from_secs(2);
+    with_broker_bounded(BUDGET, stall, |broker| async move {
+        let budget = broker.budget();
+        let processor = TestClient::connect(&broker, "processor.test").await;
+        processor.subscribe("loop");
+        processor
+            .wait_for("the subscription", Duration::from_secs(5), |c| {
+                c.subscribed("loop")
+            })
+            .await;
+        let count = 400; // 100 MiB, past the 64 MiB budget
+        for n in 0..count {
+            let mut payload = vec![0u8; MESSAGE];
+            payload[..4].copy_from_slice(&(n as u32).to_be_bytes());
+            processor.publish("loop", &payload);
+        }
+        // It is given everything it sent, and every publish is accepted...
+        processor
+            .wait_for("its own messages", Duration::from_secs(30), |c| {
+                c.received_count("loop") == count
+            })
+            .await;
+        processor
+            .wait_for("every acknowledgement", Duration::from_secs(10), |c| {
+                c.acknowledged("loop") == count
+            })
+            .await;
+        // ... the budget is not left exhausted, and the broker serves a newcomer.
+        let deadline = Instant::now() + stall * 6;
+        while budget.is_exhausted() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let stats = budget.stats();
+        assert!(
+            !budget.is_exhausted(),
+            "the budget is still exhausted after {:?}: {stats:?}",
+            stall * 6
+        );
+        let probe = TestClient::connect(&broker, "probe.test").await;
+        probe.subscribe("probe");
+        probe
+            .wait_for("the probe's subscription", Duration::from_secs(5), |c| {
+                c.subscribed("probe")
+            })
+            .await;
+        probe.publish("probe", b"still serving");
+        probe
+            .wait_for("the probe's own message", Duration::from_secs(10), |c| {
+                c.received_count("probe") == 1
+            })
+            .await;
+    })
+    .await;
+}
+
+/// Subscribers that each stay below their high water but stop reading together exhaust the budget, with no topic held
+/// back and so no stall seen by any topic: the broker ends their connections once they have made no progress for the
+/// stall bound, lets go of what they held, and serves again, a publisher that also subscribes included (review
+/// finding 1).
+#[tokio::test(flavor = "multi_thread")]
+async fn subscribers_below_their_high_water_that_stop_reading_do_not_stop_the_broker() {
+    let stall = Duration::from_secs(2);
+    with_broker_bounded(BUDGET, stall, |broker| async move {
+        let budget = broker.budget();
+        let topics = 9; // 9 x 7.5 MiB: past the 64 MiB budget, each under its 8 MiB high water
+        let mut silent = Vec::new();
+        for t in 0..topics {
+            let mut connection =
+                RawConnection::open(&broker, &format!("silent-{t}.test"), Some(4096)).await;
+            let session = connection.register().await;
+            connection.subscribe(&session, &format!("t{t}")).await;
+            silent.push(connection);
+        }
+        // An agent's client: what is lost with a cut connection is sent again.
+        let agent = support::FacadeClient::connect(&broker, "processor.test").await;
+        let processor = &agent.client;
+        processor.subscribe("loop");
+        processor
+            .wait_for("the subscription", Duration::from_secs(5), |c| {
+                c.subscribed("loop")
+            })
+            .await;
+        for n in 0..30u32 {
+            for t in 0..topics {
+                let mut payload = vec![0u8; MESSAGE];
+                payload[..4].copy_from_slice(&n.to_be_bytes());
+                processor.publish(&format!("t{t}"), &payload);
+            }
+            processor.publish("loop", &n.to_be_bytes());
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while budget.stats().alarms == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(budget.stats().alarms > 0, "the budget was exhausted");
+        let deadline = Instant::now() + stall * 6;
+        while budget.is_exhausted() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let stats = budget.stats();
+        assert!(!budget.is_exhausted(), "still exhausted: {stats:?}");
+        assert!(stats.slow_disconnections >= 1, "{stats:?}");
+        processor
+            .wait_for("every publish acknowledged", Duration::from_secs(30), |c| {
+                let distinct: std::collections::BTreeSet<_> =
+                    c.acknowledged_ids().into_iter().collect();
+                distinct.len() == 30 * (topics + 1)
+            })
+            .await;
+        processor
+            .wait_for("its own messages", Duration::from_secs(10), |c| {
+                c.received_count("loop") >= 30
+            })
+            .await;
+        // Its acknowledgements never waited behind its publishes: it was never taken for a stalled subscriber.
+        assert_eq!(
+            agent.registrations().len(),
+            1,
+            "the processor kept its connection"
+        );
+        drop(silent);
+    })
+    .await;
+}
+
+/// A client owed more than the budget holds, which publishes and then acknowledges what it was given: its
+/// acknowledgements are read while its publish waits for the budget, and they make the room the publish waits for. The
+/// broker does not wait for the stall bound to cut the client (review finding 1).
+#[tokio::test(flavor = "multi_thread")]
+async fn acknowledgements_behind_a_publish_that_waits_for_the_budget_are_read() {
+    let stall = Duration::from_secs(6);
+    with_broker_bounded(BUDGET, stall, |broker| async move {
+        let budget = broker.budget();
+        let topics = 9; // 9 x 7.5 MiB: past the 64 MiB budget, each under its 8 MiB high water
+        let mut client = RawConnection::open(&broker, "processor.test", None).await;
+        let session = client.register().await;
+        for t in 0..topics {
+            client.subscribe(&session, &format!("t{t}")).await;
+        }
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        for n in 0..30u32 {
+            for t in 0..topics {
+                let mut payload = vec![0u8; MESSAGE];
+                payload[..4].copy_from_slice(&n.to_be_bytes());
+                publisher.publish(&format!("t{t}"), &payload);
+            }
+        }
+
+        // It reads what it is given and holds on to it, until the budget is exhausted.
+        let mut owed = Vec::new();
+        let began = Instant::now();
+        while budget.stats().alarms == 0 && began.elapsed() < Duration::from_secs(10) {
+            if let Some(cassini_types::ClientMessage::PublishResponse {
+                delivery_id: Some(delivery_id),
+                ..
+            }) = tokio::time::timeout(Duration::from_millis(200), client.read())
+                .await
+                .ok()
+                .flatten()
+            {
+                owed.push(delivery_id);
+            }
+        }
+        assert!(budget.stats().alarms > 0, "the budget was exhausted");
+
+        // It publishes, and then acknowledges everything it was given, in that order on its one connection.
+        let asked = Instant::now();
+        client
+            .send(&cassini_types::ClientMessage::PublishRequest {
+                topic: "own".to_string(),
+                payload: std::sync::Arc::new(b"after".to_vec()),
+                registration_id: session.clone(),
+                trace_ctx: None,
+                share_identity: false,
+                epoch: 1,
+                seq: 1,
+            })
+            .await;
+        for delivery_id in &owed {
+            client.acknowledge(*delivery_id).await;
+        }
+        let mut answered = false;
+        while !answered && asked.elapsed() < stall {
+            match tokio::time::timeout(Duration::from_millis(200), client.read()).await {
+                Ok(Some(cassini_types::ClientMessage::PublishRequestAck { topic, .. }))
+                    if topic == "own" =>
+                {
+                    answered = true;
+                }
+                Ok(None) => break,
+                _ => {}
+            }
+        }
+        assert!(
+            answered,
+            "its publish is accepted once its acknowledgements make room ({} owed), after {:?}: {:?}",
+            owed.len(),
+            asked.elapsed(),
+            budget.stats()
+        );
+        assert!(
+            asked.elapsed() < stall / 2,
+            "well within the stall bound, not by it: {:?}",
+            asked.elapsed()
+        );
+        assert_eq!(budget.stats().slow_disconnections, 0, "{:?}", budget.stats());
+    })
+    .await;
+}
+
+/// A subscriber away when the budget is exhausted lets go of what it was owed, all of it as it was counted (its
+/// messages' frames, not only their payloads): back, it owes nothing once it has acknowledged what it is given
+/// (review finding 1).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscriber_away_when_the_budget_is_exhausted_lets_go_of_all_it_was_owed() {
+    let stall = Duration::from_secs(20);
+    with_broker_bounded(BUDGET, stall, |broker| async move {
+        let budget = broker.budget();
+        let topic = "n".repeat(4096);
+        let mut away = RawConnection::open(&broker, "away.test", None).await;
+        let session = away.register().await;
+        away.subscribe(&session, &topic).await;
+        drop(away);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Held for it while it is away, past the budget: each message is 60 KiB of payload in a frame some 4 KiB
+        // longer.
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        let count = BUDGET / (60 * 1024) + 64;
+        for n in 0..count {
+            let mut payload = vec![0u8; 60 * 1024];
+            payload[..4].copy_from_slice(&(n as u32).to_be_bytes());
+            publisher.publish(&topic, &payload);
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while budget.stats().alarms == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(budget.stats().alarms > 0, "the budget was exhausted");
+        settled(Duration::from_secs(10), Duration::from_millis(500), || {
+            publisher.acknowledged(&topic)
+        })
+        .await;
+
+        // Back, it reads and acknowledges what it is given.
+        let mut back = RawConnection::open(&broker, "away.test", None).await;
+        assert_eq!(back.register_resuming(Some(session.clone())).await, session);
+        while let Some(delivery) = back.next_delivery(&topic, Duration::from_secs(1)).await {
+            back.acknowledge(delivery.delivery_id).await;
+        }
+        let owes = || {
+            budget
+                .holders()
+                .into_iter()
+                .find(|b| b.owner().is_some_and(|(_, t)| t == topic))
+                .map(|b| b.bytes())
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while owes() != Some(0) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            owes(),
+            Some(0),
+            "it owes nothing once it has acknowledged all it was given: {:?}",
+            budget.stats()
+        );
     })
     .await;
 }

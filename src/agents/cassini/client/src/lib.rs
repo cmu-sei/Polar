@@ -606,6 +606,38 @@ pub enum DeliveryMode {
     },
 }
 
+/// Writes delivery acknowledgements to `writer` as they are sent to the returned channel, a batch at a time, beside
+/// the transport's mailbox: an acknowledgement never waits behind the publishes queued there, only behind the frame
+/// being written (a single stream keeps its order). Ends when the channel's senders are gone or a write fails (the
+/// connection is gone, and its reader says so).
+pub fn spawn_ack_writer<W>(writer: Arc<Mutex<W>>) -> tokio::sync::mpsc::UnboundedSender<u64>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (acks, mut pending) = tokio::sync::mpsc::unbounded_channel::<u64>();
+    tokio::spawn(async move {
+        while let Some(first) = pending.recv().await {
+            let mut frames = Vec::new();
+            let mut next = Some(first);
+            while let Some(delivery_id) = next {
+                match TcpClientActor::frame(&ClientMessage::PublishResponseAck { delivery_id }) {
+                    Ok(frame) => frames.extend_from_slice(&frame),
+                    Err(e) => warn!(
+                        delivery_id,
+                        "a delivery acknowledgement was not framed: {e}"
+                    ),
+                }
+                next = pending.try_recv().ok();
+            }
+            let mut writer = writer.lock().await;
+            if writer.write_all(&frames).await.is_err() || writer.flush().await.is_err() {
+                return;
+            }
+        }
+    });
+    acks
+}
+
 /// Actor state for the TCP client
 pub struct TcpClientState {
     bind_addr: String,
@@ -711,6 +743,8 @@ impl TcpClientActor {
         let answers = state.answers.clone();
         let broker_addr = state.bind_addr.clone();
         let reconnect = state.reconnect;
+        // This connection's delivery acknowledgements are written beside the mailbox, ahead of what waits in it.
+        let acks = state.writer.clone().map(spawn_ack_writer);
 
         let read_loop_span =
             info_span!("cassini.tcp_client.read_loop", broker_addr = %broker_addr,);
@@ -770,10 +804,11 @@ impl TcpClientActor {
 
                                     match rkyv::from_bytes::<ClientMessage, Error>(&buffer) {
                                         Ok(message) => {
-                                            TcpClientActor::process_client_message(
+                                            TcpClientActor::process_client_message_with(
                                                 myself.clone(),
                                                 &delivery,
                                                 answers.as_ref(),
+                                                acks.as_ref(),
                                                 message,
                                             );
                                         }
@@ -826,10 +861,23 @@ impl TcpClientActor {
     /// at all: nothing in this function actually awaits anything, it
     /// was simply nested inside spawn_reader's own, real, async read
     /// loop before this.
+    #[cfg(test)]
     fn process_client_message(
         myself: ActorRef<TcpClientMessage>,
         delivery: &DeliveryMode,
         answers: Option<&ActorRef<TcpClientMessage>>,
+        message: ClientMessage,
+    ) {
+        Self::process_client_message_with(myself, delivery, answers, None, message)
+    }
+
+    /// As [`process_client_message`](Self::process_client_message), acknowledging deliveries through `acks` (the
+    /// connection's acknowledgement writer, [`spawn_ack_writer`]) when there is one.
+    fn process_client_message_with(
+        myself: ActorRef<TcpClientMessage>,
+        delivery: &DeliveryMode,
+        answers: Option<&ActorRef<TcpClientMessage>>,
+        acks: Option<&tokio::sync::mpsc::UnboundedSender<u64>>,
         message: ClientMessage,
     ) {
         let answer = |topic: &str, use_: facade::TopicUse, result: &Result<(), String>| {
@@ -903,7 +951,7 @@ impl TcpClientActor {
                     TcpClientActor::dispatch_event(delivery, event);
                     trace!("TCP client dispatched MessagePublished for topic {}", topic);
                     if let Some(delivery_id) = delivery_id {
-                        TcpClientActor::delivery_handed_off(&myself, delivery_id);
+                        TcpClientActor::delivery_handed_off(&myself, acks, delivery_id);
                     }
                 } else if let (Err(reason), Some(cassini_types::PublishRefusal::Unavailable)) =
                     (&result, refusal)
@@ -1169,7 +1217,19 @@ impl TcpClientActor {
     /// may let go of it. This is the one place a delivery is acknowledged. Acknowledging it after the agent has done
     /// its work (a consumer's graph write, docs/architecture/cassini-client-reliability.md, 5a) is not built: it would
     /// move this call to the domain, which would be given the `delivery_id` with the message.
-    fn delivery_handed_off(myself: &ActorRef<TcpClientMessage>, delivery_id: u64) {
+    ///
+    /// It goes through the connection's acknowledgement writer when there is one, not the transport's mailbox, so it
+    /// never waits behind the publishes queued there (docs/architecture/cassini-backpressure.md, review finding 1).
+    fn delivery_handed_off(
+        myself: &ActorRef<TcpClientMessage>,
+        acks: Option<&tokio::sync::mpsc::UnboundedSender<u64>>,
+        delivery_id: u64,
+    ) {
+        if let Some(acks) = acks
+            && acks.send(delivery_id).is_ok()
+        {
+            return;
+        }
         if let Err(e) = myself.send_message(TcpClientMessage::AcknowledgeDelivery { delivery_id }) {
             warn!(delivery_id, "a delivery could not be acknowledged: {e}");
         }

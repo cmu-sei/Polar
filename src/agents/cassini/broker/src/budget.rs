@@ -315,6 +315,17 @@ impl Budget {
         holders.push(Arc::downgrade(backlog));
     }
 
+    /// Every holder still counted.
+    pub fn holders(&self) -> Vec<Arc<Backlog>> {
+        self.0
+            .holders
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect()
+    }
+
     /// The `n` largest holders, by name and bytes.
     pub fn largest_holders(&self, n: usize) -> Vec<(String, usize)> {
         let mut holders: Vec<(String, usize)> = self
@@ -357,6 +368,67 @@ impl Budget {
             alarms: self.0.alarms.load(Ordering::Relaxed),
         }
     }
+}
+
+/// The connected subscribers the watchdog ends while the budget is exhausted: each holding something and without
+/// progress (an acknowledgement, a return) for at least `stall`. Pure, for its tests.
+pub fn stalled_while_exhausted(holders: &[Arc<Backlog>], stall: Duration) -> Vec<Arc<Backlog>> {
+    holders
+        .iter()
+        .filter(|b| b.owner().is_some() && b.stalled_for().is_some_and(|d| d >= stall))
+        .cloned()
+        .collect()
+}
+
+/// While the budget is exhausted, every stall check: tells the subscriber manager again (a subscriber that went away
+/// since the alarm rose lets go of what it holds), and ends the connection of every connected subscriber that holds
+/// something and has made no progress for the stall bound. A topic sees a stall only when a subscriber is above its
+/// high water and holds the topic back; with the budget exhausted no reader reads, so nothing may be held back while
+/// subscribers below their high water hold the budget. This bounds the broker's recovery by the stall bound
+/// (docs/architecture/cassini-backpressure.md, review finding 1). Ends with `broker`.
+pub fn spawn_watchdog(bounds: Bounds, broker: ActorRef<BrokerMessage>) {
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(bounds.stall_check());
+        loop {
+            every.tick().await;
+            if matches!(
+                broker.get_status(),
+                ractor::ActorStatus::Stopping | ractor::ActorStatus::Stopped
+            ) {
+                return;
+            }
+            if !bounds.budget.is_exhausted() {
+                continue;
+            }
+            if let Some(listener) = bounds.budget.0.listener.lock().unwrap().as_ref() {
+                let _ = listener.send_message(BrokerMessage::BudgetExhausted);
+            }
+            let sessions = ractor::registry::where_is(crate::SESSION_MANAGER_NAME.to_string());
+            for backlog in stalled_while_exhausted(&bounds.budget.holders(), bounds.stall) {
+                let Some((registration_id, topic)) = backlog.owner() else {
+                    continue;
+                };
+                let stalled = backlog.stalled_for().unwrap_or_default();
+                backlog.set_connected(false);
+                bounds.budget.count_slow_disconnection();
+                warn!(
+                    subscriber = backlog.name(),
+                    held = backlog.bytes(),
+                    ?stalled,
+                    "the broker's memory budget is exhausted and a subscriber has acknowledged nothing for the stall \
+                     bound: its connection is ended"
+                );
+                if let Some(sessions) = &sessions {
+                    let _ = sessions.send_message(BrokerMessage::SlowSubscriber {
+                        registration_id: registration_id.to_string(),
+                        topic: topic.to_string(),
+                        held: backlog.bytes(),
+                        above_for: stalled,
+                    });
+                }
+            }
+        }
+    });
 }
 
 /// One connection's ingress window: the bytes of the publishes its reader admitted that no topic has accepted yet.

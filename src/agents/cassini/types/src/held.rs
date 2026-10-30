@@ -71,6 +71,8 @@ impl std::fmt::Debug for Hold {
 
 struct Charged {
     bytes: Arc<Vec<u8>>,
+    /// The bytes it is counted as: its frame's, which it was charged, or its own if it took no charge.
+    weight: usize,
     _charge: Hold,
 }
 
@@ -83,17 +85,25 @@ impl Payload {
     /// A payload that took no charge: the broker's own, or an empty one.
     pub fn uncharged(bytes: Arc<Vec<u8>>) -> Self {
         Payload(Arc::new(Charged {
+            weight: bytes.len(),
             bytes,
             _charge: Hold::none(),
         }))
     }
 
-    /// A payload carrying `charge` until the last holder lets it go.
-    pub fn charged(bytes: Arc<Vec<u8>>, charge: Hold) -> Self {
+    /// A payload carrying `charge`, of `weight` bytes (its frame's), until the last holder lets it go.
+    pub fn charged(bytes: Arc<Vec<u8>>, charge: Hold, weight: usize) -> Self {
         Payload(Arc::new(Charged {
+            weight: weight.max(bytes.len()),
             bytes,
             _charge: charge,
         }))
+    }
+
+    /// The bytes it counts for against the budget and a subscriber's high water: the frame it came in, which is more
+    /// than its payload by the envelope (for a small message, many times more).
+    pub fn weight(&self) -> usize {
+        self.0.weight
     }
 
     pub fn bytes(&self) -> &Arc<Vec<u8>> {
@@ -165,7 +175,12 @@ pub struct Backlog {
     above: AtomicBool,
     /// When it went above its high water, in milliseconds since the epoch; zero when it is not above.
     above_since_ms: AtomicU64,
+    /// When it last made progress (an acknowledgement, or a return), or began to hold anything, in milliseconds since
+    /// the epoch.
+    progress_ms: AtomicU64,
     connected: AtomicBool,
+    /// Whose it is, when it is a subscriber's: its registration id and topic.
+    owner: Option<(String, String)>,
 }
 
 impl Backlog {
@@ -178,8 +193,33 @@ impl Backlog {
             bytes: AtomicUsize::new(0),
             above: AtomicBool::new(false),
             above_since_ms: AtomicU64::new(0),
+            progress_ms: AtomicU64::new(now_ms()),
             connected: AtomicBool::new(true),
+            owner: None,
         }
+    }
+
+    /// The backlog of the subscriber of the session `registration_id` on `topic`, named `<registration id>:<topic>`.
+    pub fn subscriber(registration_id: &str, topic: &str, high_water: usize) -> Self {
+        Backlog {
+            owner: Some((registration_id.to_string(), topic.to_string())),
+            ..Self::new(format!("{registration_id}:{topic}"), high_water)
+        }
+    }
+
+    /// Whose it is: a subscriber's registration id and topic.
+    pub fn owner(&self) -> Option<(&str, &str)> {
+        self.owner.as_ref().map(|(r, t)| (r.as_str(), t.as_str()))
+    }
+
+    /// How long a connected subscriber holding anything has gone without progress (no acknowledgement, no return):
+    /// what the broker's watchdog ends a connection for while the budget is exhausted.
+    pub fn stalled_for(&self) -> Option<Duration> {
+        if !self.is_connected() || self.bytes() == 0 {
+            return None;
+        }
+        let since = self.progress_ms.load(Ordering::SeqCst);
+        Some(Duration::from_millis(now_ms().saturating_sub(since)))
     }
 
     pub fn name(&self) -> &str {
@@ -197,7 +237,12 @@ impl Backlog {
     /// Counts `n` more bytes held. True if that took it above its high water. The stall clock starts then only if the
     /// subscriber is connected; one that is away starts it when it comes back.
     pub fn add(&self, n: usize) -> bool {
-        let now = self.bytes.fetch_add(n, Ordering::SeqCst) + n;
+        let before = self.bytes.fetch_add(n, Ordering::SeqCst);
+        if before == 0 {
+            // Its clock of progress starts with the first thing it holds.
+            self.progress_ms.store(now_ms(), Ordering::SeqCst);
+        }
+        let now = before + n;
         if now > self.high && !self.above.swap(true, Ordering::SeqCst) {
             if self.is_connected() {
                 self.above_since_ms.store(now_ms().max(1), Ordering::SeqCst);
@@ -217,6 +262,7 @@ impl Backlog {
             })
             .unwrap_or(0);
         let now = before.saturating_sub(n);
+        self.progress_ms.store(now_ms(), Ordering::SeqCst);
         if now < self.low.max(1) && self.above.swap(false, Ordering::SeqCst) {
             self.above_since_ms.store(0, Ordering::SeqCst);
             return true;
@@ -246,6 +292,9 @@ impl Backlog {
     /// it is away.
     pub fn set_connected(&self, connected: bool) {
         self.connected.store(connected, Ordering::SeqCst);
+        if connected {
+            self.progress_ms.store(now_ms(), Ordering::SeqCst);
+        }
         let since = if connected && self.is_above() {
             now_ms().max(1)
         } else {
@@ -273,7 +322,8 @@ mod tests {
             }
         }
         let dropped = Arc::new(AtomicBool::new(false));
-        let payload = Payload::charged(Arc::new(vec![1, 2, 3]), Hold::new(Flag(dropped.clone())));
+        let payload =
+            Payload::charged(Arc::new(vec![1, 2, 3]), Hold::new(Flag(dropped.clone())), 3);
         let copies: Vec<Payload> = (0..4).map(|_| payload.clone()).collect();
         assert_eq!(payload.holders(), 5);
         drop(payload);
@@ -320,5 +370,42 @@ mod tests {
         );
         backlog.set_connected(false);
         assert_eq!(backlog.above_for(), None, "away again: no clock");
+    }
+
+    /// What the watchdog reads: how long a connected subscriber holding anything has made no progress, counted from
+    /// when it began to hold, its last acknowledgement, or its return; nothing for one away or holding nothing.
+    #[test]
+    fn a_subscriber_stalls_from_its_last_progress_while_it_holds_anything() {
+        let backlog = Backlog::subscriber("r", "t", 100);
+        assert_eq!(backlog.owner(), Some(("r", "t")));
+        assert_eq!(backlog.stalled_for(), None, "holding nothing");
+        std::thread::sleep(Duration::from_millis(40));
+        backlog.add(10);
+        let held = backlog.stalled_for().expect("holding, and connected");
+        assert!(
+            held < Duration::from_millis(30),
+            "from when it began to hold: {held:?}"
+        );
+        std::thread::sleep(Duration::from_millis(40));
+        backlog.add(10);
+        assert!(
+            backlog.stalled_for().unwrap() >= Duration::from_millis(40),
+            "more to hold is not progress"
+        );
+        backlog.remove(5);
+        assert!(
+            backlog.stalled_for().unwrap() < Duration::from_millis(30),
+            "an acknowledgement is"
+        );
+        std::thread::sleep(Duration::from_millis(40));
+        backlog.set_connected(false);
+        assert_eq!(backlog.stalled_for(), None, "away");
+        backlog.set_connected(true);
+        assert!(
+            backlog.stalled_for().unwrap() < Duration::from_millis(30),
+            "a return is progress"
+        );
+        backlog.remove(15);
+        assert_eq!(backlog.stalled_for(), None, "holding nothing again");
     }
 }

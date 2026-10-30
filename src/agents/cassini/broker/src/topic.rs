@@ -653,7 +653,7 @@ impl Actor for TopicAgent {
                 ..
             } => {
                 trace!(topic = %state.name, %registration_id, "Topic agent received publish request");
-                state.held.add(payload.len());
+                state.held.add(payload.weight());
                 state.waiting.push_back(Pending {
                     registration_id,
                     payload,
@@ -744,7 +744,7 @@ impl TopicAgent {
                 return;
             }
             if let Some(pending) = state.waiting.pop_front() {
-                state.held.remove(pending.payload.len());
+                state.held.remove(pending.payload.weight());
                 Self::accept(state, pending);
             }
         }
@@ -839,7 +839,7 @@ impl TopicAgent {
                         .to_string(),
                 );
             } else {
-                state.held.add(pending.payload.len());
+                state.held.add(pending.payload.weight());
                 state.queue.push_back((
                     std::time::Instant::now(),
                     pending.payload.clone(),
@@ -906,7 +906,7 @@ impl TopicAgent {
         // Phase 3 (flush) happens before phase 4 (terminate subscribers), so subscribers might still exist: queued
         // messages are delivered to them.
         while let Some((_queued_at, msg, published_by, origin)) = state.queue.pop_front() {
-            state.held.remove(msg.len());
+            state.held.remove(msg.weight());
             if state.subscribers.is_empty() {
                 warn!(
                     "Discarding queued message on topic {} during flush: no subscribers",
@@ -981,7 +981,7 @@ impl TopicAgent {
 
         // Drain queued messages now that someone is listening.
         while let Some((_queued_at, msg, published_by, origin)) = state.queue.pop_front() {
-            state.held.remove(msg.len());
+            state.held.remove(msg.weight());
             subscriber_ref
                 .send_message(BrokerMessage::PublishResponse {
                     topic: state.name.clone(),
@@ -1040,7 +1040,7 @@ impl TopicAgent {
                 break;
             }
             if let Some((_, payload, _, _)) = state.queue.pop_front() {
-                state.held.remove(payload.len());
+                state.held.remove(payload.weight());
             }
             dropped += 1;
         }
