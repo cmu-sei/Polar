@@ -151,6 +151,7 @@ What each agent's publishes are caused by, as declared:
 | | the decisions | a proposal |
 | git-repo-observer | commits, ref updates, status | the repository set, its `observe` timer |
 | jira-observer | projects, groups, users, issues | its `poll` timer |
+| | `soft-state-requests` | its `poll` timer (before its first issue pull); `soft-state-replies.jira-observer` answers it |
 | kube-observer | resource changes | the Kubernetes API (`Outside`) |
 | kube-consumer | image discovery | the observer's resource changes |
 | oci-registry-resolver | resolutions, provenance events | an image to resolve |
@@ -158,6 +159,7 @@ What each agent's publishes are caused by, as declared:
 | polar-scheduler-observer | `scheduler.in` | the git server's announcement, its `pull` timer |
 | | `agent.{workload}.configuration` | a replay request |
 | polar-scheduler | `agent.{workload}.configuration` | `scheduler.in` |
+| soft-state-observer | `soft-state-replies.{workload}` | `soft-state-requests` |
 | harness-producer | its lanes | of its own accord: the load its run gives it |
 
 ## Every builder agent
@@ -223,6 +225,8 @@ retrieval and decrypt, as before.
 | `polar-proposal-observe-repo` | `discover_repo` | the git controller |
 | `gitlab.consumer.metadata`, `gitlab:consumer:{projects,groups,users,pipelines,repositories}` | the gitlab observer | the gitlab consumer (also `gitlab:consumer:runners`, which nobody publishes) |
 | `jira:consumer:{projects,groups,users,issues}` | the jira observer | the jira processor |
+| `soft-state-requests` | every agent that reads state (jira-observer) | the state agent, soft-state-observer (`soft-state.md`) |
+| `soft-state-replies.{workload}` | the state agent, one topic for each workload whose scaffold declares a read | that workload alone |
 | `polar.web.consumer` | the openapi observer | nobody: the openapi processor subscribes `polar.openapi.processor`, a mismatch |
 | `logging:consumer:logs` | nobody | the logger |
 
