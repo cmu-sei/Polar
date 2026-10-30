@@ -29,6 +29,8 @@
 //! #[global_allocator]
 //! static GLOBAL: polar_scudo::Scudo = polar_scudo::Scudo;
 //! ```
+//!
+//! Linking it also gives the binary LLVM libc's memcpy and memmove in place of the libc's (build.rs).
 
 use std::alloc::{GlobalAlloc, Layout};
 use std::ffi::{c_int, c_void};

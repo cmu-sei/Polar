@@ -617,6 +617,88 @@ Linux binaries.
 - The experiment's builds (`cassini/experiment.nix`, the broker's allocator features, S0 to S3's configurations) are
   removed; they are in this branch's history up to `3cd2272f`.
 
+## The fourth set: LLVM libc's memcpy (2026-10-29 and 30, u7c)
+
+The maintainer, 2026-10-29, of musl's `memcpy` at 6% of the broker's CPU: "3% is not trivial". musl's x86_64 `memcpy`
+is `rep movsq` and a byte loop for the tail; in the profile at `warn` it was 6.1% of S2's CPU against glibc's 3.2%, and
+79% of its samples were on the `rep movsq`. In the harness's clients, profiled under 256 B as fast as the window allows,
+it was 12% of the producer's CPU and 8.5% of the sink's. (musl's aarch64 `memcpy` is already Arm's optimized routine.)
+
+*The candidate:* LLVM libc's `memcpy` and `memmove`, built in its overlay mode (`LIBC_COPT_PUBLIC_PACKAGING`, namespace
+`__llvm_libc_polar`) from nixpkgs' LLVM source (21.1.8), freestanding, so one object serves the musl and the gnu target.
+It never uses `rep movsb` by default. `memmove` has to come with it: musl's x86_64 `memmove` jumps to `__memcpy_fwd`, in
+the object of musl's `memcpy`, so a binary that took musl's `memmove` took its `memcpy` too, and the link failed on two
+definitions. Linked whole (`+whole-archive`), both are defined before the libc is searched, wherever the first reference
+comes; a wrong mix fails the link, it never mixes silently.
+
+*On the host, idle* (i9-13950HX, a scratch benchmark, ns a copy, musl → LLVM): 8 to 64 B 32 → 6; 256 B 27 → 6; 4 KiB
+108 → 44; 64 KiB 1,600 → 960; 1 MiB 27,000 → 21,000.
+
+*In the cluster:* S4 (the deployed broker, `aef14fcb`) against S4 with LLVM's `memcpy` and `memmove` (S4m, broker only;
+the harness's clients kept musl's), the full baseline, three rounds interleaved, the third set's conditions (scratch
+`exp-driver5.nu`, `exp5-analyse.nu`; records `baseline-20261029T225801.nuon` to `baseline-20261030T001950.nuon`).
+Every check passed (6 sessions, nothing refused), the broker held through every run, nothing was lost. Each cell is
+rounds 1, 2, 3.
+
+| | S4 | S4m |
+| --- | --- | --- |
+| 256 B and 4 KiB, every rate | | no difference |
+| 1 MiB at 10,000/s, received a second | 1,664, 1,658, 1,619 | 1,906, 1,830, 2,036 |
+| 1 MiB saturated, received a second | 1,628, 1,669, 1,739 | 2,043, 1,933, 2,021 |
+| 1 MiB at 100/s, CPU a message | 1,016, 1,016, 1,011 µs | 929, 934, 907 |
+| 64 KiB saturated, CPU a message (rounds 2, 3) | 113, 114 µs | 102, 103 |
+| peak after every row | 63, 78, 66 MB | 107, 161, 207 |
+
+So large messages carry 16 to 18% more at 9 to 10% less CPU. The first round of each build carried 256 B saturated at
+about 12,000 a second, the later ones at 83,000 to 87,000, in both builds alike: soon after the cluster is scaled down,
+the producer spends about 1.3 cores, about 100 µs a message, in what its profile shows as a tight retry loop (regex,
+Cedar schema and X.509 parsing, `serde_json` errors); its logs were not kept, so what it retried is not known.
+
+*The peak memory is a backlog, not a leak* (2026-10-30, scratch `exp-driver6.nu`): the saturated 64 KiB and 1 MiB rows
+alone, three rounds interleaved, the broker's cgroup sampled every 100 ms (`memory.current` and `memory.stat`). The
+64 KiB row sends 16,384 messages (its 1 GiB cap) in about 0.8 s; the 1 MiB row raises the peak in neither build.
+
+| 64 KiB saturated | S4 | S4m |
+| --- | --- | --- |
+| the producer's rate, a second | 21,823 to 22,139 | 23,868 to 24,578 |
+| the sink's rate, a second | 20,148 to 20,991 | 20,695 to 21,170 |
+| the sink's p99 latency | 72 to 88 ms | 135 to 160 |
+| backlog at the end: (sent − received a second) × time × 64 KiB | 46 to 107 MB | 160 to 176 |
+| the broker's anonymous memory at its peak | 34 to 61 MB | 154 to 196 |
+| its socket memory then | 2 to 3 MB | 0 to 2 |
+| cAdvisor's peak | 59 to 81 MB | 180 to 231 |
+
+The peak is the heap, and it is the messages held for the sink. LLVM's `memcpy` lets the broker take publishes about 11%
+faster; the sink, on musl's, drains at the same rate either way, and the difference waits in the broker. Nothing bounds
+it (read in the code, 2026-10-30):
+
+- The broker acknowledges a publish once the topic has put it in each subscriber's mailbox (`topic.rs:764`, after the
+  fan-out at `:732`), not once it is delivered; the producer's window (1,000 messages or 64 MiB,
+  `test/common/src/schedule.rs`) bounds only what has not reached the topic.
+- From the topic on, every hop is an unbounded ractor mailbox: the subscriber agent, the subscriber's session, the
+  subscriber's listener (`subscriber.rs:818`, `session.rs:1219`).
+- The listener writes in its handler (`listener.rs:751-781`): while the sink's TCP window is full it waits there, with
+  no timeout, and every later message waits in its mailbox, holding its payload (an `Arc`, one copy for all
+  subscribers).
+
+So a subscriber that is slow but connected grows the broker without a bound, whatever the `memcpy`; the faster one only
+made it visible here. The signal is the difference between what the broker acknowledges and what it writes, a
+subscriber at a time. Bounding it is open (below).
+
+## Decided (2026-10-30)
+
+*The maintainer:* LLVM libc's `memcpy` and `memmove` in every binary, on both targets, from nixpkgs' LLVM source, once
+the peak was explained (above). aarch64 is not measured: the maintainer has no aarch64 machine to measure on, and one
+mechanism on both targets is the rule (one artifact per target).
+
+- `src/agents/workspace.nix` builds them (`mem`, `libpolar_mem.a`) and installs the archive beside each target's
+  `libpolar_scudo.a`; `polar-scudo/build.rs` links it whole, and stops, saying why, when it is missing. Every binary
+  links polar-scudo (`every_binary.rs`), so every binary has them.
+- `polar-scudo/tests/mem.rs`: the `memcpy` and `memmove` a binary calls are LLVM libc's (their addresses are those of
+  `__llvm_libc_polar::memcpy` and `::memmove`), and property tests that `memcpy` writes exactly its bytes for any
+  length to 140 KiB and any alignment, and that `memmove` within one buffer, overlapping either way, is a copy through a
+  temporary.
+
 ## What measuring it found
 
 Each fix was made test first, the test failing before it.
@@ -668,3 +750,7 @@ document (`c5ab1a5f`); the render's layer checks and rendered-only files (`9f759
   in a run).
 - In the earlier, invalid four-by-four runs one message in 100,000 was still lost after the fixes; with one connection
   none was. Measure again once several connections are valid.
+- Backpressure, in the broker and the client (the maintainer, 2026-10-30): nothing bounds what the broker holds for a
+  subscriber that is slow but connected (the fourth set, above). A plan first, cleared before any code.
+- The harness's producer, soon after the cluster is scaled down, carries about a seventh of its rate in what looks like a
+  retry loop (the fourth set). Reproduce it with its logs kept.

@@ -21,6 +21,7 @@
 
 # Scudo, LLVM's hardened allocator (built by the nix-scudo flake input, build.rs), as a Rust global allocator: every
 # Polar binary's (docs/architecture/broker-baseline.md, "Decided"). config/custom_scudo_config.h is the configuration.
+# It also links LLVM libc's memcpy and memmove into every binary, in place of the libc's (build.rs).
 [package]
 name = "polar-scudo"
 version.workspace = true

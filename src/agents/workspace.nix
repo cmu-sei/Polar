@@ -50,9 +50,27 @@ let
         prefix = "polar_scudo_";
         name = "polar_scudo";
     };
+    # Beside it, libpolar_mem.a: LLVM libc's memcpy and memmove (nixpkgs' LLVM source), which build.rs links whole, so
+    # every binary calls them and not the libc's (docs/architecture/broker-baseline.md, "The fourth set"). musl's
+    # x86_64 memcpy is `rep movsq` and a byte loop. memmove too: musl's x86_64 memmove jumps to __memcpy_fwd, in the
+    # object of its memcpy, so a binary that took musl's memmove took its memcpy as well, a second definition. They are
+    # freestanding (no libc), so one object serves the musl and the gnu target.
+    llvmLibc = pkgs.llvmPackages.libc.src;
+    mem = pkgs.runCommandCC "polar-mem" { nativeBuildInputs = [ pkgs.clang ]; } ''
+        for f in memcpy memmove; do
+          clang++ -std=c++17 -O3 -ffreestanding -fno-builtin -fno-exceptions -fno-rtti -fno-stack-protector -fPIC \
+            -DLIBC_NAMESPACE=__llvm_libc_polar -DLIBC_COPT_PUBLIC_PACKAGING -I${llvmLibc}/libc \
+            -c ${llvmLibc}/libc/src/string/$f.cpp -o llvm_libc_$f.o
+        done
+        mkdir -p $out/lib
+        ar rcs $out/lib/libpolar_mem.a llvm_libc_memcpy.o llvm_libc_memmove.o
+    '';
     scudo = pkgs.runCommand "polar-scudo-libs" { } ''
-        install -Dm644 ${scudoFor pkgs.pkgsStatic}/lib/libpolar_scudo.a $out/lib/polar/scudo/${triple}/libpolar_scudo.a
-        install -Dm644 ${scudoFor pkgs}/lib/libpolar_scudo.a $out/lib/polar/scudo/${hostTriple}/libpolar_scudo.a
+        for t in ${triple}:${scudoFor pkgs.pkgsStatic} ${hostTriple}:${scudoFor pkgs}; do
+          d=$out/lib/polar/scudo/''${t%%:*}
+          install -Dm644 ''${t#*:}/lib/libpolar_scudo.a $d/libpolar_scudo.a
+          install -Dm644 ${mem}/lib/libpolar_mem.a $d/libpolar_mem.a
+        done
     '';
 
     craneLib = (crane.mkLib pkgs).overrideToolchain (p: p.rust-bin.nightly.latest.default.override {

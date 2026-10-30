@@ -26,6 +26,10 @@
 // development shell, the development container and the CI container all set the variable, so every build is the same
 // `cargo build` and links the same library. The wrappers' names carry the prefix `polar_scudo_`, so they do not take
 // the place of musl's malloc in a static binary.
+//
+// Beside it, libpolar_mem.a: LLVM libc's memcpy and memmove, linked whole, so they are defined before the libc is
+// searched wherever the first reference to either comes on the link line, and every binary calls them and not the
+// libc's (docs/architecture/broker-baseline.md, "The fourth set"; tests/mem.rs).
 
 use std::env;
 use std::path::PathBuf;
@@ -40,15 +44,18 @@ fn main() {
         );
     };
     let dir = PathBuf::from(dir).join(&target);
-    let lib = dir.join("libpolar_scudo.a");
-    if !lib.is_file() {
-        panic!(
-            "polar-scudo: no {}. Polar's binaries are built for x86_64 and aarch64 Linux, musl, and tested on the \
-             host's gnu target; Scudo is not built for {target}.",
-            lib.display()
-        );
+    for name in ["libpolar_scudo.a", "libpolar_mem.a"] {
+        let lib = dir.join(name);
+        if !lib.is_file() {
+            panic!(
+                "polar-scudo: no {}. Polar's binaries are built for x86_64 and aarch64 Linux, musl, and tested on the \
+                 host's gnu target; Scudo is not built for {target}.",
+                lib.display()
+            );
+        }
+        println!("cargo:rerun-if-changed={}", lib.display());
     }
-    println!("cargo:rerun-if-changed={}", lib.display());
     println!("cargo:rustc-link-search=native={}", dir.display());
     println!("cargo:rustc-link-lib=static=polar_scudo");
+    println!("cargo:rustc-link-lib=static:+whole-archive=polar_mem");
 }
