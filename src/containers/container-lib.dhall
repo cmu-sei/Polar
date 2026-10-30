@@ -24,7 +24,7 @@ let Lib =
       -- Pinned, with its hash, to the commit flake.lock names for nix-container-lib, so the Dhall and the Nix sides of the
       -- library are one version (a moving `main` let them differ). Update both together (nix-container-lib's
       -- DEVELOPER_GUIDE.md, "Pin to a New Revision").
-      https://raw.githubusercontent.com/daveman1010221/nix-container-lib/0771d7c5f13440ea812ad95f422cd8be5a1bf9ae/dhall/prelude.dhall
+      https://raw.githubusercontent.com/daveman1010221/nix-container-lib/72f9d1063f1c8a215ade6b217999124fd216c1a1/dhall/prelude.dhall
         sha256:e88446f08eba97c5e8540743a4c0458d3bee5d7debd8e072f9b9ace610abf729
 
 in Lib

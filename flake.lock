@@ -248,11 +248,11 @@
         "vigil-rs": "vigil-rs"
       },
       "locked": {
-        "lastModified": 1793365789,
-        "narHash": "sha256-7V74Nbu6If2pSbnruAFcNrJDdT6+dpEaRwCS8xuD4KY=",
+        "lastModified": 1793372268,
+        "narHash": "sha256-AnNgAYP52jhlWY2uP8jOJEjMaARcp5P+hUwczXeTn/4=",
         "owner": "daveman1010221",
         "repo": "nix-container-lib",
-        "rev": "0771d7c5f13440ea812ad95f422cd8be5a1bf9ae",
+        "rev": "72f9d1063f1c8a215ade6b217999124fd216c1a1",
         "type": "github"
       },
       "original": {
