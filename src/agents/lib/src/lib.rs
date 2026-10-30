@@ -22,6 +22,7 @@
 */
 
 pub mod cassini;
+pub mod egress;
 pub mod event_log;
 pub mod events;
 pub mod graph;

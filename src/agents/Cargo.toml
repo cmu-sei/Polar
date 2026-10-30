@@ -113,6 +113,8 @@ futures = "0.3.32"                                       # used in kube-observer
 futures-lite = "2.6.1"
 git2 = "0.20"
 hex = "0.4.3"
+# http::Uri, the type hyper-util's proxy matcher takes (polar::egress)
+http = "1.5"
 hyper-util = { version = "0.1", features = ["server", "server-auto", "tokio"] }
 indexmap = "2.13"                                        # used in jira/common
 k8s-openapi = { version = "0.27", features = ["v1_35", "schemars"] }

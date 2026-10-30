@@ -31,6 +31,9 @@ cassini-client.workspace = true
 cassini-types.workspace = true
 chrono = { workspace = true }
 hex.workspace = true
+http.workspace = true
+# The proxy rules reqwest follows, for a client told its proxy per connection (polar::egress::Egress::proxy_for).
+hyper-util = { workspace = true, features = ["client-proxy"] }
 neo4rs.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
@@ -55,8 +58,17 @@ bytes.workspace = true
 k8s-openapi = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 url.workspace = true
+rcgen = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+
+[features]
+# Test certificates, TLS servers and child processes for the tests of egress (`polar::egress::testing`).
+testing = ["dep:rcgen", "dep:tokio-rustls"]
+
 [dev-dependencies]
-polar.workspace = true
+# The crate's own tests use its testing module.
+polar = { workspace = true, features = ["testing"] }
+proptest.workspace = true
 rcgen.workspace = true
 tokio-rustls.workspace = true
 polar-test-graph.workspace = true
