@@ -321,12 +321,17 @@ impl TcpClientFacade {
                     .clone();
                 Self::transmit(state, &entry);
             }
-            Slot::Buffer => state.buffer.push_back(TcpClientMessage::Publish {
-                topic,
-                payload,
-                trace_ctx,
-                share_identity,
-            }),
+            Slot::Buffer => {
+                state.buffer.push_back(TcpClientMessage::Publish {
+                    topic,
+                    payload,
+                    trace_ctx,
+                    share_identity,
+                });
+                // The outbox may have emptied since this took its room (its acknowledgements came first): nothing
+                // else would move it, and its count in the buffer would hold back every caller after it.
+                Self::promote(state);
+            }
         }
     }
 
@@ -1157,6 +1162,45 @@ mod tests {
             .unwrap();
         rig.events.subscribe(listener, Some);
         seen
+    }
+
+    /// A publish that took buffer room, but reaches the facade after the acknowledgements emptied the outbox, is sent:
+    /// it is not left in the buffer with nothing to move it, the buffer's count wedging every later caller.
+    #[tokio::test(start_paused = true)]
+    async fn a_buffered_publish_that_arrives_after_the_outbox_emptied_is_sent() {
+        let rig = bounded_rig(
+            10,
+            OutboxLimits {
+                messages: 1,
+                bytes: usize::MAX,
+            },
+            None,
+            None,
+        )
+        .await;
+        registered(&rig, "reg-1");
+        settle().await;
+        let credit = rig.credit();
+        let with = |topic: &str, slot| TcpClientMessage::PublishWith {
+            topic: topic.to_string(),
+            payload: b"x".to_vec(),
+            trace_ctx: None,
+            share_identity: true,
+            slot,
+        };
+        assert_eq!(credit.take(1, true), Ok(Slot::Outbox));
+        rig.facade.cast(with("a", Slot::Outbox)).unwrap();
+        settle().await;
+        let (_, a) = sent(&rig.spawner.latest().1)[0].clone();
+        // The caller takes buffer room while "a" holds the outbox...
+        assert_eq!(credit.take(1, true), Ok(Slot::Buffer));
+        // ... and "a" is acknowledged before its publish reaches the facade.
+        acknowledge(&rig, a);
+        settle().await;
+        rig.facade.cast(with("b", Slot::Buffer)).unwrap();
+        settle().await;
+        assert_eq!(topics(&rig.spawner.latest().1), ["a", "b"]);
+        assert_eq!(credit.held(), (1, 1, 0, 0), "nothing wedged in the buffer");
     }
 
     #[tokio::test(start_paused = true)]
