@@ -434,7 +434,8 @@ cluster.
 - volumes for the checkout (`/workspace`), the Nix store (seeded from the image, again whenever the image changes) and your
   state under your home: atuin's history, `~/.config/polar-admin` and `polar-deploy`, `~/.cache`, and `~/.ssh` with the
   pod's SSH host keys;
-- your public key (the first in your agent, or `POLAR_DEV_SSH_KEY`) to log in with, and the key `sops` decrypts with
+- your public key (the first in your agent, or `POLAR_DEV_SSH_KEY`) to log in with (the agent must hold a key either
+  way: git in the pod uses it, forwarded), and the key `sops` decrypts with
   (`POLAR_DEV_SOPS_KEY`), as Secrets in your namespace. That one is a *private* key, kept wherever the cluster keeps its
   Secrets (a cloud provider's, for a cluster in the cloud): use a key for SOPS alone, not your main one;
 - the pod, from `docker.io/daveman1010220/polar-dev:latest-<arch>` (amd64 and arm64; `POLAR_DEV_IMAGE` for another),

@@ -100,6 +100,10 @@ wait_ready() {
 }
 
 
+# The pod's git (the clone into /workspace, and every fetch and push after) uses your key through the forwarded agent, so
+# the agent has to hold one, whatever key POLAR_DEV_SSH_KEY logs in with.
+agent_has_key() { ssh-add -l >/dev/null 2>&1; }
+
 pubkey() {
     if [ -n "${POLAR_DEV_SSH_KEY:-}" ]; then cat "$POLAR_DEV_SSH_KEY"; return; fi
     # All of the listing first, then its first line: `| head -1` would close the pipe on ssh-add, which pipefail counts as a failure.
@@ -189,6 +193,7 @@ esac
 
 case "${1:-}" in
     up)
+        agent_has_key || die "your ssh agent holds no key: ssh-add yours (on a Mac, ssh-add --apple-use-keychain ~/.ssh/id_ed25519), then run this again. The pod's git uses it through the forwarded agent, so POLAR_DEV_SSH_KEY alone is not enough"
         ARCH=$(cluster_arch) || exit 1
         IMAGE=${POLAR_DEV_IMAGE:-docker.io/daveman1010220/polar-dev:latest-$ARCH}
         say "applying $NS (image $IMAGE, on $ARCH nodes)"
