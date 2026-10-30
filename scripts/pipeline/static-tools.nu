@@ -45,6 +45,7 @@
 # The colour helpers (core/mod.nu) and the loggers (core/logging.nu): `use ./core` alone brings in neither by name.
 use ./core *
 use ./core/logging.nu *
+use ../../infra/check-sources.nu [summary_lines]
 
 const COMPONENT = "polar-static-analysis"
 const CHECK_SOURCES = (path self | path dirname | path join ../../infra/check-sources.nu | path expand)
@@ -280,9 +281,7 @@ def generate-summary [results: table, output_dir: string, skip_summary: bool] {
     let sources_file = $"($output_dir)/check_sources.txt"
     $sections = ($sections | append (bold "=== check-sources ==="))
     if ($sources_file | path exists) {
-        let sources_lines = open $sources_file
-            | lines
-            | where { |l| $l =~ '^(FAIL|moved)' or $l =~ 'sources checked' or $l =~ 'cannot be reached' }
+        let sources_lines = summary_lines (open $sources_file | lines)
         $sections = ($sections | append ($sources_lines | str join "\n"))
     }
     $sections = ($sections | append "")

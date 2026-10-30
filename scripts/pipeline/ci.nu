@@ -25,7 +25,8 @@
 # Runs the full build sequence under a single Cassini daemon:
 #
 #   Phase 0 — Static analysis (no Cassini, no artifacts)
-#     Parallel: cargo deny, clippy, udeps, semver-checks, geiger, hack
+#     Parallel: cargo deny, clippy, udeps, semver-checks, geiger, hack,
+#     check-sources (every locked git source fetchable anonymously)
 #     Sequential: noseyparker (manages its own datastore), cargo mutants
 #     (spawns its own workers). Failures are reported; --strict-analysis
 #     aborts the pipeline on any non-zero exit.
@@ -61,6 +62,8 @@ use ./core/state.nu [
     lookup-package-purl get-all-sbom-packages
     record-tarball-hash get-tarball-hash assert-sbom-state-populated
 ]
+# The colour helpers (core/mod.nu): phase 0's logging names them, and `use ./core/<file>.nu` brings in none of them.
+use ./core *
 use ./core/oci.nu *
 use ./core/cassini.nu *
 use ./core/logging.nu *
@@ -69,7 +72,9 @@ use ./core/cargo.nu workspace-root
 use ./core/hashing.nu *
 use ./core/sbom.nu *
 use ./core/scanning.nu [run-vulnerability-scan]
+use ../../infra/check-sources.nu [summary_lines]
 const COMPONENT = "ci"
+const CHECK_SOURCES = (path self | path dirname | path join ../../infra/check-sources.nu | path expand)
 const ELF_BINARY_ARTIFACT = "elf-binary"
 
 
@@ -156,6 +161,11 @@ def static-tool-definitions [manifest: string, output_dir: string]: nothing -> l
                 --feature-powerset
             ]
         }
+        {
+            name: "check-sources"
+            outfile: $"($output_dir)/check_sources.txt"
+            cmd: [nu $CHECK_SOURCES]
+        }
     ]
 }
 
@@ -227,6 +237,15 @@ def generate-static-summary [results: table, output_dir: string] {
         $geiger_body
         ""
     ])
+    let sources_file = $"($output_dir)/check_sources.txt"
+    let sources_body = if ($sources_file | path exists) {
+        summary_lines (open $sources_file | lines) | str join "\n"
+    } else { "" }
+    $sections = ($sections | append [
+        (bold "=== check-sources ===")
+        $sources_body
+        ""
+    ])
     let np_report = $"($output_dir)/noseyparker_report.txt"
     let np_body = if ($np_report | path exists) {
         open $np_report | lines | first 30 | str join "\n"
@@ -274,6 +293,9 @@ def run-static-analysis [ws_manifest: path, artifact_dir: path]: nothing -> tabl
         cargo-geiger
         cargo-hack
         cargo-mutants
+        git
+        curl
+        timeout
     ]
     log-info (bold "phase 0 — static analysis") --component $COMPONENT
     let parallel_results = (

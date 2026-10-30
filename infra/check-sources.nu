@@ -226,6 +226,14 @@ export def check_all [checks: list, reachable: closure, run: closure] {
     { lines: $lines, exit_code: (if ($failed | is-empty) { 0 } else { 1 }) }
 }
 
+# The lines of this script's output that a pipeline summary repeats (static-tools.nu, ci.nu): each failure and
+# move, the count, or why nothing was checked. Not the "checking N sources" header, nor anything else in the file.
+export def summary_lines [lines: list<string>] {
+    $lines | where {|l|
+        ($l | str starts-with "FAIL ") or ($l | str starts-with "moved ") or ($l =~ '^\d+ sources checked: ') or ($l | str starts-with "github.com cannot be reached")
+    }
+}
+
 def github_reachable [] {
     (^curl -q -sS -o /dev/null --connect-timeout 10 --max-time 15 https://github.com/ | complete).exit_code == 0
 }

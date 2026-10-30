@@ -393,6 +393,24 @@ def main [] {
                 assert equal ($a | last) "https://e.org/x"
             }
         }
+        {
+            name: "the pipeline summaries keep every line the report makes, failures, moves, summary and offline alike"
+            body: {
+                let fail = (check_all [(a_check "https://e.org/a" "1") (a_check "https://e.org/b" "2")] { true } {|c|
+                    if $c.url == "https://e.org/a" { { verdict: "missing", detail: "gone" } } else { { verdict: "moved", detail: "" } }
+                })
+                assert equal (summary_lines $fail.lines) $fail.lines
+                let offline = (check_all [(a_check "https://e.org/a" "1")] { false } {|c| error make { msg: "fetched" } })
+                assert equal (summary_lines $offline.lines) $offline.lines
+            }
+        }
+        {
+            name: "the pipeline summaries drop the header and anything else in the output file"
+            body: {
+                let out = ["checking 35 sources from flake.lock, src/agents/Cargo.lock" "Error: nu::shell::something" "35 sources checked: 35 ok, 0 moved, 0 failed"]
+                assert equal (summary_lines $out) ["35 sources checked: 35 ok, 0 moved, 0 failed"]
+            }
+        }
     ]
 
     let results = ($tests | each {|t|
