@@ -42,8 +42,11 @@ pub const PROVIDED_ENV: &str = crate::environment::CAPABILITIES.name();
 pub enum Capability {
     /// A Cassini client with mTLS. Every agent built by `AgentBuilder`.
     Cassini,
-    /// Writes to the graph (Neo4j) over mTLS.
+    /// Writes to the graph (Neo4j) over mTLS. The agent's health then depends on the graph.
     GraphWrite,
+    /// Reads the graph (Neo4j) over mTLS, with the connection `GraphWrite` has, but its health does not depend on the
+    /// graph: a read that fails is answered as unavailable (the state agent, docs/architecture/soft-state.md).
+    GraphRead,
     /// Encrypts payloads through CryptoActor. Opt-in.
     Encryption,
     /// Reads the Kubernetes API with the workload's own ServiceAccount token.
@@ -52,9 +55,10 @@ pub enum Capability {
 
 impl Capability {
     /// Every capability, in the order the catalog lists them.
-    pub const ALL: [Capability; 4] = [
+    pub const ALL: [Capability; 5] = [
         Capability::Cassini,
         Capability::GraphWrite,
+        Capability::GraphRead,
         Capability::Encryption,
         Capability::KubeApiRead,
     ];
@@ -78,6 +82,7 @@ impl Capability {
         match self {
             Capability::Cassini => "cassini",
             Capability::GraphWrite => "graph-write",
+            Capability::GraphRead => "graph-read",
             Capability::Encryption => "encryption",
             Capability::KubeApiRead => "kube-api-read",
         }

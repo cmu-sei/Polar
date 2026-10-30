@@ -362,6 +362,30 @@ mod tests {
     }
 
     #[test]
+    fn reading_the_graph_needs_its_settings_but_the_health_actor_does_not_watch_it() {
+        let err = prepare(
+            &env(CASSINI_ENV),
+            &[],
+            &[Capability::Cassini, Capability::GraphRead],
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("GRAPH_ENDPOINT"), "{err}");
+        let mut vars = CASSINI_ENV.to_vec();
+        vars.extend_from_slice(GRAPH_ENV);
+        vars.push(("POLAR_CAPABILITIES", "cassini,graph-read"));
+        let s = prepare(
+            &env(&vars),
+            &[],
+            &[Capability::Cassini, Capability::GraphRead],
+            None,
+        )
+        .unwrap();
+        assert!(!s.health.expects_graph);
+    }
+
+    #[test]
     fn the_health_settings_come_from_the_snapshot() {
         let s = prepared(
             &[

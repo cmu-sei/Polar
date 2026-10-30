@@ -111,7 +111,10 @@ pub fn sections_for(capabilities: &[Capability]) -> Vec<&'static Section> {
         .iter()
         .filter_map(|capability| match capability {
             Capability::Cassini => Some(&cassini_client::environment::SECTION),
-            Capability::GraphWrite => Some(&polar::graph::environment::SECTION),
+            // A reader connects as a writer does; only its health differs (startup).
+            Capability::GraphWrite | Capability::GraphRead => {
+                Some(&polar::graph::environment::SECTION)
+            }
             Capability::Encryption => Some(&polar_crypto::environment::SECTION),
             Capability::KubeApiRead => None,
         })
@@ -270,6 +273,7 @@ mod tests {
         };
         assert_eq!(names(&[Capability::Cassini]), ["cassini-client"]);
         assert_eq!(names(&[Capability::GraphWrite]), ["graph"]);
+        assert_eq!(names(&[Capability::GraphRead]), ["graph"]);
         assert_eq!(
             names(&[Capability::Cassini, Capability::GraphWrite]),
             ["cassini-client", "graph"]

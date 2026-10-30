@@ -326,7 +326,9 @@ every **facet**:
 | `init` | what polar-init is given besides the certificates it issues: environment and mounts |
 | `resources` | Kubernetes objects that live alongside the workload (cluster roles, token Secrets, persistent volume claims) |
 
-Today's capabilities are `cassini`, `graph-write`, `encryption`,
+Today's capabilities are `cassini`, `graph-write`, `graph-read` (the same Neo4j
+environment and certificate as `graph-write`, with no `dependency` and no graph
+watch in the health check: the state agent's, `docs/architecture/soft-state.md`), `encryption`,
 `kube-api-read`, and others that describe the shape of the pod rather than what
 the code needs: `persistent-data` (a claim named for the workload, mounted at
 `/var/lib/<workload>`), `pinned-ca` (polar-init and the container trust the Polar CA

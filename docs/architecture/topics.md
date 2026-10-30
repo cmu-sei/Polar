@@ -86,6 +86,13 @@ pattern reaches the set, the certificates or policy (`policy-enforcement.md`, "T
 The scaffold shows the family unexpanded under `topic_families`, and, filled from a document (`--scaffold --config`), its
 topics expanded for the workloads that document names, each with `from: family` and its workload. Built 2026-10-21.
 
+A family may be expanded over another set (`FamilyDecl::over`, `polar-agent-builder/src/topics.rs`, `Over`): the
+state agent's replies, `soft-state-replies.{workload}`, are expanded over the workloads whose scaffolds declare a graph
+read, which the render writes into `POLAR_STATE_READERS` (`polar-agent-builder/src/graph_schema.rs`;
+`soft-state.md`), so that the state agent publishes, and its certificate carries, one reply topic for each asker and
+none for an agent that never asks. The scaffold names the variable a family is expanded over in `over`. Built
+2026-10-30.
+
 ## The cross-check
 
 Every declared or family topic has another side somewhere in the catalog (a subscriber, declared or implied, for a
