@@ -438,7 +438,8 @@ cluster.
   (`POLAR_DEV_SOPS_KEY`), as Secrets in your namespace. That one is a *private* key, kept wherever the cluster keeps its
   Secrets (a cloud provider's, for a cluster in the cloud): use a key for SOPS alone, not your main one;
 - the pod, from `docker.io/daveman1010220/polar-dev:latest-<arch>` (amd64 and arm64; `POLAR_DEV_IMAGE` for another),
-  headless, with SSH on 2223.
+  headless, with SSH on 2223, on a node of that architecture. The architecture is the cluster's nodes', not your
+  machine's; where they are of both, `POLAR_DEV_ARCH` says which.
 
 It copies your `~/.config/polar-deploy` and `polar-admin` in, unless the pod has its own already, forwards
 `127.0.0.1:2222` (`POLAR_DEV_PORT`) to the pod's SSH, clones `POLAR_DEV_REPO` (`POLAR_DEV_BRANCH`) into `/workspace` if it is

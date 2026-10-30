@@ -31,8 +31,9 @@
 #   bin/polar-dev sync      copy ~/.config/polar-deploy (the deployment PKI and its signed history) and polar-admin back here
 #   bin/polar-dev down      sync, then stop the pod (its volumes stay); --purge removes the namespace and the volumes too
 #
-# Settings (environment): POLAR_DEV_IMAGE, POLAR_DEV_STORAGE_CLASS (default: the cluster's), POLAR_DEV_SSH_KEY (the public key
-# to log in with; default: the first your agent holds), POLAR_DEV_SOPS_KEY (the private key sops decrypts with; default:
+# Settings (environment): POLAR_DEV_IMAGE, POLAR_DEV_ARCH (amd64 or arm64; default: the cluster's nodes'),
+# POLAR_DEV_STORAGE_CLASS (default: the cluster's), POLAR_DEV_SSH_KEY (the public key to log in with; default: the first
+# your agent holds), POLAR_DEV_SOPS_KEY (the private key sops decrypts with; default:
 # SOPS_AGE_SSH_PRIVATE_KEY_FILE, else ~/.ssh/id_ed25519), POLAR_DEV_REPO and POLAR_DEV_BRANCH (what is cloned),
 # POLAR_DEV_PORT (local end of the SSH forward, 2222).
 set -euo pipefail
@@ -41,8 +42,6 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 U=$(id -un | tr '[:upper:]_.' '[:lower:]--')
 NS=polar-dev-$U
 DEPLOY=polar-dev-$U
-ARCH=$(case "$(uname -m)" in x86_64|amd64) echo amd64;; aarch64|arm64) echo arm64;; *) uname -m;; esac)
-IMAGE=${POLAR_DEV_IMAGE:-docker.io/daveman1010220/polar-dev:latest-$ARCH}
 REPO=${POLAR_DEV_REPO:-git@52.235.181.217:SEI/ACE.git}
 BRANCH=${POLAR_DEV_BRANCH:-feat/ace-integration}
 PORT=${POLAR_DEV_PORT:-2222}
@@ -58,6 +57,18 @@ ssh_opts() {
 die() { echo "polar-dev: $*" >&2; exit 1; }
 k() { kubectl -n "$NS" "$@"; }
 say() { echo "polar-dev: $*"; }
+
+# The architecture the pod runs on: its nodes', not this machine's (a Mac against an amd64 cluster, a laptop against an
+# arm64 one). A cluster whose nodes are of both is asked which, through POLAR_DEV_ARCH.
+cluster_arch() {
+    if [ -n "${POLAR_DEV_ARCH:-}" ]; then echo "$POLAR_DEV_ARCH"; return; fi
+    local arches
+    arches=$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.nodeInfo.architecture}{"\n"}{end}' 2>/dev/null | grep . | sort -u) \
+        || die "cannot read the cluster's nodes for their architecture (set POLAR_DEV_ARCH to amd64 or arm64)"
+    [ "$(printf '%s\n' "$arches" | grep -c .)" -eq 1 ] \
+        || die "the cluster's nodes are $(printf '%s\n' "$arches" | paste -s -d, -): set POLAR_DEV_ARCH to the one the pod should run on"
+    echo "$arches"
+}
 
 # The newest of the dev pods (one being replaced may still be there).
 pod() { k get pod -l app=polar-dev --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null; }
@@ -131,6 +142,7 @@ patches:
       spec:
         template:
           spec:
+            nodeSelector: { kubernetes.io/arch: $ARCH }
             securityContext: { fsGroup: $gid }
             initContainers:
               - name: seed
@@ -177,7 +189,9 @@ esac
 
 case "${1:-}" in
     up)
-        say "applying $NS (image $IMAGE)"
+        ARCH=$(cluster_arch) || exit 1
+        IMAGE=${POLAR_DEV_IMAGE:-docker.io/daveman1010220/polar-dev:latest-$ARCH}
+        say "applying $NS (image $IMAGE, on $ARCH nodes)"
         manifests=$(render) || exit 1
         printf '%s\n' "$manifests" | kubectl apply -f - | sed 's/^/  /'
         say "waiting for the pod (a first start pulls the image and copies its Nix store to a volume: several minutes)"
