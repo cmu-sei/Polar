@@ -56,7 +56,7 @@ Registry credentials are provided via the standard `DOCKER_CONFIG` environment v
 
 No resolver-specific credential configuration exists. Credentials are an operational concern handled at deploy time via the rendered manifest pattern.
 
-For private registries using a self-signed or internal CA, set `PROXY_CA_CERT` to the path of the PEM-encoded CA certificate. The resolver will configure the OCI client to trust it for all outbound connections.
+For a private registry with an internal CA, or a proxy that inspects TLS, the target sets `cluster.egress` (docs/architecture/egress.md): `POLAR_EGRESS_CA_CERT` names the PEM CA certificates the OCI client trusts beside the system's, every one of them, and `POLAR_EGRESS_PROXY` and `POLAR_EGRESS_NO_PROXY` the proxy it reaches a registry through and the hosts it reaches directly.
 
 **Identity tokens** returned by credential helpers are not supported and are skipped in favor of anonymous access. See the Known Limitations section below.
 
@@ -70,7 +70,8 @@ For private registries using a self-signed or internal CA, set `PROXY_CA_CERT` t
 
 | Variable | Purpose |
 |---|---|
-| `PROXY_CA_CERT` | Path to PEM-encoded CA certificate for private registries |
+| `POLAR_EGRESS_CA_CERT` | PEM CA certificates trusted beside the system's (the egress section, `polar::egress`) |
+| `POLAR_EGRESS_PROXY`, `POLAR_EGRESS_NO_PROXY` | The proxy a registry is reached through, and the hosts reached directly |
 | `DOCKER_CONFIG` | Path to Docker credential config directory (standard OCI client convention) |
 
 Standard Cassini broker connection variables apply as with all Polar agents.

@@ -23,20 +23,13 @@
 
 //! What the OCI resolver reads from its configuration, declared once.
 //!
-//! `PROXY_CA_CERT` was read from the process environment by a helper in `polar`, and
-//! `DOCKER_CONFIG` by the `docker_credential` crate itself, so neither was declared or checked
-//! before the agent started, and neither could reach an agent whose environment is a pointer to a
-//! configuration document. Declared here they are in its scaffold, and the resolver is handed the
-//! values.
+//! `DOCKER_CONFIG` was read from the process environment by the `docker_credential` crate itself,
+//! so it was not declared or checked before the agent started, and could not reach an agent whose
+//! environment is a pointer to a configuration document. Declared here it is in its scaffold, and
+//! the resolver is handed the value. The CA a private registry or a TLS-intercepting proxy needs
+//! trusted is the egress section's (`polar::egress`).
 
 use polar_env::{Config, ConfigError, Defaulted, Described, Optional, Section};
-
-pub static PROXY_CA_CERT: Optional<String> = Optional::text(
-    "PROXY_CA_CERT",
-    "path to a PEM CA certificate to trust, as well as the system's, when pulling manifests from a \
-     private registry or through a proxy that intercepts TLS; a path that is set and cannot be \
-     read stops the agent",
-);
 
 pub static DOCKER_CONFIG: Optional<String> = Optional::text(
     "DOCKER_CONFIG",
@@ -56,7 +49,7 @@ pub static INSECURE_REGISTRIES: Defaulted<Vec<String>> = Defaulted::list(
     DEFAULT_INSECURE_REGISTRIES,
 );
 
-static VARIABLES: &[&dyn Described] = &[&PROXY_CA_CERT, &DOCKER_CONFIG, &INSECURE_REGISTRIES];
+static VARIABLES: &[&dyn Described] = &[&DOCKER_CONFIG, &INSECURE_REGISTRIES];
 
 /// The section the OCI resolver registers.
 pub static SECTION: Section = Section {
@@ -66,7 +59,6 @@ pub static SECTION: Section = Section {
 };
 
 pub struct ResolverSettings {
-    pub proxy_ca_cert: Option<String>,
     pub docker_config: Option<String>,
     pub insecure_registries: Vec<String>,
 }
@@ -74,7 +66,6 @@ pub struct ResolverSettings {
 impl ResolverSettings {
     pub fn read(config: &Config) -> Result<Self, ConfigError> {
         Ok(Self {
-            proxy_ca_cert: config.read(&PROXY_CA_CERT)?,
             docker_config: config.read(&DOCKER_CONFIG)?,
             insecure_registries: config.read(&INSECURE_REGISTRIES)?,
         })
@@ -102,7 +93,6 @@ mod tests {
     #[test]
     fn nothing_is_required() {
         let settings = ResolverSettings::read(&config(&[])).unwrap();
-        assert_eq!(settings.proxy_ca_cert, None);
         assert_eq!(settings.docker_config, None);
         assert_eq!(
             settings.insecure_registries,
@@ -114,7 +104,6 @@ mod tests {
     #[test]
     fn what_is_set_is_used() {
         let settings = ResolverSettings::read(&config(&[
-            ("PROXY_CA_CERT", "/etc/proxy/ca.pem"),
             ("DOCKER_CONFIG", "/etc/oci-registry-auth"),
             ("OCI_INSECURE_REGISTRIES", "10.0.2.2:5000, reg.local:5000"),
         ]))
@@ -123,7 +112,6 @@ mod tests {
             settings.insecure_registries,
             vec!["10.0.2.2:5000", "reg.local:5000"]
         );
-        assert_eq!(settings.proxy_ca_cert.as_deref(), Some("/etc/proxy/ca.pem"));
         assert_eq!(
             settings.docker_config.as_deref(),
             Some("/etc/oci-registry-auth")

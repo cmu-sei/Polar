@@ -56,12 +56,14 @@ impl PolarAgent for OciResolver {
         .because(&[Cause::Topic(polar::topics::PROVENANCE_DISCOVERY)])
         .waiting("read by build-processor, a chart outside the catalog"),
     ];
-    const SECTIONS: &'static [&'static Section] = &[&settings::SECTION];
+    const SECTIONS: &'static [&'static Section] = &[&settings::SECTION, &polar::egress::SECTION];
     const HELP: Option<&'static str> = Some(
         "The resolver subscribes to the provenance discovery topic on Cassini. For each image \
          reference it is told of, it pulls the manifest from the registry (with the credentials \
          in DOCKER_CONFIG, or anonymously) and publishes the resolved artifact for the build \
-         processor. It never touches the graph.",
+         processor. It never touches the graph. The egress section says how a registry is \
+         reached: through POLAR_EGRESS_PROXY unless the host is in POLAR_EGRESS_NO_PROXY, trusting \
+         the CA certificates of POLAR_EGRESS_CA_CERT beside the system's.",
     );
 
     async fn start(configured: Configured) -> Result<(), StartError> {
@@ -94,4 +96,33 @@ mod tests {
     use super::*;
 
     polar_agent_builder::polar_agent_tests!(OciResolver);
+
+    /// The render writes the target's egress setting only into an agent that declares the section.
+    #[test]
+    fn the_scaffold_declares_the_egress_section_and_not_proxy_ca_cert() {
+        let scaffold = polar_agent_builder::agent::scaffold_document::<OciResolver>();
+        let egress = scaffold
+            .document
+            .sections
+            .iter()
+            .find(|s| s.name == "egress")
+            .expect("an egress section");
+        let names: Vec<&str> = egress.variables.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "POLAR_EGRESS_PROXY",
+                "POLAR_EGRESS_NO_PROXY",
+                "POLAR_EGRESS_CA_CERT"
+            ]
+        );
+        assert!(
+            scaffold
+                .document
+                .sections
+                .iter()
+                .flat_map(|s| &s.variables)
+                .all(|v| v.name != "PROXY_CA_CERT")
+        );
+    }
 }

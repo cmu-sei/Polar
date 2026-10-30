@@ -32,6 +32,7 @@ use oci_client::Client as OciClient;
 use oci_client::client::{Certificate, CertificateEncoding, ClientConfig, ClientProtocol};
 use polar::ProvenanceEvent;
 use polar::cassini::{CassiniClient, UnsubscribeRequest};
+use polar::egress::Egress;
 use polar::topics::PROVENANCE_DISCOVERY;
 use polar_agent_builder::{
     AgentBuilder, Configured, HealthClient, InfrastructureEvent, InfrastructureSupervisorMessage,
@@ -61,8 +62,13 @@ pub enum ResolverSupervisorMessage {
 pub struct ResolverSupervisor;
 
 /// The OCI client's configuration: https for every registry except those named as insecure, which
-/// are spoken to over http (a development registry), and the extra root certificates, if any.
-pub fn client_config(insecure_registries: &[String], certs: Vec<Certificate>) -> ClientConfig {
+/// are spoken to over http (a development registry), the extra root certificates, if any, and the
+/// egress proxy with the hosts that bypass it, if one is set.
+pub fn client_config(
+    insecure_registries: &[String],
+    egress: &Egress,
+    certs: Vec<Certificate>,
+) -> ClientConfig {
     if certs.is_empty() {
         debug!("Initializing OCI client without extra certificates");
     } else {
@@ -74,6 +80,9 @@ pub fn client_config(insecure_registries: &[String], certs: Vec<Certificate>) ->
     ClientConfig {
         protocol: ClientProtocol::HttpsExcept(insecure_registries.to_vec()),
         extra_root_certificates: certs,
+        https_proxy: egress.proxy.clone(),
+        http_proxy: egress.proxy.clone(),
+        no_proxy: egress.proxy.as_ref().and(egress.no_proxy.clone()),
         ..ClientConfig::default()
     }
 }
@@ -87,26 +96,27 @@ pub struct ResolverSupervisorState {
 }
 
 impl ResolverSupervisor {
-    /// The OCI client, trusting the CA the settings name as well as the system's. A CA that is
-    /// named and cannot be read stops the agent: a trust root that was asked for must not be
-    /// silently left out.
-    async fn oci_client(settings: &ResolverSettings) -> Result<OciClient, ActorProcessingErr> {
-        let mut certs = Vec::new();
-        if let Some(path) = &settings.proxy_ca_cert {
-            let data = tokio::fs::read(path).await.map_err(|e| {
-                ActorProcessingErr::from(format!("cannot read PROXY_CA_CERT {path}: {e}"))
-            })?;
-            debug!("Configuring OCI client with PROXY_CA_CERT {path}");
-            certs.push(Certificate {
+    /// The OCI client, trusting every certificate of the egress CA as well as the system's, and
+    /// going out through the egress proxy if one is set. A CA that is named and cannot be read or
+    /// used stops the agent: a trust root that was asked for must not be silently left out. Each
+    /// certificate is given as one PEM block of its own, since the client reads only the first
+    /// certificate of what it is given; and the client is made with `try_from`, since `new` falls
+    /// back to a default client, without the CA, on an error.
+    pub async fn oci_client(
+        settings: &ResolverSettings,
+        egress: &Egress,
+    ) -> Result<OciClient, ActorProcessingErr> {
+        let certs = egress
+            .pem_blocks()
+            .await?
+            .into_iter()
+            .map(|data| Certificate {
                 encoding: CertificateEncoding::Pem,
                 data,
-            });
-        }
-
-        Ok(OciClient::new(client_config(
-            &settings.insecure_registries,
-            certs,
-        )))
+            })
+            .collect();
+        OciClient::try_from(client_config(&settings.insecure_registries, egress, certs))
+            .map_err(|e| ActorProcessingErr::from(format!("cannot make the OCI client: {e}")))
     }
 
     /// Decodes what was published on the discovery topic. Anything that does not decode is logged
@@ -136,6 +146,7 @@ impl Actor for ResolverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
         let settings = ResolverSettings::read(configured.config())?;
+        let egress = Egress::read(configured.config())?;
 
         // The subscription: what is published on the discovery topic reaches the supervisor,
         // which hands it to the resolver. The builder subscribes on the wire when the client
@@ -166,7 +177,7 @@ impl Actor for ResolverSupervisor {
                 }
             });
 
-        let oci_client = Self::oci_client(&settings).await?;
+        let oci_client = Self::oci_client(&settings, &egress).await?;
         let (resolver, _) = Actor::spawn_linked(
             Some(format!("{RESOLVER_SUPERVISOR_NAME}.resolver")),
             ResolverAgent,
@@ -290,6 +301,7 @@ mod tests {
     fn registries_named_as_insecure_are_spoken_to_over_http_and_no_other() {
         let config = client_config(
             &["10.0.2.2:5000".to_string(), "reg.local:5000".to_string()],
+            &Egress::default(),
             Vec::new(),
         );
         match config.protocol {
@@ -303,7 +315,7 @@ mod tests {
         }
         // and none named means https for every registry
         assert!(matches!(
-            client_config(&[], Vec::new()).protocol,
+            client_config(&[], &Egress::default(), Vec::new()).protocol,
             ClientProtocol::HttpsExcept(ref e) if e.is_empty()
         ));
     }
@@ -314,9 +326,121 @@ mod tests {
             encoding: CertificateEncoding::Pem,
             data: b"x".to_vec(),
         };
-        let config = client_config(&["10.0.2.2:5000".to_string()], vec![cert]);
+        let config = client_config(
+            &["10.0.2.2:5000".to_string()],
+            &Egress::default(),
+            vec![cert],
+        );
         assert_eq!(config.extra_root_certificates.len(), 1);
         assert!(matches!(config.protocol, ClientProtocol::HttpsExcept(ref e) if e.len() == 1));
+    }
+
+    #[test]
+    fn the_egress_proxy_and_its_bypass_list_are_the_clients_and_none_is_none() {
+        let egress = Egress {
+            proxy: Some("http://proxy.corp.example:3128".to_string()),
+            no_proxy: Some(".svc,.cluster.local".to_string()),
+            ca_cert: None,
+        };
+        let config = client_config(&[], &egress, Vec::new());
+        assert_eq!(
+            config.https_proxy.as_deref(),
+            Some("http://proxy.corp.example:3128")
+        );
+        assert_eq!(
+            config.http_proxy.as_deref(),
+            Some("http://proxy.corp.example:3128")
+        );
+        assert_eq!(config.no_proxy.as_deref(), Some(".svc,.cluster.local"));
+
+        let none = client_config(&[], &Egress::default(), Vec::new());
+        assert_eq!(
+            (none.https_proxy, none.http_proxy, none.no_proxy),
+            (None, None, None)
+        );
+    }
+
+    /// Every certificate of the egress CA is trusted: the client reads only the first certificate of
+    /// each one it is given, so a bundle given whole would leave the second registry untrusted.
+    #[tokio::test]
+    async fn every_certificate_of_the_egress_ca_is_trusted_by_the_oci_client() {
+        use polar::egress::testing::{TestCa, https_server};
+        let dir = tempfile::tempdir().unwrap();
+        let first = TestCa::new("first registry root");
+        let second = TestCa::new("second registry root");
+        let bundle = dir.path().join("bundle.pem");
+        std::fs::write(&bundle, format!("{}{}", first.pem, second.pem)).unwrap();
+        let one = https_server(&first).await;
+        let two = https_server(&second).await;
+        let egress = Egress {
+            ca_cert: Some(bundle.display().to_string()),
+            ..Egress::default()
+        };
+        let settings = ResolverSettings {
+            docker_config: None,
+            insecure_registries: Vec::new(),
+        };
+        let client = ResolverSupervisor::oci_client(&settings, &egress)
+            .await
+            .unwrap();
+
+        for server in [&one, &two] {
+            let registry = server.url.trim_start_matches("https://").to_string();
+            let reference =
+                oci_client::Reference::with_tag(registry, "repo".to_string(), "1".to_string());
+            // The stand-in is no registry, so what it answers is not a manifest; only that the
+            // request got past the handshake matters.
+            let _ = client
+                .fetch_manifest_digest(&reference, &oci_client::secrets::RegistryAuth::Anonymous)
+                .await;
+            assert!(server.served() > 0, "{} was not trusted", server.url);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_egress_ca_that_cannot_be_read_stops_the_resolver() {
+        let egress = Egress {
+            ca_cert: Some("/nonexistent/egress-ca.pem".to_string()),
+            ..Egress::default()
+        };
+        let settings = ResolverSettings {
+            docker_config: None,
+            insecure_registries: Vec::new(),
+        };
+        let error = ResolverSupervisor::oci_client(&settings, &egress)
+            .await
+            .err()
+            .expect("an error")
+            .to_string();
+        assert!(
+            error.contains("POLAR_EGRESS_CA_CERT") && error.contains("/nonexistent/egress-ca.pem"),
+            "{error}"
+        );
+    }
+
+    /// A certificate the client cannot use is an error, not a client made without it.
+    #[tokio::test]
+    async fn an_egress_ca_that_does_not_parse_stops_the_resolver() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.pem");
+        std::fs::write(
+            &bad,
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let egress = Egress {
+            ca_cert: Some(bad.display().to_string()),
+            ..Egress::default()
+        };
+        let settings = ResolverSettings {
+            docker_config: None,
+            insecure_registries: Vec::new(),
+        };
+        assert!(
+            ResolverSupervisor::oci_client(&settings, &egress)
+                .await
+                .is_err()
+        );
     }
 
     #[test]
