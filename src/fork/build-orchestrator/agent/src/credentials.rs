@@ -314,13 +314,7 @@ mod tests {
         async fn store_secret(&self, _: String, _: Vec<u8>) -> Result<(), CryptoError> {
             unreachable!()
         }
-        async fn decrypt_own_message(&self, _: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
-            unreachable!()
-        }
         async fn encrypt_for_recipient(&self, _: String, _: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
-            unreachable!()
-        }
-        async fn ensure_bootstrapped(&self) -> Result<(), CryptoError> {
             unreachable!()
         }
         async fn retrieve_secret(&self, _: String) -> Result<Option<Zeroizing<Vec<u8>>>, CryptoError> {
