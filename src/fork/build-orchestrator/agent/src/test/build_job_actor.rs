@@ -239,6 +239,7 @@ mod build_job_actor {
             publisher: Arc::new(publisher.clone()),
             config: config_with_image(repo_url, image),
             storage: Arc::new(StorageClient::noop()),
+            crypto: None,
         };
 
         let (job_ref, job_handle) = Actor::spawn(None, BuildJobActor, args)
@@ -287,6 +288,7 @@ mod build_job_actor {
             publisher: Arc::new(publisher.clone()),
             config: config_with_image(repo_url, image),
             storage: Arc::new(StorageClient::noop()),
+            crypto: None,
         };
 
         let (_job_ref, job_handle) = Actor::spawn(None, BuildJobActor, args)
@@ -329,6 +331,7 @@ mod build_job_actor {
             publisher: Arc::new(MockPublisher::new()),
             config: config_with_image(repo_url, image),
             storage: Arc::new(StorageClient::noop()),
+            crypto: None,
         };
 
         let (_job_ref, job_handle) = Actor::spawn(None, BuildJobActor, args)
@@ -372,6 +375,7 @@ mod build_job_actor {
             publisher: Arc::new(publisher.clone()),
             config: config_with_image(repo_url, image),
             storage: Arc::new(StorageClient::noop()),
+            crypto: None,
         };
 
         let (_job_ref, job_handle) = Actor::spawn(None, BuildJobActor, args)
@@ -424,6 +428,7 @@ mod build_job_actor {
             publisher: Arc::new(publisher.clone()),
             config: config_with_image(repo_url, image),
             storage: Arc::new(StorageClient::noop()),
+            crypto: None,
         };
 
         let (_job_ref, job_handle) = Actor::spawn(None, BuildJobActor, args)
@@ -494,6 +499,7 @@ mod build_job_actor {
             publisher: Arc::new(MockPublisher::new()),
             config,
             storage: Arc::new(StorageClient::noop()),
+            crypto: None,
         };
 
         let (_job_ref, job_handle) = Actor::spawn(None, BuildJobActor, args)

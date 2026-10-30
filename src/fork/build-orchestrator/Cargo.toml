@@ -25,7 +25,9 @@ cassini-types = { path = "../../../../ACE/src/agents/cassini/types" }
 git-agent-common = { path = "../../../../ACE/src/agents/git/common" }
 polar = { path = "../../../../ACE/src/agents/lib" }
 polar-agent-builder = { path = "../../../../ACE/src/agents/polar-agent-builder" }
+polar-crypto = { path = "../../../../ACE/src/agents/polar-crypto" }
 polar-env = { path = "../../../../ACE/src/agents/polar-env" }
+polar-escrow = { path = "../../../../ACE/src/agents/polar-escrow" }
 
 # This workspace.
 orchestrator-core = { path = "core" }
@@ -36,6 +38,7 @@ async-trait = "0.1.89"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-credential-types = "1"
 aws-sdk-s3 = "1"
+base64 = "0.22.1"
 bytes = "1.11.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 config = "0.14"

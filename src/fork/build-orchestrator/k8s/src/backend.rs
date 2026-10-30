@@ -4,11 +4,13 @@ use orchestrator_core::backend::{
     BackendJobHandle, BuildBackend, JobGraphIdentity, JobStatus, LogStream, SubmittedJob,
 };
 use orchestrator_core::error::BackendError;
-use orchestrator_core::types::BuildSpec;
+use orchestrator_core::types::{BuildSpec, SourceRef};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{error, info, instrument};
 
-use crate::job::{JobOptions, build_job_manifest, job_name_for_build, service_account_for_build};
+use crate::job::{
+    JobOptions, build_job_manifest, git_secret_name_for_build, job_name_for_build, service_account_for_build,
+};
 
 pub struct KubernetesBackend {
     client: Client,
@@ -53,7 +55,8 @@ impl BuildBackend for KubernetesBackend {
     #[instrument(skip(self, spec), fields(build_id = %spec.build_id))]
     async fn submit(&self, spec: &BuildSpec) -> Result<SubmittedJob, BackendError> {
         use k8s_openapi::api::batch::v1::Job;
-        use k8s_openapi::api::core::v1::ServiceAccount;
+        use k8s_openapi::ByteString;
+        use k8s_openapi::api::core::v1::{Secret, ServiceAccount};
         use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
         use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
         use std::collections::BTreeMap;
@@ -92,15 +95,63 @@ impl BuildBackend for KubernetesBackend {
                 .map_err(|e| BackendError::SubmissionFailed(format!("could not make the build's ServiceAccount: {e}")))?;
         }
 
+        // A git credential is a Secret of the build's own, made before the job so the pod does not wait for it.
+        let secrets: Api<Secret> = Api::namespaced(self.client.clone(), &self.options.namespace);
+        let git_secret = match (&spec.git_secret, &spec.source) {
+            (Some(credential), SourceRef::Git { .. }) => {
+                let name = git_secret_name_for_build(spec.build_id);
+                let secret = Secret {
+                    metadata: ObjectMeta {
+                        name: Some(name.clone()),
+                        labels: Some(BTreeMap::from([(
+                            "cyclops/build-id".to_string(),
+                            spec.build_id.to_string(),
+                        )])),
+                        ..Default::default()
+                    },
+                    type_: Some("Opaque".to_string()),
+                    data: Some(BTreeMap::from([
+                        ("username".to_string(), ByteString(credential.username.clone().into_bytes())),
+                        ("password".to_string(), ByteString(credential.password.clone().into_bytes())),
+                    ])),
+                    ..Default::default()
+                };
+                if let Err(e) = secrets.create(&PostParams::default(), &secret).await {
+                    if let Some(account) = &account {
+                        let _ = accounts.delete(account, &DeleteParams::default()).await;
+                    }
+                    // The error is the API server's about the object, which does not repeat its data.
+                    return Err(BackendError::SubmissionFailed(format!("could not make the build's git credential Secret: {e}")));
+                }
+                Some(name)
+            }
+            _ => None,
+        };
+
         let job = match jobs.create(&PostParams::default(), &manifest).await {
             Ok(job) => job,
             Err(e) => {
                 if let Some(name) = &account {
                     let _ = accounts.delete(name, &DeleteParams::default()).await;
                 }
+                if let Some(name) = &git_secret {
+                    let _ = secrets.delete(name, &DeleteParams::default()).await;
+                }
                 return Err(BackendError::SubmissionFailed(e.to_string()));
             }
         };
+
+        // The Secret goes with the job, as the ServiceAccount does: nothing outlives the build.
+        if let (Some(name), Some(job_uid), Some(job_name)) = (&git_secret, &job.metadata.uid, &job.metadata.name) {
+            let owner = serde_json::json!({"metadata": {"ownerReferences": [{
+                "apiVersion": "batch/v1", "kind": "Job", "name": job_name, "uid": job_uid
+            }]}});
+            if let Err(e) = secrets.patch(name, &PatchParams::default(), &Patch::Merge(&owner)).await {
+                // A credential left behind is worse than a build that fails: take it away now.
+                tracing::error!(error = %e, secret = %name, "the build's credential could not be given to its job; deleting it");
+                let _ = secrets.delete(name, &DeleteParams::default()).await;
+            }
+        }
 
         // The ServiceAccount goes with the job (and its time-to-live), so nothing is left behind.
         if let (Some(name), Some(job_uid), Some(job_name)) = (&account, &job.metadata.uid, &job.metadata.name) {

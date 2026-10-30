@@ -235,7 +235,7 @@ let buildOrchestrator
               , name = "build-orchestrator"
               , namespace = ns
               , image = v.images.buildOrchestrator
-              , provides = [ "cassini", "kube-api-read" ]
+              , provides = [ "cassini", "kube-api-read", "encryption" ]
               , shutdownBudgetSecs = 30
               , serviceAccountToken = True
               , configFiles = [ { configMap = "build-orchestrator-config", mountPath = configDir } ]
@@ -333,6 +333,10 @@ let buildOrchestrator
                             -- One ServiceAccount per build: the identity on the job's certificate. It is
                             -- owned by the job, so it goes with it.
                             , rule [ "" ] [ "serviceaccounts" ] [ "create", "get", "patch", "delete" ]
+                            -- One Secret per build that clones a private repository, for the credential: made
+                            -- before the job, given to it so it goes with it, deleted if the job cannot be made.
+                            -- It can put a Secret there and cannot read one back.
+                            , rule [ "" ] [ "secrets" ] [ "create", "patch", "delete" ]
                             ]
                           }
                       , kubernetes.Resource.RoleBinding

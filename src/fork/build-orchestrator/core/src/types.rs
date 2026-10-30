@@ -407,6 +407,10 @@ pub struct BuildSpec {
     /// The referenced Secret must exist in the build namespace.
     pub git_credentials: GitCredentials,
 
+    /// The credential this build may clone with, when its repository's mapping names one. The backend puts it
+    /// in a Secret of the build's own and mounts that into the clone container only.
+    pub git_secret: Option<GitSecret>,
+
     /// Credentials for pulling the pipeline image from the registry.
     /// The referenced Secret must be of type kubernetes.io/dockerconfigjson.
     pub registry_credentials: RegistryCredentials,
@@ -434,6 +438,7 @@ impl BuildSpec {
             // analyzer images define their own, unlike CI pipeline images.
             entrypoint: (!command.is_empty()).then_some(command),
             git_credentials,
+            git_secret: None,
             registry_credentials,
             env: HashMap::new(),
         }
@@ -479,6 +484,21 @@ pub struct BootstrapSpec {
 }
 
 // ── Credential types ──────────────────────────────────────────────────────────
+
+/// A user name and a token for cloning one repository, as the credentials agent gave them.
+///
+/// It is in no log, no status and no event: `Debug` says only that it is there, and nothing here is `Serialize`.
+#[derive(Clone)]
+pub struct GitSecret {
+    pub username: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for GitSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GitSecret(<redacted>)")
+    }
+}
 
 /// Describes how the init container should authenticate to the git host
 /// when cloning the source repository.

@@ -4,6 +4,7 @@ use crate::actors::build_job::{BuildJobActor, BuildJobArguments};
 use crate::actors::build_registry::{BuildRegistryActor, RegistryMessage};
 use crate::client::StorageClient;
 use crate::config::RepoMapping;
+use crate::credentials;
 use crate::mappings;
 use cassini_types::ClientEvent;
 use git_agent_common::GitRepositoryMessage;
@@ -16,8 +17,8 @@ use polar::cassini::CassiniClient;
 use polar::graph::nodes::git::RepoId;
 use polar::topics::GIT_REPOSITORY_EVENTS;
 use polar_agent_builder::{
-    AgentBuilder, ConfigurationHandle, Configured, HealthClient, HealthHandle, InfrastructureEvent,
-    InfrastructureSupervisorMessage, Subscription,
+    AgentBuilder, ConfigurationHandle, Configured, CryptoClient, HealthClient, HealthHandle,
+    InfrastructureEvent, InfrastructureSupervisorMessage, Subscription,
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use rkyv::from_bytes;
@@ -64,6 +65,8 @@ pub struct SupervisorState {
     infrastructure: ActorRef<InfrastructureSupervisorMessage>,
     configuration: ConfigurationHandle,
     healthcheck: HealthHandle,
+    /// Opens the credentials a mapping names, for a build that is to clone a private repository.
+    crypto: Arc<dyn CryptoClient>,
     /// The repositories built: the configuration file's list until the `mappings` section arrives, and then
     /// the section's, replaced whole each time.
     mappings: Vec<RepoMapping>,
@@ -230,9 +233,16 @@ impl Actor for OrchestratorSupervisor {
                 })
             });
         // A section already held (the replay may have been quicker than this subscription) is read first.
-        myself.cast(SupervisorMessage::RuntimeChanged {
-            section: mappings::SECTION_NAME.to_string(),
-        })?;
+        for section in [mappings::SECTION_NAME, credentials::SECTION_NAME] {
+            myself.cast(SupervisorMessage::RuntimeChanged {
+                section: section.to_string(),
+            })?;
+        }
+        // The agent declares that it needs encryption, so the builder gives it the CryptoActor.
+        let crypto = resources
+            .crypto
+            .clone()
+            .ok_or("the builder gave no CryptoActor, which this agent needs for its credentials")?;
 
         // Spawn the registry as a child of this supervisor.
         let (registry, _) = Actor::spawn_linked(
@@ -255,6 +265,7 @@ impl Actor for OrchestratorSupervisor {
             infrastructure: resources.infrastructure,
             configuration: resources.configuration,
             healthcheck: resources.healthcheck,
+            crypto: Arc::new(crypto),
             mappings,
             draining: false,
         })
@@ -297,6 +308,8 @@ impl Actor for OrchestratorSupervisor {
             SupervisorMessage::RuntimeChanged { section } => {
                 if section == mappings::SECTION_NAME {
                     Self::load_mappings(state).await;
+                } else if section == credentials::SECTION_NAME {
+                    Self::apply_credentials(state).await;
                 }
             }
             SupervisorMessage::PrepareShutdown => {
@@ -380,6 +393,48 @@ impl OrchestratorSupervisor {
         }
     }
 
+    /// Reads the latest `credentials` section and hands it to the CryptoActor, which opens each entry, keeps it
+    /// with its binding and escrows it. A body that does not read is logged and left: the builder judged it
+    /// before accepting it, so that is a disagreement between the two, not an author's mistake.
+    async fn apply_credentials(state: &SupervisorState) {
+        let value = match state.configuration.runtime(credentials::SECTION_NAME).await {
+            Ok(Some(value)) => value,
+            Ok(None) => return,
+            Err(e) => {
+                warn!("could not read the credentials section: {e}");
+                return;
+            }
+        };
+        let entries = match credentials::parse(&value.body) {
+            Ok(entries) => entries,
+            Err(problems) => {
+                warn!(version = value.version, "the credentials section does not read: {}", problems.join("; "));
+                return;
+            }
+        };
+        if let Err(e) =
+            credentials::apply(state.crypto.as_ref(), crate::agent::AGENT_NAME, value.version, &entries).await
+        {
+            error!(version = value.version, "the credentials section was not applied: {e}");
+        }
+    }
+
+    /// What a mapped repository's build runs is the mapping's, or the configuration file's, and never what the
+    /// request says: a request can come from anyone who can publish on the broker. A repository with no mapping
+    /// keeps the request's own command, as it has no other.
+    pub fn command_from_mapping(
+        mappings: &[RepoMapping],
+        default: &[String],
+        request: &mut BuildRequest,
+    ) {
+        let SourceRef::Git { url, .. } = &request.source else {
+            return;
+        };
+        if let Some(mapping) = mappings.iter().find(|m| &m.repo_url == url) {
+            request.command = mapping.command.clone().unwrap_or_else(|| default.to_vec());
+        }
+    }
+
     /// The configuration as it stands now: the file's, with the repositories the latest section named.
     fn current_config(state: &SupervisorState) -> Arc<crate::config::OrchestratorConfig> {
         Arc::new(crate::config::OrchestratorConfig {
@@ -416,6 +471,9 @@ impl OrchestratorSupervisor {
             return Ok(());
         }
 
+        let mut request = request;
+        Self::command_from_mapping(&state.mappings, &state.config.backend.command, &mut request);
+
         // Insert into the registry before spawning the actor so there is never
         // a window where the actor exists but has no registry record.
         state
@@ -433,6 +491,7 @@ impl OrchestratorSupervisor {
             publisher: Arc::clone(&state.tcp_client),
             config: Self::current_config(state),
             storage: Arc::new(client),
+            crypto: Some(Arc::clone(&state.crypto)),
         };
 
         let (_, _handle) =

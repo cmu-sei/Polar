@@ -69,7 +69,7 @@ use k8s_openapi::{
 };
 use orchestrator_core::{
     TLS_CERT_DIR, tls_ca_cert_path, tls_client_cert_path, tls_client_key_path,
-    types::{BuildSpec, GitCredentials, RegistryCredentials, SourceRef},
+    types::{BuildSpec, RegistryCredentials, SourceRef},
 };
 use uuid::Uuid;
 
@@ -93,12 +93,18 @@ const WORKSPACE_VOLUME: &str = "workspace";
 /// are read-only. The cassini daemon's socket and queue live here.
 const TMP_VOLUME: &str = "tmp";
 
-/// Name of the projected volume that holds git credential env var sources.
-/// The actual credential values are sourced from a k8s Secret and injected
-/// as env vars into the init container only — never into the main container.
+/// Name of the volume that holds the build's git credential, and where the clone container sees it. The
+/// credential is a Secret of the build's own, mounted as files into the clone container only — never an
+/// environment variable, and never in the pipeline container.
 const GIT_CREDS_VOLUME: &str = "git-credentials";
+pub const GIT_CREDS_DIR: &str = "/run/git-credentials";
 
 pub const CLIENT_TLS_SECRET_NAME: &str = "client-tls";
+
+/// The Secret that holds a build's git credential: made with the job and owned by it, so it goes with it.
+pub fn git_secret_name_for_build(build_id: Uuid) -> String {
+    format!("build-{}-git", build_id)
+}
 
 /// The ServiceAccount a build's pod runs under. Its name is the identity on the job's certificate, and the
 /// broker allows one session per identity, so every build has one of its own.
@@ -229,7 +235,8 @@ pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
     let job_name = job_name_for_build(spec.build_id);
     let (labels, annotations) = standard_metadata(spec.build_id, &spec.source, "pipeline");
 
-    let mut init_container = clone_init_container(&spec.source, &spec.git_credentials, options.keep_git);
+    let has_git_secret = spec.git_secret.is_some() && matches!(spec.source, SourceRef::Git { .. });
+    let mut init_container = clone_init_container(&spec.source, options.keep_git, has_git_secret);
     init_container.image_pull_policy = options.image_pull_policy.clone();
 
     let identity = options.identity.as_ref();
@@ -267,8 +274,10 @@ pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
     let mut volumes = vec![workspace_volume(options.workspace_size_limit.as_deref())];
     match identity {
         Some(identity) => volumes.extend(identity.volumes.iter().cloned()),
-        // git_credentials_volume(&spec.git_credentials), TODO: Optionally insert git credentials via configuration
         None => volumes.push(client_tls_voiume()),
+    }
+    if has_git_secret {
+        volumes.push(git_secret_volume(spec.build_id));
     }
 
     // The init container is build-orchestrator'ss own minimal image and never needs
@@ -343,7 +352,7 @@ pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
 ///
 /// The init container mounts the workspace volume as writable (it populates it).
 /// The main container mounts the same volume as read-only.
-fn clone_init_container(source: &SourceRef, credentials: &GitCredentials, keep_git: bool) -> Container {
+fn clone_init_container(source: &SourceRef, keep_git: bool, git_secret: bool) -> Container {
     let mut env: Vec<EnvVar> = source
         .fetch_env()
         .into_iter()
@@ -355,14 +364,17 @@ fn clone_init_container(source: &SourceRef, credentials: &GitCredentials, keep_g
         })
         .collect();
 
-    // TODO: do this only if the configured repo has credentials provided
-    // Inject credential env vars sourced from the k8s Secret.
-    // The clone image reads GIT_USERNAME and GIT_PASSWORD and constructs
-    // the authenticated remote URL itself. This keeps credential handling
-    // inside the clone image, not in the orchestrator.
-    // Archive sources are public downloads and never receive git credentials.
+    // Archive sources are public downloads and never receive git credentials. A git source gets the
+    // build's own credential, when its repository's mapping names one, as files: the clone script reads
+    // them through git's askpass, so the value is in no URL, no environment and no process argument.
     if let SourceRef::Git { .. } = source {
-        env.extend(git_credential_env_vars(credentials));
+        if git_secret {
+            env.push(EnvVar {
+                name: "CYCLOPS_GIT_CREDENTIALS_DIR".to_string(),
+                value: Some(GIT_CREDS_DIR.to_string()),
+                ..Default::default()
+            });
+        }
         if keep_git {
             env.push(EnvVar {
                 name: "CYCLOPS_KEEP_GIT".to_string(),
@@ -370,6 +382,22 @@ fn clone_init_container(source: &SourceRef, credentials: &GitCredentials, keep_g
                 ..Default::default()
             });
         }
+    }
+
+    let mut mounts = vec![VolumeMount {
+        name: WORKSPACE_VOLUME.to_string(),
+        mount_path: WORKSPACE_PATH.to_string(),
+        // Init container writes — must be writable.
+        read_only: Some(false),
+        ..Default::default()
+    }];
+    if git_secret {
+        mounts.push(VolumeMount {
+            name: GIT_CREDS_VOLUME.to_string(),
+            mount_path: GIT_CREDS_DIR.to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        });
     }
 
     Container {
@@ -380,13 +408,7 @@ fn clone_init_container(source: &SourceRef, credentials: &GitCredentials, keep_g
         // TODO: enable hardened sec context when we get a controlled clone image.
         // security_context: Some(hardened_security_context()),
         resources: Some(clone_resources()),
-        volume_mounts: Some(vec![VolumeMount {
-            name: WORKSPACE_VOLUME.to_string(),
-            mount_path: WORKSPACE_PATH.to_string(),
-            // Init container writes — must be writable.
-            read_only: Some(false),
-            ..Default::default()
-        }]),
+        volume_mounts: Some(mounts),
         ..Default::default()
     }
 }
@@ -446,40 +468,6 @@ fn pipeline_env_vars(spec: &BuildSpec, shared_tls: bool) -> Vec<EnvVar> {
 /// are never present in the Job manifest itself, which is important for
 /// audit log hygiene. Anyone reading the Job spec sees only which secret
 /// is referenced, not what the credentials are.
-fn git_credential_env_vars(credentials: &GitCredentials) -> Vec<EnvVar> {
-    match credentials {
-        GitCredentials::HttpToken { secret_name } => vec![
-            EnvVar {
-                name: "GIT_USERNAME".to_string(),
-                // TODO: remove hardcoded test username, replace with val from secret
-                value: Some("username".to_string()),
-                // value_from: Some(EnvVarSource {
-                //     secret_key_ref: Some(SecretKeySelector {
-                //         name: secret_name.clone(),
-                //         key: "username".to_string(),
-                //         optional: Some(false),
-                //     }),
-                //     ..Default::default()
-                // }),
-                ..Default::default()
-            },
-            EnvVar {
-                name: "GIT_PASSWORD".to_string(),
-                // TODO: remove,
-                value: Some("password".to_string()),
-                // value_from: Some(EnvVarSource {
-                //     secret_key_ref: Some(SecretKeySelector {
-                //         name: secret_name.clone(),
-                //         key: "password".to_string(),
-                //         optional: Some(false),
-                //     }),
-                //     ..Default::default()
-                // }),
-                ..Default::default()
-            },
-        ],
-    }
-}
 
 /// Registry push credentials for the bootstrap container.
 ///
@@ -560,30 +548,19 @@ fn client_tls_volume_mount() -> VolumeMount {
     }
 }
 
-/// Projects the git credential secret into a volume.
+/// The volume that holds the build's git credential, from the Secret the backend made for it.
 ///
-/// This volume is mounted into the init container only, not the main container.
-/// The main container has no business touching git credentials.
-///
-/// Note: we also inject credentials as env vars (see git_credential_env_vars).
-/// The volume exists for future SSH key support — an SSH key cannot be
-/// passed as an env var, it must be a file at a known path for the ssh client.
-/// For HTTP token auth today, the env var approach is sufficient and the
-/// volume is vestigial — but it's cheap to declare and removes a future
-/// refactor.
-fn git_credentials_volume(credentials: &GitCredentials) -> Volume {
-    let secret_name = match credentials {
-        GitCredentials::HttpToken { secret_name } => secret_name.clone(),
-    };
-
+/// It is mounted into the clone container only, not the pipeline container: the pipeline has no business
+/// touching the credential it was cloned with, and nothing here puts the value in an environment variable.
+fn git_secret_volume(build_id: Uuid) -> Volume {
     Volume {
         name: GIT_CREDS_VOLUME.to_string(),
         secret: Some(SecretVolumeSource {
-            secret_name: Some(secret_name),
-            // optional: false — if the secret doesn't exist, fail fast at
-            // pod scheduling time rather than letting the init container
-            // start and fail with a less obvious error.
+            secret_name: Some(git_secret_name_for_build(build_id)),
+            // optional: false — a pod whose Secret is not there waits, rather than start without it.
             optional: Some(false),
+            // The clone container does not run as root; only it mounts this volume.
+            default_mode: Some(0o444),
             ..Default::default()
         }),
         ..Default::default()
@@ -840,7 +817,7 @@ fn assemble_job(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestrator_core::types::source_env;
+    use orchestrator_core::types::{GitCredentials, GitSecret, source_env};
 
     fn spec(source: SourceRef) -> BuildSpec {
         BuildSpec::with_pipeline_runner(
@@ -1181,11 +1158,68 @@ mod tests {
         );
         let env = init_env(&job);
         assert!(env.contains(&(source_env::COMMIT_SHA.into(), Some("a".repeat(40)))));
-        assert!(env.iter().any(|(k, _)| k == "GIT_USERNAME"));
+        assert!(
+            !env.iter().any(|(k, _)| k.starts_with("GIT_USERNAME") || k.starts_with("GIT_PASSWORD")),
+            "a credential is never an environment variable"
+        );
         assert_eq!(
             job.metadata.annotations.unwrap()["cyclops.build/commit"],
             "a".repeat(40)
         );
+    }
+
+    fn with_secret(mut spec: BuildSpec) -> BuildSpec {
+        spec.git_secret = Some(GitSecret {
+            username: "deploy".into(),
+            password: "tokentokentoken".into(),
+        });
+        spec
+    }
+
+    #[test]
+    fn a_git_credential_is_a_secret_volume_mounted_read_only_into_the_clone_container_alone() {
+        let build = with_secret(git_spec());
+        let job = build_job_manifest(&build, &JobOptions::new("polar-builds"));
+        let pod = pod(&job);
+
+        let volume = pod.volumes.as_ref().unwrap().iter().find(|v| v.name == GIT_CREDS_VOLUME).unwrap();
+        assert_eq!(
+            volume.secret.as_ref().unwrap().secret_name.as_deref(),
+            Some(git_secret_name_for_build(build.build_id).as_str())
+        );
+
+        let clone = &pod.init_containers.as_ref().unwrap()[0];
+        let mount = clone.volume_mounts.as_ref().unwrap().iter().find(|m| m.name == GIT_CREDS_VOLUME).unwrap();
+        assert_eq!(mount.mount_path, GIT_CREDS_DIR);
+        assert_eq!(mount.read_only, Some(true));
+        let dir = clone.env.as_ref().unwrap().iter().find(|e| e.name == "CYCLOPS_GIT_CREDENTIALS_DIR").unwrap();
+        assert_eq!(dir.value.as_deref(), Some(GIT_CREDS_DIR));
+
+        for container in pod.containers.iter().chain(pod.init_containers.as_ref().unwrap().iter().skip(1)) {
+            assert!(
+                !container.volume_mounts.as_ref().unwrap().iter().any(|m| m.name == GIT_CREDS_VOLUME),
+                "only the clone container sees the credential, not {}",
+                container.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_credential_is_in_no_manifest_field() {
+        let build = with_secret(git_spec());
+        let job = build_job_manifest(&build, &JobOptions::new("polar-builds"));
+        let text = serde_json::to_string(&job).unwrap();
+        assert!(!text.contains("tokentokentoken"));
+        assert!(!format!("{build:?}").contains("tokentokentoken"), "its Debug must not print it");
+    }
+
+    #[test]
+    fn a_build_with_no_credential_has_no_volume_and_the_clone_is_told_nothing() {
+        let job = build_job_manifest(&git_spec(), &JobOptions::new("polar-builds"));
+        let pod = pod(&job);
+        assert!(!pod.volumes.as_ref().unwrap().iter().any(|v| v.name == GIT_CREDS_VOLUME));
+        let clone = &pod.init_containers.as_ref().unwrap()[0];
+        assert!(!clone.env.as_ref().unwrap().iter().any(|e| e.name == "CYCLOPS_GIT_CREDENTIALS_DIR"));
     }
 
     const IDENTITY: &str = r#"{"initContainers":[{"name":"polar-init","image":"polar-init:latest","command":["polar-init"],"args":["--cert","client:/home/polar/certs:ecdsa-p256"],"volumeMounts":[{"name":"sa-token","mountPath":"/workspace","readOnly":true},{"name":"polar-certs","mountPath":"/home/polar/certs"}]}],"volumes":[{"name":"sa-token","projected":{"sources":[{"serviceAccountToken":{"audience":"a","expirationSeconds":3600,"path":"token"}}]}},{"name":"polar-certs","emptyDir":{}}],"pipelineMounts":[{"name":"polar-certs","mountPath":"/home/polar/certs","readOnly":true}],"pipelineEnv":[{"name":"TLS_CLIENT_CERT","value":"/home/polar/certs/cert.pem"}]}"#;

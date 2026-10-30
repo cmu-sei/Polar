@@ -3,6 +3,7 @@
 
 use crate::actors::supervisor::{OrchestratorSupervisor, SupervisorArguments};
 use crate::config::OrchestratorConfig;
+use crate::credentials::CREDENTIALS;
 use crate::mappings::MAPPINGS;
 use crate::settings::{BuildOrchestratorSettings, SECTION};
 use orchestrator_backend_k8s::backend::KubernetesBackend;
@@ -27,16 +28,18 @@ impl PolarAgent for BuildOrchestrator {
     const PURPOSE: &'static str =
         "The authoritative builder: runs a repository's pipeline as a job against pinned source and reports what ran";
     // It also creates the jobs and, for each, a service account and a secret; the deployment's Role is what
-    // says so. The capability is the token it asks the API server with.
-    const NEEDS: &'static [Capability] = &[Capability::KubeApiRead];
+    // says so. The capability is the token it asks the API server with. Encryption is for the credentials a
+    // repository's builds may be cloned with, which arrive sealed to this agent.
+    const NEEDS: &'static [Capability] = &[Capability::KubeApiRead, Capability::Encryption];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
     const SECTIONS: &'static [&'static polar_env::Section] = &[&SECTION];
-    const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] = &[&MAPPINGS];
+    const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] = &[&MAPPINGS, &CREDENTIALS];
     const HELP: Option<&'static str> = Some(
         "build-orchestrator builds a repository when the git observer reports that a ref moved, or when a build request \
          arrives on polar.orchestrator.builds.requests, if the `mappings` runtime section (a signed document) \
          names the repository. Each build is a Kubernetes Job in the namespace of the configuration file; \
-         what the job is given is decided here, from the section, and never from the request.",
+         what the job is given is decided here, from the section, and never from the request. The `credentials` section \
+         (also signed, with each secret sealed to this agent) holds what a mapping may name for its builds to clone with.",
     );
 
     async fn start(configured: Configured) -> Result<(), StartError> {

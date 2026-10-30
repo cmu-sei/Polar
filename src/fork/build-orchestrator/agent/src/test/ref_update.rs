@@ -98,4 +98,45 @@ mod ref_update {
             Err(EventConversionError::InvalidSource(_))
         ));
     }
+
+    fn request_with_command(url: &str, command: &[&str]) -> orchestrator_core::types::BuildRequest {
+        let mut request = OrchestratorSupervisor::build_request_from_ref_update(
+            &config(url),
+            &RepoId::from_url(url),
+            "refs/heads/main",
+            SHA,
+            "1700000000000",
+        )
+        .unwrap()
+        .unwrap();
+        request.command = command.iter().map(|s| s.to_string()).collect();
+        request
+    }
+
+    #[test]
+    fn a_mapped_repositorys_command_is_the_mappings_and_never_the_requests() {
+        let url = "https://git.example.org/a.git";
+        let default = vec!["nu".to_string(), "default.nu".to_string()];
+
+        // The mapping gives its own command.
+        let mapping = RepoMapping {
+            repo_url: url.to_string(),
+            command: Some(vec!["sh".into(), "-c".into(), "mapped".into()]),
+            ..Default::default()
+        };
+        let mut request = request_with_command(url, &["sh", "-c", "from the request"]);
+        OrchestratorSupervisor::command_from_mapping(&[mapping], &default, &mut request);
+        assert_eq!(request.command, ["sh", "-c", "mapped"]);
+
+        // The mapping gives none: the configuration file's.
+        let bare = RepoMapping { repo_url: url.to_string(), ..Default::default() };
+        let mut request = request_with_command(url, &["sh", "-c", "from the request"]);
+        OrchestratorSupervisor::command_from_mapping(&[bare], &default, &mut request);
+        assert_eq!(request.command, default);
+
+        // A repository with no mapping has nothing but the request's.
+        let mut request = request_with_command(url, &["sh", "-c", "from the request"]);
+        OrchestratorSupervisor::command_from_mapping(&[], &default, &mut request);
+        assert_eq!(request.command, ["sh", "-c", "from the request"]);
+    }
 }

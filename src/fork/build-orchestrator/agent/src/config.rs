@@ -141,6 +141,15 @@ impl OrchestratorConfig {
             .try_deserialize()
     }
 
+    /// The credentials a build of this repository may be given, by name: none unless its mapping names them.
+    pub fn credentials_for(&self, repo_url: &str) -> &[String] {
+        self.repo_mappings
+            .iter()
+            .find(|m| m.repo_url == repo_url)
+            .map(|m| m.credentials.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Look up the pipeline image for a given repo URL.
     /// Returns None if no mapping exists or the image has not been set yet.
     pub fn pipeline_image_for(&self, repo_url: &str) -> Option<&str> {

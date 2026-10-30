@@ -45,11 +45,13 @@ use std::time::Instant;
 use crate::actors::build_registry::RegistryMessage;
 use crate::client::{LogContainer, StorageClient};
 use crate::config::OrchestratorConfig;
+use crate::credentials::{self, Resolution};
 use orchestrator_core::{
     backend::{BackendJobHandle, BuildBackend, JobStatus},
-    types::{BuildRequest, BuildSpec, BuildState, GitCredentials, RegistryCredentials, SourceRef},
+    types::{BuildRequest, BuildSpec, BuildState, GitCredentials, GitSecret, RegistryCredentials, SourceRef},
 };
 use polar::cassini::{CassiniClient, PublishRequest};
+use polar_agent_builder::CryptoClient;
 use polar::{BUILD_EVENTS_TOPIC, BackendIdentity, ProvenanceEvent, RkyvError};
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use rkyv::to_bytes;
@@ -103,6 +105,8 @@ pub struct BuildJobArguments {
     pub config: Arc<OrchestratorConfig>,
     /// Storage client for uploading logs and manifests to MinIO.
     pub storage: Arc<StorageClient>,
+    /// Opens the credentials the repository's mapping names. `None` where nothing is to be opened (tests).
+    pub crypto: Option<Arc<dyn CryptoClient>>,
 }
 
 pub struct BuildJobState {
@@ -112,6 +116,7 @@ pub struct BuildJobState {
     publisher: Arc<dyn CassiniClient>,
     config: Arc<OrchestratorConfig>,
     storage: Arc<StorageClient>,
+    crypto: Option<Arc<dyn CryptoClient>>,
 
     /// The backend handle for whatever job is currently running.
     /// Replaced when transitioning from bootstrap to pipeline phase.
@@ -165,6 +170,7 @@ impl Actor for BuildJobActor {
             publisher: args.publisher,
             config: args.config,
             storage: args.storage,
+            crypto: args.crypto,
             backend_handle: None,
             resolved_image: None,
             phase: None,
@@ -270,6 +276,26 @@ impl BuildJobActor {
 
         Ok(())
     }
+    /// The credential the repository's mapping names, if it names one. A build whose mapping names a credential
+    /// that cannot be had does not start: it would only fail at the clone, with a worse reason.
+    async fn resolve_git_secret(state: &BuildJobState) -> Result<Option<GitSecret>, String> {
+        let SourceRef::Git { url, .. } = &state.request.source else {
+            return Ok(None);
+        };
+        let names = state.config.credentials_for(url);
+        if names.is_empty() {
+            return Ok(None);
+        }
+        let Some(crypto) = &state.crypto else {
+            return Err("the mapping names a credential, and there is no credential store to open it".to_string());
+        };
+        match credentials::resolve(crypto.as_ref(), names, url).await {
+            Resolution::Public => Ok(None),
+            Resolution::Ready(secret) => Ok(Some(secret)),
+            Resolution::Refused(reason) => Err(reason),
+        }
+    }
+
     /// Submits the pipeline job using a known image digest.
     /// Called either directly from handle_start (image was in config) or
     /// from handle_poll after a bootstrap job succeeds.
@@ -282,6 +308,17 @@ impl BuildJobActor {
     ) -> Result<(), ActorProcessingErr> {
         let build_id = state.request.build_id;
 
+        // What this build may clone with is decided here, from the signed mapping, and never from the request.
+        let git_secret = match Self::resolve_git_secret(state).await {
+            Ok(secret) => secret,
+            Err(reason) => {
+                tracing::error!(build_id = %build_id, %reason, "the build's credential could not be had");
+                self.fail(state, reason, STAGE_SCHEDULING).await?;
+                myself.stop(Some("no credential".to_string()));
+                return Ok(());
+            }
+        };
+
         let git_credentials = git_credentials_from_config(&state.config);
         let registry_credentials = registry_credentials_from_config(&state.config);
 
@@ -293,6 +330,7 @@ impl BuildJobActor {
             registry_credentials,
             state.request.command.clone(),
         );
+        spec.git_secret = git_secret;
         spec.env = state
             .config
             .backend

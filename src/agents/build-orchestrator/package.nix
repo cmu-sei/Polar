@@ -121,6 +121,23 @@ let
 
       mkdir -p "$CYCLOPS_WORKSPACE"
 
+      # A private repository: the orchestrator mounts the credential as files, and git is told to ask this
+      # script for it, so it is in no URL, no environment variable and no process argument. The script holds
+      # no secret itself; it reads the files when git asks.
+      if [[ -n "''${CYCLOPS_GIT_CREDENTIALS_DIR:-}" ]]; then
+        askpass="$(mktemp /tmp/git-askpass.XXXXXX)"
+        cat > "$askpass" <<'ASKPASS'
+#!${pkgs.bash}/bin/bash
+case "$1" in
+  Username*) cat "$CYCLOPS_GIT_CREDENTIALS_DIR/username" ;;
+  *) cat "$CYCLOPS_GIT_CREDENTIALS_DIR/password" ;;
+esac
+ASKPASS
+        chmod 700 "$askpass"
+        export GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0
+        echo "[clone] using the build's credential"
+      fi
+
       echo "[clone] cloning (partial)..."
       git clone \
         --no-checkout \
