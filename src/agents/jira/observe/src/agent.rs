@@ -27,7 +27,7 @@
 use crate::settings::{self, JiraSettings};
 use crate::supervisor::{ObserverSupervisor, ObserverSupervisorArgs, SHUTDOWN_BUDGET};
 use crate::{JiraAuth, JiraDeployment};
-use polar_agent_builder::{Cause, Configured, PolarAgent, StartError, TopicDecl};
+use polar_agent_builder::{Cause, Configured, GraphDecl, PolarAgent, StartError, TopicDecl};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
@@ -67,14 +67,32 @@ impl PolarAgent for JiraObserver {
             "the issues it reads from Jira",
         )
         .because(&[Cause::Timer("poll")]),
+        // Where its first issue pull starts: the newest update of an issue in the graph, asked of the state agent
+        // (docs/architecture/soft-state.md, "The Jira cursor").
+        TopicDecl::publish(
+            soft_state_common::REQUESTS_TOPIC,
+            "the question where its first issue pull starts",
+        )
+        .because(&[Cause::Timer("poll")]),
+        TopicDecl::subscribe(
+            crate::supervisor::STATE_REPLIES_TOPIC,
+            "the state agent's answer, on its own reply topic",
+        )
+        .answers(&[Cause::Timer("poll")]),
     ];
+    const GRAPH: &'static [GraphDecl] = &[GraphDecl::reads(
+        crate::issues::CURSOR_LABEL,
+        "the newest updated_ms of an issue, where its first issue pull starts",
+    )];
     const SECTIONS: &'static [&'static Section] = &[&settings::SECTION, &polar::egress::SECTION];
     const HELP: Option<&'static str> = Some(
         "jira-observer polls the Jira site at JIRA_URL every half hour and publishes its \
          projects, groups, users and issues for jira-processor to write into the graph. \
          JIRA_TOKEN is the credential; with JIRA_EMAIL as well it is Atlassian Cloud's basic \
          authentication, without it a bearer token. JIRA_DEPLOYMENT overrides the guess made \
-         from the address, and QUERY_DATE starts the first full pull from a date. The egress \
+         from the address. Before its first issue pull it asks the state agent for the newest update of an \
+         issue in the graph and starts there; QUERY_DATE starts the first pull from a date only when the graph \
+         has no issue. The egress \
          section says how the site is reached: through POLAR_EGRESS_PROXY unless the host is in \
          POLAR_EGRESS_NO_PROXY, trusting the CA certificates of POLAR_EGRESS_CA_CERT beside the \
          system's (the CA of a TLS-intercepting proxy).",

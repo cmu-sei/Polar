@@ -3866,6 +3866,7 @@ dependencies = [
  "base64 0.22.1",
  "cassini-client",
  "cassini-types",
+ "cert-issuer-common",
  "jira_common",
  "log",
  "polar",
@@ -3879,12 +3880,14 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "soft-state-common",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-glog",
  "tracing-subscriber",
  "url",
+ "uuid",
  "wiremock",
 ]
 

@@ -40,7 +40,7 @@ changes to them, signed-configuration.md):
 | `JIRA_EMAIL` | optional | set: Basic `email:token` (a Jira Cloud API token); unset: `Bearer <token>` (a Data Center or Server personal access token) (`lib.rs`, `JiraAuth::from_parts`) |
 | `JIRA_DEPLOYMENT` | optional | `cloud`, `server` or `datacenter`; unset, Cloud only for an `.atlassian.net` address |
 | `PROXY_CA_CERT` | optional | a PEM path; nothing can mount one yet (below: private CAs and proxies) |
-| `QUERY_DATE` | optional | the first full issue pull asks only for `updated > QUERY_DATE` |
+| `QUERY_DATE` | optional | when the graph has no issue yet, the first issue pull asks only for `updated > QUERY_DATE`; once it has one, the first pull starts from the graph instead (below) |
 
 Every endpoint is the site root plus `/rest/api/...`, so `normalise_jira_url` (`settings.rs:115`) is applied at start:
 trailing slashes are dropped, and an address is refused, with what to set, when its scheme is not http(s), a path
@@ -75,9 +75,19 @@ because the render's `--check` runs on targets that still hold the placeholder.
    `[]`, `serverInfo` without a version where anonymous access is locked down.
 3. A token that decodes from base64 to printable text is warned about once at start (`settings.rs:155`,
    `token_looks_base64`); a Data Center token, itself base64-looking, decodes to binary and does not trip it.
-4. Projects, groups, users and issues each pull at once and then every 1800 s (`agent.rs:39`). The first issue pull is
-   full (or from `QUERY_DATE`); later ones ask for `updated >=` the start of the last SUCCESSFUL pull plus 300 s overlap,
-   never less than 35 minutes (`issues.rs:240`, `incremental_window`), so a long outage leaves no gap.
+4. Projects, groups, users and issues each pull at once and then every 1800 s (`agent.rs:39`). **Before its first
+   issue pull** the issue observer asks the state agent (`soft-state.md`) for the newest `updated_ms` of a `JiraIssue`
+   in the graph, which jira-processor writes for every issue: `Max { JiraIssue, updated_ms }` on `soft-state-requests`,
+   answered on its own `soft-state-replies.jira-observer` (`supervisor.rs`, `state_asker`, an 8 s wait, a fresh
+   correlation id each time). With a time `t`, the first pull asks `updated >= -Nm`, N the minutes from `t` to now
+   plus the 300 s overlap, rounded up, at least 1 (`issues.rs`, `cursor_minutes`); relative, so the Jira user's time
+   zone does not enter. With no issue in the graph it is full, or from `QUERY_DATE`. A refusal, a graph the state
+   agent cannot read, or no answer is retried on the backoff below, and nothing is pulled until it says: never a full
+   pull (`issues.rs`, `start_from`). Later pulls ask for `updated >=` the start of the last SUCCESSFUL pull plus 300 s
+   overlap, never less than 35 minutes (`incremental_window`), so a long outage leaves no gap. Every issue pull is
+   ordered `ORDER BY updated ASC`, on Data Center and Cloud alike (`issue_jql`; a full pull on Cloud is bounded by
+   `project is not EMPTY`), so a pull cut short leaves the graph's newest update meaning everything older was
+   written. The projects, groups and users observers ask nothing.
 5. **Every Jira failure is retried, not fatal** (`lib.rs:403`, `settle`): an HTTP error, a connection, DNS or TLS
    failure, a timeout (connect 15 s, request 120 s, `supervisor.rs:56-61`), a decode error or a refused token is logged
    once per attempt (the host kept out of messages above debug) and retried after 30 s, doubling to 15 minutes
@@ -119,8 +129,11 @@ then what each pattern means. It never prints the host, URL, email or token (INF
 
 - The user picker sends `query=''` and may repeat pages (`users.rs`; remaining-work.md); not changed, because what an
   empty query lists differs between Jira versions.
-- The cursor: whether the full pull is done is held in memory, so every restart (about every half hour, with
-  rejuvenation) pulls everything again or from the fixed `QUERY_DATE`. A user has been moving `QUERY_DATE` by script as
-  a hand-made cursor. The cursor belongs in the graph as soft state (remaining-work.md, "STATE FOR AGENTS THAT IS NOT
-  AUTHORITATIVE"); designed 2026-10-30 in `soft-state.md`, "The Jira cursor".
+- The cursor: BUILT 2026-10-30 (`soft-state.md`, "The Jira cursor"). Before, whether the full pull was done was held
+  in memory, so every restart (about every half hour, with rejuvenation) pulled everything again or from the fixed
+  `QUERY_DATE`, and a user moved `QUERY_DATE` by script as a hand-made cursor. Now the first pull after a start begins
+  at the graph's newest issue; `QUERY_DATE` applies only to a graph with no issue. Not yet seen on a cluster. Kept
+  open: pagination by `startAt` can skip an issue updated during a pull, as before; the display name `Updated` is
+  Jira's English one; and a graph whose issues were all written before jira-processor wrote `updated_ms` answers that
+  none has it, so the first start after the upgrade pulls everything (or from `QUERY_DATE`) once, as before.
 - A failed container's cause outlives it only if written to a volume that survives the in-place restart.

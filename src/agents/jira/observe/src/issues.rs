@@ -30,7 +30,11 @@ use polar::cassini::TcpClient;
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use reqwest::Url;
 use serde_json::Value;
+use soft_state_common::{Answer, StateReply};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -42,6 +46,67 @@ const PAGE_SIZE: usize = 50;
 /// does not lose an update that landed between two windows. The processor
 /// upserts, so an issue seen twice is harmless.
 pub const INCREMENTAL_OVERLAP_SECS: u64 = 300;
+
+/// What every issue pull is ordered by, so that a pull cut short leaves the graph's newest `updated` meaning that
+/// everything older was written (docs/architecture/soft-state.md, "The Jira cursor").
+pub const ORDER: &str = "ORDER BY updated ASC";
+
+/// The label and property the cursor is the largest of: what jira-processor writes for each issue
+/// (`jira/process/src/issues.rs`, `UPDATED_MS`).
+pub const CURSOR_LABEL: &str = "JiraIssue";
+pub const CURSOR_PROPERTY: &str = "updated_ms";
+
+/// One question to the state agent, where issue pulls start: an [`Answer`] for each call, a fresh correlation id each
+/// time (`supervisor.rs`, `state_asker`).
+pub type AskCursor = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Answer> + Send>> + Send + Sync>;
+
+/// Where the first issue pull starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Start {
+    /// From the newest update of an issue the graph has, in epoch milliseconds.
+    Since(i64),
+    /// The graph has no issue: the first pull is full, or from `QUERY_DATE`.
+    Scratch,
+}
+
+/// What the state agent's answer means for the first pull: where it starts, or why it cannot start yet. Only a value
+/// says where; a refusal, an unavailable graph or no answer is retried, and never taken for an empty graph, since a
+/// full pull is what the cursor is there to avoid.
+pub fn start_from(answer: &Answer) -> Result<Start, String> {
+    match answer {
+        Answer::Replied(StateReply::Value(Some(newest_ms))) => Ok(Start::Since(*newest_ms)),
+        Answer::Replied(StateReply::Value(None)) => Ok(Start::Scratch),
+        Answer::Replied(StateReply::Refused(why)) => Err(format!(
+            "the state agent refused to say where issue pulls start: {why}"
+        )),
+        Answer::Replied(StateReply::Unavailable(why)) => Err(format!(
+            "the state agent could not say where issue pulls start: {why}"
+        )),
+        Answer::NoReply(why) => Err(format!(
+            "no answer from the state agent on where issue pulls start: {why}"
+        )),
+    }
+}
+
+/// How many minutes back the first pull asks, from `now_ms` on this clock to the graph's newest update `newest_ms`:
+/// the gap plus the overlap ([`INCREMENTAL_OVERLAP_SECS`], which covers the skew between the clocks), rounded up, and
+/// at least one. A newest update ahead of this clock leaves the overlap alone.
+pub fn cursor_minutes(now_ms: i64, newest_ms: i64) -> u64 {
+    // In i128, so no difference of two i64s saturates.
+    let gap = u128::try_from(i128::from(now_ms) - i128::from(newest_ms)).unwrap_or(0);
+    let reach = gap + u128::from(INCREMENTAL_OVERLAP_SECS) * 1000;
+    u64::try_from(reach.div_ceil(60_000))
+        .unwrap_or(u64::MAX)
+        .max(1)
+}
+
+/// This machine's time, in epoch milliseconds.
+pub fn wall_clock_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
 
 pub struct JiraIssueObserver;
 
@@ -62,6 +127,15 @@ impl JiraIssueObserver {
         // sooner after a failure.
         myself.cast(Self::tick())?;
         Ok(())
+    }
+
+    /// Where the first pull starts, asked of the state agent once per attempt. An observer given no way to ask (a test
+    /// of something else) starts as it did before there was one.
+    async fn learn_start(state: &JiraObserverState) -> Result<Start, String> {
+        match &state.cursor {
+            Some(ask) => start_from(&ask().await),
+            None => Ok(Start::Scratch),
+        }
     }
 
     /// Pulls issues from Jira and publishes each one. A failure in talking
@@ -87,16 +161,19 @@ impl JiraIssueObserver {
                 (state.clock)(),
                 state.base_interval,
             ),
+            state.start,
+            (state.wall_clock)(),
             state.query_date.as_deref(),
         );
         info!(
             "Pulling issues ({})",
-            if state.full_pull_done {
-                "incremental"
-            } else {
-                "full"
+            match (state.full_pull_done, state.start) {
+                (true, _) => "incremental",
+                (false, Some(Start::Since(_))) => "from the newest issue the graph has",
+                (false, _) => "full",
             }
         );
+        let jql = issue_jql(filter.as_deref(), state.deployment);
 
         match state.deployment {
             JiraDeployment::ServerOrDataCenter => {
@@ -104,14 +181,12 @@ impl JiraIssueObserver {
                 let mut start_at = 0usize;
 
                 loop {
-                    let mut params = vec![
+                    let params = vec![
                         ("startAt", start_at.to_string()),
                         ("maxResults", PAGE_SIZE.to_string()),
                         ("expand", "changelog".to_string()),
+                        ("jql", jql.clone()),
                     ];
-                    if let Some(jql) = &filter {
-                        params.push(("jql", jql.clone()));
-                    }
                     let url = Url::parse_with_params(&endpoint, params)?;
                     debug!("{url}");
 
@@ -131,15 +206,8 @@ impl JiraIssueObserver {
             }
             JiraDeployment::Cloud => {
                 // Cloud removed /rest/api/2/search (CHANGE-2046). Use
-                // /rest/api/3/search/jql with cursor-based pagination.
-                // Cloud rejects fully unbounded JQL, so a full pull uses
-                // "project is not EMPTY", Atlassian's own recommended
-                // dummy bound; an incremental pull is already bounded by
-                // its updated clause.
-                let jql = match &filter {
-                    Some(filter) => format!("{filter} order by updated DESC"),
-                    None => "project is not EMPTY order by created DESC".to_string(),
-                };
+                // /rest/api/3/search/jql with cursor-based pagination; the
+                // JQL is bounded even for a full pull (`issue_jql`).
                 let endpoint = format!("{}/rest/api/3/search/jql", state.jira_url);
                 let mut next_page_token: Option<String> = None;
 
@@ -199,7 +267,8 @@ impl Actor for JiraIssueObserver {
             Duration::from_secs(args.base_interval),
         )
         .with_query_date(args.query_date)
-        .with_retry(args.retry, args.clock))
+        .with_retry(args.retry, args.clock)
+        .with_cursor(args.cursor, args.wall_clock))
     }
 
     async fn post_start(
@@ -219,6 +288,32 @@ impl Actor for JiraIssueObserver {
         match message {
             JiraObserverMessage::Tick(command) => {
                 if let Command::GetIssues(op) = command {
+                    // Before the first pull, where it starts: the graph's newest issue, through the state agent. Until
+                    // it says, nothing is pulled, and the question is asked again on the observer's backoff.
+                    if !state.full_pull_done && state.start.is_none() {
+                        match JiraIssueObserver::learn_start(state).await {
+                            Ok(start) => {
+                                match start {
+                                    Start::Since(newest_ms) => info!(
+                                        "the graph's newest issue was updated at {newest_ms} ms; the first pull \
+                                         starts there"
+                                    ),
+                                    Start::Scratch => info!(
+                                        "the graph has no issue; the first pull is full, or from QUERY_DATE"
+                                    ),
+                                }
+                                state.start = Some(start);
+                            }
+                            Err(why) => {
+                                return state.settle(
+                                    &myself,
+                                    JIRA_ISSUE_OBSERVER,
+                                    Err(JiraError::no_cursor(why).into()),
+                                    Self::tick,
+                                );
+                            }
+                        }
+                    }
                     let started = (state.clock)();
                     let pulled = JiraIssueObserver::pull_issues(&op, state).await;
                     if pulled.is_ok() {
@@ -249,24 +344,42 @@ pub fn incremental_window(
         .max(base_interval)
 }
 
-/// The JQL restricting a pull, if any. The first pull is full unless a
-/// QUERY_DATE was given to start from; every pull after a completed one only
-/// asks for what changed within the window (`incremental_window`) plus the
-/// overlap, in whole minutes rounded up.
+/// The JQL restricting a pull, if any. Every pull after a completed one only asks for what changed within the window
+/// (`incremental_window`) plus the overlap, in whole minutes rounded up. The first starts where the graph's newest
+/// issue was updated (`start`, [`cursor_minutes`] back from `now_ms`), relative, so the Jira user's time zone, which
+/// JQL applies to an absolute date, does not enter; with no issue in the graph it is full, unless a QUERY_DATE was
+/// given to start from.
 pub fn jql_filter(
     full_pull_done: bool,
     window: Duration,
+    start: Option<Start>,
+    now_ms: i64,
     query_date: Option<&str>,
 ) -> Option<String> {
     if full_pull_done {
         let reach = window + Duration::from_secs(INCREMENTAL_OVERLAP_SECS);
         let minutes = reach.as_millis().div_ceil(60_000);
         Some(format!("updated >= -{minutes}m"))
+    } else if let Some(Start::Since(newest_ms)) = start {
+        Some(format!(
+            "updated >= -{}m",
+            cursor_minutes(now_ms, newest_ms)
+        ))
     } else {
         match query_date {
             Some(date) if !date.is_empty() => Some(format!("updated > {date}")),
             _ => None,
         }
+    }
+}
+
+/// The whole JQL of an issue pull: its filter, if any, then [`ORDER`]. Jira Cloud rejects fully unbounded JQL, so a
+/// full pull there is bounded by "project is not EMPTY", Atlassian's own recommended dummy bound.
+pub fn issue_jql(filter: Option<&str>, deployment: JiraDeployment) -> String {
+    match (filter, deployment) {
+        (Some(filter), _) => format!("{filter} {ORDER}"),
+        (None, JiraDeployment::Cloud) => format!("project is not EMPTY {ORDER}"),
+        (None, JiraDeployment::ServerOrDataCenter) => ORDER.to_string(),
     }
 }
 
@@ -366,23 +479,98 @@ mod tests {
         assert!(!rename_fields(&mut issue, &names()));
     }
 
+    const NOW: i64 = 1_704_164_645_000;
+
     #[test]
-    fn the_first_pull_is_full_unless_a_start_date_was_given() {
+    fn with_no_issue_in_the_graph_the_first_pull_is_full_unless_a_start_date_was_given() {
         let interval = Duration::from_secs(1800);
-        assert_eq!(jql_filter(false, interval, None), None);
-        assert_eq!(jql_filter(false, interval, Some("")), None);
+        for start in [None, Some(Start::Scratch)] {
+            assert_eq!(jql_filter(false, interval, start, NOW, None), None);
+            assert_eq!(jql_filter(false, interval, start, NOW, Some("")), None);
+            assert_eq!(
+                jql_filter(false, interval, start, NOW, Some("2024-01-01")),
+                Some("updated > 2024-01-01".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_pull_starts_at_the_graph_s_newest_issue_and_query_date_does_not_apply() {
+        let interval = Duration::from_secs(1800);
+        // Updated an hour ago: 60 minutes, and the overlap's five.
         assert_eq!(
-            jql_filter(false, interval, Some("2024-01-01")),
-            Some("updated > 2024-01-01".to_string())
+            jql_filter(
+                false,
+                interval,
+                Some(Start::Since(NOW - 3_600_000)),
+                NOW,
+                Some("2020-01-01")
+            ),
+            Some("updated >= -65m".to_string())
+        );
+        // A second over a minute rounds up.
+        assert_eq!(
+            jql_filter(false, interval, Some(Start::Since(NOW - 61_000)), NOW, None),
+            Some("updated >= -7m".to_string())
+        );
+        // A newest update ahead of this clock still asks for the overlap.
+        assert_eq!(
+            jql_filter(
+                false,
+                interval,
+                Some(Start::Since(NOW + 600_000)),
+                NOW,
+                None
+            ),
+            Some("updated >= -5m".to_string())
         );
     }
 
     #[test]
     fn later_pulls_cover_the_interval_plus_the_overlap() {
         let interval = Duration::from_secs(1800);
+        for start in [None, Some(Start::Scratch), Some(Start::Since(0))] {
+            assert_eq!(
+                jql_filter(true, interval, start, NOW, Some("2024-01-01")),
+                Some("updated >= -35m".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn every_issue_pull_is_ordered_by_its_last_update_oldest_first_on_both_deployments() {
         assert_eq!(
-            jql_filter(true, interval, Some("2024-01-01")),
-            Some("updated >= -35m".to_string())
+            issue_jql(None, JiraDeployment::ServerOrDataCenter),
+            "ORDER BY updated ASC"
         );
+        assert_eq!(
+            issue_jql(None, JiraDeployment::Cloud),
+            "project is not EMPTY ORDER BY updated ASC"
+        );
+        for deployment in [JiraDeployment::ServerOrDataCenter, JiraDeployment::Cloud] {
+            assert_eq!(
+                issue_jql(Some("updated >= -35m"), deployment),
+                "updated >= -35m ORDER BY updated ASC"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_value_says_where_to_start_and_anything_else_is_tried_again() {
+        assert_eq!(
+            start_from(&Answer::Replied(StateReply::Value(Some(NOW)))),
+            Ok(Start::Since(NOW))
+        );
+        assert_eq!(
+            start_from(&Answer::Replied(StateReply::Value(None))),
+            Ok(Start::Scratch)
+        );
+        for answer in [
+            Answer::Replied(StateReply::Refused("not declared".into())),
+            Answer::Replied(StateReply::Unavailable("graph down".into())),
+            Answer::NoReply("timed out".into()),
+        ] {
+            assert!(start_from(&answer).is_err(), "{answer:?}");
+        }
     }
 }

@@ -74,6 +74,7 @@ const TOKEN_REJECTED: &str = "Jira did not accept the token: the request was tre
 pub struct JiraError {
     message: String,
     token_rejected: bool,
+    no_cursor: bool,
 }
 
 impl JiraError {
@@ -81,6 +82,7 @@ impl JiraError {
         Self {
             message,
             token_rejected: false,
+            no_cursor: false,
         }
     }
 
@@ -88,6 +90,17 @@ impl JiraError {
         Self {
             message,
             token_rejected: true,
+            no_cursor: false,
+        }
+    }
+
+    /// The issue observer could not learn where its first pull starts (the state agent did not say): retried as a
+    /// failed pull is, without anything having been asked of Jira.
+    pub fn no_cursor(message: String) -> Self {
+        Self {
+            message,
+            token_rejected: false,
+            no_cursor: true,
         }
     }
 
@@ -245,6 +258,12 @@ pub struct JiraObserverState {
     pub clock: fn() -> Instant,
     /// When this observer pulls next.
     pub retry: Retry,
+    /// How the issue observer asks the state agent where its first pull starts; the other observers ignore it.
+    pub cursor: Option<issues::AskCursor>,
+    /// Where the issue observer's first pull starts, once the state agent has said.
+    pub start: Option<issues::Start>,
+    /// The time in epoch milliseconds, for the issue cursor: the system clock except in a test.
+    pub wall_clock: fn() -> i64,
     /// Whether Jira accepted the token at the last check. It is checked before the first pull
     /// and again before the pull after any failure.
     pub token_checked: bool,
@@ -288,7 +307,21 @@ impl JiraObserverState {
             clock: Instant::now,
             retry: Retry::new(RETRY),
             token_checked: false,
+            cursor: None,
+            start: None,
+            wall_clock: issues::wall_clock_ms,
         }
+    }
+
+    /// How the issue observer asks where its first pull starts, and the wall clock it measures from.
+    pub fn with_cursor(
+        mut self,
+        cursor: Option<issues::AskCursor>,
+        wall_clock: fn() -> i64,
+    ) -> Self {
+        self.cursor = cursor;
+        self.wall_clock = wall_clock;
+        self
     }
 
     /// The date the first full pull starts from.
@@ -421,9 +454,17 @@ impl JiraObserverState {
                 let Some(failure) = e.downcast_ref::<JiraError>() else {
                     return Err(e);
                 };
-                self.token_checked = false;
                 let attempt = self.retry.failures() + 1;
                 let wait = self.retry.next(false, self.base_interval);
+                if failure.no_cursor {
+                    // Nothing was asked of Jira, so the token stands as it was checked.
+                    warn!(
+                        "{observer}: not pulling yet: {failure}. Asking again in {wait:?} (attempt {attempt})"
+                    );
+                    myself.send_after(wait, tick);
+                    return Ok(());
+                }
+                self.token_checked = false;
                 if failure.token_rejected() {
                     error!("{observer}: {failure}. Trying again in {wait:?} (attempt {attempt})");
                 } else {
@@ -475,6 +516,10 @@ pub struct JiraObserverArgs {
     pub retry: Backoff,
     /// The time: `Instant::now`, or a test's clock.
     pub clock: fn() -> Instant,
+    /// How the issue observer asks the state agent where its first pull starts (`supervisor.rs`, `state_asker`).
+    pub cursor: Option<issues::AskCursor>,
+    /// The time in epoch milliseconds: the system clock, or a test's.
+    pub wall_clock: fn() -> i64,
 }
 
 /// Publishes one JiraData value on a topic through the agent's client.

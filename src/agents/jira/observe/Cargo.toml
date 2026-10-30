@@ -47,6 +47,11 @@ tracing-glog.workspace = true
 tracing-subscriber.workspace = true
 tracing.workspace = true
 url.workspace = true
+# The state agent's questions and answers (docs/architecture/soft-state.md), a fresh correlation id for each, and who
+# answered, as the broker names it.
+soft-state-common.workspace = true
+uuid.workspace = true
+cert-issuer-common = { path = "../../cert-issuer/common" }
 
 [dev-dependencies]
 # Test CAs, TLS servers and child processes (polar::egress::testing).

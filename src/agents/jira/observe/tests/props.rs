@@ -26,8 +26,12 @@
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use cassini_client::facade::Backoff;
+use jira_observer::JiraDeployment;
 use jira_observer::Retry;
-use jira_observer::issues::{INCREMENTAL_OVERLAP_SECS, incremental_window, jql_filter};
+use jira_observer::issues::{
+    INCREMENTAL_OVERLAP_SECS, ORDER, Start, cursor_minutes, incremental_window, issue_jql,
+    jql_filter,
+};
 use jira_observer::settings::{normalise_jira_url, token_looks_base64};
 use proptest::prelude::*;
 use std::time::{Duration, Instant};
@@ -220,7 +224,7 @@ proptest! {
         let since = Duration::from_secs(since_secs) + Duration::from_millis(since_millis);
         let base = Duration::from_secs(base_secs);
         let window = incremental_window(Some(now - since), now, base);
-        let jql = jql_filter(true, window, None).unwrap();
+        let jql = jql_filter(true, window, None, 0, None).unwrap();
         let minutes: u64 = jql
             .strip_prefix("updated >= -")
             .and_then(|m| m.strip_suffix('m'))
@@ -237,5 +241,46 @@ proptest! {
         // And it asks for no more than a minute beyond what it needs.
         let needed = since.max(base) + Duration::from_secs(INCREMENTAL_OVERLAP_SECS);
         prop_assert!(Duration::from_secs(minutes * 60) < needed + Duration::from_secs(60), "{}", jql);
+    }
+
+    /// The first pull starts far enough back to cover the whole gap since the graph's newest issue and the overlap,
+    /// never by a minute more than it needs, and never less than a minute, whatever the two clocks say.
+    #[test]
+    fn the_cursor_covers_the_gap_and_the_overlap_and_is_never_less_than_a_minute(
+        now in any::<i64>(),
+        newest in any::<i64>(),
+    ) {
+        let minutes = cursor_minutes(now, newest);
+        prop_assert!(minutes >= 1);
+        let gap = (i128::from(now) - i128::from(newest)).max(0);
+        let reach = gap + i128::from(INCREMENTAL_OVERLAP_SECS) * 1000;
+        prop_assert!(i128::from(minutes) * 60_000 >= reach, "{} minutes < {} ms", minutes, reach);
+        prop_assert!(i128::from(minutes - 1) * 60_000 < reach, "{} minutes is a minute more than {} ms", minutes, reach);
+        // And it is what the first pull asks.
+        let jql = jql_filter(false, Duration::from_secs(1800), Some(Start::Since(newest)), now, Some("2020-01-01"));
+        prop_assert_eq!(jql, Some(format!("updated >= -{minutes}m")));
+    }
+
+    /// Every issue pull's JQL is ordered oldest update first, once, whatever the filter and the deployment.
+    #[test]
+    fn every_issue_pull_is_ordered_oldest_update_first(
+        done in any::<bool>(),
+        window_secs in 0u64..1_000_000,
+        since in proptest::option::of(any::<i64>()),
+        scratch in any::<bool>(),
+        now in any::<i64>(),
+        date in proptest::option::of("[0-9-]{0,10}"),
+        cloud in any::<bool>(),
+    ) {
+        let start = match since {
+            Some(ms) => Some(Start::Since(ms)),
+            None if scratch => Some(Start::Scratch),
+            None => None,
+        };
+        let filter = jql_filter(done, Duration::from_secs(window_secs), start, now, date.as_deref());
+        let deployment = if cloud { JiraDeployment::Cloud } else { JiraDeployment::ServerOrDataCenter };
+        let jql = issue_jql(filter.as_deref(), deployment);
+        prop_assert!(jql.ends_with(ORDER), "{}", jql);
+        prop_assert_eq!(jql.matches("ORDER BY").count(), 1);
     }
 }
