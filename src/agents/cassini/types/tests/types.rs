@@ -481,6 +481,7 @@ fn test_client_message_publish_response() {
         result: Ok(()),
         trace_ctx: None,
         published_by: None,
+        delivery_id: None,
         origin: None,
     };
 

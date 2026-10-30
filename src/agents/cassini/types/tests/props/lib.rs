@@ -183,6 +183,7 @@ proptest! {
             result: Err("no".into()),
             trace_ctx: None,
             published_by: None,
+            delivery_id: None,
             origin: Some(MessageId { epoch, seq }),
         };
         match wire(&refusal) {
@@ -190,6 +191,47 @@ proptest! {
                 prop_assert_eq!(origin, Some(MessageId { epoch, seq }));
             }
             _ => prop_assert!(false, "not a refusal"),
+        }
+    }
+}
+
+proptest! {
+    /// A delivery keeps its origin (who published it and their number for it) and its delivery number through the
+    /// wire, and the client's acknowledgement of it becomes the broker's message naming the same number.
+    #[test]
+    fn a_delivery_s_origin_and_number_survive_the_wire_and_its_acknowledgement(
+        epoch in any::<u64>(),
+        seq in any::<u64>(),
+        delivery_id in any::<u64>(),
+        published_by in proptest::option::of("[a-z][a-z0-9.-]{0,30}"),
+    ) {
+        use cassini_types::{BrokerMessage, ClientMessage, MessageId};
+        use std::sync::Arc;
+        fn wire(message: &ClientMessage) -> ClientMessage {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(message).unwrap();
+            rkyv::from_bytes::<ClientMessage, rkyv::rancor::Error>(&bytes).unwrap()
+        }
+        let delivery = ClientMessage::PublishResponse {
+            topic: "t".to_string(),
+            payload: Arc::new(vec![1, 2]),
+            result: Ok(()),
+            trace_ctx: None,
+            published_by: published_by.clone(),
+            origin: Some(MessageId { epoch, seq }),
+            delivery_id: Some(delivery_id),
+        };
+        match wire(&delivery) {
+            ClientMessage::PublishResponse { origin, delivery_id: d, published_by: p, .. } => {
+                prop_assert_eq!(origin, Some(MessageId { epoch, seq }));
+                prop_assert_eq!(d, Some(delivery_id));
+                prop_assert_eq!(p, published_by);
+            }
+            _ => prop_assert!(false, "not a delivery"),
+        }
+        let ack = wire(&ClientMessage::PublishResponseAck { delivery_id });
+        match BrokerMessage::from_client_message(ack, "c".to_string(), None) {
+            BrokerMessage::PublishResponseAck { delivery_id: d } => prop_assert_eq!(d, delivery_id),
+            _ => prop_assert!(false, "not an acknowledgement of a delivery"),
         }
     }
 }

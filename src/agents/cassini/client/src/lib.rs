@@ -473,6 +473,11 @@ pub enum TcpClientMessage {
     Refused {
         id: MessageId,
     },
+    /// Tell the broker this client has the delivery numbered `delivery_id`, so it lets go of it
+    /// (`ClientMessage::PublishResponseAck`).
+    AcknowledgeDelivery {
+        delivery_id: u64,
+    },
 }
 
 impl TcpClientMessage {
@@ -501,6 +506,7 @@ impl TcpClientMessage {
             TcpClientMessage::Transmit { .. } => "Transmit",
             TcpClientMessage::Acknowledged { .. } => "Acknowledged",
             TcpClientMessage::Refused { .. } => "Refused",
+            TcpClientMessage::AcknowledgeDelivery { .. } => "AcknowledgeDelivery",
         }
     }
 
@@ -843,6 +849,7 @@ impl TcpClientActor {
                 trace_ctx,
                 published_by,
                 origin,
+                delivery_id,
             } => {
                 let span = trace_span!("client.handle_publish_response");
                 if let Some(wire_ctx) = trace_ctx {
@@ -864,6 +871,9 @@ impl TcpClientActor {
                     };
                     TcpClientActor::dispatch_event(delivery, event);
                     trace!("TCP client dispatched MessagePublished for topic {}", topic);
+                    if let Some(delivery_id) = delivery_id {
+                        TcpClientActor::delivery_handed_off(&myself, delivery_id);
+                    }
                 } else if let Err(reason) = result {
                     // The broker did not take our publish: the agent hears it, not only the log.
                     warn!("The broker refused a publish on {topic}: {reason}");
@@ -1103,6 +1113,16 @@ impl TcpClientActor {
                 }
                 other => lifecycle(other),
             },
+        }
+    }
+
+    /// A delivery has been handed to the agent (its router, or whoever listens to its events): the broker is told it
+    /// may let go of it. This is the one place a delivery is acknowledged. Acknowledging it after the agent has done
+    /// its work (a consumer's graph write, docs/architecture/cassini-client-reliability.md, 5a) is not built: it would
+    /// move this call to the domain, which would be given the `delivery_id` with the message.
+    fn delivery_handed_off(myself: &ActorRef<TcpClientMessage>, delivery_id: u64) {
+        if let Err(e) = myself.send_message(TcpClientMessage::AcknowledgeDelivery { delivery_id }) {
+            warn!(delivery_id, "a delivery could not be acknowledged: {e}");
         }
     }
 
@@ -1692,6 +1712,14 @@ impl Actor for TcpClientActor {
                         self.handle_subscribe(myself, state, &reg_id, topic, trace_ctx)
                             .await?;
                     }
+                    TcpClientMessage::AcknowledgeDelivery { delivery_id } => {
+                        TcpClientActor::send_or_fail(
+                            myself,
+                            state,
+                            ClientMessage::PublishResponseAck { delivery_id },
+                        )
+                        .await?;
+                    }
                     TcpClientMessage::UnsubscribeRequest { topic, trace_ctx } => {
                         self.handle_unsubscribe_request(myself, state, &reg_id, topic, trace_ctx)
                             .await?;
@@ -1856,6 +1884,7 @@ mod process_client_message_tests {
                 result: Ok(()),
                 trace_ctx: None,
                 published_by: Some("some-agent".to_string()),
+                delivery_id: None,
                 origin: None,
             },
         );
@@ -1877,6 +1906,49 @@ mod process_client_message_tests {
             }
             other => panic!("expected MessagePublished, got {other:?}"),
         }
+    }
+
+    /// A delivery is acknowledged, by its number, once it has been handed on; a refusal and a delivery with no number
+    /// are not.
+    #[tokio::test]
+    async fn a_delivery_handed_on_is_acknowledged_by_its_number() {
+        let (myself, received) = spawn_fake_tcp_client().await;
+        let (delivery, captured) = broadcast_delivery().await;
+        for (result, delivery_id) in [
+            (Ok(()), Some(42)),
+            (Err("refused".to_string()), None),
+            (Ok(()), None),
+        ] {
+            TcpClientActor::process_client_message(
+                myself.clone(),
+                &delivery,
+                None,
+                ClientMessage::PublishResponse {
+                    topic: "news".to_string(),
+                    payload: b"x".to_vec().into(),
+                    result,
+                    trace_ctx: None,
+                    published_by: None,
+                    origin: None,
+                    delivery_id,
+                },
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let acknowledged: Vec<u64> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|m| match m {
+                TcpClientMessage::AcknowledgeDelivery { delivery_id } => Some(*delivery_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(acknowledged, [42]);
+        assert!(matches!(
+            captured.lock().unwrap().first(),
+            Some(ClientEvent::MessagePublished { .. })
+        ));
     }
 
     /// The events the client dispatches for one message from the broker.
@@ -1923,6 +1995,7 @@ mod process_client_message_tests {
             result: Err("broker rejected it".to_string()),
             trace_ctx: None,
             published_by: None,
+            delivery_id: None,
             origin: None,
         })
         .await;
@@ -2013,6 +2086,7 @@ mod process_client_message_tests {
                 result: Err("the broker refused: no".to_string()),
                 trace_ctx: None,
                 published_by: None,
+                delivery_id: None,
                 origin: None,
             },
             // Someone else's message, delivered: not an answer to anything this client asked.
@@ -2022,6 +2096,7 @@ mod process_client_message_tests {
                 result: Ok(()),
                 trace_ctx: None,
                 published_by: None,
+                delivery_id: None,
                 origin: None,
             },
         ])
@@ -2068,6 +2143,7 @@ mod process_client_message_tests {
                     result: Err(reason.clone()),
                     trace_ctx: None,
                     published_by: None,
+                    delivery_id: None,
                     origin: None,
                 }
             };

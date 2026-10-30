@@ -921,6 +921,8 @@ impl Actor for SessionAgent {
                 topic,
                 trace_ctx,
                 published_by,
+                origin,
+                delivery_id,
             } => {
                 self.handle_push_message(
                     myself.clone(),
@@ -929,6 +931,8 @@ impl Actor for SessionAgent {
                     topic,
                     trace_ctx,
                     published_by,
+                    origin,
+                    delivery_id,
                 )
                 .await?;
             }
@@ -1169,6 +1173,7 @@ impl SessionAgent {
                         trace_ctx: Some(span.context()),
                         published_by: None,
                         origin: Some(id),
+                        delivery_id: None,
                     });
                 // no broker -> timeout path (client may be fine; broker is not)
                 let _ = myself.send_message(BrokerMessage::TimeoutMessage {
@@ -1214,6 +1219,7 @@ impl SessionAgent {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_push_message(
         &self,
         _myself: ActorRef<BrokerMessage>,
@@ -1222,6 +1228,8 @@ impl SessionAgent {
         topic: String,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        origin: Option<MessageId>,
+        delivery_id: u64,
     ) -> Result<(), ActorProcessingErr> {
         let registration_id = state.registration_id.clone();
         let span = trace_span!("session.push_message", %registration_id, %topic);
@@ -1231,21 +1239,21 @@ impl SessionAgent {
 
         if let Err(e) = state.client_ref.cast(BrokerMessage::PublishResponse {
             topic: topic.clone(),
-            payload: payload.clone(),
+            payload,
             result: Ok(()),
             trace_ctx: Some(span.context()),
-            published_by: published_by.clone(),
-            origin: None,
+            published_by,
+            origin,
+            delivery_id: Some(delivery_id),
         }) {
             warn!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}: {e}");
 
             if let Some(subscriber) = where_is(get_subscriber_name(&registration_id, &topic)) {
                 subscriber
-                    .send_message(BrokerMessage::PushMessageFailed {
-                        payload: payload.clone(),
-                        published_by: published_by.clone(),
+                    .send_message(BrokerMessage::PushMessageFailed { delivery_id })
+                    .inspect_err(|_| {
+                        warn!("failed to tell the subscriber on {topic} a delivery failed")
                     })
-                    .inspect_err(|_| warn!("failed to DLQ message on topic {topic}"))
                     .ok();
             }
         }

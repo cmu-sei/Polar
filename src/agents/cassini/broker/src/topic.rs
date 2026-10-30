@@ -443,6 +443,7 @@ impl TopicManager {
                 trace_ctx: Some(span.context()),
                 published_by,
                 origin: None,
+                delivery_id: None,
             }) {
                 error!("Failed to forward publish response to broker: {}", e);
             }
@@ -534,9 +535,17 @@ impl TopicManager {
 /// The broker supervisor is generally notified of incoming messages on the message queue.
 struct TopicAgent;
 
+/// A message waiting in a topic with no subscriber: when it came, its payload, who published it and their number for it.
+type Queued = (
+    std::time::Instant,
+    Arc<Vec<u8>>,
+    Option<String>,
+    Option<MessageId>,
+);
+
 struct TopicAgentState {
     subscribers: HashMap<String, ActorRef<BrokerMessage>>,
-    queue: VecDeque<(std::time::Instant, Arc<Vec<u8>>, Option<String>)>,
+    queue: VecDeque<Queued>,
     flushing: bool,
 }
 
@@ -670,7 +679,7 @@ impl TopicAgent {
         // Actually, during shutdown, there are no active subscribers (they are terminated in phase 4).
         // But phase 3 (flush) happens before phase 4 (terminate subscribers). So subscribers might still exist.
         // We must attempt to deliver all queued messages to existing subscribers.
-        while let Some((_queued_at, msg, published_by)) = state.queue.pop_front() {
+        while let Some((_queued_at, msg, published_by, origin)) = state.queue.pop_front() {
             if state.subscribers.is_empty() {
                 warn!(
                     "Discarding queued message on topic {} during flush: no subscribers",
@@ -685,7 +694,8 @@ impl TopicAgent {
                     result: Ok(()),
                     trace_ctx: None,
                     published_by: published_by.clone(),
-                    origin: None,
+                    origin,
+                    delivery_id: None,
                 }) {
                     warn!("Failed to deliver queued message to subscriber: {}", e);
                 }
@@ -749,7 +759,8 @@ impl TopicAgent {
                 result: Ok(()),
                 trace_ctx: Some(span.context()),
                 published_by: published_by.clone(),
-                origin: None,
+                origin: Some(id),
+                delivery_id: None,
             }) {
                 Ok(()) => delivered += 1,
                 Err(_) => ended.push(registration_id.clone()),
@@ -762,9 +773,12 @@ impl TopicAgent {
             warn!(%topic, ended = ?ended, "{PUBLISH_REQ_FAILED_TXT}: these subscribers have ended and are dropped");
         }
         if delivered == 0 {
-            state
-                .queue
-                .push_back((std::time::Instant::now(), payload.clone(), published_by));
+            state.queue.push_back((
+                std::time::Instant::now(),
+                payload.clone(),
+                published_by,
+                Some(id),
+            ));
             info!(
                 "{}",
                 format!(
@@ -816,7 +830,7 @@ impl TopicAgent {
             .insert(registration_id, subscriber_ref.clone());
 
         // Drain queued messages now that someone is listening.
-        while let Some((_queued_at, msg, published_by)) = state.queue.pop_front() {
+        while let Some((_queued_at, msg, published_by, origin)) = state.queue.pop_front() {
             subscriber_ref
                 .send_message(BrokerMessage::PublishResponse {
                     topic: myself.get_name().unwrap(),
@@ -824,7 +838,8 @@ impl TopicAgent {
                     result: Ok(()),
                     trace_ctx: Some(span.context()),
                     published_by,
-                    origin: None,
+                    origin,
+                    delivery_id: None,
                 })
                 .ok();
         }
@@ -868,7 +883,7 @@ impl TopicAgent {
         let threshold = std::time::Duration::from_secs(QUEUE_STALE_AFTER_SECS);
         let mut dropped = 0usize;
 
-        while let Some((queued_at, _, _)) = state.queue.front() {
+        while let Some((queued_at, _, _, _)) = state.queue.front() {
             if queued_at.elapsed() < threshold {
                 break;
             }

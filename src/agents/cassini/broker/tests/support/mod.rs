@@ -1037,6 +1037,15 @@ impl FacadeClient {
     }
 }
 
+/// A delivery as a raw connection reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delivery {
+    pub payload: Vec<u8>,
+    pub published_by: Option<String>,
+    pub origin: Option<cassini_types::MessageId>,
+    pub delivery_id: u64,
+}
+
 /// A connection to the broker with no client behind it: the test writes and reads the frames itself, so it can send
 /// what no client would (a frame header over the limit) or stop reading while the socket stays open.
 pub struct RawConnection {
@@ -1106,8 +1115,13 @@ impl RawConnection {
 
     /// Registers, and returns the session the broker gave.
     pub async fn register(&mut self) -> String {
+        self.register_resuming(None).await
+    }
+
+    /// Registers asking to resume `registration_id`, and returns the session the broker gave.
+    pub async fn register_resuming(&mut self, registration_id: Option<String>) -> String {
         self.send(&cassini_types::ClientMessage::RegistrationRequest {
-            registration_id: None,
+            registration_id,
             trace_ctx: None,
         })
         .await;
@@ -1119,6 +1133,41 @@ impl RawConnection {
                 _ => continue,
             }
         }
+    }
+
+    /// The next delivery on `topic` within `within`, or `None`: its payload, its origin and its number.
+    pub async fn next_delivery(&mut self, topic: &str, within: Duration) -> Option<Delivery> {
+        tokio::time::timeout(within, async {
+            loop {
+                if let cassini_types::ClientMessage::PublishResponse {
+                    topic: t,
+                    payload,
+                    result: Ok(()),
+                    published_by,
+                    origin,
+                    delivery_id: Some(delivery_id),
+                    ..
+                } = self.read().await?
+                    && t == topic
+                {
+                    return Some(Delivery {
+                        payload: payload.to_vec(),
+                        published_by,
+                        origin,
+                        delivery_id,
+                    });
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Tells the broker this client has the delivery numbered `delivery_id`.
+    pub async fn acknowledge(&mut self, delivery_id: u64) {
+        self.send(&cassini_types::ClientMessage::PublishResponseAck { delivery_id })
+            .await;
     }
 
     /// Subscribes to `topic` and waits until the broker has taken it.

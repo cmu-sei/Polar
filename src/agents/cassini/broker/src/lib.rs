@@ -26,6 +26,7 @@ pub mod agent;
 pub mod authority;
 pub mod broker;
 pub mod control;
+pub mod deliveries;
 pub mod listener;
 pub mod session;
 pub mod settings;

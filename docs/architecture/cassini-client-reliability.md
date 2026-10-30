@@ -110,6 +110,37 @@ Built with the backpressure plan's decisions (cassini-backpressure.md, "Decided"
   out of order; a full outbox holding what follows; a refused one let go), the broker's
   `each_publish_is_acknowledged_by_its_own_number` and `a_refused_publish_is_named_by_its_number`
   (`cassini/broker/tests/acknowledgments.rs`), and the wire's round trip (`cassini/types/tests/props/lib.rs`).
+
+### Step 5's acknowledged deliveries, as built (2026-10-30)
+
+The acknowledgement part of step 5, with step 2 (cassini-backpressure.md, "Decided" 4). Persistence is not in it.
+
+- **The wire.** A delivery (`PublishResponse` with `Ok`) carries its origin, who published it (`published_by`, when
+  they share it) and their `(epoch, seq)` (`origin`), and the broker's number for it, `delivery_id`; the client
+  returns the number in `ClientMessage::PublishResponseAck { delivery_id }`. The fieldless
+  `BrokerMessage::PublishResponseAck`, which nothing used, is now the broker's form of that acknowledgement.
+- **The subscriber's delivery outbox** (`cassini/broker/src/deliveries.rs`, held by each `SubscriberAgent`,
+  `subscriber.rs`): every message the subscriber is given is numbered (`next_delivery_id`, unique in the broker) and
+  held from then until its client acknowledges it, whether it is sent at once or held (a superseded session's). It
+  replaces the dead-letter queue: a push that fails leaves the delivery where it is (`PushMessageFailed` names it),
+  a resumed session is sent everything held again, oldest first, with the numbers it had, and a session that takes
+  an identity over is handed what the old one held (`ClaimHeld`), which its new subscriber numbers and holds in turn.
+- **The acknowledgement's way back:** the Listener remembers which topic each delivery it wrote came on
+  (`ListenerState::deliveries`) and passes the client's acknowledgement to that topic's subscriber of its session
+  (`Listener::handle_delivery_ack`).
+- **The client** acknowledges a delivery once it has handed it to the agent: its router, or whoever listens to its
+  events (`TcpClientActor::delivery_handed_off`, the one place it is done, called by the reader after the
+  hand-off). **Not built:** the acknowledgement after the agent's work (5a: a consumer acknowledges after its graph
+  write). It would move that one call to the domain, which would be given the `delivery_id` with the message
+  (`polar_router::IncomingMessage` does not carry it today), and until it is built a consumer that dies with a message
+  in its mailbox loses it, as before.
+- **What it gives:** a delivery the client never had (written to a connection that died, or held while it was away)
+  is sent again on resume; one it had but whose acknowledgement was lost is sent twice (at-least-once, no
+  deduplication: step 4).
+- **Tests:** `deliveries.rs`'s own; `cassini/broker/tests/deliveries.rs` (a delivery names its publisher, their
+  number and its own; what was not acknowledged is sent again on resume and what was is not; the client acknowledges
+  on hand-off, so a resumed session is owed nothing); the client's
+  `a_delivery_handed_on_is_acknowledged_by_its_number`; the wire's round trip.
 - **No production agent uses `ClientEvent::PublishAcknowledged`;** the harness producer, the CLI and the broker tests
   do.
 - **How the agents treat a failed publish** (which a bound would make happen): jira-observer propagates it, and a
@@ -164,7 +195,7 @@ the file once the outbox is empty.
 ![inbound](sequences/general/cassini_client_inbound.svg)
 
 The same problem in the other direction. The broker keeps a delivery until the client acknowledges it
-(`PublishResponseAck`, which exists in the protocol), and the facade drops a repeat by its origin.
+(`PublishResponseAck`, built 2026-10-30), and the facade drops a repeat by its origin (not built: step 4).
 
 ### The facade's states
 
@@ -290,4 +321,6 @@ credentials agent's volume and the databases.
    existing ack. *(Done 2026-10-30: "Step 2, as built".)*
 3. The offline file: quiesce on trouble, rehydrate on start, replay.
 4. Dedupe at the broker and at subscribers, with the epoch and sequence.
-5. The broker's per-subscriber outbox and, if decided, persistence.
+5. The broker's per-subscriber outbox and, if decided, persistence. *(The outbox and the acknowledgements built
+   2026-10-30, acknowledged on hand-off: "Step 5's acknowledged deliveries, as built". Not built: the acknowledgement
+   after the domain's work, and persistence, decided against, section 6.)*

@@ -253,6 +253,8 @@ Nothing bounds what the broker holds, by count, bytes or time, except the sessio
 - **Holders:** the topic queue for no subscribers is unbounded in size and drops by age after 180 s, checked every 60 s
   (`topic.rs:37-41, 530, 847-870`); a subscriber's dead-letter queue (`subscriber.rs:643`) is unbounded, with no expiry
   of its own, until its session is swept at `R` (600 s, `lib.rs:40`); replays to a resumed subscriber are a burst.
+  *(Since 2026-10-30 the dead-letter queue is the subscriber's delivery outbox, which holds every delivery until its
+  client acknowledges it: cassini-client-reliability.md, "Step 5's acknowledged deliveries, as built".)*
 - **Counters:** the session's `pending_publishes` (`session.rs:1137-1145, 1270-1276`) counts publishes between session
   and ack, for the shutdown drain only.
 - **Sockets:** keepalive and `TCP_USER_TIMEOUT` 60 s on both ends (`cassini/types/src/socket.rs:61-77`); no

@@ -677,6 +677,8 @@ struct ListenerState {
     /// Subscriptions the broker dropped itself: the client was told it was refused, so the acknowledgment of the
     /// unsubscribe is not passed on.
     dropped: std::collections::HashSet<String>,
+    /// The deliveries written to this client and not yet acknowledged, by number, with the topic each came on.
+    deliveries: HashMap<u64, String>,
 }
 
 struct ListenerArguments {
@@ -827,6 +829,7 @@ impl Actor for Listener {
             authority: args.authority,
             subscribed: std::collections::HashSet::new(),
             dropped: std::collections::HashSet::new(),
+            deliveries: HashMap::new(),
         })
     }
 
@@ -1102,6 +1105,7 @@ impl Actor for Listener {
                 result,
                 published_by,
                 origin,
+                delivery_id,
             } => {
                 self.handle_publish_response(
                     myself,
@@ -1112,8 +1116,12 @@ impl Actor for Listener {
                     result,
                     published_by,
                     origin,
+                    delivery_id,
                 )
                 .await?;
+            }
+            BrokerMessage::PublishResponseAck { delivery_id } => {
+                Self::handle_delivery_ack(state, delivery_id);
             }
             BrokerMessage::PublishRequestAck {
                 topic,
@@ -1439,6 +1447,7 @@ impl Listener {
                     trace_ctx: WireTraceCtx::from_current_span(),
                     published_by: None,
                     origin: Some(id),
+                    delivery_id: None,
                 };
                 if let Err(e) =
                     Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
@@ -1471,6 +1480,7 @@ impl Listener {
                     trace_ctx: WireTraceCtx::from_current_span(),
                     published_by: None,
                     origin: Some(id),
+                    delivery_id: None,
                 };
                 if let Err(e) =
                     Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
@@ -1495,6 +1505,7 @@ impl Listener {
         result: Result<(), String>,
         published_by: Option<String>,
         origin: Option<MessageId>,
+        delivery_id: Option<u64>,
     ) -> Result<(), ActorProcessingErr> {
         let span =
             trace_span!("cassini.listener.publish_response", topic = ?topic, ok = result.is_ok());
@@ -1514,6 +1525,10 @@ impl Listener {
                 return Ok(());
             }
         }
+        // Which subscriber a delivery came from, by its number, for the client's acknowledgement of it.
+        if let Some(id) = delivery_id {
+            state.deliveries.insert(id, topic.clone());
+        }
         async {
             trace!("Listener received publish response");
             let msg = ClientMessage::PublishResponse {
@@ -1523,6 +1538,7 @@ impl Listener {
                 trace_ctx: WireTraceCtx::from_current_span(),
                 published_by,
                 origin,
+                delivery_id,
             };
             if let Err(e) =
                 Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
@@ -1533,6 +1549,22 @@ impl Listener {
         }
         .instrument(span)
         .await
+    }
+
+    /// The client has the delivery numbered `delivery_id`: the subscriber of the topic it came on lets go of it.
+    fn handle_delivery_ack(state: &mut ListenerState, delivery_id: u64) {
+        let Some(topic) = state.deliveries.remove(&delivery_id) else {
+            debug!(
+                delivery_id,
+                "an acknowledgement of a delivery this connection did not write"
+            );
+            return;
+        };
+        if let Some(registration_id) = &state.registration_id
+            && let Some(subscriber) = where_is(crate::get_subscriber_name(registration_id, &topic))
+        {
+            let _ = subscriber.send_message(BrokerMessage::PublishResponseAck { delivery_id });
+        }
     }
 
     async fn handle_publish_request_ack(

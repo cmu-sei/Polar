@@ -32,8 +32,18 @@ pub use trace::WireTraceCtx;
 
 pub type SessionMap = HashMap<String, SessionDetails>;
 
-/// What a held subscriber hands over: each message it kept, with who published it.
-pub type HeldMessages = Vec<(std::sync::Arc<Vec<u8>>, Option<String>)>;
+/// A message a subscriber keeps for its client: delivered and not acknowledged, or not yet delivered.
+#[derive(Debug, Clone)]
+pub struct HeldDelivery {
+    pub payload: Arc<Vec<u8>>,
+    /// Who published it, if they shared it.
+    pub published_by: Option<String>,
+    /// Its publisher's number for it.
+    pub origin: Option<MessageId>,
+}
+
+/// What a held subscriber hands over: each message it kept, oldest first.
+pub type HeldMessages = Vec<HeldDelivery>;
 
 /// The largest frame either end reads or writes: a hard cap on a frame's declared length, checked before it sizes an
 /// allocation. Without it, `read_u32` handed a value like `0xFFFFFFFF` turns directly into a ~4 GiB `vec![0u8; len]`.
@@ -128,19 +138,13 @@ pub struct PublisherContext {
 #[derive(Debug)]
 pub enum BrokerMessage {
     /// Initiate graceful shutdown sequence
-    PrepareForShutdown {
-        auth_token: Option<String>,
-    },
+    PrepareForShutdown { auth_token: Option<String> },
 
     /// Control message to initiate a specific shutdown phase
-    InitiateShutdownPhase {
-        phase: ShutdownPhase,
-    },
+    InitiateShutdownPhase { phase: ShutdownPhase },
 
     /// Signal that a shutdown phase has been completed by a manager
-    ShutdownPhaseComplete {
-        phase: ShutdownPhase,
-    },
+    ShutdownPhaseComplete { phase: ShutdownPhase },
 
     /// Sent by SessionAgent to SessionManager to report a change in pending publish count
     SessionPendingUpdate {
@@ -149,14 +153,10 @@ pub enum BrokerMessage {
     },
 
     /// Instruct a topic actor to flush its queue and report completion
-    FlushQueue {
-        reply_to: ActorRef<BrokerMessage>,
-    },
+    FlushQueue { reply_to: ActorRef<BrokerMessage> },
 
     /// Sent by a topic actor to TopicManager when its queue is flushed
-    FlushQueueComplete {
-        topic: String,
-    },
+    FlushQueueComplete { topic: String },
 
     /// Periodic check for shutdown completion (sent by broker to itself)
     CheckShutdownComplete,
@@ -224,8 +224,12 @@ pub enum BrokerMessage {
         result: Result<(), String>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
-        /// The `(epoch, seq)` of the publish this is about: the refused one, for a refusal.
+        /// The `(epoch, seq)` of the publish this is about: the refused one, for a refusal; the delivered one's, as its
+        /// publisher numbered it, for a delivery.
         origin: Option<MessageId>,
+        /// For a delivery to a client, its number, which the client returns in `PublishResponseAck`; none for a
+        /// refusal, and none on its way from a topic to a subscriber, which numbers it.
+        delivery_id: Option<u64>,
     },
     /// Message sent to the client to let them know they successfully published a message: the topic accepted the
     /// publish numbered `id`.
@@ -234,7 +238,9 @@ pub enum BrokerMessage {
         id: MessageId,
         trace_ctx: Option<opentelemetry::Context>,
     },
-    PublishResponseAck,
+    /// The client has the delivery numbered `delivery_id`: its subscriber lets go of it. From the client to its
+    /// Listener, which passes it to the subscriber of the topic the delivery was on.
+    PublishResponseAck { delivery_id: u64 },
     /// Subscribe request from the client.
     SubscribeRequest {
         registration_id: String,
@@ -275,13 +281,13 @@ pub enum BrokerMessage {
         topic: String,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        origin: Option<MessageId>,
+        /// The subscriber's number for this delivery, which the client acknowledges.
+        delivery_id: u64,
     },
-    /// Sent back to subscription actors if sessions fail to forward messages to the client for requeueing
-    PushMessageFailed {
-        payload: Arc<Vec<u8>>,
-        published_by: Option<String>,
-        //trace_ctx: Option<opentelemetry::Context>,
-    },
+    /// Sent back to subscription actors if sessions fail to forward messages to the client. The subscriber still
+    /// holds the delivery (it holds every delivery until it is acknowledged), and sends it again on a resume.
+    PushMessageFailed { delivery_id: u64 },
     /// Subscribe acknowledgment to the client.
     SubscribeAcknowledgment {
         registration_id: String,
@@ -308,19 +314,13 @@ pub enum BrokerMessage {
     /// Internal: a client came back as a new session, so this detached session of the same
     /// identity can no longer be resumed. The subscriber manager has its subscribers hold what
     /// they receive, and answers with `SessionHeld`.
-    SessionSuperseded {
-        registration_id: String,
-    },
+    SessionSuperseded { registration_id: String },
     /// Internal: a session was superseded while its client still looked connected. The session
     /// agent closes that connection, unless it is the one named (a client that registered a
     /// second session on the connection it already had).
-    CloseConnection {
-        except: String,
-    },
+    CloseConnection { except: String },
     /// Internal: every subscriber of the superseded session is holding; the session may stop.
-    SessionHeld {
-        registration_id: String,
-    },
+    SessionHeld { registration_id: String },
     /// Internal: which sessions of the same identity as `registration_id` are held for it, oldest
     /// first. Answered once every takeover in progress for that identity has completed.
     GetHeldSessions {
@@ -330,9 +330,7 @@ pub enum BrokerMessage {
     /// Internal: a Listener decides its client's subscriptions again, and drops those now refused, telling the
     /// client (docs/architecture/policy-enforcement.md, "Decisions": held subscriptions are judged again). `None` is
     /// every subscription it holds, after a change of authority; a list is a resumed session's.
-    JudgeSubscriptions {
-        topics: Option<Vec<String>>,
-    },
+    JudgeSubscriptions { topics: Option<Vec<String>> },
     /// Internal: the topics a session is subscribed to, which a Listener judges when the session is resumed.
     SubscriptionsOf {
         registration_id: String,
@@ -340,9 +338,7 @@ pub enum BrokerMessage {
     },
     /// Internal: a subscriber of a superseded session keeps what it receives instead of
     /// forwarding it, and stays subscribed.
-    HoldSubscription {
-        reply: ractor::RpcReplyPort<()>,
-    },
+    HoldSubscription { reply: ractor::RpcReplyPort<()> },
     /// Internal: a held subscriber hands over what it holds, and ends.
     ClaimHeld {
         reply: ractor::RpcReplyPort<HeldMessages>,
@@ -354,10 +350,7 @@ pub enum BrokerMessage {
         trace_ctx: Option<opentelemetry::Context>,
     },
     /// Error message to the client.
-    ErrorMessage {
-        client_id: String,
-        error: String,
-    },
+    ErrorMessage { client_id: String, error: String },
     TimeoutMessage {
         client_id: String,
         ///name of the session agent that died
@@ -385,9 +378,7 @@ pub enum BrokerMessage {
         listener_ref: ActorRef<BrokerMessage>,
     },
     /// Internal message for SessionAgent to receive the broker reference.
-    SetBrokerRef {
-        broker: ActorRef<BrokerMessage>,
-    },
+    SetBrokerRef { broker: ActorRef<BrokerMessage> },
     /// Internal message for SubscriberManager to get a session actor ref.
     GetSessionRef {
         registration_id: String,
@@ -402,9 +393,7 @@ pub enum BrokerMessage {
         listener_mgr: ActorRef<BrokerMessage>,
     },
     /// Internal message for SubscriberManager to receive its topic manager ref.
-    SetTopicManagerRef {
-        topic_mgr: ActorRef<BrokerMessage>,
-    },
+    SetTopicManagerRef { topic_mgr: ActorRef<BrokerMessage> },
     /// Internal message for SessionManager to receive its subscriber manager ref.
     SetSubscriberManagerRef {
         subscriber_mgr: ActorRef<BrokerMessage>,
@@ -499,6 +488,9 @@ impl BrokerMessage {
                 reply_to: None,
                 trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
             },
+            ClientMessage::PublishResponseAck { delivery_id } => {
+                BrokerMessage::PublishResponseAck { delivery_id }
+            }
 
             _ => {
                 // For other message types, we don't have conversion yet
@@ -696,7 +688,10 @@ pub enum ClientMessage {
     },
     /// Publish response to the client -- also delivers a subscribed
     /// message; see BrokerMessage::PublishResponse's own doc. A refusal (`result` an `Err`) names the publish it
-    /// refuses in `origin`.
+    /// refuses in `origin`. A delivery carries its origin, who published it (`published_by`, if they shared it) and
+    /// their number for it (`origin`), and the broker's number for the delivery (`delivery_id`), which the client
+    /// returns in `PublishResponseAck` once it has it; until then the broker keeps it for this client
+    /// (docs/architecture/cassini-client-reliability.md, section 5).
     PublishResponse {
         topic: String,
         payload: Arc<Vec<u8>>,
@@ -704,7 +699,11 @@ pub enum ClientMessage {
         trace_ctx: Option<WireTraceCtx>,
         published_by: Option<String>,
         origin: Option<MessageId>,
+        delivery_id: Option<u64>,
     },
+    /// The client has the delivery numbered `delivery_id`, and the broker may let go of it. Sent when the client has
+    /// handed the delivery to the agent (its router, or whoever listens to its events).
+    PublishResponseAck { delivery_id: u64 },
     /// The topic accepted the publish numbered `(epoch, seq)`. Each publish is acknowledged by itself and in no
     /// particular order: topics accept independently, so a later message can be acknowledged before an earlier one,
     /// and an acknowledgement says nothing about any other message (there is no cumulative acknowledgement).

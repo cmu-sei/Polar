@@ -22,17 +22,18 @@
 */
 
 use crate::UNEXPECTED_MESSAGE_STR;
+use crate::deliveries::{DeliveryOutbox, next_delivery_id};
 use crate::{
     CLIENT_NOT_FOUND_TXT, DISCONNECTED_REASON, REGISTRATION_REQ_FAILED_TXT, SESSION_NOT_FOUND_TXT,
     SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON, get_subscriber_name,
 };
 use cassini_tracing::try_set_parent_otel;
-use cassini_types::{BrokerMessage, ShutdownPhase};
+use cassini_types::{BrokerMessage, HeldDelivery, HeldMessages, MessageId, ShutdownPhase};
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent, registry::where_is,
     rpc::CallResult,
 };
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
 use tracing::{Instrument, debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -257,7 +258,7 @@ impl SubscriberManager {
         state: &SubscriberManagerState,
         registration_id: &str,
         topic: &str,
-    ) -> Vec<(Arc<Vec<u8>>, Option<String>)> {
+    ) -> HeldMessages {
         let held_sessions = match state
             .session_mgr
             .call(
@@ -469,16 +470,17 @@ impl SubscriberManager {
         .await
         {
             Ok((subscriber, _)) => {
-                // What was held for this identity on this topic goes to the new session first,
-                // ahead of anything published once the subscription is attached to the topic.
-                for (payload, published_by) in
-                    Self::claim_held(state, &registration_id, &topic).await
-                {
-                    let _ = session_ref.send_message(BrokerMessage::PushMessage {
-                        payload,
+                // What was held for this identity on this topic goes to the new subscriber first, ahead of anything
+                // published once it is attached to the topic, and is held by it until the new client acknowledges it.
+                for held in Self::claim_held(state, &registration_id, &topic).await {
+                    let _ = subscriber.send_message(BrokerMessage::PublishResponse {
                         topic: topic.clone(),
+                        payload: held.payload,
+                        result: Ok(()),
                         trace_ctx: None,
-                        published_by,
+                        published_by: held.published_by,
+                        origin: held.origin,
+                        delivery_id: None,
                     });
                 }
                 info!(%registration_id, %topic, "subscription created");
@@ -642,7 +644,8 @@ pub struct SubscriberAgentState {
     // session_ref is now stored directly
     session_ref: ActorRef<BrokerMessage>,
     topic: String,
-    dead_letter_queue: VecDeque<(Arc<Vec<u8>>, Option<String>)>,
+    /// Every message given to this subscriber, from when it is given until its client acknowledges it.
+    outbox: DeliveryOutbox,
     /// The session this subscription belonged to was superseded: nothing is forwarded, everything
     /// is kept until a new session of the same identity claims it, or the broker lets it go.
     held: bool,
@@ -676,7 +679,7 @@ impl Actor for SubscriberAgent {
                 registration_id: registration_id.to_string(),
                 session_ref: args.session,
                 topic: topic.to_string(),
-                dead_letter_queue: VecDeque::new(),
+                outbox: DeliveryOutbox::default(),
                 held: false,
             })
         } else {
@@ -724,6 +727,7 @@ impl Actor for SubscriberAgent {
                 payload,
                 trace_ctx,
                 published_by,
+                origin,
                 ..
             } => {
                 self.handle_publish_response(
@@ -733,22 +737,23 @@ impl Actor for SubscriberAgent {
                     payload,
                     trace_ctx,
                     published_by,
+                    origin,
                 )
                 .await?;
             }
-            BrokerMessage::PushMessageFailed {
-                payload,
-                published_by,
-            } => {
-                self.handle_push_message_failed(myself.clone(), state, payload, published_by)
-                    .await?;
+            BrokerMessage::PublishResponseAck { delivery_id } => {
+                state.outbox.acknowledge(delivery_id);
+            }
+            BrokerMessage::PushMessageFailed { delivery_id } => {
+                // Still held: it is sent again when the session is resumed.
+                debug!(topic = %state.topic, delivery_id, held = state.outbox.len(), "a delivery did not reach the client");
             }
             BrokerMessage::HoldSubscription { reply } => {
                 state.held = true;
                 let _ = reply.send(());
             }
             BrokerMessage::ClaimHeld { reply } => {
-                let held: Vec<_> = state.dead_letter_queue.drain(..).collect();
+                let held = state.outbox.take();
                 debug!(topic = %state.topic, count = held.len(), "handing over what was held");
                 let _ = reply.send(held);
                 myself.stop(Some("CLAIMED".to_string()));
@@ -777,24 +782,47 @@ impl SubscriberAgent {
         trace!("Subscriber actor received registration request for client {client_id}");
 
         if let Some(id) = registration_id {
-            // Reconnection: forward missed messages to session (which we already have)
+            // Reconnection: everything the client did not acknowledge is sent again, oldest first, with the number
+            // it had (the client may have had it before its connection went: delivery is at-least-once).
             let session = state.session_ref.clone();
-            info!("Forwarding missed messages to session: {id}");
-            while let Some((msg, published_by)) = state.dead_letter_queue.pop_front() {
-                if let Err(e) = session.send_message(BrokerMessage::PushMessage {
-                    payload: msg,
-                    topic: state.topic.clone(),
-                    trace_ctx: Some(span.context()),
-                    published_by,
-                }) {
+            info!(
+                held = state.outbox.len(),
+                "Forwarding unacknowledged messages to session: {id}"
+            );
+            for (delivery_id, delivery) in state.outbox.iter() {
+                if let Err(e) = session.send_message(Self::push(
+                    &state.topic,
+                    *delivery_id,
+                    delivery,
+                    Some(span.context()),
+                )) {
                     warn!("Failed to forward message to subscriber! {e} Ending subscription");
                     myself.stop(None);
+                    break;
                 }
             }
         }
         Ok(())
     }
 
+    /// The message that hands `delivery` to the session, to write to its client.
+    fn push(
+        topic: &str,
+        delivery_id: u64,
+        delivery: &HeldDelivery,
+        trace_ctx: Option<opentelemetry::Context>,
+    ) -> BrokerMessage {
+        BrokerMessage::PushMessage {
+            payload: delivery.payload.clone(),
+            topic: topic.to_string(),
+            trace_ctx,
+            published_by: delivery.published_by.clone(),
+            origin: delivery.origin,
+            delivery_id,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn handle_publish_response(
         &self,
         myself: ActorRef<BrokerMessage>,
@@ -803,6 +831,7 @@ impl SubscriberAgent {
         payload: Arc<Vec<u8>>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        origin: Option<MessageId>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.subscriber.publish_response", %topic);
         try_set_parent_otel(&span, trace_ctx);
@@ -812,37 +841,23 @@ impl SubscriberAgent {
             "New message on topic: \"{topic}\", forwarding to session: {}",
             state.registration_id
         );
+        // Held from now until the client acknowledges it, whether it is sent now or later.
+        let delivery_id = next_delivery_id();
+        let delivery = HeldDelivery {
+            payload,
+            published_by,
+            origin,
+        };
+        let push = Self::push(&topic, delivery_id, &delivery, Some(span.context()));
+        state.outbox.hold(delivery_id, delivery);
         if state.held {
-            state.dead_letter_queue.push_back((payload, published_by));
             return Ok(());
         }
-        let session = state.session_ref.clone();
-        if let Err(e) = session.send_message(BrokerMessage::PushMessage {
-            payload: payload.clone(),
-            topic,
-            trace_ctx: Some(span.context()),
-            published_by,
-        }) {
+        if let Err(e) = state.session_ref.send_message(push) {
             warn!("Failed to forward message to subscriber! {e} Ending subscription");
             myself.stop(None);
             return Ok(());
         }
-        Ok(())
-    }
-    async fn handle_push_message_failed(
-        &self,
-        _myself: ActorRef<BrokerMessage>,
-        state: &mut SubscriberAgentState,
-        payload: Arc<Vec<u8>>,
-        published_by: Option<String>,
-    ) -> Result<(), ActorProcessingErr> {
-        state
-            .dead_letter_queue
-            .push_back((payload.clone(), published_by));
-        debug!(
-            "Subscriber queue has {} message(s) waiting",
-            state.dead_letter_queue.len()
-        );
         Ok(())
     }
 }

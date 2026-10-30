@@ -534,6 +534,7 @@ impl Actor for Broker {
                 trace_ctx,
                 published_by,
                 origin,
+                ..
             } => {
                 self.handle_publish_response(
                     myself,
@@ -878,6 +879,7 @@ impl Broker {
                     trace_ctx: Some(span.context()),
                     published_by: None,
                     origin: Some(id),
+                    delivery_id: None,
                 })
             {
                 warn!(error = %e2, "Failed to notify SessionManager of publish failure");
@@ -911,6 +913,7 @@ impl Broker {
                         trace_ctx: Some(span.context()),
                         published_by: None,
                         origin: Some(id),
+                        delivery_id: None,
                     }) {
                         warn!(error = %e2, "Failed to notify SessionManager of publish failure");
                     }
@@ -931,6 +934,7 @@ impl Broker {
                     trace_ctx: Some(span.context()),
                     published_by: None,
                     origin: Some(id),
+                    delivery_id: None,
                 });
             }
         }
@@ -962,6 +966,7 @@ impl Broker {
                 trace_ctx: Some(span.context()),
                 published_by,
                 origin,
+                delivery_id: None,
             }) {
                 error!(error = %e, "Failed to forward PublishResponse to SubscriberManager");
             }
