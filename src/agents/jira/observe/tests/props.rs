@@ -21,12 +21,16 @@
    DM26-0670
 */
 
-//! Properties of the Jira observer's configuration checks.
+//! Properties of the Jira observer's configuration checks and of when it pulls.
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+use cassini_client::facade::Backoff;
+use jira_observer::Retry;
+use jira_observer::issues::{INCREMENTAL_OVERLAP_SECS, incremental_window, jql_filter};
 use jira_observer::settings::{normalise_jira_url, token_looks_base64};
 use proptest::prelude::*;
+use std::time::{Duration, Instant};
 use url::Url;
 
 /// Every path the observers append to the address.
@@ -164,5 +168,74 @@ proptest! {
         // 33 random bytes as 44 characters of base64, the shape of a personal access token. All
         // 33 are printable with probability (94/256)^33, about 5e-15.
         prop_assert!(!token_looks_base64(&STANDARD.encode(&blob)));
+    }
+
+    #[test]
+    fn the_wait_after_failures_grows_to_the_last_and_a_success_resets_it(
+        outcomes in proptest::collection::vec(any::<bool>(), 0..40),
+        first_ms in 1u64..60_000,
+        factor in 1u64..64,
+        base_secs in 1u64..7200,
+    ) {
+        let backoff = Backoff {
+            first: Duration::from_millis(first_ms),
+            last: Duration::from_millis(first_ms * factor),
+        };
+        let base = Duration::from_secs(base_secs);
+        let mut retry = Retry::new(backoff);
+        let mut previous: Option<(bool, Duration)> = None;
+        let mut in_a_row = 0u32;
+
+        for succeeded in outcomes {
+            let wait = retry.next(succeeded, base);
+            if succeeded {
+                in_a_row = 0;
+                prop_assert_eq!(wait, base);
+            } else {
+                in_a_row += 1;
+                prop_assert!(wait >= backoff.first && wait <= backoff.last);
+                match previous {
+                    // The first failure after a success, or at the start, waits the first.
+                    None | Some((true, _)) => prop_assert_eq!(wait, backoff.first),
+                    // A failure after a failure waits at least as long, twice as long until
+                    // the last.
+                    Some((false, before)) => {
+                        prop_assert!(wait >= before);
+                        prop_assert_eq!(wait, (before * 2).min(backoff.last));
+                    }
+                }
+            }
+            prop_assert_eq!(retry.failures(), in_a_row);
+            previous = Some((succeeded, wait));
+        }
+    }
+
+    #[test]
+    fn an_incremental_pull_reaches_back_over_any_outage_and_never_less_than_before(
+        since_secs in 0u64..30 * 24 * 3600,
+        since_millis in 0u64..1000,
+        base_secs in 1u64..7200,
+    ) {
+        let now = Instant::now() + Duration::from_secs(31 * 24 * 3600);
+        let since = Duration::from_secs(since_secs) + Duration::from_millis(since_millis);
+        let base = Duration::from_secs(base_secs);
+        let window = incremental_window(Some(now - since), now, base);
+        let jql = jql_filter(true, window, None).unwrap();
+        let minutes: u64 = jql
+            .strip_prefix("updated >= -")
+            .and_then(|m| m.strip_suffix('m'))
+            .and_then(|m| m.parse().ok())
+            .unwrap();
+
+        // It covers the time since the last completed pull started, and the overlap.
+        prop_assert!(
+            Duration::from_secs(minutes * 60) >= since + Duration::from_secs(INCREMENTAL_OVERLAP_SECS),
+            "{} for {:?}", jql, since
+        );
+        // It never asks for less than one interval and the overlap, as it did before.
+        prop_assert!(minutes >= (base_secs + INCREMENTAL_OVERLAP_SECS) / 60, "{}", jql);
+        // And it asks for no more than a minute beyond what it needs.
+        let needed = since.max(base) + Duration::from_secs(INCREMENTAL_OVERLAP_SECS);
+        prop_assert!(Duration::from_secs(minutes * 60) < needed + Duration::from_secs(60), "{}", jql);
     }
 }

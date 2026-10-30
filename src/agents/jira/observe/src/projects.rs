@@ -20,7 +20,10 @@
 
    DM26-0670
 */
-use crate::{Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState, publish_data};
+use crate::{
+    Command, JIRA_PROJECT_OBSERVER, JiraObserverArgs, JiraObserverMessage, JiraObserverState,
+    publish_data,
+};
 use jira_common::JIRA_PROJECTS_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraProject};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
@@ -43,12 +46,26 @@ impl JiraProjectObserver {
         info!("Observing every {} seconds", state.base_interval.as_secs());
 
         // Poll straight away rather than leaving the graph empty for a
-        // whole interval after every start. The interval task ends on its
-        // own once this actor has stopped and the cast fails, so there is
-        // no handle to keep.
+        // whole interval after every start. Each pull schedules the next
+        // (`JiraObserverState::settle`): an interval away after a success,
+        // sooner after a failure.
         myself.cast(Self::tick())?;
-        myself.send_interval(state.base_interval, Self::tick);
         Ok(())
+    }
+
+    /// Pulls the projects and publishes them.
+    async fn pull(op: &str, state: &mut JiraObserverState) -> Result<(), ActorProcessingErr> {
+        state.ensure_token().await?;
+        debug!("{op}");
+
+        let projects: Vec<JiraProject> =
+            state.get_json(&format!("{}{}", state.jira_url, op)).await?;
+
+        publish_data(
+            &state.tcp_client,
+            JIRA_PROJECTS_CONSUMER_TOPIC,
+            &JiraData::Projects(projects),
+        )
     }
 }
 
@@ -72,7 +89,8 @@ impl Actor for JiraProjectObserver {
             args.web_client,
             args.tcp_client,
             Duration::from_secs(args.base_interval),
-        ))
+        )
+        .with_retry(args.retry, args.clock))
     }
 
     async fn post_start(
@@ -85,23 +103,15 @@ impl Actor for JiraProjectObserver {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             JiraObserverMessage::Tick(command) => {
                 if let Command::GetProjects(op) = command {
-                    debug!("{op}");
-
-                    let projects: Vec<JiraProject> =
-                        state.get_json(&format!("{}{}", state.jira_url, op)).await?;
-
-                    publish_data(
-                        &state.tcp_client,
-                        JIRA_PROJECTS_CONSUMER_TOPIC,
-                        &JiraData::Projects(projects),
-                    )?;
+                    let pulled = JiraProjectObserver::pull(&op, state).await;
+                    state.settle(&myself, JIRA_PROJECT_OBSERVER, pulled, Self::tick)?;
                 }
             }
         }

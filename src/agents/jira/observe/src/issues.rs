@@ -21,7 +21,8 @@
    DM26-0670
 */
 use crate::{
-    Command, JiraDeployment, JiraObserverArgs, JiraObserverMessage, JiraObserverState, publish_data,
+    Command, JIRA_ISSUE_OBSERVER, JiraDeployment, JiraError, JiraObserverArgs, JiraObserverMessage,
+    JiraObserverState, publish_data,
 };
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraField, JsonString};
@@ -30,17 +31,17 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use reqwest::Url;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 const ISSUES_OP: &str = "/rest/api/2/search";
 const PAGE_SIZE: usize = 50;
 
-/// An incremental pull asks for everything updated within one interval plus
-/// this much, so a poll that runs a little late does not lose an update that
-/// landed between two windows. The processor upserts, so an issue seen twice
-/// is harmless.
-const INCREMENTAL_OVERLAP_SECS: u64 = 300;
+/// An incremental pull asks for everything updated since the last completed
+/// pull started plus this much, so that clock skew between here and Jira
+/// does not lose an update that landed between two windows. The processor
+/// upserts, so an issue seen twice is harmless.
+pub const INCREMENTAL_OVERLAP_SECS: u64 = 300;
 
 pub struct JiraIssueObserver;
 
@@ -56,18 +57,21 @@ impl JiraIssueObserver {
         info!("Observing every {} seconds", state.base_interval.as_secs());
 
         // Poll straight away rather than leaving the graph empty for a
-        // whole interval after every start. The interval task ends on its
-        // own once this actor has stopped and the cast fails, so there is
-        // no handle to keep.
+        // whole interval after every start. Each pull schedules the next
+        // (`JiraObserverState::settle`): an interval away after a success,
+        // sooner after a failure.
         myself.cast(Self::tick())?;
-        myself.send_interval(state.base_interval, Self::tick);
         Ok(())
     }
 
-    /// Pulls issues from Jira and publishes each one. Any failure is an
-    /// error: the actor fails, the supervisor exits non-zero and the Job
-    /// restarts the pod.
-    async fn pull_issues(op: &str, state: &JiraObserverState) -> Result<(), ActorProcessingErr> {
+    /// Pulls issues from Jira and publishes each one. A failure in talking
+    /// to Jira is a JiraError, and the pull is tried again later
+    /// (`JiraObserverState::settle`); any other failure ends the observer.
+    async fn pull_issues(
+        op: &str,
+        state: &mut JiraObserverState,
+    ) -> Result<(), ActorProcessingErr> {
+        state.ensure_token().await?;
         let fields: Vec<JiraField> = state
             .get_json(&format!("{}/rest/api/2/field", state.jira_url))
             .await?;
@@ -78,7 +82,11 @@ impl JiraIssueObserver {
 
         let filter = jql_filter(
             state.full_pull_done,
-            state.base_interval,
+            incremental_window(
+                state.last_pull_started,
+                (state.clock)(),
+                state.base_interval,
+            ),
             state.query_date.as_deref(),
         );
         info!(
@@ -190,7 +198,8 @@ impl Actor for JiraIssueObserver {
             args.tcp_client,
             Duration::from_secs(args.base_interval),
         )
-        .with_query_date(args.query_date))
+        .with_query_date(args.query_date)
+        .with_retry(args.retry, args.clock))
     }
 
     async fn post_start(
@@ -203,15 +212,20 @@ impl Actor for JiraIssueObserver {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             JiraObserverMessage::Tick(command) => {
                 if let Command::GetIssues(op) = command {
-                    JiraIssueObserver::pull_issues(&op, state).await?;
-                    state.full_pull_done = true;
+                    let started = (state.clock)();
+                    let pulled = JiraIssueObserver::pull_issues(&op, state).await;
+                    if pulled.is_ok() {
+                        state.full_pull_done = true;
+                        state.last_pull_started = Some(started);
+                    }
+                    state.settle(&myself, JIRA_ISSUE_OBSERVER, pulled, Self::tick)?;
                 }
             }
         }
@@ -219,16 +233,34 @@ impl Actor for JiraIssueObserver {
     }
 }
 
+/// How far back an incremental pull asks: from the start of the last pull
+/// that completed, so that a run of failed pulls, or one that ran late,
+/// leaves no gap; never less than one interval, which is what it asked for
+/// before pulls were retried.
+pub fn incremental_window(
+    last_pull_started: Option<Instant>,
+    now: Instant,
+    base_interval: Duration,
+) -> Duration {
+    last_pull_started
+        .map_or(base_interval, |started| {
+            now.saturating_duration_since(started)
+        })
+        .max(base_interval)
+}
+
 /// The JQL restricting a pull, if any. The first pull is full unless a
 /// QUERY_DATE was given to start from; every pull after a completed one only
-/// asks for what changed within the interval plus the overlap.
-fn jql_filter(
+/// asks for what changed within the window (`incremental_window`) plus the
+/// overlap, in whole minutes rounded up.
+pub fn jql_filter(
     full_pull_done: bool,
-    base_interval: Duration,
+    window: Duration,
     query_date: Option<&str>,
 ) -> Option<String> {
     if full_pull_done {
-        let minutes = (base_interval.as_secs() + INCREMENTAL_OVERLAP_SECS) / 60;
+        let reach = window + Duration::from_secs(INCREMENTAL_OVERLAP_SECS);
+        let minutes = reach.as_millis().div_ceil(60_000);
         Some(format!("updated >= -{minutes}m"))
     } else {
         match query_date {
@@ -269,9 +301,9 @@ fn publish_issues(
     names: &HashMap<String, String>,
     tcp_client: &TcpClient,
 ) -> Result<usize, ActorProcessingErr> {
-    let items = res["issues"].as_array().ok_or_else(|| {
-        ActorProcessingErr::from("the search response has no issues array".to_string())
-    })?;
+    let items = res["issues"]
+        .as_array()
+        .ok_or_else(|| JiraError::new("the search response has no issues array".to_string()))?;
 
     for issue in items {
         let mut issue = issue.clone();

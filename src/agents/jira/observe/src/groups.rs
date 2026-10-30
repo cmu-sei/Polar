@@ -20,7 +20,10 @@
 
    DM26-0670
 */
-use crate::{Command, JiraObserverArgs, JiraObserverMessage, JiraObserverState, publish_data};
+use crate::{
+    Command, JIRA_GROUP_OBSERVER, JiraError, JiraObserverArgs, JiraObserverMessage,
+    JiraObserverState, publish_data,
+};
 use jira_common::JIRA_GROUPS_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraGroup};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
@@ -43,12 +46,58 @@ impl JiraGroupObserver {
         info!("Observing every {} seconds", state.base_interval.as_secs());
 
         // Poll straight away rather than leaving the graph empty for a
-        // whole interval after every start. The interval task ends on its
-        // own once this actor has stopped and the cast fails, so there is
-        // no handle to keep.
+        // whole interval after every start. Each pull schedules the next
+        // (`JiraObserverState::settle`): an interval away after a success,
+        // sooner after a failure.
         myself.cast(Self::tick())?;
-        myself.send_interval(state.base_interval, Self::tick);
         Ok(())
+    }
+
+    /// Pulls every page of groups and publishes them together.
+    async fn pull(op: &str, state: &mut JiraObserverState) -> Result<(), ActorProcessingErr> {
+        state.ensure_token().await?;
+        debug!("{op}");
+
+        let mut all_groups = Vec::new();
+        let mut start_at = 0;
+        let max_results = 50;
+        let query_string = "";
+
+        loop {
+            let url = format!(
+                "{}{}?query={}&startAt={}&maxResults={}",
+                state.jira_url, op, query_string, start_at, max_results
+            );
+
+            let res: serde_json::Value = state.get_json(&url).await?;
+            debug!("Group Data {}", res["groups"]);
+
+            let groups: Vec<JiraGroup> = if res["groups"].is_null() {
+                Vec::new()
+            } else {
+                serde_json::from_value(res["groups"].clone()).map_err(|e| {
+                    JiraError::new(format!("could not decode the groups from {op}: {e}"))
+                })?
+            };
+            let total = res["total"].as_u64().unwrap_or(0);
+            let fetched = groups.len();
+
+            all_groups.extend(groups);
+
+            // An empty page ends the walk: with a non-zero
+            // total it would otherwise never advance.
+            if fetched == 0 || (start_at + fetched) >= total as usize {
+                break;
+            }
+
+            start_at += fetched;
+        }
+
+        publish_data(
+            &state.tcp_client,
+            JIRA_GROUPS_CONSUMER_TOPIC,
+            &JiraData::Groups(all_groups),
+        )
     }
 }
 
@@ -72,7 +121,8 @@ impl Actor for JiraGroupObserver {
             args.web_client,
             args.tcp_client,
             Duration::from_secs(args.base_interval),
-        ))
+        )
+        .with_retry(args.retry, args.clock))
     }
 
     async fn post_start(
@@ -85,53 +135,15 @@ impl Actor for JiraGroupObserver {
 
     async fn handle(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
             JiraObserverMessage::Tick(command) => {
                 if let Command::GetGroups(op) = command {
-                    debug!("{op}");
-
-                    let mut all_groups = Vec::new();
-                    let mut start_at = 0;
-                    let max_results = 50;
-                    let query_string = "";
-
-                    loop {
-                        let url = format!(
-                            "{}{}?query={}&startAt={}&maxResults={}",
-                            state.jira_url, op, query_string, start_at, max_results
-                        );
-
-                        let res: serde_json::Value = state.get_json(&url).await?;
-                        debug!("Group Data {}", res["groups"]);
-
-                        let groups: Vec<JiraGroup> = if res["groups"].is_null() {
-                            Vec::new()
-                        } else {
-                            serde_json::from_value(res["groups"].clone())?
-                        };
-                        let total = res["total"].as_u64().unwrap_or(0);
-                        let fetched = groups.len();
-
-                        all_groups.extend(groups);
-
-                        // An empty page ends the walk: with a non-zero
-                        // total it would otherwise never advance.
-                        if fetched == 0 || (start_at + fetched) >= total as usize {
-                            break;
-                        }
-
-                        start_at += fetched;
-                    }
-
-                    publish_data(
-                        &state.tcp_client,
-                        JIRA_GROUPS_CONSUMER_TOPIC,
-                        &JiraData::Groups(all_groups),
-                    )?;
+                    let pulled = JiraGroupObserver::pull(&op, state).await;
+                    state.settle(&myself, JIRA_GROUP_OBSERVER, pulled, Self::tick)?;
                 }
             }
         }

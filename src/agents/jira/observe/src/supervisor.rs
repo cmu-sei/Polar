@@ -26,7 +26,7 @@ use crate::projects::JiraProjectObserver;
 use crate::users::JiraUserObserver;
 use crate::{
     BROKER_CLIENT_NAME, JIRA_GROUP_OBSERVER, JIRA_ISSUE_OBSERVER, JIRA_PROJECT_OBSERVER,
-    JIRA_USER_OBSERVER, JiraAuth, JiraDeployment, JiraObserverArgs, JiraObserverMessage,
+    JIRA_USER_OBSERVER, JiraAuth, JiraDeployment, JiraObserverArgs, JiraObserverMessage, RETRY,
 };
 use cassini_types::ClientEvent;
 use polar::async_get_file_as_byte_vec;
@@ -113,6 +113,8 @@ impl ObserverSupervisorState {
             web_client: self.web_client.clone(),
             base_interval: self.base_interval,
             query_date: self.query_date.clone(),
+            retry: RETRY,
+            clock: std::time::Instant::now,
         }
     }
 
@@ -348,9 +350,9 @@ impl Actor for ObserverSupervisor {
                 }
 
                 // An observer we still expect to be running stopped on its
-                // own, typically after exhausting its backoff or hitting bad
-                // credentials. That needs an admin, and a visible pod
-                // restart is the signal.
+                // own. A failure in talking to Jira, a rejected token among
+                // them, never stops one (it is retried), so this is something
+                // else gone wrong, and a visible pod restart is the signal.
                 if state.tracks(actor_cell.get_id()) {
                     error!(
                         "OBSERVER_SUPERVISOR: observer {actor_name:?} stopped unexpectedly: {reason:?}"
