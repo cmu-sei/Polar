@@ -84,6 +84,7 @@ mod tests {
         // Create a mock session manager to pass as argument
         let args = SubscriberManagerArgs {
             session_mgr: create_mock_session_manager().await,
+            bounds: cassini_broker::budget::Bounds::fallback(),
         };
 
         // Just make sure we can spawn the SubscriberManager
@@ -102,6 +103,7 @@ mod tests {
         // Create a mock session manager to pass as argument
         let args = SubscriberManagerArgs {
             session_mgr: create_mock_session_manager().await,
+            bounds: cassini_broker::budget::Bounds::fallback(),
         };
 
         // Spawn SubscriberManager
@@ -128,6 +130,7 @@ mod tests {
         // Create a mock session manager to pass as argument
         let args = SubscriberManagerArgs {
             session_mgr: create_mock_session_manager().await,
+            bounds: cassini_broker::budget::Bounds::fallback(),
         };
 
         // Spawn SubscriberManager
@@ -157,6 +160,7 @@ mod tests {
         // Create a mock session manager to pass as argument
         let args = SubscriberManagerArgs {
             session_mgr: create_mock_session_manager().await,
+            bounds: cassini_broker::budget::Bounds::fallback(),
         };
 
         // Spawn SubscriberManager
@@ -178,6 +182,7 @@ mod tests {
         // Create a mock session manager to pass as argument
         let args = SubscriberManagerArgs {
             session_mgr: create_mock_session_manager().await,
+            bounds: cassini_broker::budget::Bounds::fallback(),
         };
 
         // Spawn SubscriberManager
@@ -206,6 +211,7 @@ mod tests {
         // Create a mock session manager to pass as argument
         let args = SubscriberManagerArgs {
             session_mgr: create_mock_session_manager().await,
+            bounds: cassini_broker::budget::Bounds::fallback(),
         };
 
         // Spawn SubscriberManager
@@ -235,6 +241,7 @@ mod tests {
         // Create a mock session manager to pass as argument
         let args = SubscriberManagerArgs {
             session_mgr: create_mock_session_manager().await,
+            bounds: cassini_broker::budget::Bounds::fallback(),
         };
 
         // Spawn SubscriberManager
@@ -270,7 +277,10 @@ mod tests {
             let (manager, handle) = Actor::spawn(
                 None,
                 SubscriberManager,
-                SubscriberManagerArgs { session_mgr },
+                SubscriberManagerArgs {
+                    session_mgr,
+                    bounds: cassini_broker::budget::Bounds::fallback(),
+                },
             )
             .await?;
             for _ in 0..2 {

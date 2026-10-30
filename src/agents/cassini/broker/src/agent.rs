@@ -77,7 +77,7 @@ impl PolarAgent for CassiniBroker {
             .install_default()
             .map_err(|_| "cannot install the rustls crypto provider")?;
 
-        let args = BrokerArgs::from_settings(settings, configured);
+        let args = BrokerArgs::from_settings(settings, configured)?;
         let (_broker, handle) = Actor::spawn(Some(BROKER_NAME.to_string()), Broker, args)
             .await
             .map_err(|e| format!("the broker did not start: {e}"))?;

@@ -23,7 +23,8 @@
 
 # Backpressure for the Cassini broker and client
 
-Status: **cleared 2026-10-30, not built** (the decisions are at the end). What the broker and client bound today is in cassini-broker.md ("Bounds
+Status: **cleared 2026-10-30; the broker's side built the same day** (cassini-broker.md, "The bounds, as built"); the
+client's side is not built yet (the decisions are at the end). What the broker and client bound today is in cassini-broker.md ("Bounds
 and flow control") and cassini-client-reliability.md ("As built, 2026-10-30"); in short, nothing, except the session
 retention `R`. The measurement that started this: at 64 KiB saturated, a sink that drained about 11% slower than the
 broker accepted left 46 to 176 MB of payload in the broker's heap within a second (broker-baseline.md, the fourth set).

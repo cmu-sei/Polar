@@ -94,12 +94,14 @@ impl BrokerAuthority {
             Some(BrokerMessage::PublishRequest {
                 registration_id: OWN_REGISTRATION.to_string(),
                 topic: AUTHORITY_SNAPSHOT_REQUESTS_TOPIC.to_string(),
-                payload: request.clone(),
+                // The broker's own, so not charged: no reader admitted it.
+                payload: cassini_types::Payload::uncharged(request.clone()),
                 reply_to: None,
                 trace_ctx: None,
                 published_by: None,
                 // The broker's own publish is acknowledged to no one, so its number names nothing.
                 id: cassini_types::MessageId { epoch: 0, seq: 0 },
+                window: cassini_types::Hold::none(),
             })
         });
         // Asked once at start: the broker is not a client, so no registration asks for it.

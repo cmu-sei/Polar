@@ -26,16 +26,21 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub mod held;
 pub mod socket;
 pub mod trace;
+pub use held::{Backlog, Hold, Payload};
 pub use trace::WireTraceCtx;
 
 pub type SessionMap = HashMap<String, SessionDetails>;
 
+/// What the subscriber manager answers a `CreateSubscriber` with: the subscriber, and its backlog, which its topic reads.
+pub type CreatedSubscriber = Result<(ActorRef<BrokerMessage>, Arc<Backlog>), ActorProcessingErr>;
+
 /// A message a subscriber keeps for its client: delivered and not acknowledged, or not yet delivered.
 #[derive(Debug, Clone)]
 pub struct HeldDelivery {
-    pub payload: Arc<Vec<u8>>,
+    pub payload: Payload,
     /// Who published it, if they shared it.
     pub published_by: Option<String>,
     /// Its publisher's number for it.
@@ -200,7 +205,8 @@ pub enum BrokerMessage {
     PublishRequest {
         registration_id: String,
         topic: String,
-        payload: Arc<Vec<u8>>,
+        /// Charged against the broker's memory budget from when its reader admitted it.
+        payload: Payload,
         reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
         /// Already resolved by from_client_message at decode time --
@@ -212,6 +218,9 @@ pub enum BrokerMessage {
         published_by: Option<String>,
         /// The message's `(epoch, seq)` as its publisher numbered it, returned in its acknowledgement.
         id: MessageId,
+        /// The publisher's connection's ingress credit for this frame, let go when the topic accepts the publish (or
+        /// wherever the publish is dropped): until then the connection's reader counts it against its window.
+        window: Hold,
     },
     /// Publish response to the client -- also reused, unmodified in
     /// shape, as the delivery vehicle when forwarding a published
@@ -220,7 +229,7 @@ pub enum BrokerMessage {
     /// original publisher's own ack it's left None.
     PublishResponse {
         topic: String,
-        payload: Arc<Vec<u8>>,
+        payload: Payload,
         result: Result<(), String>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
@@ -253,11 +262,13 @@ pub enum BrokerMessage {
         topic: String,
         registration_id: String,
         trace_ctx: Option<opentelemetry::Context>,
-        reply: RpcReplyPort<Result<ActorRef<BrokerMessage>, ActorProcessingErr>>,
+        reply: RpcReplyPort<CreatedSubscriber>,
     },
     AddSubscriber {
         registration_id: String,
         subscriber_ref: ActorRef<BrokerMessage>,
+        /// The subscriber's backlog, which its topic reads before it accepts a publish.
+        backlog: Arc<Backlog>,
         trace_ctx: Option<opentelemetry::Context>,
     },
     /// instructs the topic manager to create a new topic actor,
@@ -277,7 +288,7 @@ pub enum BrokerMessage {
     /// Messages that fail to be delivered for some reason are kept in their queues.
     PushMessage {
         // reply: RpcReplyPort<Result<(), String>>,
-        payload: Arc<Vec<u8>>,
+        payload: Payload,
         topic: String,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
@@ -402,6 +413,28 @@ pub enum BrokerMessage {
     /// messages that have been waiting too long with no subscriber to
     /// receive them.
     QueueExpiryTick,
+    /// Internal: a subscriber of this topic fell below its low water, or no longer holds the topic back (its client
+    /// went, it ended): the topic accepts what waits, as far as its subscribers allow.
+    TopicResume,
+    /// Internal: a topic held back by a subscriber looks whether one has been above its high water for longer than
+    /// the stall bound.
+    StallCheck,
+    /// Internal, from a topic to the session manager: the subscriber of `registration_id` on `topic` has held it back
+    /// above its high water (`held` bytes unacknowledged) for `above_for`, past the stall bound; its connection is
+    /// ended (docs/architecture/cassini-backpressure.md, "Decided" 1).
+    SlowSubscriber {
+        registration_id: String,
+        topic: String,
+        held: usize,
+        above_for: std::time::Duration,
+    },
+    /// Internal, from the session manager to the subscriber manager: the session's client went away; its
+    /// subscribers hold their topics back no longer, and keep what they hold while the budget allows.
+    SessionDetached { registration_id: String },
+    /// Internal: the broker's memory budget is exhausted. Subscribers whose clients are away let go of what they
+    /// hold, so the budget can recover (cassini-backpressure.md: what a subscriber is owed is kept only while the
+    /// budget allows).
+    BudgetExhausted,
 }
 
 impl BrokerMessage {
@@ -435,7 +468,8 @@ impl BrokerMessage {
             } => BrokerMessage::PublishRequest {
                 registration_id,
                 topic,
-                payload,
+                // Not charged: a reader that admits a frame charges it itself (the Listener's read task).
+                payload: Payload::uncharged(payload),
                 // Client doesn't know the session actor, so reply_to is None
                 reply_to: None,
                 trace_ctx: trace_ctx.map(|w| w.to_opentelemetry_context()),
@@ -450,6 +484,7 @@ impl BrokerMessage {
                     None
                 },
                 id: MessageId { epoch, seq },
+                window: Hold::none(),
             },
             ClientMessage::SubscribeRequest {
                 topic,

@@ -25,6 +25,8 @@
 pub mod agent;
 pub mod authority;
 pub mod broker;
+pub mod budget;
+pub mod budget_report;
 pub mod control;
 pub mod deliveries;
 pub mod listener;

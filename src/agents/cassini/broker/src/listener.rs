@@ -23,6 +23,7 @@
 
 use crate::UNEXPECTED_MESSAGE_STR;
 use crate::authority::{BrokerAuthority, DecisionCache};
+use crate::budget::{Bounds, Budget, Charge, SMALL_FRAME, Window, WindowCharge};
 use crate::{
     PUBLISH_REQ_FAILED_TXT, REGISTRATION_REQ_FAILED_TXT, SESSION_MISSING_REASON_STR,
     SESSION_NOT_FOUND_TXT, SUBSCRIBE_REQUEST_FAILED_TXT,
@@ -30,7 +31,7 @@ use crate::{
 use async_trait::async_trait;
 use cassini_types::{
     ArchivedClientMessage, BrokerMessage, ClientMessage, ControlError, ControlOp, ControlResult,
-    DisconnectReason, MAX_FRAME_BYTES, MessageId, ShutdownPhase, WireTraceCtx,
+    DisconnectReason, Hold, MAX_FRAME_BYTES, MessageId, Payload, ShutdownPhase, WireTraceCtx,
 };
 use polar_agent_builder::{Access, Floor};
 use ractor::{
@@ -68,6 +69,87 @@ use uuid::Uuid;
 
 static ZERO_LEN_LAST_LOG_MS: AtomicU64 = AtomicU64::new(0);
 static ZERO_LEN_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// A connection's write half, and what ends it from outside: a write that waits on a client that does not read, and
+/// the reader, both give up when it is cut.
+pub struct ConnWriter {
+    half: Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>,
+    cut: CancellationToken,
+    why: std::sync::Mutex<Option<String>>,
+}
+
+type SharedWriter = Arc<ConnWriter>;
+
+impl ConnWriter {
+    fn new(half: BufWriter<WriteHalf<TlsStream<TcpStream>>>) -> SharedWriter {
+        Arc::new(ConnWriter {
+            half: Mutex::new(half),
+            cut: CancellationToken::new(),
+            why: std::sync::Mutex::new(None),
+        })
+    }
+
+    fn why(&self) -> String {
+        self.why
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| "the connection was ended".to_string())
+    }
+}
+
+/// The connections open now, by client id, so one can be ended from outside its Listener: a Listener waiting on a
+/// write to a client that does not read cannot be sent anything.
+static CONNECTIONS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, std::sync::Weak<ConnWriter>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Ends the connection of `client_id`, saying `why`: its writes and its reader give up, and its Listener ends, as on a
+/// lost connection (its session is kept for the retention window). False if there is no such connection.
+pub fn cut_connection(client_id: &str, why: &str) -> bool {
+    let Some(writer) = CONNECTIONS
+        .lock()
+        .unwrap()
+        .get(client_id)
+        .and_then(std::sync::Weak::upgrade)
+    else {
+        return false;
+    };
+    *writer.why.lock().unwrap() = Some(why.to_string());
+    writer.cut.cancel();
+    true
+}
+
+/// Takes a frame's bytes from its connection's window and from the budget, waiting for each; `None` if the connection
+/// is cut meanwhile. While this waits its reader reads nothing, and TCP pushes back on the client.
+async fn admit(
+    window: &Arc<Window>,
+    budget: &Budget,
+    len: usize,
+    cut: &CancellationToken,
+) -> Option<(WindowCharge, Charge)> {
+    let credit = match window.try_take(len) {
+        Some(credit) => credit,
+        None => {
+            debug!(len, used = window.used(), "the reader waits for its window");
+            tokio::select! {
+                credit = window.take(len) => credit,
+                _ = cut.cancelled() => return None,
+            }
+        }
+    };
+    let charge = match budget.try_charge(len) {
+        Some(charge) => charge,
+        None => {
+            debug!(len, "the reader waits for the memory budget");
+            tokio::select! {
+                charge = budget.charge(len) => charge,
+                _ = cut.cancelled() => return None,
+            }
+        }
+    };
+    Some((credit, charge))
+}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -144,6 +226,33 @@ fn extract_peer_floor(stream: &TlsStream<TcpStream>) -> Result<Arc<Floor>, Strin
         .map_err(|e| format!("the connection's certificate cannot be read: {e}"))
 }
 
+/// A publish as its reader admitted it: its payload carrying the frame's charge, and the frame's window credit with
+/// it until its topic accepts it.
+fn charged(message: BrokerMessage, (credit, charge): (WindowCharge, Charge)) -> BrokerMessage {
+    match message {
+        BrokerMessage::PublishRequest {
+            registration_id,
+            topic,
+            payload,
+            reply_to,
+            trace_ctx,
+            published_by,
+            id,
+            ..
+        } => BrokerMessage::PublishRequest {
+            registration_id,
+            topic,
+            payload: Payload::charged(payload.bytes().clone(), Hold::new(charge)),
+            reply_to,
+            trace_ctx,
+            published_by,
+            id,
+            window: Hold::new(credit),
+        },
+        other => other,
+    }
+}
+
 // ============================== Listener Manager ============================== //
 
 pub struct ListenerManager;
@@ -158,6 +267,7 @@ pub struct ListenerManagerState {
     listeners: HashMap<String, ActorRef<BrokerMessage>>, // client_id -> listener ref
     session_mgr: ActorRef<BrokerMessage>,
     authority: BrokerAuthority,
+    bounds: Bounds,
 }
 
 pub struct ListenerManagerArgs {
@@ -169,6 +279,8 @@ pub struct ListenerManagerArgs {
     pub shutdown_auth_token: Option<String>,
     /// Who may publish and subscribe to what, which every Listener asks.
     pub authority: BrokerAuthority,
+    /// The memory budget and each connection's window.
+    pub bounds: Bounds,
 }
 
 #[async_trait]
@@ -236,6 +348,7 @@ impl Actor for ListenerManager {
             listeners: HashMap::new(),
             session_mgr: args.session_mgr,
             authority: args.authority,
+            bounds: args.bounds,
         })
     }
 
@@ -261,12 +374,14 @@ impl Actor for ListenerManager {
             let shutdown_token = state.shutdown_token.clone();
             let session_mgr = state.session_mgr.clone(); // clone for use in spawned tasks
             let authority = state.authority.clone();
+            let bounds = state.bounds.clone();
 
             // Accept loop runs in its own task; do NOT keep an entered span alive forever.
             let join_handle = tokio::spawn({
                 let myself = myself.clone();
                 let session_mgr = session_mgr; // move into closure
                 let authority = authority;
+                let bounds = bounds;
                 async move {
                     loop {
                         let (stream, peer_addr) = match server.accept().await {
@@ -307,6 +422,7 @@ impl Actor for ListenerManager {
                         let myself = myself.clone();
                         let session_mgr = session_mgr.clone(); // clone again for inner spawn
                         let authority = authority.clone();
+                        let bounds = bounds.clone();
 
                         tokio::spawn(
                             async move {
@@ -328,9 +444,13 @@ impl Actor for ListenerManager {
                                 }
                                 let client_id = Uuid::new_v4().to_string();
                                 let (reader, writer) = split(stream);
-                                let writer = BufWriter::new(writer);
+                                let writer = ConnWriter::new(BufWriter::new(writer));
+                                CONNECTIONS
+                                    .lock()
+                                    .unwrap()
+                                    .insert(client_id.clone(), Arc::downgrade(&writer));
                                 let listener_args = ListenerArguments {
-                                    writer: Arc::new(Mutex::new(writer)),
+                                    writer,
                                     reader: Some(reader),
                                     client_id: client_id.clone(),
                                     registration_id: None,
@@ -343,6 +463,7 @@ impl Actor for ListenerManager {
                                     peer_serial,
                                     floor,
                                     authority,
+                                    bounds,
                                 };
 
                                 let spawn_span = info_span!(
@@ -655,7 +776,7 @@ impl ListenerManager {
 struct Listener;
 
 struct ListenerState {
-    writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
+    writer: SharedWriter,
     reader: Option<ReadHalf<TlsStream<TcpStream>>>,
     client_id: String,
     session_mgr: ActorRef<BrokerMessage>,
@@ -679,10 +800,11 @@ struct ListenerState {
     dropped: std::collections::HashSet<String>,
     /// The deliveries written to this client and not yet acknowledged, by number, with the topic each came on.
     deliveries: HashMap<u64, String>,
+    bounds: Bounds,
 }
 
 struct ListenerArguments {
-    writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
+    writer: SharedWriter,
     reader: Option<ReadHalf<TlsStream<TcpStream>>>,
     client_id: String,
     session_mgr: ActorRef<BrokerMessage>,
@@ -692,6 +814,7 @@ struct ListenerArguments {
     peer_serial: Option<String>,
     floor: Result<Arc<Floor>, String>,
     authority: BrokerAuthority,
+    bounds: Bounds,
 }
 
 impl Listener {
@@ -766,7 +889,7 @@ impl Listener {
     async fn write(
         client_id: String,
         message: ClientMessage,
-        writer: Arc<Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>>,
+        writer: SharedWriter,
     ) -> Result<(), Error> {
         let bytes = rkyv::to_bytes::<Error>(&message)?;
 
@@ -784,15 +907,18 @@ impl Listener {
             "Sending frame"
         );
 
-        let mut w = writer.lock().await;
-
-        w.write_all(&len_u32.to_be_bytes())
-            .await
-            .map_err(rancor::Error::new)?;
-        w.write_all(&bytes).await.map_err(rancor::Error::new)?;
-        w.flush().await.map_err(rancor::Error::new)?;
-
-        Ok(())
+        // A write waits on a client that does not read for as long as it does not; it gives up when the connection
+        // is cut (`cut_connection`).
+        let written = async {
+            let mut w = writer.half.lock().await;
+            w.write_all(&len_u32.to_be_bytes()).await?;
+            w.write_all(&bytes).await?;
+            w.flush().await
+        };
+        tokio::select! {
+            written = written => written.map_err(rancor::Error::new),
+            _ = writer.cut.cancelled() => Err(rancor::Error::new(std::io::Error::other(writer.why()))),
+        }
     }
 }
 
@@ -830,6 +956,7 @@ impl Actor for Listener {
             subscribed: std::collections::HashSet::new(),
             dropped: std::collections::HashSet::new(),
             deliveries: HashMap::new(),
+            bounds: args.bounds,
         })
     }
 
@@ -841,6 +968,7 @@ impl Actor for Listener {
         if let Some(handle) = state.task_handle.take() {
             handle.abort();
         }
+        CONNECTIONS.lock().unwrap().remove(&state.client_id);
         Ok(())
     }
 
@@ -862,15 +990,41 @@ impl Actor for Listener {
             ActorProcessingErr::from(std::io::Error::other("Reader already taken"))
         })?;
 
-        // Read loop: NO long-lived span. We create per-frame spans instead.
+        // Read loop: NO long-lived span, and no span entered across a wait (the task can resume on another thread,
+        // whose span stack it is not on). Each frame's span instruments what waits.
+        //
+        // A frame larger than `SMALL_FRAME` is admitted before it is read: its bytes are taken from this connection's
+        // window and from the broker's budget, and while either cannot give them nothing more is read, so TCP pushes
+        // back on the client. A smaller one is read first, so acknowledgements and subscriptions are never stuck
+        // behind the frames they make room for; a publish among them is admitted before it goes on. A publish carries
+        // its charge (the payload's) and its window credit (released when its topic accepts it).
+        let window = Window::new(state.bounds.window);
+        let budget = state.bounds.budget.clone();
+        let writer = state.writer.clone();
         let handle = tokio::spawn({
             let myself = myself.clone();
             async move {
                 let mut buf_reader = tokio::io::BufReader::new(reader);
+                let cut = writer.cut.clone();
+                let disconnect = |reason: DisconnectReason| {
+                    let _ = myself.send_message(BrokerMessage::DisconnectRequest {
+                        reason,
+                        client_id: client_id.clone(),
+                        registration_id: None,
+                        trace_ctx: None,
+                    });
+                };
 
                 loop {
                     // Length header is u32 BE.
-                    let len = match buf_reader.read_u32().await {
+                    let header = tokio::select! {
+                        header = buf_reader.read_u32() => header,
+                        _ = cut.cancelled() => {
+                            disconnect(DisconnectReason::TransportError(writer.why()));
+                            return;
+                        }
+                    };
+                    let len = match header {
                         Ok(v) => v as usize,
                         Err(e) => {
                             // This is the normal exit path on remote close too.
@@ -878,13 +1032,7 @@ impl Actor for Listener {
                                 std::io::ErrorKind::UnexpectedEof => DisconnectReason::RemoteClosed,
                                 _ => DisconnectReason::TransportError(e.to_string()),
                             };
-
-                            let _ = myself.send_message(BrokerMessage::DisconnectRequest {
-                                reason,
-                                client_id: client_id.clone(),
-                                registration_id: None,
-                                trace_ctx: None,
-                            });
+                            disconnect(reason);
                             return;
                         }
                     };
@@ -894,7 +1042,6 @@ impl Actor for Listener {
                         client_id = %client_id,
                         frame_len = len
                     );
-                    let g = frame_span.enter();
 
                     if len == 0 {
                         // Treat as keepalive/no-op and avoid log spam.
@@ -920,54 +1067,92 @@ impl Actor for Listener {
                             max = MAX_FRAME_BYTES,
                             "Oversized frame; disconnecting before allocating"
                         );
-                        let _ = myself.send_message(BrokerMessage::DisconnectRequest {
-                            reason: DisconnectReason::TransportError(format!(
-                                "frame length {len} exceeds max {MAX_FRAME_BYTES} bytes"
-                            )),
-                            client_id: client_id.clone(),
-                            registration_id: None,
-                            trace_ctx: None,
-                        });
+                        disconnect(DisconnectReason::TransportError(format!(
+                            "frame length {len} exceeds max {MAX_FRAME_BYTES} bytes"
+                        )));
                         return;
                     }
-                    drop(g);
+
+                    let mut admitted = None;
+                    if len > SMALL_FRAME {
+                        match admit(&window, &budget, len, &cut)
+                            .instrument(frame_span.clone())
+                            .await
+                        {
+                            Some(admission) => admitted = Some(admission),
+                            None => {
+                                disconnect(DisconnectReason::TransportError(writer.why()));
+                                return;
+                            }
+                        }
+                    }
 
                     let mut buffer = vec![0u8; len];
-                    let read = buf_reader
-                        .read_exact(&mut buffer)
-                        .instrument(frame_span.clone())
-                        .await;
-                    let _g = frame_span.enter();
-                    if let Err(e) = read {
+                    let body = tokio::select! {
+                        body = buf_reader.read_exact(&mut buffer).instrument(frame_span.clone()) => body,
+                        _ = cut.cancelled() => {
+                            disconnect(DisconnectReason::TransportError(writer.why()));
+                            return;
+                        }
+                    };
+                    if let Err(e) = body {
                         warn!(error = %e, "Failed reading frame body");
-                        let _ = myself.send_message(BrokerMessage::DisconnectRequest {
-                            reason: DisconnectReason::TransportError(e.to_string()),
-                            client_id: client_id.clone(),
-                            registration_id: None,
-                            trace_ctx: None,
-                        });
+                        disconnect(DisconnectReason::TransportError(e.to_string()));
                         return;
                     }
 
-                    match rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]) {
-                        Ok(archived) => match deserialize::<ClientMessage, Error>(archived) {
-                            Ok(deserialized) => {
-                                trace!(msg = ?deserialized, "Decoded client message");
-
-                                // Convert to broker message and forward to actor handler.
-                                let converted = BrokerMessage::from_client_message(
-                                    deserialized,
-                                    client_id.clone(),
-                                    peer_identity.clone(),
-                                );
-
-                                if let Err(e) = myself.send_message(converted) {
-                                    warn!(error = %e, "Failed forwarding decoded message to listener actor");
+                    let decoded = {
+                        let _g = frame_span.enter();
+                        match rkyv::access::<ArchivedClientMessage, Error>(&buffer[..]) {
+                            Ok(archived) => match deserialize::<ClientMessage, Error>(archived) {
+                                Ok(deserialized) => {
+                                    trace!(msg = ?deserialized, "Decoded client message");
+                                    Some(deserialized)
                                 }
+                                Err(e) => {
+                                    warn!(error = ?e, "Failed to deserialize archived message");
+                                    None
+                                }
+                            },
+                            Err(e) => {
+                                warn!(error = ?e, "Failed to parse archived message");
+                                None
                             }
-                            Err(e) => warn!(error = ?e, "Failed to deserialize archived message"),
-                        },
-                        Err(e) => warn!(error = ?e, "Failed to parse archived message"),
+                        }
+                    };
+                    drop(buffer);
+                    let Some(deserialized) = decoded else {
+                        continue;
+                    };
+
+                    let is_publish = matches!(deserialized, ClientMessage::PublishRequest { .. });
+                    // Convert to broker message and forward to actor handler.
+                    let mut converted = BrokerMessage::from_client_message(
+                        deserialized,
+                        client_id.clone(),
+                        peer_identity.clone(),
+                    );
+                    if is_publish {
+                        let admission = match admitted.take() {
+                            Some(admission) => admission,
+                            None => match admit(&window, &budget, len, &cut)
+                                .instrument(frame_span.clone())
+                                .await
+                            {
+                                Some(admission) => admission,
+                                None => {
+                                    disconnect(DisconnectReason::TransportError(writer.why()));
+                                    return;
+                                }
+                            },
+                        };
+                        converted = charged(converted, admission);
+                    }
+                    // Anything else admitted gives its bytes back now.
+                    drop(admitted);
+
+                    if let Err(e) = myself.send_message(converted) {
+                        warn!(error = %e, "Failed forwarding decoded message to listener actor");
                     }
                 }
             }
@@ -1084,6 +1269,7 @@ impl Actor for Listener {
                 trace_ctx,
                 published_by,
                 id,
+                window,
             } => {
                 self.handle_publish_request(
                     myself,
@@ -1095,6 +1281,7 @@ impl Actor for Listener {
                     trace_ctx,
                     published_by,
                     id,
+                    window,
                 )
                 .await?;
             }
@@ -1385,12 +1572,13 @@ impl Listener {
         _myself: ActorRef<BrokerMessage>,
         state: &mut ListenerState,
         topic: String,
-        payload: Arc<Vec<u8>>,
+        payload: Payload,
         registration_id: String,
         _reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
         id: MessageId,
+        window: Hold,
     ) -> Result<(), ActorProcessingErr> {
         let span = debug_span!("cassini.request.publish_request", client_id = %state.client_id, %registration_id, topic = ?topic, payload_bytes = payload.len());
         try_set_parent_otel(&span, trace_ctx.clone());
@@ -1467,11 +1655,12 @@ impl Listener {
             if let Err(e) = session.send_message(BrokerMessage::PublishRequest {
                 registration_id: registration_id.clone(),
                 topic: topic.clone(),
-                payload: payload.clone(),
+                payload,
                 reply_to: None,
                 trace_ctx,
                 published_by,
                 id,
+                window,
             }) {
                 let msg = ClientMessage::PublishResponse {
                     topic,
@@ -1500,7 +1689,7 @@ impl Listener {
         _myself: ActorRef<BrokerMessage>,
         state: &mut ListenerState,
         topic: String,
-        payload: Arc<Vec<u8>>,
+        payload: Payload,
         trace_ctx: Option<opentelemetry::Context>,
         result: Result<(), String>,
         published_by: Option<String>,
@@ -1533,7 +1722,8 @@ impl Listener {
             trace!("Listener received publish response");
             let msg = ClientMessage::PublishResponse {
                 topic,
-                payload,
+                // The payload, and its charge, are held until the write is done.
+                payload: payload.bytes().clone(),
                 result,
                 trace_ctx: WireTraceCtx::from_current_span(),
                 published_by,
@@ -1543,7 +1733,12 @@ impl Listener {
             if let Err(e) =
                 Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
             {
-                error!(error = ?e, "Failed to write PublishResponse");
+                if state.writer.cut.is_cancelled() {
+                    // The connection was ended (a slow subscriber's): what waits for it is not written.
+                    debug!(error = ?e, "a delivery was not written: the connection was ended");
+                } else {
+                    error!(error = ?e, "Failed to write PublishResponse");
+                }
             }
             Ok::<(), ActorProcessingErr>(())
         }

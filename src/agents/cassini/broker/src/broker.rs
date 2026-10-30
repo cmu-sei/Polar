@@ -44,8 +44,6 @@ use polar_agent_builder::{
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 
-use std::sync::Arc;
-
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -89,6 +87,10 @@ pub struct BrokerArgs {
     /// How long a connection keeps the broker's decision about a topic; zero keeps none.
     pub decision_cache: Duration,
 
+    /// The memory budget, each connection's window, each subscriber's high water and the stall bound
+    /// (docs/architecture/cassini-backpressure.md).
+    pub bounds: crate::budget::Bounds,
+
     /// The configuration `run` judged: the snapshot, the health settings and the shutdown budget,
     /// from which the broker builds its infrastructure (the health check, the signals, the
     /// shutdown handshake with its budget and watchdog).
@@ -96,12 +98,21 @@ pub struct BrokerArgs {
 }
 
 impl BrokerArgs {
-    /// From the broker's settings and what `run` judged.
+    /// From the broker's settings and what `run` judged. Bounds that cannot work (a budget below one frame) are
+    /// refused, saying why: the broker does not start.
     pub fn from_settings(
         settings: crate::settings::BrokerSettings,
         configured: Configured,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let bounds = settings.bounds()?;
+        info!(
+            budget = bounds.budget.limit(),
+            window = bounds.window,
+            high_water = bounds.high_water,
+            stall = ?bounds.stall,
+            "the broker's bounds"
+        );
+        Ok(Self {
             bind_addr: settings.bind_addr,
             session_timeout: None,
             server_cert_file: settings.server_cert_file,
@@ -109,8 +120,9 @@ impl BrokerArgs {
             ca_cert_file: settings.ca_cert_file,
             shutdown_auth_token: Some(settings.shutdown_auth_token),
             decision_cache: settings.decision_cache,
+            bounds,
             configured,
-        }
+        })
     }
 }
 
@@ -279,6 +291,7 @@ impl Actor for Broker {
                 SubscriberManager,
                 SubscriberManagerArgs {
                     session_mgr: session_mgr.clone(),
+                    bounds: args.bounds.clone(),
                 },
                 myself.clone().into(),
             )
@@ -295,9 +308,15 @@ impl Actor for Broker {
                 subscriber_mgr: subscriber_mgr.clone(),
             });
 
+            // Subscribers whose clients are away let go of what they hold when the budget is exhausted.
+            args.bounds
+                .budget
+                .tell_when_exhausted(subscriber_mgr.clone());
+
             let topic_mgr_args = TopicManagerArgs {
                 topics: None,
                 subscriber_mgr: Some(subscriber_mgr.clone()),
+                bounds: args.bounds.clone(),
             };
 
             let (topic_mgr, _topic_handle) = Actor::spawn_linked(
@@ -344,6 +363,7 @@ impl Actor for Broker {
                 session_mgr: session_mgr.clone(),
                 shutdown_auth_token: args.shutdown_auth_token.clone(),
                 authority,
+                bounds: args.bounds.clone(),
             };
 
             let (listener_mgr, _) = Actor::spawn_linked(
@@ -392,6 +412,7 @@ impl Actor for Broker {
             })?;
 
             info!("Broker startup complete");
+            crate::budget_report::spawn(args.bounds.budget.clone(), myself.clone());
 
             Ok::<BrokerState, ActorProcessingErr>(BrokerState {
                 listener_mgr: Some(listener_mgr),
@@ -513,6 +534,7 @@ impl Actor for Broker {
                 trace_ctx,
                 published_by,
                 id,
+                window,
             } => {
                 self.handle_publish_request(
                     myself,
@@ -524,6 +546,7 @@ impl Actor for Broker {
                     trace_ctx,
                     published_by,
                     id,
+                    window,
                 )
                 .await?;
             }
@@ -852,11 +875,12 @@ impl Broker {
         state: &mut BrokerState,
         registration_id: String,
         topic: String,
-        payload: Arc<Vec<u8>>,
+        payload: cassini_types::Payload,
         reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
         id: cassini_types::MessageId,
+        window: cassini_types::Hold,
     ) -> Result<(), ActorProcessingErr> {
         let payload_len = payload.len();
         let span = trace_span!("cassini.broker.publish_request", %registration_id, %topic, payload_bytes = payload_len);
@@ -898,6 +922,7 @@ impl Broker {
                 trace_ctx: Some(span.context()),
                 published_by,
                 id,
+                window,
             });
 
             if let Err(e) = forward {
@@ -947,7 +972,7 @@ impl Broker {
         _myself: ActorRef<BrokerMessage>,
         state: &mut BrokerState,
         topic: String,
-        payload: Arc<Vec<u8>>,
+        payload: cassini_types::Payload,
         result: Result<(), String>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,

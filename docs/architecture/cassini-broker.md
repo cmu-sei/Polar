@@ -237,6 +237,9 @@ publishes in process, with the publisher's identity from its own Listener.
 
 ## Bounds and flow control (as built, 2026-10-30)
 
+*Built the same day: "The bounds, as built", below, the plan in cassini-backpressure.md. What follows is the broker
+before them, for the record.*
+
 Nothing bounds what the broker holds, by count, bytes or time, except the session retention `R`.
 
 - **The acknowledgement is acceptance, not delivery:** the topic acks a publish once it has cast it into each
@@ -263,6 +266,65 @@ Nothing bounds what the broker holds, by count, bytes or time, except the sessio
   dead-letter queues are not flushed.
 - **Tests:** none exercises a slow consumer; `TestClient` (`broker/tests/support/mod.rs:634-920`) can stop (close)
   but not stay connected and stop reading, and the harness sink cannot be slowed (`test/sink/src/settings.rs`).
+
+### The bounds, as built (2026-10-30)
+
+Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered publishes and acknowledged deliveries
+(cassini-client-reliability.md, steps 2 and 5). Paths relative to `src/agents/cassini/`.
+
+- **The frame limit:** 64 MiB (`MAX_FRAME_BYTES`, `types/src/lib.rs`). The Listener's reader refuses a larger header
+  and ends the connection before allocating, logging the identity; the client refuses to send one
+  (`TcpClientActor::frame`, and `TcpClient::publish` returns `TooLarge` for a payload over `MAX_PAYLOAD_BYTES`). The
+  accept loop waits 100 ms after a failed accept (EMFILE) instead of spinning.
+- **One budget** (`broker/src/budget.rs`, `Budget`): every payload byte the broker holds. A reader charges a frame
+  before it goes on (`Budget::try_charge`, `charge`, `budget.rs:252-286`); the charge travels with the payload
+  (`cassini_types::Payload`, `types/src/held.rs:80`), which every hop shares, and is refunded when its last holder
+  drops it, so a message fanned out to many subscribers is counted once. **Default:** half the container's cgroup v2
+  `memory.max` (`budget::default_budget`, read from `/sys/fs/cgroup/memory.max`); 256 MiB when it is `max` or cannot
+  be read (`FALLBACK_BUDGET`, `budget.rs:52`); `CASSINI_MEMORY_BUDGET_BYTES` overrides it (`settings.rs:77`). A budget
+  under one frame refuses to start, saying why (`Bounds::new`, `budget.rs:83`; the settings check says it too).
+- **Exhausted** when a frame cannot be charged: from then every reader waits (a memory alarm), until what is held
+  falls to three quarters of the budget (`low_water`, `budget.rs:224`). Raising it is logged once, with the five
+  largest holders by name (subscribers as `<registration id>:<topic>`, topics as `topic <name>`) (`raise_alarm`).
+- **Ingress credit per connection** (`Window`, `budget.rs:364`): a quarter of the budget, never less than one frame.
+  A frame over 64 KiB (`SMALL_FRAME`) is admitted, window then budget, before its body is read; a smaller one is read
+  first, so acknowledgements and subscriptions are never stuck behind the frames they would make room for, and a
+  publish among them is admitted before it goes on (`listener.rs`, `admit` at 125, the read loop from 995, `charged`
+  at 231). While it waits the reader reads nothing, and TCP pushes back. The credit travels in the publish
+  (`BrokerMessage::PublishRequest { window }`) and is released when the topic accepts it.
+- **Per-subscriber high water** (`cassini_types::Backlog`, `types/src/held.rs:160`): the bytes in the subscriber's
+  delivery outbox, delivered and not acknowledged; the mark is an eighth of the budget (never under 1 MiB), with
+  hysteresis down to half of it. A topic accepts no publish (no fan-out, no acknowledgement) while a connected
+  subscriber of it is above its mark: the publish waits in the topic, in order, holding its connection's credit
+  (`topic.rs`, `pump` at 721, `accept` at 787); a subscriber that falls below its low water, goes away or ends tells
+  its topic (`TopicResume`).
+- **The stall bound** (`CASSINI_STALL_SECS`, default 30 s, more than 0 and under 60 s, `settings.rs:85`): a topic held
+  back checks every quarter of it (between 50 ms and 5 s) for a subscriber above its high water for longer
+  (`end_stalled`, `topic.rs:751`). That subscriber's connection is ended: the session manager logs it with the
+  identity, the topic, the bytes held and for how long, and the session agent cuts the connection from outside its
+  Listener (`listener::cut_connection`, `listener.rs:109`), which may be waiting on a write to that client: the
+  write and the reader give up, and the session detaches for `R` as on any lost connection. The topic moves again.
+- **Holders bounded by the budget:** while it is exhausted, a topic's queue for no subscribers refuses the newest
+  (`topic.rs:821`) and a subscriber whose client is away refuses the newest (`subscriber.rs:940`), counted and
+  logged; and on the alarm every subscriber whose client is away lets go of what it held (`shed_if_away`,
+  `subscriber.rs:845`), counted and logged, so what a subscriber is owed is kept only while the budget allows. The age
+  bounds (`R`, the queue's 180 s) stay.
+- **Observable:** the budget's report every 30 s while something is held, waits or was counted
+  (`broker/src/budget_report.rs`: use, peak, readers waiting, refusals, slow-subscriber disconnections, alarms, the
+  largest holders), and the log lines above. There is no metrics path in the broker to add them to: `metrics.rs` is
+  not a module and `ControlOp::GetBrokerStats` is not implemented.
+- **Also changed:** the Listener's read loop and its delivery write no longer hold an entered span across a wait
+  (the trap recorded under "Policy in the broker").
+- **Tests:** `budget.rs`'s and `types/src/held.rs`'s own; `broker/tests/props.rs`,
+  `the_budget_holds_each_message_once_and_never_more_than_its_limit` (the budget as a model);
+  `broker/tests/backpressure.rs` (a subscriber that stops reading, with 256 KiB and with 16 KiB messages: the
+  publisher's acknowledgements stop, the budget's peak stays within it and reaches the high water, the connection is
+  ended after the stall bound, the publisher completes, the session is kept; a slow subscriber within the bound
+  receives everything in order; a budget under a frame is refused); `settings.rs`'s; `broker/tests/frames.rs`.
+- **Known limits:** a connection that both publishes large frames and subscribes can have its acknowledgements wait
+  behind a publish its reader is waiting to admit; until the stall bound or the budget's recovery it is slowed. The
+  broker's own working memory (the copy a write makes of a frame, TLS buffers, mailboxes of small messages) is outside
+  the budget, hence the share of half.
 
 ## Running it on its own
 

@@ -89,11 +89,10 @@ impl DeliveryOutbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     fn delivery(len: usize) -> HeldDelivery {
         HeldDelivery {
-            payload: Arc::new(vec![0; len]),
+            payload: vec![0; len].into(),
             published_by: None,
             origin: None,
         }

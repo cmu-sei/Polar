@@ -71,6 +71,24 @@ pub static DECISION_CACHE_SECS: Defaulted<u64> = Defaulted::seconds(
     "5",
 );
 
+/// The broker's memory budget (docs/architecture/cassini-backpressure.md, "Decided" 2): every payload byte it holds is
+/// counted against it, and when it is exhausted the broker stops reading until it has drained. Unset, it is half the
+/// container's memory limit, or 256 MiB where there is none (`crate::budget::default_budget`).
+pub static MEMORY_BUDGET_BYTES: Optional<u64> = Optional::number(
+    "CASSINI_MEMORY_BUDGET_BYTES",
+    "the payload bytes the broker holds at most, in bytes; unset, half the container's memory limit (cgroup v2 \
+     memory.max), or 256 MiB where there is none; at least one frame, 67108864, or the broker does not start",
+);
+
+/// How long a subscriber may hold its topics back above its high water before its connection is ended
+/// (docs/architecture/cassini-backpressure.md, "Decided" 1).
+pub static STALL_SECS: Defaulted<u64> = Defaulted::seconds(
+    "CASSINI_STALL_SECS",
+    "how long a subscriber may hold a topic back, above its high water of unacknowledged deliveries, before the \
+     broker ends its connection, in seconds; more than 0 and under 60 (TCP_USER_TIMEOUT)",
+    "30",
+);
+
 static VARIABLES: &[&dyn Described] = &[
     &SERVER_CERT_CHAIN,
     &SERVER_KEY,
@@ -79,6 +97,8 @@ static VARIABLES: &[&dyn Described] = &[
     &BIND_ADDR,
     &SHUTDOWN_TOKEN,
     &DECISION_CACHE_SECS,
+    &MEMORY_BUDGET_BYTES,
+    &STALL_SECS,
 ];
 
 /// The section the broker registers.
@@ -86,11 +106,23 @@ pub static SECTION: Section = Section {
     name: "cassini-broker",
     vars: VARIABLES,
     relations: |env| {
-        read_server_key(env)
+        let mut problems: Vec<String> = read_server_key(env)
             .err()
             .map(|e| e.to_string())
             .into_iter()
-            .collect()
+            .collect();
+        if let Ok(stall) = STALL_SECS.read(env)
+            && let Ok(budget) = MEMORY_BUDGET_BYTES.read(env)
+            && let Err(why) = crate::budget::Bounds::new(
+                budget
+                    .map(|b| b as usize)
+                    .unwrap_or(crate::budget::FALLBACK_BUDGET),
+                std::time::Duration::from_secs(stall),
+            )
+        {
+            problems.push(why);
+        }
+        problems
     },
 };
 
@@ -111,6 +143,9 @@ pub struct BrokerSettings {
     pub bind_addr: String,
     pub shutdown_auth_token: String,
     pub decision_cache: std::time::Duration,
+    /// The memory budget the deployment gives, if it gives one.
+    pub memory_budget: Option<u64>,
+    pub stall: std::time::Duration,
 }
 
 impl BrokerSettings {
@@ -122,7 +157,20 @@ impl BrokerSettings {
             bind_addr: config.read(&BIND_ADDR)?,
             shutdown_auth_token: config.read(&SHUTDOWN_TOKEN)?,
             decision_cache: std::time::Duration::from_secs(config.read(&DECISION_CACHE_SECS)?),
+            memory_budget: config.read(&MEMORY_BUDGET_BYTES)?,
+            stall: std::time::Duration::from_secs(config.read(&STALL_SECS)?),
         })
+    }
+
+    /// The broker's bounds: the budget given, or half the container's memory limit, or the fallback with none; and
+    /// the stall bound. Refused, saying why, when they cannot work.
+    pub fn bounds(&self) -> Result<crate::budget::Bounds, String> {
+        use crate::budget::{Bounds, MEMORY_MAX_PATH, default_budget, read_memory_max};
+        let budget = match self.memory_budget {
+            Some(given) => given as usize,
+            None => default_budget(read_memory_max(MEMORY_MAX_PATH)),
+        };
+        Bounds::new(budget, self.stall)
     }
 }
 
@@ -160,6 +208,37 @@ mod tests {
         assert_eq!(settings.bind_addr, DEFAULT_BIND_ADDR);
         assert_eq!(settings.shutdown_auth_token, "t0ken");
         assert_eq!(settings.decision_cache, std::time::Duration::from_secs(5));
+        assert_eq!(settings.memory_budget, None);
+        assert_eq!(settings.stall, std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn the_budget_and_the_stall_bound_are_read_and_judged() {
+        let mut vars = MINIMUM.to_vec();
+        vars.extend([
+            ("CASSINI_MEMORY_BUDGET_BYTES", "134217728"),
+            ("CASSINI_STALL_SECS", "5"),
+        ]);
+        let settings = BrokerSettings::read(&config(&vars)).unwrap();
+        let bounds = settings.bounds().unwrap();
+        assert_eq!(bounds.budget.limit(), 134_217_728);
+        assert_eq!(bounds.stall, std::time::Duration::from_secs(5));
+
+        for (name, value, why) in [
+            ("CASSINI_MEMORY_BUDGET_BYTES", "1048576", "below one frame"),
+            ("CASSINI_STALL_SECS", "60", "TCP_USER_TIMEOUT"),
+        ] {
+            let mut vars = MINIMUM.to_vec();
+            vars.push((name, value));
+            let problems = config(&vars).check().join(" | ");
+            assert!(problems.contains(why), "{name}={value}: {problems}");
+            assert!(
+                BrokerSettings::read(&config(&vars))
+                    .unwrap()
+                    .bounds()
+                    .is_err()
+            );
+        }
     }
 
     #[test]

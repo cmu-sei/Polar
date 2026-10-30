@@ -248,6 +248,18 @@ pub struct TestBroker {
     cache: Duration,
     /// The exit codes the broker asked the process to exit with.
     pub exits: Arc<Mutex<Vec<i32>>>,
+    /// The memory budget's bytes and the stall bound it starts with (again after a restart).
+    limits: (usize, Duration),
+    /// The bounds the running broker has, its budget among them.
+    bounds: Mutex<cassini_broker::budget::Bounds>,
+}
+
+/// The bounds a test broker has unless it asks for others: the broker's own when it has no memory limit.
+fn default_limits() -> (usize, Duration) {
+    (
+        cassini_broker::budget::FALLBACK_BUDGET,
+        cassini_broker::budget::DEFAULT_STALL,
+    )
 }
 
 /// The names the broker's actors register under. A broker left over from a test that failed holds
@@ -327,8 +339,33 @@ impl TestBroker {
             true,
             DEFAULT_CACHE,
             None,
+            default_limits(),
         )
         .await
+    }
+
+    /// As `start`, with a memory budget of `budget` bytes and a stall bound of `stall`.
+    pub async fn start_bounded(budget: usize, stall: Duration) -> Self {
+        Self::start_full(
+            None,
+            Duration::from_secs(20),
+            None,
+            true,
+            DEFAULT_CACHE,
+            None,
+            (budget, stall),
+        )
+        .await
+    }
+
+    /// The running broker's memory budget.
+    pub fn budget(&self) -> cassini_broker::budget::Budget {
+        self.bounds.lock().unwrap().budget.clone()
+    }
+
+    /// The running broker's bounds.
+    pub fn bounds(&self) -> cassini_broker::budget::Bounds {
+        self.bounds.lock().unwrap().clone()
     }
 
     /// A broker with no policy, as on a fresh cluster: what a client's certificate admits decides, and anything
@@ -339,7 +376,16 @@ impl TestBroker {
 
     /// As `start_enforcing`, each connection keeping a decision for `cache` (none when zero).
     pub async fn start_enforcing_caching(cache: Duration) -> Self {
-        Self::start_full(None, Duration::from_secs(20), None, false, cache, None).await
+        Self::start_full(
+            None,
+            Duration::from_secs(20),
+            None,
+            false,
+            cache,
+            None,
+            default_limits(),
+        )
+        .await
     }
 
     /// As `start`, with the certificates `pki` holds: the custody daemon's server key, say.
@@ -351,10 +397,12 @@ impl TestBroker {
             true,
             DEFAULT_CACHE,
             Some(pki),
+            default_limits(),
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_full(
         retention_secs: Option<u64>,
         shutdown_budget: Duration,
@@ -362,6 +410,7 @@ impl TestBroker {
         open: bool,
         cache: Duration,
         pki: Option<Pki>,
+        limits: (usize, Duration),
     ) -> Self {
         init_logging();
         clear_names().await;
@@ -374,6 +423,8 @@ impl TestBroker {
         let addr = format!("127.0.0.1:{port}");
         let exits = Arc::new(Mutex::new(Vec::new()));
         let token = shutdown_token.map(str::to_string);
+        let bounds = cassini_broker::budget::Bounds::new(limits.0, limits.1)
+            .expect("the test's bounds work");
         let (broker, infrastructure) = Self::spawn_broker(
             &addr,
             &pki,
@@ -382,6 +433,7 @@ impl TestBroker {
             &exits,
             token.clone(),
             cache,
+            bounds.clone(),
         )
         .await;
 
@@ -397,6 +449,8 @@ impl TestBroker {
                     open,
                     cache,
                     exits,
+                    limits,
+                    bounds: Mutex::new(bounds),
                 };
                 if open {
                     started.set_policy(OPEN_POLICY).await;
@@ -417,6 +471,7 @@ impl TestBroker {
         exits: &Arc<Mutex<Vec<i32>>>,
         shutdown_auth_token: Option<String>,
         decision_cache: Duration,
+        bounds: cassini_broker::budget::Bounds,
     ) -> (ActorRef<BrokerMessage>, Infrastructure) {
         // The builder's infrastructure as the broker gets it in the pod, except that the process
         // is not ended (the code it would have exited with is recorded in `exits`) and the
@@ -440,6 +495,7 @@ impl TestBroker {
                 ca_cert_file: pki.ca().to_string_lossy().into_owned(),
                 shutdown_auth_token,
                 decision_cache,
+                bounds,
                 configured,
             },
         )
@@ -455,6 +511,9 @@ impl TestBroker {
         let began = std::time::Instant::now();
         self.stop().await;
         tokio::time::sleep(away_for).await;
+        let bounds = cassini_broker::budget::Bounds::new(self.limits.0, self.limits.1)
+            .expect("the test's bounds work");
+        *self.bounds.lock().unwrap() = bounds.clone();
         let (broker, infrastructure) = Self::spawn_broker(
             &self.addr,
             &self.pki,
@@ -463,6 +522,7 @@ impl TestBroker {
             &self.exits,
             self.shutdown_token.clone(),
             self.cache,
+            bounds,
         )
         .await;
         *self.broker.lock().unwrap() = broker;
@@ -583,6 +643,21 @@ where
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     with_broker_retaining(None, test).await
+}
+
+/// As `with_broker`, with a memory budget of `budget` bytes and a stall bound of `stall`.
+pub async fn with_broker_bounded<F, Fut>(budget: usize, stall: Duration, test: F)
+where
+    F: FnOnce(Arc<TestBroker>) -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let _only = serial().await;
+    let broker = Arc::new(TestBroker::start_bounded(budget, stall).await);
+    let outcome = tokio::spawn(test(broker.clone())).await;
+    broker.stop().await;
+    if let Err(failure) = outcome {
+        std::panic::resume_unwind(failure.into_panic());
+    }
 }
 
 /// As `with_broker`, with a disconnected session kept for `retention_secs` seconds.

@@ -465,7 +465,7 @@ fn test_broker_message_from_client_message_unsupported() {
         } => {
             assert_eq!(topic, "topic");
             assert_eq!(registration_id, "id");
-            assert_eq!(payload, &Arc::new(vec![1, 2, 3]));
+            assert_eq!(payload.bytes(), &Arc::new(vec![1, 2, 3]));
             assert_eq!(*id, cassini_types::MessageId { epoch: 9, seq: 2 });
         }
         _ => panic!("Expected PublishRequest"),

@@ -22,13 +22,16 @@
 */
 
 use crate::UNEXPECTED_MESSAGE_STR;
+use crate::budget::Bounds;
 use crate::deliveries::{DeliveryOutbox, next_delivery_id};
 use crate::{
     CLIENT_NOT_FOUND_TXT, DISCONNECTED_REASON, REGISTRATION_REQ_FAILED_TXT, SESSION_NOT_FOUND_TXT,
     SUBSCRIBE_REQUEST_FAILED_TXT, TIMEOUT_REASON, get_subscriber_name,
 };
 use cassini_tracing::try_set_parent_otel;
-use cassini_types::{BrokerMessage, HeldDelivery, HeldMessages, MessageId, ShutdownPhase};
+use cassini_types::{
+    Backlog, BrokerMessage, HeldDelivery, HeldMessages, MessageId, Payload, ShutdownPhase,
+};
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent, registry::where_is,
     rpc::CallResult,
@@ -48,6 +51,8 @@ pub struct SubscriberManager;
 
 pub struct SubscriberManagerArgs {
     pub session_mgr: ActorRef<BrokerMessage>,
+    /// The memory budget and each subscriber's high water.
+    pub bounds: Bounds,
 }
 
 pub struct SubscriberManagerState {
@@ -63,6 +68,7 @@ pub struct SubscriberManagerState {
     #[allow(dead_code)]
     topic_mgr: Option<ActorRef<BrokerMessage>>,
     is_shutting_down: bool,
+    bounds: Bounds,
 }
 
 // ============================== SubscriberManager Actor ============================== //
@@ -84,6 +90,7 @@ impl Actor for SubscriberManager {
             session_mgr: args.session_mgr,
             topic_mgr: None,
             is_shutting_down: false,
+            bounds: args.bounds,
         })
     }
 
@@ -195,6 +202,18 @@ impl Actor for SubscriberManager {
             BrokerMessage::SessionSuperseded { registration_id } => {
                 Self::hold_subscriptions(&myself, state, registration_id).await;
             }
+            BrokerMessage::SessionDetached { registration_id } => {
+                for subscriber in Self::subscribers_of(&myself, &registration_id) {
+                    let _ = subscriber.send_message(BrokerMessage::SessionDetached {
+                        registration_id: registration_id.clone(),
+                    });
+                }
+            }
+            BrokerMessage::BudgetExhausted => {
+                for subscriber in myself.get_children() {
+                    let _ = subscriber.send_message(BrokerMessage::BudgetExhausted);
+                }
+            }
             other => warn!(?other, "{UNEXPECTED_MESSAGE_STR}"),
         }
         Ok(())
@@ -296,6 +315,22 @@ impl SubscriberManager {
             }
         }
         claimed
+    }
+
+    /// The subscribers of the session `registration_id`, each registered as `<registration id>:<topic>`.
+    fn subscribers_of(
+        myself: &ActorRef<BrokerMessage>,
+        registration_id: &str,
+    ) -> Vec<ractor::ActorCell> {
+        myself
+            .get_children()
+            .into_iter()
+            .filter(|cell| {
+                cell.get_name()
+                    .and_then(|name| name.split_once(':').map(|(id, _)| id == registration_id))
+                    .unwrap_or(false)
+            })
+            .collect()
     }
 
     /// Removes all subscriptions for a given session
@@ -415,7 +450,7 @@ impl SubscriberManager {
         registration_id: String,
         topic: String,
         trace_ctx: Option<opentelemetry::Context>,
-        reply: RpcReplyPort<Result<ActorRef<BrokerMessage>, ActorProcessingErr>>,
+        reply: RpcReplyPort<cassini_types::CreatedSubscriber>,
     ) -> Result<(), ActorProcessingErr> {
         if state.is_shutting_down {
             warn!("Rejecting subscriber creation during shutdown");
@@ -429,6 +464,9 @@ impl SubscriberManager {
         trace!("Subscriber manager received subscribe command");
 
         let subscriber_id = get_subscriber_name(&registration_id, &topic);
+        // What its client has not acknowledged, which its topic reads.
+        let backlog = Arc::new(Backlog::new(subscriber_id.clone(), state.bounds.high_water));
+        state.bounds.budget.register(&backlog);
 
         // Get the session ref from the session manager
         let session_ref = match state
@@ -463,6 +501,8 @@ impl SubscriberManager {
             SubscriberAgent,
             SubscriberAgentArgs {
                 session: session_ref.clone(),
+                backlog: backlog.clone(),
+                bounds: state.bounds.clone(),
             },
             myself.clone().into(),
         )
@@ -485,7 +525,7 @@ impl SubscriberManager {
                 }
                 info!(%registration_id, %topic, "subscription created");
                 state.subscribers.insert(subscriber_id, subscriber.clone());
-                let _ = reply.send(Ok(subscriber));
+                let _ = reply.send(Ok((subscriber, backlog)));
             }
             Err(e) => {
                 let err_msg = format!("Failed to spawn subscriber actor. {e}");
@@ -649,10 +689,15 @@ pub struct SubscriberAgentState {
     /// The session this subscription belonged to was superseded: nothing is forwarded, everything
     /// is kept until a new session of the same identity claims it, or the broker lets it go.
     held: bool,
+    /// The bytes its outbox holds, against its high water, which its topic reads.
+    backlog: Arc<Backlog>,
+    bounds: Bounds,
 }
 
 pub struct SubscriberAgentArgs {
     pub session: ActorRef<BrokerMessage>,
+    pub backlog: Arc<Backlog>,
+    pub bounds: Bounds,
 }
 
 #[ractor::async_trait]
@@ -681,6 +726,8 @@ impl Actor for SubscriberAgent {
                 topic: topic.to_string(),
                 outbox: DeliveryOutbox::default(),
                 held: false,
+                backlog: args.backlog,
+                bounds: args.bounds,
             })
         } else {
             Err(ActorProcessingErr::from(format!(
@@ -698,6 +745,17 @@ impl Actor for SubscriberAgent {
         Ok(())
     }
 
+    /// An ended subscriber holds its topic back no more.
+    async fn post_stop(
+        &self,
+        _myself: ActorRef<Self::Msg>,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        state.backlog.set_connected(false);
+        Self::resume_topic(state);
+        Ok(())
+    }
+
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,
@@ -705,6 +763,11 @@ impl Actor for SubscriberAgent {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            BrokerMessage::SessionDetached { .. } => {
+                state.backlog.set_connected(false);
+                Self::resume_topic(state);
+            }
+            BrokerMessage::BudgetExhausted => Self::shed_if_away(state),
             BrokerMessage::RegistrationRequest {
                 registration_id,
                 client_id,
@@ -742,7 +805,11 @@ impl Actor for SubscriberAgent {
                 .await?;
             }
             BrokerMessage::PublishResponseAck { delivery_id } => {
-                state.outbox.acknowledge(delivery_id);
+                if let Some(delivery) = state.outbox.acknowledge(delivery_id)
+                    && state.backlog.remove(delivery.payload.len())
+                {
+                    Self::resume_topic(state);
+                }
             }
             BrokerMessage::PushMessageFailed { delivery_id } => {
                 // Still held: it is sent again when the session is resumed.
@@ -750,10 +817,13 @@ impl Actor for SubscriberAgent {
             }
             BrokerMessage::HoldSubscription { reply } => {
                 state.held = true;
+                state.backlog.set_connected(false);
+                Self::resume_topic(state);
                 let _ = reply.send(());
             }
             BrokerMessage::ClaimHeld { reply } => {
                 let held = state.outbox.take();
+                state.backlog.remove(state.backlog.bytes());
                 debug!(topic = %state.topic, count = held.len(), "handing over what was held");
                 let _ = reply.send(held);
                 myself.stop(Some("CLAIMED".to_string()));
@@ -765,6 +835,31 @@ impl Actor for SubscriberAgent {
 }
 
 impl SubscriberAgent {
+    /// Tells this subscriber's topic it may accept what waits: it fell below its low water, or holds nothing back.
+    fn resume_topic(state: &SubscriberAgentState) {
+        if let Some(topic) = where_is(state.topic.clone()) {
+            let _ = topic.send_message(BrokerMessage::TopicResume);
+        }
+    }
+
+    /// The budget is exhausted: a subscriber whose client is away lets go of what it holds, so the budget can recover
+    /// (what a subscriber is owed is kept only while the budget allows). Counted, and logged.
+    fn shed_if_away(state: &mut SubscriberAgentState) {
+        if state.backlog.is_connected() || state.outbox.is_empty() {
+            return;
+        }
+        let bytes = state.outbox.bytes();
+        let shed = state.outbox.take();
+        state.backlog.remove(bytes);
+        state.bounds.budget.count_refused(shed.len() as u64);
+        warn!(
+            subscriber = state.backlog.name(),
+            count = shed.len(),
+            bytes,
+            "the broker's memory budget is exhausted: a subscriber whose client is away lets go of what it held"
+        );
+    }
+
     // ===== Handler methods for SubscriberAgent =====
     async fn handle_registration_request(
         &self,
@@ -784,6 +879,7 @@ impl SubscriberAgent {
         if let Some(id) = registration_id {
             // Reconnection: everything the client did not acknowledge is sent again, oldest first, with the number
             // it had (the client may have had it before its connection went: delivery is at-least-once).
+            state.backlog.set_connected(true);
             let session = state.session_ref.clone();
             info!(
                 held = state.outbox.len(),
@@ -828,7 +924,7 @@ impl SubscriberAgent {
         myself: ActorRef<BrokerMessage>,
         state: &mut SubscriberAgentState,
         topic: String,
-        payload: Arc<Vec<u8>>,
+        payload: Payload,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
         origin: Option<MessageId>,
@@ -841,8 +937,21 @@ impl SubscriberAgent {
             "New message on topic: \"{topic}\", forwarding to session: {}",
             state.registration_id
         );
+        // A subscriber whose client is away is a holder like any other: while the budget is exhausted it refuses the
+        // newest rather than grow. A connected one is bounded by its high water, which its topic keeps.
+        if !state.backlog.is_connected() && state.bounds.budget.is_exhausted() {
+            state.bounds.budget.count_refused(1);
+            warn!(
+                subscriber = state.backlog.name(),
+                bytes = payload.len(),
+                held = state.outbox.len(),
+                "the broker's memory budget is exhausted: a message for a subscriber whose client is away is refused"
+            );
+            return Ok(());
+        }
         // Held from now until the client acknowledges it, whether it is sent now or later.
         let delivery_id = next_delivery_id();
+        state.backlog.add(payload.len());
         let delivery = HeldDelivery {
             payload,
             published_by,

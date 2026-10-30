@@ -29,8 +29,8 @@ use crate::{
 use crate::{UNEXPECTED_MESSAGE_STR, get_subscriber_name};
 use cassini_tracing::try_set_parent_otel;
 use cassini_types::{
-    BrokerMessage, ControlError, ControlOp, ControlResult, DisconnectReason, MessageId,
-    ShutdownPhase,
+    BrokerMessage, ControlError, ControlOp, ControlResult, DisconnectReason, Hold, MessageId,
+    Payload, ShutdownPhase,
 };
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait, registry::where_is,
@@ -264,6 +264,35 @@ impl Actor for SessionManager {
             BrokerMessage::SessionExpiryTick => {
                 Self::end_expired_sessions(state);
             }
+            // A subscriber held its topic back past the stall bound: its connection is ended (cassini-backpressure.md,
+            // "Decided" 1), and its session detaches for the retention window as on any lost connection.
+            BrokerMessage::SlowSubscriber {
+                registration_id,
+                topic,
+                held,
+                above_for,
+            } => {
+                let session = state.sessions.get(&registration_id);
+                warn!(
+                    %registration_id,
+                    identity = ?session.and_then(|s| s.identity.clone()),
+                    %topic,
+                    held,
+                    ?above_for,
+                    "a subscriber held its topic back past the stall bound: its connection is ended, and its \
+                     session kept for the retention window"
+                );
+                if let Some(session) = session {
+                    let _ = session
+                        .agent_ref
+                        .send_message(BrokerMessage::SlowSubscriber {
+                            registration_id,
+                            topic,
+                            held,
+                            above_for,
+                        });
+                }
+            }
             BrokerMessage::SessionHeld { registration_id } => {
                 Self::complete_takeover(state, &registration_id);
             }
@@ -335,6 +364,12 @@ impl SessionManager {
         {
             info!(%registration_id, retention = ?state.retention, "client went away, keeping its session");
             session.detached_at = Some(tokio::time::Instant::now());
+            // Its subscribers no longer hold their topics back, and keep what they hold while the budget allows.
+            if let Some(subscriber_mgr) = &state.subscriber_mgr {
+                let _ = subscriber_mgr.send_message(BrokerMessage::SessionDetached {
+                    registration_id: registration_id.to_string(),
+                });
+            }
         }
     }
 
@@ -902,6 +937,7 @@ impl Actor for SessionAgent {
                 trace_ctx,
                 published_by,
                 id,
+                window,
             } => {
                 self.handle_publish_request(
                     myself.clone(),
@@ -913,8 +949,20 @@ impl Actor for SessionAgent {
                     trace_ctx,
                     published_by,
                     id,
+                    window,
                 )
                 .await?;
+            }
+            BrokerMessage::SlowSubscriber { topic, .. } => {
+                // The connection is cut from outside its Listener, which may be waiting on a write to this client.
+                let client_id = state.client_ref.get_name().unwrap_or_default();
+                let why = format!(
+                    "the broker ended this connection: its subscription to {topic} held the topic back past the \
+                     stall bound"
+                );
+                if !crate::listener::cut_connection(&client_id, &why) {
+                    debug!(%client_id, "the slow subscriber's connection had already ended");
+                }
             }
             BrokerMessage::PushMessage {
                 payload,
@@ -1129,11 +1177,12 @@ impl SessionAgent {
         state: &mut SessionAgentState,
         registration_id: String,
         topic: String,
-        payload: Arc<Vec<u8>>,
+        payload: Payload,
         _reply_to: Option<ActorRef<BrokerMessage>>, // added but ignored; we'll use our own
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
         id: MessageId,
+        window: Hold,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("session.publish_request", %registration_id, %topic);
         try_set_parent_otel(&span, trace_ctx);
@@ -1168,7 +1217,7 @@ impl SessionAgent {
                     .client_ref
                     .send_message(BrokerMessage::PublishResponse {
                         topic,
-                        payload: Arc::new(Vec::new()),
+                        payload: Payload::uncharged(Arc::new(Vec::new())),
                         result: Err(err_msg),
                         trace_ctx: Some(span.context()),
                         published_by: None,
@@ -1204,6 +1253,7 @@ impl SessionAgent {
             trace_ctx: Some(span.context()),
             published_by,
             id,
+            window,
         }) {
             error!("failed to forward publish to broker: {e}");
             // Notify manager that publish failed (delta -1)
@@ -1224,7 +1274,7 @@ impl SessionAgent {
         &self,
         _myself: ActorRef<BrokerMessage>,
         state: &mut SessionAgentState,
-        payload: Arc<Vec<u8>>,
+        payload: Payload,
         topic: String,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,

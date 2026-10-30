@@ -145,6 +145,7 @@ async fn subscribe_through(
         cassini_broker::topic::TopicManagerArgs {
             topics: None,
             subscriber_mgr: Some(subscriber_mgr),
+            bounds: cassini_broker::budget::Bounds::fallback(),
         },
     )
     .await
@@ -218,6 +219,7 @@ mod tests {
             cassini_broker::topic::TopicManagerArgs {
                 topics: Some(vec!["t-busy".to_string()]),
                 subscriber_mgr: Some(subscriber_mgr),
+                bounds: cassini_broker::budget::Bounds::fallback(),
             },
         )
         .await
@@ -232,6 +234,7 @@ mod tests {
             .send_message(BrokerMessage::AddSubscriber {
                 registration_id: "live".to_string(),
                 subscriber_ref: live,
+                backlog: Arc::new(cassini_types::Backlog::new("test", usize::MAX)),
                 trace_ctx: None,
             })
             .unwrap();
@@ -249,11 +252,12 @@ mod tests {
             .send_message(BrokerMessage::PublishRequest {
                 registration_id: "producer".to_string(),
                 topic: "t-busy".to_string(),
-                payload: Arc::new(b"now".to_vec()),
+                payload: Arc::new(b"now".to_vec()).into(),
                 reply_to: None,
                 trace_ctx: None,
                 published_by: None,
                 id: cassini_types::MessageId { epoch: 1, seq: 1 },
+                window: cassini_types::Hold::none(),
             })
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -278,6 +282,7 @@ mod tests {
             cassini_broker::topic::TopicManagerArgs {
                 topics: Some(vec![topic.to_string()]),
                 subscriber_mgr: None,
+                bounds: cassini_broker::budget::Bounds::fallback(),
             },
         )
         .await?;
@@ -290,6 +295,7 @@ mod tests {
         topic_actor.send_message(BrokerMessage::AddSubscriber {
             registration_id: "ended".to_string(),
             subscriber_ref: ended.clone(),
+            backlog: Arc::new(cassini_types::Backlog::new("test", usize::MAX)),
             trace_ctx: None,
         })?;
         ended.stop(None);
@@ -299,11 +305,12 @@ mod tests {
             topic_actor.send_message(BrokerMessage::PublishRequest {
                 registration_id: "producer".to_string(),
                 topic: topic.to_string(),
-                payload: Arc::new(payload),
+                payload: Arc::new(payload).into(),
                 reply_to: None,
                 trace_ctx: None,
                 published_by: None,
                 id: cassini_types::MessageId { epoch: 1, seq: 1 },
+                window: cassini_types::Hold::none(),
             })?;
         }
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -311,6 +318,7 @@ mod tests {
         topic_actor.send_message(BrokerMessage::AddSubscriber {
             registration_id: "live".to_string(),
             subscriber_ref: live,
+            backlog: Arc::new(cassini_types::Backlog::new("test", usize::MAX)),
             trace_ctx: None,
         })?;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -323,6 +331,7 @@ mod tests {
         let args = cassini_broker::topic::TopicManagerArgs {
             topics: None,
             subscriber_mgr: None,
+            bounds: cassini_broker::budget::Bounds::fallback(),
         };
 
         // Just make sure we can spawn the TopicManager
@@ -341,6 +350,7 @@ mod tests {
         let args = cassini_broker::topic::TopicManagerArgs {
             topics: None,
             subscriber_mgr: None,
+            bounds: cassini_broker::budget::Bounds::fallback(),
         };
 
         // Spawn TopicManager
@@ -355,11 +365,12 @@ mod tests {
         let msg = BrokerMessage::PublishRequest {
             registration_id: "test-client".to_string(),
             topic: "test-topic".to_string(),
-            payload: Arc::new(vec![1u8, 2, 3, 4, 5]),
+            payload: Arc::new(vec![1u8, 2, 3, 4, 5]).into(),
             reply_to: None,
             trace_ctx: None,
             published_by: None,
             id: cassini_types::MessageId { epoch: 1, seq: 1 },
+            window: cassini_types::Hold::none(),
         };
 
         // This should not panic or error
@@ -373,6 +384,7 @@ mod tests {
         let args = cassini_broker::topic::TopicManagerArgs {
             topics: None,
             subscriber_mgr: None,
+            bounds: cassini_broker::budget::Bounds::fallback(),
         };
 
         // Spawn TopicManager
