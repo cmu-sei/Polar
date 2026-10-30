@@ -211,6 +211,13 @@ let makeCertIssuer
                     -- The record of every certificate it signs, which the credentials agent asks for. On the
                     -- claim: a certificate that cannot be recorded is not returned.
                     , setting "CERT_ISSUER_RECORD_PATH" "${caDir}/issued.jsonl"
+                    -- It is a Cassini client now: it signs itself a client certificate on its own token and writes it,
+                    -- its key and the CA chain where its client reads them, a directory only it can see.
+                    , setting "TLS_CLIENT_CERT" C.certPaths.cert
+                    , setting "TLS_CLIENT_KEY" C.certPaths.key
+                    , setting "TLS_CA_CERT" C.certPaths.ca
+                    , setting "BROKER_ADDR" C.cassiniAddr
+                    , setting "CASSINI_SERVER_NAME" C.cassiniServerName
                     , setting "RUST_LOG" "info,cert_issuer=debug"
                     , setting "KUBERNETES_CA_CERT" "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
                     ]
@@ -220,6 +227,10 @@ let makeCertIssuer
                         , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
                           , claimName = "${name}-ca"
                           }
+                        }
+                      , kubernetes.Volume::{
+                        , name = "own-tls"
+                        , emptyDir = Some kubernetes.EmptyDirVolumeSource::{ medium = Some "Memory" }
                         }
                       , kubernetes.Volume::{
                         , name = "own-token"
@@ -257,6 +268,7 @@ let makeCertIssuer
                         v.caSecret
                   , mounts =
                       [ kubernetes.VolumeMount::{ name = "ca", mountPath = caDir }
+                      , kubernetes.VolumeMount::{ name = "own-tls", mountPath = C.certDir }
                       , kubernetes.VolumeMount::{
                         , name = "own-token"
                         , mountPath = ownTokenDir
