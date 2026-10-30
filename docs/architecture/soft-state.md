@@ -23,7 +23,8 @@
 
 # Soft state: the state agent
 
-Status: DESIGN, 2026-10-30, not built. Written from the code as it stands on `main` (`1b82f624`); paths are relative to
+Status: DESIGN CLEARED by the maintainer 2026-10-30 (the reader half only for now; the cursor derived from the issues
+written, not an explicit cursor node), not built. Written from the code as it stands on `main` (`1b82f624`); paths are relative to
 `src/agents/`. First user: the Jira observer's issue cursor (`jira.md`, "Open").
 
 ## What it is for
