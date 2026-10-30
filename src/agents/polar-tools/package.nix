@@ -84,7 +84,6 @@ let
     CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
     "CARGO_TARGET_${tripleUpper}_LINKER" = staticCCBin;
     "CC_${tripleUnderscore}" = staticCCBin;
-    inherit (crateArgs) POLAR_SCUDO_LIB_DIR;
 
     OPENSSL_STATIC = "1";
     OPENSSL_LIB_DIR = "${staticSsl.out}/lib";
@@ -95,7 +94,8 @@ let
 
   cargoArtifacts = craneStatic.buildDepsOnly staticArgs;
 
-  tools = craneStatic.buildPackage (staticArgs // { inherit cargoArtifacts; });
+  # The Scudo directory in the package's build only, as workspace.nix has it: the dependencies' build never reads it.
+  tools = craneStatic.buildPackage (staticArgs // { inherit cargoArtifacts; inherit (crateArgs) POLAR_SCUDO_LIB_DIR; });
 
   image = pkgs.dockerTools.buildLayeredImage {
     name = "polar-tools";

@@ -79,7 +79,6 @@ let
         CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
         "CARGO_TARGET_${tripleUpper}_LINKER" = staticCCBin;
         "CC_${tripleUnderscore}" = staticCCBin;
-        POLAR_SCUDO_LIB_DIR = "${scudo}/lib/polar/scudo";
 
         OPENSSL_STATIC = "1";
         OPENSSL_LIB_DIR = "${staticSsl.out}/lib";
@@ -93,6 +92,9 @@ let
     individualCrateArgs = commonArgs // {
         inherit cargoArtifacts;
         inherit (craneLib.crateNameFromCargoToml { inherit src; }) version;
+        # Here and not in commonArgs: buildDepsOnly replaces the workspace's build scripts with dummies, so
+        # polar-scudo's never reads it there, and in commonArgs a change to Scudo rebuilt every dependency.
+        POLAR_SCUDO_LIB_DIR = "${scudo}/lib/polar/scudo";
         # NB: we disable tests since we'll run them all via cargo-nextest
         doCheck = false;
     };
