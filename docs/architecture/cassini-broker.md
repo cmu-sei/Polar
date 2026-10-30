@@ -219,8 +219,11 @@ its revocation stays, as sessions the workload opens beside its custodian's
 - **A trap found building it:** the decision waits on the policy actor, and the Listener's handlers hold an entered
   span; a span held across a wait broke the tracing registry's per-thread stack when the task resumed on another thread
   (a panic in `tracing-subscriber`'s `sharded.rs`, and two in five messages lost in the four-publisher load test). The
-  decision runs with the span left and instrumented by it. The Listener's writes still wait inside entered spans, which
-  has not been seen to fail; it would under a slow reader, when a write waits on the socket.
+  decision runs with the span left and instrumented by it. The Listener's writes still waited inside entered spans, and
+  so did the other managers' handlers; under load they failed the same way (2026-10-30). Every handler now
+  instruments its future (`async { .. }.instrument(span).await`) and holds no guard across an await, and
+  `clippy::await_holding_invalid_type`, configured in every `clippy.toml` with `tracing::span::Entered` and
+  `EnteredSpan`, refuses one.
 - **Tests:** `broker/tests/enforcement.rs` (declared admitted and undeclared refused with no policy; implied topics;
   a certificate naming nothing; a Cedar forbid and permit; a snapshot believed from the credentials agent and not from
   an impostor allowed to publish on the topic). Every other broker test starts its broker with a policy that permits

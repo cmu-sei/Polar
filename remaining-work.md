@@ -107,16 +107,41 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
   volume (never grown), and the nix-usernetes node's containerd and kubelet state share `/home` with everything else,
   so a large Cargo `target` directory tainted the node with disk pressure and evicted every pod (2026-10-21). f2fs grows
   only unmounted. A volume of its own for the node's state would stop builds evicting the cluster.
-- **The broker's tests panic in tracing under load** (2026-10-30). A full workspace run while two other agents were
-  building failed 10 broker tests: `revocation` (1, `no_agent_s_connection_outlives_its_certificate_s_revocation`) and
-  `custody_revocation` (9), with tracing-subscriber's "tried to clone a span ... that already closed"
-  (`sharded.rs:317`), then a panic at `listener.rs:334` (the Listener spawn's `expect` on the manager's supervisor),
-  and "the broker's names never became free" in the tests after. Alone, and with the machine quiet, both pass every
-  time (3 runs each, and the whole broker suite 116/116), and nothing in the broker changed that day: a race that load
-  exposes. A span cloned after it closed is a use after end in the code's span handling, so a loaded production broker
-  could panic the same way. The proptest regression the failing run wrote (three `(false, false)` cases) is kept in the
-  session's scratchpad, not in the repository. To do: reproduce under load (`stress-ng` or parallel test threads), find
-  the span that outlives its scope, and fix it with a test that fails under contention.
+- **The broker's tests panic in tracing under load** (2026-10-30; fixed the same day). A full workspace run while two
+  other agents were building failed 10 broker tests in `revocation` and `custody_revocation`, with tracing-subscriber's
+  "tried to clone a span ... that already closed" (`sharded.rs:317`, an `assert_ne!`, so release builds panic too),
+  then `sharded.rs:265`; ractor caught the panic and lost the actor mid-work, hence the follow-on failures (the Listener
+  spawn's `expect` on the manager's supervisor, "the broker's names never became free"). The cause: the broker's and the
+  client's async handlers entered a span (`let _g = span.enter();`) and held the guard across their awaits. An entered
+  span is thread-local; a task that yields while holding one leaves it on the worker's span stack for whatever runs
+  there next, and exits it later on another thread whose stack it is not on, so the registry's reference counts go
+  wrong. Fixed: every such site (29 in cassini-broker, 1 in cassini-client) instruments its future instead
+  (`async { .. }.instrument(span).await`, or the guard dropped before a single trailing await), names, fields and
+  parents unchanged. Kept fixed by `clippy::await_holding_invalid_type`: every `clippy.toml` (the 26 crate files, which
+  replace the workspace one, and a new `src/agents/clippy.toml` for the rest) lists `tracing::span::Entered` and
+  `EnteredSpan` under `await-holding-invalid-types`, so `cargo clippy --workspace --all-targets -- -D warnings` refuses
+  a guard held across an await. Before the fix `revocation` failed 1 run in 3 alone on main; after it, `revocation` and
+  `custody_revocation` passed 5 of 5 alone and 12 of 12 each under load (four rounds of three: two, then six, loops
+  running every cassini-broker and cassini-client test binary, the last three rounds with twelve busy loops spinning
+  too, load average 1.5 to 22), with no "already closed" in any log. Of the load copies themselves, one `revocation`
+  failed in the second round with its output discarded; the last two rounds kept every failing copy's log, and none
+  was this panic (see the next item).
+- **The broker tests' names race under heavy load** (found 2026-10-30 loading the machine for the item above, not
+  fixed). With six copies of the broker suite running at once and twelve busy loops, single copies failed:
+  `end_to_end` (1 test) and `supersede` (3) with "timed out waiting for 1 message(s) on news", `custody_revocation`
+  (2) with "timed out waiting for its subscription to requests" and then "the broker's names never became free"
+  (`tests/support/mod.rs:286`) in the test after. Each time the new broker's TopicManager had logged
+  `ActorAlreadyRegistered` for a topic (`news`, `polar-authority-snapshot-requests`, `polar-authority-snapshot-replies`),
+  and no log had the tracing panic. A topic actor registers under its topic's name in ractor's process-wide registry;
+  the TopicManager (like the session and subscriber managers) has no `post_stop`, and ractor ends a stopped actor's
+  children with a kill signal it does not wait for (`ractor-0.15.13/src/actor.rs:774`, `supervision.rs:90`), so the
+  broker's `stop_and_wait` returns while topic actors still hold their names, and `clear_names`
+  (`tests/support/mod.rs:264`) waits only for the six manager names and the authority's two. Under load the next
+  test's broker starts in that window. Most likely also the cause of one `revocation` load copy that failed with its
+  output discarded (its proptest shrank to `[(false, false); 3]`, as every later case in a poisoned process fails), but
+  that one is unconfirmed: 36 runs of the `revocation` binary alone, six at a time with twelve busy loops, all passed.
+  To do: give the managers a `post_stop` that stops their children and waits, as the Broker and ListenerManager do
+  (`stop_children_and_wait`), or have `clear_names` also wait for the topic actors' names.
 - **One `infra/tests/resolve.nu` test fails against a cluster whose images predate the code** (2026-10-30): "workloads
   still asking cert-issuer are listed as pending while the floor is off, and refused once it is enforced" fails at its
   floor-off `check` with "the agents could not judge their documents: Eval block failed with pipeline input"

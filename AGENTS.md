@@ -104,6 +104,9 @@ pub struct MyMessage { ... }
 - Actor message handlers return `Result<(), ActorProcessingErr>`
 - Construct errors with `anyhow::anyhow!("...")`
 - Log with tracing macros: `debug!`, `info!`, `warn!`, `error!` — not `println!`
+- Never hold an entered span (`span.enter()`, `span.entered()`) across an `.await`; instrument the future instead
+  (`fut.instrument(span).await`, `use tracing::Instrument;`). Clippy enforces it: `await-holding-invalid-types` in
+  every `clippy.toml`, so a crate that adds its own `clippy.toml` copies that entry
 
 ### Constants & Type Aliases
 
