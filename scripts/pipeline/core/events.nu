@@ -47,19 +47,15 @@ export def emit-execution-started [
 ]: nothing -> nothing {
     let build_id = get-build-id
 
-    mut payload = {
+    emit {
         type: "execution_started"
         build_id: $build_id
         commit_sha: $commit_sha
         ref_name: $ref_name
         repo_url: $repo_url
         backend: null
-        triggered_by: null
+        triggered_by: (if ($triggered_by | is-not-empty) { $triggered_by } else { null })
     }
-    if ($triggered_by | is-not-empty) {
-        $payload = ($payload | upsert triggered_by $triggered_by)
-    }
-    emit $payload
 }
 
 export def emit-execution-completed [duration_secs: int]: nothing -> nothing {
@@ -273,18 +269,16 @@ export def emit-binary-linked [
     sbom_content_hash: string
     --binding_digest: string = ""
 ]: nothing -> nothing {
-    mut payload = {
+    # The field is set in the record, not assigned later: a `mut` record whose field starts as null cannot
+    # take a string in nushell 0.114 ("Type mismatch").
+    emit {
         type: "binary_linked"
         binary_content_hash: $binary_content_hash
         binary_name: $binary_name
         root_purl: $root_purl
         sbom_content_hash: $sbom_content_hash
-        binding_digest: null
+        binding_digest: (if ($binding_digest | is-not-empty) { $binding_digest } else { null })
     }
-    if ($binding_digest | is-not-empty) {
-        $payload = ($payload | upsert binding_digest $binding_digest)
-    }
-    emit $payload
 }
 
 # ── Source analysis ────────────────────────────────────────────────────────────
