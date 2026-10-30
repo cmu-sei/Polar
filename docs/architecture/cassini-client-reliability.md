@@ -56,6 +56,34 @@ connection.
 The system is effectively at-most-once, with silent loss in at least four places. The dead `Queue`
 path and the missing replay are bugs in their own right.
 
+### As built, 2026-10-30
+
+Read from the code for the backpressure plan (cassini-backpressure.md); paths relative to `src/agents/`.
+
+- **Step 1's offline buffer** holds at most 1,000 messages, by count, not bytes (`DEFAULT_OFFLINE_BUFFER`,
+  `cassini/client/src/facade.rs:105-107`), as whole `TcpClientMessage`s. When it is full the OLDEST is dropped with a
+  warning and nobody is told (`facade.rs:264-273`). It holds a publish when no transport is registered, or when the
+  send to the transport loses a race (`facade.rs:438-447`), and on `ClientRegistered` it is cast to the transport in
+  one burst, unpaced (`facade.rs:392-402`).
+- **Once registered, nothing is counted or bounded on the client:** a publish is cast straight into the transport's
+  unbounded mailbox (`facade.rs:439-442`), and the transport writes each message with `write_all` and `flush()` and no
+  timeout (`cassini/client/src/lib.rs:921-928`). A broker that stops reading makes the transport's handler wait and its
+  mailbox, the agent's memory, grow; callers still get `Ok`.
+- **`TcpClient::publish` is a synchronous `Result` after a cast** (`lib/src/cassini.rs:285-330`): `Fail` errs and
+  `Drop` discards only while the shared `online` flag is false; `Queue` falls through to the facade's buffer. It never
+  waits for an acknowledgement.
+- **Steps 2 to 5 do not exist:** no outbox, epoch, seq or message id; `PublishRequest` and `PublishRequestAck`
+  (`cassini/types/src/lib.rs:639-659`) carry none, so an ack can be matched only by topic. `PublishResponseAck`
+  (`types/src/lib.rs:195`) is a fieldless variant nothing constructs or handles. No dedupe.
+- **No production agent uses `ClientEvent::PublishAcknowledged`;** the harness producer, the CLI and the broker tests
+  do.
+- **How the agents treat a failed publish** (which a bound would make happen): jira-observer propagates it, and a
+  non-Jira error fails the observer actor (`jira/observe/src/lib.rs:420-423`); kube-observer stops its watcher
+  (`kubernetes/observe/src/lib.rs:403-414`); git-repo-observer logs and discards it inside synchronous revwalk callbacks
+  and still advances `last_seen`, so a failed publish silently loses commits (`git/observe/src/lib.rs:682-707,
+  776-777`); the gitlab observer uses a raw `TcpClientActor` and the scheduler pair casts to the facade's `ActorRef`,
+  both skipping `OfflineBehavior`; provenance events use `Drop` (`lib/src/lib.rs:159-176`).
+
 ## 2. The structure
 
 Split what `TcpClientActor` does into a stable part and a disposable part.

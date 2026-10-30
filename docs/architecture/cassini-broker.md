@@ -232,6 +232,33 @@ check but no `AuthorityHandle`: no PolicyActor, no PermissionsActor, no authorit
 certificate). `AuthorityHandle::spawn` is public, so the broker can start one itself and feed it the authority topics'
 publishes in process, with the publisher's identity from its own Listener.
 
+## Bounds and flow control (as built, 2026-10-30)
+
+Nothing bounds what the broker holds, by count, bytes or time, except the session retention `R`.
+
+- **The acknowledgement is acceptance, not delivery:** the topic acks a publish once it has cast it into each
+  subscriber's mailbox, or queued it when there is none (`broker/src/topic.rs:732-772`). Every hop after the topic is an
+  unbounded ractor mailbox, and the subscriber's Listener awaits its socket write inside its handler, with no timeout
+  (`broker/src/listener.rs:751-781`), so a subscriber that is slow but connected grows the broker without limit. Measured
+  2026-10-30 at 64 KiB saturated: the backlog for a sink that drained about 11% slower than the broker accepted was 46 to
+  176 MB of heap in under a second (broker-baseline.md, the fourth set, on `feat/musl-mimalloc` until it merges).
+- **Frames:** no maximum. The read task takes a `u32` length and allocates `vec![0u8; len]` (`listener.rs:857-898`), so
+  one frame can ask for 4 GiB; a zero length is a keepalive.
+- **Connections:** no limit on their number or rate; each accept is a task and a Listener (`listener.rs:271-369`).
+- **The read loop cannot be paused:** a detached task decodes each frame into the Listener's unbounded mailbox
+  (`listener.rs:850-934`); its only control is abort.
+- **Holders:** the topic queue for no subscribers is unbounded in size and drops by age after 180 s, checked every 60 s
+  (`topic.rs:37-41, 530, 847-870`); a subscriber's dead-letter queue (`subscriber.rs:643`) is unbounded, with no expiry
+  of its own, until its session is swept at `R` (600 s, `lib.rs:40`); replays to a resumed subscriber are a burst.
+- **Counters:** the session's `pending_publishes` (`session.rs:1137-1145, 1270-1276`) counts publishes between session
+  and ack, for the shutdown drain only.
+- **Sockets:** keepalive and `TCP_USER_TIMEOUT` 60 s on both ends (`cassini/types/src/socket.rs:61-77`); no
+  `TCP_NODELAY`, no buffer sizes; writers are `BufWriter` behind a `tokio::Mutex`.
+- **During shutdown** a publish is dropped with no ack and no refusal (`session.rs:1127-1130`), and subscriber
+  dead-letter queues are not flushed.
+- **Tests:** none exercises a slow consumer; `TestClient` (`broker/tests/support/mod.rs:634-920`) can stop (close)
+  but not stay connected and stop reading, and the harness sink cannot be slowed (`test/sink/src/settings.rs`).
+
 ## Running it on its own
 
 The broker needs no other part of Polar to start and route: three PEM files from any CA and a shutdown token. With no
