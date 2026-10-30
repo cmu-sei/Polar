@@ -986,6 +986,24 @@ access to it.
    SOPS_CONFIG=.user.sops.yaml sops --decrypt user.sops.yaml
    ```
 
+#### 4. Changing a value
+
+Edit the file (the commands above) and run `up.nu` again: the secrets
+step updates each Secret whose value the files now give differently,
+and names the deployments to restart so they read it (a pod reads a
+Secret when it starts). A Secret that already holds what the files give
+is left alone. A Secret the files have no value for keeps whatever the
+cluster holds, so a value set by hand is not overwritten by the
+placeholder. The broker's shutdown token is made in the cluster once
+and never replaced. Neo4j takes its password from the Secret on its
+first start only, so a later change to `neo4j_auth` does not change the
+database's password.
+
+Store each value as it is, not base64-encoded: Kubernetes encodes
+Secret values itself, so an encoded token reaches the agent still
+encoded, and is refused. The secrets step warns when a value looks
+encoded, naming its key and file (never the value).
+
 #### Quick reference: which mechanism for which file
 
 | File | Config used | Env var |

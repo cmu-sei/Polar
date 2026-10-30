@@ -21,41 +21,140 @@
 
 # infra/secrets-lib.nu
 #
-# What the targets' `secrets.nu` scripts share: creating Kubernetes secrets and ConfigMaps that
-# are not there yet, decrypting the SOPS files, and deciding whether the step can go on when a
-# file will not decrypt. The decision is pure, so it is tested (infra/tests/secrets.nu).
+# What the targets' `secrets.nu` scripts share: creating Kubernetes secrets and ConfigMaps,
+# keeping the Secrets made from the SOPS files equal to them, decrypting the files, and deciding
+# whether the step can go on when a file will not decrypt. The decisions are pure, so they are
+# tested (infra/tests/secrets.nu); kubectl is called only by the functions that act on them.
 #
 # A decrypt that fails is not an error in itself: on a re-run every secret already exists, and
 # nothing is needed from the files. It is an error when a secret the cluster needs is missing
 # and the files that would have made it could not be read.
+#
+# A Secret is one of two kinds, and each call says which. One from the SOPS files
+# (`kubectl_sops_secret`) is made when it is missing and updated when the files say something
+# else, so a value changed in the files reaches the cluster on the next run. One made here
+# (`kubectl_generated_secret`, a random token) is made once and never compared: making it again
+# would change it under whoever already holds it.
 
-export def kubectl_upsert_secret [
-    name: string
-    namespace: string
-    literals: list<string> = []
-    files: list<string> = []
-] {
-    let exists = (
-        do { run-external "kubectl" "get" "secret" $name "-n" $namespace }
-        | complete
-        | get exit_code
-    ) == 0
-
-    if $exists {
-        print $"    secret/($name) already exists in ($namespace) — skipping"
-        return
+# What to do with a Secret: `create` when the cluster has none, `unchanged` when there is nothing to
+# do, `update` when its data is not what the SOPS files give, and `keep-cluster` when the files have
+# no value for it (`desired` is a `placeholder`) and the cluster holds one of its own, which may have
+# been set by hand. `kind` is `sops` or `generated`; a generated Secret that exists is never compared.
+# `current` is the cluster's data, decoded, or null when it has no such Secret.
+export def secret_action [kind: string, current: any, desired: record, --placeholder] {
+    if not ($kind in ["sops" "generated"]) {
+        error make { msg: $"a Secret is from the sops files or generated, not ($kind)" }
     }
-
-    mut args = ["create" "secret" "generic" $name "-n" $namespace]
-    for lit in $literals {
-        $args = ($args | append ["--from-literal" $lit])
+    if $kind == "generated" and $placeholder {
+        error make { msg: "a generated Secret has no placeholder" }
     }
-    for f in $files {
-        $args = ($args | append ["--from-file" $f])
-    }
+    if $current == null { return "create" }
+    if $kind == "generated" or $current == $desired { return "unchanged" }
+    if $placeholder { "keep-cluster" } else { "update" }
+}
 
-    run-external "kubectl" ...$args
-    print $"    secret/($name) created in ($namespace)"
+# The data that `kubectl create secret --from-literal` makes of `key=value` literals: split at the
+# first `=`, so a value may hold one.
+export def literal_data [literals: list<string>] {
+    $literals
+    | each {|l| $l | parse --regex '^(?<key>[^=]+)=(?<value>.*)$' | first }
+    | reduce --fold {} {|kv, acc| $acc | upsert $kv.key $kv.value }
+}
+
+# The data of a Secret as `kubectl get secret -o json` gives it, decoded; null when there is none.
+export def cluster_secret_data [secret: any] {
+    if $secret == null { return null }
+    $secret
+    | get -o data
+    | default {}
+    | items {|k, v| { key: $k, value: ($v | decode base64 | decode utf-8) } }
+    | reduce --fold {} {|kv, acc| $acc | upsert $kv.key $kv.value }
+}
+
+# The workloads among `workloads` (`kubectl get deployments,statefulsets,daemonsets -o json`'s items,
+# all in the Secret's namespace) whose pods read the Secret `name`, as `kind/name`, sorted. They read
+# it when their pods start (an env var never changes in a running pod), so they are what to restart.
+export def secret_readers [workloads: list, name: string] {
+    $workloads
+    | where {|d|
+        let pod = ($d | get -o spec.template.spec | default {})
+        let containers = (($pod | get -o containers | default []) ++ ($pod | get -o initContainers | default []))
+        let from_env = ($containers | each {|c| $c | get -o env | default [] | each {|e| $e | get -o valueFrom.secretKeyRef.name } } | flatten)
+        let from_env_from = ($containers | each {|c| $c | get -o envFrom | default [] | each {|e| $e | get -o secretRef.name } } | flatten)
+        let from_volumes = ($pod | get -o volumes | default [] | each {|v|
+            [ ($v | get -o secret.secretName) ] ++ ($v | get -o projected.sources | default [] | each {|s| $s | get -o secret.name })
+        } | flatten)
+        $name in ($from_env ++ $from_env_from ++ $from_volumes)
+    }
+    | each {|d| $"($d.kind | str lowercase)/($d.metadata.name)" }
+    | sort
+}
+
+# The line the secrets step prints for a Secret, given what was done with it. It never holds a value.
+export def secret_line [kind: string, action: string, name: string, namespace: string, readers: list] {
+    let id = $"secret/($name)"
+    match $action {
+        "create" => $"    ($id) created in ($namespace)"
+        "unchanged" => (if $kind == "generated" {
+            $"    ($id) already exists in ($namespace); made once, never replaced"
+        } else {
+            $"    ($id) in ($namespace): unchanged"
+        })
+        "keep-cluster" => $"    ($id) in ($namespace): the sops files have no value for it; the cluster's is kept"
+        "update" => {
+            let how = if ($readers | is-empty) { "" } else { $": kubectl -n ($namespace) rollout restart ($readers | str join ' ')" }
+            $"    ($id) in ($namespace): updated from the sops files \(restart the pods that read it($how)\)"
+        }
+    }
+}
+
+# The cluster's data of the Secret `name`, decoded, or null when it has none.
+def current_secret_data [name: string, namespace: string] {
+    let got = (do { ^kubectl get secret $name -n $namespace -o json } | complete)
+    if $got.exit_code != 0 { return null }
+    cluster_secret_data ($got.stdout | from json)
+}
+
+# Makes or updates the Secret `name` as `secret_action` decides, and says what it did.
+def sync_secret [kind: string, name: string, namespace: string, literals: list<string>, placeholder: bool] {
+    let desired = (literal_data $literals)
+    let action = (secret_action $kind (current_secret_data $name $namespace) $desired --placeholder=$placeholder)
+    match $action {
+        "create" => {
+            let args = ($literals | each {|l| ["--from-literal" $l] } | flatten)
+            let created = (do { ^kubectl create secret generic $name -n $namespace ...$args } | complete)
+            if $created.exit_code != 0 {
+                error make { msg: $"could not create secret/($name) in ($namespace): (first_line $created.stderr)" }
+            }
+        }
+        "update" => {
+            # Its data replaced, the rest of it (type, labels, annotations) as it is. Through stdin, so no value is
+            # on a command line.
+            let secret = (^kubectl get secret $name -n $namespace -o json | from json)
+            let data = ($desired | items {|k, v| { key: $k, value: ($v | encode base64) } } | reduce --fold {} {|kv, acc| $acc | upsert $kv.key $kv.value })
+            let replaced = ($secret | reject -o stringData | upsert data $data | to json | do { ^kubectl replace -f - } | complete)
+            if $replaced.exit_code != 0 {
+                error make { msg: $"could not update secret/($name) in ($namespace): (first_line $replaced.stderr)" }
+            }
+        }
+    }
+    let readers = if $action == "update" {
+        let got = (do { ^kubectl get deployments,statefulsets,daemonsets -n $namespace -o json } | complete)
+        if $got.exit_code == 0 { secret_readers ($got.stdout | from json | get items) $name } else { [] }
+    } else { [] }
+    print (secret_line $kind $action $name $namespace $readers)
+}
+
+# A Secret whose values come from the SOPS files: made when missing, updated when its data is not
+# what they give. `--placeholder` says the files have no value for it and `literals` hold a stand-in
+# (`token=placeholder`), which is made when the Secret is missing and never replaces what the cluster has.
+export def kubectl_sops_secret [name: string, namespace: string, literals: list<string>, --placeholder] {
+    sync_secret "sops" $name $namespace $literals $placeholder
+}
+
+# A Secret whose values are made here (`random_token`): made once, never compared, never made again.
+export def kubectl_generated_secret [name: string, namespace: string, literals: list<string>] {
+    sync_secret "generated" $name $namespace $literals false
 }
 
 export def kubectl_upsert_configmap [
@@ -174,10 +273,40 @@ export def existing_required_secrets [] {
     | each {|r| $"($r.namespace)/($r.name)" }
 }
 
+# True when `value` looks like base64 of text: it decodes (standard or URL-safe, padded or not) to 16 or more
+# printable ASCII characters with no whitespace. Kubernetes encodes a Secret's values itself, so a value stored
+# this way reaches the workload still encoded. A real token that is base64 itself (a Jira Data Center token is
+# base64 of random bytes) decodes to bytes that are not text, and is not flagged.
+export def looks_base64_encoded [value: string] {
+    let decodings = [
+        { try { $value | decode base64 } catch { null } }
+        { try { $value | decode base64 --nopad } catch { null } }
+        { try { $value | decode base64 --url } catch { null } }
+        { try { $value | decode base64 --url --nopad } catch { null } }
+    ]
+    $decodings | any {|d|
+        let bytes = (do $d)
+        # An invalid UTF-8 byte decodes to U+FFFD, which the pattern does not take.
+        $bytes != null and (($bytes | decode utf-8) =~ '^[!-~]{16,}$')
+    }
+}
+
+# A warning for each value of the SOPS files that looks base64-encoded, naming its key and the file it came from
+# (`user.sops.yaml` wins over `secrets.sops.yaml`, as in `secrets_check`), never the value. Warned, not refused:
+# a value can look encoded and be meant.
+export def base64_warnings [shared: record, user: record] {
+    let from_shared = ($shared | reject -o ...($user | columns) | items {|k, v| { file: "secrets.sops.yaml", key: $k, value: $v } })
+    let from_user = ($user | items {|k, v| { file: "user.sops.yaml", key: $k, value: $v } })
+    $from_shared ++ $from_user
+    | where {|e| ($e.value | describe) == "string" and (looks_base64_encoded $e.value) }
+    | each {|e| $"($e.key) in ($e.file) looks base64-encoded: store the raw value; Kubernetes encodes Secret values itself" }
+}
+
 # What would stop the secrets step for a target, found without creating anything: decrypts its SOPS files and
-# compares what they hold with what the cluster already has. Returns `{ secrets, failures, problems }`;
-# `problems` is empty when the step can go on. `up.nu` asks this first, so a shell without the SOPS variables
-# is told so before the images are built and not after, and each target's `secrets.nu` asks it again.
+# compares what they hold with what the cluster already has. Returns `{ secrets, failures, problems, warnings }`;
+# `problems` is empty when the step can go on, and `warnings` names the values that look base64-encoded. `up.nu`
+# asks this first, so a shell without the SOPS variables is told so before the images are built and not after,
+# and each target's `secrets.nu` asks it again.
 export def secrets_check [target_dir: string, existing: list] {
     let shared = (decrypt_sops $target_dir "secrets.sops.yaml")
     let user   = (decrypt_sops $target_dir "user.sops.yaml")
@@ -188,5 +317,6 @@ export def secrets_check [target_dir: string, existing: list] {
         secrets: $secrets
         failures: $failures
         problems: (required_secret_problems $REQUIRED_SECRETS $existing $secrets $failures)
+        warnings: (base64_warnings $shared.data $user.data)
     }
 }

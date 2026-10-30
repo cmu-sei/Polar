@@ -28,6 +28,8 @@
 #
 # Reads encrypted secrets from secrets.sops.yaml (shared team secrets)
 # and user.sops.yaml (user-specific secrets), decrypting with SOPS.
+# A Secret made from them is updated when they change; one made here (the
+# shutdown token) is made once and kept (infra/secrets-lib.nu).
 #
 # Called by infra/up.nu after namespaces are created.
 
@@ -48,8 +50,10 @@ def main [target_dir: string, repo_root: string] {
     for f in $failures {
         print $"    note: could not decrypt ($f.file) \(($f.reason)\); every secret needed already exists"
     }
+    # A value stored base64-encoded would reach the workload still encoded: Kubernetes encodes it again.
+    for w in $checked.warnings { print $"    WARNING: ($w)" }
 
-    print "  Creating secrets and ConfigMaps..."
+    print "  Creating and updating secrets..."
     print ""
 
     # ── polar-graph namespace ─────────────────────────────────────────────────
@@ -57,7 +61,7 @@ def main [target_dir: string, repo_root: string] {
 
     let neo4j_auth = ($secrets | get -o neo4j_auth | default "")
     if ($neo4j_auth | is-not-empty) {
-        kubectl_upsert_secret "neo4j-secret" "polar-graph" [$"secret=($neo4j_auth)"]
+        kubectl_sops_secret "neo4j-secret" "polar-graph" [$"secret=($neo4j_auth)"]
     }
 
     print ""
@@ -67,23 +71,23 @@ def main [target_dir: string, repo_root: string] {
 
     # The token that lets a client ask the broker to shut down. Made here, once; a re-run finds it
     # and leaves it. Read it with: kubectl -n polar get secret cassini-shutdown-token -o jsonpath='{.data.token}' | base64 -d
-    kubectl_upsert_secret "cassini-shutdown-token" "polar" [$"token=(random_token)"]
+    kubectl_generated_secret "cassini-shutdown-token" "polar" [$"token=(random_token)"]
 
     let graph_password = ($secrets | get -o graph_password | default "")
     if ($graph_password | is-not-empty) {
-        kubectl_upsert_secret "polar-graph-pw" "polar" [$"secret=($graph_password)"]
+        kubectl_sops_secret "polar-graph-pw" "polar" [$"secret=($graph_password)"]
     }
 
     let jira_token = ($secrets | get -o jira_token | default "")
     if ($jira_token | is-not-empty) {
-        kubectl_upsert_secret "jira-secret" "polar" [$"token=($jira_token)"]
+        kubectl_sops_secret "jira-secret" "polar" [$"token=($jira_token)"]
     } else {
-        kubectl_upsert_secret "jira-secret" "polar" ["token=placeholder"]
+        kubectl_sops_secret "jira-secret" "polar" ["token=placeholder"] --placeholder
     }
 
     # Registry credentials for the OCI resolver: an empty Docker credential file, so registries are
-    # asked anonymously. Put real ones in the Secret to pull from a private registry.
-    kubectl_upsert_secret "oci-registry-auth" "polar" ["oci-registry-auth={}"]
+    # asked anonymously. Put real ones in the Secret to pull from a private registry; a re-run keeps them.
+    kubectl_sops_secret "oci-registry-auth" "polar" ["oci-registry-auth={}"] --placeholder
 
     print ""
 
@@ -93,7 +97,7 @@ def main [target_dir: string, repo_root: string] {
     let keycloak_admin_user = ($secrets | get -o keycloak_admin_user | default "admin")
     let keycloak_admin_password = ($secrets | get -o keycloak_admin_password | default "")
     if ($keycloak_admin_password | is-not-empty) {
-        kubectl_upsert_secret "keycloak-admin-secret" "polar-auth" [
+        kubectl_sops_secret "keycloak-admin-secret" "polar-auth" [
             $"username=($keycloak_admin_user)"
             $"password=($keycloak_admin_password)"
         ]
@@ -103,7 +107,7 @@ def main [target_dir: string, repo_root: string] {
 
     let keycloak_db_password = ($secrets | get -o keycloak_db_password | default "")
     if ($keycloak_db_password | is-not-empty) {
-        kubectl_upsert_secret "keycloak-db-secret" "polar-auth" [$"password=($keycloak_db_password)"]
+        kubectl_sops_secret "keycloak-db-secret" "polar-auth" [$"password=($keycloak_db_password)"]
     } else if not (secret_exists "keycloak-db-secret" "polar-auth") {
         print "    WARNING: keycloak_db_password not set -- skipping keycloak-db-secret"
     }

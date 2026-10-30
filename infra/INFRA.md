@@ -734,7 +734,18 @@ Secrets are encrypted per target and are not rendered by the chart pipeline.
   recipients, so decrypting needs only your private key (`SOPS_AGE_SSH_PRIVATE_KEY_FILE`). A fresh checkout can decrypt a file it was added to.
   Someone with no access can write a file of their own for a local target: `neo4j_auth` (`neo4j/<password>`) and `graph_password` (the same
   password) are the two the cluster cannot run without (the README's "Secrets setup").
-- `targets/<t>/secrets.nu` decrypts them and creates the Secrets and ConfigMaps in the cluster. It creates what is missing and skips what already exists, so re-running is safe. `up.nu` runs it in the "secrets and infrastructure" step.
+- `targets/<t>/secrets.nu` decrypts them, creates the Secrets in the cluster and updates those the files changed, so re-running is safe. `up.nu` runs it in the "secrets and infrastructure" step.
+  Each Secret is one of two kinds (`infra/secrets-lib.nu`, tests in `infra/tests/secrets.nu`):
+  - **From the SOPS files** (`kubectl_sops_secret`): created when missing; when it exists, compared with what the files give and
+    left alone (`unchanged`) or its data replaced, its type, labels and annotations kept. An update names the workloads to restart,
+    since a pod reads a Secret when it starts: `secret/jira-secret in polar: updated from the sops files (restart the pods that read it:
+    kubectl -n polar rollout restart deployment/jira-observer)`. When the files have no value (`token=placeholder`, `oci-registry-auth={}`)
+    the placeholder is made only if the Secret is missing, and never replaces a value the cluster holds, which may have been set by hand.
+    Neo4j takes its password from `neo4j-secret` on its first start only, so a changed `neo4j_auth` updates the Secret and not the
+    database's password (`up.nu`'s Neo4j check says when they differ).
+  - **Made here** (`kubectl_generated_secret`, the random `cassini-shutdown-token`): created once, never compared, never made again.
+  A value stored base64-encoded would reach the workload still encoded, since Kubernetes encodes Secret values itself: the step warns
+  when one looks so (it decodes to 16 or more printable characters with no whitespace), naming the key and the file, never the value.
 - Manifests only *reference* secrets by name (`secretKeyRef`); they never contain secret values. A catalog workload's env entry does the same: `{ name: "JIRA_TOKEN", secret: "jira-secret", key: "token" }`.
 - Never `git add` certificates or keys.
 

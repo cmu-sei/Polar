@@ -26,6 +26,8 @@
 # Creates Kubernetes secrets and ConfigMaps required by Polar agents.
 # Reads encrypted secrets from secrets.sops.yaml (shared team secrets)
 # and user.sops.yaml (user-specific secrets), decrypting with SOPS.
+# A Secret made from them is updated when they change; one made here (the
+# shutdown token) is made once and kept (infra/secrets-lib.nu).
 #
 # Called by infra/up.nu after namespaces are created.
 
@@ -46,8 +48,10 @@ def main [target_dir: string, repo_root: string] {
     for f in $failures {
         print $"    note: could not decrypt ($f.file) \(($f.reason)\); every secret needed already exists"
     }
+    # A value stored base64-encoded would reach the workload still encoded: Kubernetes encodes it again.
+    for w in $checked.warnings { print $"    WARNING: ($w)" }
 
-    print "  Creating secrets and ConfigMaps..."
+    print "  Creating and updating secrets..."
     print ""
 
     # ── polar-graph namespace ─────────────────────────────────────────────────
@@ -55,7 +59,7 @@ def main [target_dir: string, repo_root: string] {
 
     let neo4j_auth = ($secrets | get -o neo4j_auth | default "")
     if ($neo4j_auth | is-not-empty) {
-        kubectl_upsert_secret "neo4j-secret" "polar-graph" [$"secret=($neo4j_auth)"]
+        kubectl_sops_secret "neo4j-secret" "polar-graph" [$"secret=($neo4j_auth)"]
     }
 
     print ""
@@ -65,32 +69,32 @@ def main [target_dir: string, repo_root: string] {
 
     # The token that lets a client ask the broker to shut down. Made here, once; a re-run finds it
     # and leaves it. Read it with: kubectl -n polar get secret cassini-shutdown-token -o jsonpath='{.data.token}' | base64 -d
-    kubectl_upsert_secret "cassini-shutdown-token" "polar" [$"token=(random_token)"]
+    kubectl_generated_secret "cassini-shutdown-token" "polar" [$"token=(random_token)"]
 
     let graph_password = ($secrets | get -o graph_password | default "")
     if ($graph_password | is-not-empty) {
-        kubectl_upsert_secret "polar-graph-pw" "polar" [$"secret=($graph_password)"]
+        kubectl_sops_secret "polar-graph-pw" "polar" [$"secret=($graph_password)"]
     }
 
     let gitlab_token = ($secrets | get -o gitlab_token | default "")
     if ($gitlab_token | is-not-empty) {
-        kubectl_upsert_secret "gitlab-secret" "polar" [$"token=($gitlab_token)"]
+        kubectl_sops_secret "gitlab-secret" "polar" [$"token=($gitlab_token)"]
     } else {
-        kubectl_upsert_secret "gitlab-secret" "polar" ["token=placeholder"]
+        kubectl_sops_secret "gitlab-secret" "polar" ["token=placeholder"] --placeholder
     }
 
     let jira_token = ($secrets | get -o jira_token | default "")
     if ($jira_token | is-not-empty) {
-        kubectl_upsert_secret "jira-secret" "polar" [$"token=($jira_token)"]
+        kubectl_sops_secret "jira-secret" "polar" [$"token=($jira_token)"]
     } else {
-        kubectl_upsert_secret "jira-secret" "polar" ["token=placeholder"]
+        kubectl_sops_secret "jira-secret" "polar" ["token=placeholder"] --placeholder
     }
 
     let docker_auth_json = ($secrets | get -o docker_auth_json | default "")
     if ($docker_auth_json | is-not-empty) {
-        kubectl_upsert_secret "oci-registry-auth" "polar" [$"oci-registry-auth=($docker_auth_json)"]
+        kubectl_sops_secret "oci-registry-auth" "polar" [$"oci-registry-auth=($docker_auth_json)"]
     } else {
-        kubectl_upsert_secret "oci-registry-auth" "polar" ["oci-registry-auth={}"]
+        kubectl_sops_secret "oci-registry-auth" "polar" ["oci-registry-auth={}"] --placeholder
     }
 
     print ""
