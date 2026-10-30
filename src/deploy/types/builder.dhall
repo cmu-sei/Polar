@@ -141,6 +141,10 @@ let BuilderAgent =
           , extraCerts : List ExtraCert
           , scratch : List Scratch
           , configFiles : List ConfigFiles
+          -- A Secret whose `ca-bundle.crt` key is the trust store of the agent's TLS clients
+          -- (`SSL_CERT_FILE`), for a network that inspects TLS and signs with its own authority. It
+          -- replaces the image's bundle, so it holds every authority to trust, that one included.
+          , trustedCa : Optional Text
           -- Mount the pod's own service-account token, where Kubernetes clients look for it: for an
           -- agent that reads the Kubernetes API (the kube observer). Off otherwise.
           , serviceAccountToken : Bool
@@ -167,6 +171,7 @@ let BuilderAgent =
         , extraCerts = [] : List ExtraCert
         , scratch = [] : List Scratch
         , configFiles = [] : List ConfigFiles
+        , trustedCa = None Text
         , serviceAccountToken = False
         }
       }
@@ -439,6 +444,10 @@ let livenessProbe
         , timeoutSeconds = Some agent.health.timeoutSecs
         }
 
+let trustedCaVolumeName = "trusted-ca"
+
+let trustedCaDir = "/etc/polar-trusted-ca"
+
 let optionalList =
       λ(a : Type) →
       λ(o : Optional a) →
@@ -492,6 +501,17 @@ let makePolarAgent
                     , None = [] : List kubernetes.Volume.Type
                     }
                     agent.data
+                # merge
+                    { Some =
+                        λ(secretName : Text) →
+                          [ kubernetes.Volume::{
+                            , name = trustedCaVolumeName
+                            , secret = Some kubernetes.SecretVolumeSource::{ secretName = Some secretName }
+                            }
+                          ]
+                    , None = [] : List kubernetes.Volume.Type
+                    }
+                    agent.trustedCa
             , volumeMounts =
                   [ kubernetes.VolumeMount::{
                     , name = certVolumeName
@@ -539,7 +559,32 @@ let makePolarAgent
                     , None = [] : List kubernetes.VolumeMount.Type
                     }
                     agent.data
-            , env = clientEnv platform agent # agent.settings
+                # merge
+                    { Some =
+                        λ(secretName : Text) →
+                          [ kubernetes.VolumeMount::{
+                            , name = trustedCaVolumeName
+                            , mountPath = trustedCaDir
+                            , readOnly = Some True
+                            }
+                          ]
+                    , None = [] : List kubernetes.VolumeMount.Type
+                    }
+                    agent.trustedCa
+            , env =
+                  clientEnv platform agent
+                # agent.settings
+                # merge
+                    { Some =
+                        λ(secretName : Text) →
+                          [ kubernetes.EnvVar::{
+                            , name = "SSL_CERT_FILE"
+                            , value = Some "${trustedCaDir}/ca-bundle.crt"
+                            }
+                          ]
+                    , None = [] : List kubernetes.EnvVar.Type
+                    }
+                    agent.trustedCa
             , ports =
                 merge
                   { Some =

@@ -64,6 +64,10 @@ let BuildOrchestratorValues =
           -- What `polar-init` is given besides what the platform says, in the jobs' pods (the platform's
           -- own `polarInitEnv`, in plain values).
           , initEnv : List Builder.JobEnv
+          -- A Secret in the platform's namespace whose `ca-bundle.crt` jobs trust, for a network that
+          -- re-signs TLS. The plan copies it into the jobs' namespace, and each job's git, curl and nix
+          -- use it. `None`: the images' own bundles.
+          , trustedCa : Optional Text
           }
       }
 
@@ -149,6 +153,12 @@ let configuration =
                                   ( toMap
                                       { namespace = JSON.string jobsNamespace
                                       , workspace_size_limit = JSON.string v.workspaceSizeLimit
+                                      , ca_bundle_secret =
+                                          merge
+                                            { Some = λ(name : Text) → JSON.string name
+                                            , None = JSON.null
+                                            }
+                                            v.trustedCa
                                       , image_pull_policy = JSON.string (merge { Some = λ(p : Text) → p, None = "IfNotPresent" } v.platform.imagePullPolicy)
                                       -- A job's certificate: its own ServiceAccount, `polar-init`, no secret
                                       -- shared between builds.
@@ -257,6 +267,22 @@ let buildOrchestrator
                     ]
                   }
                 ]
+                # merge
+                    { Some =
+                        λ(name : Text) →
+                          [ P.Secret::{
+                            , namespace = jobsNamespace
+                            , name
+                            , keys =
+                              [ { mapKey = "ca-bundle.crt"
+                                , mapValue = P.Value.Copy { copy = { namespace = ns, name, key = "ca-bundle.crt" } }
+                                }
+                              ]
+                            }
+                          ]
+                    , None = [] : List P.Secret.Type
+                    }
+                    v.trustedCa
               , objects =
                     P.k8s
                       [ kubernetes.Resource.Namespace

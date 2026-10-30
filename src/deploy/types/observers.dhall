@@ -35,6 +35,9 @@ let ObserverValues =
               , gitController : Text
               , buildProcessor : Text
               }
+          -- A Secret in the observers' namespace whose `ca-bundle.crt` the git observer trusts, for a
+          -- network that re-signs TLS (see `BuilderAgent.trustedCa`). `None`: the image's own bundle.
+          , trustedCa : Optional Text
           }
       }
 
@@ -149,6 +152,7 @@ let gitStages =
               -- The clones can be fetched again, so they do not outlive the pod.
               , scratch = [ { name = "cache", mountPath = "/var/lib/git-repo-observer" } ]
               , settings = [ Settings.setting "POLAR_CACHE_ROOT" "/var/lib/git-repo-observer" ]
+              , trustedCa = v.trustedCa
               }
 
         let processor =
