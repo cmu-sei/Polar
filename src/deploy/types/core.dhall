@@ -31,6 +31,13 @@ let Platform = ./platform.dhall
 
 let P = ./plan.dhall
 
+let Settings = ./settings.dhall
+
+let setting = Settings.setting
+
+let secretSetting = Settings.secretSetting
+
+
 --| What a deployer states about the core, once per environment.
 let CoreValues =
       { Type =
@@ -53,6 +60,8 @@ let CoreValues =
 
 let ns = C.polarNamespace
 
+let graphSettings = Settings.graphSettings ns
+
 let certIssuerUrl = "https://cert-issuer.${ns}.svc.cluster.local:8443"
 
 let observerUrl = "http://credentials-agent-observer.${ns}.svc.cluster.local:8080"
@@ -68,22 +77,6 @@ let platform
         , issuer = Builder.Issuer.CredentialsAgent observerUrl
         , polarInitImage = v.images.polarInit
         , imagePullPolicy = v.imagePullPolicy
-        }
-
-let setting =
-      λ(name : Text) →
-      λ(value : Text) →
-        kubernetes.EnvVar::{ name, value = Some value }
-
-let secretSetting =
-      λ(name : Text) →
-      λ(secretName : Text) →
-      λ(key : Text) →
-        kubernetes.EnvVar::{
-        , name
-        , valueFrom = Some kubernetes.EnvVarSource::{
-          , secretKeyRef = Some kubernetes.SecretKeySelector::{ name = Some secretName, key }
-          }
         }
 
 --| The graph's password, once for the agents that read it and in the form the graph itself wants,
@@ -164,15 +157,6 @@ let core
                    , secretSetting "CASSINI_SHUTDOWN_TOKEN" "cassini-shutdown-token" "token"
                    ]
                  }
-
-        -- The graph, as an agent that writes to it reads its settings. No certificate settings: the
-        -- development graph has no TLS.
-        let graphSettings =
-              [ setting "GRAPH_ENDPOINT" "bolt://polar-db-svc.${ns}.svc.cluster.local:7687"
-              , setting "GRAPH_DB" "neo4j"
-              , setting "GRAPH_USER" "neo4j"
-              , secretSetting "GRAPH_PASSWORD" "polar-graph-pw" "secret"
-              ]
 
         let credentialsAgent =
                 coreAgent

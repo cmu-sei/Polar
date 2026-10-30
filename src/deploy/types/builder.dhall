@@ -137,6 +137,9 @@ let BuilderAgent =
           , skipEscrow : Bool
           , extraCerts : List ExtraCert
           , scratch : List Scratch
+          -- Mount the pod's own service-account token, where Kubernetes clients look for it: for an
+          -- agent that reads the Kubernetes API (the kube observer). Off otherwise.
+          , serviceAccountToken : Bool
           }
       , default =
         { agent = None Text
@@ -159,6 +162,7 @@ let BuilderAgent =
         , skipEscrow = False
         , extraCerts = [] : List ExtraCert
         , scratch = [] : List Scratch
+        , serviceAccountToken = False
         }
       }
 
@@ -420,7 +424,10 @@ let makePolarAgent
           , command = None (List Text)
           , args = None (List Text)
           , pod =
-            { automountServiceAccountToken = None Bool
+            { automountServiceAccountToken =
+                if    agent.serviceAccountToken
+                then  Some True
+                else  None Bool
             , readOnlyRootFilesystem = None Bool
             , runAsUser = agent.runAsUser
             -- The group owns the volumes, so a claim is writable by the user the agent runs as.

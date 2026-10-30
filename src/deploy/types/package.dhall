@@ -10,6 +10,8 @@
     ./operator.dhall
 , core =
     ./core.dhall
+, observers =
+    ./observers.dhall
 , platform =
     ./platform.dhall
 , service =
