@@ -6,7 +6,7 @@ use crate::config::OrchestratorConfig;
 use crate::mappings::MAPPINGS;
 use crate::settings::{CyclopsSettings, SECTION};
 use orchestrator_backend_k8s::backend::KubernetesBackend;
-use orchestrator_backend_k8s::job::JobOptions;
+use orchestrator_backend_k8s::job::{JobIdentity, JobOptions};
 use orchestrator_core::backend::BuildBackend;
 use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
 use ractor::Actor;
@@ -61,6 +61,16 @@ impl PolarAgent for Cyclops {
                 let mut options = JobOptions::new(k8s.namespace.clone());
                 options.ca_bundle_secret = k8s.ca_bundle_secret.clone();
                 options.workspace_size_limit = k8s.workspace_size_limit.clone();
+                options.image_pull_policy = k8s.image_pull_policy.clone();
+                options.identity = k8s
+                    .identity
+                    .as_deref()
+                    .map(JobIdentity::from_json)
+                    .transpose()
+                    .map_err(|e| format!("the jobs' identity in the configuration does not read: {e}"))?;
+                if options.identity.is_none() {
+                    tracing::warn!("jobs share one certificate: builds that overlap will supersede each other");
+                }
                 if let Some(r) = &k8s.resources {
                     let d = &mut options.resources;
                     for (field, value) in [

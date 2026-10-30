@@ -66,6 +66,16 @@ pub struct KubernetesBackendConfig {
     /// not only the proxy's CA.
     #[serde(default)]
     pub ca_bundle_secret: Option<String>,
+
+    /// `Always`, `IfNotPresent` or `Never`, for the clone and pipeline images.
+    #[serde(default)]
+    pub image_pull_policy: Option<String>,
+
+    /// The pod additions that give each job a certificate of its own, as JSON text (see
+    /// `orchestrator_backend_k8s::job::JobIdentity`). Unset, jobs share the `client-tls` Secret, and
+    /// builds that overlap supersede each other on the broker.
+    #[serde(default)]
+    pub identity: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

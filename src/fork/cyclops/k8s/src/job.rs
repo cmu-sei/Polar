@@ -99,6 +99,40 @@ const TMP_VOLUME: &str = "tmp";
 const GIT_CREDS_VOLUME: &str = "git-credentials";
 
 pub const CLIENT_TLS_SECRET_NAME: &str = "client-tls";
+
+/// The ServiceAccount a build's pod runs under. Its name is the identity on the job's certificate, and the
+/// broker allows one session per identity, so every build has one of its own.
+pub fn service_account_for_build(build_id: Uuid) -> String {
+    format!("cyclops-build-{}", build_id)
+}
+
+/// The pod additions that give each job a certificate of its own: the library's `polar-init` init container
+/// with its projected token, the volume the certificate is written to, and what the main container is told.
+/// Read from the configuration file as JSON (`serde_json`), since the file's loader lowercases the keys of a
+/// map, which Kubernetes' camelCase names cannot survive.
+///
+/// Without one, jobs share the Secret named `CLIENT_TLS_SECRET_NAME`, and builds that overlap supersede each
+/// other on the broker.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobIdentity {
+    /// Run before the clone, with the token the pod's ServiceAccount is given.
+    #[serde(default)]
+    pub init_containers: Vec<Container>,
+    #[serde(default)]
+    pub volumes: Vec<Volume>,
+    /// Where the pipeline container finds its certificate.
+    #[serde(default)]
+    pub pipeline_mounts: Vec<VolumeMount>,
+    #[serde(default)]
+    pub pipeline_env: Vec<EnvVar>,
+}
+
+impl JobIdentity {
+    pub fn from_json(text: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(text)
+    }
+}
 pub const CLIENT_TLS_VOLUME_NAME: &str = CLIENT_TLS_SECRET_NAME;
 
 /// Derives a deterministic, DNS-safe Job name from a build ID.
@@ -131,6 +165,11 @@ pub struct JobOptions {
     /// Size limit of the workspace emptyDir, e.g. "2Gi". None means no limit,
     /// so a large repo or archive can fill the node's disk.
     pub workspace_size_limit: Option<String>,
+    /// `Always`, `IfNotPresent` or `Never` for the clone and pipeline images. Left alone, a `latest` tag is
+    /// pulled every time, which an image loaded into a node by hand cannot survive.
+    pub image_pull_policy: Option<String>,
+    /// A certificate of the job's own, from its own ServiceAccount (see `JobIdentity`).
+    pub identity: Option<JobIdentity>,
 }
 
 impl JobOptions {
@@ -142,6 +181,8 @@ impl JobOptions {
             ca_bundle_secret: None,
             resources: PipelineResources::default(),
             workspace_size_limit: None,
+            image_pull_policy: None,
+            identity: None,
         }
     }
 }
@@ -185,8 +226,13 @@ pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
     let (labels, annotations) = standard_metadata(spec.build_id, &spec.source, "pipeline");
 
     let mut init_container = clone_init_container(&spec.source, &spec.git_credentials);
+    init_container.image_pull_policy = options.image_pull_policy.clone();
 
-    let pipeline_env = pipeline_env_vars(spec);
+    let identity = options.identity.as_ref();
+    let mut pipeline_env = pipeline_env_vars(spec, identity.is_none());
+    if let Some(identity) = identity {
+        pipeline_env.extend(identity.pipeline_env.iter().cloned());
+    }
 
     // When entrypoint is None the image's own CMD/ENTRYPOINT runs (/bin/pipeline-runner
     // for pipeline images built from container.dhall, or the analyzer's own entrypoint).
@@ -195,19 +241,31 @@ pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
         name: "pipeline".to_string(),
         image: Some(spec.pipeline_image.clone()),
 
-        // image_pull_policy: Some("Never".into()), // TODO: make configurable
+        image_pull_policy: options.image_pull_policy.clone(),
         command: spec.entrypoint.clone(),
         env: Some(pipeline_env),
         // TODO: allow users to specify their own security context via config for git builds
         resources: Some(pipeline_resources(&options.resources)),
-        volume_mounts: Some(vec![client_tls_volume_mount(), workspace_volume_mount()]),
+        volume_mounts: Some(
+            match identity {
+                Some(identity) => identity.pipeline_mounts.clone(),
+                None => vec![client_tls_volume_mount()],
+            }
+            .into_iter()
+            // A git build's pipeline writes beside its source (its artifacts, its build directory); only
+            // an archive, which is third-party code under analysis, gets the source read-only.
+            .chain([workspace_volume_mount(matches!(spec.source, SourceRef::RegistryArchive { .. }))])
+            .collect(),
+        ),
         ..Default::default()
     };
 
-    let mut volumes = vec![
-        workspace_volume(options.workspace_size_limit.as_deref()),
-        client_tls_voiume(), // git_credentials_volume(&spec.git_credentials), TODO: Optionally insert git credentials via configuration
-    ];
+    let mut volumes = vec![workspace_volume(options.workspace_size_limit.as_deref())];
+    match identity {
+        Some(identity) => volumes.extend(identity.volumes.iter().cloned()),
+        // git_credentials_volume(&spec.git_credentials), TODO: Optionally insert git credentials via configuration
+        None => volumes.push(client_tls_voiume()),
+    }
 
     // The init container is Cyclops's own minimal image and never needs
     // root, so it is always locked down. Its scratch space is /tmp (the clone
@@ -233,8 +291,17 @@ pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
     // TODO: Insert these IF and only IF they're present in the configuration, skipping to test on insecure local registry
     // let image_pull_secrets = registry_pull_secrets(&spec.registry_credentials);
 
+    // The certificate is obtained before anything else runs, and before the source is fetched.
+    let init_containers: Vec<Container> = identity
+        .map(|i| i.init_containers.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .chain([init_container])
+        .collect();
+
     let pod_spec = PodSpec {
-        init_containers: Some(vec![init_container]),
+        init_containers: Some(init_containers),
+        service_account_name: identity.map(|_| service_account_for_build(spec.build_id)),
         containers: vec![pipeline_container],
         volumes: Some(volumes),
         // the clone image runs as non-root user, so we must make sure that the emptydir we clone into is owned by git
@@ -321,35 +388,25 @@ fn clone_init_container(source: &SourceRef, credentials: &GitCredentials) -> Con
 /// report results, and emit Cassini events. The pipeline runner must not
 /// need to be told anything about its own internal build steps — that is
 /// encoded in the pipeline manifest baked into the image.
-fn pipeline_env_vars(spec: &BuildSpec) -> Vec<EnvVar> {
-    vec![
-        EnvVar {
-            name: "POLAR_BUILD_ID".to_string(),
-            value: Some(spec.build_id.to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "BUILD_WORKSPACE".to_string(),
-            value: Some(WORKSPACE_PATH.to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "TLS_CA_CERT".to_string(),
-            value: Some(tls_ca_cert_path()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "TLS_CLIENT_CERT".to_string(),
-            value: Some(tls_client_cert_path()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "TLS_CLIENT_KEY".to_string(),
-            value: Some(tls_client_key_path()),
-            ..Default::default()
-        },
-    ]
-    .into_iter()
+fn pipeline_env_vars(spec: &BuildSpec, shared_tls: bool) -> Vec<EnvVar> {
+    let var = |name: &str, value: String| EnvVar {
+        name: name.to_string(),
+        value: Some(value),
+        ..Default::default()
+    };
+    let mut vars = vec![
+        var("POLAR_BUILD_ID", spec.build_id.to_string()),
+        var("BUILD_WORKSPACE", WORKSPACE_PATH.to_string()),
+    ];
+    // With a certificate of its own, where it is comes from the identity (`JobIdentity::pipeline_env`).
+    if shared_tls {
+        vars.extend([
+            var("TLS_CA_CERT", tls_ca_cert_path()),
+            var("TLS_CLIENT_CERT", tls_client_cert_path()),
+            var("TLS_CLIENT_KEY", tls_client_key_path()),
+        ]);
+    }
+    vars.into_iter()
     // Source identity (commit SHA, or purl + archive digest).
     .chain(
         spec.source
@@ -473,11 +530,11 @@ fn client_tls_voiume() -> Volume {
 /// Read-only enforces this at the kernel level and is a meaningful
 /// security boundary — a compromised pipeline cannot tamper with the
 /// source it just built from.
-fn workspace_volume_mount() -> VolumeMount {
+fn workspace_volume_mount(read_only: bool) -> VolumeMount {
     VolumeMount {
         name: WORKSPACE_VOLUME.to_string(),
         mount_path: WORKSPACE_PATH.to_string(),
-        read_only: Some(true),
+        read_only: Some(read_only),
         ..Default::default()
     }
 }
@@ -1090,5 +1147,76 @@ mod tests {
             job.metadata.annotations.unwrap()["cyclops.build/commit"],
             "a".repeat(40)
         );
+    }
+
+    const IDENTITY: &str = r#"{"initContainers":[{"name":"polar-init","image":"polar-init:latest","command":["polar-init"],"args":["--cert","client:/home/polar/certs:ecdsa-p256"],"volumeMounts":[{"name":"sa-token","mountPath":"/workspace","readOnly":true},{"name":"polar-certs","mountPath":"/home/polar/certs"}]}],"volumes":[{"name":"sa-token","projected":{"sources":[{"serviceAccountToken":{"audience":"a","expirationSeconds":3600,"path":"token"}}]}},{"name":"polar-certs","emptyDir":{}}],"pipelineMounts":[{"name":"polar-certs","mountPath":"/home/polar/certs","readOnly":true}],"pipelineEnv":[{"name":"TLS_CLIENT_CERT","value":"/home/polar/certs/cert.pem"}]}"#;
+
+    fn git_spec() -> BuildSpec {
+        spec(SourceRef::Git {
+            url: "https://github.com/cmu-sei/Polar.git".into(),
+            commit_sha: "a".repeat(40),
+        })
+    }
+
+    fn pod(job: &Job) -> &PodSpec {
+        job.spec.as_ref().unwrap().template.spec.as_ref().unwrap()
+    }
+
+    #[test]
+    fn a_job_with_an_identity_runs_as_its_own_service_account_and_gets_its_certificate_first() {
+        let mut options = JobOptions::new("polar-builds");
+        options.identity = Some(JobIdentity::from_json(IDENTITY).unwrap());
+        let build = git_spec();
+        let job = build_job_manifest(&build, &options);
+        let pod = pod(&job);
+
+        assert_eq!(pod.service_account_name.as_deref(), Some(service_account_for_build(build.build_id).as_str()));
+        let inits: Vec<_> = pod.init_containers.as_ref().unwrap().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(inits.len(), 2);
+        assert_eq!(inits[0], "polar-init", "the certificate comes before the source");
+
+        let volumes: Vec<_> = pod.volumes.as_ref().unwrap().iter().map(|v| v.name.as_str()).collect();
+        assert!(!volumes.contains(&CLIENT_TLS_VOLUME_NAME), "no certificate is shared between builds: {volumes:?}");
+        assert!(volumes.contains(&"polar-certs") && volumes.contains(&"sa-token"));
+
+        let pipeline = &pod.containers[0];
+        let tls_cert: Vec<_> = pipeline
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|e| e.name == "TLS_CLIENT_CERT")
+            .collect();
+        assert_eq!(tls_cert.len(), 1, "where the certificate is comes from the identity alone");
+        assert_eq!(tls_cert[0].value.as_deref(), Some("/home/polar/certs/cert.pem"));
+        let mounts = pipeline.volume_mounts.as_ref().unwrap();
+        assert!(mounts.iter().any(|m| m.name == "polar-certs" && m.read_only == Some(true)));
+        assert!(
+            mounts.iter().any(|m| m.name == WORKSPACE_VOLUME && m.read_only == Some(false)),
+            "a git build's pipeline writes beside its source"
+        );
+    }
+
+    #[test]
+    fn without_an_identity_jobs_share_the_secret_as_before() {
+        let job = build_job_manifest(&git_spec(), &JobOptions::new("polar-builds"));
+        let pod = pod(&job);
+        assert!(pod.service_account_name.is_none());
+        let volumes: Vec<_> = pod.volumes.as_ref().unwrap().iter().map(|v| v.name.as_str()).collect();
+        assert!(volumes.contains(&CLIENT_TLS_VOLUME_NAME));
+    }
+
+    #[test]
+    fn an_archive_build_still_reads_its_source_read_only() {
+        let job = build_job_manifest(
+            &spec(SourceRef::RegistryArchive {
+                purl: "pkg:cargo/serde@1.0.219".into(),
+                download_url: "https://static.crates.io/crates/serde/serde-1.0.219.crate".into(),
+                sha256: "b".repeat(64),
+            }),
+            &JobOptions::new("polar-builds"),
+        );
+        let mounts = pod(&job).containers[0].volume_mounts.as_ref().unwrap();
+        assert!(mounts.iter().any(|m| m.name == WORKSPACE_VOLUME && m.read_only == Some(true)));
     }
 }

@@ -16,6 +16,8 @@ futures.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
 orchestrator-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 [lib]
 name = "orchestrator_backend_k8s"
 path = "src/lib.rs"

@@ -8,7 +8,7 @@ use orchestrator_core::types::BuildSpec;
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{error, info, instrument};
 
-use crate::job::{JobOptions, build_job_manifest, job_name_for_build};
+use crate::job::{JobOptions, build_job_manifest, job_name_for_build, service_account_for_build};
 
 pub struct KubernetesBackend {
     client: Client,
@@ -53,7 +53,10 @@ impl BuildBackend for KubernetesBackend {
     #[instrument(skip(self, spec), fields(build_id = %spec.build_id))]
     async fn submit(&self, spec: &BuildSpec) -> Result<SubmittedJob, BackendError> {
         use k8s_openapi::api::batch::v1::Job;
-        use kube::api::{Api, PostParams};
+        use k8s_openapi::api::core::v1::ServiceAccount;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+        use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
+        use std::collections::BTreeMap;
 
         let job_name = job_name_for_build(spec.build_id);
         let manifest = build_job_manifest(spec, &self.options);
@@ -66,10 +69,48 @@ impl BuildBackend for KubernetesBackend {
         // TODO: We might want to use the final job manifest later, so maybe we Write manifest back to the supervisor ?
         let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.options.namespace);
 
-        let job = jobs
-            .create(&PostParams::default(), &manifest)
-            .await
-            .map_err(|e| BackendError::SubmissionFailed(e.to_string()))?;
+        // The pod runs under a ServiceAccount of its own, which has to be there when the pod is made.
+        let accounts: Api<ServiceAccount> = Api::namespaced(self.client.clone(), &self.options.namespace);
+        let account = self.options.identity.as_ref().map(|_| service_account_for_build(spec.build_id));
+        if let Some(name) = &account {
+            let sa = ServiceAccount {
+                metadata: ObjectMeta {
+                    name: Some(name.clone()),
+                    labels: Some(BTreeMap::from([(
+                        "cyclops/build-id".to_string(),
+                        spec.build_id.to_string(),
+                    )])),
+                    ..Default::default()
+                },
+                // The job's token is the one `polar-init` is given, projected; nothing else may have one.
+                automount_service_account_token: Some(false),
+                ..Default::default()
+            };
+            accounts
+                .create(&PostParams::default(), &sa)
+                .await
+                .map_err(|e| BackendError::SubmissionFailed(format!("could not make the build's ServiceAccount: {e}")))?;
+        }
+
+        let job = match jobs.create(&PostParams::default(), &manifest).await {
+            Ok(job) => job,
+            Err(e) => {
+                if let Some(name) = &account {
+                    let _ = accounts.delete(name, &DeleteParams::default()).await;
+                }
+                return Err(BackendError::SubmissionFailed(e.to_string()));
+            }
+        };
+
+        // The ServiceAccount goes with the job (and its time-to-live), so nothing is left behind.
+        if let (Some(name), Some(job_uid), Some(job_name)) = (&account, &job.metadata.uid, &job.metadata.name) {
+            let owner = serde_json::json!({"metadata": {"ownerReferences": [{
+                "apiVersion": "batch/v1", "kind": "Job", "name": job_name, "uid": job_uid
+            }]}});
+            if let Err(e) = accounts.patch(name, &PatchParams::default(), &Patch::Merge(&owner)).await {
+                tracing::warn!(error = %e, account = %name, "the build's ServiceAccount could not be given to its job; it is left for the reaper");
+            }
+        }
 
         let uid = job
             .metadata

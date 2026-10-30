@@ -61,8 +61,65 @@ let CyclopsValues =
           -- What a job runs, when its repository's mapping gives no command of its own.
           , jobCommand : List Text
           , workspaceSizeLimit : Text
+          -- What `polar-init` is given besides what the platform says, in the jobs' pods (the platform's
+          -- own `polarInitEnv`, in plain values).
+          , initEnv : List Builder.JobEnv
           }
       }
+
+-- ---- The job's identity, as JSON ---------------------------------------------------------------
+--
+-- Cyclops reads the pod additions that give each job a certificate from its configuration file, as one
+-- string of JSON (the loader lowercases the keys of a file's maps, which Kubernetes' camelCase names cannot
+-- survive). The values are the library's (`Builder.makeJobIdentity`), so a job gets its certificate the way an
+-- agent does; the pod shapes are Cyclops' own, written out here.
+--
+-- Written as text, not with the Prelude's JSON: its encoding repeats itself at every level, and a document this
+-- deep takes Dhall minutes to normalise.
+
+let quoted =
+      λ(t : Text) →
+        "\"${Text/replace "\"" "\\\"" (Text/replace "\\" "\\\\" t)}\""
+
+let listOf =
+      λ(items : List Text) → "[${Prelude.Text.concatSep "," items}]"
+
+let strings = λ(items : List Text) → listOf (Prelude.List.map Text Text quoted items)
+
+let pairs =
+      λ(items : List Builder.JobEnv) →
+        listOf
+          ( Prelude.List.map
+              Builder.JobEnv
+              Text
+              (λ(e : Builder.JobEnv) → "{\"name\":${quoted e.name},\"value\":${quoted e.value}}")
+              items
+          )
+
+let mountJson =
+      λ(name : Text) →
+      λ(path : Text) →
+      λ(readOnly : Bool) →
+        "{\"name\":${quoted name},\"mountPath\":${quoted path},\"readOnly\":${if readOnly then "true" else "false"}}"
+
+let identityJson =
+      λ(i : Builder.JobIdentity) →
+        let pullPolicy = merge { Some = λ(p : Text) → p, None = "IfNotPresent" } i.imagePullPolicy
+
+        let uid = Natural/show i.uid
+
+        let polarInit =
+              "{\"name\":\"polar-init\",\"image\":${quoted i.image},\"imagePullPolicy\":${quoted pullPolicy},"
+              ++ "\"command\":${strings [ "polar-init" ]},\"args\":${strings i.args},\"env\":${pairs i.env},"
+              ++ "\"volumeMounts\":${listOf [ mountJson i.tokenVolume i.tokenDir True, mountJson i.certVolume i.certDir False ]},"
+              ++ "\"securityContext\":{\"runAsUser\":${uid},\"runAsGroup\":${uid},\"runAsNonRoot\":true,\"allowPrivilegeEscalation\":false,\"capabilities\":{\"drop\":[\"ALL\"]}}}"
+
+        let tokenVolume =
+              "{\"name\":${quoted i.tokenVolume},\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"audience\":${quoted i.tokenAudience},\"expirationSeconds\":${Natural/show i.tokenExpirySecs},\"path\":\"token\"}}]}}"
+
+        let certVolume = "{\"name\":${quoted i.certVolume},\"emptyDir\":{}}"
+
+        in  "{\"initContainers\":[${polarInit}],\"volumes\":[${tokenVolume},${certVolume}],\"pipelineMounts\":[${mountJson i.certVolume i.certDir True}],\"pipelineEnv\":${pairs i.pipelineEnv}}"
 
 let envVar =
       λ(name : Text) →
@@ -92,6 +149,10 @@ let configuration =
                                   ( toMap
                                       { namespace = JSON.string jobsNamespace
                                       , workspace_size_limit = JSON.string v.workspaceSizeLimit
+                                      , image_pull_policy = JSON.string (merge { Some = λ(p : Text) → p, None = "IfNotPresent" } v.platform.imagePullPolicy)
+                                      -- A job's certificate: its own ServiceAccount, `polar-init`, no secret
+                                      -- shared between builds.
+                                      , identity = JSON.string (identityJson (Builder.makeJobIdentity v.platform v.initEnv))
                                       }
                                   )
                             }
@@ -211,6 +272,9 @@ let cyclops
                           , rules = Some
                             [ rule [ "batch" ] [ "jobs" ] [ "create", "get", "list", "watch", "delete" ]
                             , rule [ "" ] [ "pods", "pods/log" ] [ "get", "list", "watch" ]
+                            -- One ServiceAccount per build: the identity on the job's certificate. It is
+                            -- owned by the job, so it goes with it.
+                            , rule [ "" ] [ "serviceaccounts" ] [ "create", "get", "patch", "delete" ]
                             ]
                           }
                       , kubernetes.Resource.RoleBinding

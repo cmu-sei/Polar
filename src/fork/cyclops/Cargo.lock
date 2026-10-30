@@ -3752,6 +3752,8 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "orchestrator-core",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",

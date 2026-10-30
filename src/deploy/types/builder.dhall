@@ -345,6 +345,33 @@ let configFilesVolume
         , configMap = Some kubernetes.ConfigMapVolumeSource::{ name = Some f.configMap }
         }
 
+--| The projected service-account token only `polar-init` sees, with the audience the issuer wants.
+let tokenVolume
+    : Platform.Type → kubernetes.Volume.Type
+    = λ(platform : Platform.Type) →
+        kubernetes.Volume::{
+        , name = tokenVolumeName
+        , projected = Some kubernetes.ProjectedVolumeSource::{
+          , sources = Some
+            [ kubernetes.VolumeProjection::{
+              , serviceAccountToken = Some kubernetes.ServiceAccountTokenProjection::{
+                , audience = Some platform.audience
+                , expirationSeconds = Some platform.tokenExpirySecs
+                , path = "token"
+                }
+              }
+            ]
+          }
+        }
+
+--| Where the certificate and key are written, and read.
+let certVolume
+    : kubernetes.Volume.Type
+    = kubernetes.Volume::{
+      , name = certVolumeName
+      , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
+      }
+
 --| The init container that obtains the pod's certificate.
 let polarInit
     : Platform.Type → BuilderAgent.Type → kubernetes.Container.Type
@@ -448,25 +475,7 @@ let makePolarAgent
             , imagePullPolicy = platform.imagePullPolicy
             , initContainers = [ polarInit platform agent ]
             , volumes =
-                  [ kubernetes.Volume::{
-                    , name = tokenVolumeName
-                    , projected = Some kubernetes.ProjectedVolumeSource::{
-                      , sources = Some
-                        [ kubernetes.VolumeProjection::{
-                          , serviceAccountToken = Some kubernetes.ServiceAccountTokenProjection::{
-                            , audience = Some platform.audience
-                            , expirationSeconds = Some platform.tokenExpirySecs
-                            , path = "token"
-                            }
-                          }
-                        ]
-                      }
-                    }
-                  , kubernetes.Volume::{
-                    , name = certVolumeName
-                    , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
-                    }
-                  ]
+                  [ tokenVolume platform, certVolume ]
                 # Prelude.List.map ExtraCert kubernetes.Volume.Type extraCertVolume agent.extraCerts
                 # Prelude.List.map Scratch kubernetes.Volume.Type scratchVolume agent.scratch
                 # Prelude.List.map ConfigFiles kubernetes.Volume.Type configFilesVolume agent.configFiles
@@ -545,6 +554,82 @@ let makePolarAgent
           }
         }
 
+--| What a pod that is not an agent needs to have a certificate of its own: a build's job. It is the same
+--| `polar-init` and the same projected token, with no escrow key (nothing in a job is encrypted to one) and
+--| nothing waited for. The pod must run under a ServiceAccount of its own, because that is the certificate's
+--| identity and the broker allows one session per identity. Cyclops makes one per build.
+--|
+--| Plain values, not Kubernetes records: the consumer is Cyclops, which reads them from its configuration
+--| and builds the pod, and the records are expensive for Dhall to carry about.
+let JobEnv = { name : Text, value : Text }
+
+let JobIdentity =
+      { image : Text
+      , imagePullPolicy : Optional Text
+      , uid : Natural
+      , args : List Text
+      , env : List JobEnv
+      , tokenVolume : Text
+      , tokenDir : Text
+      , tokenAudience : Text
+      , tokenExpirySecs : Natural
+      , certVolume : Text
+      , certDir : Text
+      -- What the main container is told: where its certificate is and where the broker is.
+      , pipelineEnv : List JobEnv
+      }
+
+--| Where `polar-init` gets certificates, as plain values.
+let issuerJobEnv
+    : Issuer → List JobEnv
+    = λ(issuer : Issuer) →
+        merge
+          { CertIssuer =
+              λ(url : Text) →
+                [ { name = "POLAR_INIT_ISSUER", value = "cert-issuer" }
+                , { name = "POLAR_INIT_CERT_ISSUER_URL", value = url }
+                ]
+          , CredentialsAgent =
+              λ(url : Text) →
+                [ { name = "POLAR_INIT_ISSUER", value = "credentials-agent" }
+                , { name = "POLAR_INIT_OBSERVER_URL", value = url }
+                ]
+          }
+          issuer
+
+--| `extraEnv` is for what a deployment's `polar-init` needs besides (the platform's own `polarInitEnv` is
+--| made of Kubernetes records, which are too costly for Dhall to carry through a function; say it again here
+--| in plain values).
+let makeJobIdentity
+    : Platform.Type → List JobEnv → JobIdentity
+    = λ(platform : Platform.Type) →
+      λ(extraEnv : List JobEnv) →
+        { image = platform.polarInitImage
+        , imagePullPolicy = platform.imagePullPolicy
+        , uid = 65532
+        , args = [ "--cert", certArgument CertKind.Client ]
+        , env =
+              issuerJobEnv platform.issuer
+            # [ { name = "POLAR_INIT_TOKEN_PATH", value = tokenPath }
+              -- Nothing in a job is encrypted to an escrow key.
+              , { name = "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP", value = "true" }
+              ]
+            # extraEnv
+        , tokenVolume = tokenVolumeName
+        , tokenDir
+        , tokenAudience = platform.audience
+        , tokenExpirySecs = platform.tokenExpirySecs
+        , certVolume = certVolumeName
+        , certDir = C.certDir
+        , pipelineEnv =
+          [ { name = "TLS_CA_CERT", value = C.certPaths.ca }
+          , { name = "TLS_CLIENT_CERT", value = C.certPaths.cert }
+          , { name = "TLS_CLIENT_KEY", value = C.certPaths.key }
+          , { name = "BROKER_ADDR", value = platform.cassiniAddr }
+          , { name = "CASSINI_SERVER_NAME", value = platform.cassiniServerName }
+          ]
+        }
+
 --| The Service for an agent that answers requests, under a name of its own: some are dialled by a
 --| name other than the agent's (Cassini is `cassini-ip-svc`). It selects the pods the operator labels.
 let makeServiceFor
@@ -614,6 +699,9 @@ let makeServiceAccount
         }
 
 in  { Issuer
+    , JobIdentity
+    , JobEnv
+    , makeJobIdentity
     , CertKind
     , ExtraCert
     , Scratch
