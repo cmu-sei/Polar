@@ -39,6 +39,33 @@ without a Jira restarts in place instead of piling up. Clusters older than 1.36 
 is what filled a node before; the evicted pod object stays, its Deployment making another), and the load harness's Jobs
 (`load-harness.nu` deletes them after a run). Whether that is worth an agent is open; until then, `just cluster-prune-failed`.
 
+**Update, 2026-10-30 (the maintainer): the Reaper is wanted, with a wider job.** Polar applies its own housekeeping
+policies to the infrastructure it runs on, beside whatever Kubernetes does, as a first, modest step in controlling that
+stack. Kubernetes keeps its own policies; Polar's are its own, and they act on what is noise and poor housekeeping. The
+order is fixed: what is to be removed is first recorded in the graph as an observable (by the attestation agent, which
+holds the pod observer's role), and only then cleaned up. To be addressed when the Reaper is worked on; until then the
+cleanup is by hand. The Reaper's work, as it stands:
+
+- **Failed Jobs' pods,** as designed below (most were not real failures: endings by rejuvenation).
+- **Evicted pods of Deployments.** Seen 2026-10-30 on u7c: a build filled `/home`, the kubelet evicted 18 pods on
+  ephemeral storage, and each Deployment made a replacement; the evicted pod objects stay (phase Failed, reason Evicted,
+  shown as `ContainerStatusUnknown` or `Error`) until the cluster holds 12,500 terminated pods (the controller manager's
+  `--terminated-pod-gc-threshold`). The observable: the pod, its owner, the eviction's reason and message (which
+  resource, the threshold, what was left), and when. The admission policy below widens from "owned by a Job" to "owned
+  by a Polar workload" (a Job, or a ReplicaSet of a Polar Deployment).
+- **A Deployment's old ReplicaSets** (its rollout history). Every change to the pod template leaves the previous
+  ReplicaSet scaled to 0, kept for `kubectl rollout undo` up to `revisionHistoryLimit` (10 by default; Polar's charts do
+  not set it). On u7c, `cassini` had eleven after the allocator and memcpy experiments changed its image about a dozen
+  times, and 28 empty ReplicaSets were across the cluster. With Flux, a rollback is a revert in the deployment
+  repository, so the history adds little. Decided: this is the Reaper's policy, not a `revisionHistoryLimit` in the
+  charts. The observable: each revision (its number, image digests, pod-template hash, when it was replaced); the
+  Reaper then keeps the newest N (to be settled) and deletes the rest. It needs `delete` on `replicasets` in Polar's
+  namespaces, and the admission policy refuses a ReplicaSet that has replicas, is the Deployment's current revision, or
+  is not owned by a Polar Deployment.
+- By hand until then: `just cluster-prune-failed` for Failed pods; for empty ReplicaSets, `kubectl get rs -A --no-headers
+  | awk '$3==0 && $4==0 {print $1, $2}' | while read ns rs; do kubectl -n "$ns" delete rs "$rs"; done` (both were run on
+  u7c on 2026-10-30: 18 pods and 28 ReplicaSets).
+
 ## The problem (as it was, until 2026-10-28)
 
 Every agent ends a pod by exiting 1, so that its Job (`restartPolicy: Never`, `backoffLimit` 1000000) replaces it
