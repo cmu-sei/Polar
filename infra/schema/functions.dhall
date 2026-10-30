@@ -123,75 +123,6 @@ let makeDeployment
           }
         }
 
-let ProxyVolume =
-      λ(cert : Optional Text) →
-        merge
-          { Some =
-              λ(certName : Text) →
-                [ kubernetes.Volume::{
-                  , name = certName
-                  , secret = Some kubernetes.SecretVolumeSource::{
-                    , secretName = Some certName
-                    }
-                  }
-                ]
-          , None = [] : List kubernetes.Volume.Type
-          }
-          cert
-
-let ProxyMount =
-      λ(cert : Optional Text) →
-        merge
-          { Some =
-              λ(cert : Text) →
-                [ kubernetes.VolumeMount::{
-                  , name = cert
-                  , mountPath = "/etc/tls/proxy"
-                  , readOnly = Some True
-                  }
-                ]
-          , None = [] : List kubernetes.VolumeMount.Type
-          }
-          cert
-
-let ProxyEnv =
-      λ(cert : Optional Text) →
-        merge
-          { Some =
-              λ(_ : Text) →
-                [ kubernetes.EnvVar::{
-                  , name = "PROXY_CA_CERT"
-                  , value = Some "/etc/tls/proxy/proxy.crt"
-                  }
-                ]
-          , None = [] : List kubernetes.EnvVar.Type
-          }
-          cert
-
-let GraphProxyEnv =
-      λ(cert : Optional Text) →
-        merge
-          { Some =
-              λ(_ : Text) →
-                [ kubernetes.EnvVar::{
-                  , name = "GRAPH_CA_CERT"
-                  , value = Some "/etc/tls/proxy/proxy.crt"
-                  }
-                ]
-          , None = [] : List kubernetes.EnvVar.Type
-          }
-          cert
-
-let mkProxySecret =
-      λ(b64 : Text) →
-      λ(name : Text) →
-      λ(namespace : Text) →
-        { apiVersion = "v1"
-        , kind = "Secret"
-        , metadata = { creationTimestamp = None Text, name, namespace }
-        , data.`proxy.pem` = b64
-        }
-
 let DockerRegistrySecret =
       λ(secretName : Text) →
       λ(namespace : Text) →
@@ -390,11 +321,6 @@ in  { makeGraphEnv
     , makeOpaqueSecret
     , makeDeployment
     , DockerRegistrySecret
-    , mkProxySecret
-    , ProxyVolume
-    , ProxyMount
-    , ProxyEnv
-    , GraphProxyEnv
     , makePolarInitContainer
     , makePolarInitContainerWith
     , noEnv

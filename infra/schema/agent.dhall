@@ -152,15 +152,12 @@ let render =
 
         let volumes =
                 Prelude.List.map T.VolumeEntry kubernetes.Volume.Type toVolume v.volumes
-              # functions.ProxyVolume v.proxy_ca_cert
 
         let env =
                 Prelude.List.map T.EnvEntry kubernetes.EnvVar.Type toEnv v.env
-              # functions.ProxyEnv v.proxy_ca_cert
 
         let mounts =
                 Prelude.List.map T.MountEntry kubernetes.VolumeMount.Type toMount v.mounts
-              # functions.ProxyMount v.proxy_ca_cert
 
         -- The custody daemon, when the pod's keys are its (docs/architecture/key-custody.md, step 4): a native sidecar,
         -- an init container that runs for the pod's whole life, declared before polar-init so it starts first. Its own

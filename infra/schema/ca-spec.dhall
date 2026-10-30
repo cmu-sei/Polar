@@ -59,7 +59,6 @@ let Spec =
       , probe : A.Probe
       , termination_grace_secs : Natural
       , fs_group : Optional Natural
-      , proxy_ca_cert : Optional Text
       , needs : List Text
       , env : List A.EnvEntry
       , volumes : List VolumeEntry

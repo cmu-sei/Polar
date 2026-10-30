@@ -43,7 +43,4 @@ in  { name            = "gitlab-agents"
       { name  = "polar-gitlab-consumer"
       , image = "polar-gitlab-consumer:latest"
       }
-
-    -- proxyCACert: set to Some "proxy-ca-cert" if a proxy sits in front of GitLab
-    , proxyCACert = None Text
     }

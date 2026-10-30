@@ -38,14 +38,13 @@ let render =
           , certIssuerUrl    : Text
           , saTokenAudience  : Text
           , neo4jBoltAddr    : Text
-          , proxyCACert      : Optional Text
           }
       ) ->
         let volumes =
               [ Constants.certEmptyDirVolume
               , Constants.saTokenVolume v.saTokenAudience
               , kubernetes.Volume::{ name = "polar-health", emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
-              ] # functions.ProxyVolume v.proxyCACert
+              ]
 
         let env =
               Constants.commonClientEnv
@@ -59,7 +58,7 @@ let render =
         let mounts =
               [ Constants.certVolumeMount
               , kubernetes.VolumeMount::{ name = "polar-health", mountPath = "/var/run/polar-health" }
-              ] # functions.ProxyMount v.proxyCACert
+              ]
 
         in  kubernetes.Job::{
             , metadata = kubernetes.ObjectMeta::{ name = Some v.name, namespace = Some Constants.PolarNamespace, annotations = Some [ Constants.RejectSidecarAnnotation ] }

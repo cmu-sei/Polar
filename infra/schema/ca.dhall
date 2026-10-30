@@ -148,11 +148,9 @@ let render =
 
         let volumes =
                 Prelude.List.map T.VolumeEntry kubernetes.Volume.Type toVolume v.volumes
-              # functions.ProxyVolume v.proxy_ca_cert
 
         let env =
                 Prelude.List.map A.EnvEntry kubernetes.EnvVar.Type toEnv v.env
-              # functions.ProxyEnv v.proxy_ca_cert
 
         -- Its own token, the kind's projected one, where polar-init would have it (functions.dhall): cert-issuer signs
         -- itself its client certificate on it.
@@ -164,7 +162,6 @@ let render =
                   , readOnly = Some True
                   }
                 ]
-              # functions.ProxyMount v.proxy_ca_cert
 
         let placed = functions.placementOf v.placement
 

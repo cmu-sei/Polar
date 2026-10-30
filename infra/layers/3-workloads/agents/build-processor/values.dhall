@@ -36,6 +36,4 @@ in  { imagePullPolicy  = "Always"
       { name  = "build-processor"
       , image = "build-processor:latest"
       }
-
-    , proxyCACert = None Text
     }

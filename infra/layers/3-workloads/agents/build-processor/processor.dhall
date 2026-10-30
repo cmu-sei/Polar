@@ -35,19 +35,17 @@ let render =
           , certIssuerUrl    : Text
           , saTokenAudience  : Text
           , neo4jBoltAddr    : Text
-          , proxyCACert      : Optional Text
           }
       ) ->
         let volumes =
               [ Constants.certEmptyDirVolume
               , Constants.saTokenVolume v.saTokenAudience
               , kubernetes.Volume::{ name = "polar-health", emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
-              ] # functions.ProxyVolume v.proxyCACert
+              ]
 
         let env =
               Constants.commonClientEnv
               # functions.makeGraphEnv v.neo4jBoltAddr Constants.graphConfig Constants.graphSecretKeySelector Constants.tlsPath (Some "${Constants.tlsPath}/ca.pem")
-              # functions.ProxyEnv v.proxyCACert
               # [ kubernetes.EnvVar::{ name = "POLAR_HEALTH_FILE",          value = Some "/var/run/polar-health/polar-health.json" }
                 , kubernetes.EnvVar::{ name = "POLAR_HEALTH_CERTS",         value = Some "/etc/tls/certs/cert.pem" }
                 , kubernetes.EnvVar::{ name = "POLAR_HEALTH_EXPIRY_SECS",   value = Some "60" }
@@ -58,7 +56,7 @@ let render =
         let mounts =
               [ Constants.certVolumeMount
               , kubernetes.VolumeMount::{ name = "polar-health", mountPath = "/var/run/polar-health" }
-              ] # functions.ProxyMount v.proxyCACert
+              ]
 
         let podSpec = kubernetes.PodSpec::{
               , imagePullSecrets = Some v.imagePullSecrets

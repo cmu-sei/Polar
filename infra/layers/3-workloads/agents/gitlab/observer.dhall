@@ -39,18 +39,16 @@ let render =
           , saTokenAudience  : Text
           , endpoint         : Text
           , baseIntervalSecs : Natural
-          , proxyCACert      : Optional Text
           }
       ) ->
         let volumes =
               [ Constants.certEmptyDirVolume
               , Constants.saTokenVolume v.saTokenAudience
               , kubernetes.Volume::{ name = "polar-health", emptyDir = Some kubernetes.EmptyDirVolumeSource::{=} }
-              ] # functions.ProxyVolume v.proxyCACert
+              ]
 
         let env =
               Constants.commonClientEnv
-              # functions.ProxyEnv v.proxyCACert
               # [ kubernetes.EnvVar::{ name = "OBSERVER_BASE_INTERVAL", value = Some (Natural/show v.baseIntervalSecs) }
                 , kubernetes.EnvVar::{ name = "GITLAB_ENDPOINT",        value = Some v.endpoint }
                 , kubernetes.EnvVar::{
@@ -69,7 +67,7 @@ let render =
         let mounts =
               [ Constants.certVolumeMount
               , kubernetes.VolumeMount::{ name = "polar-health", mountPath = "/var/run/polar-health" }
-              ] # functions.ProxyMount v.proxyCACert
+              ]
 
         let podSpec = kubernetes.PodSpec::{
               , imagePullSecrets = Some v.imagePullSecrets

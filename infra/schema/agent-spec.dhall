@@ -104,7 +104,6 @@ let Spec =
       , job : Optional { backoff_limit : Natural, ttl_after_finished_secs : Natural }
       , probe : Probe
       , termination_grace_secs : Natural
-      , proxy_ca_cert : Optional Text
       , needs : List Text
       , env : List EnvEntry
       , volumes : List VolumeEntry

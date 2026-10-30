@@ -237,7 +237,8 @@ Stage 1 (done): `infra/config/{cluster,services,capabilities,kinds}.nuon`,
 (`list`, `check`, `explain`, `json`, `diff`). Verified against golden manifests.
 
 Stage 2 (done): generic `schema/agent.dhall` reusing `functions.makePolarInitContainer`
-(10 args) and the Proxy* helpers; render wiring (resolve -> JSON -> `json-to-dhall` ->
+(10 args) and the Proxy* helpers (always given None; removed 2026-10-30, when the target's
+`cluster.egress` took their place, `egress.md`); render wiring (resolve -> JSON -> `json-to-dhall` ->
 `dhall-to-yaml`) coexisting with legacy charts; `kube/main.nu` reduced to RBAC only,
 then the whole kube chart removed; golden-diff harness (`compare-manifests.nu`).
 

@@ -36,7 +36,7 @@ def main [context_nuon: string] {
     let values_path = ($chart_dir | path join "values.dhall")
     let merged      = "let v = " + $values_path + " in let o = (" + $overrides + ").gitlab in v // { imagePullSecrets = o.imagePullSecrets, observer = v.observer // o.observer, consumer = v.consumer // o.consumer }"
     let base        = "let v = (" + $merged + ") in "
-    let cert_args   = ", polarInitImage = \"" + $polar_init_image + "\", certIssuerUrl = \"" + $cert_issuer_url + "\", saTokenAudience = \"" + $sa_audience + "\", proxyCACert = v.proxyCACert }"
+    let cert_args   = ", polarInitImage = \"" + $polar_init_image + "\", certIssuerUrl = \"" + $cert_issuer_url + "\", saTokenAudience = \"" + $sa_audience + "\" }"
     let neo         = ", neo4jBoltAddr = \"" + $neo4j_addr + "\""
 
     let tmp  = (mktemp --suffix ".dhall")

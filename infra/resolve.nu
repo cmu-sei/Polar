@@ -648,7 +648,6 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         probe: $spec.probe
         termination_grace_secs: $grace
         fs_group: ($spec.fs_group? | default null)
-        proxy_ca_cert: null
         needs: $needs
         env: $env_list
         volumes: $volumes
