@@ -33,6 +33,7 @@ let ObserverValues =
               , gitObserver : Text
               , gitProcessor : Text
               , gitController : Text
+              , buildProcessor : Text
               }
           }
       }
@@ -187,4 +188,29 @@ let gitStages =
               }
             ]
 
-in  { ObserverValues, kubernetes = kubeStages, git = gitStages }
+--| The build processor: it reads the provenance events that builds publish (Cyclops' own, and the
+--| pipeline library's from a job) and writes them to the graph.
+let buildStages =
+      λ(v : ObserverValues.Type) →
+        let processor =
+              Builder.BuilderAgent::{
+              , name = "build-processor"
+              , namespace = ns
+              , image = v.images.buildProcessor
+              , provides = [ "cassini", "graph-write" ]
+              , shutdownBudgetSecs = 50
+              , settings = Settings.graphSettings ns
+              }
+
+        in  [ P.Stage::{
+              , name = "build-processor"
+              , description = Some "the build processor: provenance events from builds, written to the graph"
+              , shared = True
+              , objects =
+                    P.k8s [ kubernetes.Resource.ServiceAccount (Builder.makeServiceAccount ns "build-processor") ]
+                  # P.agents [ Builder.makePolarAgent v.platform processor ]
+              , waits = [ P.waitForAgent ns "build-processor" ]
+              }
+            ]
+
+in  { ObserverValues, kubernetes = kubeStages, git = gitStages, build = buildStages }
