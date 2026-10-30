@@ -31,6 +31,7 @@ use polar_agent_builder::{Cause, Configured, PolarAgent, StartError, TopicDecl};
 use polar_env::Section;
 use ractor::Actor;
 use std::time::Duration;
+use tracing::warn;
 
 const JIRA_OBSERVER_SUPERVISOR: &str = "jira.supervisor.observer";
 
@@ -83,10 +84,20 @@ impl PolarAgent for JiraObserver {
         // Declared and judged with the rest of the configuration, so a missing address or token
         // was reported before this point, with every other problem.
         let settings = JiraSettings::read(configured.config())?;
+        // An address that cannot be the site's is a configuration error, and ends the start
+        // with what to set.
+        let jira_url = settings::normalise_jira_url(&settings.url)?;
+        if settings::token_looks_base64(&settings.token) {
+            warn!(
+                "JIRA_TOKEN looks like a base64-encoded copy of a token: it decodes to printable \
+                 text. Jira expects the token itself; check that the Secret was not encoded twice \
+                 (a Secret's data is base64 already, its stringData is not)"
+            );
+        }
         let args = ObserverSupervisorArgs {
             auth: JiraAuth::from_parts(settings.email, settings.token),
-            deployment: JiraDeployment::resolve(settings.deployment.as_deref(), &settings.url),
-            jira_url: settings.url,
+            deployment: JiraDeployment::resolve(settings.deployment.as_deref(), &jira_url),
+            jira_url,
             proxy_ca_cert_file: settings.proxy_ca_cert,
             query_date: settings.query_date,
             // TODO: read this from configuration

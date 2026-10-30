@@ -27,6 +27,7 @@ license.workspace = true
 description = "Observer agent for Jira — polls APIs, publishes updates via Cassini broker."
 
 [dependencies]
+base64.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
 jira_common.workspace = true
@@ -45,6 +46,9 @@ tracing-glog.workspace = true
 tracing-subscriber.workspace = true
 tracing.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
 
 [[bin]]
 name = "jira-observer"

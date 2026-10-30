@@ -3848,6 +3848,7 @@ dependencies = [
 name = "jira-observer"
 version = "1.0.0"
 dependencies = [
+ "base64 0.22.1",
  "cassini-client",
  "cassini-types",
  "jira_common",
@@ -3855,6 +3856,7 @@ dependencies = [
  "polar",
  "polar-agent-builder",
  "polar-env",
+ "proptest",
  "ractor",
  "reqwest 0.12.28",
  "rkyv",
