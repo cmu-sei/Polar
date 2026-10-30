@@ -765,9 +765,13 @@ def step_seed [target: string, config: record, username: string, mail: string, a
 }
 
 # Whether a pod can reach the outside, said once the cluster is up. A note, never a failure: the cluster works
-# offline, and a probe that cannot run is not a reason to stop.
-def report_egress [] {
-    let r = try { egress_report (probe_url) {|u| kube_probe $u } } catch {|e|
+# offline, and a probe that cannot run is not a reason to stop. A target that goes out through cluster.egress.proxy is
+# not probed: the probe's git does not use it.
+def report_egress [target: string] {
+    let r = try {
+        let proxy = ((cluster-registry cluster_of $target).egress? | default {} | get -o proxy)
+        egress_report (probe_url) {|u| kube_probe $u } $proxy
+    } catch {|e|
         { verdict: "error", lines: [$"could not check access to the outside: ($e.msg)"] }
     }
     for l in $r.lines { if $r.verdict == "ok" { ok $l } else { note $l } }
@@ -843,7 +847,7 @@ def main [
     print ""
     print $"=== Target ($target) is up ==="
     ^kubectl -n $POLAR get pods
-    report_egress
+    report_egress $target
     if ($env.POLAR_DEV_POD? | default "") == "1" {
         note "for a browser on your own machine: bin/polar-dev forward there (Neo4j and ACE); just port-forwards-up there has every service"
     } else {

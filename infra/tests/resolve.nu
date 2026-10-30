@@ -94,8 +94,9 @@ def with_target [config: record, body: closure] {
     mkdir $dir
     $config | to nuon | save --force ($dir | path join "config.nuon")
     try {
-        do $body $name
+        let out = (do $body $name)
         rm -rf $dir
+        $out
     } catch {|e|
         rm -rf $dir
         error make { msg: $e.msg }
@@ -131,6 +132,41 @@ def pod_of [name: string, target: string] {
 def init_env_value [r: record, name: string] {
     $r.init_env | where name == $name | get -o 0.value
 }
+
+# Every workload `target` runs, resolved in one process (resolve.nu's `resolve`: the record `json` and `resources` are
+# made from), as { name, r }.
+def resolve_all [target: string] {
+    let names = (^nu $RESOLVER names --target $target | from json)
+    # Sourced, not used: a module may not export a command of its own name.
+    let code = ("source '" + $RESOLVER + "'; $env.EGRESS_TEST_NAMES | from json | each {|n| { name: $n, r: (resolve $n $env.EGRESS_TEST_TARGET) } } | to json --raw")
+    let r = (with-env { EGRESS_TEST_NAMES: ($names | to json --raw), EGRESS_TEST_TARGET: $target } { do { ^nu -c $code } | complete })
+    if $r.exit_code != 0 { error make { msg: $"resolving ($target) failed: ($r.stderr | lines | last 5 | str join '; ')" } }
+    $r.stdout | from json
+}
+
+# The variables a workload's agent declares, from its scaffold.
+def declared_of [name: string] {
+    open ($env.POLAR_SCAFFOLD_DIR | path join $"($name).json") | get sections | each {|s| $s.variables | get name } | flatten
+}
+
+# The variables of the document a resolved workload is given, as { section, name, value }.
+def document_variables [r: record] {
+    $r.config_map.content | from json | get sections | each {|s| $s.variables | each {|v| { section: $s.name, name: $v.name, value: $v.value } } } | flatten
+}
+
+# A certificate-shaped PEM block (base64 of random bytes): what the render checks of a CA file.
+def fake_pem [] {
+    "-----BEGIN CERTIFICATE-----\n" + (random binary 48 | encode base64) + "\n-----END CERTIFICATE-----\n"
+}
+
+# Writes `content` to `file` inside the test target `target`'s directory.
+def target_file [target: string, file: string, content: string] {
+    let p = ($INFRA | path join "targets" $target $file)
+    mkdir ($p | path dirname)
+    $content | save --force $p
+}
+
+const EGRESS_AGENTS = ["git-repo-observer" "jira-observer" "oci-registry-resolver"]
 
 def main [] {
     # The agents' scaffolds, asked of their images on the cluster once for the whole run (it needs KUBECONFIG and the images in
@@ -952,6 +988,95 @@ def main [] {
             assert ($missing.exit_code != 0)
             let unknown = (^nu $RESOLVER service-url no-such-service | complete)
             assert ($unknown.exit_code != 0)
+        }
+
+        # docs/architecture/egress.md: a target that sets nothing renders as before.
+        "for every real target, egress absent and egress {} resolve every workload the same": {
+            for t in ["local" "local-minimal" "sandbox-local"] {
+                let config = (open ($INFRA | path join "targets" $t "config.nuon"))
+                let cluster = ($config.cluster? | default {} | reject -o egress)
+                let absent = (with_target ($config | upsert cluster $cluster) {|x| resolve_all $x })
+                let empty = (with_target ($config | upsert cluster ($cluster | insert egress {})) {|x| resolve_all $x })
+                assert ($absent | is-not-empty) $t
+                assert equal $empty $absent $t
+            }
+        }
+
+        "with a proxy and a CA, each agent that declares the egress section gains exactly them, and nothing else changes": {
+            let config = (open ($INFRA | path join "targets/local/config.nuon"))
+            let pem = (fake_pem)
+            let base = (with_target $config {|t| resolve_all $t })
+            let egress = { proxy: "http://proxy.corp.example:3128", ca_file: "trust/corp-root-ca.pem" }
+            let with = (with_target ($config | upsert cluster (($config.cluster? | default {}) | insert egress $egress)) {|t|
+                target_file $t "trust/corp-root-ca.pem" $pem
+                resolve_all $t
+            })
+            let declaring = ($with | get name | where {|n| "POLAR_EGRESS_PROXY" in (declared_of $n) } | sort)
+            assert equal $declaring $EGRESS_AGENTS
+            assert equal ($with | get name) ($base | get name)
+            for w in $with {
+                let b = ($base | where name == $w.name | first | get r)
+                let r = $w.r
+                for k in [init_env init_mounts custody env] {
+                    assert equal ($r | get $k) ($b | get $k) $"($w.name): ($k)"
+                }
+                if not ($w.name in $declaring) {
+                    assert equal $r $b $w.name
+                    continue
+                }
+                let cm = $"($w.name)-egress-ca"
+                let fields = [name secret audience config_map claim items]
+                assert equal ($r.volumes | where name != "polar-egress-ca") $b.volumes $w.name
+                assert equal ($r.volumes | where name == "polar-egress-ca" | select ...$fields) [{ name: "polar-egress-ca", secret: null, audience: null, config_map: $cm, claim: null, items: [] }] $w.name
+                assert equal ($r.mounts | where name != "polar-egress-ca") $b.mounts $w.name
+                assert equal ($r.mounts | where name == "polar-egress-ca" | select name path read_only) [{ name: "polar-egress-ca", path: "/etc/polar-egress-ca", read_only: true }] $w.name
+                assert equal $r.resources.config_maps [{ name: $cm, key: "ca.pem", content: $pem }] $w.name
+                assert equal $b.resources.config_maps [] $w.name
+                assert equal (document_variables $r | where section != "egress") (document_variables $b | where section != "egress") $w.name
+                assert equal (document_variables $b | where section == "egress" | get value) [null null null] $w.name
+                let given = (document_variables $r | where section == "egress" | reduce --fold {} {|v, acc| $acc | insert $v.name $v.value })
+                assert equal $given.POLAR_EGRESS_PROXY "http://proxy.corp.example:3128" $w.name
+                assert equal $given.POLAR_EGRESS_NO_PROXY "localhost,127.0.0.1,::1,.svc,.cluster.local" $w.name
+                assert equal $given.POLAR_EGRESS_CA_CERT "/etc/polar-egress-ca/ca.pem" $w.name
+                let rest = [volumes mounts config_map resources _from]
+                assert equal ($r | reject ...$rest) ($b | reject ...$rest) $w.name
+            }
+        }
+
+        "an agent is given the proxy and a bypass list that keeps the cluster's own names, and its document stays the first ConfigMap": {
+            let config = (open ($INFRA | path join "targets/local/config.nuon"))
+            let egress = { proxy: "http://proxy.corp.example:3128", no_proxy: [".corp.example" "10.20.0.0/16"], ca_file: "trust/ca.pem" }
+            with_target ($config | upsert cluster (($config.cluster? | default {}) | insert egress $egress)) {|t|
+                target_file $t "trust/ca.pem" (fake_pem)
+                let r = (resolve_for $t "jira-observer")
+                assert equal (env_value $r "POLAR_EGRESS_PROXY" $t) "http://proxy.corp.example:3128"
+                let bypass = (env_value $r "POLAR_EGRESS_NO_PROXY" $t | split row ",")
+                for host in [".svc" ".cluster.local" "localhost" ".corp.example" "10.20.0.0/16"] {
+                    assert ($host in $bypass) $"($host) in ($bypass)"
+                }
+                let maps = (^nu $RESOLVER resources jira-observer --target $t | from json | get config_maps | get name)
+                assert equal $maps ["jira-observer-config" "jira-observer-egress-ca"]
+            }
+        }
+
+        "a target that sets an egress variable itself is refused, and so is a CA file that holds a key": {
+            let config = (open ($INFRA | path join "targets/local/config.nuon"))
+            let workloads = ($config.workloads | upsert jira-observer {|w|
+                $w.jira-observer | upsert env (($w.jira-observer.env? | default []) | append { name: "POLAR_EGRESS_PROXY", value: "http://proxy.corp.example:3128" })
+            })
+            with_target ($config | upsert workloads $workloads) {|t|
+                let r = (do { ^nu $RESOLVER json jira-observer --target $t } | complete)
+                assert ($r.exit_code != 0) "refused"
+                assert ($r.stderr | str contains "POLAR_EGRESS_PROXY is set by") $r.stderr
+                assert ($r.stderr | str contains "it is the cluster's egress setting: set cluster.egress instead") $r.stderr
+            }
+            let key = $"-----BEGIN (['PRIVATE' 'KEY'] | str join ' ')-----\nAAAA\n-----END (['PRIVATE' 'KEY'] | str join ' ')-----\n"
+            with_target ($config | upsert cluster (($config.cluster? | default {}) | insert egress { ca_file: "trust/ca.pem" })) {|t|
+                target_file $t "trust/ca.pem" ((fake_pem) + $key)
+                let r = (do { ^nu $RESOLVER json jira-observer --target $t } | complete)
+                assert ($r.exit_code != 0) "refused"
+                assert ($r.stderr | str contains "cluster.egress.ca_file trust/ca.pem holds a private key") $r.stderr
+            }
         }
 
         "the template does not see the settings record": {

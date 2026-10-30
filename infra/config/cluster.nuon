@@ -63,4 +63,15 @@
   # Persistent volume claims a workload's capabilities ask for: the storage class the cluster
   # provides and how much each claim asks for.
   storage: { class: "managed-csi", size: "1Gi" }
+
+  # The way out of the cluster (docs/architecture/egress.md), for a target whose calls outside must go through a
+  # proxy or trust a CA of its own. There is no default: a target that sets none of it renders as before. Every key
+  # is optional, and only the agents whose code declares the egress section (polar::egress) are given it.
+  #
+  #   egress: {
+  #     proxy: "http://proxy.corp.example:3128"       # http:// or https://, a host and a port, no user or password
+  #     no_proxy: [".corp.example", "10.20.0.0/16"]   # reached directly; localhost, 127.0.0.1, ::1, .svc and
+  #                                                   # .<domain> always are
+  #     ca_file: "trust/corp-root-ca.pem"             # PEM CA certificates, a path inside infra/targets/<target>/
+  #   }
 }

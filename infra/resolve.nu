@@ -52,6 +52,7 @@ use cluster-inputs.nu [env_for, env_merged, path_of, read_inputs]
 use registry.nu [node_registry, push_registry]
 use agent-pods.nu [collect_scaffolds, run_checks]
 use topics.nu [served, judge, oversized]
+use egress.nu
 const CONFIG = ($INFRA | path join "config")
 
 const DEFAULT_TARGET = "local-minimal"
@@ -465,6 +466,16 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         $init_env = ($init_env | append (env_entry { name: "POLAR_CUSTODY_SOCKET", value: $CUSTODY.socket } $vars "custody" $name))
     }
 
+    # The way out of the cluster is the cluster's setting, written into the agents that declare it (below): neither the
+    # entry nor the target's env names it.
+    for given in [{ from: "its catalog entry", env: ($entry.env? | default []) } { from: $"target ($target)'s config", env: ($ov.env? | default []) }] {
+        for e in $given.env {
+            if ($e.name | str starts-with "POLAR_EGRESS_") {
+                error make { msg: $"($name): ($e.name) is set by ($given.from), but it is the cluster's egress setting: set cluster.egress instead" }
+            }
+        }
+    }
+
     # What the cluster supplies (its administrators, once the admin flow has made them) replaces a same-named entry of the
     # target's config; infra/cluster-inputs.nu.
     let supplied = (env_for (read_inputs (path_of $INFRA $target)) $name)
@@ -572,6 +583,14 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         $env_list = ($env_list | append { name: "CERT_ISSUER_BOOTSTRAP", value: ($entries | to json --raw), secret: null, key: null, from: "catalog" })
     }
 
+    # The way out of the cluster (infra/egress.nu, docs/architecture/egress.md): the target's cluster.egress, written into
+    # the document of an agent that declares the egress section, and its CA a ConfigMap of the workload's own, mounted.
+    # A target that sets none, or an agent that does not declare it, is given nothing.
+    let egress = (egress egress_entries (egress settings_of $cluster ($INFRA | path join "targets" $target)) $name $declared_vars)
+    $env_list = ($env_list ++ $egress.env)
+    $volumes = ($volumes ++ $egress.volumes)
+    $mounts = ($mounts ++ $egress.mounts)
+
     # The agent reads one document, not an environment: the entries above are written into the
     # variables they name, and the pod is given the document and the secrets it refers to.
     let entries = $env_list
@@ -641,7 +660,7 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
         certs: ($certs | get spec)
         custody: (if $custody { $CUSTODY | insert image (image_ref $images $cluster "polar-custody" $name) } else { null })
         placement: (placement_of $declared $pool)
-        resources: { cluster_roles: ($cluster_roles | reject from), sa_token_secrets: (if $sa_secret == null { [] } else { [$sa_secret] }), pvcs: $pvcs, services: $exposed }
+        resources: { cluster_roles: ($cluster_roles | reject from), sa_token_secrets: (if $sa_secret == null { [] } else { [$sa_secret] }), pvcs: $pvcs, services: $exposed, config_maps: $egress.config_maps }
         config_map: $config_map
         config_problems: $config_problems
         check_names: (check_names $spec)
@@ -1023,11 +1042,12 @@ def "main explain" [
     for s in $r.resources.sa_token_secrets { print $"    Secret ($s) \(service-account-token\)" }
     for p in $r.resources.pvcs { print $"    PersistentVolumeClaim ($p.name) \(($p.size), class ($p.storage_class)\)" }
     for s in $r.resources.services { print $"    Service ($s.name) on port ($s.port)" }
+    for c in $r.resources.config_maps { print $"    ConfigMap ($c.name) \(($c.key)\)" }
     for c in $r._from.roles {
         let rules = ($c.rules | each {|x| $"($x.verbs | str join '/') on ($x.resources | str join ',')" } | str join "; ")
         print $"    ClusterRole ($c.name) bound to ($r.service_account): ($rules)   [($c.from)]"
     }
-    if ($r.resources.sa_token_secrets | is-empty) and ($r._from.roles | is-empty) and ($r.resources.pvcs | is-empty) and ($r.resources.services | is-empty) { print "    (none)" }
+    if ($r.resources.sa_token_secrets | is-empty) and ($r._from.roles | is-empty) and ($r.resources.pvcs | is-empty) and ($r.resources.services | is-empty) and ($r.resources.config_maps | is-empty) { print "    (none)" }
 }
 
 # The health and shutdown settings the rules in rules.nu read, as JSON.
@@ -1069,7 +1089,8 @@ def "main resources" [
         sa_token_secrets: $r.resources.sa_token_secrets
         pvcs: $r.resources.pvcs
         services: $r.resources.services
-        config_maps: [$r.config_map]
+        # The document first (tests/resolve.nu reads it so), then any of the workload's own, such as its egress CA.
+        config_maps: ([$r.config_map] ++ $r.resources.config_maps)
     } | to json
 }
 
