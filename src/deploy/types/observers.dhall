@@ -85,6 +85,7 @@ let kubeStages =
               , namespace = ns
               , image = v.images.kubeConsumer
               , provides = [ "cassini", "graph-write", "encryption" ]
+              , encrypts = True
               , shutdownBudgetSecs = 50
               , settings = Settings.graphSettings ns
               }
@@ -148,6 +149,7 @@ let gitStages =
               , namespace = ns
               , image = v.images.gitObserver
               , provides = [ "cassini", "encryption" ]
+              , encrypts = True
               , shutdownBudgetSecs = 45
               -- The clones can be fetched again, so they do not outlive the pod.
               , scratch = [ { name = "cache", mountPath = "/var/lib/git-repo-observer" } ]

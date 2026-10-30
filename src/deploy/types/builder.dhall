@@ -77,12 +77,27 @@ let Platform =
           , polarInitEnv : List kubernetes.EnvVar.Type
           , tokenExpirySecs : Natural
           , imagePullPolicy : Optional Text
+          -- The custody daemon's image. `Some`: a pod's mTLS keys are the daemon's, unless its agent opts out
+          -- (`BuilderAgent.custody`), and the pod has the daemon as a native sidecar. `None`: key files, as before
+          -- custody, and nothing about a pod changes for it.
+          , custodyImage : Optional Text
+          -- The ConfigMap, in each namespace that has agents, whose `ca.pem` is the cluster's CA: what polar-init
+          -- verifies the certificates it is issued against and the daemon judges them by. `polar-init` requires it
+          -- of an agent whose certificates come through the credentials agent, so it is `Some` wherever they do.
+          , pinnedCa : Optional Text
+          -- The credentials agent's identity (`<name>.<namespace>.serviceaccount.<domain>`): polar-init believes a
+          -- session offer only if a certificate naming it, under the CA, signed it.
+          , credentialsAgentIdentity : Text
           }
       , default =
         { audience = C.certIssuerAudience
         , polarInitEnv = [] : List kubernetes.EnvVar.Type
         , tokenExpirySecs = C.certTokenExpiry
         , imagePullPolicy = None Text
+        , custodyImage = None Text
+        , pinnedCa = None Text
+        , credentialsAgentIdentity =
+            "credentials-agent.${C.polarNamespace}.serviceaccount.cluster.local"
         }
       }
 
@@ -137,7 +152,12 @@ let BuilderAgent =
           , issuer : Optional Issuer
           , client : Bool
           , waitForBroker : Bool
-          , skipEscrow : Bool
+          -- The agent opens what is sealed to its escrow key (the `encryption` capability). Its key is the
+          -- custody daemon's custodian's to fetch, so it cannot run without the daemon.
+          , encrypts : Bool
+          -- Whether the pod's keys are the custody daemon's, when the platform has the daemon at all. An agent
+          -- whose code can only read a key file (the scheduler observer, whose git reads it) says `False`.
+          , custody : Bool
           , extraCerts : List ExtraCert
           , scratch : List Scratch
           , configFiles : List ConfigFiles
@@ -167,7 +187,8 @@ let BuilderAgent =
         , issuer = None Issuer
         , client = True
         , waitForBroker = True
-        , skipEscrow = False
+        , encrypts = False
+        , custody = True
         , extraCerts = [] : List ExtraCert
         , scratch = [] : List Scratch
         , configFiles = [] : List ConfigFiles
@@ -235,16 +256,40 @@ let nonRootDropAll =
           }
         }
 
---| The five variables every Cassini client reads.
-let tlsEnv
-    : Platform.Type → List kubernetes.EnvVar.Type
+--| Whether this pod's keys are the custody daemon's: the platform has the daemon, and the agent has not opted out.
+let custodyOn
+    : Platform.Type → BuilderAgent.Type → Bool
     = λ(platform : Platform.Type) →
-        [ envValue "TLS_CA_CERT" C.certPaths.ca
-        , envValue "TLS_CLIENT_CERT" C.certPaths.cert
-        , envValue "TLS_CLIENT_KEY" C.certPaths.key
-        , envValue "BROKER_ADDR" platform.cassiniAddr
-        , envValue "CASSINI_SERVER_NAME" platform.cassiniServerName
-        ]
+      λ(agent : BuilderAgent.Type) →
+        merge
+          { Some = λ(_ : Text) → agent.custody, None = False }
+          platform.custodyImage
+
+--| What the pod is given in place of a key file when its keys are the daemon's: where to sign.
+let custodySocketEnv
+    : Platform.Type → BuilderAgent.Type → List kubernetes.EnvVar.Type
+    = λ(platform : Platform.Type) →
+      λ(agent : BuilderAgent.Type) →
+        if    custodyOn platform agent
+        then  [ envValue "POLAR_CUSTODY_SOCKET" C.custody.socket ]
+        else  [] : List kubernetes.EnvVar.Type
+
+--| The variables every Cassini client reads. The key's is left out when the key is the daemon's: a client reads
+--| a key file or the daemon's socket, exactly one.
+let tlsEnv
+    : Platform.Type → Bool → List kubernetes.EnvVar.Type
+    = λ(platform : Platform.Type) →
+      λ(keyFile : Bool) →
+          [ envValue "TLS_CA_CERT" C.certPaths.ca
+          , envValue "TLS_CLIENT_CERT" C.certPaths.cert
+          ]
+        # ( if    keyFile
+            then  [ envValue "TLS_CLIENT_KEY" C.certPaths.key ]
+            else  [] : List kubernetes.EnvVar.Type
+          )
+        # [ envValue "BROKER_ADDR" platform.cassiniAddr
+          , envValue "CASSINI_SERVER_NAME" platform.cassiniServerName
+          ]
 
 --| What the agent's health actor watches: its own certificate, and the broker's while the agent
 --| depends on it.
@@ -268,15 +313,29 @@ let clientEnv
     = λ(platform : Platform.Type) →
       λ(agent : BuilderAgent.Type) →
           ( if    agent.client
-            then  tlsEnv platform
+            then  tlsEnv platform (if custodyOn platform agent then False else True)
             else  [] : List kubernetes.EnvVar.Type
           )
+        # custodySocketEnv platform agent
         # healthEnv platform agent
 
---| The environment that says where polar-init gets certificates.
+--| The CA polar-init verifies what it is issued against, when the platform pins one.
+let pinnedCaEnv
+    : Platform.Type → List kubernetes.EnvVar.Type
+    = λ(platform : Platform.Type) →
+        merge
+          { Some =
+              λ(_ : Text) → [ envValue "POLAR_INIT_CA_CERT" C.pinnedCa.cert ]
+          , None = [] : List kubernetes.EnvVar.Type
+          }
+          platform.pinnedCa
+
+--| The environment that says where polar-init gets certificates. On the credentials agent's path it also says
+--| whose session offers to believe, which polar-init requires there (with the CA, `pinnedCaEnv`).
 let issuerEnv
-    : Issuer → List kubernetes.EnvVar.Type
-    = λ(issuer : Issuer) →
+    : Platform.Type → Issuer → List kubernetes.EnvVar.Type
+    = λ(platform : Platform.Type) →
+      λ(issuer : Issuer) →
         merge
           { CertIssuer =
               λ(url : Text) →
@@ -287,43 +346,58 @@ let issuerEnv
               λ(url : Text) →
                 [ envValue "POLAR_INIT_ISSUER" "credentials-agent"
                 , envValue "POLAR_INIT_OBSERVER_URL" url
+                , envValue
+                    "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY"
+                    platform.credentialsAgentIdentity
                 ]
           }
           issuer
 
---| After issuing, polar-init registers an escrow keypair with the credentials agent over Cassini,
---| using the certificate it just obtained, so it needs the client environment and its token. The
---| platform's own pieces skip it: they are what it travels through.
+--| Since the custody work polar-init no longer connects to the broker, so it is given none of the Cassini client's
+--| variables, and has no escrow bootstrap (nor the service-account token it needed) of its own: an agent that
+--| encrypts only asks, and the daemon's custodian fetches the key.
 let escrowEnv
-    : Platform.Type → BuilderAgent.Type → List kubernetes.EnvVar.Type
-    = λ(platform : Platform.Type) →
-      λ(agent : BuilderAgent.Type) →
-        if    agent.skipEscrow
-        then  [ envValue "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP" "true" ]
-        else    tlsEnv platform
-              # [ envValue "KUBERNETES_SA_TOKEN" tokenPath ]
+    : BuilderAgent.Type → List kubernetes.EnvVar.Type
+    = λ(agent : BuilderAgent.Type) →
+        if    agent.encrypts
+        then  [ envValue "POLAR_INIT_ESCROW_BOOTSTRAP" "true" ]
+        else  [] : List kubernetes.EnvVar.Type
+
+--| `--cert` says who makes the certificate's key in its third field: polar-init, of an algorithm, or `custody`, the
+--| pod's daemon.
+let certArgumentWith
+    : Text → CertKind → Text → Text
+    = λ(algorithm : Text) →
+      λ(kind : CertKind) →
+      λ(dir : Text) →
+        merge
+          { Client = "client:${dir}:${algorithm}"
+          , Server = λ(san : Text) → "server:${dir}:${algorithm}:${san}"
+          }
+          kind
 
 let certArgumentIn
     : CertKind → Text → Text
-    = λ(kind : CertKind) →
-      λ(dir : Text) →
-        merge
-          { Client = "client:${dir}:ecdsa-p256"
-          , Server = λ(san : Text) → "server:${dir}:ecdsa-p256:${san}"
-          }
-          kind
+    = certArgumentWith "ecdsa-p256"
+
+let keyAlgorithm
+    : Platform.Type → BuilderAgent.Type → Text
+    = λ(platform : Platform.Type) →
+      λ(agent : BuilderAgent.Type) →
+        if custodyOn platform agent then "custody" else "ecdsa-p256"
 
 let certArgument
     : CertKind → Text
     = λ(kind : CertKind) → certArgumentIn kind C.certDir
 
 let extraCertArguments
-    : List ExtraCert → List Text
-    = λ(certs : List ExtraCert) →
+    : Text → List ExtraCert → List Text
+    = λ(algorithm : Text) →
+      λ(certs : List ExtraCert) →
         Prelude.List.concatMap
           ExtraCert
           Text
-          (λ(c : ExtraCert) → [ "--cert", certArgumentIn c.kind c.dir ])
+          (λ(c : ExtraCert) → [ "--cert", certArgumentWith algorithm c.kind c.dir ])
           certs
 
 let extraCertVolume
@@ -377,59 +451,138 @@ let certVolume
       , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
       }
 
+--| The pinned CA's volume and where it is mounted, in the containers that verify against it.
+let pinnedCaVolume
+    : Text → kubernetes.Volume.Type
+    = λ(configMap : Text) →
+        kubernetes.Volume::{
+        , name = C.pinnedCa.volume
+        , configMap = Some kubernetes.ConfigMapVolumeSource::{ name = Some configMap }
+        }
+
+let pinnedCaMount
+    : kubernetes.VolumeMount.Type
+    = kubernetes.VolumeMount::{
+      , name = C.pinnedCa.volume
+      , mountPath = C.pinnedCa.dir
+      , readOnly = Some True
+      }
+
+--| The socket's volume: memory, shared by the daemon, polar-init and the workload, and gone with the pod.
+let custodyVolume
+    : kubernetes.Volume.Type
+    = kubernetes.Volume::{
+      , name = C.custody.volume
+      , emptyDir = Some kubernetes.EmptyDirVolumeSource::{ medium = Some "Memory" }
+      }
+
+let custodyMount
+    : kubernetes.VolumeMount.Type
+    = kubernetes.VolumeMount::{ name = C.custody.volume, mountPath = C.custody.dir }
+
+--| The custody daemon, as a native sidecar: an init container that runs for the pod's whole life, declared before
+--| polar-init so that it starts first. Its own user, the pod's group (which it shares its socket with), and every
+--| capability dropped but the one that lets it lock its memory. polar-init and the workload run as one user
+--| (`agent.runAsUser`), the daemon's installer and its workload both.
+let custodySidecar
+    : Platform.Type → BuilderAgent.Type → kubernetes.Container.Type
+    = λ(platform : Platform.Type) →
+      λ(agent : BuilderAgent.Type) →
+        kubernetes.Container::{
+        , name = C.custody.sidecar
+        , image = platform.custodyImage
+        , imagePullPolicy = platform.imagePullPolicy
+        , restartPolicy = Some "Always"
+        , env = Some
+          [ envValue "POLAR_CUSTODY_SOCKET" C.custody.socket
+          , envValue "POLAR_CUSTODY_CA_CERT" C.pinnedCa.cert
+          , envValue "POLAR_CUSTODY_INSTALLER_UID" (Natural/show agent.runAsUser)
+          , envValue "POLAR_CUSTODY_WORKLOAD_UIDS" (Natural/show agent.runAsUser)
+          -- Where it watches, as its pod, for its own revocation.
+          , envValue "BROKER_ADDR" platform.cassiniAddr
+          , envValue "CASSINI_SERVER_NAME" platform.cassiniServerName
+          ]
+        , volumeMounts = Some [ custodyMount, pinnedCaMount ]
+        , securityContext = Some kubernetes.SecurityContext::{
+          , runAsUser = Some C.custody.daemonUid
+          , runAsGroup = Some agent.runAsUser
+          , runAsNonRoot = Some True
+          , allowPrivilegeEscalation = Some False
+          , readOnlyRootFilesystem = Some True
+          , capabilities = Some kubernetes.Capabilities::{
+            , drop = Some [ "ALL" ]
+            , add = Some [ "IPC_LOCK" ]
+            }
+          }
+        }
+
 --| The init container that obtains the pod's certificate.
 let polarInit
     : Platform.Type → BuilderAgent.Type → kubernetes.Container.Type
     = λ(platform : Platform.Type) →
       λ(agent : BuilderAgent.Type) →
-        kubernetes.Container::{
-        , name = "polar-init"
-        , image = Some platform.polarInitImage
-        -- The image names its binary as a default command, not an entrypoint, so giving only
-        -- `args` would replace it and Kubernetes would try to run "--cert".
-        , command = Some [ "polar-init" ]
-        , imagePullPolicy = platform.imagePullPolicy
-        , args = Some
-            (   ( if    agent.waitForBroker
-                  then  [ "--check-dep-cert"
-                        , "${platform.cassiniAddr}:${Natural/show agent.health.depTtlSecs}"
-                        ]
-                  else  [] : List Text
+        let algorithm = keyAlgorithm platform agent
+
+        in  kubernetes.Container::{
+            , name = "polar-init"
+            , image = Some platform.polarInitImage
+            -- The image names its binary as a default command, not an entrypoint, so giving only
+            -- `args` would replace it and Kubernetes would try to run "--cert".
+            , command = Some [ "polar-init" ]
+            , imagePullPolicy = platform.imagePullPolicy
+            , args = Some
+                (   ( if    agent.waitForBroker
+                      then  [ "--check-dep-cert"
+                            , "${platform.cassiniAddr}:${Natural/show agent.health.depTtlSecs}"
+                            ]
+                      else  [] : List Text
+                    )
+                  # [ "--cert", certArgumentWith algorithm agent.cert C.certDir ]
+                  # extraCertArguments algorithm agent.extraCerts
                 )
-              # [ "--cert", certArgument agent.cert ]
-              # extraCertArguments agent.extraCerts
-            )
-        , env = Some
-            (   issuerEnv
-                  ( merge
-                      { Some = λ(own : Issuer) → own, None = platform.issuer }
-                      agent.issuer
+            , env = Some
+                (   issuerEnv
+                      platform
+                      ( merge
+                          { Some = λ(own : Issuer) → own, None = platform.issuer }
+                          agent.issuer
+                      )
+                  # [ envValue "POLAR_INIT_TOKEN_PATH" tokenPath ]
+                  # pinnedCaEnv platform
+                  # custodySocketEnv platform agent
+                  # escrowEnv agent
+                  # platform.polarInitEnv
+                )
+            , volumeMounts = Some
+              (   [ kubernetes.VolumeMount::{
+                    , name = tokenVolumeName
+                    , mountPath = tokenDir
+                    , readOnly = Some True
+                    }
+                  , kubernetes.VolumeMount::{
+                    , name = certVolumeName
+                    , mountPath = C.certDir
+                    }
+                  ]
+                # Prelude.List.map
+                    ExtraCert
+                    kubernetes.VolumeMount.Type
+                    ( λ(c : ExtraCert) →
+                        kubernetes.VolumeMount::{ name = c.name, mountPath = c.dir }
+                    )
+                    agent.extraCerts
+                # merge
+                    { Some = λ(_ : Text) → [ pinnedCaMount ]
+                    , None = [] : List kubernetes.VolumeMount.Type
+                    }
+                    platform.pinnedCa
+                # ( if    custodyOn platform agent
+                    then  [ custodyMount ]
+                    else  [] : List kubernetes.VolumeMount.Type
                   )
-              # [ envValue "POLAR_INIT_TOKEN_PATH" tokenPath ]
-              # escrowEnv platform agent
-              # platform.polarInitEnv
-            )
-        , volumeMounts = Some
-          ( [ kubernetes.VolumeMount::{
-            , name = tokenVolumeName
-            , mountPath = tokenDir
-            , readOnly = Some True
-            }
-          , kubernetes.VolumeMount::{
-            , name = certVolumeName
-            , mountPath = C.certDir
-            }
-          ]
-          # Prelude.List.map
-              ExtraCert
-              kubernetes.VolumeMount.Type
-              ( λ(c : ExtraCert) →
-                  kubernetes.VolumeMount::{ name = c.name, mountPath = c.dir }
               )
-              agent.extraCerts
-          )
-        , securityContext = Some (nonRootDropAll agent.runAsUser)
-        }
+            , securityContext = Some (nonRootDropAll agent.runAsUser)
+            }
 
 let livenessProbe
     : BuilderAgent.Type → kubernetes.Probe.Type
@@ -482,9 +635,23 @@ let makePolarAgent
             -- The group owns the volumes, so a claim is writable by the user the agent runs as.
             , fsGroup = Some agent.runAsUser
             , imagePullPolicy = platform.imagePullPolicy
-            , initContainers = [ polarInit platform agent ]
+            , initContainers =
+                  ( if    custodyOn platform agent
+                    then  [ custodySidecar platform agent ]
+                    else  [] : List kubernetes.Container.Type
+                  )
+                # [ polarInit platform agent ]
             , volumes =
                   [ tokenVolume platform, certVolume ]
+                # merge
+                    { Some = λ(configMap : Text) → [ pinnedCaVolume configMap ]
+                    , None = [] : List kubernetes.Volume.Type
+                    }
+                    platform.pinnedCa
+                # ( if    custodyOn platform agent
+                    then  [ custodyVolume ]
+                    else  [] : List kubernetes.Volume.Type
+                  )
                 # Prelude.List.map ExtraCert kubernetes.Volume.Type extraCertVolume agent.extraCerts
                 # Prelude.List.map Scratch kubernetes.Volume.Type scratchVolume agent.scratch
                 # Prelude.List.map ConfigFiles kubernetes.Volume.Type configFilesVolume agent.configFiles
@@ -519,6 +686,10 @@ let makePolarAgent
                     , readOnly = Some True
                     }
                   ]
+                # ( if    custodyOn platform agent
+                    then  [ custodyMount ]
+                    else  [] : List kubernetes.VolumeMount.Type
+                  )
                 # Prelude.List.map
                     ExtraCert
                     kubernetes.VolumeMount.Type
@@ -599,6 +770,43 @@ let makePolarAgent
           }
         }
 
+--| What is wrong with an agent under this platform, in plain sentences; empty is nothing. The rules are the fork's
+--| catalog's (ACE infra/rules.nu: `escrow_problems`, `custody_cert_problems`, and the pinned CA polar-init
+--| requires of an agent that gets its certificates through the credentials agent). Dhall cannot fail from inside
+--| a function, so a deployment asserts this is empty for every agent it renders (see `tests/custody.dhall`).
+let problems
+    : Platform.Type → BuilderAgent.Type → List Text
+    = λ(platform : Platform.Type) →
+      λ(agent : BuilderAgent.Type) →
+        let on = custodyOn platform agent
+
+        let throughObserver =
+              merge
+                { CertIssuer = λ(_ : Text) → False
+                , CredentialsAgent = λ(_ : Text) → True
+                }
+                ( merge
+                    { Some = λ(own : Issuer) → own, None = platform.issuer }
+                    agent.issuer
+                )
+
+        let noCa = merge { Some = λ(_ : Text) → False, None = True } platform.pinnedCa
+
+        let off = if on then False else True
+
+        in    ( if    agent.encrypts && off
+                then  [ "${agent.name} encrypts, and its escrow key is fetched only by the custody daemon's custodian, which this pod does not have: give the platform a custodyImage, or leave the agent out" ]
+                else  [] : List Text
+              )
+            # ( if    on && noCa
+                then  [ "${agent.name} has the custody daemon, which judges certificates by the pinned CA: set Platform.pinnedCa" ]
+                else  [] : List Text
+              )
+            # ( if    throughObserver && noCa
+                then  [ "${agent.name} gets its certificates through the credentials agent, and polar-init requires the pinned CA there: set Platform.pinnedCa" ]
+                else  [] : List Text
+              )
+
 --| What a pod that is not an agent needs to have a certificate of its own: a build's job. It is the same
 --| `polar-init` and the same projected token, with no escrow key (nothing in a job is encrypted to one) and
 --| nothing waited for. The pod must run under a ServiceAccount of its own, because that is the certificate's
@@ -620,14 +828,18 @@ let JobIdentity =
       , tokenExpirySecs : Natural
       , certVolume : Text
       , certDir : Text
+      -- The pinned CA's ConfigMap, volume and mount, when the platform pins one: polar-init requires it, on this
+      -- path. The ConfigMap must be in the jobs' namespace.
+      , pinnedCa : Optional { configMap : Text, volume : Text, dir : Text }
       -- What the main container is told: where its certificate is and where the broker is.
       , pipelineEnv : List JobEnv
       }
 
 --| Where `polar-init` gets certificates, as plain values.
 let issuerJobEnv
-    : Issuer → List JobEnv
-    = λ(issuer : Issuer) →
+    : Platform.Type → Issuer → List JobEnv
+    = λ(platform : Platform.Type) →
+      λ(issuer : Issuer) →
         merge
           { CertIssuer =
               λ(url : Text) →
@@ -638,6 +850,9 @@ let issuerJobEnv
               λ(url : Text) →
                 [ { name = "POLAR_INIT_ISSUER", value = "credentials-agent" }
                 , { name = "POLAR_INIT_OBSERVER_URL", value = url }
+                , { name = "POLAR_INIT_CREDENTIALS_AGENT_IDENTITY"
+                  , value = platform.credentialsAgentIdentity
+                  }
                 ]
           }
           issuer
@@ -654,11 +869,15 @@ let makeJobIdentity
         , uid = 65532
         , args = [ "--cert", certArgument CertKind.Client ]
         , env =
-              issuerJobEnv platform.issuer
-            # [ { name = "POLAR_INIT_TOKEN_PATH", value = tokenPath }
-              -- Nothing in a job is encrypted to an escrow key.
-              , { name = "POLAR_INIT_SKIP_ESCROW_BOOTSTRAP", value = "true" }
-              ]
+              issuerJobEnv platform platform.issuer
+            # [ { name = "POLAR_INIT_TOKEN_PATH", value = tokenPath } ]
+            # merge
+                { Some =
+                    λ(_ : Text) →
+                      [ { name = "POLAR_INIT_CA_CERT", value = C.pinnedCa.cert } ]
+                , None = [] : List JobEnv
+                }
+                platform.pinnedCa
             # extraEnv
         , tokenVolume = tokenVolumeName
         , tokenDir
@@ -666,6 +885,14 @@ let makeJobIdentity
         , tokenExpirySecs = platform.tokenExpirySecs
         , certVolume = certVolumeName
         , certDir = C.certDir
+        , pinnedCa =
+            merge
+              { Some =
+                  λ(configMap : Text) →
+                    Some { configMap, volume = C.pinnedCa.volume, dir = C.pinnedCa.dir }
+              , None = None { configMap : Text, volume : Text, dir : Text }
+              }
+              platform.pinnedCa
         , pipelineEnv =
           [ { name = "TLS_CA_CERT", value = C.certPaths.ca }
           , { name = "TLS_CLIENT_CERT", value = C.certPaths.cert }
@@ -758,6 +985,9 @@ in  { Issuer
     , PolarAgentSpec
     , PolarAgentResource
     , makePolarAgent
+    , custodyOn
+    , custodySidecar
+    , problems
     , makeService
     , makeServiceFor
     , makePvc

@@ -29,6 +29,8 @@ let Builder = ./builder.dhall
 
 let Service = ./service.dhall
 
+let Settings = ./settings.dhall
+
 let JSON =
       https://prelude.dhall-lang.org/JSON/package.dhall
         sha256:5f98b7722fd13509ef448b075e02b9ff98312ae7a406cf53ed25012dbc9990ac
@@ -43,9 +45,11 @@ let port = 8443
 
 let caDir = "/home/polar"
 
-let configDir = "/etc/cert-issuer"
+let ownTokenDir = "/workspace"
 
-let configFile = "cert-issuer.json"
+let ownTokenPath = "${ownTokenDir}/token"
+
+let setting = Settings.setting
 
 --| What a deployer states about the issuer.
 let CertIssuer =
@@ -67,6 +71,15 @@ let CertIssuer =
           , defaultLifetimeSecs : Natural
           , serverLifetimeSecs : Natural
           , userLifetimeSecs : Natural
+          -- An agent's escrow certificate, its durable encryption identity: it outlives the pods that asked for
+          -- it and is issued once for an identity, so an hour (the server lifetime it used to get) made a secret
+          -- unsealable an hour after an agent's first start. The fork's setting; required by cert-issuer.
+          , serviceLifetimeSecs : Natural
+          -- The Secret that holds the CA, made once by `polar-admin-grant bootstrap-ca` before anything runs.
+          -- `Some`: the issuer only loads it (the CA is then pinned by every agent, from a ConfigMap of the same
+          -- operator step). `None`: the issuer makes its own CA on its volume at first start, which nothing can
+          -- pin, so it is not enough for a platform whose pods have the custody daemon.
+          , caSecret : Optional Text
           }
       , default =
         { imagePullPolicy = None Text
@@ -79,6 +92,8 @@ let CertIssuer =
         , defaultLifetimeSecs = 3600
         , serverLifetimeSecs = 3600
         , userLifetimeSecs = 31536000
+        , serviceLifetimeSecs = 31536000
+        , caSecret = None Text
         }
       }
 
@@ -90,61 +105,34 @@ let strings =
       λ(xs : List Text) →
         JSON.array (Prelude.List.map Text JSON.Type JSON.string xs)
 
---| The issuer's configuration document, as JSON text.
--- TODO we should use the config issuer's existing dhall configuration if we can to get tighter validation.
-let certIssuerConfig
+--| The token issuers cert-issuer trusts, as the JSON list its `CERT_ISSUER_ISSUERS` variable takes. (It reads no
+--| configuration file now: each setting is a variable it declares.)
+let issuersJson
     : CertIssuer.Type → Text
     = λ(v : CertIssuer.Type) →
         JSON.render
-          ( JSON.object
-              ( toMap
-                  { bind_addr = JSON.string "0.0.0.0:${Natural/show port}"
-                  , ca =
-                      JSON.object
-                        ( toMap
-                            { ca_cert_path = JSON.string "${caDir}/ca/ca.crt"
-                            , ca_key_path = JSON.string "${caDir}/ca/ca.key"
-                            -- The issuer makes its own CA, on its claim, the first time it starts.
-                            , provisioning = JSON.string "self_bootstrap"
-                            , default_lifetime = duration v.defaultLifetimeSecs
-                            , server_lifetime = duration v.serverLifetimeSecs
-                            , user_lifetime = duration v.userLifetimeSecs
-                            , identity_lifetime_overrides = JSON.object ([] : List { mapKey : Text, mapValue : JSON.Type })
-                            }
-                        )
-                  , issuers =
-                      JSON.array
-                        [ JSON.object
+          ( JSON.array
+              [ JSON.object
+                  ( toMap
+                      { issuer = JSON.string v.tokenIssuer
+                      , audience = strings [ v.audience ]
+                      , jwks_uri = JSON.string v.jwksUri
+                      , workload_identity_claim = JSON.string "sub"
+                      , instance_binding_claim = JSON.string "kubernetes.io/pod/uid"
+                      , identity_normalization =
+                          JSON.object
                             ( toMap
-                                { issuer = JSON.string v.tokenIssuer
-                                , audience = strings [ v.audience ]
-                                , jwks_uri = JSON.string v.jwksUri
-                                , workload_identity_claim = JSON.string "sub"
-                                , instance_binding_claim = JSON.string "kubernetes.io/pod/uid"
-                                , identity_normalization =
-                                    JSON.object
-                                      ( toMap
-                                          { strategy = JSON.string "kubernetes_service_account"
-                                          , cluster_domain = JSON.string v.clusterDomain
-                                          }
-                                      )
-                                , identity_scope_claim = JSON.null
-                                , allowed_algorithms = strings [ "RS256", "ES256", "EdDSA" ]
-                                , jwks_cache_ttl_min = duration 30
-                                , jwks_cache_ttl_max = duration 3600
+                                { strategy = JSON.string "kubernetes_service_account"
+                                , cluster_domain = JSON.string v.clusterDomain
                                 }
                             )
-                        ]
-                  , mtls =
-                      JSON.object
-                        ( toMap
-                            { server_identity =
-                                JSON.string "${name}.${v.namespace}.svc.${v.clusterDomain}"
-                            , internal_callers = strings [ v.internalCaller ]
-                            }
-                        )
-                  }
-              )
+                      , identity_scope_claim = JSON.null
+                      , allowed_algorithms = strings [ "RS256", "ES256", "EdDSA" ]
+                      , jwks_cache_ttl_min = duration 30
+                      , jwks_cache_ttl_max = duration 3600
+                      }
+                  )
+              ]
           )
 
 --| The issuer: ServiceAccount, configuration, claim for its CA, Service, and the PolarAgent that runs it.
@@ -164,12 +152,6 @@ let makeCertIssuer
                   , metadata = metadata name
                   -- It reads the API server's keys with its own token.
                   , automountServiceAccountToken = Some True
-                  }
-              , kubernetes.Resource.ConfigMap
-                  kubernetes.ConfigMap::{
-                  , metadata = metadata "${name}-config"
-                  , data = Some
-                    [ { mapKey = configFile, mapValue = certIssuerConfig v } ]
                   }
               , kubernetes.Resource.PersistentVolumeClaim
                   kubernetes.PersistentVolumeClaim::{
@@ -207,41 +189,93 @@ let makeCertIssuer
                   , imagePullPolicy = v.imagePullPolicy
                   , port = Some port
                   , env =
-                    [ kubernetes.EnvVar::{
-                      , name = "CERT_ISSUER_CONFIG"
-                      , value = Some "${configDir}/${configFile}"
-                      }
-                    , kubernetes.EnvVar::{
-                      , name = "RUST_LOG"
-                      , value = Some "info,cert_issuer=debug"
-                      }
-                    , kubernetes.EnvVar::{
-                      , name = "KUBERNETES_CA_CERT"
-                      , value = Some "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-                      }
+                    [ setting "CERT_ISSUER_ISSUERS" (issuersJson v)
+                    , setting "CERT_ISSUER_CA_CERT_PATH" "${caDir}/ca/ca.crt"
+                    , setting "CERT_ISSUER_CA_KEY_PATH" "${caDir}/ca/ca.key"
+                    , setting
+                        "CERT_ISSUER_CA_PROVISIONING"
+                        ( merge
+                            { Some = λ(_ : Text) → "provisioned", None = "self_bootstrap" }
+                            v.caSecret
+                        )
+                    , setting "CERT_ISSUER_DEFAULT_LIFETIME_SECS" (Natural/show v.defaultLifetimeSecs)
+                    , setting "CERT_ISSUER_SERVER_LIFETIME_SECS" (Natural/show v.serverLifetimeSecs)
+                    , setting "CERT_ISSUER_USER_LIFETIME_SECS" (Natural/show v.userLifetimeSecs)
+                    , setting "CERT_ISSUER_SERVICE_LIFETIME_SECS" (Natural/show v.serviceLifetimeSecs)
+                    , setting
+                        "CERT_ISSUER_SERVER_IDENTITY"
+                        "${name}.${v.namespace}.svc.${v.clusterDomain}"
+                    , setting "CERT_ISSUER_INTERNAL_CALLERS" v.internalCaller
+                    -- It is signed its own client certificate on its own token, which has the issuer's audience.
+                    , setting "CERT_ISSUER_OWN_TOKEN" ownTokenPath
+                    -- The record of every certificate it signs, which the credentials agent asks for. On the
+                    -- claim: a certificate that cannot be recorded is not returned.
+                    , setting "CERT_ISSUER_RECORD_PATH" "${caDir}/issued.jsonl"
+                    , setting "RUST_LOG" "info,cert_issuer=debug"
+                    , setting "KUBERNETES_CA_CERT" "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
                     ]
                   , volumes =
-                    [ kubernetes.Volume::{
-                      , name = "ca"
-                      , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
-                        , claimName = "${name}-ca"
+                      [ kubernetes.Volume::{
+                        , name = "ca"
+                        , persistentVolumeClaim = Some kubernetes.PersistentVolumeClaimVolumeSource::{
+                          , claimName = "${name}-ca"
+                          }
                         }
-                      }
-                    , kubernetes.Volume::{
-                      , name = "config"
-                      , configMap = Some kubernetes.ConfigMapVolumeSource::{
-                        , name = Some "${name}-config"
+                      , kubernetes.Volume::{
+                        , name = "own-token"
+                        , projected = Some kubernetes.ProjectedVolumeSource::{
+                          , sources = Some
+                            [ kubernetes.VolumeProjection::{
+                              , serviceAccountToken = Some kubernetes.ServiceAccountTokenProjection::{
+                                , audience = Some v.audience
+                                , expirationSeconds = Some 3600
+                                , path = "token"
+                                }
+                              }
+                            ]
+                          }
                         }
-                      }
-                    ]
+                      ]
+                    # merge
+                        { Some =
+                            λ(secret : Text) →
+                              [ kubernetes.Volume::{
+                                , name = "provisioned-ca"
+                                , secret = Some kubernetes.SecretVolumeSource::{
+                                  , secretName = Some secret
+                                  , items = Some
+                                    [ { key = "ca.crt", path = "ca.crt", mode = None Natural }
+                                    , { key = "ca.key", path = "ca.key", mode = None Natural }
+                                    ]
+                                  -- Readable by the pod's group alone: the key is the root of the cluster's trust.
+                                  , defaultMode = Some 288
+                                  }
+                                }
+                              ]
+                        , None = [] : List kubernetes.Volume.Type
+                        }
+                        v.caSecret
                   , mounts =
-                    [ kubernetes.VolumeMount::{ name = "ca", mountPath = caDir }
-                    , kubernetes.VolumeMount::{
-                      , name = "config"
-                      , mountPath = configDir
-                      , readOnly = Some True
-                      }
-                    ]
+                      [ kubernetes.VolumeMount::{ name = "ca", mountPath = caDir }
+                      , kubernetes.VolumeMount::{
+                        , name = "own-token"
+                        , mountPath = ownTokenDir
+                        , readOnly = Some True
+                        }
+                      ]
+                    # merge
+                        { Some =
+                            λ(_ : Text) →
+                              [ kubernetes.VolumeMount::{
+                                , name = "provisioned-ca"
+                                , mountPath = "${caDir}/ca"
+                                , readOnly = Some True
+                                }
+                              ]
+                        , None = [] : List kubernetes.VolumeMount.Type
+                        }
+                        v.caSecret
+                  , fsGroup = Some 1000
                   , probe = Some kubernetes.Probe::{
                     , tcpSocket = Some kubernetes.TCPSocketAction::{
                       , port = kubernetes.NatOrString.Nat port
@@ -373,4 +407,4 @@ let makeNeo4j
                   }
             }
 
-in  { CertIssuer, makeCertIssuer, certIssuerConfig, Neo4j, makeNeo4j }
+in  { CertIssuer, makeCertIssuer, issuersJson, Neo4j, makeNeo4j }

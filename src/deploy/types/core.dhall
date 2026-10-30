@@ -59,6 +59,16 @@ let CoreValues =
               }
           , imagePullPolicy : Optional Text
           , storageClass : Optional Text
+          -- The custody daemon's image: with it, every pod's mTLS keys are the daemon's (a native sidecar), and an
+          -- agent that encrypts can run at all. `None`: key files, and no agent that encrypts.
+          , custodyImage : Optional Text
+          -- The ConfigMap, in the namespace of every pod that has a certificate, that holds the cluster's CA. The
+          -- CA is made once, outside the plan (`polar-admin-grant bootstrap-ca`), which also makes these.
+          , pinnedCa : Optional Text
+          -- The Secret that holds the CA and its key, for the issuer to load. `None`: the issuer makes its own CA
+          -- (nothing can pin it, so not for a platform with the daemon, or one whose pods are issued through the
+          -- credentials agent).
+          , caSecret : Optional Text
           -- The people who may write to the configuration git server, and so author the signed documents
           -- the scheduler carries: the DNS name in each one's certificate, which only exists once the
           -- credentials agent has provisioned them (the first administrator, see the runbook). Empty
@@ -86,6 +96,8 @@ let platform
         , issuer = Builder.Issuer.CredentialsAgent observerUrl
         , polarInitImage = v.images.polarInit
         , imagePullPolicy = v.imagePullPolicy
+        , custodyImage = v.custodyImage
+        , pinnedCa = v.pinnedCa
         }
 
 --| The graph's password, once for the agents that read it and in the form the graph itself wants,
@@ -125,6 +137,7 @@ let core
                 , storageClass = v.storageClass
                 -- The one identity allowed to ask it to sign on another's behalf. The fork fixes this name.
                 , internalCaller = "credentials-agent.${ns}.serviceaccount.cluster.local"
+                , caSecret = v.caSecret
                 }
 
         let graph =
@@ -136,9 +149,20 @@ let core
                 , storageClass = v.storageClass
                 }
 
+        -- Whether the pods' keys are the daemon's, here: a server's key variable is left out then, since the broker
+        -- and the git server read a key file or the daemon's socket, exactly one.
+        let custody = merge { Some = λ(_ : Text) → True, None = False } v.custodyImage
+
+        let keyFile =
+              λ(name : Text) →
+              λ(path : Text) →
+                if    custody
+                then  [] : List kubernetes.EnvVar.Type
+                else  [ setting name path ]
+
         -- What every one of these has in common: they take their certificates from the issuer directly
-        -- (the credentials agent is what vouches for everyone else, and Cassini is what the escrow
-        -- bootstrap travels through), none bootstraps an escrow key, and none waits for the broker.
+        -- (the credentials agent is what vouches for everyone else), none holds an escrow key, and none waits
+        -- for the broker.
         let coreAgent =
               Builder.BuilderAgent::{
               , name = ""
@@ -146,7 +170,6 @@ let core
               , image = ""
               , issuer = Some (Builder.Issuer.CertIssuer certIssuerUrl)
               , waitForBroker = False
-              , skipEscrow = True
               }
 
         let cassini =
@@ -160,11 +183,11 @@ let core
                  , port = Some C.cassiniTcpPort
                  , settings =
                    [ setting "TLS_SERVER_CERT_CHAIN" C.certPaths.cert
-                   , setting "TLS_SERVER_KEY" C.certPaths.key
                    , setting "TLS_CA_CERT" C.certPaths.ca
                    , setting "CASSINI_BIND_ADDR" "0.0.0.0:${Natural/show C.cassiniTcpPort}"
                    , secretSetting "CASSINI_SHUTDOWN_TOKEN" "cassini-shutdown-token" "token"
                    ]
+                   # keyFile "TLS_SERVER_KEY" C.certPaths.key
                  }
 
         let credentialsAgent =
@@ -221,7 +244,6 @@ let core
                 ]
               , settings =
                 [ setting "POLAR_GIT_SERVER_CERT" "${gitServerDir}/cert.pem"
-                , setting "POLAR_GIT_SERVER_KEY" "${gitServerDir}/key.pem"
                 , setting "POLAR_GIT_SERVER_CA_CERT" "${gitServerDir}/ca.pem"
                 , setting "POLAR_GIT_SERVER_REPO_ROOT" "/var/lib/polar-git-server/repos"
                 , setting "POLAR_GIT_SERVER_PORT" "8443"
@@ -229,6 +251,7 @@ let core
                     "POLAR_GIT_SERVER_REPOS"
                     "{\"admins\":[],\"repos\":[{\"name\":\"polar-schedules\",\"readers\":[\"${schedulerObserverIdentity}\"],\"writers\":[],\"seed\":\"polar-schedules\"}]}"
                 ]
+                # keyFile "POLAR_GIT_SERVER_KEY" "${gitServerDir}/key.pem"
                 # ( if    Prelude.List.null Text v.gitServerAdmins
                     then  [] : List kubernetes.EnvVar.Type
                     else  [ setting
@@ -256,6 +279,9 @@ let core
               , namespace = ns
               , image = v.images.schedulerObserver
               , shutdownBudgetSecs = 20
+              -- git reads its client key from a file (libcurl), so this one pod stays on key files until the fork
+              -- can sign for git (ACE's catalog says the same: `custody: false`).
+              , custody = False
               -- The checkout of the schedules repository does not outlive the pod: it is cloned again.
               , scratch =
                 [ { name = "checkout", mountPath = "/var/lib/polar-scheduler-observer" } ]
@@ -286,7 +312,32 @@ let core
                   , image = v.images.operator
                   , imagePullPolicy = v.imagePullPolicy
                   }
-              , P.Stage::{
+              ]
+              # ( merge
+                    { Some =
+                        λ(secret : Text) →
+                          [ P.Stage::{
+                            , name = "ca"
+                            , description = Some "the cluster's CA, made once outside the plan; the plan waits for it"
+                            , shared = True
+                            , waits =
+                              [ P.Wait::{
+                                , apiVersion = "v1"
+                                , kind = "Secret"
+                                , namespace = Some ns
+                                , name = secret
+                                , field = "metadata.name"
+                                , equals = secret
+                                , timeoutSecs = 900
+                                }
+                              ]
+                            }
+                          ]
+                    , None = [] : List P.Stage.Type
+                    }
+                    v.caSecret
+                )
+              # [ P.Stage::{
                 , name = "issuer"
                 , description = Some "the secrets, and the certificate issuer"
                 , shared = True

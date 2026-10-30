@@ -121,10 +121,29 @@ let identityJson =
 
         let uid = Natural/show i.uid
 
+        -- The pinned CA, which polar-init verifies the job's certificate against: a ConfigMap in the jobs' namespace.
+        let caMount =
+              merge
+                { Some =
+                    λ(ca : { configMap : Text, volume : Text, dir : Text }) →
+                      [ mountJson ca.volume ca.dir True ]
+                , None = [] : List Text
+                }
+                i.pinnedCa
+
+        let caVolume =
+              merge
+                { Some =
+                    λ(ca : { configMap : Text, volume : Text, dir : Text }) →
+                      [ "{\"name\":${quoted ca.volume},\"configMap\":{\"name\":${quoted ca.configMap}}}" ]
+                , None = [] : List Text
+                }
+                i.pinnedCa
+
         let polarInit =
               "{\"name\":\"polar-init\",\"image\":${quoted i.image},\"imagePullPolicy\":${quoted pullPolicy},"
               ++ "\"command\":${strings [ "polar-init" ]},\"args\":${strings i.args},\"env\":${pairs i.env},"
-              ++ "\"volumeMounts\":${listOf [ mountJson i.tokenVolume i.tokenDir True, mountJson i.certVolume i.certDir False ]},"
+              ++ "\"volumeMounts\":${listOf ([ mountJson i.tokenVolume i.tokenDir True, mountJson i.certVolume i.certDir False ] # caMount)},"
               ++ "\"securityContext\":{\"runAsUser\":${uid},\"runAsGroup\":${uid},\"runAsNonRoot\":true,\"allowPrivilegeEscalation\":false,\"capabilities\":{\"drop\":[\"ALL\"]}}}"
 
         let tokenVolume =
@@ -132,7 +151,7 @@ let identityJson =
 
         let certVolume = "{\"name\":${quoted i.certVolume},\"emptyDir\":{}}"
 
-        in  "{\"initContainers\":[${polarInit}],\"volumes\":[${tokenVolume},${certVolume}],\"pipelineMounts\":[${mountJson i.certVolume i.certDir True}],\"pipelineEnv\":${pairs i.pipelineEnv}}"
+        in  "{\"initContainers\":[${polarInit}],\"volumes\":${listOf ([ tokenVolume, certVolume ] # caVolume)},\"pipelineMounts\":[${mountJson i.certVolume i.certDir True}],\"pipelineEnv\":${pairs i.pipelineEnv}}"
 
 let envVar =
       λ(name : Text) →
@@ -236,6 +255,8 @@ let buildOrchestrator
               , namespace = ns
               , image = v.images.buildOrchestrator
               , provides = [ "cassini", "kube-api-read", "encryption" ]
+              -- It opens the credentials a mapping names, sealed to its escrow key: so it needs the custody daemon.
+              , encrypts = True
               , shutdownBudgetSecs = 30
               , serviceAccountToken = True
               , configFiles = [ { configMap = "build-orchestrator-config", mountPath = configDir } ]
