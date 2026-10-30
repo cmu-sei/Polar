@@ -176,6 +176,46 @@ the broker's bounds; the client's bounds; the harness's slow sink.
 
 The choices the decisions settled are kept below for the record.
 
+## Review before merge (2026-10-30): defects found, NOT MERGED
+
+Read from the code of `79980d3b..d70bbfb7`; paths relative to `src/agents/`. Confirmed means read end to end (three
+also checked by hand); plausible means each link was read but the whole was not reproduced.
+
+1. **An exhausted budget can stop the broker for good (plausible).** A reader waiting in `admit` for a publish
+   (`listener.rs:1071, 1129`) reads nothing behind it, acknowledgements included, and the client writes its delivery
+   acks from the same mailbox as its publishes (`client/src/lib.rs:1730`). A client that both publishes and subscribes
+   (a processor) then cannot refund what its delivery outbox holds. The stall rule does not rescue it: high water
+   counts payload bytes (`subscriber.rs:952`) where the budget charges frame bytes, and `BudgetExhausted` is sent only
+   when the alarm is raised (`budget.rs:264`). The claim at `budget.rs:64-67` holds only when the head frame is not a
+   publish.
+2. **A resumed subscriber is cut again at once (confirmed).** `Backlog::add` starts `above_since_ms` while the
+   subscriber is away (`types/src/held.rs:198-201`); `set_connected` (`held.rs:241`) does not reset it, so a subscriber
+   away longer than `T_stall` is ended by the next `StallCheck` after it resumes, replays, and loops.
+3. **The client's credit can wedge (confirmed).** `TcpClient::publish` takes a `Buffer` slot, then casts; if the acks
+   empty the outbox before the cast lands, `keep` pushes it onto the buffer (`facade.rs:324`) without `promote`, it is
+   never sent, and every later `publish_when_ready` waits for ever.
+4. **A publish dropped for want of budget is still acknowledged (confirmed)** (`topic.rs:820-846`), against design
+   goal 5.
+5. **Transient refusals settle the outbox (confirmed).** Any `Err` with an origin becomes `Refused`
+   (`client/src/lib.rs:900`, `facade.rs:507`), including "Broker is shutting down", "forward failed" and "topic manager
+   unavailable", so a rolling restart loses what the outbox exists to resend. Only a policy refusal should settle.
+6. Per-message overhead is not charged (`Pending`, outbox entries, `Listener.deliveries` at `listener.rs:1710`, cleaned
+   only by acks); with small messages real memory can be a multiple of the budget (plausible).
+7. High water is soft: `pump` on `TopicResume` overshoots it by the waiting windows; the budget still bounds it.
+8. git-repo-observer collects a whole walk before publishing (`git/observe/src/lib.rs` ~748); a first walk of a large
+   repository is held in memory at once (plausible).
+
+Wire: `PublishResponseAck` was inserted mid-`ClientMessage` (`types/src/lib.rs:748`), shifting later tags; an old
+client's frames mostly fail `rkyv::access` and are dropped without closing the connection, so it hangs rather than
+being told. All images are rebuilt together; a version check at registration would name the mismatch.
+
+Tests that cannot fail: `stats.peak <= BUDGET` in `broker/tests/backpressure.rs` (`try_charge` never exceeds by
+construction), and its `stopped_at < count` passes on the global alarm alone. None covers findings 1 to 3.
+
+Also: the tracing panic ("tried to clone a span ... already closed") is `span.enter()` guards held across `.await` in
+the broker and client; the assert is not debug-only (tracing-subscriber 0.3.23 `registry/sharded.rs:317`), so it panics
+a worker in release. On this branch `revocation` failed 3 runs in 3, on `main` 1 in 3 (run alone, 2026-10-30).
+
 ## Open decisions
 
 1. **A subscriber that stays slow** past `T_stall`: end its connection (recommended; lossless until then, and the
