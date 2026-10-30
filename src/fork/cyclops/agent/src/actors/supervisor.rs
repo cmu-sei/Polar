@@ -16,7 +16,8 @@ use polar::cassini::{CassiniClient, SubscribeRequest};
 use polar::graph::nodes::git::RepoId;
 use polar::topics::GIT_REPOSITORY_EVENTS;
 use polar_agent_builder::{
-    AgentBuilder, ConfigurationHandle, Configured, InfrastructureEvent, InfrastructureSupervisorMessage,
+    AgentBuilder, ConfigurationHandle, Configured, HealthClient, HealthHandle, InfrastructureEvent,
+    InfrastructureSupervisorMessage,
 };
 use ractor::{Actor, ActorProcessingErr, ActorRef};
 use rkyv::from_bytes;
@@ -60,6 +61,7 @@ pub struct SupervisorState {
     tcp_client: Arc<dyn CassiniClient>,
     infrastructure: ActorRef<InfrastructureSupervisorMessage>,
     configuration: ConfigurationHandle,
+    healthcheck: HealthHandle,
     /// The repositories built: the configuration file's list until the `mappings` section arrives, and then
     /// the section's, replaced whole each time.
     mappings: Vec<RepoMapping>,
@@ -237,6 +239,7 @@ impl Actor for OrchestratorSupervisor {
             tcp_client: Arc::new(resources.tcp_client),
             infrastructure: resources.infrastructure,
             configuration: resources.configuration,
+            healthcheck: resources.healthcheck,
             mappings,
             draining: false,
         })
@@ -252,6 +255,7 @@ impl Actor for OrchestratorSupervisor {
             SupervisorMessage::ClientEvent { event } => match event {
                 ClientEvent::Registered { .. } => {
                     info!("Orchestrator successfully initialized");
+                    let _ = state.healthcheck.cassini_connected();
                     for topic in [GIT_REPOSITORY_EVENTS, BUILD_REQUESTS_TOPIC] {
                         state.tcp_client.subscribe(SubscribeRequest {
                             topic: topic.to_string(),
@@ -278,6 +282,7 @@ impl Actor for OrchestratorSupervisor {
                 // reconnects. Whether an outage is long enough to restart is the builder's decision.
                 ClientEvent::TransportError { reason } => {
                     warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
+                    let _ = state.healthcheck.cassini_disconnected();
                 }
                 _ => (),
             },

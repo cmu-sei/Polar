@@ -58,9 +58,8 @@ pub struct StorageConfig {
     /// "us-east-1" is the conventional placeholder.
     pub region: String,
 
-    /// Bucket where all Cyclops build artifacts are stored.
-    /// Must exist before the orchestrator starts — the client does not
-    /// create buckets automatically.
+    /// Bucket where all Cyclops build artifacts are stored. The orchestrator makes it at start if it is
+    /// not there (`StorageClient::ensure_bucket`); a store that already has it is left as it is.
     pub bucket: String,
 }
 
@@ -98,6 +97,23 @@ impl StorageClient {
         Self {
             s3: S3Client::from_conf(s3_config),
             bucket: config.bucket.clone(),
+        }
+    }
+
+    /// Make the bucket if the store does not have it. A failure to make it is not fatal here, since an
+    /// existing bucket the credentials may not create is the normal case on a managed store: it is
+    /// reported, and the first upload says whether the bucket is usable.
+    pub async fn ensure_bucket(&self) {
+        if self.s3.head_bucket().bucket(&self.bucket).send().await.is_ok() {
+            return;
+        }
+        match self.s3.create_bucket().bucket(&self.bucket).send().await {
+            Ok(_) => tracing::info!(bucket = %self.bucket, "made the artifact bucket"),
+            Err(e) => tracing::warn!(
+                bucket = %self.bucket,
+                error = %aws_sdk_s3::error::DisplayErrorContext(&e),
+                "the artifact bucket is not there and could not be made"
+            ),
         }
     }
 

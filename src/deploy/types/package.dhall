@@ -12,6 +12,8 @@
     ./core.dhall
 , observers =
     ./observers.dhall
+, cyclops =
+    ./cyclops.dhall
 , platform =
     ./platform.dhall
 , service =

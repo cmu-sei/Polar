@@ -115,6 +115,9 @@ let ExtraCert = { name : Text, kind : CertKind, dir : Text }
 --| Space that does not outlive the pod, writable, for an agent whose root filesystem is read-only.
 let Scratch = { name : Text, mountPath : Text }
 
+--| A ConfigMap the plan makes, mounted read-only where the agent reads it: its files are the ConfigMap's keys.
+let ConfigFiles = { configMap : Text, mountPath : Text }
+
 --| What a consumer says about one agent.
 let BuilderAgent =
       { Type =
@@ -137,6 +140,7 @@ let BuilderAgent =
           , skipEscrow : Bool
           , extraCerts : List ExtraCert
           , scratch : List Scratch
+          , configFiles : List ConfigFiles
           -- Mount the pod's own service-account token, where Kubernetes clients look for it: for an
           -- agent that reads the Kubernetes API (the kube observer). Off otherwise.
           , serviceAccountToken : Bool
@@ -162,6 +166,7 @@ let BuilderAgent =
         , skipEscrow = False
         , extraCerts = [] : List ExtraCert
         , scratch = [] : List Scratch
+        , configFiles = [] : List ConfigFiles
         , serviceAccountToken = False
         }
       }
@@ -332,6 +337,14 @@ let scratchVolume
         , emptyDir = Some kubernetes.EmptyDirVolumeSource::{=}
         }
 
+let configFilesVolume
+    : ConfigFiles → kubernetes.Volume.Type
+    = λ(f : ConfigFiles) →
+        kubernetes.Volume::{
+        , name = f.configMap
+        , configMap = Some kubernetes.ConfigMapVolumeSource::{ name = Some f.configMap }
+        }
+
 --| The init container that obtains the pod's certificate.
 let polarInit
     : Platform.Type → BuilderAgent.Type → kubernetes.Container.Type
@@ -456,6 +469,7 @@ let makePolarAgent
                   ]
                 # Prelude.List.map ExtraCert kubernetes.Volume.Type extraCertVolume agent.extraCerts
                 # Prelude.List.map Scratch kubernetes.Volume.Type scratchVolume agent.scratch
+                # Prelude.List.map ConfigFiles kubernetes.Volume.Type configFilesVolume agent.configFiles
                 # merge
                     { Some =
                         λ(d : Data) →
@@ -494,6 +508,17 @@ let makePolarAgent
                         kubernetes.VolumeMount::{ name = s.name, mountPath = s.mountPath }
                     )
                     agent.scratch
+                # Prelude.List.map
+                    ConfigFiles
+                    kubernetes.VolumeMount.Type
+                    ( λ(f : ConfigFiles) →
+                        kubernetes.VolumeMount::{
+                        , name = f.configMap
+                        , mountPath = f.mountPath
+                        , readOnly = Some True
+                        }
+                    )
+                    agent.configFiles
                 # merge
                     { Some =
                         λ(d : Data) →

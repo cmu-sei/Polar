@@ -918,6 +918,7 @@ dependencies = [
  "polar-env",
  "ractor",
  "rkyv",
+ "rustls 0.23.46",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

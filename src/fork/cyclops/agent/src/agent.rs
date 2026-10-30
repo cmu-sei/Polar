@@ -42,6 +42,10 @@ impl PolarAgent for Cyclops {
     async fn start(configured: Configured) -> Result<(), StartError> {
         configured.init_logging(SERVICE_NAME);
 
+        // The Kubernetes client is made before the broker's, and rustls will not choose between the providers
+        // the dependencies bring in. The fork's own client installs `ring`, so the same one.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let settings = CyclopsSettings::read(configured.config())
             .map_err(|e| format!("could not read Cyclops' settings: {e}"))?;
         let config = OrchestratorConfig::load_from(&settings.config_file)
@@ -79,6 +83,8 @@ impl PolarAgent for Cyclops {
             }
             other => return Err(format!("unsupported backend driver: {other}").into()),
         };
+
+        crate::client::StorageClient::new(&config.storage).ensure_bucket().await;
 
         let (_supervisor, handle) = Actor::spawn(
             Some(format!("{SERVICE_NAME}.supervisor")),

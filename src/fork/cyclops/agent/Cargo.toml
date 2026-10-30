@@ -21,6 +21,7 @@ aws-config.workspace = true
 aws-sdk-s3.workspace = true
 aws-credential-types.workspace = true
 rkyv.workspace = true
+rustls.workspace = true
 config.workspace = true
 hyper-util.workspace = true
 hyper.workspace = true
