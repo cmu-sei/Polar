@@ -219,7 +219,8 @@ a worker in release. On this branch `revocation` failed 3 runs in 3, on `main` 1
 ### Fixed (2026-10-30)
 
 The branch was rebased onto main's tracing fix (`70d62aec`, which holds no entered span across an await); the read
-loop it conflicted with keeps both: no guard across a wait, and the frame check and admission. Each fix below came
+loop it conflicted with keeps both: no guard across a wait, and the frame check and admission. Since, `revocation` and
+`custody_revocation` pass 5 runs in 5 each, run alone. Each fix below came
 with a test that failed first, and fails again with the fix mutated away. Paths relative to `src/agents/cassini/`.
 
 1. **Recovery from an exhausted budget is bounded by the stall bound.** Acknowledgements never wait behind a
