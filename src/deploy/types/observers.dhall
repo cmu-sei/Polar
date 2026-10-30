@@ -188,7 +188,7 @@ let gitStages =
               }
             ]
 
---| The build processor: it reads the provenance events that builds publish (Cyclops' own, and the
+--| The build processor: it reads the provenance events that builds publish (build-orchestrator's own, and the
 --| pipeline library's from a job) and writes them to the graph.
 let buildStages =
       λ(v : ObserverValues.Type) →

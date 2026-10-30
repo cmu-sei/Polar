@@ -557,9 +557,9 @@ let makePolarAgent
 --| What a pod that is not an agent needs to have a certificate of its own: a build's job. It is the same
 --| `polar-init` and the same projected token, with no escrow key (nothing in a job is encrypted to one) and
 --| nothing waited for. The pod must run under a ServiceAccount of its own, because that is the certificate's
---| identity and the broker allows one session per identity. Cyclops makes one per build.
+--| identity and the broker allows one session per identity. build-orchestrator makes one per build.
 --|
---| Plain values, not Kubernetes records: the consumer is Cyclops, which reads them from its configuration
+--| Plain values, not Kubernetes records: the consumer is build-orchestrator, which reads them from its configuration
 --| and builds the pod, and the records are expensive for Dhall to carry about.
 let JobEnv = { name : Text, value : Text }
 

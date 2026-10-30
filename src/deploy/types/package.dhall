@@ -12,8 +12,8 @@
     ./core.dhall
 , observers =
     ./observers.dhall
-, cyclops =
-    ./cyclops.dhall
+, buildOrchestrator =
+    ./build-orchestrator.dhall
 , platform =
     ./platform.dhall
 , service =
