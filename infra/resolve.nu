@@ -52,6 +52,7 @@ use cluster-inputs.nu [env_for, env_merged, path_of, read_inputs]
 use registry.nu [node_registry, push_registry]
 use agent-pods.nu [collect_scaffolds, run_checks]
 use topics.nu [served, judge, oversized]
+use graph.nu [readers, unowned_reads, state_floor, over_readers, READERS_VARIABLE]
 use egress.nu
 const CONFIG = ($INFRA | path join "config")
 
@@ -219,11 +220,33 @@ def scaffold_dir_for [target: string] {
 }
 
 # Asks the image of every catalog workload of `target` for its scaffold, on the cluster, and writes `<workload>.json` to `dir`.
+# Twice for an agent with a family over the readers (the state agent's replies, infra/graph.nu): who reads is known only
+# from every other scaffold, so it is asked again, with POLAR_STATE_READERS, once they are in. Returns how many images
+# were run.
 def collect_into [dir: string, target: string] {
     let workloads = (all_workloads $target | where {|w| ($w.config? | default "env") == "document" } | select name image)
+    let registry = (load_cluster $target).registry
+    let images = (open ($INFRA | path join "images.nuon"))
+    let served_list = (served (all_workloads $target))
     with-env { POLAR_REGISTRY: (push_registry $target) } {
-        collect_scaffolds $workloads $dir (load_cluster $target).registry (open ($INFRA | path join "images.nuon")) (served (all_workloads $target))
+        let ran = (collect_scaffolds $workloads $dir $registry $images $served_list)
+        let sets = ($workloads | each {|w| { workload: $w.name, scaffold: (open ($dir | path join $"($w.name).json")) } })
+        let reading = (readers ($sets | each {|s| { workload: $s.workload, graph: ($s.scaffold.graph? | default []) } }))
+        let again = ($workloads | where {|w| over_readers ($sets | where workload == $w.name | first | get scaffold) })
+        if ($again | is-empty) or ($reading | is-empty) {
+            $ran
+        } else {
+            $ran + (collect_scaffolds $again $dir $registry $images $served_list $reading)
+        }
     }
+}
+
+# Every catalog workload of `target` that reads a document, with the graph schema its scaffold prints: what the state
+# agent's floor, its readers and the unowned-read check are made from.
+def graph_sets [target: string] {
+    all_workloads $target
+    | where {|w| ($w.config? | default "env") == "document" }
+    | each {|w| { workload: $w.name, graph: ((scaffold_of $w.name $w).graph? | default []) } }
 }
 
 # What the agent check needs to name: the image it pulls (a row of images.nuon) and the crate it builds with
@@ -551,8 +574,17 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     # runs that read a document (topics.nu `served`), and its builder expands the family into one exact topic for
     # each; nothing here recomputes it (docs/architecture/topics.md, "Families"). Its scaffold was asked with the
     # same list (collect_scaffolds).
-    if ($scaffold.topic_families? | default [] | is-not-empty) {
-        $env_list = ($env_list | append (env_entry { name: "POLAR_SERVED_WORKLOADS", value: (served (all_workloads $target)) } $vars "catalog" $name))
+    # A family over the readers (the state agent's replies) is given the workloads whose scaffolds declare a graph read
+    # (infra/graph.nu), as its scaffold was asked with (collect_into).
+    for over in ($scaffold.topic_families? | default [] | each {|f| $f.over? | default "POLAR_SERVED_WORKLOADS" } | uniq) {
+        let value = (if $over == "POLAR_SERVED_WORKLOADS" {
+            served (all_workloads $target)
+        } else if $over == $READERS_VARIABLE {
+            readers (graph_sets $target)
+        } else {
+            error make { msg: $"($name): a topic family is expanded over ($over), which the render does not know" }
+        })
+        $env_list = ($env_list | append (env_entry { name: $over, value: $value } $vars "catalog" $name))
     }
 
     # The credentials agent is given the authority model's facts: every workload of the target, whoever issues it, by its
@@ -564,6 +596,22 @@ export def resolve [name: string, target: string = $DEFAULT_TARGET] {
     if "CREDENTIALS_AGENT_AUTHORITY_MODEL" in $declared_vars {
         let records = (all_workloads $target | each {|w| issuance_record $w $target $kinds })
         $env_list = ($env_list | append { name: "CREDENTIALS_AGENT_AUTHORITY_MODEL", value: (model_facts $records $cluster.domain | to json --raw), secret: null, key: null, from: "catalog" })
+    }
+
+    # The state agent is given its floor (docs/architecture/soft-state.md): every workload of the target that declares a
+    # graph label, by its one identity, with the labels it owns and reads (infra/graph.nu `state_floor`), from the
+    # scaffolds, as the credentials agent is given the authority model above. Applying the catalog is the sign-off.
+    if "SOFT_STATE_FLOOR" in $declared_vars {
+        let records = (all_workloads $target | where {|w| ($w.config? | default "env") == "document" } | each {|w|
+            let s = (spec_of $w.name $target $kinds).spec
+            {
+                who: $w.name
+                namespace: $s.namespace
+                service_account: ($s.service_account? | default $w.name)
+                graph: ((scaffold_of $w.name $w).graph? | default [])
+            }
+        })
+        $env_list = ($env_list | append { name: "SOFT_STATE_FLOOR", value: (state_floor $records $cluster.domain | to json --raw), secret: null, key: null, from: "catalog" })
     }
 
     # cert-issuer is given the floor (docs/architecture/cert-issuer-isolation.md): every bootstrap service's entry, its own
@@ -756,6 +804,14 @@ def check_all [target: string] {
         }
     })
     for r in ($results | where error != null) { $problems = ($problems | append $r.error) }
+
+    # A read of a label that no workload of the target owns: the state agent would answer it from nodes nobody writes,
+    # so it fails as a topic with no other side does (docs/architecture/soft-state.md).
+    let graphs = (try { { sets: (graph_sets $target), error: null } } catch {|e| { sets: [], error: $e.msg } })
+    if $graphs.error != null { $problems = ($problems | append $graphs.error) }
+    for u in (unowned_reads $graphs.sets) {
+        $problems = ($problems | append $"($u.workload) reads ($u.label), and no workload in ($target) owns it")
+    }
     for r in $results { for p in $r.rules { $problems = ($problems | append $p) } }
     let judged = ($results | where error == null | each {|x| { name: $x.who, r: $x.resolved } })
     let verdicts = (try { agent_checks $target $judged } catch {|e| [$"the agents could not judge their documents: ($e.msg)"] })

@@ -65,6 +65,7 @@ there: placement is the target's to declare.
 | core | polar-git-server | serves signed authority (the schedules, the policy). *Decided, the maintainer, 2026-10-28* |
 | observers | git-repo-observer, jira-observer, kube-observer, polar-scheduler-observer, credentials-agent-observer | the low-trust side; the credentials agent's observer is its low-trust gateway |
 | writers | kube-consumer, git-repo-processor, jira-processor, polar-scheduler | the graph writers (polar-scheduler writes the ledger to the graph, `git-controller.md`) |
+| writers | soft-state-observer | reads the graph for other agents (`soft-state.md`) and so holds the graph password, which stays on the writers' pool and off the observers'. *Decided by the agent that built it, 2026-10-30, by the rule of the row above; to confirm* |
 | writers | Neo4j (hand chart) | beside its only writers, off the observers' host. *Decided, the maintainer, 2026-10-28* |
 | services | ace (hand chart) | not Polar proper, faces people, holds no Polar authority. *Decided, the maintainer, 2026-10-28* |
 | services | Flux, Jaeger, Postgres, Keycloak, the in-cluster registry, harness-producer, harness-sink | not Polar proper: the open pool, by its rule; nothing is rendered for them |

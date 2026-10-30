@@ -39,6 +39,11 @@ def main [] {
                 assert equal (scaffold_key "reg/a:latest" "sha256:1" "a,b") $k
                 assert not equal (scaffold_key "reg/a:latest" "sha256:1" "a,b,c") $k
                 assert not equal (scaffold_key "reg/a:latest" "sha256:2" "a,b") $k
+                # The readers a family over them is expanded for (infra/graph.nu) are part of the key when given, and a
+                # key without them is the key it always was.
+                assert equal (scaffold_key "reg/a:latest" "sha256:1" "a,b" "") $k
+                assert not equal (scaffold_key "reg/a:latest" "sha256:1" "a,b" "jira-observer") $k
+                assert not equal (scaffold_key "reg/a:latest" "sha256:1" "a,b" "jira-observer") (scaffold_key "reg/a:latest" "sha256:1" "a,b" "kube-observer")
             }
         }
         {

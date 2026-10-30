@@ -137,6 +137,8 @@ def main [] {
                 "git-repo-processor.yaml"
                 "git-repo-controller-resources.yaml"
                 "git-repo-controller.yaml"
+                "soft-state-observer-resources.yaml"
+                "soft-state-observer.yaml"
                 "polar-git-server-resources.yaml"
                 "polar-git-server.yaml"
                 "polar-scheduler-observer-resources.yaml"

@@ -289,21 +289,30 @@ export def run_pods [ns: string, objects: list] {
 # ── Questions ────────────────────────────────────────────────────────────────
 
 # Where an image's scaffold is cached: under its digest and the workloads its topic families are expanded for
-# (POLAR_SERVED_WORKLOADS), since the scaffold depends on both.
-export def scaffold_key [pushed: string, digest: string, served: string] {
-    content_key ["scaffold" $pushed $digest $served]
+# (POLAR_SERVED_WORKLOADS, and POLAR_STATE_READERS when it is given), since the scaffold depends on them. A key without
+# readers is the key it always was.
+export def scaffold_key [pushed: string, digest: string, served: string, readers: string = ""] {
+    if ($readers | is-empty) {
+        content_key ["scaffold" $pushed $digest $served]
+    } else {
+        content_key ["scaffold" $pushed $digest $served $readers]
+    }
 }
 
 # Writes `<workload>.json` to `dir` for each of `workloads` ({ name, image }): the scaffold its image prints. The images are
 # run once each, together, in one scratch namespace; one whose scaffold is cached under its digest is not run. `node_registry`
 # is the cluster's name for the registry. Each is asked with POLAR_SERVED_WORKLOADS set to `served`, the list the render
-# writes into the documents, so an agent with a topic family prints it expanded into exact names. Returns how many images
-# were run.
-export def collect_scaffolds [workloads: list, dir: string, node_registry: string, images: list, served: string = ""] {
+# writes into the documents, so an agent with a topic family prints it expanded into exact names; and, when `readers` is
+# given, with POLAR_STATE_READERS set to it, for an agent with a family over the readers (infra/graph.nu). Returns how
+# many images were run.
+export def collect_scaffolds [workloads: list, dir: string, node_registry: string, images: list, served: string = "", readers: string = ""] {
     mkdir $dir
     let located = ($workloads | get image | uniq | each {|i| locate $images $node_registry $i })
-    let keyed = ($located | each {|l| $l | insert key (scaffold_key $l.pushed $l.digest $served) })
-    let variables = (if ($served | is-empty) { [] } else { [{ name: "POLAR_SERVED_WORKLOADS", value: $served }] })
+    let keyed = ($located | each {|l| $l | insert key (scaffold_key $l.pushed $l.digest $served $readers) })
+    let variables = (
+        (if ($served | is-empty) { [] } else { [{ name: "POLAR_SERVED_WORKLOADS", value: $served }] })
+        ++ (if ($readers | is-empty) { [] } else { [{ name: "POLAR_STATE_READERS", value: $readers }] })
+    )
     let cached = ($keyed | each {|l| $l | insert text (cache_peek "scaffold" $l.key) })
     let missing = ($cached | where text == null)
     let answered = if ($missing | is-empty) { [] } else {

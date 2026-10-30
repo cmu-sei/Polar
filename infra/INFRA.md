@@ -398,6 +398,15 @@ Read while planning cert-issuer's move into the catalog (`docs/architecture/cert
   directory and leaves it in place. The four tests that run the agents' own `--check` still need the cluster.
   `rules.nu` and `charts.nu` need nothing. *Since 2026-10-27:* each agent binary prints its own scaffold
   (`<binary> --scaffold`), so the workspace's builds give a scaffold directory without a cluster.
+- **The state agent's scaffold is asked twice** (*since 2026-10-30*, `docs/architecture/soft-state.md`). Its reply
+  family is expanded over the workloads whose scaffolds declare a graph read (`POLAR_STATE_READERS`, `graph.nu`
+  `readers`), which are known only once every other scaffold is in, so `collect_into` (`resolve.nu`) asks every image
+  first, then asks again, with the readers, the images whose scaffold has a family `over` them; the cache key carries
+  the readers (`agent-pods.nu` `scaffold_key`). The render writes the same list into its document, and its floor
+  (`SOFT_STATE_FLOOR`, `graph.nu` `state_floor`: every workload that declares a label, by its identity, with what it
+  owns and reads) from the scaffolds, as it writes the credentials agent's authority model. `resolve.nu check` fails a
+  read of a label no workload of the target owns, and `tests/catalog-topics.nu` the same catalog-wide; `tests/graph.nu`
+  tests the functions.
 - **Volumes.** A capability's `pod.volumes` entry is a Secret (with `items`), a claim, a ConfigMap or, with none of
   them, an emptyDir (`capabilities.nuon:32-50`). There is no `defaultMode`, and the pod has no `securityContext`
   (`agent.dhall:166-224`). `persistent-data` is a claim named `{workload}-data` at `/var/lib/{workload}`

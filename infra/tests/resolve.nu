@@ -284,7 +284,7 @@ def main [] {
             let pools = {
                 core: [credentials-agent cert-issuer cassini git-repo-controller polar-git-server]
                 observers: [git-repo-observer jira-observer kube-observer polar-scheduler-observer credentials-agent-observer]
-                writers: [kube-consumer git-repo-processor jira-processor polar-scheduler]
+                writers: [kube-consumer git-repo-processor jira-processor polar-scheduler soft-state-observer]
             }
             let placed = ($pools | transpose pool names | each {|p| $p.names | each {|n| { name: $n, pool: $p.pool } } } | flatten)
             let names = (^nu $RESOLVER names --target sandbox-local | from json)
@@ -451,6 +451,47 @@ def main [] {
             let observer = ($m.workloads | where workload == "credentials-agent-observer" | first)
             assert equal [$observer.issuer $observer.bootstrap] ["cert-issuer" true]
         }
+        # docs/architecture/soft-state.md: the state agent reads the graph, and its health does not depend on it.
+        "the state agent is given the graph's connection, and neither waits for nor watches Neo4j": {
+            let r = (resolve "soft-state-observer")
+            assert ("graph-read" in $r.needs) ($r.needs | str join ",")
+            assert ("graph-write" not-in $r.needs) ($r.needs | str join ",")
+            assert equal (env_value $r "GRAPH_CLIENT_CERT") "/etc/tls/certs/cert.pem"
+            assert ((env_value $r "GRAPH_ENDPOINT") | str starts-with "bolt+s://")
+            assert equal $r.certs ["client:/etc/tls/certs:custody:"]
+            assert ($r.dep_checks | all {|d| not ($d | str contains "neo4j") and not ($d | str contains "polar-db") }) ($r.dep_checks | str join ",")
+            let deps = (env_value $r "POLAR_HEALTH_DEP_ENDPOINTS")
+            assert equal ($deps | split row "," | length) 1 $deps
+        }
+
+        "the state agent's floor and readers are written from every workload's scaffold, and a read nobody owns fails the check": {
+            # Stand-in graph declarations on the real scaffolds: jira-processor owns JiraIssue, jira-observer reads it.
+            let dir = (mktemp --directory)
+            cp ($env.POLAR_SCAFFOLD_DIR | path join "*.json" | into glob) $dir
+            let declare = {|name: string, graph: list|
+                let file = ($dir | path join $"($name).json")
+                open $file | upsert graph $graph | to json | save --force $file
+            }
+            do $declare "jira-processor" [{ label: "JiraIssue", access: "owns", purpose: "the issues" }]
+            do $declare "jira-observer" [{ label: "JiraIssue", access: "reads", purpose: "its cursor" }]
+            let r = (with-env { POLAR_SCAFFOLD_DIR: $dir } { resolve "soft-state-observer" })
+            let floor = (with-env { POLAR_SCAFFOLD_DIR: $dir } { env_value $r "SOFT_STATE_FLOOR" } | from json)
+            assert equal $floor.format 1
+            assert equal ($floor.workloads | get workload) ["jira-observer" "jira-processor"]
+            let observer = ($floor.workloads | where workload == "jira-observer" | first)
+            assert equal $observer { workload: "jira-observer", identity: "jira-observer.polar.serviceaccount.cluster.local", owns: [], reads: ["JiraIssue"] }
+            assert equal (with-env { POLAR_SCAFFOLD_DIR: $dir } { env_value $r "POLAR_STATE_READERS" }) "jira-observer"
+            # The served workloads are not what its family is expanded over.
+            assert equal (with-env { POLAR_SCAFFOLD_DIR: $dir } { env_value $r "POLAR_SERVED_WORKLOADS" }) null
+            # A read of a label no workload owns is named by the check.
+            do $declare "jira-observer" [{ label: "JiraIssue", access: "reads", purpose: "its cursor" } { label: "Nobody", access: "reads", purpose: "x" }]
+            let checked = (with-env { POLAR_SCAFFOLD_DIR: $dir } { do { ^nu $RESOLVER check } | complete })
+            rm -rf $dir
+            assert ($checked.exit_code != 0) "the check passed"
+            assert ($checked.stderr | str contains "jira-observer reads Nobody, and no workload in local-minimal owns it") $checked.stderr
+            assert (not ($checked.stderr | str contains "reads JiraIssue")) $checked.stderr
+        }
+
         "every workload's budget is in what the agent is given, as the code declared": {
             for w in ($BUDGETS | transpose name secs) {
                 let t = (target_for $w.name)

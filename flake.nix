@@ -236,6 +236,9 @@
           gitProcessorImage    = polarPkgs.gitAgent.processorImage;
           gitControllerImage   = polarPkgs.gitAgent.controllerImage;
 
+          # ── The state agent ──────────────────────────────────────────────────
+          softStateObserverImage = polarPkgs.softState.observerImage;
+
           # ── Credentials agent ────────────────────────────────────────────────
           credentialsAgentConsumerImage = polarPkgs.credentialsAgent.consumerImage;
           credentialsAgentObserverImage = polarPkgs.credentialsAgent.observerImage;

@@ -40,10 +40,13 @@ impl PolarAgent for SoftStateObserver {
         "Answers other agents' requests for soft state, read from the graph, by who asks";
     const NEEDS: &'static [Capability] = &[Capability::GraphRead];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
-    const TOPICS: &'static [TopicDecl] = &[TopicDecl::subscribe(
-        REQUESTS_TOPIC,
-        "an agent's request for state it may read",
-    )];
+    const TOPICS: &'static [TopicDecl] =
+        &[
+            TopicDecl::subscribe(REQUESTS_TOPIC, "an agent's request for state it may read")
+                .waiting(
+                    "no catalog agent reads state yet: jira-observer is to, for its issue cursor",
+                ),
+        ];
     // One reply topic for each workload that reads state, and none for one that does not
     // (docs/architecture/soft-state.md, "Shape").
     const TOPIC_FAMILIES: &'static [FamilyDecl] = &[FamilyDecl::publish(

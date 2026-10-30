@@ -29,6 +29,7 @@
 
 use std/assert
 use ../topics.nu [served, judge]
+use ../graph.nu [readers, unowned_reads, over_readers]
 
 const ROOT = path self ../..
 
@@ -38,8 +39,8 @@ def catalog [] {
 }
 
 # The scaffold of a catalog agent, from its binary built here: the crate is `scaffold_package` (or its image's name), and
-# the binary is named for the crate.
-def scaffold_of [w: record, served_list: string] {
+# the binary is named for the crate. Asked with the served workloads and, when given, the readers (POLAR_STATE_READERS).
+def scaffold_of [w: record, served_list: string, readers_list: string = ""] {
     let package = ($w.scaffold_package? | default $w.image)
     let features = ($w.scaffold_features? | default "")
     let agents = ($ROOT | path join "src/agents")
@@ -55,7 +56,7 @@ def scaffold_of [w: record, served_list: string] {
         error make --unspanned { msg: $"($w.name): cargo build -p ($package) failed: ($build.stderr | lines | last 5 | str join '; ')" }
     }
     let target = ($env.CARGO_TARGET_DIR? | default ($agents | path join "target"))
-    let r = (with-env { POLAR_SERVED_WORKLOADS: $served_list } { do { ^($target | path join "debug" $package) --scaffold } | complete })
+    let r = (with-env { POLAR_SERVED_WORKLOADS: $served_list, POLAR_STATE_READERS: $readers_list } { do { ^($target | path join "debug" $package) --scaffold } | complete })
     if $r.exit_code != 0 {
         error make --unspanned { msg: $"($w.name): --scaffold exited ($r.exit_code): ($r.stderr | lines | last 3 | str join '; ')" }
     }
@@ -69,7 +70,15 @@ def main [] {
     let served_list = (served (catalog))
     print $"building and asking ($agents | length) catalog agents for their scaffolds..."
     # One at a time: two builds of one crate with different features would share its binary.
-    let sets = ($agents | each {|w| { workload: $w.name, topics: ((scaffold_of $w $served_list).topics? | default []) } })
+    let first = ($agents | each {|w| { w: $w, scaffold: (scaffold_of $w $served_list) } })
+    # Who reads state is known once every scaffold is in; an agent with a family over the readers (the state agent's
+    # replies) is asked again with them, as the render asks it (resolve.nu `collect_into`).
+    let graphs = ($first | each {|x| { workload: $x.w.name, graph: ($x.scaffold.graph? | default []) } })
+    let readers_list = (readers $graphs)
+    let scaffolds = ($first | each {|x|
+        if (over_readers $x.scaffold) { { w: $x.w, scaffold: (scaffold_of $x.w $served_list $readers_list) } } else { $x }
+    })
+    let sets = ($scaffolds | each {|x| { workload: $x.w.name, topics: ($x.scaffold.topics? | default []) } })
 
     let tests = [
         {
@@ -88,6 +97,21 @@ def main [] {
                     let family = ($sets | where workload == $scheduler | first | get topics | where from == "family" | get name | sort)
                     assert equal $family $expected
                 }
+            }
+        }
+        {
+            name: "the state agent's family is expanded for every workload that reads state, and for nothing else"
+            body: {
+                let expected = ($readers_list | split row "," | where {|w| $w != "" } | each {|w| $"soft-state-replies.($w)" } | sort)
+                let family = ($sets | where workload == "soft-state-observer" | first | get topics | where from == "family" | get name | sort)
+                assert equal $family $expected
+            }
+        }
+        {
+            name: "every graph label read in the catalog is owned by some workload"
+            body: {
+                let unowned = (unowned_reads $graphs | each {|u| $"($u.workload) reads ($u.label)" })
+                assert ($unowned | is-empty) $"reads of labels nobody owns: ($unowned | str join '; ')"
             }
         }
         {
