@@ -79,6 +79,8 @@
           { attrPath = "kubectl"; flakeInput = null; }
           { attrPath = "bash"; flakeInput = null; }
           { attrPath = "diffutils"; flakeInput = null; }
+          { attrPath = "gnused"; flakeInput = null; }
+          { attrPath = "gnugrep"; flakeInput = null; }
           { attrPath = "default"; flakeInput = "polar-tools"; }
           { attrPath = "default"; flakeInput = "polar-dhall-cache"; }
           { attrPath = "git"; flakeInput = null; }

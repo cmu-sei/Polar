@@ -54,6 +54,9 @@ let polarExtras =
     , Lib.nixpkgs "bash"
     -- kubectl diff runs `diff`; without it nothing can be compared with the cluster, and up.nu restarts every Job it applies.
     , Lib.nixpkgs "diffutils"
+    -- GNU sed and grep: the coreutils here are uutils', which have neither, and scripts and habits expect both.
+    , Lib.nixpkgs "gnused"
+    , Lib.nixpkgs "gnugrep"
     , Lib.flakePackage "polar-tools" "default"
     -- The pinned remote imports of the charts' Dhall, at /lib/polar/dhall-cache, so a render here fetches nothing.
     , Lib.flakePackage "polar-dhall-cache" "default"
