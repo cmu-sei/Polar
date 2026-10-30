@@ -175,6 +175,61 @@ async fn a_slow_subscriber_within_the_stall_bound_receives_everything_in_order()
     .await;
 }
 
+/// A subscriber that was away longer than the stall bound while what it is owed passed its high water is not cut when
+/// it comes back and reads: the stall clock counts only time spent connected above high water.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscriber_back_from_away_is_given_the_stall_bound_to_catch_up() {
+    let stall = Duration::from_secs(2);
+    with_broker_bounded(BUDGET, stall, |broker| async move {
+        let budget = broker.budget();
+        let mut away = RawConnection::open(&broker, "returning.test", None).await;
+        let session = away.register().await;
+        away.subscribe(&session, "news").await;
+        drop(away);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // While it is away, more than its high water (8 MiB) is held for it, and it stays away past the bound.
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        let held = 64u32; // 16 MiB
+        for n in 0..held {
+            let mut payload = vec![0u8; MESSAGE];
+            payload[..4].copy_from_slice(&n.to_be_bytes());
+            publisher.publish("news", &payload);
+        }
+        publisher
+            .wait_for("what is held for it accepted", Duration::from_secs(10), |c| {
+                c.acknowledged("news") == held as usize
+            })
+            .await;
+        tokio::time::sleep(stall + Duration::from_secs(1)).await;
+
+        // It comes back, and more is published at once, so the topic is held back and looks for a stall.
+        let mut back = RawConnection::open(&broker, "returning.test", None).await;
+        assert_eq!(back.register_resuming(Some(session.clone())).await, session);
+        let more = 8u32;
+        for n in held..held + more {
+            let mut payload = vec![0u8; MESSAGE];
+            payload[..4].copy_from_slice(&n.to_be_bytes());
+            publisher.publish("news", &payload);
+        }
+        let mut received = Vec::new();
+        while received.len() < (held + more) as usize {
+            let delivery = back
+                .next_delivery("news", Duration::from_secs(10))
+                .await
+                .expect("it is given everything, and not cut");
+            received.push(u32::from_be_bytes(delivery.payload[..4].try_into().unwrap()));
+            back.acknowledge(delivery.delivery_id).await;
+            // Steadily, and well within the bound: still above its high water when the topic first looks.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(received, (0..held + more).collect::<Vec<_>>());
+        let stats = budget.stats();
+        assert_eq!(stats.slow_disconnections, 0, "{stats:?}");
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_broker_whose_budget_is_below_one_frame_does_not_start_and_says_why() {
     let refused = cassini_broker::budget::Bounds::new(

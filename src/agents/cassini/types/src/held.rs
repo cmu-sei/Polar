@@ -194,11 +194,14 @@ impl Backlog {
         self.high
     }
 
-    /// Counts `n` more bytes held. True if that took it above its high water.
+    /// Counts `n` more bytes held. True if that took it above its high water. The stall clock starts then only if the
+    /// subscriber is connected; one that is away starts it when it comes back.
     pub fn add(&self, n: usize) -> bool {
         let now = self.bytes.fetch_add(n, Ordering::SeqCst) + n;
         if now > self.high && !self.above.swap(true, Ordering::SeqCst) {
-            self.above_since_ms.store(now_ms().max(1), Ordering::SeqCst);
+            if self.is_connected() {
+                self.above_since_ms.store(now_ms().max(1), Ordering::SeqCst);
+            }
             return true;
         }
         false
@@ -226,7 +229,7 @@ impl Backlog {
         self.above.load(Ordering::SeqCst)
     }
 
-    /// How long it has been above its high water, if it is.
+    /// How long it has been above its high water while connected, if it is (the stall clock).
     pub fn above_for(&self) -> Option<Duration> {
         match self.above_since_ms.load(Ordering::SeqCst) {
             0 => None,
@@ -238,8 +241,17 @@ impl Backlog {
         self.connected.load(Ordering::SeqCst)
     }
 
+    /// Its client came back, or went. The stall clock measures only time spent connected above high water: it starts
+    /// again on a return above it (what it is owed is replayed, and it is given `T_stall` to read it), and stops while
+    /// it is away.
     pub fn set_connected(&self, connected: bool) {
         self.connected.store(connected, Ordering::SeqCst);
+        let since = if connected && self.is_above() {
+            now_ms().max(1)
+        } else {
+            0
+        };
+        self.above_since_ms.store(since, Ordering::SeqCst);
     }
 
     /// Whether its topic must wait for it: connected and above its high water.
@@ -289,5 +301,24 @@ mod tests {
             !backlog.holds_back(),
             "a subscriber away holds nothing back"
         );
+    }
+
+    /// The stall clock counts only time spent connected above high water: a subscriber that went above it while away
+    /// starts its clock when it comes back, not when it went above.
+    #[test]
+    fn the_stall_clock_runs_only_while_the_subscriber_is_connected() {
+        let backlog = Backlog::new("r:t", 100);
+        backlog.set_connected(false);
+        backlog.add(500);
+        assert_eq!(backlog.above_for(), None, "away: no clock");
+        std::thread::sleep(Duration::from_millis(30));
+        backlog.set_connected(true);
+        let since_back = backlog.above_for().expect("above, and connected");
+        assert!(
+            since_back < Duration::from_millis(20),
+            "counted from its return, not from when it went above: {since_back:?}"
+        );
+        backlog.set_connected(false);
+        assert_eq!(backlog.above_for(), None, "away again: no clock");
     }
 }
