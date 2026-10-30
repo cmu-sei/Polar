@@ -23,7 +23,7 @@
 
 # Backpressure for the Cassini broker and client
 
-Status: **proposed 2026-10-30, not cleared.** What the broker and client bound today is in cassini-broker.md ("Bounds
+Status: **cleared 2026-10-30, not built** (the decisions are at the end). What the broker and client bound today is in cassini-broker.md ("Bounds
 and flow control") and cassini-client-reliability.md ("As built, 2026-10-30"); in short, nothing, except the session
 retention `R`. The measurement that started this: at 64 KiB saturated, a sink that drained about 11% slower than the
 broker accepted left 46 to 176 MB of payload in the broker's heap within a second (broker-baseline.md, the fourth set).
@@ -106,6 +106,25 @@ rule stay.
 - **The harness:** a sink that can be slowed (a delay per message), the broker's memory in every record (as on
   `feat/musl-mimalloc`), and a plan `slow-sink.nuon`; acceptance: the broker's peak stays within its budget plus a fixed
   overhead, and nothing is lost below `T_stall`.
+
+## Decided (the maintainer, 2026-10-30)
+
+1. **A subscriber that stays slow past `T_stall` has its connection ended.** Nothing is lost before then; after, its
+   session detaches for `R` as on any disconnect, it is owed what the budget still holds, and the topic moves again.
+2. **The budget comes from the container's memory limit:** a share of its cgroup's `memory.max`, overridable by a broker
+   setting; the per-connection window and the per-subscriber high water are fractions of it.
+3. **The frame limit is 64 MiB.** Consequences: a connection's window is never below one frame (64 MiB), and a budget
+   under 64 MiB could never admit a full frame, so a broker whose budget is smaller refuses to start and says why. The
+   client refuses to send a larger frame, with an error to the caller.
+4. **Both phases together:** reliability step 2 (messages carry `(epoch, seq)`, `PublishRequestAck` returns them, the
+   client's outbox of unacknowledged messages) and the acknowledged deliveries of step 5 (`PublishResponse` carries a
+   delivery id, `PublishResponseAck` returns it, the broker keeps a subscriber's unacknowledged deliveries), with the
+   bounds on top. The credit is the outbox on the client and the delivery outbox per subscriber; the budget, frame limit
+   and stall rule are as in phase 1. Not in this build: the offline file (step 3) and deduplication (step 4); delivery
+   stays at-least-once across a reconnect, which the handlers' MERGE-style writes tolerate (reliability doc, 5a). The
+   wire format changes, so the broker and every agent move together (one artifact per target).
+
+The choices the decisions settled are kept below for the record.
 
 ## Open decisions
 
