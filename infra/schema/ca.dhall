@@ -193,6 +193,7 @@ let render =
                   , name = v.name
                   , restartPolicy = restart.restartPolicy
                   , restartPolicyRules = restart.restartPolicyRules
+                  , terminationMessagePolicy = Some Constants.TerminationMessageFromLogs
                   , image = Some v.image
                   , imagePullPolicy = Some v.pull_policy
                   , securityContext = Some Constants.DropAllCapSecurityContext

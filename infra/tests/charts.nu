@@ -104,6 +104,27 @@ def cert_issuer_settings [out: string] {
     open --raw ($out | path join "cert-issuer-configmap.yaml") | from yaml | get data
 }
 
+# The pod spec of a catalog workload as render-catalog.nu renders it for local-minimal, from a stand-in scaffold (the
+# real ones are asked of the images on a cluster); the pod's containers do not depend on what the scaffold says.
+def catalog_pod [name: string] {
+    let scaffolds = (mktemp --directory)
+    let out = (mktemp --directory)
+    {
+        agent: { name: $name, purpose: "a stand-in" }, requires: [], shutdown_budget_minimum_secs: 30, commands: []
+        runtime: [], topics: [], sections: []
+    } | to json | save --force ($scaffolds | path join $"($name).json")
+    let r = (with-env { POLAR_SCAFFOLD_DIR: $scaffolds } {
+        do { ^nu ($INFRA | path join "render-catalog.nu") local-minimal $out --only $name } | complete
+    })
+    if $r.exit_code != 0 {
+        rm -rf $scaffolds $out
+        error make { msg: $"the render of ($name) failed: ($r.stderr | lines | last 5 | str join '; ')" }
+    }
+    let docs = (open --raw ($out | path join $"($name).yaml") | split row "\n---\n" | each {|d| $d | from yaml })
+    rm -rf $scaffolds $out
+    $docs | where {|d| ($d.kind? | default "") in ["Job" "Deployment"] } | first | get spec.template.spec
+}
+
 def main [] {
     # The charts' Dhall reads the node registry from the environment, which render.nu sets; these render a chart without it.
     $env.POLAR_NODE_REGISTRY = (node_registry local-minimal)
@@ -127,6 +148,26 @@ def main [] {
             rm $file
             assert equal $r.exit_code 0 $r.stderr
             assert equal ($r.stdout | from yaml | get restartPolicyRules) [{ action: "RestartAllContainers" }]
+        }
+
+        # docs/architecture/deployments.md, step 4: a pod that restarts in place removes its containers, and their logs with
+        # them. A container that fails keeps its last log lines as its termination message, in the pod's status.
+        "a failed container's last log lines are its termination message, in every pod that restarts in place": {
+            let policy = "FallbackToLogsOnError"
+            # an agent, with the custody daemon and polar-init
+            let agent = (catalog_pod jira-observer)
+            let containers = [...$agent.initContainers ...$agent.containers]
+            assert equal ($containers | get name) ["polar-custody" "polar-init" "jira-observer"]
+            for c in $containers {
+                assert equal ($c.terminationMessagePolicy? | default null) $policy $c.name
+            }
+            # cert-issuer, of the `ca` kind, which has no polar-init
+            let issuer = (catalog_pod cert-issuer | get containers.0)
+            assert equal ($issuer.terminationMessagePolicy? | default null) $policy $issuer.name
+            # polar-init in a hand chart
+            let ace = (pod_of ((render ace {}) | path join "ace.yaml"))
+            let init = ($ace.initContainers | where name == "polar-init" | first)
+            assert equal ($init.terminationMessagePolicy? | default null) $policy "ace's polar-init"
         }
 
         # docs/architecture/deployments.md, step 4: ace, a pod with polar-init, restarts in place, one pod at a time.

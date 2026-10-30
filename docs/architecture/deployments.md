@@ -445,3 +445,30 @@ pod in place, under its UID, daemon and polar-init again. A second `up.nu` chang
 - nothing waits forever in `up.nu`, and the health checks read a restarting pod as they should (the item "To read when
   built", above).
 
+## A failed container's last log lines (2026-10-30)
+
+Why: a whole-pod restart removes every container, and its log with it, and leaves each one's `lastState` the kubelet's
+own (exit 137, `RestartingAllContainers`; "Read when built", above). jira-observer failed on u7c with nothing left to
+say why.
+
+*The change:* every container of a pod that restarts in place has `terminationMessagePolicy: FallbackToLogsOnError`
+(`Constants.TerminationMessageFromLogs`): the catalog's workload container (`schema/agent.dhall`, `schema/ca.dhall`),
+the custody daemon (`agent.dhall`), and `polar-init` wherever it runs (`functions.makePolarInitContainerWith`, so the
+hand charts' too). A container that exits non-zero without writing `/dev/termination-log` then has the tail of its log
+(at most 80 lines and 2 KiB) as its termination message. Test: `infra/tests/charts.nu`, "a failed container's last log
+lines are its termination message".
+
+*What it does not keep (read on u7c, 2026-10-30, a watch on jira-observer's pod, before the change):* the container's
+own ending is in the pod's status for about two seconds, `state.terminated` with its exit code (1) and reason `Error`;
+then the kubelet removes it, its `state` is `waiting` (`RestartingAllContainers`) and its `lastState` the kubelet's
+record, whose message is the kubelet's ("The container is removed because RestartAllContainers in place"). So the
+termination message is in that window and nowhere after: `kubectl describe` after the restart does not show it. It is
+read by watching the pod across a restart:
+
+    kubectl get pod -n polar -l name=<workload> -w -o json \
+      | jq -c '.status.containerStatuses[]? | select(.state.terminated) | {name, exit: .state.terminated.exitCode, message: .state.terminated.message}'
+
+*To check on the cluster* once deployed: the watch above shows the message for a failing workload (jira-observer on a
+placeholder Jira). If it never does, the kubelet does not publish the terminated state with its message before removing
+the container, and keeping the cause needs something that outlives the container (a file in the pod's health volume,
+which survives a restart in place).

@@ -247,6 +247,11 @@ let RestartAllContainersOnEveryExit =
         { operator = "NotIn", values = Some ([] : List Natural) }
       }
 
+-- Where a container that fails leaves its last log lines: its termination message, in the pod's status, when it writes
+-- none of its own. A pod that restarts in place removes its containers and their logs (docs/architecture/deployments.md,
+-- step 4), so without it why a container failed is gone with the container.
+let TerminationMessageFromLogs = "FallbackToLogsOnError"
+
 in  { PolarNamespace
     , GraphNamespace
     , AuthNamespace
@@ -280,6 +285,7 @@ in  { PolarNamespace
     , RejectSidecarAnnotation
     , JobPodReplacementPolicy
     , RestartAllContainersOnEveryExit
+    , TerminationMessageFromLogs
     , commonClientTls
     , certEmptyDirVolume
     , saTokenVolume
