@@ -176,7 +176,7 @@ the broker's bounds; the client's bounds; the harness's slow sink.
 
 The choices the decisions settled are kept below for the record.
 
-## Review before merge (2026-10-30): defects found, NOT MERGED
+## Review before merge (2026-10-30): defects found, then fixed on the branch
 
 Read from the code of `79980d3b..d70bbfb7`; paths relative to `src/agents/`. Confirmed means read end to end (three
 also checked by hand); plausible means each link was read but the whole was not reproduced.
@@ -215,6 +215,67 @@ construction), and its `stopped_at < count` passes on the global alarm alone. No
 Also: the tracing panic ("tried to clone a span ... already closed") is `span.enter()` guards held across `.await` in
 the broker and client; the assert is not debug-only (tracing-subscriber 0.3.23 `registry/sharded.rs:317`), so it panics
 a worker in release. On this branch `revocation` failed 3 runs in 3, on `main` 1 in 3 (run alone, 2026-10-30).
+
+### Fixed (2026-10-30)
+
+The branch was rebased onto main's tracing fix (`70d62aec`, which holds no entered span across an await); the read
+loop it conflicted with keeps both: no guard across a wait, and the frame check and admission. Each fix below came
+with a test that failed first, and fails again with the fix mutated away. Paths relative to `src/agents/cassini/`.
+
+1. **Recovery from an exhausted budget is bounded by the stall bound.** Acknowledgements never wait behind a
+   publish's admission: the client writes them from a task of its own per connection, beside its mailbox
+   (`spawn_ack_writer`, `client/src/lib.rs:613`), and the broker's reader, while a small publish waits, reads on,
+   passing acknowledgements at once and keeping the first other frame until the publish is admitted (`Next`,
+   `broker/src/listener.rs:178`, the loop from 1146). High water counts frame bytes, as the budget charges them
+   (`Payload::weight`, `types/src/held.rs:105`, set from the charge in `charged`); an away subscriber that sheds lets
+   go of all it was counted for (`shed_if_away`, `subscriber.rs:852`). The budget's watchdog (`spawn_watchdog`,
+   `budget.rs:389`) runs every stall check while the budget is exhausted: it tells the Listeners again (the alarm no
+   longer reaches only those away when it rose), and ends the connections of subscribers that hold anything and have
+   made no progress for the stall bound (`Backlog::stalled_for`, `held.rs:217`), so subscribers each under their
+   mark cannot hold the budget for good. Tests (`broker/tests/backpressure.rs`):
+   `subscribers_below_their_high_water_that_stop_reading_do_not_stop_the_broker` (before: still exhausted after six
+   stall bounds; it also fails with the alarm not re-sent, and with acknowledgements through the mailbox, when the
+   processor is taken for stalled), `acknowledgements_behind_a_publish_that_waits_for_the_budget_are_read` (before:
+   the publish waited out the stall bound), `what_a_subscriber_is_owed_counts_each_message_s_frame_not_only_its_payload`,
+   `a_subscriber_away_when_the_budget_is_exhausted_lets_go_of_all_it_was_owed`,
+   `a_client_that_publishes_and_subscribes_under_an_exhausted_budget_recovers`, and `held.rs`'s
+   `a_subscriber_stalls_from_its_last_progress_while_it_holds_anything`.
+2. **A resumed subscriber is given the stall bound.** The stall clock runs only while the subscriber is connected
+   above its mark: `add` starts it only when connected, and a return above the mark starts it afresh
+   (`Backlog::add`, `set_connected`, `held.rs:239, 293`). Tests: `held.rs`'s
+   `the_stall_clock_runs_only_while_the_subscriber_is_connected`; `backpressure.rs`'s
+   `a_subscriber_back_from_away_is_given_the_stall_bound_to_catch_up` (away past the bound with 16 MiB held; before:
+   cut at once).
+3. **The client's credit does not wedge.** A publish kept in the buffer after the outbox emptied is promoted at once
+   (`keep`, `client/src/facade.rs:333`). Test: `facade.rs`'s
+   `a_buffered_publish_that_arrives_after_the_outbox_emptied_is_sent` (before: never sent).
+4. **A publish dropped for want of budget is not acknowledged.** The topic answers it with a refusal for now
+   (`topic.rs:837`), which its client keeps and sends again. Test: `broker/tests/topic.rs`'s
+   `a_message_no_one_can_hold_while_the_budget_is_exhausted_is_refused_for_now`.
+5. **A transient refusal does not settle the outbox.** The refusal is typed on the wire:
+   `PublishRefusal { Denied, Unavailable }` (`types/src/lib.rs:636`), in `PublishResponse { refusal }`. The broker
+   marks policy refusals `Denied` and the transient ones `Unavailable` (shutting down, forward failed, no broker, the
+   budget: `broker.rs:909`, `session.rs:1235, 1271`, `listener.rs:1807`, `topic.rs:868`); the client settles only a
+   `Denied` one, and defers an `Unavailable` one (`ClientEvent::PublishDeferred`, `client/src/lib.rs:956`): the facade
+   keeps it in the outbox and sends it again after its backoff, or on the next registration (`Deferred`, `Resend`,
+   `facade.rs:520`). Tests: `client/src/lib.rs`'s `an_unavailable_refusal_defers_the_publish_and_a_denied_one_settles_it`;
+   `facade.rs`'s `a_deferred_publish_is_kept_and_sent_again_and_a_refused_one_is_not`; `broker/tests/acknowledgments.rs`'s
+   `a_publish_refused_while_the_broker_shuts_down_is_sent_to_the_next_broker`.
+
+The tests that could not fail are repaired: `peak <= BUDGET` is gone, and `stops_reading` runs under a budget of
+256 MiB, which one subscriber cannot exhaust: it asserts the alarm never rose, and that the subscriber's backlog went
+above its high water and held the topic back.
+
+**Known limits, not fixed (findings 6 to 8):** per-message overhead outside the payload is not charged (the
+`Pending`, outbox entries, `Listener.deliveries`), so with small messages real memory can exceed the budget; high
+water counts frames now, which narrows it for what subscribers hold, not for the broker's bookkeeping. High water is soft:
+`pump` on `TopicResume` can pass the mark by the waiting windows; the budget still bounds the whole.
+git-repo-observer holds a whole walk before publishing it, so a first walk of a large repository is in memory at
+once. And a large frame's body is not read before it is admitted, so an acknowledgement behind it waits, as does any
+frame behind the one a waiting small publish keeps; the watchdog bounds that by the stall bound.
+
+**Not done:** a protocol version at registration (the wire note above). Every image is still rebuilt together; a
+mismatched client still fails to decode rather than being told.
 
 ## Open decisions
 

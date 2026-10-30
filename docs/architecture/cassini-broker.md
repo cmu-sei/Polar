@@ -289,26 +289,40 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
 - **Ingress credit per connection** (`Window`, `budget.rs:364`): a quarter of the budget, never less than one frame.
   A frame over 64 KiB (`SMALL_FRAME`) is admitted, window then budget, before its body is read; a smaller one is read
   first, so acknowledgements and subscriptions are never stuck behind the frames they would make room for, and a
-  publish among them is admitted before it goes on (`listener.rs`, `admit` at 125, the read loop from 995, `charged`
-  at 231). While it waits the reader reads nothing, and TCP pushes back. The credit travels in the publish
+  publish among them is admitted before it goes on (`listener.rs`, `admit` at 128, the read loop from 1116, `charged`
+  at 351). While a small publish waits the reader goes on reading: an acknowledgement is passed on at once, and the
+  first other frame is kept (only its length, if it is a large one) until the publish is admitted, when reading
+  stops and TCP pushes back (`Next`, `read_header`, `read_body`, `listener.rs:178-272`). The client writes its delivery
+  acknowledgements from a task of its own per connection, beside the transport's mailbox, so they never wait behind its
+  publishes there (`spawn_ack_writer`, `client/src/lib.rs:613`). The credit travels in the publish
   (`BrokerMessage::PublishRequest { window }`) and is released when the topic accepts it.
-- **Per-subscriber high water** (`cassini_types::Backlog`, `types/src/held.rs:160`): the bytes in the subscriber's
-  delivery outbox, delivered and not acknowledged; the mark is an eighth of the budget (never under 1 MiB), with
+- **Per-subscriber high water** (`cassini_types::Backlog`, `types/src/held.rs:170`): the bytes in the subscriber's
+  delivery outbox, delivered and not acknowledged, counted as their frames were charged (`Payload::weight`, so small
+  messages are counted with their overhead on the wire, as the budget counts them); the mark is an eighth of the budget (never under 1 MiB), with
   hysteresis down to half of it. A topic accepts no publish (no fan-out, no acknowledgement) while a connected
   subscriber of it is above its mark: the publish waits in the topic, in order, holding its connection's credit
   (`topic.rs`, `pump` at 721, `accept` at 787); a subscriber that falls below its low water, goes away or ends tells
   its topic (`TopicResume`).
 - **The stall bound** (`CASSINI_STALL_SECS`, default 30 s, more than 0 and under 60 s, `settings.rs:85`): a topic held
   back checks every quarter of it (between 50 ms and 5 s) for a subscriber above its high water for longer
-  (`end_stalled`, `topic.rs:751`). That subscriber's connection is ended: the session manager logs it with the
-  identity, the topic, the bytes held and for how long, and the session agent cuts the connection from outside its
-  Listener (`listener::cut_connection`, `listener.rs:109`), which may be waiting on a write to that client: the
-  write and the reader give up, and the session detaches for `R` as on any lost connection. The topic moves again.
+  (`end_stalled`, `topic.rs:756`). The clock counts only time spent connected above the mark: a subscriber that went
+  above it while away starts it when it comes back (`Backlog::set_connected`, `held.rs:293`). That subscriber's
+  connection is ended: the session manager logs it with the identity, the topic, the bytes held and for how long, and
+  the session agent cuts the connection from outside its Listener (`listener::cut_connection`, `listener.rs:109`),
+  which may be waiting on a write to that client: the write and the reader give up, and the session detaches for `R`
+  as on any lost connection. The topic moves again.
+- **The watchdog** (`spawn_watchdog`, `budget.rs:389`, started by the broker): subscribers each under their mark can
+  hold the whole budget with no topic held back, so no topic looks for a stall. Every stall check while the budget
+  is exhausted, the watchdog tells the Listeners again (so a subscriber that went away since the alarm rose lets go
+  of what it held), and ends, as above, the connection of every subscriber that holds anything and has made no
+  progress (no acknowledgement, no return) for the stall bound (`stalled_while_exhausted`, `budget.rs:375`;
+  `Backlog::stalled_for`, `held.rs:217`). Recovery from an exhausted budget is so bounded by the stall bound.
 - **Holders bounded by the budget:** while it is exhausted, a topic's queue for no subscribers refuses the newest
-  (`topic.rs:821`) and a subscriber whose client is away refuses the newest (`subscriber.rs:940`), counted and
-  logged; and on the alarm every subscriber whose client is away lets go of what it held (`shed_if_away`,
-  `subscriber.rs:845`), counted and logged, so what a subscriber is owed is kept only while the budget allows. The age
-  bounds (`R`, the queue's 180 s) stay.
+  (`topic.rs:837`), answering its publisher with a refusal for now (`PublishRefusal::Unavailable`), which its client
+  keeps and sends again, not an acknowledgement; and a subscriber whose client is away refuses the newest
+  (`subscriber.rs:948`), counted and logged; and on the alarm (raised, and told again by the watchdog) every
+  subscriber whose client is away lets go of all it held (`shed_if_away`, `subscriber.rs:852`), counted and logged, so
+  what a subscriber is owed is kept only while the budget allows. The age bounds (`R`, the queue's 180 s) stay.
 - **Observable:** the budget's report every 30 s while something is held, waits or was counted
   (`broker/src/budget_report.rs`: use, peak, readers waiting, refusals, slow-subscriber disconnections, alarms, the
   largest holders), and the log lines above. There is no metrics path in the broker to add them to: `metrics.rs` is
@@ -317,14 +331,19 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
   (the trap recorded under "Policy in the broker").
 - **Tests:** `budget.rs`'s and `types/src/held.rs`'s own; `broker/tests/props.rs`,
   `the_budget_holds_each_message_once_and_never_more_than_its_limit` (the budget as a model);
-  `broker/tests/backpressure.rs` (a subscriber that stops reading, with 256 KiB and with 16 KiB messages: the
-  publisher's acknowledgements stop, the budget's peak stays within it and reaches the high water, the connection is
-  ended after the stall bound, the publisher completes, the session is kept; a slow subscriber within the bound
-  receives everything in order; a budget under a frame is refused); `settings.rs`'s; `broker/tests/frames.rs`.
-- **Known limits:** a connection that both publishes large frames and subscribes can have its acknowledgements wait
-  behind a publish its reader is waiting to admit; until the stall bound or the budget's recovery it is slowed. The
+  `broker/tests/backpressure.rs` (a subscriber that stops reading, with 256 KiB and with 16 KiB messages, under a
+  budget its alarm never reaches: its backlog goes above the high water and holds the topic back, the publisher's
+  acknowledgements stop, the connection is ended after the stall bound, the publisher completes, the session is kept;
+  a slow subscriber within the bound receives everything in order; one back from away is given the bound to catch
+  up; the frame-byte count; the recovery from an exhausted budget, with acknowledgements read around a waiting
+  publish, a processor that publishes to itself, subscribers under their mark that stop reading, and a subscriber
+  away that lets go of all it held; a budget under a frame is refused); `settings.rs`'s; `broker/tests/frames.rs`.
+- **Known limits:** a large frame's body is not read before it is admitted, so an acknowledgement behind it waits,
+  as does any frame behind the one kept while a small publish waits; the watchdog bounds that by the stall bound. The
   broker's own working memory (the copy a write makes of a frame, TLS buffers, mailboxes of small messages) is outside
-  the budget, hence the share of half.
+  the budget, hence the share of half; and per-message overhead is not charged (cassini-backpressure.md, review
+  finding 6). High water is soft: a topic resuming pumps what waits before it looks again, so a subscriber can pass
+  its mark by the connections' windows; the budget still bounds the whole (finding 7).
 
 ## Running it on its own
 
