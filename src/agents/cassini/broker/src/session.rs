@@ -36,7 +36,7 @@ use ractor::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, error, info, trace, trace_span, warn};
+use tracing::{Instrument, debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
@@ -600,151 +600,154 @@ impl SessionManager {
         let span =
             trace_span!("session_manager.registration_request", %client_id, ?registration_id);
         try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-        trace!("received registration request");
+        async {
+            trace!("received registration request");
 
-        if state.is_shutting_down {
-            warn!("Rejecting registration request during shutdown");
-            // Use stored listener_mgr to send response (listener manager will forward to correct listener)
-            if let Some(listener_mgr) = &state.listener_mgr {
-                listener_mgr.send_message(BrokerMessage::RegistrationResponse {
-                    client_id,
-                    result: Err("Broker is shutting down".to_string()),
-                    trace_ctx: Some(span.context()),
-                })?;
-                return Ok(());
-            } else {
-                error!("SessionManager: listener_mgr not set, cannot send registration response");
-                return Ok(());
-            }
-        }
-
-        let Some(listener_ref) = where_is(client_id.clone()) else {
-            warn!("{REGISTRATION_REQ_FAILED_TXT} {CLIENT_NOT_FOUND_TXT}");
-            return Ok(());
-        };
-
-        // Try to reuse an existing session. Only the identity that owns it may: a registration id is not a bearer token.
-        if let Some(existing_id) = &registration_id {
-            if let Some(session) = state.sessions.get(existing_id)
-                && !session.superseded
-                && !may_resume(session.identity.as_deref(), peer_identity.as_deref())
-            {
-                warn!(
-                    registration_id = %existing_id,
-                    session_identity = ?session.identity,
-                    connection_identity = ?peer_identity,
-                    "a connection asked to resume a session that is not its identity's: giving it a new one"
-                );
-            }
-            if let Some(session) = state.sessions.get_mut(existing_id).filter(|session| {
-                !session.superseded
-                    && may_resume(session.identity.as_deref(), peer_identity.as_deref())
-            }) {
-                info!(registration_id = %existing_id, "reusing existing session");
-                session.detached_at = None;
-                if let Err(e) = session
-                    .agent_ref
-                    .send_message(BrokerMessage::ReassignClient {
-                        client_ref: listener_ref.clone().into(),
+            if state.is_shutting_down {
+                warn!("Rejecting registration request during shutdown");
+                // Use stored listener_mgr to send response (listener manager will forward to correct listener)
+                if let Some(listener_mgr) = &state.listener_mgr {
+                    listener_mgr.send_message(BrokerMessage::RegistrationResponse {
+                        client_id,
+                        result: Err("Broker is shutting down".to_string()),
                         trace_ctx: Some(span.context()),
-                    })
-                {
-                    error!("Failed to reassign client to existing session: {}", e);
+                    })?;
+                    return Ok(());
                 } else {
+                    error!("SessionManager: listener_mgr not set, cannot send registration response");
+                    return Ok(());
+                }
+            }
+
+            let Some(listener_ref) = where_is(client_id.clone()) else {
+                warn!("{REGISTRATION_REQ_FAILED_TXT} {CLIENT_NOT_FOUND_TXT}");
+                return Ok(());
+            };
+
+            // Try to reuse an existing session. Only the identity that owns it may: a registration id is not a bearer token.
+            if let Some(existing_id) = &registration_id {
+                if let Some(session) = state.sessions.get(existing_id)
+                    && !session.superseded
+                    && !may_resume(session.identity.as_deref(), peer_identity.as_deref())
+                {
+                    warn!(
+                        registration_id = %existing_id,
+                        session_identity = ?session.identity,
+                        connection_identity = ?peer_identity,
+                        "a connection asked to resume a session that is not its identity's: giving it a new one"
+                    );
+                }
+                if let Some(session) = state.sessions.get_mut(existing_id).filter(|session| {
+                    !session.superseded
+                        && may_resume(session.identity.as_deref(), peer_identity.as_deref())
+                }) {
+                    info!(registration_id = %existing_id, "reusing existing session");
+                    session.detached_at = None;
+                    if let Err(e) = session
+                        .agent_ref
+                        .send_message(BrokerMessage::ReassignClient {
+                            client_ref: listener_ref.clone().into(),
+                            trace_ctx: Some(span.context()),
+                        })
+                    {
+                        error!("Failed to reassign client to existing session: {}", e);
+                    } else {
+                        let Some(_listener_mgr) = &state.listener_mgr else {
+                            error!(
+                                "SessionManager: listener_mgr not set, cannot send registration response"
+                            );
+                            return Ok(());
+                        };
+                        listener_ref.send_message(BrokerMessage::RegistrationResponse {
+                            client_id: client_id.clone(),
+                            result: Ok(existing_id.clone()),
+                            trace_ctx: Some(span.context()),
+                        })?;
+
+                        // Only now that the session agent has been told of the new connection are
+                        // the subscribers told to replay what they held for it. Told at the same
+                        // time (as the broker used to), they replayed to the old, dead connection
+                        // before it was replaced, and the messages failed again.
+                        if let Some(subscriber_mgr) = &state.subscriber_mgr {
+                            let _ = subscriber_mgr.send_message(BrokerMessage::RegistrationRequest {
+                                registration_id: Some(existing_id.clone()),
+                                client_id,
+                                trace_ctx: Some(span.context()),
+                                peer_identity: None,
+                            });
+                        } else {
+                            warn!(
+                                "SessionManager: subscriber_mgr not set, cannot rehydrate subscribers"
+                            );
+                        }
+                        return Ok(());
+                    }
+                } else {
+                    warn!(registration_id = %existing_id, "requested session not found, creating new one");
+                }
+            }
+
+            // Create new session
+            let new_id = Uuid::new_v4().to_string();
+            info!(registration_id = %new_id, "starting session for client");
+
+            match Actor::spawn_linked(
+                Some(new_id.clone()),
+                SessionAgent,
+                SessionAgentArgs {
+                    client_ref: listener_ref.clone().into(),
+                },
+                myself.clone().into(),
+            )
+            .await
+            {
+                Ok((session_agent, _)) => {
+                    state.sessions.insert(
+                        new_id.clone(),
+                        Session {
+                            agent_ref: session_agent.clone(),
+                            pending_publishes: 0,
+                            detached_at: None,
+                            identity: peer_identity.clone(),
+                            superseded: false,
+                        },
+                    );
+                    // A client asking to resume a session that was superseded is the instance that
+                    // lost it, still running. It is given a session of its own, but it does not
+                    // displace the one that took over: two live instances would otherwise take
+                    // turns closing each other's connections.
+                    let is_the_loser = registration_id
+                        .as_ref()
+                        .is_some_and(|id| state.held.iter().any(|held| &held.registration_id == id));
+                    if let Some(identity) = &peer_identity
+                        && !is_the_loser
+                    {
+                        Self::supersede_older(state, identity, &new_id, &client_id);
+                    }
+                    // Pass broker ref to the session agent
+                    let _ = session_agent.send_message(BrokerMessage::SetBrokerRef {
+                        broker: state.broker.clone(),
+                    });
                     let Some(_listener_mgr) = &state.listener_mgr else {
                         error!(
-                            "SessionManager: listener_mgr not set, cannot send registration response"
+                            "SessionManager: listener_mgr not set, cannot send registration response for new session"
                         );
                         return Ok(());
                     };
                     listener_ref.send_message(BrokerMessage::RegistrationResponse {
-                        client_id: client_id.clone(),
-                        result: Ok(existing_id.clone()),
+                        client_id,
+                        result: Ok(new_id.clone()),
                         trace_ctx: Some(span.context()),
                     })?;
-
-                    // Only now that the session agent has been told of the new connection are
-                    // the subscribers told to replay what they held for it. Told at the same
-                    // time (as the broker used to), they replayed to the old, dead connection
-                    // before it was replaced, and the messages failed again.
-                    if let Some(subscriber_mgr) = &state.subscriber_mgr {
-                        let _ = subscriber_mgr.send_message(BrokerMessage::RegistrationRequest {
-                            registration_id: Some(existing_id.clone()),
-                            client_id,
-                            trace_ctx: Some(span.context()),
-                            peer_identity: None,
-                        });
-                    } else {
-                        warn!(
-                            "SessionManager: subscriber_mgr not set, cannot rehydrate subscribers"
-                        );
-                    }
-                    return Ok(());
                 }
-            } else {
-                warn!(registration_id = %existing_id, "requested session not found, creating new one");
+                Err(e) => {
+                    error!(registration_id = %new_id, "failed to spawn session agent: {e}");
+                }
             }
+            Ok::<(), ActorProcessingErr>(())
         }
-
-        // Create new session
-        let new_id = Uuid::new_v4().to_string();
-        info!(registration_id = %new_id, "starting session for client");
-
-        match Actor::spawn_linked(
-            Some(new_id.clone()),
-            SessionAgent,
-            SessionAgentArgs {
-                client_ref: listener_ref.clone().into(),
-            },
-            myself.clone().into(),
-        )
+        .instrument(span.clone())
         .await
-        {
-            Ok((session_agent, _)) => {
-                state.sessions.insert(
-                    new_id.clone(),
-                    Session {
-                        agent_ref: session_agent.clone(),
-                        pending_publishes: 0,
-                        detached_at: None,
-                        identity: peer_identity.clone(),
-                        superseded: false,
-                    },
-                );
-                // A client asking to resume a session that was superseded is the instance that
-                // lost it, still running. It is given a session of its own, but it does not
-                // displace the one that took over: two live instances would otherwise take
-                // turns closing each other's connections.
-                let is_the_loser = registration_id
-                    .as_ref()
-                    .is_some_and(|id| state.held.iter().any(|held| &held.registration_id == id));
-                if let Some(identity) = &peer_identity
-                    && !is_the_loser
-                {
-                    Self::supersede_older(state, identity, &new_id, &client_id);
-                }
-                // Pass broker ref to the session agent
-                let _ = session_agent.send_message(BrokerMessage::SetBrokerRef {
-                    broker: state.broker.clone(),
-                });
-                let Some(_listener_mgr) = &state.listener_mgr else {
-                    error!(
-                        "SessionManager: listener_mgr not set, cannot send registration response for new session"
-                    );
-                    return Ok(());
-                };
-                listener_ref.send_message(BrokerMessage::RegistrationResponse {
-                    client_id,
-                    result: Ok(new_id.clone()),
-                    trace_ctx: Some(span.context()),
-                })?;
-            }
-            Err(e) => {
-                error!(registration_id = %new_id, "failed to spawn session agent: {e}");
-            }
-        }
-        Ok(())
     }
 
     async fn handle_actor_terminated(

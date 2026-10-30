@@ -1393,36 +1393,39 @@ impl Actor for TcpClientActor {
             broker_addr = %addr,
             server_name = %state.server_name,
         );
-        let _g = connect_span.enter();
-        info!("Connecting to {addr}");
+        async {
+            info!("Connecting to {addr}");
 
-        let tls_stream = TcpClientActor::connect_with_backoff(
-            addr.clone(),
-            state.server_name.clone(),
-            &state.client_config,
-        )
-        .await?;
+            let tls_stream = TcpClientActor::connect_with_backoff(
+                addr.clone(),
+                state.server_name.clone(),
+                &state.client_config,
+            )
+            .await?;
 
-        info!("TLS connection established");
+            info!("TLS connection established");
 
-        let (reader, write_half) = split(tls_stream);
-        let writer = tokio::io::BufWriter::new(write_half);
+            let (reader, write_half) = split(tls_stream);
+            let writer = tokio::io::BufWriter::new(write_half);
 
-        state.reader = Some(reader);
-        state.writer = Some(Arc::new(Mutex::new(writer)));
+            state.reader = Some(reader);
+            state.writer = Some(Arc::new(Mutex::new(writer)));
 
-        info!("Successfully connected to {addr}. Listening for messages.");
+            info!("Successfully connected to {addr}. Listening for messages.");
 
-        // Spawn the long-running reader loop under its own span (spawn_reader should instrument the task).
-        self.spawn_reader(myself.clone(), state)?;
+            // Spawn the long-running reader loop under its own span (spawn_reader should instrument the task).
+            self.spawn_reader(myself.clone(), state)?;
 
-        // Kick off registration *after* connection is guaranteed
-        info!("Requesting registration");
-        myself
-            .send_message(TcpClientMessage::Register)
-            .map_err(ActorProcessingErr::from)?;
+            // Kick off registration *after* connection is guaranteed
+            info!("Requesting registration");
+            myself
+                .send_message(TcpClientMessage::Register)
+                .map_err(ActorProcessingErr::from)?;
 
-        Ok(())
+            Ok::<(), ActorProcessingErr>(())
+        }
+        .instrument(connect_span)
+        .await
     }
 
     async fn post_stop(

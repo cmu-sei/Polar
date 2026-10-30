@@ -26,7 +26,7 @@ use cassini_types::{BrokerMessage, ControlError, ControlOp, ControlResult, Shutd
 use ractor::{Actor, ActorProcessingErr, ActorRef, concurrency::Duration, rpc::CallResult};
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace_span, warn};
+use tracing::{Instrument, debug, error, info, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::UNEXPECTED_MESSAGE_STR;
@@ -182,12 +182,14 @@ impl ControlManager {
             supervisor.send_message(BrokerMessage::InitiateShutdownPhase {
                 phase: ShutdownPhase::StopAcceptingNewConnections,
             })?;
+            drop(_g);
             // Start the global timeout for this phase
             self.start_phase_timeout(
                 myself.clone(),
                 state,
                 ShutdownPhase::StopAcceptingNewConnections,
             )
+            .instrument(span)
             .await?;
         }
         Ok(())
@@ -223,8 +225,10 @@ impl ControlManager {
         info!("Shutdown phase completed: {:?}", phase);
         state.phase_completed = true;
 
+        drop(_g);
         // Proceed to next phase
         self.advance_to_next_phase(myself.clone(), state, phase)
+            .instrument(span)
             .await?;
         Ok(())
     }
@@ -256,246 +260,255 @@ impl ControlManager {
         // Parent span for the whole control request; attach upstream ctx if present.
         let span = trace_span!("cassini.control_manager.handle", %registration_id, op = ?op);
         try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
 
-        let resp = match op {
-            ControlOp::Ping => {
-                debug!("Control Manager Received Ping");
-                BrokerMessage::ControlResponse {
-                    registration_id,
-                    result: Ok(ControlResult::Pong),
-                    trace_ctx: Some(span.context()),
-                }
-            }
-            ControlOp::ListSessions => {
-                // Make this span a *child* of the request span (not a new root).
-                let span = trace_span!(
-                    parent: &span,
-                    "cassini.control_manager.list_sessions",
-                    timeout_ms = 100u64
-                );
-                let _g = span.enter();
-                let t0 = Instant::now();
-
-                match state
-                    .session_mgr
-                    .call(
-                        |reply_to| BrokerMessage::GetSessions {
-                            reply_to,
-                            trace_ctx: Some(span.context()),
-                        },
-                        Some(Duration::from_millis(100)),
-                    )
-                    .await
-                {
-                    Ok(result) => match result {
-                        CallResult::Success(sessions) => {
-                            debug!(
-                                elapsed_ms = t0.elapsed().as_millis(),
-                                sessions = sessions.len(),
-                                "list_sessions ok"
-                            );
-                            BrokerMessage::ControlResponse {
-                                registration_id,
-                                result: Ok(ControlResult::SessionList(sessions)),
-                                trace_ctx: Some(span.context()),
-                            }
-                        }
-                        CallResult::SenderError => {
-                            warn!(
-                                elapsed_ms = t0.elapsed().as_millis(),
-                                "list_sessions sender_error"
-                            );
-                            BrokerMessage::ControlResponse {
-                                registration_id,
-                                result: Err(ControlError::InternalError(
-                                    "Operation failed".to_string(),
-                                )),
-                                trace_ctx: Some(span.context()),
-                            }
-                        }
-                        CallResult::Timeout => {
-                            warn!(
-                                elapsed_ms = t0.elapsed().as_millis(),
-                                "list_sessions timeout"
-                            );
-                            BrokerMessage::ControlResponse {
-                                registration_id,
-                                result: Err(ControlError::InternalError(
-                                    "Operation timed out.".to_string(),
-                                )),
-                                trace_ctx: Some(span.context()),
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        // ractor::rpc::CallError: actor stopped/mailbox closed/etc.
-                        error!(elapsed_ms = t0.elapsed().as_millis(), error = %e, "session_mgr call failed");
-                        BrokerMessage::ControlResponse {
-                            registration_id,
-                            result: Err(ControlError::InternalError(
-                                "Session manager unavailable".to_string(),
-                            )),
-                            trace_ctx: Some(span.context()),
-                        }
-                    }
-                }
-            }
-            ControlOp::ListTopics => {
-                let span = trace_span!(
-                    parent: &span,
-                    "cassini.control_manager.list_topics",
-                    timeout_ms = 100u64
-                );
-                let _g = span.enter();
-                let t0 = Instant::now();
-
-                match state
-                    .topic_mgr
-                    .call(
-                        |reply_to| BrokerMessage::GetTopics {
-                            registration_id: registration_id.clone(),
-                            reply_to,
-                            trace_ctx: Some(span.context()),
-                        },
-                        Some(Duration::from_millis(100)),
-                    )
-                    .await
-                {
-                    Ok(result) => match result {
-                        CallResult::Success(topics) => {
-                            debug!(
-                                elapsed_ms = t0.elapsed().as_millis(),
-                                topics = topics.len(),
-                                "list_topics ok"
-                            );
-                            BrokerMessage::ControlResponse {
-                                registration_id,
-                                result: Ok(ControlResult::TopicList(topics)),
-                                trace_ctx: Some(span.context()),
-                            }
-                        }
-                        CallResult::SenderError => {
-                            warn!(
-                                elapsed_ms = t0.elapsed().as_millis(),
-                                "list_topics sender_error"
-                            );
-                            BrokerMessage::ControlResponse {
-                                registration_id,
-                                result: Err(ControlError::InternalError(
-                                    "Operation failed".to_string(),
-                                )),
-                                trace_ctx: Some(span.context()),
-                            }
-                        }
-                        CallResult::Timeout => {
-                            warn!(elapsed_ms = t0.elapsed().as_millis(), "list_topics timeout");
-                            BrokerMessage::ControlResponse {
-                                registration_id,
-                                result: Err(ControlError::InternalError(
-                                    "Operation timed out.".to_string(),
-                                )),
-                                trace_ctx: Some(span.context()),
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        error!(elapsed_ms = t0.elapsed().as_millis(), error = %e, "topic_mgr call failed");
-                        BrokerMessage::ControlResponse {
-                            registration_id,
-                            result: Err(ControlError::InternalError(
-                                "Topic manager unavailable".to_string(),
-                            )),
-                            trace_ctx: Some(span.context()),
-                        }
-                    }
-                }
-            }
-            ControlOp::PrepareForShutdown { auth_token } => {
-                // Say so when the token is wrong. The shutdown handler refuses it too, but it
-                // answers nobody, and an acknowledgement for a request that was refused tells an
-                // operator the broker is going down when it is not.
-                if !tokens_match(state.shutdown_auth_token.as_deref(), Some(&auth_token)) {
-                    error!("Refusing a shutdown request: invalid shutdown token");
+        async {
+            let resp = match op {
+                ControlOp::Ping => {
+                    debug!("Control Manager Received Ping");
                     BrokerMessage::ControlResponse {
                         registration_id,
-                        result: Err(ControlError::PermissionDenied(
-                            "invalid shutdown token".to_string(),
+                        result: Ok(ControlResult::Pong),
+                        trace_ctx: Some(span.context()),
+                    }
+                }
+                ControlOp::ListSessions => {
+                    // Make this span a *child* of the request span (not a new root).
+                    let span = trace_span!(
+                        parent: &span,
+                        "cassini.control_manager.list_sessions",
+                        timeout_ms = 100u64
+                    );
+                    async {
+                        let t0 = Instant::now();
+
+                        match state
+                            .session_mgr
+                            .call(
+                                |reply_to| BrokerMessage::GetSessions {
+                                    reply_to,
+                                    trace_ctx: Some(span.context()),
+                                },
+                                Some(Duration::from_millis(100)),
+                            )
+                            .await
+                        {
+                            Ok(result) => match result {
+                                CallResult::Success(sessions) => {
+                                    debug!(
+                                        elapsed_ms = t0.elapsed().as_millis(),
+                                        sessions = sessions.len(),
+                                        "list_sessions ok"
+                                    );
+                                    BrokerMessage::ControlResponse {
+                                        registration_id,
+                                        result: Ok(ControlResult::SessionList(sessions)),
+                                        trace_ctx: Some(span.context()),
+                                    }
+                                }
+                                CallResult::SenderError => {
+                                    warn!(
+                                        elapsed_ms = t0.elapsed().as_millis(),
+                                        "list_sessions sender_error"
+                                    );
+                                    BrokerMessage::ControlResponse {
+                                        registration_id,
+                                        result: Err(ControlError::InternalError(
+                                            "Operation failed".to_string(),
+                                        )),
+                                        trace_ctx: Some(span.context()),
+                                    }
+                                }
+                                CallResult::Timeout => {
+                                    warn!(
+                                        elapsed_ms = t0.elapsed().as_millis(),
+                                        "list_sessions timeout"
+                                    );
+                                    BrokerMessage::ControlResponse {
+                                        registration_id,
+                                        result: Err(ControlError::InternalError(
+                                            "Operation timed out.".to_string(),
+                                        )),
+                                        trace_ctx: Some(span.context()),
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                // ractor::rpc::CallError: actor stopped/mailbox closed/etc.
+                                error!(elapsed_ms = t0.elapsed().as_millis(), error = %e, "session_mgr call failed");
+                                BrokerMessage::ControlResponse {
+                                    registration_id,
+                                    result: Err(ControlError::InternalError(
+                                        "Session manager unavailable".to_string(),
+                                    )),
+                                    trace_ctx: Some(span.context()),
+                                }
+                            }
+                    }
+                    }
+                    .instrument(span.clone())
+                    .await
+                }
+                ControlOp::ListTopics => {
+                    let span = trace_span!(
+                        parent: &span,
+                        "cassini.control_manager.list_topics",
+                        timeout_ms = 100u64
+                    );
+                    async {
+                        let t0 = Instant::now();
+
+                        match state
+                            .topic_mgr
+                            .call(
+                                |reply_to| BrokerMessage::GetTopics {
+                                    registration_id: registration_id.clone(),
+                                    reply_to,
+                                    trace_ctx: Some(span.context()),
+                                },
+                                Some(Duration::from_millis(100)),
+                            )
+                            .await
+                        {
+                            Ok(result) => match result {
+                                CallResult::Success(topics) => {
+                                    debug!(
+                                        elapsed_ms = t0.elapsed().as_millis(),
+                                        topics = topics.len(),
+                                        "list_topics ok"
+                                    );
+                                    BrokerMessage::ControlResponse {
+                                        registration_id,
+                                        result: Ok(ControlResult::TopicList(topics)),
+                                        trace_ctx: Some(span.context()),
+                                    }
+                                }
+                                CallResult::SenderError => {
+                                    warn!(
+                                        elapsed_ms = t0.elapsed().as_millis(),
+                                        "list_topics sender_error"
+                                    );
+                                    BrokerMessage::ControlResponse {
+                                        registration_id,
+                                        result: Err(ControlError::InternalError(
+                                            "Operation failed".to_string(),
+                                        )),
+                                        trace_ctx: Some(span.context()),
+                                    }
+                                }
+                                CallResult::Timeout => {
+                                    warn!(elapsed_ms = t0.elapsed().as_millis(), "list_topics timeout");
+                                    BrokerMessage::ControlResponse {
+                                        registration_id,
+                                        result: Err(ControlError::InternalError(
+                                            "Operation timed out.".to_string(),
+                                        )),
+                                        trace_ctx: Some(span.context()),
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                error!(elapsed_ms = t0.elapsed().as_millis(), error = %e, "topic_mgr call failed");
+                                BrokerMessage::ControlResponse {
+                                    registration_id,
+                                    result: Err(ControlError::InternalError(
+                                        "Topic manager unavailable".to_string(),
+                                    )),
+                                    trace_ctx: Some(span.context()),
+                                }
+                            }
+                    }
+                    }
+                    .instrument(span.clone())
+                    .await
+                }
+                ControlOp::PrepareForShutdown { auth_token } => {
+                    // Say so when the token is wrong. The shutdown handler refuses it too, but it
+                    // answers nobody, and an acknowledgement for a request that was refused tells an
+                    // operator the broker is going down when it is not.
+                    if !tokens_match(state.shutdown_auth_token.as_deref(), Some(&auth_token)) {
+                        error!("Refusing a shutdown request: invalid shutdown token");
+                        BrokerMessage::ControlResponse {
+                            registration_id,
+                            result: Err(ControlError::PermissionDenied(
+                                "invalid shutdown token".to_string(),
+                            )),
+                            trace_ctx: Some(span.context()),
+                        }
+                    } else {
+                        // Forward to ControlManager's own shutdown handler
+                        myself
+                            .send_message(BrokerMessage::PrepareForShutdown {
+                                auth_token: Some(auth_token),
+                            })
+                            .ok();
+
+                        BrokerMessage::ControlResponse {
+                            registration_id,
+                            result: Ok(ControlResult::ShutdownInitiated),
+                            trace_ctx: Some(span.context()),
+                        }
+                    }
+                }
+                ControlOp::GetSessionInfo { registration_id } => {
+                    error!("ControlOp::GetSessionInfo not implemented");
+                    BrokerMessage::ControlResponse {
+                        registration_id,
+                        result: Err(ControlError::InternalError("not implemented".to_string())),
+                        trace_ctx: Some(span.context()),
+                    }
+                }
+                ControlOp::DisconnectSession { registration_id } => {
+                    error!("ControlOp::DisconnectSession not implemented");
+                    BrokerMessage::ControlResponse {
+                        registration_id,
+                        result: Err(ControlError::InternalError("not implemented".to_string())),
+                        trace_ctx: Some(span.context()),
+                    }
+                }
+                ControlOp::ListSubscribers { topic: _ } => {
+                    error!("ControlOp::ListSubscribers not implemented");
+                    BrokerMessage::ControlResponse {
+                        registration_id,
+                        result: Err(ControlError::InternalError("not implemented".to_string())),
+                        trace_ctx: Some(span.context()),
+                    }
+                }
+                ControlOp::GetBrokerStats => {
+                    error!("ControlOp::GetBrokerStats not implemented");
+                    BrokerMessage::ControlResponse {
+                        registration_id,
+                        result: Err(ControlError::InternalError("not implemented".to_string())),
+                        trace_ctx: Some(span.context()),
+                    }
+                }
+                ControlOp::ShutdownBroker { graceful: _ } => {
+                    error!("ControlOp::ShutdownBroker not implemented; use PrepareForShutdown instead");
+                    BrokerMessage::ControlResponse {
+                        registration_id,
+                        result: Err(ControlError::InternalError(
+                            "use PrepareForShutdown".to_string(),
                         )),
                         trace_ctx: Some(span.context()),
                     }
+                }
+            };
+
+            // forward response back to client
+            if let Some(session) = reply_to {
+                if let Err(e) = session.cast(resp) {
+                    warn!(error = %e, "Failed to respond to session");
                 } else {
-                    // Forward to ControlManager's own shutdown handler
-                    myself
-                        .send_message(BrokerMessage::PrepareForShutdown {
-                            auth_token: Some(auth_token),
-                        })
-                        .ok();
-
-                    BrokerMessage::ControlResponse {
-                        registration_id,
-                        result: Ok(ControlResult::ShutdownInitiated),
-                        trace_ctx: Some(span.context()),
-                    }
+                    // Helpful breadcrumb when correlating "request -> response" without opening every span.
+                    debug!("ControlResponse forwarded to session");
                 }
-            }
-            ControlOp::GetSessionInfo { registration_id } => {
-                error!("ControlOp::GetSessionInfo not implemented");
-                BrokerMessage::ControlResponse {
-                    registration_id,
-                    result: Err(ControlError::InternalError("not implemented".to_string())),
-                    trace_ctx: Some(span.context()),
-                }
-            }
-            ControlOp::DisconnectSession { registration_id } => {
-                error!("ControlOp::DisconnectSession not implemented");
-                BrokerMessage::ControlResponse {
-                    registration_id,
-                    result: Err(ControlError::InternalError("not implemented".to_string())),
-                    trace_ctx: Some(span.context()),
-                }
-            }
-            ControlOp::ListSubscribers { topic: _ } => {
-                error!("ControlOp::ListSubscribers not implemented");
-                BrokerMessage::ControlResponse {
-                    registration_id,
-                    result: Err(ControlError::InternalError("not implemented".to_string())),
-                    trace_ctx: Some(span.context()),
-                }
-            }
-            ControlOp::GetBrokerStats => {
-                error!("ControlOp::GetBrokerStats not implemented");
-                BrokerMessage::ControlResponse {
-                    registration_id,
-                    result: Err(ControlError::InternalError("not implemented".to_string())),
-                    trace_ctx: Some(span.context()),
-                }
-            }
-            ControlOp::ShutdownBroker { graceful: _ } => {
-                error!("ControlOp::ShutdownBroker not implemented; use PrepareForShutdown instead");
-                BrokerMessage::ControlResponse {
-                    registration_id,
-                    result: Err(ControlError::InternalError(
-                        "use PrepareForShutdown".to_string(),
-                    )),
-                    trace_ctx: Some(span.context()),
-                }
-            }
-        };
-
-        // forward response back to client
-        if let Some(session) = reply_to {
-            if let Err(e) = session.cast(resp) {
-                warn!(error = %e, "Failed to respond to session");
             } else {
-                // Helpful breadcrumb when correlating "request -> response" without opening every span.
-                debug!("ControlResponse forwarded to session");
+                warn!("ControlRequest missing reply_to; dropping response");
             }
-        } else {
-            warn!("ControlRequest missing reply_to; dropping response");
-        }
 
-        Ok(())
+            Ok::<(), ActorProcessingErr>(())
+        }
+        .instrument(span.clone())
+        .await
     }
 
     async fn advance_to_next_phase(

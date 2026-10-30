@@ -539,22 +539,24 @@ impl SubscriberManager {
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.subscriber_manager.disconnect_request", %client_id, has_registration_id = registration_id.is_some());
         try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
+        async {
+            if let Some(registration_id) = registration_id {
+                SubscriberManager::forget_subscriptions(
+                    registration_id,
+                    myself.clone(),
+                    Some(DISCONNECTED_REASON.to_string()),
+                );
 
-        if let Some(registration_id) = registration_id {
-            SubscriberManager::forget_subscriptions(
-                registration_id,
-                myself.clone(),
-                Some(DISCONNECTED_REASON.to_string()),
-            );
-
-            if state.is_shutting_down {
-                self.check_terminate_complete(myself.clone(), state).await?;
+                if state.is_shutting_down {
+                    self.check_terminate_complete(myself.clone(), state).await?;
+                }
+            } else {
+                warn!("Failed to process disconnect request! registration_id missing.")
             }
-        } else {
-            warn!("Failed to process disconnect request! registration_id missing.")
+            Ok::<(), ActorProcessingErr>(())
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     async fn handle_timeout_message(

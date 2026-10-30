@@ -249,128 +249,134 @@ impl Actor for ListenerManager {
             actor = ?myself,
             bind_addr = %state.bind_addr
         );
-        let _g = span.enter();
 
-        let bind_addr = state.bind_addr.clone();
-        let acceptor = TlsAcceptor::from(Arc::clone(&state.server_config));
-        let server = TcpListener::bind(&bind_addr)
-            .await
-            .map_err(ActorProcessingErr::from)?;
+        async {
+            let bind_addr = state.bind_addr.clone();
+            let acceptor = TlsAcceptor::from(Arc::clone(&state.server_config));
+            let server = TcpListener::bind(&bind_addr)
+                .await
+                .map_err(ActorProcessingErr::from)?;
 
-        info!("Server running on {bind_addr}");
-        let shutdown_token = state.shutdown_token.clone();
-        let session_mgr = state.session_mgr.clone(); // clone for use in spawned tasks
-        let authority = state.authority.clone();
+            info!("Server running on {bind_addr}");
+            let shutdown_token = state.shutdown_token.clone();
+            let session_mgr = state.session_mgr.clone(); // clone for use in spawned tasks
+            let authority = state.authority.clone();
 
-        // Accept loop runs in its own task; do NOT keep an entered span alive forever.
-        let join_handle = tokio::spawn({
-            let myself = myself.clone();
-            let session_mgr = session_mgr; // move into closure
-            let authority = authority;
-            async move {
-                loop {
-                    let (stream, peer_addr) = match server.accept().await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            warn!(error = %e, "TCP accept failed");
-                            continue;
-                        }
-                    };
-
-                    // Find a client that has died without a word in about a minute, instead of
-                    // keeping its session, and everything held for it, until a write fails.
-                    if let Err(e) = cassini_types::socket::enable_dead_peer_detection(&stream) {
-                        warn!(error = %e, %peer_addr, "could not enable dead-peer detection");
-                    }
-
-                    // Check if we're shutting down before accepting new connection
-                    if shutdown_token.is_cancelled() {
-                        debug!(
-                            "ListenerManager not accepting new connections, stopping accept loop"
-                        );
-                        break;
-                    }
-
-                    let handshake_span = info_span!(
-                        "cassini.listener_manager.accept",
-                        peer_addr = %peer_addr
-                    );
-
-                    let acceptor = acceptor.clone();
-                    let myself = myself.clone();
-                    let session_mgr = session_mgr.clone(); // clone again for inner spawn
-                    let authority = authority.clone();
-
-                    tokio::spawn(async move {
-                        let _g = handshake_span.enter();
-
-                        let stream = match acceptor.accept(stream).await {
-                            Ok(s) => s,
+            // Accept loop runs in its own task; do NOT keep an entered span alive forever.
+            let join_handle = tokio::spawn({
+                let myself = myself.clone();
+                let session_mgr = session_mgr; // move into closure
+                let authority = authority;
+                async move {
+                    loop {
+                        let (stream, peer_addr) = match server.accept().await {
+                            Ok(v) => v,
                             Err(e) => {
-                                warn!(error = %e, "TLS handshake failed");
-                                return;
+                                warn!(error = %e, "TCP accept failed");
+                                continue;
                             }
                         };
-                        // Extracted before split() -- peer_certificates()
-                        // is only reachable through the still-unified
-                        // TlsStream.
-                        let peer_identity = extract_peer_identity(&stream);
-                        let peer_serial = extract_peer_serial(&stream);
-                        let floor = extract_peer_floor(&stream);
-                        if let Err(why) = &floor {
-                            warn!(%why, "every publish and subscribe on this connection will be refused");
+
+                        // Find a client that has died without a word in about a minute, instead of
+                        // keeping its session, and everything held for it, until a write fails.
+                        if let Err(e) = cassini_types::socket::enable_dead_peer_detection(&stream) {
+                            warn!(error = %e, %peer_addr, "could not enable dead-peer detection");
                         }
-                        let client_id = Uuid::new_v4().to_string();
-                        let (reader, writer) = split(stream);
-                        let writer = BufWriter::new(writer);
-                        let listener_args = ListenerArguments {
-                            writer: Arc::new(Mutex::new(writer)),
-                            reader: Some(reader),
-                            client_id: client_id.clone(),
-                            registration_id: None,
-                            session_mgr,
-                            broker: myself
-                                .try_get_supervisor()
-                                .expect("ListenerManager must have a supervisor (the broker)")
-                                .into(),
-                            peer_identity,
-                            peer_serial,
-                            floor,
-                            authority,
-                        };
 
-                        let spawn_span = info_span!(
-                            "cassini.listener_manager.spawn_listener",
-                            client_id = %client_id
+                        // Check if we're shutting down before accepting new connection
+                        if shutdown_token.is_cancelled() {
+                            debug!(
+                                "ListenerManager not accepting new connections, stopping accept loop"
+                            );
+                            break;
+                        }
+
+                        let handshake_span = info_span!(
+                            "cassini.listener_manager.accept",
+                            peer_addr = %peer_addr
                         );
-                        let _g2 = spawn_span.enter();
 
-                        match Actor::spawn_linked(
-                            Some(client_id.clone()),
-                            Listener,
-                            listener_args,
-                            myself.clone().into(),
-                        )
-                        .await
-                        {
-                            Ok((listener_ref, _)) => {
-                                let _ = myself.send_message(BrokerMessage::RegisterListener {
+                        let acceptor = acceptor.clone();
+                        let myself = myself.clone();
+                        let session_mgr = session_mgr.clone(); // clone again for inner spawn
+                        let authority = authority.clone();
+
+                        tokio::spawn(
+                            async move {
+                                let stream = match acceptor.accept(stream).await {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        warn!(error = %e, "TLS handshake failed");
+                                        return;
+                                    }
+                                };
+                                // Extracted before split() -- peer_certificates()
+                                // is only reachable through the still-unified
+                                // TlsStream.
+                                let peer_identity = extract_peer_identity(&stream);
+                                let peer_serial = extract_peer_serial(&stream);
+                                let floor = extract_peer_floor(&stream);
+                                if let Err(why) = &floor {
+                                    warn!(%why, "every publish and subscribe on this connection will be refused");
+                                }
+                                let client_id = Uuid::new_v4().to_string();
+                                let (reader, writer) = split(stream);
+                                let writer = BufWriter::new(writer);
+                                let listener_args = ListenerArguments {
+                                    writer: Arc::new(Mutex::new(writer)),
+                                    reader: Some(reader),
                                     client_id: client_id.clone(),
-                                    listener_ref,
-                                });
+                                    registration_id: None,
+                                    session_mgr,
+                                    broker: myself
+                                        .try_get_supervisor()
+                                        .expect("ListenerManager must have a supervisor (the broker)")
+                                        .into(),
+                                    peer_identity,
+                                    peer_serial,
+                                    floor,
+                                    authority,
+                                };
+
+                                let spawn_span = info_span!(
+                                    "cassini.listener_manager.spawn_listener",
+                                    client_id = %client_id
+                                );
+                                async {
+                                    match Actor::spawn_linked(
+                                        Some(client_id.clone()),
+                                        Listener,
+                                        listener_args,
+                                        myself.clone().into(),
+                                    )
+                                    .await
+                                    {
+                                        Ok((listener_ref, _)) => {
+                                            let _ = myself.send_message(BrokerMessage::RegisterListener {
+                                                client_id: client_id.clone(),
+                                                listener_ref,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            error!(error = ?e, "Failed to spawn Listener actor for connection {}", client_id);
+                                        }
+                                }
+                                }
+                                .instrument(spawn_span)
+                                .await;
                             }
-                            Err(e) => {
-                                error!(error = ?e, "Failed to spawn Listener actor for connection {}", client_id);
-                            }
-                        }
-                    });
+                            .instrument(handshake_span),
+                        );
+                    }
                 }
-            }
-        });
+            });
 
-        state.accept_task_abort = Some(join_handle.abort_handle());
+            state.accept_task_abort = Some(join_handle.abort_handle());
 
-        Ok(())
+            Ok::<(), ActorProcessingErr>(())
+        }
+        .instrument(span)
+        .await
     }
 
     /// However the manager ends, it stops listening and closes its connections: the accept loop is
@@ -878,7 +884,7 @@ impl Actor for Listener {
                         client_id = %client_id,
                         frame_len = len
                     );
-                    let _g = frame_span.enter();
+                    let g = frame_span.enter();
 
                     if len == 0 {
                         // Treat as keepalive/no-op and avoid log spam.
@@ -894,9 +900,15 @@ impl Actor for Listener {
 
                         continue;
                     }
+                    drop(g);
 
                     let mut buffer = vec![0u8; len];
-                    if let Err(e) = buf_reader.read_exact(&mut buffer).await {
+                    let read = buf_reader
+                        .read_exact(&mut buffer)
+                        .instrument(frame_span.clone())
+                        .await;
+                    let _g = frame_span.enter();
+                    if let Err(e) = read {
                         warn!(error = %e, "Failed reading frame body");
                         let _ = myself.send_message(BrokerMessage::DisconnectRequest {
                             reason: DisconnectReason::TransportError(e.to_string()),
@@ -1148,31 +1160,35 @@ impl Listener {
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.request.registration", %client_id, registration_id = ?registration_id);
         try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-        trace!("Listener received registration request");
-        let broker = state.broker.clone();
-        if let Err(e) = broker.send_message(BrokerMessage::RegistrationRequest {
-            registration_id,
-            client_id: client_id.clone(),
-            trace_ctx: Some(span.context()),
-            peer_identity,
-        }) {
-            let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {e}");
-            error!("{err_msg}");
+        async {
+            trace!("Listener received registration request");
+            let broker = state.broker.clone();
+            if let Err(e) = broker.send_message(BrokerMessage::RegistrationRequest {
+                registration_id,
+                client_id: client_id.clone(),
+                trace_ctx: Some(span.context()),
+                peer_identity,
+            }) {
+                let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {e}");
+                error!("{err_msg}");
 
-            let msg = ClientMessage::RegistrationResponse {
-                result: Err(cassini_types::Refusal::other(err_msg.clone())),
-                trace_ctx: WireTraceCtx::from_current_span(),
-            };
+                let msg = ClientMessage::RegistrationResponse {
+                    result: Err(cassini_types::Refusal::other(err_msg.clone())),
+                    trace_ctx: WireTraceCtx::from_current_span(),
+                };
 
-            if let Err(e) = Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await
-            {
-                error!(error = ?e, "Failed to write RegistrationResponse");
-            }
+                if let Err(e) =
+                    Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await
+                {
+                    error!(error = ?e, "Failed to write RegistrationResponse");
+                }
 
-            myself.stop(Some(err_msg));
-        } // Note: the else branch for broker not found is removed because broker is guaranteed
-        Ok(())
+                myself.stop(Some(err_msg));
+            } // Note: the else branch for broker not found is removed because broker is guaranteed
+            Ok::<(), ActorProcessingErr>(())
+        }
+        .instrument(span.clone())
+        .await
     }
 
     async fn handle_registration_response(
@@ -1185,95 +1201,98 @@ impl Listener {
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.listener.registration_response", %client_id);
         try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-        trace!("Listener received registration response");
+        async {
+            trace!("Listener received registration response");
 
-        match result {
-            Ok(registration_id) => {
-                let reg_id_clone = registration_id.clone();
-                state.registration_id = Some(registration_id.clone());
+            match result {
+                Ok(registration_id) => {
+                    let reg_id_clone = registration_id.clone();
+                    state.registration_id = Some(registration_id.clone());
 
-                let msg = ClientMessage::RegistrationResponse {
-                    result: Ok(registration_id.clone()),
-                    trace_ctx: WireTraceCtx::from_current_span(),
-                };
+                    let msg = ClientMessage::RegistrationResponse {
+                        result: Ok(registration_id.clone()),
+                        trace_ctx: WireTraceCtx::from_current_span(),
+                    };
 
-                if let Err(e) =
-                    Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await
-                {
-                    error!(error = ?e, "Failed to write RegistrationResponse");
-                    let _ = myself.send_message(BrokerMessage::TimeoutMessage {
-                        client_id: state.client_id.clone(),
-                        registration_id: state.registration_id.clone().unwrap_or_default(),
-                        error: Some(e.to_string()),
-                    });
-                } else {
-                    let session_mgr = state.session_mgr.clone();
-                    let myself_clone = myself.clone();
-                    tokio::spawn(async move {
-                        let result = session_mgr
-                            .call(
-                                |reply_to| BrokerMessage::GetSessionRef {
-                                    registration_id: reg_id_clone.clone(),
-                                    reply_to,
-                                },
-                                Some(Duration::from_millis(100)),
-                            )
-                            .await;
-                        match result {
-                            Ok(CallResult::Success(Some(session_ref))) => {
-                                let _ = myself_clone.send_message(
-                                    BrokerMessage::SetListenerSessionRef { session_ref },
-                                );
-                                debug!("Cached session ref for listener");
-                                // A resumed session keeps the subscriptions it had, made under the certificate it
-                                // had: they are judged again under this connection's.
-                                if let Some(subscribers) =
-                                    where_is(crate::SUBSCRIBER_MANAGER_NAME.to_string())
-                                    && let Ok(CallResult::Success(topics)) =
-                                        ActorRef::<BrokerMessage>::from(subscribers)
-                                            .call(
-                                                |reply_to| BrokerMessage::SubscriptionsOf {
-                                                    registration_id: reg_id_clone.clone(),
-                                                    reply_to,
-                                                },
-                                                Some(Duration::from_secs(2)),
-                                            )
-                                            .await
-                                    && !topics.is_empty()
-                                {
+                    if let Err(e) =
+                        Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await
+                    {
+                        error!(error = ?e, "Failed to write RegistrationResponse");
+                        let _ = myself.send_message(BrokerMessage::TimeoutMessage {
+                            client_id: state.client_id.clone(),
+                            registration_id: state.registration_id.clone().unwrap_or_default(),
+                            error: Some(e.to_string()),
+                        });
+                    } else {
+                        let session_mgr = state.session_mgr.clone();
+                        let myself_clone = myself.clone();
+                        tokio::spawn(async move {
+                            let result = session_mgr
+                                .call(
+                                    |reply_to| BrokerMessage::GetSessionRef {
+                                        registration_id: reg_id_clone.clone(),
+                                        reply_to,
+                                    },
+                                    Some(Duration::from_millis(100)),
+                                )
+                                .await;
+                            match result {
+                                Ok(CallResult::Success(Some(session_ref))) => {
                                     let _ = myself_clone.send_message(
-                                        BrokerMessage::JudgeSubscriptions {
-                                            topics: Some(topics),
-                                        },
+                                        BrokerMessage::SetListenerSessionRef { session_ref },
+                                    );
+                                    debug!("Cached session ref for listener");
+                                    // A resumed session keeps the subscriptions it had, made under the certificate it
+                                    // had: they are judged again under this connection's.
+                                    if let Some(subscribers) =
+                                        where_is(crate::SUBSCRIBER_MANAGER_NAME.to_string())
+                                        && let Ok(CallResult::Success(topics)) =
+                                            ActorRef::<BrokerMessage>::from(subscribers)
+                                                .call(
+                                                    |reply_to| BrokerMessage::SubscriptionsOf {
+                                                        registration_id: reg_id_clone.clone(),
+                                                        reply_to,
+                                                    },
+                                                    Some(Duration::from_secs(2)),
+                                                )
+                                                .await
+                                        && !topics.is_empty()
+                                    {
+                                        let _ = myself_clone.send_message(
+                                            BrokerMessage::JudgeSubscriptions {
+                                                topics: Some(topics),
+                                            },
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    error!(
+                                        "Failed to get session ref for registration {}",
+                                        reg_id_clone
                                     );
                                 }
                             }
-                            _ => {
-                                error!(
-                                    "Failed to get session ref for registration {}",
-                                    reg_id_clone
-                                );
-                            }
-                        }
-                    });
+                        });
+                    }
                 }
-            }
-            Err(error) => {
-                let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {error}");
-                let msg = ClientMessage::RegistrationResponse {
-                    result: Err(cassini_types::Refusal::other(err_msg.clone())),
-                    trace_ctx: WireTraceCtx::from_current_span(),
-                };
+                Err(error) => {
+                    let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT}: {error}");
+                    let msg = ClientMessage::RegistrationResponse {
+                        result: Err(cassini_types::Refusal::other(err_msg.clone())),
+                        trace_ctx: WireTraceCtx::from_current_span(),
+                    };
 
-                if let Err(e) =
-                    Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await
-                {
-                    error!(error = ?e, "Failed to write RegistrationResponse");
+                    if let Err(e) =
+                        Listener::write(client_id.clone(), msg, Arc::clone(&state.writer)).await
+                    {
+                        error!(error = ?e, "Failed to write RegistrationResponse");
+                    }
                 }
             }
+            Ok::<(), ActorProcessingErr>(())
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     async fn handle_disconnect_request(
@@ -1331,103 +1350,99 @@ impl Listener {
     ) -> Result<(), ActorProcessingErr> {
         let span = debug_span!("cassini.request.publish_request", client_id = %state.client_id, %registration_id, topic = ?topic, payload_bytes = payload.len());
         try_set_parent_otel(&span, trace_ctx.clone());
-        let entered = span.enter();
-        trace!("Listener received publish request");
+        async {
+            trace!("Listener received publish request");
 
-        let Some(listener_reg) = state.registration_id.clone() else {
-            let err_msg = format!("Bad request: no active session for {registration_id:?}");
-            warn!("{err_msg}");
-            let _ = Listener::write(
-                state.client_id.clone(),
-                ClientMessage::ErrorMessage {
-                    error: err_msg,
-                    trace_ctx: WireTraceCtx::from_current_span(),
-                },
-                Arc::clone(&state.writer),
-            )
-            .await;
-            return Ok(());
-        };
+            let Some(listener_reg) = state.registration_id.clone() else {
+                let err_msg = format!("Bad request: no active session for {registration_id:?}");
+                warn!("{err_msg}");
+                let _ = Listener::write(
+                    state.client_id.clone(),
+                    ClientMessage::ErrorMessage {
+                        error: err_msg,
+                        trace_ctx: WireTraceCtx::from_current_span(),
+                    },
+                    Arc::clone(&state.writer),
+                )
+                .await;
+                return Ok(());
+            };
 
-        if registration_id != listener_reg {
-            let err_msg = format!("Bad request: session mismatch: {registration_id:?}");
-            warn!("{err_msg}");
-            let _ = Listener::write(
-                state.client_id.clone(),
-                ClientMessage::ErrorMessage {
-                    error: err_msg,
-                    trace_ctx: WireTraceCtx::from_current_span(),
-                },
-                Arc::clone(&state.writer),
-            )
-            .await;
-            return Ok(());
-        }
-
-        let session = match state.session_ref.as_ref() {
-            Some(s) => s.clone(),
-            None => {
-                error!(
-                    "No session ref for listener {} – dropping publish",
-                    state.client_id
-                );
+            if registration_id != listener_reg {
+                let err_msg = format!("Bad request: session mismatch: {registration_id:?}");
+                warn!("{err_msg}");
+                let _ = Listener::write(
+                    state.client_id.clone(),
+                    ClientMessage::ErrorMessage {
+                        error: err_msg,
+                        trace_ctx: WireTraceCtx::from_current_span(),
+                    },
+                    Arc::clone(&state.writer),
+                )
+                .await;
                 return Ok(());
             }
-        };
 
-        // The decision waits on the policy actor, and an entered span must not be held across a wait: the task can
-        // resume on another thread, whose span stack it is not on (tracing panics, and the Listener is lost).
-        drop(entered);
-        let decided = Self::decide(state, &topic, Access::Publish)
-            .instrument(span.clone())
-            .await;
-        let _g = span.enter();
-        if let Err(reason) = decided {
-            warn!(%topic, identity = ?state.peer_identity, %reason, "publish refused");
-            let msg = ClientMessage::PublishResponse {
-                topic,
-                payload: Arc::new(Vec::new()),
-                result: Err(reason),
-                trace_ctx: WireTraceCtx::from_current_span(),
-                published_by: None,
+            let session = match state.session_ref.as_ref() {
+                Some(s) => s.clone(),
+                None => {
+                    error!(
+                        "No session ref for listener {} – dropping publish",
+                        state.client_id
+                    );
+                    return Ok(());
+                }
             };
-            if let Err(e) =
-                Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
-            {
-                error!(error = ?e, "Failed to write a publish refusal");
-            }
-            return Ok(());
-        }
-        // The broker keeps the credentials agent's authority as every agent does, believing it only from the
-        // identity this connection verified (never from what a client says about itself).
-        if BrokerAuthority::carries_authority(&topic)
-            && let Ok(floor) = &state.floor
-        {
-            state.authority.hear(&topic, &payload, floor.identity());
-        }
 
-        if let Err(e) = session.send_message(BrokerMessage::PublishRequest {
-            registration_id: registration_id.clone(),
-            topic: topic.clone(),
-            payload: payload.clone(),
-            reply_to: None,
-            trace_ctx,
-            published_by,
-        }) {
-            let msg = ClientMessage::PublishResponse {
-                topic,
-                payload,
-                result: Err(format!("{PUBLISH_REQ_FAILED_TXT}: {e}")),
-                trace_ctx: WireTraceCtx::from_current_span(),
-                published_by: None,
-            };
-            if let Err(e) =
-                Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
-            {
-                error!(error = ?e, "Failed to write PublishResponse");
+            if let Err(reason) = Self::decide(state, &topic, Access::Publish).await {
+                warn!(%topic, identity = ?state.peer_identity, %reason, "publish refused");
+                let msg = ClientMessage::PublishResponse {
+                    topic,
+                    payload: Arc::new(Vec::new()),
+                    result: Err(reason),
+                    trace_ctx: WireTraceCtx::from_current_span(),
+                    published_by: None,
+                };
+                if let Err(e) =
+                    Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+                {
+                    error!(error = ?e, "Failed to write a publish refusal");
+                }
+                return Ok(());
             }
+            // The broker keeps the credentials agent's authority as every agent does, believing it only from the
+            // identity this connection verified (never from what a client says about itself).
+            if BrokerAuthority::carries_authority(&topic)
+                && let Ok(floor) = &state.floor
+            {
+                state.authority.hear(&topic, &payload, floor.identity());
+            }
+
+            if let Err(e) = session.send_message(BrokerMessage::PublishRequest {
+                registration_id: registration_id.clone(),
+                topic: topic.clone(),
+                payload: payload.clone(),
+                reply_to: None,
+                trace_ctx,
+                published_by,
+            }) {
+                let msg = ClientMessage::PublishResponse {
+                    topic,
+                    payload,
+                    result: Err(format!("{PUBLISH_REQ_FAILED_TXT}: {e}")),
+                    trace_ctx: WireTraceCtx::from_current_span(),
+                    published_by: None,
+                };
+                if let Err(e) =
+                    Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+                {
+                    error!(error = ?e, "Failed to write PublishResponse");
+                }
+            }
+            Ok::<(), ActorProcessingErr>(())
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1459,21 +1474,24 @@ impl Listener {
                 return Ok(());
             }
         }
-        let _g = span.enter();
-        trace!("Listener received publish response");
-        let msg = ClientMessage::PublishResponse {
-            topic,
-            payload,
-            result,
-            trace_ctx: WireTraceCtx::from_current_span(),
-            published_by,
-        };
-        if let Err(e) =
-            Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
-        {
-            error!(error = ?e, "Failed to write PublishResponse");
+        async {
+            trace!("Listener received publish response");
+            let msg = ClientMessage::PublishResponse {
+                topic,
+                payload,
+                result,
+                trace_ctx: WireTraceCtx::from_current_span(),
+                published_by,
+            };
+            if let Err(e) =
+                Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+            {
+                error!(error = ?e, "Failed to write PublishResponse");
+            }
+            Ok::<(), ActorProcessingErr>(())
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     async fn handle_publish_request_ack(
@@ -1485,18 +1503,20 @@ impl Listener {
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.listener.publish_ack", topic = ?topic);
         try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-
-        let msg = ClientMessage::PublishRequestAck {
-            topic,
-            trace_ctx: WireTraceCtx::from_current_span(),
-        };
-        if let Err(e) =
-            Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
-        {
-            error!(error = ?e, "Failed to write PublishRequestAck");
+        async {
+            let msg = ClientMessage::PublishRequestAck {
+                topic,
+                trace_ctx: WireTraceCtx::from_current_span(),
+            };
+            if let Err(e) =
+                Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+            {
+                error!(error = ?e, "Failed to write PublishRequestAck");
+            }
+            Ok::<(), ActorProcessingErr>(())
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     async fn handle_subscribe_ack(
@@ -1510,23 +1530,25 @@ impl Listener {
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.listener.subscribe_ack", %registration_id, topic = ?topic, ok = result.is_ok());
         try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-
-        if result.is_ok() {
-            state.dropped.remove(&topic);
-            state.subscribed.insert(topic.clone());
+        async {
+            if result.is_ok() {
+                state.dropped.remove(&topic);
+                state.subscribed.insert(topic.clone());
+            }
+            let msg = ClientMessage::SubscribeAcknowledgment {
+                topic,
+                result,
+                trace_ctx: WireTraceCtx::from_current_span(),
+            };
+            if let Err(e) =
+                Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+            {
+                error!(error = ?e, "Failed to write SubscribeAcknowledgment");
+            }
+            Ok::<(), ActorProcessingErr>(())
         }
-        let msg = ClientMessage::SubscribeAcknowledgment {
-            topic,
-            result,
-            trace_ctx: WireTraceCtx::from_current_span(),
-        };
-        if let Err(e) =
-            Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
-        {
-            error!(error = ?e, "Failed to write SubscribeAcknowledgment");
-        }
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     async fn handle_subscribe_request(
@@ -1539,82 +1561,83 @@ impl Listener {
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.request.subscribe", client_id = %state.client_id, %registration_id, topic = ?topic);
         try_set_parent_otel(&span, trace_ctx);
-        let entered = span.enter();
-        trace!("Listener received subscribe request");
+        async {
+            trace!("Listener received subscribe request");
 
-        let Some(listener_reg) = state.registration_id.clone() else {
-            warn!("Subscribe from unregistered client");
-            let msg = ClientMessage::SubscribeAcknowledgment {
-                topic,
-                result: Err("Bad request: not registered".to_string()),
-                trace_ctx: WireTraceCtx::from_current_span(),
-            };
-            let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
-            return Ok(());
-        };
-
-        if registration_id != listener_reg {
-            warn!("Subscribe session mismatch");
-            let msg = ClientMessage::SubscribeAcknowledgment {
-                topic,
-                result: Err("Bad request: session mismatch".to_string()),
-                trace_ctx: WireTraceCtx::from_current_span(),
-            };
-            let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
-            return Ok(());
-        }
-
-        // Not entered across the wait on the policy actor (see handle_publish_request).
-        drop(entered);
-        let decided = Self::decide(state, &topic, Access::Subscribe)
-            .instrument(span.clone())
-            .await;
-        let _g = span.enter();
-        if let Err(reason) = decided {
-            warn!(%topic, identity = ?state.peer_identity, %reason, "subscription refused");
-            let msg = ClientMessage::SubscribeAcknowledgment {
-                topic,
-                result: Err(reason),
-                trace_ctx: WireTraceCtx::from_current_span(),
-            };
-            let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
-            return Ok(());
-        }
-
-        match where_is(listener_reg.clone()) {
-            Some(session) => {
-                if let Err(e) = session.send_message(BrokerMessage::SubscribeRequest {
-                    registration_id: listener_reg,
-                    topic,
-                    trace_ctx: Some(span.context()),
-                }) {
-                    let err_msg =
-                        format!("{SUBSCRIBE_REQUEST_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}");
-                    error!("{err_msg}");
-                    let _ = Listener::write(
-                        state.client_id.clone(),
-                        ClientMessage::ErrorMessage {
-                            error: err_msg,
-                            trace_ctx: WireTraceCtx::from_current_span(),
-                        },
-                        Arc::clone(&state.writer),
-                    )
-                    .await;
-                }
-            }
-            None => {
-                error!("Could not forward subscribe to session; closing connection");
+            let Some(listener_reg) = state.registration_id.clone() else {
+                warn!("Subscribe from unregistered client");
                 let msg = ClientMessage::SubscribeAcknowledgment {
                     topic,
-                    result: Err("Failed to complete request: session missing".to_string()),
+                    result: Err("Bad request: not registered".to_string()),
                     trace_ctx: WireTraceCtx::from_current_span(),
                 };
                 let _ =
                     Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
-                myself.stop(Some(SESSION_MISSING_REASON_STR.to_string()));
+                return Ok(());
+            };
+
+            if registration_id != listener_reg {
+                warn!("Subscribe session mismatch");
+                let msg = ClientMessage::SubscribeAcknowledgment {
+                    topic,
+                    result: Err("Bad request: session mismatch".to_string()),
+                    trace_ctx: WireTraceCtx::from_current_span(),
+                };
+                let _ =
+                    Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
+                return Ok(());
             }
+
+            if let Err(reason) = Self::decide(state, &topic, Access::Subscribe).await {
+                warn!(%topic, identity = ?state.peer_identity, %reason, "subscription refused");
+                let msg = ClientMessage::SubscribeAcknowledgment {
+                    topic,
+                    result: Err(reason),
+                    trace_ctx: WireTraceCtx::from_current_span(),
+                };
+                let _ =
+                    Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
+                return Ok(());
+            }
+
+            match where_is(listener_reg.clone()) {
+                Some(session) => {
+                    if let Err(e) = session.send_message(BrokerMessage::SubscribeRequest {
+                        registration_id: listener_reg,
+                        topic,
+                        trace_ctx: Some(span.context()),
+                    }) {
+                        let err_msg =
+                            format!("{SUBSCRIBE_REQUEST_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}");
+                        error!("{err_msg}");
+                        let _ = Listener::write(
+                            state.client_id.clone(),
+                            ClientMessage::ErrorMessage {
+                                error: err_msg,
+                                trace_ctx: WireTraceCtx::from_current_span(),
+                            },
+                            Arc::clone(&state.writer),
+                        )
+                        .await;
+                    }
+                }
+                None => {
+                    error!("Could not forward subscribe to session; closing connection");
+                    let msg = ClientMessage::SubscribeAcknowledgment {
+                        topic,
+                        result: Err("Failed to complete request: session missing".to_string()),
+                        trace_ctx: WireTraceCtx::from_current_span(),
+                    };
+                    let _ =
+                        Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer))
+                            .await;
+                    myself.stop(Some(SESSION_MISSING_REASON_STR.to_string()));
+                }
+            }
+            Ok::<(), ActorProcessingErr>(())
         }
-        Ok(())
+        .instrument(span.clone())
+        .await
     }
 
     async fn handle_unsubscribe_request(
@@ -1627,28 +1650,43 @@ impl Listener {
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.request.unsubscribe", client_id = %state.client_id, %registration_id, topic = ?topic);
         try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-        trace!("Listener received unsubscribe request");
+        async {
+            trace!("Listener received unsubscribe request");
 
-        let Some(listener_reg) = state.registration_id.clone() else {
-            warn!("Unsubscribe from unregistered client");
-            return Ok(());
-        };
+            let Some(listener_reg) = state.registration_id.clone() else {
+                warn!("Unsubscribe from unregistered client");
+                return Ok(());
+            };
 
-        if registration_id != listener_reg {
-            warn!("Unsubscribe session mismatch");
-            return Ok(());
-        }
+            if registration_id != listener_reg {
+                warn!("Unsubscribe session mismatch");
+                return Ok(());
+            }
 
-        match where_is(registration_id.clone()) {
-            Some(session) => {
-                if let Err(e) = session.send_message(BrokerMessage::UnsubscribeRequest {
-                    registration_id,
-                    topic,
-                    trace_ctx: Some(span.context()),
-                }) {
+            match where_is(registration_id.clone()) {
+                Some(session) => {
+                    if let Err(e) = session.send_message(BrokerMessage::UnsubscribeRequest {
+                        registration_id,
+                        topic,
+                        trace_ctx: Some(span.context()),
+                    }) {
+                        let err_msg =
+                            format!("{SUBSCRIBE_REQUEST_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}");
+                        error!("{err_msg}");
+                        let _ = Listener::write(
+                            state.client_id.clone(),
+                            ClientMessage::ErrorMessage {
+                                error: err_msg,
+                                trace_ctx: WireTraceCtx::from_current_span(),
+                            },
+                            Arc::clone(&state.writer),
+                        )
+                        .await;
+                    }
+                }
+                None => {
                     let err_msg =
-                        format!("{SUBSCRIBE_REQUEST_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}: {e}");
+                        format!("{SUBSCRIBE_REQUEST_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}");
                     error!("{err_msg}");
                     let _ = Listener::write(
                         state.client_id.clone(),
@@ -1661,21 +1699,10 @@ impl Listener {
                     .await;
                 }
             }
-            None => {
-                let err_msg = format!("{SUBSCRIBE_REQUEST_FAILED_TXT}: {SESSION_NOT_FOUND_TXT}");
-                error!("{err_msg}");
-                let _ = Listener::write(
-                    state.client_id.clone(),
-                    ClientMessage::ErrorMessage {
-                        error: err_msg,
-                        trace_ctx: WireTraceCtx::from_current_span(),
-                    },
-                    Arc::clone(&state.writer),
-                )
-                .await;
-            }
+            Ok::<(), ActorProcessingErr>(())
         }
-        Ok(())
+        .instrument(span.clone())
+        .await
     }
 
     async fn handle_unsubscribe_ack(
@@ -1686,21 +1713,23 @@ impl Listener {
         result: Result<(), String>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.listener.unsubscribe_ack", topic = ?topic);
-        let _g = span.enter();
-
-        debug!(topic = ?topic, "Unsubscribe acknowledged");
-        state.subscribed.remove(&topic);
-        if state.dropped.contains(&topic) {
-            // The broker ended it, and the client was told it is refused.
-            return Ok(());
+        async {
+            debug!(topic = ?topic, "Unsubscribe acknowledged");
+            state.subscribed.remove(&topic);
+            if state.dropped.contains(&topic) {
+                // The broker ended it, and the client was told it is refused.
+                return Ok(());
+            }
+            let msg = ClientMessage::UnsubscribeAcknowledgment {
+                topic,
+                result,
+                trace_ctx: WireTraceCtx::from_current_span(),
+            };
+            let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
+            Ok::<(), ActorProcessingErr>(())
         }
-        let msg = ClientMessage::UnsubscribeAcknowledgment {
-            topic,
-            result,
-            trace_ctx: WireTraceCtx::from_current_span(),
-        };
-        let _ = Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     async fn handle_control_request(
@@ -1748,20 +1777,23 @@ impl Listener {
         let span =
             trace_span!("cassini.listener.control_response", %registration_id, ok = result.is_ok());
         try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-        trace!("Received ControlResponse");
+        async {
+            trace!("Received ControlResponse");
 
-        let msg = ClientMessage::ControlResponse {
-            registration_id,
-            result,
-            trace_ctx: WireTraceCtx::from_current_span(),
-        };
+            let msg = ClientMessage::ControlResponse {
+                registration_id,
+                result,
+                trace_ctx: WireTraceCtx::from_current_span(),
+            };
 
-        if let Err(e) =
-            Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
-        {
-            error!(error = ?e, "Failed to write ControlResponse");
+            if let Err(e) =
+                Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+            {
+                error!(error = ?e, "Failed to write ControlResponse");
+            }
+            Ok::<(), ActorProcessingErr>(())
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 }

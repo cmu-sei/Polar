@@ -30,7 +30,7 @@ use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait}
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, info, trace, trace_span, warn};
+use tracing::{Instrument, debug, error, info, trace, trace_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub const TOPIC_ADD_FAILED_TXT: &str = "Failed to add topic \"{topic}!\"";
@@ -380,39 +380,41 @@ impl TopicManager {
         }
 
         try_set_parent_otel(&span, trace_ctx);
-        let _g = span.enter();
-
-        // Always go through ensure_topic
-        match self
-            .ensure_topic(topic.clone(), myself.clone(), state)
-            .await
-        {
-            Ok(topic_actor) => {
-                // Forward the publish to the topic actor
-                if let Err(e) = topic_actor.send_message(BrokerMessage::PublishRequest {
-                    registration_id,
-                    topic: topic.clone(),
-                    payload,
-                    reply_to, // forward to topic agent
-                    trace_ctx: Some(span.context()),
-                    published_by,
-                }) {
-                    error!(error = %e, topic = %topic, "failed to forward publish");
+        async {
+            // Always go through ensure_topic
+            match self
+                .ensure_topic(topic.clone(), myself.clone(), state)
+                .await
+            {
+                Ok(topic_actor) => {
+                    // Forward the publish to the topic actor
+                    if let Err(e) = topic_actor.send_message(BrokerMessage::PublishRequest {
+                        registration_id,
+                        topic: topic.clone(),
+                        payload,
+                        reply_to, // forward to topic agent
+                        trace_ctx: Some(span.context()),
+                        published_by,
+                    }) {
+                        error!(error = %e, topic = %topic, "failed to forward publish");
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, topic = %topic, "failed to ensure topic; notifying broker");
+                    if let Some(supervisor) = myself.try_get_supervisor() {
+                        supervisor
+                            .send_message(BrokerMessage::ErrorMessage {
+                                client_id: registration_id.clone(),
+                                error: format!("Failed to ensure topic {topic}: {e:?}"),
+                            })
+                            .ok();
+                    }
                 }
             }
-            Err(e) => {
-                error!(error = %e, topic = %topic, "failed to ensure topic; notifying broker");
-                if let Some(supervisor) = myself.try_get_supervisor() {
-                    supervisor
-                        .send_message(BrokerMessage::ErrorMessage {
-                            client_id: registration_id.clone(),
-                            error: format!("Failed to ensure topic {topic}: {e:?}"),
-                        })
-                        .ok();
-                }
-            }
+            Ok::<(), ActorProcessingErr>(())
         }
-        Ok(())
+        .instrument(span.clone())
+        .await
     }
 
     async fn handle_publish_response(
@@ -461,21 +463,23 @@ impl TopicManager {
 
         let span = trace_span!("cassini.topic_manager.subscribe_request", %registration_id, topic = %topic);
         try_set_parent_otel(&span, trace_ctx.clone());
-        let _g = span.enter();
-
-        if let Err(e) = self
-            .ensure_topic_and_subscribe(
-                registration_id.clone(),
-                topic.clone(),
-                trace_ctx,
-                myself.clone(),
-                state,
-            )
-            .await
-        {
-            error!(error = %e, "ensure_topic_and_subscribe failed");
+        async {
+            if let Err(e) = self
+                .ensure_topic_and_subscribe(
+                    registration_id.clone(),
+                    topic.clone(),
+                    trace_ctx,
+                    myself.clone(),
+                    state,
+                )
+                .await
+            {
+                error!(error = %e, "ensure_topic_and_subscribe failed");
+            }
+            Ok::<(), ActorProcessingErr>(())
         }
-        Ok(())
+        .instrument(span)
+        .await
     }
 
     async fn handle_get_topics(
