@@ -32,6 +32,8 @@
 #   cargo hack          — compiles every feature combination
 #   cargo mutants       — mutation testing; verifies tests actually catch bugs
 #   noseyparker-cli     — secret/credential scanning across files and git history
+#   check-sources       — every git source in a Cargo.lock or flake.lock still fetchable anonymously at its pinned
+#                         revision (infra/check-sources.nu; needs the network, as cargo deny's advisory fetch does)
 #
 # Usage:
 #   nu static-tools.nu [--manifest-path <path>] [--output-path <path>]
@@ -45,6 +47,7 @@ use ./core *
 use ./core/logging.nu *
 
 const COMPONENT = "polar-static-analysis"
+const CHECK_SOURCES = (path self | path dirname | path join ../../infra/check-sources.nu | path expand)
 # ---------------------------------------------------------------------------
 # Colour helpers
 # ---------------------------------------------------------------------------
@@ -186,6 +189,14 @@ def tool-definitions [manifest: string, output_dir: string] {
                 --feature-powerset
             ]
         }
+        {
+            key: "sources"
+            name: "check-sources"
+            outfile: $"($output_dir)/check_sources.txt"
+            cmd: [
+                nu $CHECK_SOURCES
+            ]
+        }
     ]
 }
 
@@ -265,6 +276,17 @@ def generate-summary [results: table, output_dir: string, skip_summary: bool] {
     }
     $sections = ($sections | append "")
 
+    # check-sources — one line per failure or move, then its summary (or why nothing was checked)
+    let sources_file = $"($output_dir)/check_sources.txt"
+    $sections = ($sections | append (bold "=== check-sources ==="))
+    if ($sources_file | path exists) {
+        let sources_lines = open $sources_file
+            | lines
+            | where { |l| $l =~ '^(FAIL|moved)' or $l =~ 'sources checked' or $l =~ 'cannot be reached' }
+        $sections = ($sections | append ($sources_lines | str join "\n"))
+    }
+    $sections = ($sections | append "")
+
     # noseyparker
     let np_report = $"($output_dir)/noseyparker_report.txt"
     $sections = ($sections | append (bold "=== noseyparker ==="))
@@ -310,10 +332,10 @@ def main [
     --output-path: string = "./pipeline-out"            # Directory for output files
     --skip-summary                                      # Skip summary report generation
     --no-progress                                       # (reserved; progress always shown for now)
-    --only: string = ""                                 # Comma-separated: deny, clippy, udeps, semver-checks, geiger, hack, noseyparker, mutants (default: all)
+    --only: string = ""                                 # Comma-separated: deny, clippy, udeps, semver-checks, geiger, hack, sources, noseyparker, mutants (default: all)
 ] {
     let chosen = ($only | split row "," | each {|t| $t | str trim } | where {|t| $t != "" })
-    let known = ["deny" "clippy" "udeps" "semver-checks" "geiger" "hack" "noseyparker" "mutants"]
+    let known = ["deny" "clippy" "udeps" "semver-checks" "geiger" "hack" "sources" "noseyparker" "mutants"]
     let unknown = ($chosen | where {|t| $t not-in $known })
     if ($unknown | is-not-empty) {
         log-error --component $COMPONENT $"unknown tool\(s\) in --only: ($unknown | str join ', '). Known: ($known | str join ', ')"
@@ -337,6 +359,9 @@ def main [
         [hack cargo-hack]
         [mutants cargo-mutants]
         [noseyparker noseyparker-cli]
+        [sources git]
+        [sources curl]
+        [sources timeout]
     ] | where {|r| $r.0 == "always" or (do $want $r.0) } | each {|r| $r.1 })
     check-tools $needed
 

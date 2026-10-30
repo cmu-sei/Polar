@@ -415,6 +415,11 @@ fmt:
 static-analysis:
     nu scripts/pipeline/static-tools.nu --manifest-path src/agents/Cargo.toml
 
+# Also run by static-analysis. Exit 1: a source is gone; exit 2: github.com could not be reached, nothing was checked.
+# Check that every git source in a Cargo.lock or flake.lock is fetchable anonymously at its pinned revision
+check-sources:
+    nu infra/check-sources.nu
+
 # Import your claimed user certificate (and the Polar CA) into Librewolf.
 # Reads ~/.config/polar-admin/<username>.{crt,key} and ca.pem, which `claim`
 # and `bootstrap` wrote. Close Librewolf first so the NSS db is not locked.
