@@ -7727,6 +7727,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "soft-state-common"
+version = "1.0.0"
+dependencies = [
+ "polar",
+ "proptest",
+ "rkyv",
+ "tokio",
+]
+
+[[package]]
+name = "soft-state-observer"
+version = "1.0.0"
+dependencies = [
+ "cassini-client",
+ "cassini-types",
+ "cert-issuer-common",
+ "neo4rs",
+ "polar",
+ "polar-agent-builder",
+ "polar-env",
+ "polar-policy",
+ "polar-scudo",
+ "polar-test-graph",
+ "proptest",
+ "ractor",
+ "serde",
+ "serde_json",
+ "soft-state-common",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "spdx"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

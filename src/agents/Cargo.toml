@@ -85,6 +85,8 @@ members = [
     "build-processor",
     "cert-issuer/server","cert-issuer/client", "cert-issuer/common",
     "secret-harness",
+    "soft-state/common",
+    "soft-state/observe",
 ]
 
 [workspace.package]
@@ -208,6 +210,7 @@ polar-policy = { path = "polar-policy" }
 polar-agent-builder = { path = "polar-agent-builder" }
 polar-router = { path = "polar-router" }
 polar-test-graph = { path = "polar-test-graph" }
+soft-state-common = { path = "soft-state/common" }
 openapi-common = { path = "openapi/common" }
 time = { version = "0.3.47", features = ["serde"]}
 wiremock = "0.6"
