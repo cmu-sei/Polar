@@ -27,7 +27,13 @@ let ns = C.polarNamespace
 let ObserverValues =
       { Type =
           { platform : Builder.Platform.Type
-          , images : { kubeObserver : Text, kubeConsumer : Text }
+          , images :
+              { kubeObserver : Text
+              , kubeConsumer : Text
+              , gitObserver : Text
+              , gitProcessor : Text
+              , gitController : Text
+              }
           }
       }
 
@@ -122,4 +128,63 @@ let kubeStages =
               }
             ]
 
-in  { ObserverValues, kubernetes = kubeStages }
+--| The git agents: the observer clones and fetches the repositories it is told to watch and publishes
+--| what it finds, the processor writes that to the graph, and the controller decides which repositories
+--| are watched, from the runtime documents the scheduler carries (nothing is watched until a signed
+--| `repositories` document names one).
+let gitStages =
+      λ(v : ObserverValues.Type) →
+        let account =
+              λ(name : Text) →
+                kubernetes.Resource.ServiceAccount (Builder.makeServiceAccount ns name)
+
+        let observer =
+              Builder.BuilderAgent::{
+              , name = "git-repo-observer"
+              , namespace = ns
+              , image = v.images.gitObserver
+              , provides = [ "cassini", "encryption" ]
+              , shutdownBudgetSecs = 45
+              -- The clones can be fetched again, so they do not outlive the pod.
+              , scratch = [ { name = "cache", mountPath = "/var/lib/git-repo-observer" } ]
+              , settings = [ Settings.setting "POLAR_CACHE_ROOT" "/var/lib/git-repo-observer" ]
+              }
+
+        let processor =
+              Builder.BuilderAgent::{
+              , name = "git-repo-processor"
+              , namespace = ns
+              , image = v.images.gitProcessor
+              , provides = [ "cassini", "graph-write" ]
+              , shutdownBudgetSecs = 50
+              , settings = Settings.graphSettings ns
+              }
+
+        let controller =
+              Builder.BuilderAgent::{
+              , name = "git-repo-controller"
+              , namespace = ns
+              , image = v.images.gitController
+              , shutdownBudgetSecs = 20
+              }
+
+        in  [ P.Stage::{
+              , name = "git-agents"
+              , description = Some "the git observer, processor and controller: watch the repositories the scheduler's documents name"
+              , shared = True
+              , objects =
+                    P.k8s [ account "git-repo-observer", account "git-repo-processor", account "git-repo-controller" ]
+                  # P.agents
+                      [ Builder.makePolarAgent v.platform processor
+                      , Builder.makePolarAgent v.platform controller
+                      , Builder.makePolarAgent v.platform observer
+                      ]
+              , waits =
+                [ P.waitForAgent ns "git-repo-processor"
+                , P.waitForAgent ns "git-repo-controller"
+                , P.waitForAgent ns "git-repo-observer"
+                ]
+              }
+            ]
+
+in  { ObserverValues, kubernetes = kubeStages, git = gitStages }
