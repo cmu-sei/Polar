@@ -440,7 +440,8 @@ cluster.
   Secrets (a cloud provider's, for a cluster in the cloud): use a key for SOPS alone, not your main one;
 - the pod, from `docker.io/daveman1010220/polar-dev:latest-<arch>` (amd64 and arm64; `POLAR_DEV_IMAGE` for another),
   headless, with SSH on 2223, on a node of that architecture. The architecture is the cluster's nodes', not your
-  machine's; where they are of both, `POLAR_DEV_ARCH` says which.
+  machine's; where they are of both, `POLAR_DEV_ARCH` says which. When `up` would change the image the pod runs (which
+  seeds its Nix store again), it says so, and at a terminal asks first unless `POLAR_DEV_IMAGE` asked for it.
 
 It copies your `~/.config/polar-deploy` and `polar-admin` in, unless the pod has its own already, forwards
 `127.0.0.1:2222` (`POLAR_DEV_PORT`) to the pod's SSH, clones `POLAR_DEV_REPO` (`POLAR_DEV_BRANCH`) into `/workspace` if it is
@@ -458,7 +459,16 @@ bin/polar-dev cert [name]   # copy your certificate out and import it into Libre
 bin/polar-dev forward       # Neo4j (https://localhost:7473) and ACE (http://localhost:8050) for a browser here
 bin/polar-dev sync          # copy ~/.config/polar-deploy and polar-admin back here
 bin/polar-dev down          # sync, then stop the pod; --purge removes the namespace and its volumes too
+bin/polar-dev build-image   # build the dev image in the pod and push it to the cluster's registry (below)
 ```
+
+An image newer than the published one (a fix not yet on Docker Hub) is built in the pod itself, so your machine still
+needs only `kubectl` and `git`: `bin/polar-dev build-image [tag] [target]` bundles this checkout's current commit (what is
+committed, not the working tree), builds `devContainer` for the pod's architecture with the pod's Nix (as root, with
+root's own cache), starts the target's registry in the cluster (`nu infra/cluster-registry.nu up`; the target is
+`POLAR_TARGET`, else `local-minimal`), pushes `polar-dev:<tag>` (the short commit by default) to it, and prints the
+`POLAR_DEV_IMAGE=localhost:30500/polar-dev:<tag> bin/polar-dev up` that puts the pod on it. The script's own tests are
+`bash bin/tests/polar-dev.bash`.
 
 #### Dev container on your machine
 

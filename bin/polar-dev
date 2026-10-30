@@ -30,6 +30,10 @@
 #   bin/polar-dev forward   the port-forwards a browser here needs: Neo4j (7473, 7687) and ACE (8050)
 #   bin/polar-dev sync      copy ~/.config/polar-deploy (the deployment PKI and its signed history) and polar-admin back here
 #   bin/polar-dev down      sync, then stop the pod (its volumes stay); --purge removes the namespace and the volumes too
+#   bin/polar-dev build-image [tag] [target]
+#                           build the dev image from this checkout's current commit, in the pod, and push it to the target's
+#                           registry in the cluster (tag: the short commit; target: POLAR_TARGET, else local-minimal); it
+#                           prints the `up` that runs it
 #
 # Settings (environment): POLAR_DEV_IMAGE, POLAR_DEV_ARCH (amd64 or arm64; default: the cluster's nodes'),
 # POLAR_DEV_STORAGE_CLASS (default: the cluster's), POLAR_DEV_SSH_KEY (the public key to log in with; default: the first
@@ -185,9 +189,100 @@ copy_in() { [ -d "$HOME/.config/$1" ] || return 0; tar -C "$HOME/.config" -cf - 
 # A socket there (gpg-agent's, in a deployment PKI's GnuPG home) cannot be copied; tar leaves it out, and is told not to say so.
 copy_out() { mkdir -p "$HOME/.config"; k exec "deploy/$DEPLOY" -c dev -- tar --warning=no-file-ignored -C "$REMOTE_HOME/.config" -cf - "$1" | tar -C "$HOME/.config" -xf -; }
 
+# ── build-image, and the image `up` applies ──────────────────────────────────
+# image_warning, oci_arch and image_tag_ok only read their arguments; their tests are bin/tests/polar-dev.bash.
+
+# Says when `up` is about to change the pod's image (the current, the new): a change re-seeds the Nix store. Returns 0 when
+# the change was not asked for (the third, POLAR_DEV_IMAGE, is empty), so `up` asks first: a later `up` without
+# POLAR_DEV_IMAGE would otherwise put a pod on an image built for it back on the published one, unsaid.
+image_warning() {
+    [ -n "$1" ] && [ "$1" != "$2" ] || return 1
+    if [ -n "$3" ]; then
+        say "the pod runs $1; this applies $2 (POLAR_DEV_IMAGE): a changed image re-seeds the Nix store (several minutes)"
+        return 1
+    fi
+    say "the pod runs $1; this applies $2 (set POLAR_DEV_IMAGE=$1 to keep it)"
+    say "a changed image re-seeds the Nix store (several minutes)"
+}
+
+# The image architecture of a machine (uname -m).
+oci_arch() { case "$1" in x86_64|amd64) echo amd64 ;; aarch64|arm64) echo arm64 ;; *) return 1 ;; esac; }
+
+# Whether it can be an image's tag: letters, digits, _ . and -, not starting with . or -, at most 128.
+image_tag_ok() { local re='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; [[ $1 =~ $re ]]; }
+
+# What build_image runs in the pod, as root, after its settings (scratch, machine, arch, target, tag). Root's own HOME and
+# cache: an image older than nix-container-lib's fix has /run/container-env.fish give root the session user's XDG
+# directories, and Nix's git fetcher refuses a cache root does not own.
+build_in_pod() {
+    cat <<'BUILD'
+set -euo pipefail
+say() { echo "polar-dev (in the pod): $*"; }
+die() { echo "polar-dev (in the pod): $*" >&2; exit 1; }
+# The clone, the bundle and the link to the image go however the build ends (the image stays in the store until collected).
+trap 'cd /; rm -rf "$scratch"' EXIT
+export HOME=/root XDG_CACHE_HOME=/root/.cache
+unset XDG_CONFIG_HOME XDG_DATA_HOME
+mkdir -p "$XDG_CACHE_HOME"
+git clone -q "$scratch/polar.bundle" "$scratch/src" || die "cloning the bundle failed"
+cd "$scratch/src"
+say "nix build .#packages.$machine-linux.devContainer"
+nix build -L -o "$scratch/image" ".#packages.$machine-linux.devContainer" || die "nix build failed (above)"
+say "nu infra/cluster-registry.nu up $target: the registry in the cluster, made if it is not there"
+nu infra/cluster-registry.nu up "$target" || die "the target's registry in the cluster is not up (above)"
+dest=registry.polar-registry.svc:5000/polar-dev:$tag
+say "pushing the image to $dest"
+skopeo --insecure-policy copy --dest-tls-verify=false "docker-archive:$scratch/image" "docker://$dest" || die "skopeo could not push to $dest (above)"
+got=$(skopeo inspect --tls-verify=false --format '{{.Architecture}}' "docker://$dest") || die "skopeo could not read $dest back (above)"
+[ "$got" = "$arch" ] || die "$dest is an image for $got, not for $arch"
+say "$dest is for $arch"
+BUILD
+}
+
+# Builds the dev image from this checkout's current commit in the pod (its Nix and its store), and pushes it to the
+# target's registry in the cluster: a machine with no Nix and no container runtime (a Mac) gets an image with a fix the
+# published one lacks. The commit goes in as a git bundle, so what is built is what is committed. It prints the `up` that
+# puts the pod on it.
+build_image() {
+    local tag=${1:-} target=${2:-${POLAR_TARGET:-local-minimal}} scratch=/tmp/polar-dev-build-image
+    local commit branch p machine arch node_port
+    git -C "$HERE" rev-parse --git-dir >/dev/null 2>&1 || die "$HERE is not a git checkout: build-image bundles its current commit"
+    commit=$(git -C "$HERE" rev-parse --short HEAD) || die "cannot read the current commit of $HERE"
+    tag=${tag:-$commit}
+    image_tag_ok "$tag" || die "$tag cannot be an image's tag (letters, digits, _ . and -, not first; at most 128)"
+    [ -d "$HERE/infra/targets/$target" ] || die "there is no target $target in infra/targets: name one, or set POLAR_TARGET"
+    p=$(pod)
+    { [ -n "$p" ] && k rollout status "deploy/$DEPLOY" --timeout=5s >/dev/null 2>&1; } || die "no dev pod is ready in $NS: bin/polar-dev up first"
+    machine=$(k exec "$p" -c dev -- uname -m) || die "cannot ask the pod $p what it runs on"
+    arch=$(oci_arch "$machine") || die "the pod runs on $machine; build-image knows x86_64 and aarch64"
+    [ -z "$(git -C "$HERE" status --porcelain --untracked-files=no)" ] || say "uncommitted changes are left out: the image is built from $commit"
+    branch=$(git -C "$HERE" symbolic-ref --quiet --short HEAD) || branch=""
+    BUILD_TMP=$(mktemp -d) || die "cannot make a temporary directory"
+    trap 'rm -rf "$BUILD_TMP"' EXIT
+    say "bundling $commit${branch:+ ($branch)} from $HERE"
+    git -C "$HERE" bundle create "$BUILD_TMP/polar.bundle" HEAD ${branch:+"$branch"} || die "git bundle create failed in $HERE"
+    { printf 'scratch=%q machine=%q arch=%q target=%q tag=%q\n' "$scratch" "$machine" "$arch" "$target" "$tag"
+      build_in_pod; } > "$BUILD_TMP/build.bash"
+    say "copying it into $p ($scratch)"
+    { k exec "$p" -c dev -- rm -rf "$scratch" && k exec "$p" -c dev -- mkdir -p "$scratch"; } || die "cannot make $scratch in $p"
+    # COPYFILE_DISABLE: macOS's tar would add an ._ file of extended attributes beside each.
+    COPYFILE_DISABLE=1 tar -C "$BUILD_TMP" -cf - polar.bundle build.bash | k exec -i "$p" -c dev -- tar -C "$scratch" -xf - \
+        || die "copying the bundle into $p failed"
+    say "building the dev image for $machine-linux in $p, then pushing it to $target's registry in the cluster (a first build fetches and builds a lot: many minutes)"
+    # With the environment an SSH session gets (PATH and the rest), as kubectl exec gives only the image's own.
+    k exec "$p" -c dev -- fish -c "test -r /run/container-env.fish; and source /run/container-env.fish; exec bash $scratch/build.bash" \
+        || die "building or pushing the image in $p failed (above)"
+    node_port=$(kubectl -n polar-registry get svc registry -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null) || node_port=""
+    say "pushed polar-dev:$tag ($arch) to the registry in the cluster. Put the pod on it with:"
+    echo "  POLAR_DEV_IMAGE=localhost:${node_port:-30500}/polar-dev:$tag bin/polar-dev up"
+}
+
+# Sourced (bin/tests/polar-dev.bash), the script defines its functions and stops here.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
 # Every command but the help talks to the cluster: say so plainly when kubectl cannot reach it, before anything is half done.
 case "${1:-}" in
-    up|attach|cert|forward|sync|down)
+    up|attach|cert|forward|sync|down|build-image)
         kubectl version --request-timeout=5s >/dev/null 2>&1 || die "the cluster does not answer (KUBECONFIG is ${KUBECONFIG:-not set}): point kubectl at it, then run this again" ;;
 esac
 
@@ -196,6 +291,13 @@ case "${1:-}" in
         agent_has_key || die "your ssh agent holds no key: ssh-add yours (on a Mac, ssh-add --apple-use-keychain ~/.ssh/id_ed25519), then run this again. The pod's git uses it through the forwarded agent, so POLAR_DEV_SSH_KEY alone is not enough"
         ARCH=$(cluster_arch) || exit 1
         IMAGE=${POLAR_DEV_IMAGE:-docker.io/daveman1010220/polar-dev:latest-$ARCH}
+        # The pod's image as it runs now; a change not asked for is confirmed at a terminal (a script is not asked).
+        current=$(k get deploy "$DEPLOY" -o jsonpath='{.spec.template.spec.containers[?(@.name=="dev")].image}' 2>/dev/null) || current=""
+        if image_warning "$current" "$IMAGE" "${POLAR_DEV_IMAGE:-}" && [ -t 0 ]; then
+            printf 'polar-dev: replace it? [y/N] '
+            read -r answer || answer=""
+            case "$answer" in [yY]|[yY][eE][sS]) ;; *) die "nothing applied: the pod stays on $current" ;; esac
+        fi
         say "applying $NS (image $IMAGE, on $ARCH nodes)"
         manifests=$(render) || exit 1
         printf '%s\n' "$manifests" | kubectl apply -f - | sed 's/^/  /'
@@ -234,5 +336,6 @@ case "${1:-}" in
         "$0" sync
         if [ "${2:-}" = "--purge" ]; then kubectl delete namespace "$NS"; kubectl delete clusterrolebinding "polar-dev-$U" --ignore-not-found
         else k scale "deploy/$DEPLOY" --replicas=0; fi ;;
+    build-image) build_image "${2:-}" "${3:-}" ;;
     *) sed -n '/^# bin\/polar-dev/,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 1 ;;
 esac
