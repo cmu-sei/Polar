@@ -443,6 +443,16 @@ stages:
           selector:
             polar.sei.cmu.edu/agent: credentials-agent-observer
           type: ClusterIP
+      - apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: polar-bootstrap
+      - apiVersion: v1
+        automountServiceAccountToken: false
+        kind: ServiceAccount
+        metadata:
+          name: polar-admin-bootstrap
+          namespace: polar-bootstrap
       - apiVersion: polar.sei.cmu.edu/v1alpha1
         kind: PolarAgent
         metadata:

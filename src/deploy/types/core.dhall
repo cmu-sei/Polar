@@ -31,6 +31,10 @@ let Platform = ./platform.dhall
 
 let P = ./plan.dhall
 
+let Prelude =
+      https://prelude.dhall-lang.org/package.dhall
+        sha256:931cbfae9d746c4611b07633ab1e547637ab4ba138b16bf65ef1b9ad66a60b7f
+
 let Settings = ./settings.dhall
 
 let setting = Settings.setting
@@ -55,6 +59,11 @@ let CoreValues =
               }
           , imagePullPolicy : Optional Text
           , storageClass : Optional Text
+          -- The people who may write to the configuration git server, and so author the signed documents
+          -- the scheduler carries: the DNS name in each one's certificate, which only exists once the
+          -- credentials agent has provisioned them (the first administrator, see the runbook). Empty
+          -- until then.
+          , gitServerAdmins : List Text
           }
       }
 
@@ -220,6 +229,13 @@ let core
                     "POLAR_GIT_SERVER_REPOS"
                     "{\"admins\":[],\"repos\":[{\"name\":\"polar-schedules\",\"readers\":[\"${schedulerObserverIdentity}\"],\"writers\":[],\"seed\":\"polar-schedules\"}]}"
                 ]
+                # ( if    Prelude.List.null Text v.gitServerAdmins
+                    then  [] : List kubernetes.EnvVar.Type
+                    else  [ setting
+                              "POLAR_GIT_SERVER_ADMINS"
+                              (Prelude.Text.concatSep "," v.gitServerAdmins)
+                          ]
+                  )
               }
 
         -- The scheduler. The processor records schedules in the graph and tells the agents they affect;
@@ -303,6 +319,23 @@ let core
                             (Builder.makePvc ns "credentials-agent-data" "1Gi" v.storageClass)
                         , kubernetes.Resource.Service
                             (Builder.makeService ns "credentials-agent-observer" 8080)
+                        -- Where the first administrator proves control of the cluster. Nothing runs
+                        -- here, no role or binding may ever name this account, and no pod mounts its
+                        -- token: whoever can mint one (`polar-admin-grant bootstrap`, with the
+                        -- cluster administrator's own kubeconfig) controls the cluster. The credentials
+                        -- agent accepts exactly this identity for the bootstrap claim.
+                        , kubernetes.Resource.Namespace
+                            kubernetes.Namespace::{
+                            , metadata = kubernetes.ObjectMeta::{ name = Some "polar-bootstrap" }
+                            }
+                        , kubernetes.Resource.ServiceAccount
+                            kubernetes.ServiceAccount::{
+                            , metadata = kubernetes.ObjectMeta::{
+                              , name = Some "polar-admin-bootstrap"
+                              , namespace = Some "polar-bootstrap"
+                              }
+                            , automountServiceAccountToken = Some False
+                            }
                         ]
                     # P.agents
                         [ Builder.makePolarAgent (platform v) credentialsAgent

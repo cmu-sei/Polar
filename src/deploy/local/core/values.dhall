@@ -25,6 +25,7 @@ let values
         }
       , imagePullPolicy = Some "IfNotPresent"
       , storageClass = None Text
+      , gitServerAdmins = [] : List Text
       }
 
 in  values
