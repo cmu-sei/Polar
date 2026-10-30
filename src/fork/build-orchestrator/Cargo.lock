@@ -582,7 +582,7 @@ dependencies = [
  "pin-project-lite",
  "rustls 0.21.12",
  "rustls 0.23.46",
- "rustls-native-certs 0.8.4",
+ "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls 0.26.5",
@@ -990,8 +990,10 @@ dependencies = [
  "chrono",
  "clap",
  "opentelemetry",
+ "polar-custody",
  "polar-env",
  "polar-router",
+ "polar-scudo",
  "ractor",
  "rkyv",
  "rustls 0.23.46",
@@ -1402,11 +1404,12 @@ dependencies = [
  "cert-issuer-common",
  "clap",
  "ed25519-dalek",
- "hkdf",
+ "hkdf 0.12.4",
  "neo4rs",
  "p256 0.13.2",
  "polar",
  "polar-escrow",
+ "polar-signing",
  "rand 0.10.3",
  "rkyv",
  "rsa",
@@ -1694,6 +1697,9 @@ name = "deadpool-runtime"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "defmt"
@@ -1974,6 +1980,7 @@ dependencies = [
  "digest 0.11.3",
  "ff 0.14.0",
  "group 0.14.0",
+ "hkdf 0.13.0",
  "hybrid-array",
  "pem-rfc7468 1.0.0",
  "pkcs8 0.11.0",
@@ -2479,6 +2486,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hkdf"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
+dependencies = [
+ "hmac 0.13.0",
+]
+
+[[package]]
 name = "hmac"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2505,6 +2521,26 @@ dependencies = [
  "cfg-if",
  "libc",
  "windows-link",
+]
+
+[[package]]
+name = "hpke"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f512e325a1a71bf3273fb9b7fc9e5d96dac136fb4a95d0e6637001b12ea3e09"
+dependencies = [
+ "aead",
+ "aes-gcm",
+ "getrandom 0.4.3",
+ "hkdf 0.13.0",
+ "hybrid-array",
+ "p256 0.14.0",
+ "p384",
+ "p521",
+ "rand_core 0.10.1",
+ "sha2 0.11.0",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -2623,6 +2659,7 @@ dependencies = [
  "http 1.5.0",
  "http-body 1.1.0",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -2656,7 +2693,7 @@ dependencies = [
  "hyper-util",
  "log",
  "rustls 0.23.46",
- "rustls-native-certs 0.8.4",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls 0.26.5",
  "tower-service",
@@ -3064,17 +3101,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "keyutils-raw"
-version = "0.5.0"
-source = "git+https://github.com/daveman1010221/rust-keyutils.git?rev=f22e830#f22e830c0663a2e3ed16b8ac05c8408c03ed34f2"
-dependencies = [
- "errno",
- "libc",
- "log",
- "uninit",
-]
-
-[[package]]
 name = "kube"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3456,6 +3482,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mutants"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc0287524726960e07b119cebd01678f852f147742ae0d925e6a520dca956126"
+
+[[package]]
 name = "native-tls"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3474,26 +3506,27 @@ dependencies = [
 
 [[package]]
 name = "neo4rs"
-version = "0.9.0-rc.8"
-source = "git+https://github.com/neo4j-labs/neo4rs?tag=v0.9.0-rc.8#1b92c9b822327330e0c46927f02aafbc7cb212a9"
+version = "0.9.0-rc.10"
+source = "git+https://github.com/daveman1010221/neo4rs?rev=4117f5a#4117f5aac44a5e70b1a232fd1ae0d842454e12a8"
 dependencies = [
  "backon",
  "bytes",
  "chrono",
  "chrono-tz",
- "dashmap",
  "deadpool",
  "delegate",
  "futures",
  "log",
  "neo4rs-macros",
+ "neo4rs_include_snippet",
  "pastey",
  "pin-project-lite",
  "rustls 0.23.46",
- "rustls-native-certs 0.7.3",
- "rustls-pemfile",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "serde",
- "thiserror 1.0.69",
+ "socket2 0.5.10",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-rustls 0.26.5",
  "url",
@@ -3502,10 +3535,18 @@ dependencies = [
 [[package]]
 name = "neo4rs-macros"
 version = "0.3.0"
-source = "git+https://github.com/neo4j-labs/neo4rs?tag=v0.9.0-rc.8#1b92c9b822327330e0c46927f02aafbc7cb212a9"
+source = "git+https://github.com/daveman1010221/neo4rs?rev=4117f5a#4117f5aac44a5e70b1a232fd1ae0d842454e12a8"
 dependencies = [
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "neo4rs_include_snippet"
+version = "0.9.0-rc.10"
+source = "git+https://github.com/daveman1010221/neo4rs?rev=4117f5a#4117f5aac44a5e70b1a232fd1ae0d842454e12a8"
+dependencies = [
+ "unsynn",
 ]
 
 [[package]]
@@ -3837,6 +3878,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "p384"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d17b851e6b3e378ab4ecb07fa2ed23f4d15f075735f8fec9fa1e7bdce5f8301f"
+dependencies = [
+ "elliptic-curve 0.14.1",
+ "fiat-crypto 0.3.0",
+ "primefield",
+ "primeorder 0.14.0",
+]
+
+[[package]]
+name = "p521"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ad64cc32c2dc466317c12ee5853e61f159f9eab1fe7efade0395dc2e7b43449"
+dependencies = [
+ "base16ct 1.0.0",
+ "elliptic-curve 0.14.1",
+ "primefield",
+ "primeorder 0.14.0",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3867,9 +3932,9 @@ dependencies = [
 
 [[package]]
 name = "pastey"
-version = "0.1.1"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "pathdiff"
@@ -4079,17 +4144,21 @@ dependencies = [
  "cassini-types",
  "chrono",
  "hex",
+ "http 1.5.0",
+ "hyper-util",
  "k8s-openapi",
  "neo4rs",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "polar-custody",
  "polar-env",
  "polar-health",
  "polar-router",
  "ractor",
  "reqwest 0.12.28",
  "rkyv",
+ "rustls 0.23.46",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4106,6 +4175,7 @@ name = "polar-agent-builder"
 version = "1.0.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "cassini-client",
  "cassini-types",
  "cert-issuer-common",
@@ -4140,21 +4210,38 @@ dependencies = [
  "credentials-agent-client",
  "credentials_agent_common",
  "polar",
+ "polar-custody",
  "polar-env",
- "polar-kernel-keyring",
  "polar-router",
  "ractor",
- "rand 0.10.3",
  "rkyv",
- "rsa",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "uuid",
- "x25519-dalek",
+ "x509-parser",
+ "zeroize",
+]
+
+[[package]]
+name = "polar-custody"
+version = "1.0.0"
+dependencies = [
+ "cert-issuer-common",
+ "p256 0.13.2",
+ "polar-env",
+ "polar-escrow",
+ "rcgen",
+ "ring",
+ "rkyv",
+ "rsa",
+ "rustls 0.23.46",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "x509-parser",
  "zeroize",
 ]
 
@@ -4172,6 +4259,8 @@ version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
+ "hpke",
+ "p256 0.13.2",
  "rand 0.10.3",
  "rkyv",
  "rsa",
@@ -4185,6 +4274,7 @@ dependencies = [
 name = "polar-health"
 version = "1.0.0"
 dependencies = [
+ "polar-custody",
  "polar-env",
  "ractor",
  "rand 0.10.3",
@@ -4195,20 +4285,6 @@ dependencies = [
  "tokio",
  "tracing",
  "x509-parser",
-]
-
-[[package]]
-name = "polar-kernel-keyring"
-version = "1.0.0"
-dependencies = [
- "errno",
- "keyutils-raw",
- "libc",
- "rsa",
- "sha2 0.11.0",
- "thiserror 1.0.69",
- "tracing",
- "uninit",
 ]
 
 [[package]]
@@ -4251,6 +4327,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "polar-scudo"
+version = "1.0.0"
 
 [[package]]
 name = "polar-signing"
@@ -4940,19 +5020,6 @@ dependencies = [
 
 [[package]]
 name = "rustls-native-certs"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5bfb394eeed242e909609f56089eecfe5fda225042e8b171791b9c95f5931e5"
-dependencies = [
- "openssl-probe 0.1.6",
- "rustls-pemfile",
- "rustls-pki-types",
- "schannel",
- "security-framework 2.11.1",
-]
-
-[[package]]
-name = "rustls-native-certs"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
@@ -4961,15 +5028,6 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework 3.7.0",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]
@@ -5361,6 +5419,12 @@ dependencies = [
  "digest 0.10.7",
  "keccak",
 ]
+
+[[package]]
+name = "shadow_counted"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65da48d447333cebe1aadbdd3662f3ba56e76e67f53bc46f3dd5f67c74629d6b"
 
 [[package]]
 name = "sharded-slab"
@@ -6112,12 +6176,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
-name = "uninit"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac20c07bcac4f505f1e4fbd2e55b54f6297a35a27538f107cb3d4254b4514146"
-
-[[package]]
 name = "universal-hash"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6132,6 +6190,17 @@ name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
+name = "unsynn"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd574186a61b234717745ee569f9323def8ac863c2e4b512a25d3b0ec39322fc"
+dependencies = [
+ "mutants",
+ "proc-macro2",
+ "shadow_counted",
+]
 
 [[package]]
 name = "untrusted"
@@ -6675,6 +6744,20 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zerotrie"
