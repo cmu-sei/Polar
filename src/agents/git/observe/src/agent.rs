@@ -64,7 +64,7 @@ impl PolarAgent for GitObserver {
             Cause::Timer("observe"),
         ]),
     ];
-    const SECTIONS: &'static [&'static Section] = &[&settings::SECTION];
+    const SECTIONS: &'static [&'static Section] = &[&settings::SECTION, &polar::egress::SECTION];
     const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] =
         &[&crate::credentials::CREDENTIALS];
     const HELP: Option<&'static str> = Some(
@@ -73,7 +73,10 @@ impl PolarAgent for GitObserver {
          that event gives it fetches, walks the new commits and publishes them and the ref \
          updates. It never touches the graph. A repository that needs a credential names it; the \
          credentials come in the `credentials` runtime section, as ciphertext only this agent can \
-         open, and each is used only for the hosts it is bound to.",
+         open, and each is used only for the hosts it is bound to. The egress section says how a \
+         repository is reached: through POLAR_EGRESS_PROXY unless its host is in \
+         POLAR_EGRESS_NO_PROXY, trusting the CA certificates of POLAR_EGRESS_CA_CERT beside the \
+         system's.",
     );
 
     async fn start(configured: Configured) -> Result<(), StartError> {
@@ -102,4 +105,25 @@ mod tests {
     use super::*;
 
     polar_agent_builder::polar_agent_tests!(GitObserver);
+
+    /// The render writes the target's egress setting only into an agent that declares the section.
+    #[test]
+    fn the_scaffold_declares_the_egress_section() {
+        let scaffold = polar_agent_builder::agent::scaffold_document::<GitObserver>();
+        let egress = scaffold
+            .document
+            .sections
+            .iter()
+            .find(|s| s.name == "egress")
+            .expect("an egress section");
+        let names: Vec<&str> = egress.variables.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "POLAR_EGRESS_PROXY",
+                "POLAR_EGRESS_NO_PROXY",
+                "POLAR_EGRESS_CA_CERT"
+            ]
+        );
+    }
 }

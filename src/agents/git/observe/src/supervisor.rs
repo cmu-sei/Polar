@@ -36,6 +36,7 @@ use crate::{
 use cassini_types::ClientEvent;
 use git_agent_common::{GIT_REPO_CONFIG_EVENTS, RepositorySet};
 use polar::cassini::{CassiniClient, TcpClient, UnsubscribeRequest};
+use polar::egress::Egress;
 use polar_agent_builder::{
     AgentBuilder, ConfigurationHandle, Configured, CryptoHandle, HealthClient, HealthHandle,
     InfrastructureEvent, InfrastructureSupervisorMessage, Subscription,
@@ -151,6 +152,21 @@ impl Actor for RootSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
         let settings = ObserverSettings::read(configured.config())?;
+        let egress = Egress::read(configured.config())?;
+        // The egress CA is trusted from the start, before any clone or fetch: libgit2 takes it once, for the whole
+        // process. It is read here first, so a file that cannot be used stops the agent with the variable's name.
+        if let Some(path) = &egress.ca_cert {
+            let bundle = egress.ca_bundle().await?;
+            crate::trust_ca_file(path).map_err(|e| {
+                ActorProcessingErr::from(format!(
+                    "POLAR_EGRESS_CA_CERT {path} could not be given to git: {e}"
+                ))
+            })?;
+            info!(
+                "trusting {} egress CA certificate(s) beside the system's",
+                bundle.len()
+            );
+        }
 
         let cache_root = settings
             .absolute_cache_root()
@@ -205,6 +221,7 @@ impl Actor for RootSupervisor {
                 cache_root,
                 crypto: Arc::new(crypto.clone()),
                 clone: crate::GitRepoWorker::open_or_clone_bare,
+                egress,
             },
             myself.get_cell(),
         )

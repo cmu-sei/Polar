@@ -51,6 +51,8 @@ url.workspace = true
 serde_yaml.workspace = true
 
 [dev-dependencies]
+# Test CAs, TLS servers, a proxy and child processes (polar::egress::testing).
+polar = { workspace = true, features = ["testing"] }
 rand.workspace = true
 rsa.workspace = true
 tempfile.workspace = true

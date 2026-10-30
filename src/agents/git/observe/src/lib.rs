@@ -28,8 +28,9 @@ use git_agent_common::GitRepositoryMessage;
 use git_agent_common::RepoObservationConfig;
 use git_agent_common::RepositorySet;
 use git_agent_common::status::{GIT_REPO_OBSERVATION_STATUS, ObservationStatus};
-use git2::{Cred, CredentialType, FetchOptions, Oid, RemoteCallbacks, Repository};
+use git2::{Cred, CredentialType, FetchOptions, Oid, ProxyOptions, RemoteCallbacks, Repository};
 use polar::cassini::TcpClient;
+use polar::egress::Egress;
 use polar::graph::nodes::git::RepoId;
 use polar::topics::GIT_REPOSITORY_EVENTS;
 use polar_agent_builder::CryptoClient;
@@ -82,13 +83,23 @@ pub fn tracked_refs(remotes: &[String], refs: &[String]) -> Vec<String> {
  */
 
 /// How a worker makes its clone: `GitRepoWorker::open_or_clone_bare` outside a test. A function pointer so that a
-/// test can put another in its place and need no network, and so that it can see what the clone is given.
+/// test can put another in its place and need no network, and so that it can see what the clone is given. The last
+/// argument is the proxy to reach the repository through, if any (`polar::egress::Egress::proxy_for`).
 pub type CloneFn = fn(
     &Path,
     &str,
     Arc<dyn GitCredentialProvider>,
     Option<usize>,
+    Option<&str>,
 ) -> Result<Repository, git2::Error>;
+
+/// Trusts the CA certificates in the file at `path` for every TLS connection libgit2 makes from now on, beside the
+/// ones it trusts already (OpenSSL's default locations: the system bundle): the egress CA.
+pub fn trust_ca_file(path: &str) -> Result<(), git2::Error> {
+    // SAFETY: libgit2's options are global to the process and not synchronised. This is called once, as the agent
+    // starts and before any worker exists, so no other libgit2 call runs beside it.
+    unsafe { git2::opts::set_ssl_cert_file(path) }
+}
 
 /// A source of Git credentials.
 ///
@@ -194,6 +205,7 @@ pub struct GitRepoSupervisorState {
     tcp_client: TcpClient,
     crypto: Arc<dyn CryptoClient>,
     clone: CloneFn,
+    egress: Egress,
 }
 
 pub struct GitRepoSupervisorArgs {
@@ -202,6 +214,8 @@ pub struct GitRepoSupervisorArgs {
     /// Where each worker asks for the credential its repository names.
     crypto: Arc<dyn CryptoClient>,
     clone: CloneFn,
+    /// The way out of the cluster: which proxy, if any, each repository is reached through.
+    egress: Egress,
 }
 
 #[derive(Serialize, Deserialize, Archive, Debug)]
@@ -276,6 +290,7 @@ impl GitRepoSupervisor {
 
         let announced = config.clone();
         let args = GitRepoWorkerArgs {
+            proxy: state.egress.proxy_for(&config.repo_url),
             config,
             crypto: state.crypto.clone(),
             clone: state.clone,
@@ -330,6 +345,7 @@ impl Actor for GitRepoSupervisor {
             tcp_client: args.tcp_client,
             crypto: args.crypto,
             clone: args.clone,
+            egress: args.egress,
             workers: HashMap::new(),
         })
     }
@@ -431,6 +447,8 @@ pub struct GitRepoWorkerState {
     tcp_client: TcpClient,
     crypto: Arc<dyn CryptoClient>,
     clone: CloneFn,
+    /// The proxy the repository is reached through, or none.
+    proxy: Option<String>,
     /// Cloned or opened by the first attempt that has what it needs, not before: a repository whose
     /// credential has not arrived has no clone yet.
     repo: Option<Repository>,
@@ -450,6 +468,8 @@ pub struct GitRepoWorkerArgs {
     tcp_client: TcpClient,
     crypto: Arc<dyn CryptoClient>,
     clone: CloneFn,
+    /// The proxy the repository is reached through, or none (`Egress::proxy_for` its URL).
+    proxy: Option<String>,
 }
 
 fn on_commit(
@@ -537,14 +557,22 @@ impl GitRepoWorker {
         callbacks
     }
 
+    /// What a clone or a fetch is given: the credentials, the depth, and the proxy to go through, if any. With none,
+    /// libgit2 connects directly: it is not told to look for one, so the process environment never decides.
     fn build_fetch_options(
         provider: Arc<dyn GitCredentialProvider>,
         depth: Option<usize>,
+        proxy: Option<&str>,
     ) -> FetchOptions<'static> {
         let mut fetch_opts = FetchOptions::new();
         fetch_opts.remote_callbacks(Self::build_remote_callbacks(provider));
         if let Some(d) = depth {
             fetch_opts.depth(d as i32);
+        }
+        if let Some(proxy) = proxy {
+            let mut options = ProxyOptions::new();
+            options.url(proxy);
+            fetch_opts.proxy_options(options);
         }
         fetch_opts
     }
@@ -554,13 +582,14 @@ impl GitRepoWorker {
         repo_url: &str,
         credential_provider: Arc<dyn GitCredentialProvider>,
         shallow_depth: Option<usize>,
+        proxy: Option<&str>,
     ) -> Result<Repository, git2::Error> {
         if repo_path.exists() {
             Repository::open_bare(repo_path)
         } else {
             let mut builder = git2::build::RepoBuilder::new();
             builder.bare(true);
-            let fetch_opts = Self::build_fetch_options(credential_provider, shallow_depth);
+            let fetch_opts = Self::build_fetch_options(credential_provider, shallow_depth, proxy);
             builder.fetch_options(fetch_opts);
             builder.clone(repo_url, repo_path)
         }
@@ -571,11 +600,12 @@ impl GitRepoWorker {
         credential_provider: Arc<dyn GitCredentialProvider>,
         remotes: &[String],
         shallow_depth: Option<usize>,
+        proxy: Option<&str>,
     ) -> Result<(), git2::Error> {
         for remote_name in remotes {
             let mut remote = repo.find_remote(remote_name)?;
             let mut fetch_opts =
-                Self::build_fetch_options(credential_provider.clone(), shallow_depth);
+                Self::build_fetch_options(credential_provider.clone(), shallow_depth, proxy);
             remote.fetch(&[] as &[&str], Some(&mut fetch_opts), None)?;
         }
         Ok(())
@@ -654,6 +684,7 @@ impl GitRepoWorker {
                 &state.config.repo_url,
                 provider.clone(),
                 state.config.shallow_depth,
+                state.proxy.as_deref(),
             ) {
                 Ok(repo) => {
                     if state.config.refs.is_empty() {
@@ -683,6 +714,7 @@ impl GitRepoWorker {
             repo,
             &provider,
             &state.config,
+            state.proxy.as_deref(),
             &mut state.last_seen,
             |ref_name, commit| {
                 on_commit(
@@ -734,6 +766,7 @@ impl GitRepoWorker {
         repo: &Repository,
         credential_provider: &Arc<dyn GitCredentialProvider>,
         obs_config: &RepoObservationConfig,
+        proxy: Option<&str>,
         last_seen: &mut HashMap<String, Oid>,
         mut on_commit: F,
         mut on_ref_update: impl FnMut(&str, Option<Oid>, Oid),
@@ -746,6 +779,7 @@ impl GitRepoWorker {
             credential_provider.clone(),
             &obs_config.remotes,
             obs_config.shallow_depth,
+            proxy,
         )?;
 
         for ref_name in &obs_config.refs {
@@ -803,6 +837,7 @@ impl Actor for GitRepoWorker {
             tcp_client: args.tcp_client,
             crypto: args.crypto,
             clone: args.clone,
+            proxy: args.proxy,
             repo: None,
             last_seen: HashMap::new(),
             waiting: false,
@@ -908,27 +943,40 @@ mod tests {
         url: &str,
         provider: Arc<dyn GitCredentialProvider>,
         _depth: Option<usize>,
+        proxy: Option<&str>,
     ) -> Result<Repository, git2::Error> {
         let credential_offered = provider
             .credentials(url, None, CredentialType::USER_PASS_PLAINTEXT)
             .is_ok();
-        CLONES
-            .lock()
-            .unwrap()
-            .push((url.to_string(), credential_offered));
+        CLONES.lock().unwrap().push((
+            url.to_string(),
+            credential_offered,
+            proxy.map(str::to_string),
+        ));
         Err(git2::Error::from_str("test: there is no network"))
     }
 
-    /// What `refusing_clone` was asked: the URL, and whether the provider it was given offers a credential.
-    static CLONES: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
+    /// What `refusing_clone` was asked: the URL, whether the provider it was given offers a credential, and the
+    /// proxy it was given.
+    static CLONES: Mutex<Vec<(String, bool, Option<String>)>> = Mutex::new(Vec::new());
 
     fn clones_of(url: &str) -> Vec<bool> {
         CLONES
             .lock()
             .unwrap()
             .iter()
-            .filter(|(u, _)| u == url)
-            .map(|(_, offered)| *offered)
+            .filter(|(u, _, _)| u == url)
+            .map(|(_, offered, _)| *offered)
+            .collect()
+    }
+
+    fn proxies_of(url: &str) -> Vec<Option<String>> {
+        CLONES
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(u, _, _)| u == url)
+            .map(|(_, _, proxy)| proxy.clone())
             .collect()
     }
 
@@ -958,6 +1006,7 @@ mod tests {
                 tcp_client: TcpClient::from_actor_ref(sink),
                 crypto: crypto.clone(),
                 clone,
+                proxy: None,
             },
         )
         .await
@@ -1336,6 +1385,10 @@ mod tests {
     }
 
     async fn start_supervisor() -> SupervisorRig {
+        start_supervisor_with(Egress::default()).await
+    }
+
+    async fn start_supervisor_with(egress: Egress) -> SupervisorRig {
         let received = Arc::new(Mutex::new(Vec::new()));
         let (sink, _) = Actor::spawn(None, Sink { received }, ()).await.unwrap();
         let crypto = Arc::new(Recorder::default());
@@ -1348,6 +1401,7 @@ mod tests {
                 tcp_client: TcpClient::from_actor_ref(sink),
                 crypto: crypto.clone(),
                 clone: refusing_clone,
+                egress,
             },
         )
         .await
@@ -1545,6 +1599,141 @@ mod tests {
         assert_eq!(clones_of(url), vec![false]);
         assert_eq!(asked(&rig), 0);
         rig.worker.stop(None);
+    }
+
+    /// The proxy a repository is reached through follows its URL: one outside the cluster goes through the egress
+    /// proxy, the cluster's own git server does not.
+    #[tokio::test]
+    async fn a_repository_outside_the_cluster_is_cloned_through_the_proxy_and_one_inside_is_not() {
+        let proxy = "http://proxy.corp.example:3128";
+        let rig = start_supervisor_with(Egress {
+            proxy: Some(proxy.to_string()),
+            no_proxy: Some("localhost,127.0.0.1,::1,.svc,.cluster.local".to_string()),
+            ca_cert: None,
+        })
+        .await;
+        let outside = "https://github.com/egress-test/outside.git";
+        let inside = "https://polar-git-server.polar.svc.cluster.local/egress-test/inside.git";
+        for url in [outside, inside] {
+            let mut config = private_repo_at(url);
+            config.credential = None;
+            rig.supervisor
+                .send_message(RepoSupervisorMessage::SpawnWorker { config })
+                .unwrap();
+        }
+        until("both clones", || {
+            !proxies_of(outside).is_empty() && !proxies_of(inside).is_empty()
+        })
+        .await;
+        assert_eq!(proxies_of(outside)[0].as_deref(), Some(proxy));
+        assert_eq!(proxies_of(inside)[0], None);
+        rig.supervisor.stop(None);
+    }
+
+    /// libgit2 is told the proxy: a clone of a repository outside goes to it as a CONNECT to the host.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_clone_given_a_proxy_connects_through_it() {
+        let (proxy, seen) = polar::egress::testing::recording_proxy().await;
+        let cache = tempfile::tempdir().unwrap();
+        let path = cache.path().join("clone");
+        let cloned = tokio::task::spawn_blocking(move || {
+            GitRepoWorker::open_or_clone_bare(
+                &path,
+                "https://outside.example.org/r.git",
+                Arc::new(PublicRepoProvider),
+                None,
+                Some(&proxy),
+            )
+            .map(|_| ())
+        })
+        .await
+        .unwrap();
+        assert!(cloned.is_err(), "the proxy refuses everything");
+        assert_eq!(
+            seen.lock().unwrap().first().map(String::as_str),
+            Some("CONNECT outside.example.org:443 HTTP/1.1")
+        );
+    }
+
+    /// In a child (EGRESS_TEST_URLS set): trusts POLAR_EGRESS_CA_CERT if it is set, then tries a clone of each URL.
+    fn clone_each() {
+        if let Some(ca) = polar::egress::testing::given("POLAR_EGRESS_CA_CERT") {
+            trust_ca_file(&ca).unwrap();
+        }
+        let urls = polar::egress::testing::given("EGRESS_TEST_URLS").unwrap();
+        for (i, url) in urls.split(',').enumerate() {
+            let cache = tempfile::tempdir().unwrap();
+            let result = GitRepoWorker::open_or_clone_bare(
+                &cache.path().join(i.to_string()),
+                &format!("{url}/r.git"),
+                Arc::new(PublicRepoProvider),
+                None,
+                None,
+            );
+            // What the clone found, for a person reading a failure: the stand-in is no git server.
+            println!(
+                "CLONE {url} {:?}",
+                result.err().map(|e| e.message().to_string())
+            );
+        }
+    }
+
+    /// The egress CA is added to what libgit2 trusts, not put in place of the roots OpenSSL finds by default. Those
+    /// are read from the process environment, so the clones are made in a child process: SSL_CERT_FILE, and
+    /// NIX_SSL_CERT_FILE, which nixpkgs' OpenSSL reads in its place (OpenSSL's own default file otherwise; in the
+    /// image, that is the system bundle).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_egress_ca_is_trusted_by_git_beside_the_image_roots() {
+        use polar::egress::testing::{TestCa, given, https_server, rerun};
+        if given("EGRESS_TEST_URLS").is_some() {
+            return clone_each();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let image = TestCa::new("image roots");
+        let corporate = TestCa::new("corporate root");
+        let image_file = image.write(dir.path(), "image.pem");
+        let corporate_file = corporate.write(dir.path(), "corporate.pem");
+        let name = "tests::the_egress_ca_is_trusted_by_git_beside_the_image_roots";
+
+        // Without the egress CA only the image's server is trusted: the test can tell.
+        let (inside, outside) = (https_server(&image).await, https_server(&corporate).await);
+        let urls = format!("{},{}", inside.url, outside.url);
+        let output = rerun(
+            name,
+            &[
+                ("SSL_CERT_FILE", image_file.to_str().unwrap()),
+                ("NIX_SSL_CERT_FILE", image_file.to_str().unwrap()),
+                ("EGRESS_TEST_URLS", &urls),
+            ],
+        )
+        .await;
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            (inside.served() > 0, outside.served() > 0),
+            (true, false),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        let (inside, outside) = (https_server(&image).await, https_server(&corporate).await);
+        let urls = format!("{},{}", inside.url, outside.url);
+        let output = rerun(
+            name,
+            &[
+                ("SSL_CERT_FILE", image_file.to_str().unwrap()),
+                ("NIX_SSL_CERT_FILE", image_file.to_str().unwrap()),
+                ("POLAR_EGRESS_CA_CERT", corporate_file.to_str().unwrap()),
+                ("EGRESS_TEST_URLS", &urls),
+            ],
+        )
+        .await;
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            (inside.served() > 0, outside.served() > 0),
+            (true, true),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 
     #[tokio::test]
