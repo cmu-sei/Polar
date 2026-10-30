@@ -442,6 +442,10 @@ cluster.
   headless, with SSH on 2223, on a node of that architecture. The architecture is the cluster's nodes', not your
   machine's; where they are of both, `POLAR_DEV_ARCH` says which. When `up` would change the image the pod runs (which
   seeds its Nix store again), it says so, and at a terminal asks first unless `POLAR_DEV_IMAGE` asked for it.
+  Its SSH (dropbear) offers ECDSA P-256 as well as ed25519 and RSA host keys, and AES-GCM as well as chacha20 and
+  AES-CTR (nix-container-lib `fff6abc`, `0771d7c`): a managed Mac's FIPS policy (`/etc/ssh/ssh_config.d/fips_ssh_config`,
+  2026-10-30) takes neither ed25519 nor rsa-sha2-256 host keys and only AES-GCM ciphers. An image from before then
+  refuses such a Mac; `build-image` (below) makes one until the published images are rebuilt.
 
 It copies your `~/.config/polar-deploy` and `polar-admin` in, unless the pod has its own already, forwards
 `127.0.0.1:2222` (`POLAR_DEV_PORT`) to the pod's SSH, clones `POLAR_DEV_REPO` (`POLAR_DEV_BRANCH`) into `/workspace` if it is

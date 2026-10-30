@@ -228,6 +228,8 @@ infra/
                          (a note, never a failure)
   jira-check.nu          jira-observer's Jira connection, checked from a pod in the cluster, in facts safe to share
                          (no host, URL, address, email or token), and what they mean
+  check-sources.nu       every git source in a Cargo.lock or flake.lock still fetchable anonymously at its pinned
+                         revision (just check-sources; also run by just static-analysis and ci.nu's phase 0)
   cassini-shutdown.nu  harness.nu  measure-render-cache.nu     asking the broker to stop; reading the secret harness; timing the cache
   tests/                 one test file per script: nu infra/tests/<name>.nu
   config/                the catalog
