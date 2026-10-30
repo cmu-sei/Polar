@@ -51,7 +51,7 @@
     nix-container-lib.inputs.flake-utils.follows  = "flake-utils";
     # Scudo, every binary's allocator (docs/architecture/broker-baseline.md, "Decided"): LLVM's source with a flake that
     # builds it with our configuration.
-    nix-scudo.url                                 = "git+file:///home/djshepard/Documents/projects/nix-scudo?ref=main";
+    nix-scudo.url                                 = "github:daveman1010221/nix-scudo";
     nix-scudo.inputs.nixpkgs.follows              = "nixpkgs";
     nix-scudo.inputs.flake-utils.follows          = "flake-utils";
 

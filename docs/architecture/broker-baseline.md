@@ -603,7 +603,7 @@ Linux binaries.
 - `polar-scudo` is every binary's global allocator (`static GLOBAL: polar_scudo::Scudo`), and the only one:
   `polar-scudo/tests/every_binary.rs` reads the workspace's binaries from `cargo metadata` and fails on one that does
   not declare it, or on a package that depends on another allocator. mimalloc and smalloc are out of the workspace.
-- Scudo's source is the flake input `nix-scudo`, the maintainer's repository: LLVM's
+- Scudo's source is the flake input `nix-scudo`, the maintainer's repository `github:daveman1010221/nix-scudo`: LLVM's
   `compiler-rt/lib/scudo/standalone` split out with its history, at `llvmorg-23.1.0` (the source measured here),
   unmodified, with a flake whose `lib.mkScudo` builds it as a static library with the caller's configuration (its README
   says how to move it to a later LLVM). The configuration stays in Polar, `polar-scudo/config/custom_scudo_config.h`,
