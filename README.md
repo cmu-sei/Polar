@@ -462,6 +462,12 @@ bin/polar-dev down          # sync, then stop the pod; --purge removes the names
 bin/polar-dev build-image   # build the dev image in the pod and push it to the cluster's registry (below)
 ```
 
+When the login fails, `up` and `attach` say why: whether the port-forward runs, ssh's refusal (`ssh -v`) and dropbear's
+(the pod's log), and what to do. A local ssh policy (a managed Mac's FIPS one, in `/etc/ssh/ssh_config.d`) that accepts
+none of the pod's host keys or ciphers is named with the files it comes from, and `up` warns before it starts when that
+policy accepts none of the key types your agent holds. A clone the git server refuses (it knows none of your agent's keys,
+which are listed) still logs you in, to an empty `/workspace`: add a key to your account there and `up` again clones it.
+
 An image newer than the published one (a fix not yet on Docker Hub) is built in the pod itself, so your machine still
 needs only `kubectl` and `git`: `bin/polar-dev build-image [tag] [target]` bundles this checkout's current commit (what is
 committed, not the working tree), builds `devContainer` for the pod's architecture with the pod's Nix (as root, with

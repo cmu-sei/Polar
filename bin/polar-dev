@@ -172,14 +172,204 @@ K
 
 ssh_answers() { ssh_opts; ssh "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$(id -un)@127.0.0.1" true 2>/dev/null; }
 
+# ── Why a login or a clone is refused ────────────────────────────────────────
+# The functions down to clone_hint only read text (what ssh -v, ssh -G, ssh-add, dropbear and git said) and print; their
+# tests are bin/tests/polar-dev.bash. They keep to what macOS has: bash 3.2, BSD awk and sed.
+
+# The cause of the last refusal in what ssh (or git through it, or the pod's dropbear) said: hostkey, cipher, kex or mac
+# (the two ends share no algorithm of that kind), publickey (the key was denied), refused (nothing listens at the port),
+# closed (something listens and hangs up: a forward whose pod end does not answer), timeout, ok (it logged in), or unknown.
+ssh_cause() {
+    awk '
+        /no matching host key type found|No matching algo hostkey/ { c = "hostkey" }
+        /no matching cipher found|No matching algo enc/ { c = "cipher" }
+        /no matching key exchange method found|No matching algo kex/ { c = "kex" }
+        /no matching MAC found|No matching algo mac/ { c = "mac" }
+        /Permission denied \(publickey/ { c = "publickey" }
+        /Connection refused/ { c = "refused" }
+        /kex_exchange_identification|Connection closed by|Connection reset by/ { c = "closed" }
+        /[Tt]imed out/ { c = "timeout" }
+        /Authenticated to / { c = "ok" }
+        END { print (c == "" ? "unknown" : c) }'
+}
+
+# The line that says it, as ssh said it (without its debug1: prefix); nothing when it did not refuse.
+ssh_reason() {
+    awk '/no matching .* found|Permission denied|Connection refused|kex_exchange_identification|Connection closed by|Connection reset by|[Tt]imed out/ {
+        sub(/^debug[0-9]: /, ""); r = $0 } END { print r }'
+}
+
+# What the pod offered, from ssh's "Unable to negotiate ... Their offer: ..." line.
+ssh_offer() { awk '/Their offer: / { o = $0; sub(/.*Their offer: /, "", o) } END { print o }'; }
+
+# The configuration files ssh read (ssh -v says each), in order, each once: the policy a managed machine imposes is in
+# one of them (/etc/ssh/ssh_config.d/... on a Mac).
+ssh_config_files() {
+    awk '/Reading configuration data / { f = $0; sub(/.*Reading configuration data /, "", f); if (!(f in seen)) { seen[f] = 1; print f } }'
+}
+
+# One setting from ssh -G's output; an OpenSSH older than 8.5 calls pubkeyacceptedalgorithms pubkeyacceptedkeytypes.
+ssh_g_field() {
+    awk -v f="$1" '!done && ($1 == f || (f == "pubkeyacceptedalgorithms" && $1 == "pubkeyacceptedkeytypes")) { print $2; done = 1 }'
+}
+
+# The ssh -G setting that lists the algorithms of a negotiation cause.
+ssh_g_name() { case "$1" in hostkey) echo hostkeyalgorithms ;; cipher) echo ciphers ;; kex) echo kexalgorithms ;; mac) echo macs ;; esac; }
+
+# The key types ssh left out because its own policy does not accept them (ssh -v: "Skipping <type> key ... not in
+# PubkeyAcceptedAlgorithms"), each once.
+skipped_key_types() {
+    awk '/Skipping .* key .* - corresponding algorithm not in PubkeyAccepted/ { sub(/^debug[0-9]: /, ""); if (!seen[$2]++) print $2 }'
+}
+
+# The last few refusals in the pod's log: dropbear's (an algorithm it shares with no client, a login it ended before
+# authentication, a key it refused, a user it does not have) and start.nu's when it was given no key to let in.
+dropbear_refusals() {
+    awk '/No matching algo|Exit before auth|nonexistent user|[Pp]ubkey auth (attempt|bad)|Max auth tries|must be owned by|AUTHORIZED_KEYS_B64 not set/ {
+        l[n++ % 5] = $0 } END { for (i = (n > 5 ? n - 5 : 0); i < n; i++) print l[i % 5] }'
+}
+
+# The key types in ssh-add -L's listing.
+agent_key_types() { awk '/^The agent has no identities/ { next } NF { print $1 }'; }
+
+# Which of the key types (one per line) a policy's accepted algorithms (comma-separated, as ssh -G prints them) let ssh
+# offer. An RSA key is offered through rsa-sha2-256 or -512 (ssh-rsa itself is SHA-1, which most policies refuse), and so
+# is an RSA certificate through their -cert-v01 forms.
+usable_key_types() {
+    printf '%s\n' "$1" | awk -v accepted="$2" '
+        BEGIN { n = split(accepted, a, ","); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
+        NF == 0 { next }
+        { t = $1; use = (t in ok) }
+        t == "ssh-rsa" && (("rsa-sha2-256" in ok) || ("rsa-sha2-512" in ok)) { use = 1 }
+        t == "ssh-rsa-cert-v01@openssh.com" && (("rsa-sha2-256-cert-v01@openssh.com" in ok) || ("rsa-sha2-512-cert-v01@openssh.com" in ok)) { use = 1 }
+        use && !seen[t]++ { print t }'
+}
+
+# The hint for a negotiation refused by your ssh: what it refused, what the pod offered and what your ssh accepts, where
+# that policy is written, and that the pod's image may be older than the fixes for a FIPS policy.
+negotiation_hint() {
+    local what
+    case "$1" in hostkey) what="host key type" ;; cipher) what=cipher ;; kex) what="key exchange method" ;; *) what=MAC ;; esac
+    say "your ssh accepts no $what the pod offers. The pod offers: ${2:-(ssh did not say)}"
+    say "your ssh accepts: ${3:-(ssh -G does not say)}"
+    say "that is your ssh's policy, from ${4:-its configuration} (the files ssh -G reads). A FIPS policy refuses ed25519, chacha20 and the ctr ciphers, and the pod's image may predate the fixes for it (an ECDSA host key and AES-GCM in dropbear): build one from this checkout with bin/polar-dev build-image, or set POLAR_DEV_IMAGE to a newer image, then bin/polar-dev up again"
+}
+
+# The hint for a key the pod denied: the key the pod was given (a fingerprint, and where bin/polar-dev took it from), the
+# keys the agent holds (ssh-add -l), and which of three it is: the policy kept ssh from offering the agent's key types,
+# the pod's key is not in the agent, or the agent holds it and the pod has another (or dropbear refused it).
+publickey_hint() {
+    local fp; fp=$(printf '%s\n' "$1" | awk '{ print $2 }')
+    say "the pod refused your key. It lets in: ${1:-(a key bin/polar-dev cannot read)} ($2)"
+    say "your agent holds:"; printf '%s\n' "${3:-(no key)}" | sed 's/^/  /'
+    if [ -n "$4" ]; then
+        say "your ssh did not offer your $(printf '%s\n' "$4" | paste -s -d, -) keys: its policy's PubkeyAcceptedAlgorithms leaves those types out. ssh-add a key of a type it accepts (an ECDSA key: ssh-keygen -t ecdsa), set POLAR_DEV_SSH_KEY to its .pub unless it is the agent's first, and bin/polar-dev up again"
+    elif [ -n "$fp" ] && printf '%s\n' "$3" | awk -v fp="$fp" '$2 == fp { found = 1 } END { exit !found }'; then
+        say "your agent holds it, so the pod was given another key, or its dropbear refused this one (its log, above): bin/polar-dev up again gives the pod this key"
+    else
+        say "that key is not in your agent: ssh-add it, or set POLAR_DEV_SSH_KEY to the public half of one that is, and bin/polar-dev up again"
+    fi
+}
+
+# The hint when nothing refused the login but nothing let it in either: the port-forward (stopped, or running with nothing
+# behind it), with the last line of its log.
+forward_hint() {
+    if [ "$1" = dead ]; then
+        say "the port-forward has stopped${2:+ (its log ends: $2)}: the pod may have been stopped or replaced (kubectl -n $NS get pods); bin/polar-dev attach starts it again"
+    elif [ "$3" = refused ]; then
+        say "the port-forward runs, but nothing answers at 127.0.0.1:$PORT: another program may hold that port; set POLAR_DEV_PORT to a free one"
+    else
+        say "the port-forward runs, but the pod's end does not answer${2:+ (its log ends: $2)}: dropbear may not be running in the pod (kubectl -n $NS logs deploy/$DEPLOY -c dev)"
+    fi
+}
+
+# The host of a git remote: scp-style (git@host:path), or a URL (ssh://, https://).
+repo_host() { printf '%s\n' "$1" | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://##; s#^[^@/]*@##; s#[:/].*$##'; }
+
+# The hint for a clone the git server refused: it knows none of the agent's keys (listed by fingerprint, never the keys).
+clone_hint() {
+    say "the git server at $1 knows none of the keys your agent holds:"
+    printf '%s\n' "${2:-(no key)}" | sed 's/^/  /'
+    say "add one of them to your account on $1, or set POLAR_DEV_REPO to a remote you can reach. /workspace stays empty until then: once the key is added, bin/polar-dev up again clones it"
+}
+
+# The files ssh -G reads, as one line.
+policy_files() { ssh -v -G -p "$PORT" 127.0.0.1 2>&1 >/dev/null | ssh_config_files | paste -s -d' ' -; }
+
+# Whether your ssh's policy lets it offer any key the agent holds: one that accepts none of their types (a FIPS policy and
+# an ed25519 key) has the login to the pod refused, however the pod is made (git in the pod goes through the pod's own
+# ssh). A warning, said before anything is applied: ssh also offers keys in ~/.ssh that the agent does not hold.
+check_key_types() {
+    local types accepted files
+    types=$(ssh-add -L 2>/dev/null | agent_key_types) || true
+    [ -n "$types" ] || return 0
+    accepted=$(ssh -G -p "$PORT" 127.0.0.1 2>/dev/null | ssh_g_field pubkeyacceptedalgorithms) || true
+    [ -n "$accepted" ] && [ -z "$(usable_key_types "$types" "$accepted")" ] || return 0
+    files=$(policy_files) || true
+    say "warning: your ssh's policy accepts none of the key types your agent holds ($(printf '%s\n' "$types" | paste -s -d, -)); it accepts $accepted (ssh -G${files:+, from $files}). The login to the pod will be refused: ssh-add a key of a type it accepts (an ECDSA key: ssh-keygen -t ecdsa)"
+}
+
+# One login that says why it fails (ssh -v), and dropbear's refusals in the pod's log; CAUSE is ssh's cause, else
+# dropbear's last. It trusts any host key and records none (UserKnownHostsFile=/dev/null), so a host key the pod has
+# changed does not hide what else is wrong.
+probe_ssh() {
+    PROBE=$(ssh -v -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null \
+        -p "$PORT" "$(id -un)@127.0.0.1" true 2>&1) || true
+    REFUSALS=$(k logs "deploy/$DEPLOY" -c dev --tail=2000 2>/dev/null | dropbear_refusals) || true
+    CAUSE=$(printf '%s\n' "$PROBE" | ssh_cause)
+    if [ "$CAUSE" = unknown ] && [ -n "$REFUSALS" ]; then CAUSE=$(printf '%s\n' "$REFUSALS" | tail -n 1 | ssh_cause); fi
+}
+
+# Says why the pod's SSH does not let you in, from what probe_ssh found: the port-forward, ssh's refusal, dropbear's, and
+# the hint for the cause.
+diagnose_ssh() {
+    local fwd=dead last reason key from
+    if { [ -n "${PF_PID:-}" ] && kill -0 "$PF_PID" 2>/dev/null; } || pgrep -f "port-forward deploy/$DEPLOY $PORT:2223" >/dev/null 2>&1; then fwd=alive; fi
+    last=$(tail -n 1 "$PF_LOG" 2>/dev/null) || true
+    if [ "$fwd" = alive ]; then say "the port-forward to the pod runs${last:+; its log ($PF_LOG) ends: $last}"
+    else say "the port-forward to the pod has stopped${last:+; its log ($PF_LOG) ends: $last}"; fi
+    reason=$(printf '%s\n' "$PROBE" | ssh_reason)
+    say "ssh -v says: ${reason:-$(printf '%s\n' "$PROBE" | tail -n 1)}"
+    if [ -n "$REFUSALS" ]; then say "the pod's log says:"; printf '%s\n' "$REFUSALS" | sed 's/^/  /'; fi
+    case "$CAUSE" in
+        hostkey|cipher|kex|mac)
+            negotiation_hint "$CAUSE" "$(printf '%s\n' "$PROBE" | ssh_offer)" \
+                "$(ssh -G -p "$PORT" 127.0.0.1 2>/dev/null | ssh_g_field "$(ssh_g_name "$CAUSE")")" \
+                "$(printf '%s\n' "$PROBE" | ssh_config_files | paste -s -d' ' -)" ;;
+        publickey)
+            if [ -n "${POLAR_DEV_SSH_KEY:-}" ]; then
+                key=$(ssh-keygen -lf "$POLAR_DEV_SSH_KEY" 2>/dev/null) || key=""; from="POLAR_DEV_SSH_KEY=$POLAR_DEV_SSH_KEY"
+            else
+                key=$(ssh-add -l 2>/dev/null) || key=""; key=${key%%$'\n'*}; from="your agent's first key"
+            fi
+            publickey_hint "$key" "$from" "$(ssh-add -l 2>/dev/null || true)" "$(printf '%s\n' "$PROBE" | skipped_key_types)" ;;
+        ok) say "a login that trusts any host key works: the pod's host key is not the one $HOME/.ssh/polar-dev_known_hosts.* holds for it (ssh -p $PORT $(id -un)@127.0.0.1 says more)" ;;
+        *) forward_hint "$fwd" "$last" "$CAUSE" ;;
+    esac
+}
+
+PF_LOG=/tmp/polar-dev-$U-ssh.log
+
 # Starts the forward to the pod's SSH and waits until a login works. A forward left from before that does not reach the pod
-# (it was made for a pod that has since been replaced) is replaced.
+# (it was made for a pod that has since been replaced) is replaced. A refusal that waiting does not change (no algorithm
+# the two ends share, a key the pod does not take) is said after a few tries; anything else, when it gives up.
 forward_ssh() {
     ssh_answers && return
     pkill -f "port-forward deploy/$DEPLOY $PORT:2223" 2>/dev/null || true
-    k port-forward "deploy/$DEPLOY" "$PORT:2223" >/tmp/polar-dev-$U-ssh.log 2>&1 &
-    for _ in $(seq 1 60); do ssh_answers && return; sleep 2; done
-    die "the pod's SSH does not answer at 127.0.0.1:$PORT (kubectl -n $NS logs deploy/$DEPLOY; /tmp/polar-dev-$U-ssh.log)"
+    k port-forward "deploy/$DEPLOY" "$PORT:2223" >"$PF_LOG" 2>&1 &
+    PF_PID=$!
+    local n
+    for n in $(seq 1 60); do
+        ssh_answers && return
+        if [ "$n" -eq 5 ]; then
+            probe_ssh
+            case "$CAUSE" in hostkey|cipher|kex|mac|publickey) diagnose_ssh; die "the pod's SSH refuses this login (above)" ;; esac
+        fi
+        sleep 2
+    done
+    probe_ssh
+    diagnose_ssh
+    die "the pod's SSH does not answer at 127.0.0.1:$PORT (kubectl -n $NS logs deploy/$DEPLOY -c dev; $PF_LOG)"
 }
 
 login() { forward_ssh; exec ssh "${SSH_OPTS[@]}" -t "$(id -un)@127.0.0.1" "$@"; }
@@ -289,6 +479,7 @@ esac
 case "${1:-}" in
     up)
         agent_has_key || die "your ssh agent holds no key: ssh-add yours (on a Mac, ssh-add --apple-use-keychain ~/.ssh/id_ed25519), then run this again. The pod's git uses it through the forwarded agent, so POLAR_DEV_SSH_KEY alone is not enough"
+        check_key_types
         ARCH=$(cluster_arch) || exit 1
         IMAGE=${POLAR_DEV_IMAGE:-docker.io/daveman1010220/polar-dev:latest-$ARCH}
         # The pod's image as it runs now; a change not asked for is confirmed at a terminal (a script is not asked).
@@ -317,7 +508,13 @@ case "${1:-}" in
             say "/workspace already has a checkout"
         else
             say "cloning $REPO ($BRANCH) into /workspace, with your forwarded agent"
-            ssh "${SSH_OPTS[@]}" "$(id -un)@127.0.0.1" "GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' git clone -b '$BRANCH' '$REPO' /workspace"
+            # A clone that fails still logs you in (to an empty /workspace), saying why; a refused key, with what to do.
+            clone_out=$(mktemp)
+            if ! ssh "${SSH_OPTS[@]}" "$(id -un)@127.0.0.1" "GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new' git clone -b '$BRANCH' '$REPO' /workspace" 2>&1 | tee "$clone_out"; then
+                if [ "$(ssh_cause < "$clone_out")" = publickey ]; then clone_hint "$(repo_host "$REPO")" "$(ssh-add -l 2>/dev/null || true)"
+                else say "the clone failed (above): /workspace stays empty; bin/polar-dev up again clones it"; fi
+            fi
+            rm -f "$clone_out"
         fi
         say "logging in (bin/polar-dev attach to come back)"
         login ;;
