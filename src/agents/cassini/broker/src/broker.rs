@@ -64,6 +64,8 @@ pub struct BrokerState {
     control_mgr: Option<ActorRef<BrokerMessage>>,
 
     is_shutting_down: bool,
+    /// The memory budget, told when the drain begins (its watchdog stops then).
+    budget: crate::budget::Budget,
 }
 
 /// What the broker is started with: where it listens and with what certificate, and the
@@ -423,6 +425,7 @@ impl Actor for Broker {
                 control_mgr: Some(control_mgr),
                 infrastructure: infrastructure.infrastructure,
                 is_shutting_down: false,
+                budget: args.bounds.budget.clone(),
             })
         }
         .instrument(span)
@@ -666,6 +669,7 @@ impl Broker {
                 .cast(InfrastructureSupervisorMessage::BeginShutdown {
                     reason: "an orderly shutdown was requested".to_string(),
                 });
+            state.budget.begin_drain();
         }
         state.is_shutting_down = true;
 

@@ -35,7 +35,7 @@
 
 use cassini_types::{Backlog, BrokerMessage, MAX_FRAME_BYTES};
 use ractor::ActorRef;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -155,6 +155,24 @@ struct Inner {
     holders: Mutex<Vec<Weak<Backlog>>>,
     /// Told when the budget is exhausted: the subscriber manager, whose subscribers that are away let go.
     listener: Mutex<Option<ActorRef<BrokerMessage>>>,
+    /// The broker's drain has begun: the watchdog stops.
+    draining: AtomicBool,
+}
+
+/// A reader counted as waiting on the budget, until it is dropped.
+struct Waiting<'a>(&'a Inner);
+
+impl<'a> Waiting<'a> {
+    fn new(inner: &'a Inner) -> Self {
+        inner.state.lock().unwrap().waiting += 1;
+        Waiting(inner)
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap().waiting -= 1;
+    }
 }
 
 /// The broker's memory budget. Cloning shares it.
@@ -231,7 +249,19 @@ impl Budget {
             alarms: AtomicU64::new(0),
             holders: Mutex::new(Vec::new()),
             listener: Mutex::new(None),
+            draining: AtomicBool::new(false),
         }))
+    }
+
+    /// The broker's drain has begun: from now its sessions are let go by the drain, and the watchdog ends (it would
+    /// otherwise go on telling the subscribers and cutting connections the drain is ending).
+    pub fn begin_drain(&self) {
+        self.0.draining.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the broker's drain has begun.
+    pub fn is_draining(&self) -> bool {
+        self.0.draining.load(Ordering::SeqCst)
     }
 
     pub fn limit(&self) -> usize {
@@ -279,9 +309,10 @@ impl Budget {
             if let Some(charge) = self.try_charge(bytes) {
                 return charge;
             }
-            self.0.state.lock().unwrap().waiting += 1;
+            // Counted while it waits, and no longer once it stops, however it stops: a reader whose connection is
+            // cut drops this wait.
+            let _waiting = Waiting::new(&self.0);
             notified.await;
-            self.0.state.lock().unwrap().waiting -= 1;
         }
     }
 
@@ -391,10 +422,13 @@ pub fn spawn_watchdog(bounds: Bounds, broker: ActorRef<BrokerMessage>) {
         let mut every = tokio::time::interval(bounds.stall_check());
         loop {
             every.tick().await;
-            if matches!(
-                broker.get_status(),
-                ractor::ActorStatus::Stopping | ractor::ActorStatus::Stopped
-            ) {
+            // The drain lets go of what is held; the watchdog would only cut what it is ending.
+            if bounds.budget.is_draining()
+                || matches!(
+                    broker.get_status(),
+                    ractor::ActorStatus::Stopping | ractor::ActorStatus::Stopped
+                )
+            {
                 return;
             }
             if !bounds.budget.is_exhausted() {
@@ -571,5 +605,85 @@ mod tests {
         drop(first);
         assert_eq!(next.await.unwrap(), 1);
         assert_eq!(window.used(), 0);
+    }
+
+    /// A reader that gives up waiting (its connection cut, its wait dropped) is no longer counted as waiting
+    /// (cassini-backpressure.md, second review, finding E).
+    #[tokio::test]
+    async fn a_wait_given_up_is_no_longer_counted() {
+        let budget = Budget::new(100);
+        let _held = budget.try_charge(100).unwrap();
+        let waiting = tokio::spawn({
+            let budget = budget.clone();
+            async move { budget.charge(50).await.bytes() }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(budget.stats().readers_waiting, 1);
+        waiting.abort();
+        let _ = waiting.await;
+        assert_eq!(budget.stats().readers_waiting, 0);
+    }
+
+    /// An actor that records the messages it is sent, standing in for whoever the watchdog tells.
+    struct Recorder;
+
+    #[ractor::async_trait]
+    impl ractor::Actor for Recorder {
+        type Msg = BrokerMessage;
+        type State = Arc<Mutex<Vec<String>>>;
+        type Arguments = Arc<Mutex<Vec<String>>>;
+
+        async fn pre_start(
+            &self,
+            _myself: ActorRef<BrokerMessage>,
+            seen: Self::Arguments,
+        ) -> Result<Self::State, ractor::ActorProcessingErr> {
+            Ok(seen)
+        }
+
+        async fn handle(
+            &self,
+            _myself: ActorRef<BrokerMessage>,
+            message: BrokerMessage,
+            seen: &mut Self::State,
+        ) -> Result<(), ractor::ActorProcessingErr> {
+            seen.lock().unwrap().push(format!("{message:?}"));
+            Ok(())
+        }
+    }
+
+    /// The watchdog tells the listener again while the budget is exhausted, and stops once the broker's drain has
+    /// begun: what the drain lets go of is the drain's (finding F).
+    #[tokio::test]
+    async fn the_watchdog_stops_when_the_drain_begins() {
+        let bounds = Bounds::new(MAX_FRAME_BYTES, Duration::from_millis(400)).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (listener, _) = ractor::Actor::spawn(None, Recorder, seen.clone())
+            .await
+            .unwrap();
+        let (broker, _) = ractor::Actor::spawn(None, Recorder, Arc::new(Mutex::new(Vec::new())))
+            .await
+            .unwrap();
+        bounds.budget.tell_when_exhausted(listener.clone());
+        let _held = bounds.budget.try_charge(MAX_FRAME_BYTES).unwrap();
+        assert!(bounds.budget.try_charge(1).is_none());
+        let told = || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.contains("BudgetExhausted"))
+                .count()
+        };
+        let raised = told();
+        spawn_watchdog(bounds.clone(), broker.clone());
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        assert!(told() > raised, "told again while exhausted");
+        bounds.budget.begin_drain();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let at_drain = told();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(told(), at_drain, "not told again once the drain has begun");
+        listener.stop(None);
+        broker.stop(None);
     }
 }
