@@ -76,6 +76,10 @@ pub struct KubernetesBackendConfig {
     /// builds that overlap supersede each other on the broker.
     #[serde(default)]
     pub identity: Option<String>,
+
+    /// Leave the repository's `.git` in each job's workspace, for a pipeline that records which commit it built.
+    #[serde(default)]
+    pub keep_git: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]

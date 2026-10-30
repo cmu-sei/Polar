@@ -170,6 +170,9 @@ pub struct JobOptions {
     pub image_pull_policy: Option<String>,
     /// A certificate of the job's own, from its own ServiceAccount (see `JobIdentity`).
     pub identity: Option<JobIdentity>,
+    /// Keep the repository's `.git` in the workspace. The instrumented pipeline records which commit and tree it
+    /// built, so it needs it; a pipeline that only reads source does not.
+    pub keep_git: bool,
 }
 
 impl JobOptions {
@@ -183,6 +186,7 @@ impl JobOptions {
             workspace_size_limit: None,
             image_pull_policy: None,
             identity: None,
+            keep_git: false,
         }
     }
 }
@@ -225,7 +229,7 @@ pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
     let job_name = job_name_for_build(spec.build_id);
     let (labels, annotations) = standard_metadata(spec.build_id, &spec.source, "pipeline");
 
-    let mut init_container = clone_init_container(&spec.source, &spec.git_credentials);
+    let mut init_container = clone_init_container(&spec.source, &spec.git_credentials, options.keep_git);
     init_container.image_pull_policy = options.image_pull_policy.clone();
 
     let identity = options.identity.as_ref();
@@ -339,7 +343,7 @@ pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
 ///
 /// The init container mounts the workspace volume as writable (it populates it).
 /// The main container mounts the same volume as read-only.
-fn clone_init_container(source: &SourceRef, credentials: &GitCredentials) -> Container {
+fn clone_init_container(source: &SourceRef, credentials: &GitCredentials, keep_git: bool) -> Container {
     let mut env: Vec<EnvVar> = source
         .fetch_env()
         .into_iter()
@@ -359,6 +363,13 @@ fn clone_init_container(source: &SourceRef, credentials: &GitCredentials) -> Con
     // Archive sources are public downloads and never receive git credentials.
     if let SourceRef::Git { .. } = source {
         env.extend(git_credential_env_vars(credentials));
+        if keep_git {
+            env.push(EnvVar {
+                name: "CYCLOPS_KEEP_GIT".to_string(),
+                value: Some("1".to_string()),
+                ..Default::default()
+            });
+        }
     }
 
     Container {
@@ -648,8 +659,9 @@ fn ca_bundle_volume(secret_name: &str) -> Volume {
 
 /// Point the container's TLS clients at the mounted bundle. Each tool reads
 /// its own variable: OpenSSL-based tools `SSL_CERT_FILE`, git
-/// `GIT_SSL_CAINFO`, curl `CURL_CA_BUNDLE`, Nix `NIX_SSL_CERT_FILE`. These
-/// override the defaults baked into build-orchestrator'ss images.
+/// `GIT_SSL_CAINFO`, curl `CURL_CA_BUNDLE`, Nix `NIX_SSL_CERT_FILE`, and cargo
+/// (its own git fetches too) `CARGO_HTTP_CAINFO`. These override the defaults
+/// baked into the images.
 fn trust_ca_bundle(container: &mut Container) {
     let bundle = format!("{CA_BUNDLE_DIR}/{CA_BUNDLE_KEY}");
     let env = container.env.get_or_insert_with(Vec::new);
@@ -658,6 +670,7 @@ fn trust_ca_bundle(container: &mut Container) {
         "GIT_SSL_CAINFO",
         "CURL_CA_BUNDLE",
         "NIX_SSL_CERT_FILE",
+        "CARGO_HTTP_CAINFO",
     ] {
         env.push(EnvVar {
             name: name.to_string(),
@@ -994,6 +1007,32 @@ mod tests {
             .find(|v| v.name == WORKSPACE_VOLUME)
             .unwrap();
         assert_eq!(ws.empty_dir.unwrap().size_limit, None);
+    }
+
+    #[test]
+    fn the_clone_keeps_git_only_when_asked() {
+        let source = || SourceRef::Git {
+            url: "https://github.com/cmu-sei/Polar.git".into(),
+            commit_sha: "a".repeat(40),
+        };
+        let keeps = |options: &JobOptions| {
+            let job = build_job_manifest(&spec(source()), options);
+            let pod = job.spec.unwrap().template.spec.unwrap();
+            pod.init_containers
+                .unwrap()
+                .iter()
+                .find(|c| c.name == "clone")
+                .unwrap()
+                .env
+                .clone()
+                .unwrap()
+                .iter()
+                .any(|e| e.name == "CYCLOPS_KEEP_GIT" && e.value.as_deref() == Some("1"))
+        };
+        assert!(!keeps(&JobOptions::new("polar-builds")));
+        let mut options = JobOptions::new("polar-builds");
+        options.keep_git = true;
+        assert!(keeps(&options));
     }
 
     #[test]

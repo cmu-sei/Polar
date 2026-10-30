@@ -153,6 +153,8 @@ let configuration =
                                   ( toMap
                                       { namespace = JSON.string jobsNamespace
                                       , workspace_size_limit = JSON.string v.workspaceSizeLimit
+                                      -- The pipeline records which commit and tree it built, so it needs the repository.
+                                      , keep_git = JSON.bool True
                                       , ca_bundle_secret =
                                           merge
                                             { Some = λ(name : Text) → JSON.string name

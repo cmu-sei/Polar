@@ -144,7 +144,13 @@ let
       echo "[clone] checking out $CYCLOPS_COMMIT_SHA..."
       git checkout "$CYCLOPS_COMMIT_SHA"
 
-      rm -rf "$CYCLOPS_WORKSPACE/.git"
+      # The source is pinned content, so its history goes. An instrumented pipeline records which commit and tree
+      # it built and needs the repository, so the orchestrator asks for it to stay.
+      if [[ "''${CYCLOPS_KEEP_GIT:-}" == "1" ]]; then
+        echo "[clone] keeping .git for the pipeline"
+      else
+        rm -rf "$CYCLOPS_WORKSPACE/.git"
+      fi
 
       echo "[clone] done — workspace ready at $CYCLOPS_WORKSPACE"
     '';
