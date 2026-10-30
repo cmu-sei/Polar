@@ -107,6 +107,16 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
   volume (never grown), and the nix-usernetes node's containerd and kubelet state share `/home` with everything else,
   so a large Cargo `target` directory tainted the node with disk pressure and evicted every pod (2026-10-21). f2fs grows
   only unmounted. A volume of its own for the node's state would stop builds evicting the cluster.
+- **The broker's tests panic in tracing under load** (2026-10-30). A full workspace run while two other agents were
+  building failed 10 broker tests: `revocation` (1, `no_agent_s_connection_outlives_its_certificate_s_revocation`) and
+  `custody_revocation` (9), with tracing-subscriber's "tried to clone a span ... that already closed"
+  (`sharded.rs:317`), then a panic at `listener.rs:334` (the Listener spawn's `expect` on the manager's supervisor),
+  and "the broker's names never became free" in the tests after. Alone, and with the machine quiet, both pass every
+  time (3 runs each, and the whole broker suite 116/116), and nothing in the broker changed that day: a race that load
+  exposes. A span cloned after it closed is a use after end in the code's span handling, so a loaded production broker
+  could panic the same way. The proptest regression the failing run wrote (three `(false, false)` cases) is kept in the
+  session's scratchpad, not in the repository. To do: reproduce under load (`stress-ng` or parallel test threads), find
+  the span that outlives its scope, and fix it with a test that fails under contention.
 
 ## Found running Cassini on its own, 2026-10-28 (`src/agents/cassini/broker/readme.md`)
 
