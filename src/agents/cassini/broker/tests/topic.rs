@@ -405,4 +405,95 @@ mod tests {
 
         Ok(())
     }
+
+    /// What a session is told about its publishes: an acknowledgement or a refusal, each with its number.
+    type Answers = Arc<std::sync::Mutex<Vec<String>>>;
+
+    struct AnswerRecorder;
+
+    #[ractor::async_trait]
+    impl Actor for AnswerRecorder {
+        type Msg = BrokerMessage;
+        type State = Answers;
+        type Arguments = Answers;
+
+        async fn pre_start(
+            &self,
+            _myself: ractor::ActorRef<Self::Msg>,
+            answers: Answers,
+        ) -> Result<Answers, ActorProcessingErr> {
+            Ok(answers)
+        }
+
+        async fn handle(
+            &self,
+            _myself: ractor::ActorRef<Self::Msg>,
+            message: Self::Msg,
+            answers: &mut Answers,
+        ) -> Result<(), ActorProcessingErr> {
+            match message {
+                BrokerMessage::PublishRequestAck { id, .. } => {
+                    answers.lock().unwrap().push(format!("ack {}", id.seq))
+                }
+                BrokerMessage::PublishResponse {
+                    result: Err(_),
+                    origin: Some(id),
+                    refusal,
+                    ..
+                } => answers
+                    .lock()
+                    .unwrap()
+                    .push(format!("refused {} {refusal:?}", id.seq)),
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    /// A message for a topic with no subscriber, while the broker's budget is exhausted, is refused for now, not
+    /// acknowledged and dropped: the client keeps it and sends it again (docs/architecture/cassini-backpressure.md,
+    /// review finding 4).
+    #[tokio::test]
+    async fn a_message_no_one_can_hold_while_the_budget_is_exhausted_is_refused_for_now() {
+        let bounds = cassini_broker::budget::Bounds::fallback();
+        let (manager, _) = Actor::spawn(
+            None,
+            cassini_broker::topic::TopicManager,
+            cassini_broker::topic::TopicManagerArgs {
+                topics: None,
+                subscriber_mgr: None,
+                bounds: bounds.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let answers: Answers = Default::default();
+        let (session, _) = Actor::spawn(None, AnswerRecorder, answers.clone())
+            .await
+            .unwrap();
+        let publish = |seq| BrokerMessage::PublishRequest {
+            registration_id: "producer".to_string(),
+            topic: "t-nobody".to_string(),
+            payload: Arc::new(b"x".to_vec()).into(),
+            reply_to: Some(session.clone()),
+            trace_ctx: None,
+            published_by: None,
+            id: cassini_types::MessageId { epoch: 1, seq },
+            window: cassini_types::Hold::none(),
+        };
+        manager.send_message(publish(1)).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Exhaust the budget: everything taken, and one more asked for.
+        let _held = bounds
+            .budget
+            .try_charge(bounds.budget.limit() - bounds.budget.used());
+        assert!(bounds.budget.try_charge(1).is_none());
+        manager.send_message(publish(2)).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            *answers.lock().unwrap(),
+            ["ack 1", "refused 2 Some(Unavailable)"]
+        );
+        assert_eq!(bounds.budget.stats().refused, 1);
+    }
 }

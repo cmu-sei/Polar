@@ -197,9 +197,11 @@ async fn a_subscriber_back_from_away_is_given_the_stall_bound_to_catch_up() {
             publisher.publish("news", &payload);
         }
         publisher
-            .wait_for("what is held for it accepted", Duration::from_secs(10), |c| {
-                c.acknowledged("news") == held as usize
-            })
+            .wait_for(
+                "what is held for it accepted",
+                Duration::from_secs(10),
+                |c| c.acknowledged("news") == held as usize,
+            )
             .await;
         tokio::time::sleep(stall + Duration::from_secs(1)).await;
 
@@ -218,7 +220,9 @@ async fn a_subscriber_back_from_away_is_given_the_stall_bound_to_catch_up() {
                 .next_delivery("news", Duration::from_secs(10))
                 .await
                 .expect("it is given everything, and not cut");
-            received.push(u32::from_be_bytes(delivery.payload[..4].try_into().unwrap()));
+            received.push(u32::from_be_bytes(
+                delivery.payload[..4].try_into().unwrap(),
+            ));
             back.acknowledge(delivery.delivery_id).await;
             // Steadily, and well within the bound: still above its high water when the topic first looks.
             tokio::time::sleep(Duration::from_millis(20)).await;

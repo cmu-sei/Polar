@@ -521,6 +521,7 @@ impl SubscriberManager {
                         published_by: held.published_by,
                         origin: held.origin,
                         delivery_id: None,
+                        refusal: None,
                     });
                 }
                 info!(%registration_id, %topic, "subscription created");

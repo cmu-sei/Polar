@@ -184,6 +184,7 @@ proptest! {
             trace_ctx: None,
             published_by: None,
             delivery_id: None,
+            refusal: None,
             origin: Some(MessageId { epoch, seq }),
         };
         match wire(&refusal) {
@@ -219,6 +220,7 @@ proptest! {
             published_by: published_by.clone(),
             origin: Some(MessageId { epoch, seq }),
             delivery_id: Some(delivery_id),
+            refusal: None,
         };
         match wire(&delivery) {
             ClientMessage::PublishResponse { origin, delivery_id: d, published_by: p, .. } => {

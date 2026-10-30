@@ -474,6 +474,16 @@ pub enum TcpClientMessage {
     Refused {
         id: MessageId,
     },
+    /// From the transport to the facade: the broker could not take the publish numbered `id` now
+    /// (`PublishRefusal::Unavailable`); the outbox keeps it, and it is sent again on the next registration or after a
+    /// wait.
+    Deferred {
+        id: MessageId,
+    },
+    /// The facade's own: send the publish numbered `id` again, if the outbox still holds it.
+    Resend {
+        id: MessageId,
+    },
     /// Tell the broker this client has the delivery numbered `delivery_id`, so it lets go of it
     /// (`ClientMessage::PublishResponseAck`).
     AcknowledgeDelivery {
@@ -522,6 +532,8 @@ impl TcpClientMessage {
             TcpClientMessage::Transmit { .. } => "Transmit",
             TcpClientMessage::Acknowledged { .. } => "Acknowledged",
             TcpClientMessage::Refused { .. } => "Refused",
+            TcpClientMessage::Deferred { .. } => "Deferred",
+            TcpClientMessage::Resend { .. } => "Resend",
             TcpClientMessage::AcknowledgeDelivery { .. } => "AcknowledgeDelivery",
             TcpClientMessage::PublishWith { .. } => "PublishWith",
             TcpClientMessage::NotSent { .. } => "NotSent",
@@ -868,6 +880,7 @@ impl TcpClientActor {
                 published_by,
                 origin,
                 delivery_id,
+                refusal,
             } => {
                 let span = trace_span!("client.handle_publish_response");
                 if let Some(wire_ctx) = trace_ctx {
@@ -892,6 +905,24 @@ impl TcpClientActor {
                     if let Some(delivery_id) = delivery_id {
                         TcpClientActor::delivery_handed_off(&myself, delivery_id);
                     }
+                } else if let (Err(reason), Some(cassini_types::PublishRefusal::Unavailable)) =
+                    (&result, refusal)
+                {
+                    // Not a refusal of this publish, but of now: it is kept and sent again. The agent's topic is not
+                    // taken as refused.
+                    info!("The broker could not take a publish on {topic} now: {reason}");
+                    if let (Some(answers), Some(id)) = (answers, origin)
+                        && let Err(e) = answers.send_message(TcpClientMessage::Deferred { id })
+                    {
+                        warn!("the deferral of a publish on {topic} could not be passed on: {e}");
+                    }
+                    TcpClientActor::dispatch_event(
+                        delivery,
+                        ClientEvent::PublishDeferred {
+                            topic: topic.clone(),
+                            reason: reason.clone(),
+                        },
+                    );
                 } else if let Err(reason) = result {
                     // The broker did not take our publish: the agent hears it, not only the log.
                     warn!("The broker refused a publish on {topic}: {reason}");
@@ -1903,6 +1934,7 @@ mod process_client_message_tests {
                 trace_ctx: None,
                 published_by: Some("some-agent".to_string()),
                 delivery_id: None,
+                refusal: None,
                 origin: None,
             },
         );
@@ -1949,6 +1981,7 @@ mod process_client_message_tests {
                     published_by: None,
                     origin: None,
                     delivery_id,
+                    refusal: None,
                 },
             );
         }
@@ -1967,6 +2000,58 @@ mod process_client_message_tests {
             captured.lock().unwrap().first(),
             Some(ClientEvent::MessagePublished { .. })
         ));
+    }
+
+    /// A refusal the broker says is for now (`Unavailable`) is passed on as deferred: the facade keeps the publish, the
+    /// agent is not told it was refused, and its topic is not taken as refused. One it says is denied settles as before.
+    #[tokio::test]
+    async fn an_unavailable_refusal_defers_the_publish_and_a_denied_one_settles_it() {
+        use cassini_types::PublishRefusal;
+        let (myself, _) = spawn_fake_tcp_client().await;
+        let (answers, told) = spawn_fake_tcp_client().await;
+        let (delivery, captured) = broadcast_delivery().await;
+        for (seq, refusal) in [
+            (1, PublishRefusal::Unavailable),
+            (2, PublishRefusal::Denied),
+        ] {
+            TcpClientActor::process_client_message(
+                myself.clone(),
+                &delivery,
+                Some(&answers),
+                ClientMessage::PublishResponse {
+                    topic: "news".to_string(),
+                    payload: Vec::new().into(),
+                    result: Err("no".to_string()),
+                    trace_ctx: None,
+                    published_by: None,
+                    origin: Some(MessageId { epoch: 5, seq }),
+                    delivery_id: None,
+                    refusal: Some(refusal),
+                },
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let told: Vec<String> = told
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| match m {
+                TcpClientMessage::Deferred { id } => format!("deferred {}", id.seq),
+                TcpClientMessage::Refused { id } => format!("refused {}", id.seq),
+                other => other.kind().to_string(),
+            })
+            .collect();
+        assert_eq!(told, ["deferred 1", "BrokerAnswered", "refused 2"]);
+        let refused = captured
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, ClientEvent::PublishRefused { .. }))
+            .count();
+        assert_eq!(
+            refused, 1,
+            "only the denied one is told to the agent as refused"
+        );
     }
 
     /// The events the client dispatches for one message from the broker.
@@ -2014,6 +2099,7 @@ mod process_client_message_tests {
             trace_ctx: None,
             published_by: None,
             delivery_id: None,
+            refusal: None,
             origin: None,
         })
         .await;
@@ -2105,6 +2191,7 @@ mod process_client_message_tests {
                 trace_ctx: None,
                 published_by: None,
                 delivery_id: None,
+                refusal: None,
                 origin: None,
             },
             // Someone else's message, delivered: not an answer to anything this client asked.
@@ -2115,6 +2202,7 @@ mod process_client_message_tests {
                 trace_ctx: None,
                 published_by: None,
                 delivery_id: None,
+                refusal: None,
                 origin: None,
             },
         ])
@@ -2162,6 +2250,7 @@ mod process_client_message_tests {
                     trace_ctx: None,
                     published_by: None,
                     delivery_id: None,
+                    refusal: None,
                     origin: None,
                 }
             };

@@ -946,6 +946,16 @@ impl TestClient {
             .count()
     }
 
+    /// How many publishes the broker could not take for now (`ClientEvent::PublishDeferred`).
+    pub fn deferred(&self) -> usize {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, ClientEvent::PublishDeferred { .. }))
+            .count()
+    }
+
     /// The numbers of the publishes the broker has acknowledged, in the order the acknowledgements came.
     pub fn acknowledged_ids(&self) -> Vec<cassini_types::MessageId> {
         self.events
@@ -1218,6 +1228,7 @@ impl RawConnection {
                     published_by,
                     origin,
                     delivery_id: Some(delivery_id),
+                    refusal: None,
                     ..
                 } = self.read().await?
                     && t == topic

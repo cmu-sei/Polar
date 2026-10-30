@@ -147,6 +147,14 @@ impl Outbox {
         Some(entry)
     }
 
+    /// The message numbered `id`, if the outbox still holds it.
+    pub fn get(&self, id: MessageId) -> Option<&Entry> {
+        if id.epoch != self.epoch {
+            return None;
+        }
+        self.entries.get(&id.seq)
+    }
+
     /// What it holds, oldest first: what is sent again when a transport registers.
     pub fn entries(&self) -> impl Iterator<Item = &Entry> {
         self.entries.values()

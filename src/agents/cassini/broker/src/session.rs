@@ -953,6 +953,37 @@ impl Actor for SessionAgent {
                 )
                 .await?;
             }
+            // A refusal of one of this session's publishes, from the broker or its topic: the client is told, and the
+            // publish is no longer pending.
+            BrokerMessage::PublishResponse {
+                topic,
+                payload,
+                result: Err(reason),
+                trace_ctx,
+                published_by,
+                origin,
+                delivery_id,
+                refusal,
+            } => {
+                let _ = state
+                    .client_ref
+                    .send_message(BrokerMessage::PublishResponse {
+                        topic,
+                        payload,
+                        result: Err(reason),
+                        trace_ctx,
+                        published_by,
+                        origin,
+                        delivery_id,
+                        refusal,
+                    });
+                if let Some(manager) = myself.try_get_supervisor() {
+                    let _ = manager.send_message(BrokerMessage::SessionPendingUpdate {
+                        registration_id: state.registration_id.clone(),
+                        delta: -1,
+                    });
+                }
+            }
             BrokerMessage::SlowSubscriber { topic, .. } => {
                 // The connection is cut from outside its Listener, which may be waiting on a write to this client.
                 let client_id = state.client_ref.get_name().unwrap_or_default();
@@ -1189,7 +1220,21 @@ impl SessionAgent {
         let _g = span.enter();
 
         if state.shutting_down {
+            // Refused for now: the client keeps it, and sends it to the broker that comes next.
             warn!("Rejecting publish during shutdown");
+            let _ = state
+                .client_ref
+                .send_message(BrokerMessage::PublishResponse {
+                    topic,
+                    payload: Payload::uncharged(Arc::new(Vec::new())),
+                    result: Err("the broker is shutting down".to_string()),
+                    trace_ctx: Some(span.context()),
+                    published_by: None,
+                    origin: Some(id),
+                    delivery_id: None,
+                    refusal: Some(cassini_types::PublishRefusal::Unavailable),
+                });
+            drop(window);
             return Ok(());
         }
 
@@ -1223,6 +1268,7 @@ impl SessionAgent {
                         published_by: None,
                         origin: Some(id),
                         delivery_id: None,
+                        refusal: Some(cassini_types::PublishRefusal::Unavailable),
                     });
                 // no broker -> timeout path (client may be fine; broker is not)
                 let _ = myself.send_message(BrokerMessage::TimeoutMessage {
@@ -1295,6 +1341,7 @@ impl SessionAgent {
             published_by,
             origin,
             delivery_id: Some(delivery_id),
+            refusal: None,
         }) {
             warn!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}: {e}");
 

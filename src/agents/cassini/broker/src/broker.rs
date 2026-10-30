@@ -892,28 +892,44 @@ impl Broker {
         );
         trace!("Broker received publish request");
 
+        // A refusal that is the broker's state, not the publish's: the client keeps the publish and sends it again
+        // (`PublishRefusal::Unavailable`). Told to the publisher's session, which passes it on to its client.
+        let unavailable = |reply_to: &Option<ActorRef<BrokerMessage>>,
+                           topic: String,
+                           reason: String| {
+            let refusal = BrokerMessage::PublishResponse {
+                topic,
+                payload: Vec::new().into(),
+                result: Err(reason),
+                trace_ctx: Some(span.context()),
+                published_by: None,
+                origin: Some(id),
+                delivery_id: None,
+                refusal: Some(cassini_types::PublishRefusal::Unavailable),
+            };
+            let told = match reply_to {
+                Some(session) => session.send_message(refusal),
+                None => match &state.session_mgr {
+                    Some(session_mgr) => session_mgr.send_message(refusal),
+                    None => Ok(()),
+                },
+            };
+            if let Err(e) = told {
+                warn!(error = %e, "Failed to tell the publisher's session its publish was refused");
+            }
+        };
+
         // Reject new publishes during shutdown
         if state.is_shutting_down {
             warn!("Rejecting publish request during shutdown");
-            if let Some(session_mgr) = &state.session_mgr
-                && let Err(e2) = session_mgr.send_message(BrokerMessage::PublishResponse {
-                    topic,
-                    payload: Vec::new().into(),
-                    result: Err("Broker is shutting down".to_string()),
-                    trace_ctx: Some(span.context()),
-                    published_by: None,
-                    origin: Some(id),
-                    delivery_id: None,
-                })
-            {
-                warn!(error = %e2, "Failed to notify SessionManager of publish failure");
-            }
+            unavailable(&reply_to, topic, "Broker is shutting down".to_string());
             return Ok(());
         }
 
         if let Some(topic_mgr) = &state.topic_mgr {
             // Low-hanging fruit: don't clone payload unless we have to.
             // Move it into the forward message; only clone in the failure path.
+            let session = reply_to.clone();
             let forward = topic_mgr.send_message(BrokerMessage::PublishRequest {
                 registration_id: registration_id.clone(),
                 topic: topic.clone(),
@@ -930,38 +946,15 @@ impl Broker {
 
                 // If forwarding fails, we need a payload for the failure response.
                 // We only have the length now; best we can do is return an error without echoing bytes.
-                if let Some(session_mgr) = &state.session_mgr {
-                    if let Err(e2) = session_mgr.send_message(BrokerMessage::PublishResponse {
-                        topic,
-                        payload: Vec::new().into(),
-                        result: Err(format!("forward failed: {e}")),
-                        trace_ctx: Some(span.context()),
-                        published_by: None,
-                        origin: Some(id),
-                        delivery_id: None,
-                    }) {
-                        warn!(error = %e2, "Failed to notify SessionManager of publish failure");
-                    }
-                } else {
-                    error!(
-                        payload_bytes = payload_len,
-                        "SessionManager missing; publish failure can't be reported"
-                    );
-                }
+                debug!(
+                    payload_bytes = payload_len,
+                    "the publish is refused for now"
+                );
+                unavailable(&session, topic, format!("forward failed: {e}"));
             }
         } else {
             error!("TopicManager missing; cannot publish");
-            if let Some(session_mgr) = &state.session_mgr {
-                let _ = session_mgr.send_message(BrokerMessage::PublishResponse {
-                    topic,
-                    payload: Vec::new().into(),
-                    result: Err("topic manager unavailable".to_string()),
-                    trace_ctx: Some(span.context()),
-                    published_by: None,
-                    origin: Some(id),
-                    delivery_id: None,
-                });
-            }
+            unavailable(&reply_to, topic, "topic manager unavailable".to_string());
         }
         Ok(())
     }
@@ -992,6 +985,7 @@ impl Broker {
                 published_by,
                 origin,
                 delivery_id: None,
+                refusal: None,
             }) {
                 error!(error = %e, "Failed to forward PublishResponse to SubscriberManager");
             }

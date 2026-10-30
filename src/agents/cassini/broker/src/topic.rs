@@ -454,6 +454,7 @@ impl TopicManager {
                 published_by,
                 origin: None,
                 delivery_id: None,
+                refusal: None,
             }) {
                 error!("Failed to forward publish response to broker: {}", e);
             }
@@ -810,6 +811,7 @@ impl TopicAgent {
                 published_by: pending.published_by.clone(),
                 origin: Some(pending.id),
                 delivery_id: None,
+                refusal: None,
             }) {
                 Ok(()) => delivered += 1,
                 Err(_) => ended.push(registration_id.clone()),
@@ -821,6 +823,7 @@ impl TopicAgent {
             }
             warn!(%topic, ended = ?ended, "{PUBLISH_REQ_FAILED_TXT}: these subscribers have ended and are dropped");
         }
+        let mut refused = None;
         if delivered == 0 {
             if state.bounds.budget.is_exhausted() {
                 state.bounds.budget.count_refused(1);
@@ -830,6 +833,10 @@ impl TopicAgent {
                     queued = state.queue.len(),
                     "the broker's memory budget is exhausted: a message for a topic with no subscriber is refused, \
                      not queued"
+                );
+                refused = Some(
+                    "the broker's memory budget is exhausted and the topic has no subscriber to take the message"
+                        .to_string(),
                 );
             } else {
                 state.held.add(pending.payload.len());
@@ -847,11 +854,26 @@ impl TopicAgent {
         }
 
         if let Some(session) = pending.reply_to {
-            if let Err(e) = session.send_message(BrokerMessage::PublishRequestAck {
-                topic: topic.clone(),
-                id: pending.id,
-                trace_ctx: Some(span.context()),
-            }) {
+            // Refused for want of memory, it is not acknowledged: the publisher is told it was refused for now, keeps
+            // it and sends it again (docs/architecture/cassini-backpressure.md, review finding 4).
+            let answer = match refused {
+                Some(reason) => BrokerMessage::PublishResponse {
+                    topic: topic.clone(),
+                    payload: Payload::uncharged(Arc::new(Vec::new())),
+                    result: Err(reason),
+                    trace_ctx: Some(span.context()),
+                    published_by: None,
+                    origin: Some(pending.id),
+                    delivery_id: None,
+                    refusal: Some(cassini_types::PublishRefusal::Unavailable),
+                },
+                None => BrokerMessage::PublishRequestAck {
+                    topic: topic.clone(),
+                    id: pending.id,
+                    trace_ctx: Some(span.context()),
+                },
+            };
+            if let Err(e) = session.send_message(answer) {
                 warn!("Failed to send publish Ack to session! {e}")
             }
         } else {
@@ -901,6 +923,7 @@ impl TopicAgent {
                     published_by: published_by.clone(),
                     origin,
                     delivery_id: None,
+                    refusal: None,
                 }) {
                     warn!("Failed to deliver queued message to subscriber: {}", e);
                 }
@@ -968,6 +991,7 @@ impl TopicAgent {
                     published_by,
                     origin,
                     delivery_id: None,
+                    refusal: None,
                 })
                 .ok();
         }

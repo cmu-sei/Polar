@@ -75,6 +75,49 @@ async fn a_refused_publish_is_named_by_its_number() {
     assert_eq!(origin, Some(cassini_types::MessageId { epoch: 41, seq: 7 }));
 }
 
+/// A publish the broker refuses because it is shutting down is refused for now, not denied: the client keeps it and
+/// sends it to the next broker (docs/architecture/cassini-backpressure.md, review finding 5).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_publish_refused_while_the_broker_shuts_down_is_sent_to_the_next_broker() {
+    with_broker(|broker| async move {
+        let agent = support::FacadeClient::connect(&broker, "agent.test").await;
+        let session = agent.client.registration_id().unwrap();
+        // The session is told the broker is shutting down, as its drain phase tells it.
+        let session_ref: ractor::ActorRef<cassini_types::BrokerMessage> =
+            ractor::registry::where_is(session).unwrap().into();
+        session_ref
+            .send_message(cassini_types::BrokerMessage::PrepareForShutdown { auth_token: None })
+            .unwrap();
+        support::pause().await;
+        agent.client.publish("news", b"across the restart");
+        agent
+            .client
+            .wait_for("the refusal", Duration::from_secs(5), |c| c.deferred() == 1)
+            .await;
+        assert!(
+            agent.client.refusals("news").is_empty(),
+            "the agent is not told it was refused"
+        );
+
+        broker.restart(Duration::from_millis(500)).await;
+        agent
+            .client
+            .wait_for(
+                "a registration with the new broker",
+                Duration::from_secs(30),
+                |_| agent.registrations().len() >= 2,
+            )
+            .await;
+        let subscriber = TestClient::connect(&broker, "subscriber.test").await;
+        subscriber.subscribe("news");
+        assert_eq!(
+            subscriber.wait_for_messages("news", 1).await,
+            [b"across the restart".to_vec()]
+        );
+    })
+    .await;
+}
+
 /// Each publish is acknowledged by its own number (docs/architecture/cassini-client-reliability.md, build step 2): the
 /// transport numbers what it is given 1, 2, 3 in its epoch, and every number comes back once.
 #[tokio::test(flavor = "multi_thread")]

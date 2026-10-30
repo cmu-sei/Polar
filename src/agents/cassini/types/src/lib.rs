@@ -239,6 +239,8 @@ pub enum BrokerMessage {
         /// For a delivery to a client, its number, which the client returns in `PublishResponseAck`; none for a
         /// refusal, and none on its way from a topic to a subscriber, which numbers it.
         delivery_id: Option<u64>,
+        /// For a refusal, what kind it is; none for a delivery.
+        refusal: Option<PublishRefusal>,
     },
     /// Message sent to the client to let them know they successfully published a message: the topic accepted the
     /// publish numbered `id`.
@@ -618,6 +620,28 @@ pub enum RefusalCode {
     Other,
 }
 
+/// What a refused publish means, for the client to act on (a reader never acts on the refusal's words).
+#[derive(
+    Serialize,
+    Deserialize,
+    Archive,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum PublishRefusal {
+    /// The broker will not take it: its policy, or the connection's certificate, refuses it. The client lets go of it
+    /// and tells the agent, which may be refused this topic.
+    Denied,
+    /// The broker cannot take it now (it is shutting down, a part of it is not there, its memory budget is
+    /// exhausted): the client keeps it and sends it again later, on its next registration or after a wait.
+    Unavailable,
+}
+
 /// A refused registration: its code, and why in words.
 #[derive(Serialize, Deserialize, Archive, Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
@@ -700,6 +724,13 @@ pub enum ClientEvent {
         topic: String,
         reason: String,
     },
+    /// The broker could not take a publish on `topic` now (`reason` says why: it is shutting down, or its memory budget
+    /// is exhausted): it is not refused, and the client's facade keeps it and sends it again, on its next registration
+    /// or after a wait. A client with no facade does not send it again.
+    PublishDeferred {
+        topic: String,
+        reason: String,
+    },
 }
 /// External Messages for client comms
 /// These messages are serialized/deserialized to/from JSON
@@ -742,6 +773,8 @@ pub enum ClientMessage {
         published_by: Option<String>,
         origin: Option<MessageId>,
         delivery_id: Option<u64>,
+        /// For a refusal (`result` an `Err`), what kind it is, which the client acts on: the words are for people.
+        refusal: Option<PublishRefusal>,
     },
     /// The client has the delivery numbered `delivery_id`, and the broker may let go of it. Sent when the client has
     /// handed the delivery to the agent (its router, or whoever listens to its events).

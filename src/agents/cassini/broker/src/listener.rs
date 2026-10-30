@@ -1293,6 +1293,7 @@ impl Actor for Listener {
                 published_by,
                 origin,
                 delivery_id,
+                refusal,
             } => {
                 self.handle_publish_response(
                     myself,
@@ -1304,6 +1305,7 @@ impl Actor for Listener {
                     published_by,
                     origin,
                     delivery_id,
+                    refusal,
                 )
                 .await?;
             }
@@ -1636,6 +1638,7 @@ impl Listener {
                     published_by: None,
                     origin: Some(id),
                     delivery_id: None,
+                    refusal: Some(cassini_types::PublishRefusal::Denied),
                 };
                 if let Err(e) =
                     Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
@@ -1670,6 +1673,7 @@ impl Listener {
                     published_by: None,
                     origin: Some(id),
                     delivery_id: None,
+                    refusal: Some(cassini_types::PublishRefusal::Unavailable),
                 };
                 if let Err(e) =
                     Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
@@ -1695,6 +1699,7 @@ impl Listener {
         published_by: Option<String>,
         origin: Option<MessageId>,
         delivery_id: Option<u64>,
+        refusal: Option<cassini_types::PublishRefusal>,
     ) -> Result<(), ActorProcessingErr> {
         let span =
             trace_span!("cassini.listener.publish_response", topic = ?topic, ok = result.is_ok());
@@ -1729,6 +1734,7 @@ impl Listener {
                 published_by,
                 origin,
                 delivery_id,
+                refusal,
             };
             if let Err(e) =
                 Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await

@@ -515,6 +515,19 @@ impl Actor for TcpClientFacade {
                     Self::promote(state);
                 }
             }
+            // The broker could not take it now: it stays in the outbox, sent again after the first backoff (and on
+            // the next registration, as everything unacknowledged is).
+            TcpClientMessage::Deferred { id } => {
+                if state.outbox.get(id).is_some() {
+                    let wait = state.args.backoff.first;
+                    drop(myself.send_after(wait, move || TcpClientMessage::Resend { id }));
+                }
+            }
+            TcpClientMessage::Resend { id } => {
+                if let Some(entry) = state.outbox.get(id).cloned() {
+                    Self::transmit(state, &entry);
+                }
+            }
             TcpClientMessage::BrokerAnswered {
                 topic,
                 use_,
@@ -1162,6 +1175,40 @@ mod tests {
             .unwrap();
         rig.events.subscribe(listener, Some);
         seen
+    }
+
+    /// A publish the broker could not take now is kept: sent again after a wait, and on the next registration, with
+    /// its number; one it denied is let go.
+    #[tokio::test(start_paused = true)]
+    async fn a_deferred_publish_is_kept_and_sent_again_and_a_refused_one_is_not() {
+        let rig = rig(10).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        rig.facade.cast(publish("later")).unwrap();
+        rig.facade.cast(publish("never")).unwrap();
+        settle().await;
+        let first = sent(&rig.spawner.latest().1);
+        rig.facade
+            .cast(TcpClientMessage::Deferred { id: first[0].1 })
+            .unwrap();
+        rig.facade
+            .cast(TcpClientMessage::Refused { id: first[1].1 })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert_eq!(
+            sent(&rig.spawner.latest().1),
+            [first[0].clone(), first[1].clone(), first[0].clone()],
+            "the deferred one is sent again after a wait"
+        );
+        rig.spawner.latest().0.kill();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        registered(&rig, "reg-2");
+        settle().await;
+        assert_eq!(
+            sent(&rig.spawner.latest().1),
+            [first[0].clone()],
+            "and on the next registration, while it is not acknowledged"
+        );
     }
 
     /// A publish that took buffer room, but reaches the facade after the acknowledgements emptied the outbox, is sent:
