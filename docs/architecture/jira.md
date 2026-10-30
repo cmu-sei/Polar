@@ -122,5 +122,5 @@ then what each pattern means. It never prints the host, URL, email or token (INF
 - The cursor: whether the full pull is done is held in memory, so every restart (about every half hour, with
   rejuvenation) pulls everything again or from the fixed `QUERY_DATE`. A user has been moving `QUERY_DATE` by script as
   a hand-made cursor. The cursor belongs in the graph as soft state (remaining-work.md, "STATE FOR AGENTS THAT IS NOT
-  AUTHORITATIVE").
+  AUTHORITATIVE"); designed 2026-10-30 in `soft-state.md`, "The Jira cursor".
 - A failed container's cause outlives it only if written to a volume that survives the in-place restart.

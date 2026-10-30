@@ -131,8 +131,9 @@ knows one, so a replaced pod does not erase its predecessor's); a reason is clea
 The topic needs no broker rule: the broker's permission checks are on its control plane, not on topics. The
 controller does not consume the status yet (liveness and backoff belong to path 2).
 
-A starting observer asks the processor over Cassini (request and reply) for the last observed tip of each ref,
-so a replaced pod does not walk history it already published. The processor reads the newest `POINTS_TO` edge
+Decided, NOT BUILT (checked 2026-10-30: no code asks for or answers a checkpoint): a starting observer asks over
+Cassini (request and reply) for the last observed tip of each ref, so a replaced pod does not walk history it already
+published. Since 2026-10-30 the state agent (`soft-state.md`) is meant to answer it, not the processor. The processor reads the newest `POINTS_TO` edge
 (`observed_at` is a string, so it compares as a number). The observer still never touches the graph.
 
 ## The `runtime` document type
