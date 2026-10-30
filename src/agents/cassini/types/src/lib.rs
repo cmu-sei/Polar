@@ -73,6 +73,29 @@ pub enum DisconnectReason {
     TransportError(String),
 }
 
+/// A published message's number: the `epoch` its publisher's client chose when it started, and its `seq` within it.
+/// The pair names one message of one publisher; nothing else about it is promised (an epoch is random, so two epochs
+/// are not ordered).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+    Serialize,
+    Deserialize,
+    Archive,
+)]
+pub struct MessageId {
+    pub epoch: u64,
+    pub seq: u64,
+}
+
 /// The publisher's own identity, attached to a published message so a
 /// subscriber can know who sent it -- extracted by the broker from
 /// the publisher's verified mTLS client certificate at connection
@@ -187,6 +210,8 @@ pub enum BrokerMessage {
         /// decode time needs to know about share_identity/peer_identity
         /// separately again.
         published_by: Option<String>,
+        /// The message's `(epoch, seq)` as its publisher numbered it, returned in its acknowledgement.
+        id: MessageId,
     },
     /// Publish response to the client -- also reused, unmodified in
     /// shape, as the delivery vehicle when forwarding a published
@@ -199,10 +224,14 @@ pub enum BrokerMessage {
         result: Result<(), String>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        /// The `(epoch, seq)` of the publish this is about: the refused one, for a refusal.
+        origin: Option<MessageId>,
     },
-    /// Message sent to the client to let them know they successfully published a message
+    /// Message sent to the client to let them know they successfully published a message: the topic accepted the
+    /// publish numbered `id`.
     PublishRequestAck {
         topic: String,
+        id: MessageId,
         trace_ctx: Option<opentelemetry::Context>,
     },
     PublishResponseAck,
@@ -412,6 +441,8 @@ impl BrokerMessage {
                 registration_id,
                 trace_ctx,
                 share_identity,
+                epoch,
+                seq,
             } => BrokerMessage::PublishRequest {
                 registration_id,
                 topic,
@@ -429,6 +460,7 @@ impl BrokerMessage {
                 } else {
                     None
                 },
+                id: MessageId { epoch, seq },
             },
             ClientMessage::SubscribeRequest {
                 topic,
@@ -611,8 +643,10 @@ pub enum ClientEvent {
         result: Result<ControlResult, ControlError>,
         trace_ctx: Option<WireTraceCtx>,
     },
+    /// The broker accepted the publish numbered `id` on `topic` (its topic took it; that is not yet a delivery).
     PublishAcknowledged {
         topic: String,
+        id: MessageId,
     },
     /// The broker took the subscription: messages published on `topic` from now on are delivered.
     ClientSubscribed {
@@ -648,26 +682,36 @@ pub enum ClientMessage {
         result: Result<String, Refusal>,
         trace_ctx: Option<WireTraceCtx>,
     },
-    /// Publish request from the client.
+    /// Publish request from the client. The client numbers what it publishes: `epoch` is chosen at random when its
+    /// client starts, and `seq` counts 1, 2, 3 within it (docs/architecture/cassini-client-reliability.md, section 4),
+    /// so the acknowledgement names this message and no other.
     PublishRequest {
         topic: String,
         payload: Arc<Vec<u8>>,
         registration_id: String,
         trace_ctx: Option<WireTraceCtx>,
         share_identity: bool,
+        epoch: u64,
+        seq: u64,
     },
     /// Publish response to the client -- also delivers a subscribed
-    /// message; see BrokerMessage::PublishResponse's own doc.
+    /// message; see BrokerMessage::PublishResponse's own doc. A refusal (`result` an `Err`) names the publish it
+    /// refuses in `origin`.
     PublishResponse {
         topic: String,
         payload: Arc<Vec<u8>>,
         result: Result<(), String>,
         trace_ctx: Option<WireTraceCtx>,
         published_by: Option<String>,
+        origin: Option<MessageId>,
     },
-    /// Sent back to actor that made initial publish request
+    /// The topic accepted the publish numbered `(epoch, seq)`. Each publish is acknowledged by itself and in no
+    /// particular order: topics accept independently, so a later message can be acknowledged before an earlier one,
+    /// and an acknowledgement says nothing about any other message (there is no cumulative acknowledgement).
     PublishRequestAck {
         topic: String,
+        epoch: u64,
+        seq: u64,
         trace_ctx: Option<WireTraceCtx>,
     },
     SubscribeRequest {

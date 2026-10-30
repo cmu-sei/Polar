@@ -89,7 +89,7 @@ impl Actor for ProducerSupervisor {
         let resources = AgentBuilder::new(myself.clone(), SERVICE_NAME)
             .with_lifecycle_handler(move |event| match event {
                 ClientEvent::Registered { .. } => Some(ProducerMessage::Registered),
-                ClientEvent::PublishAcknowledged { topic: t } if t == topic => {
+                ClientEvent::PublishAcknowledged { topic: t, .. } if t == topic => {
                     counted.acknowledge();
                     None
                 }

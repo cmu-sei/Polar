@@ -80,7 +80,7 @@ async fn test_client_event_forwarder_mailbox() -> Result<(), ActorProcessingErr>
             CassiniClientEvent::MessagePublished { topic, .. } => Some(MockMessage {
                 payload: format!("published:{topic}"),
             }),
-            CassiniClientEvent::PublishAcknowledged { topic } => Some(MockMessage {
+            CassiniClientEvent::PublishAcknowledged { topic, .. } => Some(MockMessage {
                 payload: format!("ack:{topic}"),
             }),
             CassiniClientEvent::Registered { registration_id } => Some(MockMessage {
@@ -142,7 +142,7 @@ async fn test_client_event_forwarder_multiple_events() -> Result<(), ActorProces
             CassiniClientEvent::MessagePublished { topic, .. } => Some(MockMessage {
                 payload: format!("pub:{topic}"),
             }),
-            CassiniClientEvent::PublishAcknowledged { topic } => Some(MockMessage {
+            CassiniClientEvent::PublishAcknowledged { topic, .. } => Some(MockMessage {
                 payload: format!("ack:{topic}"),
             }),
             CassiniClientEvent::Registered { registration_id } => Some(MockMessage {
@@ -183,6 +183,7 @@ async fn test_client_event_forwarder_multiple_events() -> Result<(), ActorProces
 
     forwarder_ref.send_message(CassiniClientEvent::PublishAcknowledged {
         topic: "topic2".to_string(),
+        id: cassini_types::MessageId { epoch: 1, seq: 1 },
     })?;
 
     forwarder_ref.send_message(CassiniClientEvent::Registered {
@@ -211,7 +212,7 @@ async fn test_client_event_forwarder_filters_events() -> Result<(), ActorProcess
     // Create a mapper that only forwards PublishAcknowledged events
     let mapper: Box<dyn Fn(CassiniClientEvent) -> Option<MockMessage> + Send + Sync + 'static> =
         Box::new(move |event| match event {
-            CassiniClientEvent::PublishAcknowledged { topic } => Some(MockMessage {
+            CassiniClientEvent::PublishAcknowledged { topic, .. } => Some(MockMessage {
                 payload: format!("ack:{topic}"),
             }),
             _ => None, // Filter out other events
@@ -239,6 +240,7 @@ async fn test_client_event_forwarder_filters_events() -> Result<(), ActorProcess
     // Send a PublishAcknowledged event (should pass through)
     forwarder_ref.send_message(CassiniClientEvent::PublishAcknowledged {
         topic: "filtered".to_string(),
+        id: cassini_types::MessageId { epoch: 1, seq: 2 },
     })?;
 
     // Give time to process

@@ -134,6 +134,66 @@ proptest! {
     }
 }
 
+// ==================== Numbered publishes ====================
+
+proptest! {
+    /// A publish keeps its `(epoch, seq)` through the wire and into the broker's message made of it, and its
+    /// acknowledgement and a refusal of it keep the same pair: what the client's outbox settles by.
+    #[test]
+    fn a_publish_s_number_survives_the_wire_its_acknowledgement_and_its_refusal(
+        epoch in any::<u64>(),
+        seq in any::<u64>(),
+        topic in "[a-z][a-z0-9.:-]{0,40}",
+        payload in prop::collection::vec(any::<u8>(), 0..64),
+    ) {
+        use cassini_types::{BrokerMessage, ClientMessage, MessageId};
+        use std::sync::Arc;
+        fn wire(message: &ClientMessage) -> ClientMessage {
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(message).unwrap();
+            rkyv::from_bytes::<ClientMessage, rkyv::rancor::Error>(&bytes).unwrap()
+        }
+        let sent = ClientMessage::PublishRequest {
+            topic: topic.clone(),
+            payload: Arc::new(payload.clone()),
+            registration_id: "r".to_string(),
+            trace_ctx: None,
+            share_identity: true,
+            epoch,
+            seq,
+        };
+        match BrokerMessage::from_client_message(wire(&sent), "c".to_string(), Some("me".into())) {
+            BrokerMessage::PublishRequest { id, topic: t, payload: p, published_by, .. } => {
+                prop_assert_eq!(id, MessageId { epoch, seq });
+                prop_assert_eq!(t, topic.clone());
+                prop_assert_eq!(p.as_ref(), &payload);
+                prop_assert_eq!(published_by.as_deref(), Some("me"));
+            }
+            _ => prop_assert!(false, "not a publish"),
+        }
+        let ack = ClientMessage::PublishRequestAck { topic: topic.clone(), epoch, seq, trace_ctx: None };
+        match wire(&ack) {
+            ClientMessage::PublishRequestAck { epoch: e, seq: s, topic: t, .. } => {
+                prop_assert_eq!((e, s, t), (epoch, seq, topic.clone()));
+            }
+            _ => prop_assert!(false, "not an acknowledgement"),
+        }
+        let refusal = ClientMessage::PublishResponse {
+            topic,
+            payload: Arc::new(Vec::new()),
+            result: Err("no".into()),
+            trace_ctx: None,
+            published_by: None,
+            origin: Some(MessageId { epoch, seq }),
+        };
+        match wire(&refusal) {
+            ClientMessage::PublishResponse { origin, result: Err(_), .. } => {
+                prop_assert_eq!(origin, Some(MessageId { epoch, seq }));
+            }
+            _ => prop_assert!(false, "not a refusal"),
+        }
+    }
+}
+
 // ==================== Registration refusal Property Tests ====================
 
 fn refusal_code() -> impl Strategy<Value = cassini_types::RefusalCode> {

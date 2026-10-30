@@ -512,6 +512,7 @@ impl Actor for Broker {
                 reply_to,
                 trace_ctx,
                 published_by,
+                id,
             } => {
                 self.handle_publish_request(
                     myself,
@@ -522,6 +523,7 @@ impl Actor for Broker {
                     reply_to,
                     trace_ctx,
                     published_by,
+                    id,
                 )
                 .await?;
             }
@@ -531,6 +533,7 @@ impl Actor for Broker {
                 result,
                 trace_ctx,
                 published_by,
+                origin,
             } => {
                 self.handle_publish_response(
                     myself,
@@ -540,6 +543,7 @@ impl Actor for Broker {
                     result,
                     trace_ctx,
                     published_by,
+                    origin,
                 )
                 .await?;
             }
@@ -851,6 +855,7 @@ impl Broker {
         reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        id: cassini_types::MessageId,
     ) -> Result<(), ActorProcessingErr> {
         let payload_len = payload.len();
         let span = trace_span!("cassini.broker.publish_request", %registration_id, %topic, payload_bytes = payload_len);
@@ -872,6 +877,7 @@ impl Broker {
                     result: Err("Broker is shutting down".to_string()),
                     trace_ctx: Some(span.context()),
                     published_by: None,
+                    origin: Some(id),
                 })
             {
                 warn!(error = %e2, "Failed to notify SessionManager of publish failure");
@@ -889,6 +895,7 @@ impl Broker {
                 reply_to, // pass through the reply_to from the incoming message
                 trace_ctx: Some(span.context()),
                 published_by,
+                id,
             });
 
             if let Err(e) = forward {
@@ -903,6 +910,7 @@ impl Broker {
                         result: Err(format!("forward failed: {e}")),
                         trace_ctx: Some(span.context()),
                         published_by: None,
+                        origin: Some(id),
                     }) {
                         warn!(error = %e2, "Failed to notify SessionManager of publish failure");
                     }
@@ -922,6 +930,7 @@ impl Broker {
                     result: Err("topic manager unavailable".to_string()),
                     trace_ctx: Some(span.context()),
                     published_by: None,
+                    origin: Some(id),
                 });
             }
         }
@@ -938,6 +947,7 @@ impl Broker {
         result: Result<(), String>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        origin: Option<cassini_types::MessageId>,
     ) -> Result<(), ActorProcessingErr> {
         let payload_len = payload.len();
         let span = trace_span!("cassini.broker.publish_response", %topic, ok = result.is_ok(), payload_bytes = payload_len);
@@ -951,6 +961,7 @@ impl Broker {
                 result,
                 trace_ctx: Some(span.context()),
                 published_by,
+                origin,
             }) {
                 error!(error = %e, "Failed to forward PublishResponse to SubscriberManager");
             }

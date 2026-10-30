@@ -23,8 +23,9 @@
 
 # Cassini client reliability
 
-Status: **design; build step 1 is done** (the facade, the in-memory offline buffer and the removal of the
-supervisor's respawn, 2026-10-08), the rest is not. Written 2026-10-08 from a design discussion. It describes what the
+Status: **design; build steps 1 and 2 are done** (step 1, the facade, the in-memory offline buffer and the removal of
+the supervisor's respawn, 2026-10-08; step 2, the outbox and per-message acknowledgements, 2026-10-30: "Step 2, as
+built", below), the rest is not. Written 2026-10-08 from a design discussion. It describes what the
 Cassini client does today, why that loses messages, and the structure that replaces it. The open
 decisions are in section 6.
 
@@ -74,7 +75,41 @@ Read from the code for the backpressure plan (cassini-backpressure.md); paths re
   waits for an acknowledgement.
 - **Steps 2 to 5 do not exist:** no outbox, epoch, seq or message id; `PublishRequest` and `PublishRequestAck`
   (`cassini/types/src/lib.rs:639-659`) carry none, so an ack can be matched only by topic. `PublishResponseAck`
-  (`types/src/lib.rs:195`) is a fieldless variant nothing constructs or handles. No dedupe.
+  (`types/src/lib.rs:195`) is a fieldless variant nothing constructs or handles. No dedupe. *(Step 2 built the same
+  day: below.)*
+
+### Step 2, as built (2026-10-30)
+
+Built with the backpressure plan's decisions (cassini-backpressure.md, "Decided" 4); paths relative to `src/agents/`.
+
+- **The wire.** `ClientMessage::PublishRequest` carries `epoch` and `seq`, and `PublishRequestAck` returns them, with
+  the topic; a refusal (`PublishResponse` with `Err`) names the refused publish in `origin`
+  (`cassini/types/src/lib.rs`, `MessageId` and the three variants' docs). The broker carries the number from the
+  Listener through the session, the broker and the topic manager to the topic actor, which acknowledges by it
+  (`BrokerMessage::PublishRequest { id }`, `PublishRequestAck { id }`). Each publish is acknowledged by itself and in
+  no particular order; there is no cumulative acknowledgement (section 3).
+- **The outbox** (`cassini/client/src/outbox.rs`): the facade picks a random epoch when it starts
+  (`cassini_client::new_epoch`, never zero, which the broker's own publishes use) and numbers what it is given 1, 2,
+  3. An entry leaves only on its own acknowledgement or its refusal (`Outbox::settle`, which ignores another epoch's
+  number and one it does not hold). It is bounded by count and bytes (`DEFAULT_OUTBOX_LIMITS`: 1,000 messages or
+  64 MiB, the load harness producer's window), and always takes one message when empty, so a frame-sized message
+  goes. Its payloads are `Arc`s, shared with what is sent.
+- **The facade** (`cassini/client/src/facade.rs`): a publish goes into the outbox if there is room and nothing waits
+  before it, and is sent at once as `TcpClientMessage::Transmit` if a transport is registered (`admit`, `transmit`);
+  otherwise it waits in the buffer, in order (`hold`, `promote`). On every registration the whole outbox is sent
+  again, in order, with the numbers it had (the `ClientRegistered` arm); an acknowledgement or a refusal from the
+  transport (`TcpClientMessage::Acknowledged`, `Refused`) settles its entry and moves what waits into the room made.
+- **The transport** (`cassini/client/src/lib.rs`): sends a `Transmit` with its number; a `Publish` given to it
+  directly (agents that hold the transport itself, the CLI) is numbered in an epoch of the transport's own. It tells
+  the facade each acknowledgement and refusal, and the agent `ClientEvent::PublishAcknowledged { topic, id }`.
+- **What it gives:** a message written to a connection that dies before its acknowledgement is sent again on the
+  next registration, so it is no longer lost (section 1's loss while registered); delivery is at-least-once, with no
+  deduplication (step 4) and no offline file (step 3): a facade that ends loses its outbox.
+- **Tests:** `outbox.rs`'s own, the property `no_message_leaves_the_outbox_before_its_own_acknowledgement`
+  (`cassini/client/tests/props.rs`), the facade's (numbered 1, 2, 3; sent again by the next transport, acknowledged
+  out of order; a full outbox holding what follows; a refused one let go), the broker's
+  `each_publish_is_acknowledged_by_its_own_number` and `a_refused_publish_is_named_by_its_number`
+  (`cassini/broker/tests/acknowledgments.rs`), and the wire's round trip (`cassini/types/tests/props/lib.rs`).
 - **No production agent uses `ClientEvent::PublishAcknowledged`;** the harness producer, the CLI and the broker tests
   do.
 - **How the agents treat a failed publish** (which a bound would make happen): jira-observer propagates it, and a
@@ -166,7 +201,8 @@ matter, handled by mTLS and, for configuration, by signed monotonic versions.
 
 ## 5. Protocol and broker changes
 
-- `PublishRequest` gains `epoch` and `seq`; `PublishRequestAck` returns them (cumulative).
+- `PublishRequest` gains `epoch` and `seq`; `PublishRequestAck` returns them, per message (built 2026-10-30, not
+  cumulative: section 3 says why).
 - Deliveries (`PublishResponse`) carry the origin `(published_by, epoch, seq)` and a delivery id;
   `PublishResponseAck` returns the delivery id.
 - The broker dedupes at the session's ingress, in socket order and before it fans out to topic
@@ -251,7 +287,7 @@ credentials agent's volume and the databases.
    resume replays it, and a sweep ends it at `R`. Left from the design below: the supersede rule and holding
    per identity and topic, and acknowledged deliveries.
 2. The outbox with an in-memory queue, and the acknowledgement path, using a message id added to the
-   existing ack.
+   existing ack. *(Done 2026-10-30: "Step 2, as built".)*
 3. The offline file: quiesce on trouble, rehydrate on start, replay.
 4. Dedupe at the broker and at subscribers, with the epoch and sequence.
 5. The broker's per-subscriber outbox and, if decided, persistence.

@@ -867,8 +867,23 @@ impl TestClient {
             .lock()
             .unwrap()
             .iter()
-            .filter(|e| matches!(e, ClientEvent::PublishAcknowledged { topic: t } if t == topic))
+            .filter(
+                |e| matches!(e, ClientEvent::PublishAcknowledged { topic: t, .. } if t == topic),
+            )
             .count()
+    }
+
+    /// The numbers of the publishes the broker has acknowledged, in the order the acknowledgements came.
+    pub fn acknowledged_ids(&self) -> Vec<cassini_types::MessageId> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                ClientEvent::PublishAcknowledged { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Whether the broker has acknowledged a subscription to `topic`.
@@ -962,6 +977,7 @@ impl FacadeClient {
                 gate: None,
                 watch: None,
                 buffer_limit: DEFAULT_OFFLINE_BUFFER,
+                outbox: cassini_client::outbox::OutboxLimits::default(),
                 backoff: Backoff {
                     first: Duration::from_millis(200),
                     last: Duration::from_secs(1),

@@ -29,7 +29,8 @@ use crate::{
 use crate::{UNEXPECTED_MESSAGE_STR, get_subscriber_name};
 use cassini_tracing::try_set_parent_otel;
 use cassini_types::{
-    BrokerMessage, ControlError, ControlOp, ControlResult, DisconnectReason, ShutdownPhase,
+    BrokerMessage, ControlError, ControlOp, ControlResult, DisconnectReason, MessageId,
+    ShutdownPhase,
 };
 use ractor::{
     Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait, registry::where_is,
@@ -900,6 +901,7 @@ impl Actor for SessionAgent {
                 reply_to,
                 trace_ctx,
                 published_by,
+                id,
             } => {
                 self.handle_publish_request(
                     myself.clone(),
@@ -910,6 +912,7 @@ impl Actor for SessionAgent {
                     reply_to,
                     trace_ctx,
                     published_by,
+                    id,
                 )
                 .await?;
             }
@@ -929,8 +932,12 @@ impl Actor for SessionAgent {
                 )
                 .await?;
             }
-            BrokerMessage::PublishRequestAck { topic, trace_ctx } => {
-                self.handle_publish_ack(myself.clone(), state, topic, trace_ctx)
+            BrokerMessage::PublishRequestAck {
+                topic,
+                id,
+                trace_ctx,
+            } => {
+                self.handle_publish_ack(myself.clone(), state, topic, id, trace_ctx)
                     .await?;
             }
             BrokerMessage::SubscribeRequest {
@@ -1122,6 +1129,7 @@ impl SessionAgent {
         _reply_to: Option<ActorRef<BrokerMessage>>, // added but ignored; we'll use our own
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        id: MessageId,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("session.publish_request", %registration_id, %topic);
         try_set_parent_otel(&span, trace_ctx);
@@ -1156,10 +1164,11 @@ impl SessionAgent {
                     .client_ref
                     .send_message(BrokerMessage::PublishResponse {
                         topic,
-                        payload,
+                        payload: Arc::new(Vec::new()),
                         result: Err(err_msg),
                         trace_ctx: Some(span.context()),
                         published_by: None,
+                        origin: Some(id),
                     });
                 // no broker -> timeout path (client may be fine; broker is not)
                 let _ = myself.send_message(BrokerMessage::TimeoutMessage {
@@ -1189,6 +1198,7 @@ impl SessionAgent {
             reply_to: Some(myself.clone()),
             trace_ctx: Some(span.context()),
             published_by,
+            id,
         }) {
             error!("failed to forward publish to broker: {e}");
             // Notify manager that publish failed (delta -1)
@@ -1225,6 +1235,7 @@ impl SessionAgent {
             result: Ok(()),
             trace_ctx: Some(span.context()),
             published_by: published_by.clone(),
+            origin: None,
         }) {
             warn!("{PUBLISH_REQ_FAILED_TXT}: {CLIENT_NOT_FOUND_TXT}: {e}");
 
@@ -1246,6 +1257,7 @@ impl SessionAgent {
         myself: ActorRef<BrokerMessage>,
         state: &mut SessionAgentState,
         topic: String,
+        id: MessageId,
         trace_ctx: Option<opentelemetry::Context>,
     ) -> Result<(), ActorProcessingErr> {
         let registration_id = state.registration_id.clone();
@@ -1259,6 +1271,7 @@ impl SessionAgent {
             .client_ref
             .send_message(BrokerMessage::PublishRequestAck {
                 topic,
+                id,
                 trace_ctx: Some(span.context()),
             })
         {

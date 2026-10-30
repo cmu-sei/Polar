@@ -24,7 +24,7 @@
 use crate::PUBLISH_REQ_FAILED_TXT;
 use crate::UNEXPECTED_MESSAGE_STR;
 use cassini_tracing::try_set_parent_otel;
-use cassini_types::{BrokerMessage, ShutdownPhase};
+use cassini_types::{BrokerMessage, MessageId, ShutdownPhase};
 use ractor::rpc::CallResult;
 use ractor::{Actor, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -247,6 +247,7 @@ impl Actor for TopicManager {
                 reply_to,
                 trace_ctx,
                 published_by,
+                id,
             } => {
                 self.handle_publish_request(
                     myself.clone(),
@@ -257,6 +258,7 @@ impl Actor for TopicManager {
                     reply_to,
                     trace_ctx,
                     published_by,
+                    id,
                 )
                 .await?;
             }
@@ -370,6 +372,7 @@ impl TopicManager {
         reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        id: MessageId,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.topic_manager.publish_request", %registration_id, topic = %topic, payload_len = payload.len());
 
@@ -395,6 +398,7 @@ impl TopicManager {
                         reply_to, // forward to topic agent
                         trace_ctx: Some(span.context()),
                         published_by,
+                        id,
                     }) {
                         error!(error = %e, topic = %topic, "failed to forward publish");
                     }
@@ -438,6 +442,7 @@ impl TopicManager {
                 result: Ok(()),
                 trace_ctx: Some(span.context()),
                 published_by,
+                origin: None,
             }) {
                 error!("Failed to forward publish response to broker: {}", e);
             }
@@ -589,6 +594,7 @@ impl Actor for TopicAgent {
                 reply_to,
                 trace_ctx,
                 published_by,
+                id,
             } => {
                 self.handle_publish_request(
                     myself.clone(),
@@ -599,6 +605,7 @@ impl Actor for TopicAgent {
                     reply_to,
                     trace_ctx,
                     published_by,
+                    id,
                 )
                 .await?;
             }
@@ -678,6 +685,7 @@ impl TopicAgent {
                     result: Ok(()),
                     trace_ctx: None,
                     published_by: published_by.clone(),
+                    origin: None,
                 }) {
                     warn!("Failed to deliver queued message to subscriber: {}", e);
                 }
@@ -717,6 +725,7 @@ impl TopicAgent {
         reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        id: MessageId,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!(
             "cassini.topic_agent.publish",
@@ -740,6 +749,7 @@ impl TopicAgent {
                 result: Ok(()),
                 trace_ctx: Some(span.context()),
                 published_by: published_by.clone(),
+                origin: None,
             }) {
                 Ok(()) => delivered += 1,
                 Err(_) => ended.push(registration_id.clone()),
@@ -768,6 +778,7 @@ impl TopicAgent {
         if let Some(session) = reply_to {
             if let Err(e) = session.send_message(BrokerMessage::PublishRequestAck {
                 topic: topic.clone(),
+                id,
                 trace_ctx: Some(span.context()),
             }) {
                 warn!("Failed to send publish Ack to session! {e}")
@@ -813,6 +824,7 @@ impl TopicAgent {
                     result: Ok(()),
                     trace_ctx: Some(span.context()),
                     published_by,
+                    origin: None,
                 })
                 .ok();
         }

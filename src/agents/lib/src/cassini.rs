@@ -227,6 +227,7 @@ impl TcpClient {
                 spawner: std::sync::Arc::new(TlsTransportSpawner),
                 online: online.clone(),
                 buffer_limit: DEFAULT_OFFLINE_BUFFER,
+                outbox: cassini_client::outbox::OutboxLimits::default(),
                 backoff: Backoff::default(),
                 gate,
                 watch,

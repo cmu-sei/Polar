@@ -27,9 +27,12 @@ pub use polar_custody::client::ClientKey;
 mod connect;
 pub mod environment;
 pub mod facade;
+pub mod outbox;
 pub mod refused;
 
-use cassini_types::{ClientEvent, ClientMessage, ControlOp, MAX_FRAME_BYTES, WireTraceCtx};
+use cassini_types::{
+    ClientEvent, ClientMessage, ControlOp, MAX_FRAME_BYTES, MessageId, WireTraceCtx,
+};
 use ractor::concurrency::{Duration, sleep};
 use ractor::{Actor, ActorProcessingErr, ActorRef, Message, OutputPort, RpcReplyPort, async_trait};
 use rkyv::rancor::Error;
@@ -60,6 +63,13 @@ pub const REGISTRATION_EXPECTED: &str =
     "Expected client to be registered to conduct this operation.";
 
 pub const CLIENT_DISCONNECTED: &str = "CLIENT_DISCONNECTED";
+
+/// A new epoch for a client's numbering of what it publishes: random, so a client that starts again does not reuse
+/// the numbers of the one before (docs/architecture/cassini-client-reliability.md, section 4). Never zero, which the
+/// broker's own publishes use.
+pub fn new_epoch() -> u64 {
+    uuid::Uuid::new_v4().as_u64_pair().0.max(1)
+}
 
 /// Bridges [`ClientEvent`] messages from the TCP client to any actor using a mapping closure.
 ///
@@ -445,6 +455,24 @@ pub enum TcpClientMessage {
     /// The agent's authority changed: the facade asks its gate again about every topic it was refused, and sends
     /// the wanted subscriptions it now admits.
     JudgeAgain,
+    /// From the facade to the transport: send the publish its outbox numbered `id`. The outbox keeps it until it is
+    /// acknowledged, and sends it again on the next registration if it is not.
+    Transmit {
+        topic: String,
+        payload: Arc<Vec<u8>>,
+        trace_ctx: Option<WireTraceCtx>,
+        share_identity: bool,
+        id: MessageId,
+    },
+    /// From the transport to the facade: the broker accepted the publish numbered `id`.
+    Acknowledged {
+        id: MessageId,
+    },
+    /// From the transport to the facade: the publish numbered `id` will never be accepted (the broker refused it, or
+    /// it does not fit in a frame), so the outbox lets it go.
+    Refused {
+        id: MessageId,
+    },
 }
 
 impl TcpClientMessage {
@@ -470,6 +498,9 @@ impl TcpClientMessage {
             TcpClientMessage::SessionInvalidated => "SessionInvalidated",
             TcpClientMessage::BrokerAnswered { .. } => "BrokerAnswered",
             TcpClientMessage::JudgeAgain => "JudgeAgain",
+            TcpClientMessage::Transmit { .. } => "Transmit",
+            TcpClientMessage::Acknowledged { .. } => "Acknowledged",
+            TcpClientMessage::Refused { .. } => "Refused",
         }
     }
 
@@ -552,6 +583,10 @@ pub struct TcpClientState {
     abort_handle: Option<AbortHandle>, // abort handle switch for the stream read loop
     reconnect: ReconnectMode,
     answers: Option<ActorRef<TcpClientMessage>>,
+    /// How this transport numbers a publish it is sent directly (`Publish`), with no facade numbering it: an epoch
+    /// of its own, and the next seq in it.
+    epoch: u64,
+    next_seq: u64,
 }
 
 pub struct TcpClientArgs {
@@ -807,6 +842,7 @@ impl TcpClientActor {
                 result,
                 trace_ctx,
                 published_by,
+                origin,
             } => {
                 let span = trace_span!("client.handle_publish_response");
                 if let Some(wire_ctx) = trace_ctx {
@@ -832,6 +868,11 @@ impl TcpClientActor {
                     // The broker did not take our publish: the agent hears it, not only the log.
                     warn!("The broker refused a publish on {topic}: {reason}");
                     answer(&topic, facade::TopicUse::Publish, &Err(reason.clone()));
+                    if let (Some(answers), Some(id)) = (answers, origin)
+                        && let Err(e) = answers.send_message(TcpClientMessage::Refused { id })
+                    {
+                        warn!("the refusal of a publish on {topic} could not be passed on: {e}");
+                    }
                     TcpClientActor::dispatch_event(
                         delivery,
                         ClientEvent::PublishRefused {
@@ -904,13 +945,26 @@ impl TcpClientActor {
                     let _ = myself.send_message(TcpClientMessage::SessionInvalidated);
                 }
             }
-            ClientMessage::PublishRequestAck { topic, trace_ctx } => {
+            ClientMessage::PublishRequestAck {
+                topic,
+                epoch,
+                seq,
+                trace_ctx,
+            } => {
                 let span = trace_span!("client.handle_publish_ack");
                 try_set_parent_wire(&span, trace_ctx);
                 let _g = span.enter();
                 debug!("Received publish ack for topic: {topic}");
 
-                let event = ClientEvent::PublishAcknowledged { topic };
+                let id = MessageId { epoch, seq };
+                if let Some(answers) = answers
+                    && let Err(e) = answers.send_message(TcpClientMessage::Acknowledged { id })
+                {
+                    warn!(
+                        "the acknowledgement of a publish on {topic} could not be passed on: {e}"
+                    );
+                }
+                let event = ClientEvent::PublishAcknowledged { topic, id };
                 TcpClientActor::dispatch_event(delivery, event);
             }
             ClientMessage::ControlResponse {
@@ -1185,16 +1239,19 @@ impl TcpClientActor {
         state: &mut TcpClientState,
         registration_id: &str,
         topic: String,
-        payload: Vec<u8>,
+        payload: Arc<Vec<u8>>,
         trace_ctx: Option<WireTraceCtx>,
         share_identity: bool,
+        id: MessageId,
     ) -> Result<(), ActorProcessingErr> {
         let envelope = ClientMessage::PublishRequest {
             topic: topic.clone(),
-            payload: payload.into(),
+            payload,
             registration_id: registration_id.to_owned(),
             trace_ctx,
             share_identity,
+            epoch: id.epoch,
+            seq: id.seq,
         };
         match Self::frame(&envelope) {
             Ok(frame) => {
@@ -1205,6 +1262,9 @@ impl TcpClientActor {
             // Not the connection's fault: the publish is refused, and the connection kept.
             Err(e) => {
                 error!(%topic, "a publish was not sent: {e}");
+                if let Some(answers) = &state.answers {
+                    let _ = answers.send_message(TcpClientMessage::Refused { id });
+                }
                 TcpClientActor::dispatch_event(
                     &state.delivery,
                     ClientEvent::PublishRefused {
@@ -1448,6 +1508,8 @@ impl Actor for TcpClientActor {
             delivery: args.delivery,
             abort_handle: None,
             answers: args.answers,
+            epoch: new_epoch(),
+            next_seq: 1,
         };
 
         Ok(state)
@@ -1590,6 +1652,30 @@ impl Actor for TcpClientActor {
                         trace_ctx,
                         share_identity,
                     } => {
+                        let id = MessageId {
+                            epoch: state.epoch,
+                            seq: state.next_seq,
+                        };
+                        state.next_seq += 1;
+                        self.handle_publish(
+                            myself,
+                            state,
+                            &reg_id,
+                            topic,
+                            Arc::new(payload),
+                            trace_ctx,
+                            share_identity,
+                            id,
+                        )
+                        .await?;
+                    }
+                    TcpClientMessage::Transmit {
+                        topic,
+                        payload,
+                        trace_ctx,
+                        share_identity,
+                        id,
+                    } => {
                         self.handle_publish(
                             myself,
                             state,
@@ -1598,6 +1684,7 @@ impl Actor for TcpClientActor {
                             payload,
                             trace_ctx,
                             share_identity,
+                            id,
                         )
                         .await?;
                     }
@@ -1769,6 +1856,7 @@ mod process_client_message_tests {
                 result: Ok(()),
                 trace_ctx: None,
                 published_by: Some("some-agent".to_string()),
+                origin: None,
             },
         );
 
@@ -1835,6 +1923,7 @@ mod process_client_message_tests {
             result: Err("broker rejected it".to_string()),
             trace_ctx: None,
             published_by: None,
+            origin: None,
         })
         .await;
         assert!(
@@ -1924,6 +2013,7 @@ mod process_client_message_tests {
                 result: Err("the broker refused: no".to_string()),
                 trace_ctx: None,
                 published_by: None,
+                origin: None,
             },
             // Someone else's message, delivered: not an answer to anything this client asked.
             ClientMessage::PublishResponse {
@@ -1932,6 +2022,7 @@ mod process_client_message_tests {
                 result: Ok(()),
                 trace_ctx: None,
                 published_by: None,
+                origin: None,
             },
         ])
         .await;
@@ -1977,6 +2068,7 @@ mod process_client_message_tests {
                     result: Err(reason.clone()),
                     trace_ctx: None,
                     published_by: None,
+                    origin: None,
                 }
             };
             let events = tokio::runtime::Runtime::new().unwrap().block_on(dispatched_for(message));
@@ -2085,6 +2177,8 @@ mod registration_tests {
             },
             abort_handle: None,
             answers: None,
+            epoch: 1,
+            next_seq: 1,
         };
         (state, events)
     }
@@ -2190,6 +2284,9 @@ mod frame_tests {
             registration_id: "r".to_string(),
             trace_ctx: None,
             share_identity: true,
+            // The largest numbers there are, so the frame measured is as large as a publish's can be.
+            epoch: u64::MAX,
+            seq: u64::MAX,
         }
     }
 
@@ -2237,6 +2334,8 @@ mod frame_tests {
             },
             abort_handle: None,
             answers: None,
+            epoch: 1,
+            next_seq: 1,
         };
         struct Idle;
         #[async_trait]

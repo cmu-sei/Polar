@@ -253,6 +253,7 @@ mod tests {
                 reply_to: None,
                 trace_ctx: None,
                 published_by: None,
+                id: cassini_types::MessageId { epoch: 1, seq: 1 },
             })
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -302,6 +303,7 @@ mod tests {
                 reply_to: None,
                 trace_ctx: None,
                 published_by: None,
+                id: cassini_types::MessageId { epoch: 1, seq: 1 },
             })?;
         }
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -357,6 +359,7 @@ mod tests {
             reply_to: None,
             trace_ctx: None,
             published_by: None,
+            id: cassini_types::MessageId { epoch: 1, seq: 1 },
         };
 
         // This should not panic or error

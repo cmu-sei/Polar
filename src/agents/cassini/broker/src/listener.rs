@@ -30,7 +30,7 @@ use crate::{
 use async_trait::async_trait;
 use cassini_types::{
     ArchivedClientMessage, BrokerMessage, ClientMessage, ControlError, ControlOp, ControlResult,
-    DisconnectReason, MAX_FRAME_BYTES, ShutdownPhase, WireTraceCtx,
+    DisconnectReason, MAX_FRAME_BYTES, MessageId, ShutdownPhase, WireTraceCtx,
 };
 use polar_agent_builder::{Access, Floor};
 use ractor::{
@@ -1080,6 +1080,7 @@ impl Actor for Listener {
                 reply_to,
                 trace_ctx,
                 published_by,
+                id,
             } => {
                 self.handle_publish_request(
                     myself,
@@ -1090,6 +1091,7 @@ impl Actor for Listener {
                     reply_to,
                     trace_ctx,
                     published_by,
+                    id,
                 )
                 .await?;
             }
@@ -1099,6 +1101,7 @@ impl Actor for Listener {
                 trace_ctx,
                 result,
                 published_by,
+                origin,
             } => {
                 self.handle_publish_response(
                     myself,
@@ -1108,11 +1111,16 @@ impl Actor for Listener {
                     trace_ctx,
                     result,
                     published_by,
+                    origin,
                 )
                 .await?;
             }
-            BrokerMessage::PublishRequestAck { topic, trace_ctx } => {
-                self.handle_publish_request_ack(myself, state, topic, trace_ctx)
+            BrokerMessage::PublishRequestAck {
+                topic,
+                id,
+                trace_ctx,
+            } => {
+                self.handle_publish_request_ack(myself, state, topic, id, trace_ctx)
                     .await?;
             }
             BrokerMessage::SubscribeAcknowledgment {
@@ -1374,6 +1382,7 @@ impl Listener {
         _reply_to: Option<ActorRef<BrokerMessage>>,
         trace_ctx: Option<opentelemetry::Context>,
         published_by: Option<String>,
+        id: MessageId,
     ) -> Result<(), ActorProcessingErr> {
         let span = debug_span!("cassini.request.publish_request", client_id = %state.client_id, %registration_id, topic = ?topic, payload_bytes = payload.len());
         try_set_parent_otel(&span, trace_ctx.clone());
@@ -1429,6 +1438,7 @@ impl Listener {
                     result: Err(reason),
                     trace_ctx: WireTraceCtx::from_current_span(),
                     published_by: None,
+                    origin: Some(id),
                 };
                 if let Err(e) =
                     Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
@@ -1452,13 +1462,15 @@ impl Listener {
                 reply_to: None,
                 trace_ctx,
                 published_by,
+                id,
             }) {
                 let msg = ClientMessage::PublishResponse {
                     topic,
-                    payload,
+                    payload: Arc::new(Vec::new()),
                     result: Err(format!("{PUBLISH_REQ_FAILED_TXT}: {e}")),
                     trace_ctx: WireTraceCtx::from_current_span(),
                     published_by: None,
+                    origin: Some(id),
                 };
                 if let Err(e) =
                     Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
@@ -1482,6 +1494,7 @@ impl Listener {
         trace_ctx: Option<opentelemetry::Context>,
         result: Result<(), String>,
         published_by: Option<String>,
+        origin: Option<MessageId>,
     ) -> Result<(), ActorProcessingErr> {
         let span =
             trace_span!("cassini.listener.publish_response", topic = ?topic, ok = result.is_ok());
@@ -1509,6 +1522,7 @@ impl Listener {
                 result,
                 trace_ctx: WireTraceCtx::from_current_span(),
                 published_by,
+                origin,
             };
             if let Err(e) =
                 Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
@@ -1526,6 +1540,7 @@ impl Listener {
         _myself: ActorRef<BrokerMessage>,
         state: &mut ListenerState,
         topic: String,
+        id: MessageId,
         trace_ctx: Option<opentelemetry::Context>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.listener.publish_ack", topic = ?topic);
@@ -1533,6 +1548,8 @@ impl Listener {
         async {
             let msg = ClientMessage::PublishRequestAck {
                 topic,
+                epoch: id.epoch,
+                seq: id.seq,
                 trace_ctx: WireTraceCtx::from_current_span(),
             };
             if let Err(e) =

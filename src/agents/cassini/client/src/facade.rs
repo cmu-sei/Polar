@@ -38,10 +38,13 @@
 //! `ClientEvent::Registered` through its delivery, which the facade observes), and `Reconnect` means
 //! "bring a transport up if there is none".
 //!
-//! What this does not do yet: a message already written to a connection that then dies is still
-//! lost, because nothing acknowledges it. That is the next step of the design in
-//! `docs/architecture/cassini-client-reliability.md`.
+//! Every publish it is given is numbered `(epoch, seq)` and kept in its outbox (`outbox.rs`) until the
+//! broker acknowledges that message, so a message written to a connection that then dies is sent
+//! again on the next registration (build step 2 of `docs/architecture/cassini-client-reliability.md`).
+//! What is published while the outbox is full waits in the buffer, in order. There is no offline
+//! file (step 3) and no deduplication (step 4): a message sent again may be delivered twice.
 
+use crate::outbox::{Entry, Outbox, OutboxLimits};
 use crate::refused::{RefusedTopics, StandingRefusal};
 use crate::{
     DeliveryMode, ReconnectMode, TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage,
@@ -175,6 +178,8 @@ pub struct FacadeArgs {
     /// can ask without a message.
     pub online: Arc<AtomicBool>,
     pub buffer_limit: usize,
+    /// How much the outbox holds before publishes wait in the buffer.
+    pub outbox: OutboxLimits,
     pub backoff: Backoff,
     /// Asked before each publish and subscribe; none admits everything.
     pub gate: Option<TopicGate>,
@@ -189,6 +194,8 @@ pub struct FacadeState {
     registered: bool,
     registration_id: Option<String>,
     buffer: VecDeque<TcpClientMessage>,
+    /// What was published and not yet acknowledged, numbered in this facade's epoch.
+    outbox: Outbox,
     attempt: u32,
     closing: bool,
     /// What the agent was refused and still wants. It outlives every transport, as the agent's wanting does.
@@ -261,6 +268,75 @@ impl TcpClientFacade {
         drop(myself.send_after(wait, || TcpClientMessage::Reconnect));
     }
 
+    /// Sends an outbox entry to the transport, if one is registered. Otherwise it waits in the outbox for the next.
+    fn transmit(state: &FacadeState, entry: &Entry) {
+        if let Some(transport) = &state.transport
+            && state.registered
+        {
+            let _ = transport.send_message(TcpClientMessage::Transmit {
+                topic: entry.topic.clone(),
+                payload: entry.payload.clone(),
+                trace_ctx: entry.trace_ctx,
+                share_identity: entry.share_identity,
+                id: entry.id,
+            });
+        }
+    }
+
+    /// Takes a publish: into the outbox if there is room and nothing waits before it, sent at once if a transport
+    /// is registered; otherwise into the buffer, behind what already waits.
+    fn admit(state: &mut FacadeState, publish: TcpClientMessage) {
+        let TcpClientMessage::Publish {
+            topic,
+            payload,
+            trace_ctx,
+            share_identity,
+        } = publish
+        else {
+            return;
+        };
+        if state.buffer.is_empty() && state.outbox.has_room(payload.len()) {
+            let entry = state
+                .outbox
+                .push(topic, Arc::new(payload), trace_ctx, share_identity)
+                .clone();
+            Self::transmit(state, &entry);
+        } else {
+            Self::hold(
+                state,
+                TcpClientMessage::Publish {
+                    topic,
+                    payload,
+                    trace_ctx,
+                    share_identity,
+                },
+            );
+        }
+    }
+
+    /// Moves what waits in the buffer into the outbox, oldest first, while it has room.
+    fn promote(state: &mut FacadeState) {
+        while let Some(TcpClientMessage::Publish { payload, .. }) = state.buffer.front() {
+            if !state.outbox.has_room(payload.len()) {
+                break;
+            }
+            let Some(TcpClientMessage::Publish {
+                topic,
+                payload,
+                trace_ctx,
+                share_identity,
+            }) = state.buffer.pop_front()
+            else {
+                break;
+            };
+            let entry = state
+                .outbox
+                .push(topic, Arc::new(payload), trace_ctx, share_identity)
+                .clone();
+            Self::transmit(state, &entry);
+        }
+    }
+
     fn hold(state: &mut FacadeState, message: TcpClientMessage) {
         if state.buffer.len() >= state.args.buffer_limit {
             state.buffer.pop_front();
@@ -328,6 +404,7 @@ impl Actor for TcpClientFacade {
         args: FacadeArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         let delivery = observe(args.delivery.clone(), myself.clone());
+        let outbox = Outbox::new(crate::new_epoch(), args.outbox);
         let mut state = FacadeState {
             args,
             delivery,
@@ -335,6 +412,7 @@ impl Actor for TcpClientFacade {
             registered: false,
             registration_id: None,
             buffer: VecDeque::new(),
+            outbox,
             attempt: 0,
             closing: false,
             refused: RefusedTopics::default(),
@@ -393,12 +471,16 @@ impl Actor for TcpClientFacade {
                 state.registration_id = Some(id);
                 state.attempt = 0;
                 Self::set_online(state, true);
-                if let Some(transport) = &state.transport {
-                    for held in state.buffer.drain(..) {
-                        if let Err(e) = transport.send_message(held) {
-                            warn!("a held publish could not be sent to the transport: {e}");
-                        }
-                    }
+                // Everything not acknowledged is sent again, in order, with the number it had: the connection it
+                // was written to may have died with it. Then what waits in the buffer, as there is room.
+                for entry in state.outbox.entries() {
+                    Self::transmit(state, entry);
+                }
+                Self::promote(state);
+            }
+            TcpClientMessage::Acknowledged { id } | TcpClientMessage::Refused { id } => {
+                if state.outbox.settle(id).is_some() {
+                    Self::promote(state);
                 }
             }
             TcpClientMessage::BrokerAnswered {
@@ -435,17 +517,7 @@ impl Actor for TcpClientFacade {
                     Self::retry_later(&myself, state);
                 }
             }
-            publish @ TcpClientMessage::Publish { .. } => match &state.transport {
-                Some(transport) if state.registered => {
-                    // Lost the race with the transport ending: keep it for the next one.
-                    if let Err(ractor::MessagingErr::SendErr(message)) =
-                        transport.send_message(publish)
-                    {
-                        Self::hold(state, message);
-                    }
-                }
-                _ => Self::hold(state, publish),
-            },
+            publish @ TcpClientMessage::Publish { .. } => Self::admit(state, publish),
             TcpClientMessage::GetRegistrationId(reply) => match &state.transport {
                 Some(transport) if state.registered => {
                     let _ = transport.send_message(TcpClientMessage::GetRegistrationId(reply));
@@ -515,6 +587,7 @@ impl Actor for TcpClientFacade {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cassini_types::MessageId;
     use std::sync::Mutex;
 
     /// A stand-in transport that records what it is sent.
@@ -638,6 +711,15 @@ mod tests {
         gate: Option<TopicGate>,
         watch: Option<RefusalWatch>,
     ) -> Rig {
+        bounded_rig(buffer_limit, OutboxLimits::default(), gate, watch).await
+    }
+
+    async fn bounded_rig(
+        buffer_limit: usize,
+        outbox: OutboxLimits,
+        gate: Option<TopicGate>,
+        watch: Option<RefusalWatch>,
+    ) -> Rig {
         let spawner = Arc::new(FakeSpawner::default());
         let online = Arc::new(AtomicBool::new(false));
         let events = Arc::new(ractor::OutputPort::default());
@@ -651,6 +733,7 @@ mod tests {
                 spawner: spawner.clone(),
                 online: online.clone(),
                 buffer_limit,
+                outbox,
                 backoff: Backoff::default(),
                 gate,
                 watch,
@@ -670,16 +753,29 @@ mod tests {
         TcpClientMessage::publish(topic.to_string(), topic.as_bytes().to_vec(), None)
     }
 
+    /// The topics of the publishes the transport was sent, in order (the facade sends each as its outbox numbered
+    /// it).
     fn topics(received: &Arc<Mutex<Vec<TcpClientMessage>>>) -> Vec<String> {
+        sent(received).into_iter().map(|(topic, _)| topic).collect()
+    }
+
+    /// The publishes the transport was sent, in order, each with its number.
+    fn sent(received: &Arc<Mutex<Vec<TcpClientMessage>>>) -> Vec<(String, MessageId)> {
         received
             .lock()
             .unwrap()
             .iter()
             .filter_map(|m| match m {
-                TcpClientMessage::Publish { topic, .. } => Some(topic.clone()),
+                TcpClientMessage::Transmit { topic, id, .. } => Some((topic.clone(), *id)),
                 _ => None,
             })
             .collect()
+    }
+
+    fn acknowledge(rig: &Rig, id: MessageId) {
+        rig.facade
+            .cast(TcpClientMessage::Acknowledged { id })
+            .unwrap();
     }
 
     async fn settle() {
@@ -932,14 +1028,113 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_buffer_is_bounded_and_the_oldest_goes_first() {
-        let rig = rig(3).await;
+        // An outbox of one, so everything after the first waits in the buffer.
+        let rig = bounded_rig(
+            3,
+            OutboxLimits {
+                messages: 1,
+                bytes: usize::MAX,
+            },
+            None,
+            None,
+        )
+        .await;
         for t in ["1", "2", "3", "4", "5"] {
             rig.facade.cast(publish(t)).unwrap();
         }
         settle().await;
         registered(&rig, "reg-1");
         settle().await;
-        assert_eq!(topics(&rig.spawner.latest().1), ["3", "4", "5"]);
+        for _ in 0..3 {
+            let (_, id) = *sent(&rig.spawner.latest().1).last().unwrap();
+            acknowledge(&rig, id);
+            settle().await;
+        }
+        assert_eq!(topics(&rig.spawner.latest().1), ["1", "3", "4", "5"]);
+    }
+
+    // -- the outbox (docs/architecture/cassini-client-reliability.md, build step 2) ---------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn each_publish_is_numbered_one_two_three_in_the_facade_s_epoch() {
+        let rig = rig(10).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        for t in ["a", "b", "c"] {
+            rig.facade.cast(publish(t)).unwrap();
+        }
+        settle().await;
+        let ids: Vec<MessageId> = sent(&rig.spawner.latest().1)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect();
+        assert_eq!(ids.iter().map(|id| id.seq).collect::<Vec<_>>(), [1, 2, 3]);
+        assert!(ids.iter().all(|id| id.epoch == ids[0].epoch));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn what_was_not_acknowledged_is_sent_again_with_its_number_by_the_next_transport() {
+        let rig = rig(10).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        for t in ["a", "b", "c"] {
+            rig.facade.cast(publish(t)).unwrap();
+        }
+        settle().await;
+        let first = sent(&rig.spawner.latest().1);
+        // Out of order: the last before the first, and the middle one never.
+        acknowledge(&rig, first[2].1);
+        acknowledge(&rig, first[0].1);
+        settle().await;
+        rig.spawner.latest().0.kill();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        registered(&rig, "reg-2");
+        settle().await;
+        assert_eq!(sent(&rig.spawner.latest().1), [first[1].clone()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_full_outbox_holds_what_follows_until_an_acknowledgement_makes_room() {
+        let rig = bounded_rig(
+            10,
+            OutboxLimits {
+                messages: 2,
+                bytes: usize::MAX,
+            },
+            None,
+            None,
+        )
+        .await;
+        registered(&rig, "reg-1");
+        settle().await;
+        for t in ["a", "b", "c"] {
+            rig.facade.cast(publish(t)).unwrap();
+        }
+        settle().await;
+        assert_eq!(topics(&rig.spawner.latest().1), ["a", "b"]);
+        let (_, b) = sent(&rig.spawner.latest().1)[1].clone();
+        acknowledge(&rig, b);
+        settle().await;
+        assert_eq!(topics(&rig.spawner.latest().1), ["a", "b", "c"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_publish_leaves_the_outbox_and_is_not_sent_again() {
+        let rig = rig(10).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        rig.facade.cast(publish("a")).unwrap();
+        settle().await;
+        let (_, a) = sent(&rig.spawner.latest().1)[0].clone();
+        rig.facade
+            .cast(TcpClientMessage::Refused { id: a })
+            .unwrap();
+        settle().await;
+        rig.spawner.latest().0.kill();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        registered(&rig, "reg-2");
+        settle().await;
+        assert!(sent(&rig.spawner.latest().1).is_empty());
     }
 
     #[tokio::test(start_paused = true)]

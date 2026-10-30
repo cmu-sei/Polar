@@ -256,11 +256,12 @@ fn test_client_event_variants() {
 
     let event = ClientEvent::PublishAcknowledged {
         topic: "topic".to_string(),
+        id: cassini_types::MessageId { epoch: 3, seq: 4 },
     };
 
     assert_eq!(
         format!("{:?}", event),
-        "PublishAcknowledged { topic: \"topic\" }"
+        "PublishAcknowledged { topic: \"topic\", id: MessageId { epoch: 3, seq: 4 } }"
     );
 
     let event = ClientEvent::ClientSubscribed {
@@ -318,6 +319,8 @@ fn test_client_message_publish_request() {
         registration_id: "id".to_string(),
         trace_ctx: None,
         share_identity: true,
+        epoch: 1,
+        seq: 1,
     };
 
     match &msg {
@@ -446,6 +449,8 @@ fn test_broker_message_from_client_message_unsupported() {
         registration_id: "id".to_string(),
         trace_ctx: None,
         share_identity: true,
+        epoch: 9,
+        seq: 2,
     };
 
     let broker_msg = BrokerMessage::from_client_message(client_msg, "client1".to_string(), None);
@@ -455,11 +460,13 @@ fn test_broker_message_from_client_message_unsupported() {
             topic,
             payload,
             registration_id,
+            id,
             ..
         } => {
             assert_eq!(topic, "topic");
             assert_eq!(registration_id, "id");
             assert_eq!(payload, &Arc::new(vec![1, 2, 3]));
+            assert_eq!(*id, cassini_types::MessageId { epoch: 9, seq: 2 });
         }
         _ => panic!("Expected PublishRequest"),
     }
@@ -474,6 +481,7 @@ fn test_client_message_publish_response() {
         result: Ok(()),
         trace_ctx: None,
         published_by: None,
+        origin: None,
     };
 
     match &msg {
@@ -560,6 +568,8 @@ fn test_client_message_control_response() {
 fn test_client_message_publish_request_ack() {
     let msg = ClientMessage::PublishRequestAck {
         topic: "topic".to_string(),
+        epoch: 1,
+        seq: 1,
         trace_ctx: None,
     };
 

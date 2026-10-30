@@ -401,7 +401,7 @@ impl Actor for CompletionBridge {
             (BridgeMode::Registration, ClientEvent::Registered { registration_id }) => {
                 Some(CompletionEvent::Registered(registration_id))
             }
-            (BridgeMode::Publish, ClientEvent::PublishAcknowledged { topic }) => {
+            (BridgeMode::Publish, ClientEvent::PublishAcknowledged { topic, .. }) => {
                 Some(CompletionEvent::Published { topic })
             }
             (BridgeMode::Control, ClientEvent::ControlResponse { result, .. }) => {

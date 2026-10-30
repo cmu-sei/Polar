@@ -98,6 +98,8 @@ impl BrokerAuthority {
                 reply_to: None,
                 trace_ctx: None,
                 published_by: None,
+                // The broker's own publish is acknowledged to no one, so its number names nothing.
+                id: cassini_types::MessageId { epoch: 0, seq: 0 },
             })
         });
         // Asked once at start: the broker is not a client, so no registration asks for it.
