@@ -46,6 +46,25 @@ fn sanitize_label(raw: &str) -> String {
         .replace('#', "num")
 }
 
+/// The field an issue's last update is in: Jira's system field `updated`, under its display name, which the observer
+/// puts in place of the id (`jira/observe/src/issues.rs`, `rename_fields`).
+pub const UPDATED_FIELD: &str = "Updated";
+
+/// The property the issue's last update is written to as epoch milliseconds, beside the text of `Updated`: a number,
+/// so times Jira wrote with different UTC offsets compare as instants. The state agent reads its largest value as the
+/// observer's cursor (docs/architecture/soft-state.md, "The Jira cursor").
+pub const UPDATED_MS: &str = "updated_ms";
+
+/// How Jira writes a time: `2024-01-02T03:04:05.000+0000`.
+const JIRA_TIME: &str = "%Y-%m-%dT%H:%M:%S%.f%z";
+
+/// The instant `text` names, in epoch milliseconds, if it is a time as Jira writes one.
+pub fn parse_updated_ms(text: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_str(text.trim(), JIRA_TIME)
+        .ok()
+        .map(|time| time.timestamp_millis())
+}
+
 /// Converts a FirstTierField's scalar variants into a Property with the
 /// matching GraphValue type -- preserves real Neo4j integer/boolean
 /// types instead of collapsing everything to a string, matching the
@@ -333,6 +352,20 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
         }
     }
 
+    match issue.fields.get(UPDATED_FIELD) {
+        Some(FieldValue::OptionValue(Some(text))) => match parse_updated_ms(text) {
+            Some(ms) => issue_props.push(Property(UPDATED_MS.to_string(), GraphValue::I64(ms))),
+            None => debug!(
+                "Issue {}: its {UPDATED_FIELD} is not a time as Jira writes one, so no {UPDATED_MS} is written",
+                issue.key
+            ),
+        },
+        _ => debug!(
+            "Issue {}: it has no {UPDATED_FIELD}, so no {UPDATED_MS} is written",
+            issue.key
+        ),
+    }
+
     ops.insert(
         0,
         GraphOp::UpsertNode {
@@ -521,6 +554,109 @@ mod tests {
         )));
         assert!(props.contains(&Property("Story_Points".to_string(), GraphValue::I64(5))));
         assert!(props.contains(&Property("Flagged".to_string(), GraphValue::Bool(true))));
+    }
+
+    /// The issue node's properties in `ops`.
+    fn issue_props(ops: &[GraphOp]) -> &[Property] {
+        let GraphOp::UpsertNode { props, .. } = &ops[0] else {
+            panic!("expected the issue's UpsertNode first");
+        };
+        props
+    }
+
+    fn updated(text: &str) -> JiraIssue {
+        let mut issue = empty_issue("PROJ-9");
+        issue.fields.insert(
+            UPDATED_FIELD.to_string(),
+            FieldValue::OptionValue(Some(text.to_string())),
+        );
+        issue
+    }
+
+    #[test]
+    fn the_last_update_is_written_as_epoch_milliseconds_beside_its_text() {
+        let ops = build_ops_for_issue(&updated("2024-01-02T03:04:05.000+0000"));
+        let props = issue_props(&ops);
+        assert!(props.contains(&Property(
+            "Updated".to_string(),
+            GraphValue::String("2024-01-02T03:04:05.000+0000".to_string())
+        )));
+        assert!(props.contains(&Property(
+            UPDATED_MS.to_string(),
+            GraphValue::I64(1_704_164_645_000)
+        )));
+    }
+
+    #[test]
+    fn times_written_with_different_offsets_are_compared_as_instants() {
+        // The same instant, from a site in UTC and one at UTC-4.
+        assert_eq!(
+            parse_updated_ms("2024-01-02T03:04:05.000+0000"),
+            parse_updated_ms("2024-01-01T23:04:05.000-0400")
+        );
+        // As text the later one sorts first; as instants it is later.
+        let utc = parse_updated_ms("2024-01-02T03:04:05.000+0000").unwrap();
+        let later_at_minus_four = parse_updated_ms("2024-01-01T23:30:00.000-0400").unwrap();
+        assert!("2024-01-01T23:30:00.000-0400" < "2024-01-02T03:04:05.000+0000");
+        assert!(later_at_minus_four > utc);
+        assert_eq!(later_at_minus_four - utc, (25 * 60 + 55) * 1000);
+        // Milliseconds are kept; seconds without them are read too.
+        assert_eq!(
+            parse_updated_ms("2024-01-02T03:04:05.123+0000"),
+            Some(1_704_164_645_123)
+        );
+        assert_eq!(
+            parse_updated_ms("2024-01-02T03:04:05+0000"),
+            Some(1_704_164_645_000)
+        );
+    }
+
+    #[test]
+    fn an_issue_with_no_time_or_one_that_does_not_read_gets_no_milliseconds() {
+        for text in [
+            "",
+            "yesterday",
+            "2024-01-02",
+            "2024-01-02T03:04:05.000",
+            "2024-13-02T03:04:05.000+0000",
+        ] {
+            assert_eq!(parse_updated_ms(text), None, "{text}");
+            let ops = build_ops_for_issue(&updated(text));
+            assert!(
+                issue_props(&ops).iter().all(|p| p.0 != UPDATED_MS),
+                "{text}"
+            );
+        }
+        let ops = build_ops_for_issue(&empty_issue("PROJ-10"));
+        assert!(issue_props(&ops).iter().all(|p| p.0 != UPDATED_MS));
+    }
+
+    proptest::proptest! {
+        /// Any instant, written as Jira writes it at any whole-minute offset, reads back as that instant; so two
+        /// instants keep their order whatever offsets they were written at.
+        #[test]
+        fn a_time_written_at_any_offset_reads_back_as_its_instant(
+            a in 0i64..4_102_444_800_000,
+            b in 0i64..4_102_444_800_000,
+            offset_a in -840i32..=840,
+            offset_b in -840i32..=840,
+        ) {
+            let write = |ms: i64, minutes: i32| {
+                let zone = chrono::FixedOffset::east_opt(minutes * 60).unwrap();
+                chrono::DateTime::from_timestamp_millis(ms)
+                    .unwrap()
+                    .with_timezone(&zone)
+                    .format("%Y-%m-%dT%H:%M:%S%.3f%z")
+                    .to_string()
+            };
+            let (text_a, text_b) = (write(a, offset_a), write(b, offset_b));
+            proptest::prop_assert_eq!(parse_updated_ms(&text_a), Some(a));
+            proptest::prop_assert_eq!(parse_updated_ms(&text_b), Some(b));
+            proptest::prop_assert_eq!(
+                parse_updated_ms(&text_a).cmp(&parse_updated_ms(&text_b)),
+                a.cmp(&b)
+            );
+        }
     }
 
     #[test]

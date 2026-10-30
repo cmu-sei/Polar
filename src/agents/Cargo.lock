@@ -3894,6 +3894,7 @@ version = "1.0.0"
 dependencies = [
  "async-global-executor",
  "cassini-types",
+ "chrono",
  "futures-lite",
  "jira_common",
  "lazy_static",
@@ -3902,6 +3903,7 @@ dependencies = [
  "polar",
  "polar-agent-builder",
  "polar-scudo",
+ "proptest",
  "ractor",
  "regex",
  "rkyv",

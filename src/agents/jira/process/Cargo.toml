@@ -29,6 +29,8 @@ license.workspace = true
 polar-scudo.workspace = true
 async-global-executor = "3.1.0"
 cassini-types.workspace = true
+# Reads the time of an issue's last update into epoch milliseconds (issues.rs, updated_ms).
+chrono.workspace = true
 futures-lite.workspace = true
 jira_common.workspace = true
 neo4rs.workspace = true
@@ -43,6 +45,9 @@ url.workspace = true
 once_cell = "1"
 regex = "1"
 lazy_static = "1"
+
+[dev-dependencies]
+proptest.workspace = true
 
 [[bin]]
 name = "jira-processor"

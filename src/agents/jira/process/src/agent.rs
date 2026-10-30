@@ -25,7 +25,7 @@
 //! `polar_agent_builder::PolarAgent`.
 
 use crate::supervisor::{ConsumerSupervisor, SHUTDOWN_BUDGET};
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError, TopicDecl};
+use polar_agent_builder::{Capability, Configured, GraphDecl, PolarAgent, StartError, TopicDecl};
 use ractor::Actor;
 use std::time::Duration;
 
@@ -56,6 +56,24 @@ impl PolarAgent for JiraProcessor {
             jira_common::JIRA_ISSUES_CONSUMER_TOPIC,
             "the observer's issues, written to the graph",
         ),
+    ];
+    // The labels it writes, each of a node keyed by Jira (jira_common::graph::JiraNodeKey). It also writes a
+    // `JiraIssue_<field>` label for each custom field an issue carries as an object or a list (issues.rs,
+    // `dynamic_field_ops`): their names are Jira's, so they cannot be declared here, and nothing reads them through the
+    // state agent.
+    const GRAPH: &'static [GraphDecl] = &[
+        GraphDecl::owns(
+            "JiraIssue",
+            "the issues, with each one's last update in updated_ms (the observer's cursor)",
+        ),
+        GraphDecl::owns("JiraProject", "the projects"),
+        GraphDecl::owns(
+            "JiraUser",
+            "the users, and who is assigned, created or reported an issue",
+        ),
+        GraphDecl::owns("JiraGroup", "the groups"),
+        GraphDecl::owns("JiraIssueType", "the issue types"),
+        GraphDecl::owns("JiraIssueChangeLog", "each change in an issue's history"),
     ];
     const HELP: Option<&'static str> = Some(
         "jira-processor subscribes to the Jira observer's four topics on Cassini (projects, \
@@ -90,6 +108,25 @@ mod tests {
     use super::*;
 
     polar_agent_builder::polar_agent_tests!(JiraProcessor);
+
+    #[test]
+    fn it_owns_the_issues_whose_last_update_is_the_observer_s_cursor() {
+        let scaffold = polar_agent_builder::agent::scaffold_document::<JiraProcessor>();
+        assert!(
+            scaffold
+                .graph
+                .iter()
+                .any(|e| e.label == "JiraIssue"
+                    && e.access == polar_agent_builder::GraphAccess::Owns)
+        );
+        assert!(
+            scaffold
+                .graph
+                .iter()
+                .all(|e| e.access == polar_agent_builder::GraphAccess::Owns),
+            "it reads nothing through the state agent"
+        );
+    }
 
     #[test]
     fn every_topic_it_subscribes_to_is_in_its_declared_set() {
