@@ -117,6 +117,14 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
   could panic the same way. The proptest regression the failing run wrote (three `(false, false)` cases) is kept in the
   session's scratchpad, not in the repository. To do: reproduce under load (`stress-ng` or parallel test threads), find
   the span that outlives its scope, and fix it with a test that fails under contention.
+- **One `infra/tests/resolve.nu` test fails against a cluster whose images predate the code** (2026-10-30): "workloads
+  still asking cert-issuer are listed as pending while the floor is off, and refused once it is enforced" fails at its
+  floor-off `check` with "the agents could not judge their documents: Eval block failed with pipeline input"
+  (`resolve.nu:761`, `agent_checks`, which runs each agent's `--check` as a pod in the images the cluster's registry has).
+  It fails the same on `feat/ace-integration` before the egress change (1 of 65) and after (1 of 69), run against u7c,
+  whose images are the day before's. The rest of the file passes there; with no cluster it cannot run at all (it asks
+  the agents' images for their scaffolds, or takes `POLAR_SCAFFOLD_DIR`). To do: find which agent's check fails on that
+  target (the test's own `cert-issuer` and `jira-observer` overrides are the suspects), and make the error say which.
 
 ## Found running Cassini on its own, 2026-10-28 (`src/agents/cassini/broker/readme.md`)
 
