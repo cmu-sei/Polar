@@ -244,7 +244,8 @@ pub struct Facts {
     /// are apart from attributes, so a label can never take the place of a fact above.
     pub labels: std::collections::BTreeMap<String, String>,
     /// For a topic (`publish`, `subscribe`): whether it is in the requester's declared or implied set. For a request to
-    /// the credentials agent (`request`): whether the requester publishes the request's topic, and how.
+    /// the credentials agent (`request`): whether the requester publishes the request's topic, and how. For a read of
+    /// soft state (`read-state`): whether the asker's floor declares the read (`implied` is false).
     pub topic: Option<TopicFacts>,
 }
 
@@ -1210,6 +1211,42 @@ mod tests {
             request("credentials-store-secret-requests", false, true).await,
             Decision::Deny
         );
+    }
+
+    #[tokio::test]
+    async fn a_read_of_soft_state_says_whether_the_asker_declares_it() {
+        let actor = spawn_policy_actor().await;
+        load(
+            &actor,
+            r#"permit (principal, action == Action::"read-state", resource == Label::"GitRepository")
+                 when { principal has workload && principal.workload == "jira-observer" };
+               forbid (principal, action == Action::"read-state", resource == Label::"JiraIssue")
+                 unless { context.declared };"#,
+        )
+        .await;
+        let read = |label: &'static str, declared| {
+            let actor = actor.clone();
+            async move {
+                ask_with(
+                    &actor,
+                    "jira-observer.polar.serviceaccount.cluster.local",
+                    r#"Action::"read-state""#,
+                    &format!(r#"Label::"{label}""#),
+                    Facts {
+                        topic: Some(TopicFacts {
+                            declared,
+                            implied: false,
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await
+            }
+        };
+        assert_eq!(read("GitRepository", false).await, Decision::Allow);
+        assert_eq!(read("JiraIssue", false).await, Decision::Deny);
+        assert_eq!(read("JiraIssue", true).await, Decision::NotDetermined);
+        assert_eq!(read("KubePod", true).await, Decision::NotDetermined);
     }
 
     #[tokio::test]

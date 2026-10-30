@@ -42,6 +42,9 @@
 //! - A request to the credentials agent is `Action::"request"` on `Request::"<its topic's exact name>"`, and carries in
 //!   its context whether the requester publishes that topic and how, as a topic request does
 //!   (docs/architecture/authority-model.md, slice 9).
+//! - A read of soft state is `Action::"read-state"` on `Label::"<a graph label>"`, asked by the state agent of every
+//!   request (docs/architecture/soft-state.md), and carries in its context whether the asker's floor declares the read
+//!   (`context.declared`; `context.implied` is always false, since no read is implied).
 
 use cedar_policy::{PolicySet, Schema, ValidationMode, Validator};
 use std::sync::OnceLock;
@@ -60,7 +63,7 @@ entity Secret = {
   "namespace"?: Identity,
   "frozen"?: Bool,
 } tags String;
-entity KubeSecret, Topic, Request, Variable, Section, Agent, Command;
+entity KubeSecret, Topic, Request, Label, Variable, Section, Agent, Command;
 
 action "retrieve", "store" appliesTo {
   principal: Identity,
@@ -80,6 +83,11 @@ action "publish", "subscribe" appliesTo {
 action "request" appliesTo {
   principal: Identity,
   resource: Request,
+  context: { "now_secs": Long, "declared": Bool, "implied": Bool },
+};
+action "read-state" appliesTo {
+  principal: Identity,
+  resource: Label,
   context: { "now_secs": Long, "declared": Bool, "implied": Bool },
 };
 action "update-configuration" appliesTo {
@@ -162,6 +170,15 @@ mod tests {
             r#"permit (principal in Group::"operators", action == Action::"request", resource);"#,
         )
         .unwrap();
+        // A read of soft state, by the label (docs/architecture/soft-state.md).
+        check(
+            r#"forbid (principal, action == Action::"read-state", resource == Label::"JiraIssue")
+                 unless { context.declared };"#,
+        )
+        .unwrap();
+        check(r#"permit (principal, action == Action::"read-state", resource == Label::"GitRepository")
+                 when { principal has workload && principal.workload == "git-repo-observer" };"#)
+        .unwrap();
     }
 
     #[test]
@@ -190,6 +207,11 @@ mod tests {
             // an action on a resource it does not apply to
             (
                 r#"permit (principal, action == Action::"publish", resource == Secret::"x");"#,
+                "impossible",
+            ),
+            // a read is of a label, not a topic
+            (
+                r#"permit (principal, action == Action::"read-state", resource == Topic::"soft-state-requests");"#,
                 "impossible",
             ),
             // a request is made of a request, not a topic

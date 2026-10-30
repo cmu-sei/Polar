@@ -128,6 +128,13 @@ code today, and what stands between the two. The detail of each part is in the d
   credentials agent's request gate asks it of every request, with the broker-verified publisher and the groups of the
   certificate it connects with; where policy is silent, the topic's own publishers in the authority model are admitted.
   For example, `forbid (principal in Group::"retired", action == Action::"request", resource);`.
+- **The Cedar vocabulary for reads of soft state (2026-10-30, `soft-state.md`).** `Action::"read-state"` on
+  `Label::"<graph label>"` (`polar-policy/src/schema.rs`), with the context a topic has: `declared` says whether the
+  asker's floor (the labels its scaffold declares it reads, rendered into the state agent's configuration) has the
+  read, and `implied` is always false. The state agent asks it of every request, with the broker-verified asker and no
+  certificate (it holds none of the asker's, so `principal in Group::"x"` holds only through the signed groups
+  document); a permit adds a read, a forbid removes one, and the floor decides where policy is silent. For example,
+  `forbid (principal, action == Action::"read-state", resource == Label::"JiraIssue") unless { context.declared };`.
 - **Applying the catalog is the administrator's sign-off (2026-10-21, gap 6).** The administrator applies the catalog:
   its render and apply (on a Flux target, its signed publish, with provenance) are the approval of every workload's
   declared topics. There is no separate grants document. The render writes each workload's declared topics into the
