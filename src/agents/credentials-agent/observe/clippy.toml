@@ -33,3 +33,10 @@ disallowed-methods = [
     { path = "std::env::set_var", reason = "the environment is read once, into a Config; a test passes an Env of its own" },
     { path = "std::env::remove_var", reason = "the environment is read once, into a Config; a test passes an Env of its own" },
 ]
+
+# An entered span is thread-local; a task that yields while holding one corrupts the subscriber's
+# span stack and ref counts (tracing-subscriber panics: "tried to clone a span that already closed").
+await-holding-invalid-types = [
+    { path = "tracing::span::Entered", reason = "do not hold an entered span across an await; instrument the future with `.instrument(span)`" },
+    { path = "tracing::span::EnteredSpan", reason = "do not hold an entered span across an await; instrument the future with `.instrument(span)`" },
+]
