@@ -226,6 +226,8 @@ infra/
                          password been changed (read-only)
   egress.nu              the check at the end of up.nu: can a pod reach a host outside the cluster, and if not, why
                          (a note, never a failure)
+  jira-check.nu          jira-observer's Jira connection, checked from a pod in the cluster, in facts safe to share
+                         (no host, URL, address, email or token), and what they mean
   cassini-shutdown.nu  harness.nu  measure-render-cache.nu     asking the broker to stop; reading the secret harness; timing the cache
   tests/                 one test file per script: nu infra/tests/<name>.nu
   config/                the catalog
