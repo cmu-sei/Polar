@@ -49,6 +49,11 @@
     nix-container-lib.url = "github:daveman1010221/nix-container-lib";
     nix-container-lib.inputs.nixpkgs.follows      = "nixpkgs";
     nix-container-lib.inputs.flake-utils.follows  = "flake-utils";
+    # Scudo, every binary's allocator (docs/architecture/broker-baseline.md, "Decided"): LLVM's source with a flake that
+    # builds it with our configuration.
+    nix-scudo.url                                 = "git+file:///home/djshepard/Documents/projects/nix-scudo?ref=main";
+    nix-scudo.inputs.nixpkgs.follows              = "nixpkgs";
+    nix-scudo.inputs.flake-utils.follows          = "flake-utils";
 
     pyproject-nix.url = "github:pyproject-nix/pyproject.nix";
     pyproject-nix.inputs.nixpkgs.follows = "nixpkgs";
@@ -111,6 +116,9 @@
             polar-dhall-cache = {
               packages.${system}.default = dhallCache;
             };
+            polar-scudo = {
+              packages.${system}.default = polarPkgs.scudo;
+            };
           };
           inherit configNixPath;
         };
@@ -124,6 +132,7 @@
           inherit pkgs lib system;
           cassiniClient = polarPkgs.cassini.client;
           certIssuerClient = polarPkgs.certIssuer.client;
+          scudo = polarPkgs.scudo;
         };
 
         # ── Agent containers ───────────────────────────────────────────────────
@@ -199,9 +208,6 @@
           cassiniImage         = polarPkgs.cassini.cassiniImage;
           cassiniProducerImage = polarPkgs.cassini.producerImage;
           cassiniSinkImage     = polarPkgs.cassini.sinkImage;
-          # The allocator experiment's brokers (src/agents/cassini/experiment.nix): .v0, .v2, .s0 to .s2 and .m0 are
-          # images, .servers the binaries.
-          cassiniExperiment    = polarPkgs.cassiniExperiment;
 
           # ── GitLab agent ─────────────────────────────────────────────────────
           gitlabObserverImage  = polarPkgs.gitlabAgent.observerImage;
@@ -280,6 +286,7 @@
             echo "  # the browser import and the Neo4j password; re-run the same command to resume"
             echo ""
             export POLAR_DHALL_CACHE="${dhallCache}/lib/polar/dhall-cache"
+            export POLAR_SCUDO_LIB_DIR="${polarPkgs.scudo}/lib/polar/scudo"
             export SOPS_AGE_BINARY=$(which rage)
             export SOPS_AGE_SSH_PRIVATE_KEY_FILE=~/.ssh/id_github
           '';

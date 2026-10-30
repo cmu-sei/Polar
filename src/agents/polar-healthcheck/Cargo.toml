@@ -30,5 +30,5 @@ name = "polar-healthcheck"
 path = "src/main.rs"
 
 [dependencies]
-mimalloc.workspace = true
+polar-scudo.workspace = true
 polar-health = { path = "../polar-health" }

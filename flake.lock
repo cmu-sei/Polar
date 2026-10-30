@@ -261,6 +261,30 @@
         "type": "github"
       }
     },
+    "nix-scudo": {
+      "inputs": {
+        "flake-utils": [
+          "flake-utils"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1793315773,
+        "narHash": "sha256-eO63vilC7Qtlcu1w21aNH/Rqw3qxElUyCYXBDPbWxkw=",
+        "ref": "main",
+        "rev": "1d5b3ebb566aa15393f93e6eda48e79a02f3ec21",
+        "revCount": 782,
+        "type": "git",
+        "url": "file:///home/djshepard/Documents/projects/nix-scudo"
+      },
+      "original": {
+        "ref": "main",
+        "type": "git",
+        "url": "file:///home/djshepard/Documents/projects/nix-scudo"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1718714799,
@@ -393,6 +417,7 @@
         "flake-utils": "flake-utils_2",
         "myNeovimOverlay": "myNeovimOverlay",
         "nix-container-lib": "nix-container-lib",
+        "nix-scudo": "nix-scudo",
         "nixpkgs": "nixpkgs_2",
         "pyproject-build-systems": "pyproject-build-systems",
         "pyproject-nix": "pyproject-nix",

@@ -21,9 +21,9 @@
    DM26-0670
 */
 
-//! Scudo, LLVM's hardened allocator, as a Rust global allocator, for the musl allocator experiment
-//! (docs/architecture/broker-baseline.md). build.rs compiles it, under the names `polar_scudo_*`, with the
-//! configuration it is given. A binary installs it with
+//! Scudo, LLVM's hardened allocator, as a Rust global allocator: every Polar binary's
+//! (docs/architecture/broker-baseline.md, "Decided"). build.rs compiles it, under the names `polar_scudo_*`, with
+//! config/custom_scudo_config.h. A binary installs it with
 //!
 //! ```ignore
 //! #[global_allocator]

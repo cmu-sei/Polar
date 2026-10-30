@@ -36,7 +36,7 @@ name = "polar-custody"
 path = "src/main.rs"
 
 [dependencies]
-mimalloc.workspace = true
+polar-scudo.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
 # The credentials agent's authority, kept by the rules every agent keeps (`authority_leaf`).

@@ -36,6 +36,12 @@
         u.StartTime;
       value = "/tmp/polar-health/polar-health.json";
     }
+    {
+      name = "POLAR_SCUDO_LIB_DIR";
+      placement = u:
+        u.StartTime;
+      value = "/lib/polar/scudo";
+    }
   ];
   mode = u:
     u.Dev;
@@ -83,6 +89,7 @@
           { attrPath = "gnugrep"; flakeInput = null; }
           { attrPath = "default"; flakeInput = "polar-tools"; }
           { attrPath = "default"; flakeInput = "polar-dhall-cache"; }
+          { attrPath = "default"; flakeInput = "polar-scudo"; }
           { attrPath = "git"; flakeInput = null; }
           { attrPath = "curl"; flakeInput = null; }
           { attrPath = "dhall"; flakeInput = null; }

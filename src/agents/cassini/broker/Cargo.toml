@@ -26,9 +26,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-mimalloc = { workspace = true, optional = true }
-polar-scudo = { workspace = true, optional = true }
-smalloc = { workspace = true, optional = true }
+polar-scudo.workspace = true
 rkyv = { workspace = true }
 polar = { path = "../../lib" }
 polar-health = { workspace = true }
@@ -59,14 +57,6 @@ tracing-opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
 x509-parser.workspace = true
-
-# The broker's allocator: mimalloc, as every Polar binary; the others for the musl allocator experiment
-# (docs/architecture/broker-baseline.md), each built with --no-default-features. With none, the libc's own.
-[features]
-default = ["alloc-mimalloc"]
-alloc-mimalloc = ["dep:mimalloc"]
-alloc-scudo = ["dep:polar-scudo"]
-alloc-smalloc = ["dep:smalloc"]
 
 [[bin]]
 name = "cassini-server"

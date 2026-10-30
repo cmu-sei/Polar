@@ -857,10 +857,10 @@ dependencies = [
  "cassini-types",
  "chrono",
  "cyclonedx-bom",
- "mimalloc",
  "neo4rs",
  "oci-client",
  "polar",
+ "polar-scudo",
  "ractor",
  "reqwest 0.12.28",
  "rkyv",
@@ -930,7 +930,6 @@ dependencies = [
  "cert-issuer-common",
  "credentials_agent_common",
  "libc",
- "mimalloc",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -951,7 +950,6 @@ dependencies = [
  "rkyv",
  "rsa 0.10.0-rc.18",
  "rustls",
- "smmalloc",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -971,10 +969,10 @@ version = "1.0.0"
 dependencies = [
  "cassini-client",
  "cassini-types",
- "mimalloc",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "polar-scudo",
  "ractor",
  "tokio",
  "tracing",
@@ -995,11 +993,11 @@ dependencies = [
  "cassini-types",
  "chrono",
  "clap",
- "mimalloc",
  "opentelemetry",
  "polar-custody",
  "polar-env",
  "polar-router",
+ "polar-scudo",
  "proptest",
  "ractor",
  "rkyv",
@@ -1145,8 +1143,8 @@ dependencies = [
  "cert-issuer-common",
  "clap",
  "jsonwebtoken",
- "mimalloc",
  "polar-custody",
+ "polar-scudo",
  "rand 0.10.3",
  "rcgen",
  "reqwest 0.12.28",
@@ -1181,13 +1179,13 @@ dependencies = [
  "hyper-util",
  "jsonwebtoken",
  "jwt_utils",
- "mimalloc",
  "polar",
  "polar-agent-builder",
  "polar-custody",
  "polar-env",
  "polar-health",
  "polar-policy",
+ "polar-scudo",
  "proptest",
  "ractor",
  "rand 0.10.3",
@@ -1525,7 +1523,6 @@ dependencies = [
  "credentials-agent-model",
  "credentials_agent_common",
  "jwt_utils",
- "mimalloc",
  "neo4rs",
  "polar",
  "polar-agent-builder",
@@ -1533,6 +1530,7 @@ dependencies = [
  "polar-permissions",
  "polar-policy",
  "polar-router",
+ "polar-scudo",
  "polar-signing",
  "proptest",
  "ractor",
@@ -1581,11 +1579,11 @@ dependencies = [
  "chrono",
  "credentials_agent_common",
  "jwt_utils",
- "mimalloc",
  "polar",
  "polar-agent-builder",
  "polar-env",
  "polar-router",
+ "polar-scudo",
  "ractor",
  "rcgen",
  "rkyv",
@@ -2881,11 +2879,11 @@ dependencies = [
  "cassini-client",
  "cassini-types",
  "git-agent-common",
- "mimalloc",
  "polar",
  "polar-agent-builder",
  "polar-crypto",
  "polar-env",
+ "polar-scudo",
  "ractor",
  "rkyv",
  "serde_json",
@@ -2904,12 +2902,12 @@ dependencies = [
  "credentials_agent_common",
  "git-agent-common",
  "git2",
- "mimalloc",
  "polar",
  "polar-agent-builder",
  "polar-crypto",
  "polar-env",
  "polar-escrow",
+ "polar-scudo",
  "ractor",
  "rand 0.10.3",
  "rkyv",
@@ -2930,9 +2928,9 @@ dependencies = [
  "cassini-types",
  "chrono",
  "git-agent-common",
- "mimalloc",
  "polar",
  "polar-agent-builder",
+ "polar-scudo",
  "ractor",
  "rkyv",
  "tokio",
@@ -2966,9 +2964,9 @@ dependencies = [
  "futures-lite",
  "gitlab-queries",
  "gitlab-schema",
- "mimalloc",
  "neo4rs",
  "polar",
+ "polar-scudo",
  "ractor",
  "rkyv",
  "serde_json",
@@ -2988,9 +2986,9 @@ dependencies = [
  "cynic-codegen",
  "gitlab-queries",
  "gitlab-schema",
- "mimalloc",
  "parse_link_header",
  "polar",
+ "polar-scudo",
  "ractor",
  "rand 0.10.3",
  "reqwest 0.12.28",
@@ -3116,10 +3114,10 @@ dependencies = [
  "cassini-client",
  "cassini-types",
  "harness-common",
- "mimalloc",
  "polar",
  "polar-agent-builder",
  "polar-env",
+ "polar-scudo",
  "proptest",
  "ractor",
  "tokio",
@@ -3132,9 +3130,9 @@ version = "1.0.0"
 dependencies = [
  "cassini-types",
  "harness-common",
- "mimalloc",
  "polar-agent-builder",
  "polar-env",
+ "polar-scudo",
  "ractor",
  "tracing",
 ]
@@ -3870,10 +3868,10 @@ dependencies = [
  "cassini-types",
  "jira_common",
  "log",
- "mimalloc",
  "polar",
  "polar-agent-builder",
  "polar-env",
+ "polar-scudo",
  "proptest",
  "ractor",
  "reqwest 0.12.28",
@@ -3898,11 +3896,11 @@ dependencies = [
  "futures-lite",
  "jira_common",
  "lazy_static",
- "mimalloc",
  "neo4rs",
  "once_cell",
  "polar",
  "polar-agent-builder",
+ "polar-scudo",
  "ractor",
  "regex",
  "rkyv",
@@ -4230,12 +4228,12 @@ dependencies = [
  "credentials_agent_common",
  "k8s-openapi",
  "kube-common",
- "mimalloc",
  "neo4rs",
  "polar",
  "polar-agent-builder",
  "polar-crypto",
  "polar-router",
+ "polar-scudo",
  "ractor",
  "rand 0.10.3",
  "rcgen",
@@ -4295,9 +4293,9 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "kube-common",
- "mimalloc",
  "polar",
  "polar-agent-builder",
+ "polar-scudo",
  "ractor",
  "rkyv",
  "rustls",
@@ -4404,15 +4402,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
-name = "libmimalloc-sys"
-version = "0.1.49"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "libssh2-sys"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4489,8 +4478,8 @@ version = "1.0.0"
 dependencies = [
  "cassini-client",
  "cassini-types",
- "mimalloc",
  "polar",
+ "polar-scudo",
  "ractor",
  "rkyv",
  "tokio",
@@ -4569,15 +4558,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
-name = "mach-sys"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48460c2e82a3a0de197152fdf8d2c2d5e43adc501501553e439bf2156e6f87c7"
-dependencies = [
- "fastrand",
-]
-
-[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4625,15 +4605,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "mimalloc"
-version = "0.1.52"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
-dependencies = [
- "libmimalloc-sys",
 ]
 
 [[package]]
@@ -5056,11 +5027,11 @@ dependencies = [
  "cassini-types",
  "cyclonedx-bom",
  "docker_credential",
- "mimalloc",
  "oci-client",
  "polar",
  "polar-agent-builder",
  "polar-env",
+ "polar-scudo",
  "ractor",
  "reqwest 0.12.28",
  "rkyv",
@@ -5146,10 +5117,10 @@ version = "1.0.0"
 dependencies = [
  "cassini-client",
  "cassini-types",
- "mimalloc",
  "native-tls",
  "openapi-common",
  "polar",
+ "polar-scudo",
  "ractor",
  "reqwest 0.12.28",
  "rkyv",
@@ -5167,10 +5138,10 @@ dependencies = [
  "cassini-client",
  "cassini-types",
  "futures-lite",
- "mimalloc",
  "neo4rs",
  "openapi-common",
  "polar",
+ "polar-scudo",
  "ractor",
  "reqwest 0.12.28",
  "rkyv",
@@ -5844,7 +5815,7 @@ dependencies = [
  "credentials_agent_common",
  "k8s-openapi",
  "kube",
- "mimalloc",
+ "polar-scudo",
  "reqwest 0.12.28",
  "serde_json",
  "tokio",
@@ -5952,12 +5923,12 @@ dependencies = [
  "cert-issuer-common",
  "credentials_agent_common",
  "libc",
- "mimalloc",
  "polar",
  "polar-agent-builder",
  "polar-custody",
  "polar-env",
  "polar-escrow",
+ "polar-scudo",
  "polar-signing",
  "proptest",
  "ractor",
@@ -6009,11 +5980,11 @@ dependencies = [
  "cassini-types",
  "flate2",
  "hyper-util",
- "mimalloc",
  "polar-agent-builder",
  "polar-custody",
  "polar-env",
  "polar-git-server-common",
+ "polar-scudo",
  "ractor",
  "rcgen",
  "rkyv",
@@ -6062,8 +6033,8 @@ dependencies = [
 name = "polar-healthcheck"
 version = "1.0.0"
 dependencies = [
- "mimalloc",
  "polar-health",
+ "polar-scudo",
 ]
 
 [[package]]
@@ -6076,11 +6047,11 @@ dependencies = [
  "clap",
  "credentials-agent-client",
  "credentials_agent_common",
- "mimalloc",
  "polar-crypto",
  "polar-custody",
  "polar-env",
  "polar-health",
+ "polar-scudo",
  "proptest",
  "rcgen",
  "rsa 0.10.0-rc.18",
@@ -6160,12 +6131,12 @@ dependencies = [
  "cassini-types",
  "chrono",
  "futures",
- "mimalloc",
  "neo4rs",
  "polar",
  "polar-agent-builder",
  "polar-router",
  "polar-scheduler-common",
+ "polar-scudo",
  "proptest",
  "ractor",
  "reqwest 0.12.28",
@@ -6195,13 +6166,13 @@ dependencies = [
  "cassini-client",
  "cassini-types",
  "git2",
- "mimalloc",
  "notify",
  "polar-agent-builder",
  "polar-env",
  "polar-git-server-common",
  "polar-router",
  "polar-scheduler-common",
+ "polar-scudo",
  "proptest",
  "ractor",
  "rkyv",
@@ -6217,8 +6188,8 @@ dependencies = [
 name = "polar-scudo"
 version = "1.0.0"
 dependencies = [
- "cc",
  "proptest",
+ "serde_json",
 ]
 
 [[package]]
@@ -6227,10 +6198,10 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
- "mimalloc",
  "polar-env",
  "polar-escrow",
  "polar-policy",
+ "polar-scudo",
  "polar-signing",
  "rand 0.10.3",
  "reqwest 0.12.28",
@@ -7351,10 +7322,10 @@ version = "1.0.0"
 dependencies = [
  "cassini-types",
  "credentials_agent_common",
- "mimalloc",
  "polar-agent-builder",
  "polar-crypto",
  "polar-env",
+ "polar-scudo",
  "ractor",
  "tokio",
  "tracing",
@@ -7720,17 +7691,6 @@ name = "smallvec"
 version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
-
-[[package]]
-name = "smmalloc"
-version = "7.6.13+59fa8012bfa1f62b849e83515f1be695230c3fd3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aacde5607ba73f0f6094d1e9acf3723e113db43d11bbfad00f7f395eefc818c8"
-dependencies = [
- "mach-sys",
- "rustix",
- "windows-sys 0.61.2",
-]
 
 [[package]]
 name = "smol_str"
@@ -8681,7 +8641,7 @@ dependencies = [
  "clap",
  "credentials-agent-client",
  "credentials_agent_common",
- "mimalloc",
+ "polar-scudo",
  "reqwest 0.12.28",
  "serde_json",
  "thiserror 1.0.69",

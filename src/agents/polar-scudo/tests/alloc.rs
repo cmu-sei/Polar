@@ -24,8 +24,6 @@
 // The allocator, as the global allocator of this test binary, so every allocation here (proptest's own too) goes
 // through it.
 
-#![cfg(polar_scudo_built)]
-
 use polar_scudo::{Scudo, mallopt, param};
 use proptest::prelude::*;
 use std::alloc::{GlobalAlloc, Layout};

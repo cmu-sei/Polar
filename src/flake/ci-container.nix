@@ -28,6 +28,7 @@
 #   ciContainer = import ./src/flake/ci-container.nix {
 #     inherit pkgs lib system;
 #     cassiniClient = polarPkgs.cassini.client;
+#     scudo = polarPkgs.scudo;
 #   };
 #   ciImage = ciContainer.image;
 
@@ -36,6 +37,7 @@
 , system
 , cassiniClient
 , certIssuerClient
+, scudo
 }:
 
 let
@@ -297,6 +299,8 @@ let
         "RUSTFLAGS=-Clinker=${llvm.clang}/bin/clang"
         "CARGO_HOME=/root/.cargo"
         "CARGO_TARGET_DIR=/var/cache/cargo-target"
+        # The Scudo libraries polar-scudo links (src/agents/polar-scudo/build.rs)
+        "POLAR_SCUDO_LIB_DIR=${scudo}/lib/polar/scudo"
         "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
         "SSL_CERT_DIR=${pkgs.cacert}/etc/ssl/certs"
         "CARGO_HTTP_CAINFO=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"

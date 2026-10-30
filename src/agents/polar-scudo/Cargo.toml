@@ -19,9 +19,8 @@
 #
 # DM26-0670
 
-# Scudo, LLVM's hardened allocator, built from the source of the LLVM in nixpkgs (compiler-rt/lib/scudo/standalone), as
-# a Rust global allocator: for the musl allocator experiment (docs/architecture/broker-baseline.md). SCUDO_SRC names the
-# source; POLAR_SCUDO_CONFIG names the configuration (configs/<name>/custom_scudo_config.h).
+# Scudo, LLVM's hardened allocator (built by the nix-scudo flake input, build.rs), as a Rust global allocator: every
+# Polar binary's (docs/architecture/broker-baseline.md, "Decided"). config/custom_scudo_config.h is the configuration.
 [package]
 name = "polar-scudo"
 version.workspace = true
@@ -33,6 +32,4 @@ links = "polar_scudo"
 
 [dev-dependencies]
 proptest.workspace = true
-
-[build-dependencies]
-cc = "1"
+serde_json.workspace = true

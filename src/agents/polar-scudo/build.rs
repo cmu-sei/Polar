@@ -21,100 +21,34 @@
    DM26-0670
 */
 
-// Compiles Scudo as upstream does (compiler-rt/lib/scudo/standalone/CMakeLists.txt): its sources and the C wrappers,
-// C++17 without exceptions, RTTI or the C++ standard library, crc32_hw.cpp with the CRC32 instructions. Two changes:
-// the wrappers' names carry the prefix `polar_scudo_`, so they do not take the place of musl's malloc in a static
-// binary, and the configuration is ours (SCUDO_USE_CUSTOM_CONFIG), chosen by POLAR_SCUDO_CONFIG.
-//
-// Without SCUDO_SRC nothing is compiled, so `cargo check --workspace` works anywhere; a binary that uses the allocator
-// then fails to link, saying which symbols are missing, and the crate's tests (which run on it) are left out.
+// Links Scudo, which nix-scudo builds with our configuration (config/custom_scudo_config.h): src/agents/workspace.nix
+// puts the library for each target at $POLAR_SCUDO_LIB_DIR/<target>/libpolar_scudo.a. The workspace's Nix build, the
+// development shell, the development container and the CI container all set the variable, so every build is the same
+// `cargo build` and links the same library. The wrappers' names carry the prefix `polar_scudo_`, so they do not take
+// the place of musl's malloc in a static binary.
 
 use std::env;
 use std::path::PathBuf;
 
-const SOURCES: &[&str] = &[
-    "checksum.cpp",
-    "common.cpp",
-    "condition_variable_linux.cpp",
-    "flags_parser.cpp",
-    "flags.cpp",
-    "linux.cpp",
-    "mem_map.cpp",
-    "mem_map_linux.cpp",
-    "release.cpp",
-    "report.cpp",
-    "report_linux.cpp",
-    "string_utils.cpp",
-    "timing.cpp",
-    "wrappers_c.cpp",
-];
-
-fn build(src: &PathBuf, config: &PathBuf) -> cc::Build {
-    let mut b = cc::Build::new();
-    b.cpp(true)
-        .cpp_link_stdlib(None)
-        .include(config)
-        .include(src)
-        .include(src.join("include"))
-        .define("SCUDO_USE_CUSTOM_CONFIG", None)
-        .define("SCUDO_PREFIX_NAME", "polar_scudo_")
-        .flag("-std=c++17")
-        .flag("-fno-exceptions")
-        .flag("-fno-rtti")
-        .flag("-nostdinc++")
-        .flag("-fvisibility=hidden")
-        .opt_level(3)
-        .warnings(false);
-    b
-}
-
 fn main() {
-    println!("cargo:rerun-if-env-changed=SCUDO_SRC");
-    println!("cargo:rerun-if-env-changed=POLAR_SCUDO_CONFIG");
-    println!("cargo:rerun-if-changed=configs");
-    println!("cargo::rustc-check-cfg=cfg(polar_scudo_built)");
-
-    let Some(src) = env::var_os("SCUDO_SRC").map(PathBuf::from) else {
-        println!("cargo:warning=polar-scudo: SCUDO_SRC is not set, so Scudo is not compiled");
-        return;
+    println!("cargo:rerun-if-env-changed=POLAR_SCUDO_LIB_DIR");
+    let target = env::var("TARGET").unwrap();
+    let Some(dir) = env::var_os("POLAR_SCUDO_LIB_DIR") else {
+        panic!(
+            "polar-scudo: POLAR_SCUDO_LIB_DIR is not set. Build in the development shell (nix develop), the development \
+             container or through the workspace's Nix build, which set it to the Scudo that Polar's flake builds."
+        );
     };
-    let name = env::var("POLAR_SCUDO_CONFIG").unwrap_or_else(|_| "default".into());
-    let config = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-        .join("configs")
-        .join(&name);
-    assert!(
-        config.join("custom_scudo_config.h").exists(),
-        "polar-scudo: no configuration {name} (configs/{name}/custom_scudo_config.h)"
-    );
-
-    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-    let crc = match arch.as_str() {
-        "x86_64" => "-mcrc32",
-        "aarch64" => "-march=armv8-a+crc",
-        _ => "",
-    };
-    let mut hw = build(&src, &config);
-    hw.file(src.join("crc32_hw.cpp"));
-    if !crc.is_empty() {
-        hw.flag_if_supported(crc);
+    let dir = PathBuf::from(dir).join(&target);
+    let lib = dir.join("libpolar_scudo.a");
+    if !lib.is_file() {
+        panic!(
+            "polar-scudo: no {}. Polar's binaries are built for x86_64 and aarch64 Linux, musl, and tested on the \
+             host's gnu target; Scudo is not built for {target}.",
+            lib.display()
+        );
     }
-    hw.compile("polar_scudo_crc32");
-
-    // POLAR_SCUDO_CRC32=everywhere compiles every source with the CRC instructions, so the chunk header's checksum is
-    // the instruction inline (chunk.h, computeChecksum) and no host without them can run the binary. Otherwise, as
-    // upstream, Scudo chooses at start, and the hardware CRC is found only if computeHardwareCRC32 is linked: its
-    // reference is weak, and a weak reference does not take crc32_hw.cpp out of its archive, so the checksum is the
-    // BSD one in software (found 2026-10-29: S0 to S2 had no CRC instruction).
-    println!("cargo:rerun-if-env-changed=POLAR_SCUDO_CRC32");
-    let everywhere = env::var("POLAR_SCUDO_CRC32").is_ok_and(|v| v == "everywhere");
-    let mut lib = build(&src, &config);
-    for f in SOURCES {
-        lib.file(src.join(f));
-    }
-    if everywhere && !crc.is_empty() {
-        lib.flag(crc);
-    }
-    lib.compile("polar_scudo");
-    // The tests run on the allocator, so only when it was compiled.
-    println!("cargo:rustc-cfg=polar_scudo_built");
+    println!("cargo:rerun-if-changed={}", lib.display());
+    println!("cargo:rustc-link-search=native={}", dir.display());
+    println!("cargo:rustc-link-lib=static=polar_scudo");
 }

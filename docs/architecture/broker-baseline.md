@@ -591,6 +591,32 @@ most of the change on tracing.
 *Not decided here:* which build the broker uses. S4 carries what V2, every binary's current build, carries, with about
 half its peak memory and a quarter of its working set under small messages.
 
+## Decided (2026-10-29)
+
+*The maintainer:* one allocator in every binary, S4, and one artifact per target. Every Polar binary is static for musl
+(`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) and allocates with Scudo in S4's configuration; the same
+binary runs in the cluster, on a Linux host and on a Mac (in the Linux VM its container runtime provides), with the
+same libraries and the same allocator, built and run by the same commands everywhere. No build for one environment
+only, and no fallback to another allocator where Scudo cannot be compiled: Scudo runs on Linux, and Polar's binaries are
+Linux binaries.
+
+- `polar-scudo` is every binary's global allocator (`static GLOBAL: polar_scudo::Scudo`), and the only one:
+  `polar-scudo/tests/every_binary.rs` reads the workspace's binaries from `cargo metadata` and fails on one that does
+  not declare it, or on a package that depends on another allocator. mimalloc and smalloc are out of the workspace.
+- Scudo's source is the flake input `nix-scudo`, the maintainer's repository: LLVM's
+  `compiler-rt/lib/scudo/standalone` split out with its history, at `llvmorg-23.1.0` (the source measured here),
+  unmodified, with a flake whose `lib.mkScudo` builds it as a static library with the caller's configuration (its README
+  says how to move it to a later LLVM). The configuration stays in Polar, `polar-scudo/config/custom_scudo_config.h`,
+  S4's. `src/agents/workspace.nix` builds it for this system's musl target, which every binary ships with, and its gnu
+  target, which `cargo test` builds for, at `<dir>/<target>/libpolar_scudo.a`; `POLAR_SCUDO_LIB_DIR` names the
+  directory, set by the workspace's Nix build, the development shell, the development container (`/lib/polar/scudo`)
+  and the CI container. `polar-scudo/build.rs` links it, and stops, saying why, when the variable is unset or the target
+  has no library: every build is the same `cargo build`, linking the same library.
+- Every Scudo source is compiled with the CRC instructions (SSE4.2 on x86_64, the CRC extension on aarch64), as S4 was
+  (`mkScudo`'s `crc`, on by default).
+- The experiment's builds (`cassini/experiment.nix`, the broker's allocator features, S0 to S3's configurations) are
+  removed; they are in this branch's history up to `3cd2272f`.
+
 ## What measuring it found
 
 Each fix was made test first, the test failing before it.

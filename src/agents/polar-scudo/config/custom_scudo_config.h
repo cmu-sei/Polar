@@ -21,7 +21,12 @@
    DM26-0670
 */
 
-// S0: upstream's DefaultConfig as it is (allocator_config.h), so the newer Scudo is measured untuned.
+// Every Polar binary's allocator: S4 of the allocator experiment (docs/architecture/broker-baseline.md, "The third
+// set"). Upstream's DefaultConfig (allocator_config.h) with four changes: freed blocks up to 4 MiB kept in the
+// large-block cache (upstream keeps none above 512 KiB, so every 1 MiB message was a fresh mmap and munmap); the
+// quarantine compiled out (it is off by default); freed memory released to the system after 1 s; and the futex
+// condition variable for the primary's refills. One thread cache a thread, as upstream: shared ones take a lock on every
+// allocation and free, and held small messages to about four fifths of what this carries.
 // Included by Scudo's allocator_config.h (SCUDO_USE_CUSTOM_CONFIG); the fields are allocator_config.def's. 64-bit
 // targets only (x86_64, aarch64).
 #ifndef POLAR_SCUDO_CONFIG_H_
@@ -33,6 +38,7 @@ namespace scudo {
 
 struct PolarConfig {
   static const bool MaySupportMemoryTagging = true;
+  static const bool QuarantineDisabled = true;
   template <class A> using TSDRegistryT = TSDRegistryExT<A>; // one cache a thread;
 
   struct Primary {
@@ -43,8 +49,9 @@ struct PolarConfig {
     static const uptr CompactPtrScale = 0;
     static const bool EnableRandomOffset = true;
     static const uptr MapSizeIncrement = 1UL << 18;
-    static const s32 MinReleaseToOsIntervalMs = INT32_MIN;
-    static const s32 MaxReleaseToOsIntervalMs = INT32_MAX;
+    static const s32 MinReleaseToOsIntervalMs = 1000;
+    static const s32 MaxReleaseToOsIntervalMs = 1000;
+    using ConditionVariableT = ConditionVariableLinux;
   };
   template <typename Config> using PrimaryT = SizeClassAllocator64<Config>;
 
@@ -53,9 +60,10 @@ struct PolarConfig {
       static const u32 EntriesArraySize = 32U;
       static const u32 QuarantineSize = 0U;
       static const u32 DefaultMaxEntriesCount = 32U;
-      static const uptr DefaultMaxEntrySize = 1UL << 19;
-      static const s32 MinReleaseToOsIntervalMs = INT32_MIN;
-      static const s32 MaxReleaseToOsIntervalMs = INT32_MAX;
+      static const uptr DefaultMaxEntrySize = 4UL << 20;
+      static const s32 MinReleaseToOsIntervalMs = 1000;
+      static const s32 MaxReleaseToOsIntervalMs = 1000;
+      static const s32 DefaultReleaseToOsIntervalMs = 1000;
     };
     template <typename Config> using CacheT = MapAllocatorCache<Config>;
   };

@@ -60,6 +60,8 @@ let polarExtras =
     , Lib.flakePackage "polar-tools" "default"
     -- The pinned remote imports of the charts' Dhall, at /lib/polar/dhall-cache, so a render here fetches nothing.
     , Lib.flakePackage "polar-dhall-cache" "default"
+    -- Scudo for this architecture's targets, at /lib/polar/scudo/<target>/libpolar_scudo.a, which polar-scudo links.
+    , Lib.flakePackage "polar-scudo" "default"
     , Lib.nixpkgs "git"
     , Lib.nixpkgs "curl"
     , Lib.nixpkgs "dhall"
@@ -83,6 +85,7 @@ let polarEnv : List Lib.EnvVar =
   , Lib.startEnv "GRAPH_ENDPOINT"     "bolt+s://localhost:7687"
   , Lib.startEnv "GRAPH_USER"         "neo4j"
   , Lib.startEnv "POLAR_HEALTH_FILE"  "/tmp/polar-health/polar-health.json"
+  , Lib.startEnv "POLAR_SCUDO_LIB_DIR" "/lib/polar/scudo"
   ]
 
 -- ---------------------------------------------------------------------------

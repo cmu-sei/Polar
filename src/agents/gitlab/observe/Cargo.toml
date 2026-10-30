@@ -27,7 +27,7 @@ license.workspace = true
 description = "Observer agent for GitLab — polls APIs and publishes via Cassini broker."
 
 [dependencies]
-mimalloc.workspace = true
+polar-scudo.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
 common.workspace = true

@@ -84,6 +84,7 @@ let
     CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
     "CARGO_TARGET_${tripleUpper}_LINKER" = staticCCBin;
     "CC_${tripleUnderscore}" = staticCCBin;
+    inherit (crateArgs) POLAR_SCUDO_LIB_DIR;
 
     OPENSSL_STATIC = "1";
     OPENSSL_LIB_DIR = "${staticSsl.out}/lib";

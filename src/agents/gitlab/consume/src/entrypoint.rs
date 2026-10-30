@@ -43,6 +43,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// Every Polar binary allocates with mimalloc (docs/architecture/broker-baseline.md, "musl and the allocators").
+// Every Polar binary allocates with Scudo (docs/architecture/broker-baseline.md, "Decided").
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: polar_scudo::Scudo = polar_scudo::Scudo;

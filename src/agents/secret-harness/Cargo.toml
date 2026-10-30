@@ -31,7 +31,7 @@ license.workspace = true
 intruder = []
 
 [dependencies]
-mimalloc.workspace = true
+polar-scudo.workspace = true
 cassini-types.workspace = true
 credentials_agent_common.workspace = true
 polar-agent-builder.workspace = true

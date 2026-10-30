@@ -33,7 +33,7 @@ name = "polar-scheduler-observer"
 path = "src/main.rs"
 
 [dependencies]
-mimalloc.workspace = true
+polar-scudo.workspace = true
 anyhow.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true

@@ -25,7 +25,7 @@ let
 
     # Every binary is static, for musl on the architecture of `system`, as polar-tools always was
     # (polar-tools/package.nix): crane with the musl target, pkgsStatic's cc as linker and C compiler, OpenSSL linked
-    # in. Each binary allocates with mimalloc (docs/architecture/broker-baseline.md, "musl and the allocators").
+    # in. Each binary allocates with Scudo (docs/architecture/broker-baseline.md, "Decided").
     triple =
         if system == "aarch64-linux" then "aarch64-unknown-linux-musl"
         else "x86_64-unknown-linux-musl";
@@ -37,6 +37,23 @@ let
     staticCC = pkgs.pkgsStatic.stdenv.cc;
     staticCCBin = "${staticCC}/bin/${staticCC.targetPrefix}cc";
     staticSsl = pkgs.pkgsStatic.openssl;
+
+    # Scudo with our configuration (polar-scudo/config), built by nix-scudo: <dir>/<target>/libpolar_scudo.a, which
+    # polar-scudo's build.rs links. The musl target is what every binary ships with; this system's gnu target is for
+    # `cargo test` in the development shell and container, whose cargo builds for the host.
+    hostTriple =
+        if system == "aarch64-linux" then "aarch64-unknown-linux-gnu"
+        else "x86_64-unknown-linux-gnu";
+    scudoFor = p: inputs.nix-scudo.lib.mkScudo {
+        pkgs = p;
+        config = ./polar-scudo/config/custom_scudo_config.h;
+        prefix = "polar_scudo_";
+        name = "polar_scudo";
+    };
+    scudo = pkgs.runCommand "polar-scudo-libs" { } ''
+        install -Dm644 ${scudoFor pkgs.pkgsStatic}/lib/libpolar_scudo.a $out/lib/polar/scudo/${triple}/libpolar_scudo.a
+        install -Dm644 ${scudoFor pkgs}/lib/libpolar_scudo.a $out/lib/polar/scudo/${hostTriple}/libpolar_scudo.a
+    '';
 
     craneLib = (crane.mkLib pkgs).overrideToolchain (p: p.rust-bin.nightly.latest.default.override {
         extensions = [ "rust-src" "rust-std" ];
@@ -62,6 +79,7 @@ let
         CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
         "CARGO_TARGET_${tripleUpper}_LINKER" = staticCCBin;
         "CC_${tripleUnderscore}" = staticCCBin;
+        POLAR_SCUDO_LIB_DIR = "${scudo}/lib/polar/scudo";
 
         OPENSSL_STATIC = "1";
         OPENSSL_LIB_DIR = "${staticSsl.out}/lib";
@@ -97,7 +115,6 @@ let
       ./Cargo.toml
       ./Cargo.lock
       ./gitlab/schema/src/gitlab.graphql
-      ./polar-scudo/configs
     ]);
 
     workspaceFileset = crate: lib.fileset.toSource {
@@ -215,19 +232,11 @@ let
       crateArgs = individualCrateArgs;
     };
 
-    # The allocator experiment's brokers (cassini/experiment.nix), on its branch only.
-    cassiniExperiment = import ./cassini/experiment.nix {
-      inherit pkgs crane craneLib workspaceFileset nix-container-lib inputs system;
-      crateArgs = individualCrateArgs;
-      healthcheckDrv = healthcheck;
-      cassiniImage = cassini.cassiniImage;
-    };
-
     polarTools = import ./polar-tools/package.nix {
       inherit pkgs crane workspaceFileset system;
       crateArgs = individualCrateArgs;
     };
 in
 {
-        inherit workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer polarGitServer polarInit polarCustody polarTools healthcheck credentialsAgent secretHarness cassiniExperiment;
+        inherit scudo workspacePackages gitlabAgent cassini kubeAgent webAgent ociResolver scheduler jiraAgent gitAgent buildProcessor certIssuer nuInit gitServer polarGitServer polarInit polarCustody polarTools healthcheck credentialsAgent secretHarness;
 }

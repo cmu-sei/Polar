@@ -29,7 +29,7 @@ license.workspace = true
 default-run = "git-repo-observer"
 
 [dependencies]
-mimalloc.workspace = true
+polar-scudo.workspace = true
 cassini-client.workspace = true
 base64.workspace = true
 cassini-types.workspace = true
