@@ -241,6 +241,27 @@ pub struct TCPClientConfig {
     pub tls: Option<Arc<ClientConfig>>,
 }
 
+/// Why a message could not be made a frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameError {
+    /// It does not fit in one frame ([`MAX_FRAME_BYTES`]).
+    TooLarge { bytes: usize },
+    /// It could not be encoded.
+    Encode(String),
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameError::TooLarge { bytes } => write!(
+                f,
+                "the message is {bytes} bytes as a frame, over the limit of {MAX_FRAME_BYTES}"
+            ),
+            FrameError::Encode(e) => write!(f, "the message could not be encoded: {e}"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum RegistrationState {
     Unregistered,
@@ -921,48 +942,54 @@ impl TcpClientActor {
         }
     }
 
+    /// A message as a frame: its length (u32, big-endian, as the broker reads it) and its bytes. A message whose
+    /// frame would be over [`MAX_FRAME_BYTES`] is refused here, before anything is written: the broker would close the
+    /// connection on it.
+    pub fn frame(message: &ClientMessage) -> Result<Vec<u8>, FrameError> {
+        let bytes =
+            rkyv::to_bytes::<Error>(message).map_err(|e| FrameError::Encode(e.to_string()))?;
+        if bytes.len() > MAX_FRAME_BYTES {
+            return Err(FrameError::TooLarge { bytes: bytes.len() });
+        }
+        let len = bytes.len() as u32;
+        let mut buffer = Vec::with_capacity(4 + bytes.len());
+        buffer.extend_from_slice(&len.to_be_bytes());
+        buffer.extend_from_slice(&bytes);
+        Ok(buffer)
+    }
+
+    /// A frame's body (what follows its length) as the message it carries.
+    pub fn unframe(body: &[u8]) -> Result<ClientMessage, FrameError> {
+        rkyv::from_bytes::<ClientMessage, Error>(body)
+            .map_err(|e| FrameError::Encode(e.to_string()))
+    }
+
+    /// Writes a frame to the broker and flushes it.
+    async fn write_frame(
+        frame: &[u8],
+        state: &mut TcpClientState,
+    ) -> Result<(), ActorProcessingErr> {
+        let Some(arc_writer) = state.writer.as_ref() else {
+            error!("No writer available in TcpClientState");
+            return Err(ActorProcessingErr::from("No writer assigned to client!"));
+        };
+        let mut writer = arc_writer.lock().await;
+        writer.write_all(frame).await?;
+        // Flush to ensure data is sent immediately (CRITICAL!)
+        writer.flush().await?;
+        Ok(())
+    }
+
     /// Send a payload to the broker over the write.
     pub async fn send_message(
         message: ClientMessage,
         state: &mut TcpClientState,
     ) -> Result<(), ActorProcessingErr> {
-        // NOTE: Broker expects u32 length prefix, NOT u64
-        match rkyv::to_bytes::<Error>(&message) {
-            Ok(bytes) => {
-                // Validate frame size fits in u32
-                let len: u32 = bytes
-                    .len()
-                    .try_into()
-                    .map_err(|_| ActorProcessingErr::from("Frame too large (>4GB)"))?;
-
-                // Pre-allocate buffer with exact capacity (4 bytes + payload)
-                let mut buffer = Vec::with_capacity(4 + bytes.len());
-
-                // Write 4-byte BE length prefix (matching broker's read_u32)
-                buffer.extend_from_slice(&len.to_be_bytes());
-
-                //add message to buffer
-                buffer.extend_from_slice(&bytes);
-
-                //write message
-                if let Some(arc_writer) = state.writer.as_ref() {
-                    let mut writer = arc_writer.lock().await;
-
-                    // Write entire buffer in one go
-                    writer.write_all(&buffer).await?;
-
-                    // Flush to ensure data is sent immediately (CRITICAL!)
-                    writer.flush().await?;
-                    Ok(())
-                } else {
-                    error!("No writer available in TcpClientState");
-                    let reason = "No writer assigned to client!".to_string();
-                    Err(ActorProcessingErr::from(reason))
-                }
-            }
+        match Self::frame(&message) {
+            Ok(frame) => Self::write_frame(&frame, state).await,
             Err(e) => {
-                warn!("Failed to serialize message. {e}");
-                Err(ActorProcessingErr::from(e))
+                warn!("Failed to frame message. {e}");
+                Err(ActorProcessingErr::from(e.to_string()))
             }
         }
     }
@@ -1163,13 +1190,31 @@ impl TcpClientActor {
         share_identity: bool,
     ) -> Result<(), ActorProcessingErr> {
         let envelope = ClientMessage::PublishRequest {
-            topic,
+            topic: topic.clone(),
             payload: payload.into(),
             registration_id: registration_id.to_owned(),
             trace_ctx,
             share_identity,
         };
-        TcpClientActor::send_or_fail(myself, state, envelope).await
+        match Self::frame(&envelope) {
+            Ok(frame) => {
+                if let Err(e) = Self::write_frame(&frame, state).await {
+                    TcpClientActor::emit_transport_err_and_stop(myself, state, e.to_string());
+                }
+            }
+            // Not the connection's fault: the publish is refused, and the connection kept.
+            Err(e) => {
+                error!(%topic, "a publish was not sent: {e}");
+                TcpClientActor::dispatch_event(
+                    &state.delivery,
+                    ClientEvent::PublishRefused {
+                        topic,
+                        reason: e.to_string(),
+                    },
+                );
+            }
+        }
+        Ok(())
     }
 
     async fn handle_subscribe(
@@ -2131,6 +2176,103 @@ mod registration_tests {
             .await
             .unwrap();
         assert_eq!(registered_ids(&events), ["same"]);
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    fn publish_of(bytes: usize) -> ClientMessage {
+        ClientMessage::PublishRequest {
+            topic: "t".to_string(),
+            payload: Arc::new(vec![7; bytes]),
+            registration_id: "r".to_string(),
+            trace_ctx: None,
+            share_identity: true,
+        }
+    }
+
+    /// A frame is its length, big-endian, then the message; one over the limit is refused before anything is written.
+    #[test]
+    fn a_frame_over_the_limit_is_refused_and_one_at_it_is_made() {
+        let fits = TcpClientActor::frame(&publish_of(cassini_types::MAX_PAYLOAD_BYTES)).unwrap();
+        let len = u32::from_be_bytes(fits[..4].try_into().unwrap()) as usize;
+        assert_eq!(len, fits.len() - 4);
+        assert!(len <= MAX_FRAME_BYTES);
+        assert!(matches!(
+            TcpClientActor::frame(&publish_of(MAX_FRAME_BYTES)),
+            Err(FrameError::TooLarge { bytes }) if bytes > MAX_FRAME_BYTES
+        ));
+    }
+
+    /// A publish too large for a frame is refused to whoever listens, and the transport stays: it is not the
+    /// connection's fault.
+    #[tokio::test]
+    async fn a_publish_too_large_for_a_frame_is_refused_and_the_transport_stays() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let router = Actor::spawn(None, polar_router::RouterActor, ())
+            .await
+            .unwrap()
+            .0;
+        let mut state = TcpClientState {
+            reconnect: ReconnectMode::default(),
+            bind_addr: "broker:1".into(),
+            server_name: "broker".into(),
+            writer: None,
+            reader: None,
+            registration: RegistrationState::Registered {
+                registration_id: "r".into(),
+            },
+            client_config: Arc::new(
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(rustls::RootCertStore::empty())
+                    .with_no_client_auth(),
+            ),
+            delivery: DeliveryMode::Router {
+                router,
+                lifecycle: Arc::new(move |event| captured.lock().unwrap().push(event)),
+            },
+            abort_handle: None,
+            answers: None,
+        };
+        struct Idle;
+        #[async_trait]
+        impl Actor for Idle {
+            type Msg = TcpClientMessage;
+            type State = ();
+            type Arguments = ();
+            async fn pre_start(
+                &self,
+                _myself: ActorRef<Self::Msg>,
+                _args: (),
+            ) -> Result<Self::State, ActorProcessingErr> {
+                Ok(())
+            }
+        }
+        let (myself, _) = Actor::spawn(None, Idle, ()).await.unwrap();
+        TcpClientActor
+            .handle(
+                myself.clone(),
+                TcpClientMessage::publish("big".into(), vec![0; MAX_FRAME_BYTES], None),
+                &mut state,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [ClientEvent::PublishRefused { topic, .. }] if topic == "big"
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !matches!(
+                myself.get_status(),
+                ractor::ActorStatus::Stopping | ractor::ActorStatus::Stopped
+            ),
+            "the transport is not ended for it"
+        );
     }
 }
 

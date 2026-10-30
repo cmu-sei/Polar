@@ -68,6 +68,11 @@ pub enum CassiniClientError {
 
     #[error("broker is unavailable")]
     BrokerUnavailable,
+
+    /// The payload does not fit in one frame: it is refused before it is sent, as the broker would close the
+    /// connection on it.
+    #[error("the payload is {bytes} bytes, over the {max} a frame carries")]
+    TooLarge { bytes: usize, max: usize },
 }
 
 /// Abstraction over the Cassini client operations
@@ -283,6 +288,12 @@ impl TcpClient {
 #[async_trait]
 impl CassiniClient for TcpClient {
     fn publish(&self, req: PublishRequest) -> Result<(), CassiniClientError> {
+        if req.payload.len() > cassini_types::MAX_PAYLOAD_BYTES {
+            return Err(CassiniClientError::TooLarge {
+                bytes: req.payload.len(),
+                max: cassini_types::MAX_PAYLOAD_BYTES,
+            });
+        }
         // The front is always there, so a cast to it always succeeds. Whether the connection is
         // up is what decides these two: `Queue` is handed to the front, which holds it.
         if let Some(online) = &self.online
@@ -495,6 +506,22 @@ mod tests {
         let (client, received) = client(false).await;
         client.publish(publish(OfflineBehavior::Queue)).unwrap();
         assert_eq!(sent(&received).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_payload_over_what_a_frame_carries_is_refused_with_an_error_and_not_sent() {
+        let (client, received) = client(true).await;
+        let mut too_large = publish(OfflineBehavior::Queue);
+        too_large.payload = vec![0; cassini_types::MAX_PAYLOAD_BYTES + 1];
+        assert!(matches!(
+            client.publish(too_large),
+            Err(CassiniClientError::TooLarge { bytes, max })
+                if bytes == cassini_types::MAX_PAYLOAD_BYTES + 1 && max == cassini_types::MAX_PAYLOAD_BYTES
+        ));
+        let mut largest = publish(OfflineBehavior::Queue);
+        largest.payload = vec![0; cassini_types::MAX_PAYLOAD_BYTES];
+        client.publish(largest).unwrap();
+        assert_eq!(sent(&received).await, 1, "only the one that fits is sent");
     }
 
     #[tokio::test]

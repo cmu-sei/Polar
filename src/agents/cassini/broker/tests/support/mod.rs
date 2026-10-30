@@ -1021,6 +1021,111 @@ impl FacadeClient {
     }
 }
 
+/// A connection to the broker with no client behind it: the test writes and reads the frames itself, so it can send
+/// what no client would (a frame header over the limit) or stop reading while the socket stays open.
+pub struct RawConnection {
+    stream: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+}
+
+impl RawConnection {
+    /// Connects as `identity` over mutual TLS, with a receive buffer of `recv_buffer` bytes (the kernel rounds it),
+    /// so a connection that stops reading fills quickly.
+    pub async fn open(broker: &TestBroker, identity: &str, recv_buffer: Option<usize>) -> Self {
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+        let (cert, key) = broker.pki.client(identity);
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from_pem_file(broker.pki.ca()).unwrap())
+            .unwrap();
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(
+                vec![CertificateDer::from_pem_file(&cert).unwrap()],
+                PrivateKeyDer::from_pem_file(&key).unwrap(),
+            )
+            .unwrap();
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        if let Some(bytes) = recv_buffer {
+            socket.set_recv_buffer_size(bytes as u32).unwrap();
+        }
+        let tcp = socket.connect(broker.addr.parse().unwrap()).await.unwrap();
+        let stream = tokio_rustls::TlsConnector::from(Arc::new(config))
+            .connect(ServerName::try_from("localhost").unwrap(), tcp)
+            .await
+            .expect("the TLS handshake");
+        Self { stream }
+    }
+
+    /// Writes `len` as a frame's header, and nothing after it.
+    pub async fn send_header(&mut self, len: u32) {
+        use tokio::io::AsyncWriteExt;
+        self.stream.write_all(&len.to_be_bytes()).await.unwrap();
+        self.stream.flush().await.unwrap();
+    }
+
+    /// Writes `message` as one frame.
+    pub async fn send(&mut self, message: &cassini_types::ClientMessage) {
+        use tokio::io::AsyncWriteExt;
+        let frame = TcpClientActor::frame(message).unwrap();
+        self.stream.write_all(&frame).await.unwrap();
+        self.stream.flush().await.unwrap();
+    }
+
+    /// Reads the next frame, or `None` once the broker has closed the connection.
+    pub async fn read(&mut self) -> Option<cassini_types::ClientMessage> {
+        use tokio::io::AsyncReadExt;
+        let len = self.stream.read_u32().await.ok()? as usize;
+        let mut body = vec![0u8; len];
+        self.stream.read_exact(&mut body).await.ok()?;
+        Some(TcpClientActor::unframe(&body).unwrap())
+    }
+
+    /// Whether the broker closes the connection within `within`, whatever it writes before.
+    pub async fn closed_within(&mut self, within: Duration) -> bool {
+        tokio::time::timeout(within, async { while self.read().await.is_some() {} })
+            .await
+            .is_ok()
+    }
+
+    /// Registers, and returns the session the broker gave.
+    pub async fn register(&mut self) -> String {
+        self.send(&cassini_types::ClientMessage::RegistrationRequest {
+            registration_id: None,
+            trace_ctx: None,
+        })
+        .await;
+        loop {
+            match self.read().await.expect("the broker answers") {
+                cassini_types::ClientMessage::RegistrationResponse { result, .. } => {
+                    return result.expect("registered");
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    /// Subscribes to `topic` and waits until the broker has taken it.
+    pub async fn subscribe(&mut self, registration_id: &str, topic: &str) {
+        self.send(&cassini_types::ClientMessage::SubscribeRequest {
+            registration_id: registration_id.to_string(),
+            topic: topic.to_string(),
+            trace_ctx: None,
+        })
+        .await;
+        loop {
+            if let cassini_types::ClientMessage::SubscribeAcknowledgment {
+                topic: t, result, ..
+            } = self.read().await.expect("the broker answers")
+                && t == topic
+            {
+                result.expect("subscribed");
+                return;
+            }
+        }
+    }
+}
+
 pub fn pause() -> impl std::future::Future<Output = ()> {
     tokio::time::sleep(Duration::from_millis(300))
 }

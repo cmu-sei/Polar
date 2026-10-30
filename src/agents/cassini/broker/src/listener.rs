@@ -912,6 +912,7 @@ impl Actor for Listener {
                     if len > MAX_FRAME_BYTES {
                         warn!(
                             client_id = %client_id,
+                            identity = ?peer_identity,
                             len,
                             max = MAX_FRAME_BYTES,
                             "Oversized frame; disconnecting before allocating"

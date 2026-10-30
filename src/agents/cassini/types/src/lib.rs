@@ -41,6 +41,13 @@ pub type HeldMessages = Vec<(std::sync::Arc<Vec<u8>>, Option<String>)>;
 /// below one frame, and a broker whose memory budget is below it refuses to start.
 pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
+/// The room a frame keeps beside its payload for the rest of the message (the topic, the ids, the trace context).
+pub const FRAME_ENVELOPE_ALLOWANCE: usize = 64 * 1024;
+
+/// The largest payload a client takes to publish: what fits in one frame beside its envelope. A larger one is refused
+/// with an error to the caller, before it is sent.
+pub const MAX_PAYLOAD_BYTES: usize = MAX_FRAME_BYTES - FRAME_ENVELOPE_ALLOWANCE;
+
 /// Our representation of a connected session, and how close it is to timing out
 /// TODO: Eventually, we might want to add metadata to the session struct to track additional information.
 /// Consider stuff like last_activity_time, last_message_received_time, etc.
