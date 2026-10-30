@@ -52,6 +52,9 @@ result line from each.
 - `sink` (`harness-sink`): subscribes to its lane, says it is ready once the broker acknowledges the subscription, and
   measures every message from its lane's producers, the first `HARNESS_WARMUP` of each left out of the latencies. It
   reports when it has them all, or when none has come for `HARNESS_IDLE_SECS` (`HARNESS_FIRST_WAIT_SECS` for the first).
+  `HARNESS_SINK_DELAY_US` slows it: it spends that long on each message before the next (a plan's `sink_delay_us`;
+  `infra/load-plans/slow-sink.nuon`). Its client acknowledges a delivery when it hands it to the sink, so what waits
+  for a slow sink waits in the sink, until acknowledgements are the domain's (docs/architecture/cassini-backpressure.md).
 
 Each prints every variable it reads with `--scaffold`, and what it does with `--help`. Both exit 0 when their part of a
 run is done, and 1 for anything else.

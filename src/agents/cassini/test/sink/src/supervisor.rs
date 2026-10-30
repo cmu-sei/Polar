@@ -169,6 +169,13 @@ impl Actor for SinkSupervisor {
                         state.finish("complete");
                     }
                 }
+                // A slow sink (HARNESS_SINK_DELAY_US) spends this on each message before it takes the next. Its client
+                // acknowledges a delivery when it hands it here, not when this is done, so until acknowledgements are
+                // the domain's what waits for it waits in this mailbox (docs/architecture/cassini-backpressure.md,
+                // "As built").
+                if !state.settings.delay.is_zero() {
+                    ractor::concurrency::sleep(state.settings.delay).await;
+                }
             }
             SinkMessage::Registered => {
                 let _ = state.healthcheck.cassini_connected();

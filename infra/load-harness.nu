@@ -65,6 +65,7 @@ export const DEFAULTS = {
     stall_secs: 30
     idle_secs: 30
     first_wait_secs: 300
+    sink_delay_us: 0
 }
 
 # Every combination of the lists in `axes` (a list of records sets several fields at once); with none, one empty one.
@@ -126,6 +127,7 @@ export def values_for [run: record, role: string, index: int]: nothing -> record
             HARNESS_WARMUP: $run.warmup
             HARNESS_IDLE_SECS: $run.idle_secs
             HARNESS_FIRST_WAIT_SECS: $run.first_wait_secs
+            HARNESS_SINK_DELAY_US: $run.sink_delay_us
         }
     }
     $shared | merge $own | transpose name value | each {|r| { name: $r.name value: ($r.value | into string) } }

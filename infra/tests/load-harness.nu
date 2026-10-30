@@ -127,6 +127,7 @@ def main [] {
                 assert ("HARNESS_WARMUP" not-in ($producer | columns))
                 let sink = (values_for $run "sink" 0)
                 assert equal $sink.HARNESS_WARMUP ($DEFAULTS.warmup | into string)
+                assert equal $sink.HARNESS_SINK_DELAY_US "0"
                 assert ("HARNESS_RATE" not-in ($sink | columns))
             }
         }

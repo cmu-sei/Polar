@@ -45,7 +45,16 @@ pub static FIRST_WAIT_SECS: Defaulted<u64> = Defaulted::number(
     "300",
 );
 
-static VARIABLES: &[&dyn Described] = &[&WARMUP, &IDLE_SECS, &FIRST_WAIT_SECS];
+/// A sink that is slow on purpose (docs/architecture/cassini-backpressure.md, "Tests, first"): how long it spends on
+/// each message before the next, so a run can measure what a subscriber that falls behind costs the broker.
+pub static DELAY_US: Defaulted<u64> = Defaulted::number(
+    "HARNESS_SINK_DELAY_US",
+    "how long the sink spends on each message it receives, in microseconds, before it takes the next; 0 spends \
+     nothing",
+    "0",
+);
+
+static VARIABLES: &[&dyn Described] = &[&WARMUP, &IDLE_SECS, &FIRST_WAIT_SECS, &DELAY_US];
 
 pub static SECTION: Section = Section {
     name: "harness-sink",
@@ -57,6 +66,8 @@ pub struct SinkSettings {
     pub warmup: u64,
     pub idle: Duration,
     pub first_wait: Duration,
+    /// Spent on each message; zero for none.
+    pub delay: Duration,
 }
 
 impl SinkSettings {
@@ -65,6 +76,7 @@ impl SinkSettings {
             warmup: config.read(&WARMUP)?,
             idle: Duration::from_secs(config.read(&IDLE_SECS)?),
             first_wait: Duration::from_secs(config.read(&FIRST_WAIT_SECS)?),
+            delay: Duration::from_micros(config.read(&DELAY_US)?),
         })
     }
 }
@@ -85,6 +97,7 @@ mod tests {
             ("HARNESS_WARMUP", "100"),
             ("HARNESS_IDLE_SECS", "5"),
             ("HARNESS_FIRST_WAIT_SECS", "60"),
+            ("HARNESS_SINK_DELAY_US", "250"),
         ]
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -94,5 +107,13 @@ mod tests {
         assert_eq!(s.warmup, 100);
         assert_eq!(s.idle, Duration::from_secs(5));
         assert_eq!(s.first_wait, Duration::from_secs(60));
+        assert_eq!(s.delay, Duration::from_micros(250));
+    }
+
+    #[test]
+    fn a_sink_is_not_slowed_unless_it_is_asked_to_be() {
+        let vars: HashMap<String, String> = HashMap::new();
+        let config = Config::builder(&vars).register(&SECTION).build();
+        assert_eq!(SinkSettings::read(&config).unwrap().delay, Duration::ZERO);
     }
 }
