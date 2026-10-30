@@ -51,6 +51,15 @@ const OBSERVER_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// regardless.
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(OBSERVER_STOP_TIMEOUT.as_secs() * 3 + 10);
 
+/// How long opening a connection to Jira may take, the TLS handshake included. A site that
+/// has not answered by then is as good as unreachable, and the pull is tried again later.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long one request to Jira may take, from sending it to the end of its body. The largest
+/// is a page of 50 issues with their changelogs; without a bound, a site that stops answering
+/// in the middle of one leaves the observer waiting for ever.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// This supervisor's own message type. polar::SupervisorMessage cannot carry
 /// the infrastructure signals without polar-agent-builder depending back on
 /// lib, so the builder is generic over the message (see kube-observer).
@@ -144,9 +153,16 @@ impl ObserverSupervisorState {
 }
 
 impl ObserverSupervisor {
-    /// Build reqwest client, optionally with a proxy CA certificate.
-    async fn get_client(proxy_ca_cert_path: Option<&str>) -> Result<Client, ActorProcessingErr> {
-        let mut builder = ClientBuilder::new();
+    /// Build reqwest client, optionally with a proxy CA certificate, with a bound on opening a
+    /// connection and on each request.
+    async fn get_client(
+        proxy_ca_cert_path: Option<&str>,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> Result<Client, ActorProcessingErr> {
+        let mut builder = ClientBuilder::new()
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout);
 
         if let Some(path) = proxy_ca_cert_path {
             let cert_data = async_get_file_as_byte_vec(path).await.map_err(|e| {
@@ -233,7 +249,12 @@ impl Actor for ObserverSupervisor {
         debug!("{myself:?} starting");
 
         // Fail on a bad proxy CA before anything is started.
-        let web_client = ObserverSupervisor::get_client(args.proxy_ca_cert_file.as_deref()).await?;
+        let web_client = ObserverSupervisor::get_client(
+            args.proxy_ca_cert_file.as_deref(),
+            CONNECT_TIMEOUT,
+            REQUEST_TIMEOUT,
+        )
+        .await?;
 
         // Health check, router and broker client in one call. Observers only
         // depend on Cassini, which is the default capability, so there is
@@ -351,5 +372,62 @@ impl Actor for ObserverSupervisor {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn a_request_that_takes_too_long_is_given_up() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
+            .mount(&server)
+            .await;
+        let client = ObserverSupervisor::get_client(
+            None,
+            Duration::from_secs(5),
+            Duration::from_millis(200),
+        )
+        .await
+        .unwrap();
+
+        let started = Instant::now();
+        let error = client.get(server.uri()).send().await.unwrap_err();
+        assert!(error.is_timeout(), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_never_opens_is_given_up() {
+        // A listener that never accepts: the kernel completes the TCP handshake, and the TLS
+        // handshake then waits for an answer that never comes.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = ObserverSupervisor::get_client(
+            None,
+            Duration::from_millis(200),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+
+        let started = Instant::now();
+        let sent = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.get(format!("https://{address}/")).send(),
+        )
+        .await;
+        let error = sent
+            .expect("the connect timeout did not end the request")
+            .unwrap_err();
+        assert!(error.is_connect() || error.is_timeout(), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        drop(listener);
     }
 }
