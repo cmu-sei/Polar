@@ -148,7 +148,9 @@ The acknowledgement part of step 5, with step 2 (cassini-backpressure.md, "Decid
   (`kubernetes/observe/src/lib.rs:403-414`); git-repo-observer logs and discards it inside synchronous revwalk callbacks
   and still advances `last_seen`, so a failed publish silently loses commits (`git/observe/src/lib.rs:682-707,
   776-777`); the gitlab observer uses a raw `TcpClientActor` and the scheduler pair casts to the facade's `ActorRef`,
-  both skipping `OfflineBehavior`; provenance events use `Drop` (`lib/src/lib.rs:159-176`).
+  both skipping `OfflineBehavior`; provenance events use `Drop` (`lib/src/lib.rs:159-176`). *(Since 2026-10-30 the
+  client's outbox bounds what it holds, the buffer refuses the newest, `publish_when_ready` waits for room, and
+  jira-observer, kube-observer and git-repo-observer use it: cassini-backpressure.md, "As built".)*
 
 ## 2. The structure
 
