@@ -61,6 +61,15 @@ let BuildOrchestratorValues =
           -- What a job runs, when its repository's mapping gives no command of its own.
           , jobCommand : List Text
           , workspaceSizeLimit : Text
+          -- What a job's pipeline container may use. `None`: the orchestrator's CI-sized defaults (2 CPU, 4Gi),
+          -- which a cargo build of anything large outgrows.
+          , pipelineResources :
+              Optional
+                { cpuLimit : Text
+                , memoryLimit : Text
+                , cpuRequest : Text
+                , memoryRequest : Text
+                }
           -- What `polar-init` is given besides what the platform says, in the jobs' pods (the platform's
           -- own `polarInitEnv`, in plain values).
           , initEnv : List Builder.JobEnv
@@ -155,6 +164,27 @@ let configuration =
                                       , workspace_size_limit = JSON.string v.workspaceSizeLimit
                                       -- The pipeline records which commit and tree it built, so it needs the repository.
                                       , keep_git = JSON.bool True
+                                      , resources =
+                                          merge
+                                            { Some =
+                                                λ ( r
+                                                  : { cpuLimit : Text
+                                                    , memoryLimit : Text
+                                                    , cpuRequest : Text
+                                                    , memoryRequest : Text
+                                                    }
+                                                  ) →
+                                                  JSON.object
+                                                    ( toMap
+                                                        { cpu_limit = JSON.string r.cpuLimit
+                                                        , memory_limit = JSON.string r.memoryLimit
+                                                        , cpu_request = JSON.string r.cpuRequest
+                                                        , memory_request = JSON.string r.memoryRequest
+                                                        }
+                                                    )
+                                            , None = JSON.null
+                                            }
+                                            v.pipelineResources
                                       , ca_bundle_secret =
                                           merge
                                             { Some = λ(name : Text) → JSON.string name
