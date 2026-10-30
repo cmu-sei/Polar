@@ -68,14 +68,16 @@ impl PolarAgent for JiraObserver {
         )
         .because(&[Cause::Timer("poll")]),
     ];
-    const SECTIONS: &'static [&'static Section] = &[&settings::SECTION];
+    const SECTIONS: &'static [&'static Section] = &[&settings::SECTION, &polar::egress::SECTION];
     const HELP: Option<&'static str> = Some(
         "jira-observer polls the Jira site at JIRA_URL every half hour and publishes its \
          projects, groups, users and issues for jira-processor to write into the graph. \
          JIRA_TOKEN is the credential; with JIRA_EMAIL as well it is Atlassian Cloud's basic \
          authentication, without it a bearer token. JIRA_DEPLOYMENT overrides the guess made \
-         from the address, PROXY_CA_CERT trusts the CA of a TLS-intercepting proxy, and \
-         QUERY_DATE starts the first full pull from a date.",
+         from the address, and QUERY_DATE starts the first full pull from a date. The egress \
+         section says how the site is reached: through POLAR_EGRESS_PROXY unless the host is in \
+         POLAR_EGRESS_NO_PROXY, trusting the CA certificates of POLAR_EGRESS_CA_CERT beside the \
+         system's (the CA of a TLS-intercepting proxy).",
     );
 
     async fn start(configured: Configured) -> Result<(), StartError> {
@@ -98,7 +100,7 @@ impl PolarAgent for JiraObserver {
             auth: JiraAuth::from_parts(settings.email, settings.token),
             deployment: JiraDeployment::resolve(settings.deployment.as_deref(), &jira_url),
             jira_url,
-            proxy_ca_cert_file: settings.proxy_ca_cert,
+            egress: polar::egress::Egress::read(configured.config())?,
             query_date: settings.query_date,
             // TODO: read this from configuration
             base_interval: BASE_INTERVAL_SECS,
@@ -128,4 +130,34 @@ mod tests {
     use super::*;
 
     polar_agent_builder::polar_agent_tests!(JiraObserver);
+
+    /// The render writes the target's egress setting only into an agent that declares the section.
+    #[test]
+    fn the_scaffold_declares_the_egress_section() {
+        let scaffold = polar_agent_builder::agent::scaffold_document::<JiraObserver>();
+        let egress = scaffold
+            .document
+            .sections
+            .iter()
+            .find(|s| s.name == "egress")
+            .expect("an egress section");
+        let names: Vec<&str> = egress.variables.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "POLAR_EGRESS_PROXY",
+                "POLAR_EGRESS_NO_PROXY",
+                "POLAR_EGRESS_CA_CERT"
+            ]
+        );
+        assert!(
+            scaffold
+                .document
+                .sections
+                .iter()
+                .flat_map(|s| &s.variables)
+                .all(|v| v.name != "PROXY_CA_CERT"),
+            "PROXY_CA_CERT is gone"
+        );
+    }
 }

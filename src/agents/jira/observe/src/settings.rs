@@ -56,11 +56,6 @@ pub static JIRA_DEPLOYMENT: Optional<String> = Optional::text(
     "cloud, server or datacenter; when unset it follows the address (an atlassian.net site is cloud)",
 );
 
-pub static PROXY_CA_CERT: Optional<String> = Optional::text(
-    "PROXY_CA_CERT",
-    "path to a CA certificate to trust as well as the system's, for a proxy that intercepts TLS",
-);
-
 pub static QUERY_DATE: Optional<String> = Optional::text(
     "QUERY_DATE",
     "a date from which the first full pull asks for issues (updated > date); unset pulls all of them",
@@ -71,7 +66,6 @@ static VARIABLES: &[&dyn Described] = &[
     &JIRA_TOKEN,
     &JIRA_EMAIL,
     &JIRA_DEPLOYMENT,
-    &PROXY_CA_CERT,
     &QUERY_DATE,
 ];
 
@@ -88,7 +82,6 @@ pub struct JiraSettings {
     pub token: String,
     pub email: Option<String>,
     pub deployment: Option<String>,
-    pub proxy_ca_cert: Option<String>,
     pub query_date: Option<String>,
 }
 
@@ -99,7 +92,6 @@ impl JiraSettings {
             token: config.read(&JIRA_TOKEN)?,
             email: config.read(&JIRA_EMAIL)?,
             deployment: config.read(&JIRA_DEPLOYMENT)?,
-            proxy_ca_cert: config.read(&PROXY_CA_CERT)?,
             query_date: config.read(&QUERY_DATE)?,
         })
     }
@@ -318,7 +310,6 @@ mod tests {
         assert_eq!(settings.token, "t0ken");
         assert_eq!(settings.email, None);
         assert_eq!(settings.deployment, None);
-        assert_eq!(settings.proxy_ca_cert, None);
         assert_eq!(settings.query_date, None);
     }
 

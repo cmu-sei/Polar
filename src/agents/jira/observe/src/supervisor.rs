@@ -29,15 +29,15 @@ use crate::{
     JIRA_USER_OBSERVER, JiraAuth, JiraDeployment, JiraObserverArgs, JiraObserverMessage, RETRY,
 };
 use cassini_types::ClientEvent;
-use polar::async_get_file_as_byte_vec;
 use polar::cassini::TcpClient;
+use polar::egress::Egress;
 use polar_agent_builder::{
     AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
     InfrastructureSupervisorMessage,
 };
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorId, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
-use reqwest::{Certificate, Client, ClientBuilder};
+use reqwest::{Client, ClientBuilder};
 use tracing::{debug, error, info, warn};
 
 /// How long a child observer gets to stop before the supervisor moves on.
@@ -98,7 +98,8 @@ pub struct ObserverSupervisorArgs {
     pub jira_url: String,
     pub auth: JiraAuth,
     pub deployment: JiraDeployment,
-    pub proxy_ca_cert_file: Option<String>,
+    /// How the site is reached: the proxy, the hosts that bypass it, and the CA trusted beside the system's.
+    pub egress: Egress,
     pub query_date: Option<String>,
     pub base_interval: u64,
 }
@@ -155,32 +156,25 @@ impl ObserverSupervisorState {
 }
 
 impl ObserverSupervisor {
-    /// Build reqwest client, optionally with a proxy CA certificate, with a bound on opening a
-    /// connection and on each request.
+    /// The reqwest client: the way out of the cluster the egress settings give (polar::egress), with
+    /// a bound on opening a connection and on each request.
     async fn get_client(
-        proxy_ca_cert_path: Option<&str>,
+        egress: &Egress,
         connect_timeout: Duration,
         request_timeout: Duration,
     ) -> Result<Client, ActorProcessingErr> {
-        let mut builder = ClientBuilder::new()
+        let bundle = egress.ca_bundle().await?;
+        if !bundle.is_empty() {
+            info!(
+                "trusting {} egress CA certificate(s) beside the system's",
+                bundle.len()
+            );
+        }
+        let builder = ClientBuilder::new()
             .connect_timeout(connect_timeout)
             .timeout(request_timeout);
-
-        if let Some(path) = proxy_ca_cert_path {
-            let cert_data = async_get_file_as_byte_vec(path).await.map_err(|e| {
-                ActorProcessingErr::from(format!(
-                    "failed to read proxy CA certificate at {path}: {e}"
-                ))
-            })?;
-            let root_cert = Certificate::from_pem(&cert_data).map_err(|e| {
-                ActorProcessingErr::from(format!("{path} is not a PEM certificate: {e}"))
-            })?;
-
-            info!("Found PROXY_CA_CERT at: {path}, configuring web client...");
-            builder = builder.add_root_certificate(root_cert).use_rustls_tls();
-        }
-
-        builder
+        egress
+            .configure(builder, &bundle)?
             .build()
             .map_err(|e| ActorProcessingErr::from(format!("failed to build web client: {e}")))
     }
@@ -250,13 +244,9 @@ impl Actor for ObserverSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
 
-        // Fail on a bad proxy CA before anything is started.
-        let web_client = ObserverSupervisor::get_client(
-            args.proxy_ca_cert_file.as_deref(),
-            CONNECT_TIMEOUT,
-            REQUEST_TIMEOUT,
-        )
-        .await?;
+        // Fail on an egress CA that cannot be used before anything is started.
+        let web_client =
+            ObserverSupervisor::get_client(&args.egress, CONNECT_TIMEOUT, REQUEST_TIMEOUT).await?;
 
         // Health check, router and broker client in one call. Observers only
         // depend on Cassini, which is the default capability, so there is
@@ -380,6 +370,7 @@ impl Actor for ObserverSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polar::egress::testing::{TestCa, given, https_server, rerun};
     use std::time::Instant;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -392,7 +383,7 @@ mod tests {
             .mount(&server)
             .await;
         let client = ObserverSupervisor::get_client(
-            None,
+            &Egress::default(),
             Duration::from_secs(5),
             Duration::from_millis(200),
         )
@@ -412,7 +403,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let client = ObserverSupervisor::get_client(
-            None,
+            &Egress::default(),
             Duration::from_millis(200),
             Duration::from_secs(60),
         )
@@ -431,5 +422,50 @@ mod tests {
         assert!(error.is_connect() || error.is_timeout(), "{error}");
         assert!(started.elapsed() < Duration::from_secs(3));
         drop(listener);
+    }
+
+    /// The image's roots (SSL_CERT_FILE, read from the process environment, so the client is made in a child
+    /// process) and the egress CA are trusted together: a site behind a TLS-inspecting proxy and one that is not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_egress_ca_is_trusted_beside_the_image_roots() {
+        if let Some(urls) = given("JIRA_TEST_URLS") {
+            let egress = Egress {
+                ca_cert: given("POLAR_EGRESS_CA_CERT"),
+                ..Egress::default()
+            };
+            let client = ObserverSupervisor::get_client(&egress, CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+                .await
+                .unwrap();
+            for url in urls.split(',') {
+                let body = client.get(url).send().await.unwrap().text().await.unwrap();
+                assert_eq!(body, "ok", "{url}");
+            }
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let image = TestCa::new("image roots");
+        let corporate = TestCa::new("corporate root");
+        let image_file = image.write(dir.path(), "image.pem");
+        let corporate_file = corporate.write(dir.path(), "corporate.pem");
+        let urls = format!(
+            "{},{}",
+            https_server(&image).await.url,
+            https_server(&corporate).await.url
+        );
+        let output = rerun(
+            "supervisor::tests::the_egress_ca_is_trusted_beside_the_image_roots",
+            &[
+                ("SSL_CERT_FILE", image_file.to_str().unwrap()),
+                ("POLAR_EGRESS_CA_CERT", corporate_file.to_str().unwrap()),
+                ("JIRA_TEST_URLS", &urls),
+            ],
+        )
+        .await;
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

@@ -350,7 +350,7 @@ export def interpret [facts: record] {
         $out = ($out | append $"The pod resolved JIRA-HOST but could not connect \(($kinds | where $it != 'DNS' | str join ', ')\).($where) Check the nodes' egress \(firewall, VPN, proxy\).")
     }
     if "TLS" in $kinds {
-        $out = ($out | append "TLS failed: the certificate is not trusted by the pod's CA bundle, or something between presents its own (a proxy or ZPA inspecting TLS). The agent trusts PROXY_CA_CERT besides the system's; openssl's verify code above says which.")
+        $out = ($out | append "TLS failed: the certificate is not trusted by the pod's CA bundle, or something between presents its own (a proxy or ZPA inspecting TLS). The agent trusts the target's cluster.egress.ca_file (POLAR_EGRESS_CA_CERT) besides the system's; openssl's verify code above says which.")
     }
     if "other" in $kinds { $out = ($out | append "A request failed in a way this check does not recognise; the kind above is nu's.") }
     # Every answer a 200, and nothing above said: a failed request, or an anonymous caller, was.
