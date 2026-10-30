@@ -599,6 +599,14 @@ image references, pull secrets, storage classes, hostnames, URLs.
 }
 ```
 
+**A target's way out of the cluster** is `cluster.egress`, every key optional: `proxy` (an `http://` or `https://`
+URL with a host and a port), `no_proxy` (hosts, `.suffixes`, addresses and CIDRs reached directly, beside
+`localhost`, `127.0.0.1`, `::1`, `.svc` and `.<domain>`) and `ca_file` (PEM CA certificates, a path inside the
+target's directory). Only the agents whose code declares the egress section are given it (jira-observer,
+oci-registry-resolver and git-repo-observer): the variables in their document, and the CA as a ConfigMap of their
+own, mounted. A target that sets none renders as before. `infra/egress.nu` judges it; the design, what each agent
+does with it and what is not done are in `docs/architecture/egress.md`.
+
 **A target leaves a workload out** with `enabled: false`. The catalog is every workload there is, and every
 command resolves the ones a target runs, so a disabled workload is not resolved, checked, rendered, listed,
 given an image build, or part of the cert-issuer floor for that target. Resolving it by name says it is not enabled
