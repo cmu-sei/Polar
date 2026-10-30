@@ -51,9 +51,9 @@ use crate::{
     DeliveryMode, ReconnectMode, TCPClientConfig, TcpClientActor, TcpClientArgs, TcpClientMessage,
 };
 use async_trait::async_trait;
-use cassini_types::ClientEvent;
+use cassini_types::{ClientEvent, MessageId};
 use ractor::{Actor, ActorCell, ActorProcessingErr, ActorRef, SupervisionEvent};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -201,6 +201,20 @@ pub struct FacadeState {
     closing: bool,
     /// What the agent was refused and still wants. It outlives every transport, as the agent's wanting does.
     refused: RefusedTopics,
+    /// The publishes the broker could not take for now, each with how often it was deferred and the one timer that
+    /// sends it again (none while it is in flight), until it is acknowledged or refused.
+    deferred: HashMap<MessageId, Deferral>,
+    /// The last resend timer armed: each has its own number, so one replaced or cancelled does nothing when it fires.
+    timers: u64,
+}
+
+/// A publish the broker could not take for now.
+#[derive(Debug, Default)]
+struct Deferral {
+    /// How often it was deferred: its next wait is the backoff's for that many attempts.
+    times: u32,
+    /// The timer that sends it again, if one is armed.
+    timer: Option<u64>,
 }
 
 pub struct TcpClientFacade;
@@ -440,6 +454,8 @@ impl Actor for TcpClientFacade {
             attempt: 0,
             closing: false,
             refused: RefusedTopics::default(),
+            deferred: HashMap::new(),
+            timers: 0,
         };
         // The first transport is part of starting: if it cannot be built (a missing certificate,
         // say) the facade does not start, as the transport did not before it. Later failures are
@@ -503,29 +519,47 @@ impl Actor for TcpClientFacade {
                 state.attempt = 0;
                 Self::set_online(state, true);
                 // Everything not acknowledged is sent again, in order, with the number it had: the connection it
-                // was written to may have died with it. Then what waits in the buffer, as there is room.
+                // was written to may have died with it. Then what waits in the buffer, as there is room. A deferred
+                // publish is among them, so its timer is cancelled: one resend at a time.
+                for deferral in state.deferred.values_mut() {
+                    deferral.timer = None;
+                }
                 for entry in state.outbox.entries() {
                     Self::transmit(state, entry);
                 }
                 Self::promote(state);
             }
             TcpClientMessage::Acknowledged { id } | TcpClientMessage::Refused { id } => {
+                state.deferred.remove(&id);
                 if let Some(entry) = state.outbox.settle(id) {
                     state.args.credit.settle(entry.payload.len());
                     Self::promote(state);
                 }
             }
-            // The broker could not take it now: it stays in the outbox, sent again after the first backoff (and on
-            // the next registration, as everything unacknowledged is).
+            // The broker could not take it now: it stays in the outbox, sent again after a backoff that doubles each
+            // time it is deferred, up to the last (and on the next registration, as everything unacknowledged is).
+            // One timer at a time: a later deferral replaces it.
             TcpClientMessage::Deferred { id } => {
                 if state.outbox.get(id).is_some() {
-                    let wait = state.args.backoff.first;
-                    drop(myself.send_after(wait, move || TcpClientMessage::Resend { id }));
+                    state.timers += 1;
+                    let timer = state.timers;
+                    let deferral = state.deferred.entry(id).or_default();
+                    let wait = state.args.backoff.delay(deferral.times);
+                    deferral.times = deferral.times.saturating_add(1);
+                    deferral.timer = Some(timer);
+                    drop(myself.send_after(wait, move || TcpClientMessage::Resend { id, timer }));
                 }
             }
-            TcpClientMessage::Resend { id } => {
-                if let Some(entry) = state.outbox.get(id).cloned() {
-                    Self::transmit(state, &entry);
+            TcpClientMessage::Resend { id, timer } => {
+                let armed = state
+                    .deferred
+                    .get_mut(&id)
+                    .filter(|deferral| deferral.timer == Some(timer));
+                if let Some(deferral) = armed {
+                    deferral.timer = None;
+                    if let Some(entry) = state.outbox.get(id).cloned() {
+                        Self::transmit(state, &entry);
+                    }
                 }
             }
             TcpClientMessage::BrokerAnswered {
@@ -1209,6 +1243,80 @@ mod tests {
             [first[0].clone()],
             "and on the next registration, while it is not acknowledged"
         );
+    }
+
+    /// A deferred publish is sent again once at a time: a registration before its timer sends it once (the timer then
+    /// does nothing), and a second deferral before its timer replaces the timer rather than adding a chain
+    /// (cassini-backpressure.md, second review, finding C).
+    #[tokio::test(start_paused = true)]
+    async fn a_deferred_publish_is_sent_again_once_however_deferrals_and_registrations_fall() {
+        let rig = rig(10).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        rig.facade.cast(publish("later")).unwrap();
+        settle().await;
+        let a = sent(&rig.spawner.latest().1)[0].clone();
+        rig.facade
+            .cast(TcpClientMessage::Deferred { id: a.1 })
+            .unwrap();
+        settle().await;
+        registered(&rig, "reg-1");
+        settle().await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(
+            sent(&rig.spawner.latest().1),
+            [a.clone(), a.clone()],
+            "sent again by the registration, and not again by the deferral's timer"
+        );
+        for _ in 0..2 {
+            rig.facade
+                .cast(TcpClientMessage::Deferred { id: a.1 })
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        assert_eq!(
+            sent(&rig.spawner.latest().1).len(),
+            3,
+            "two deferrals before the timer: one resend"
+        );
+    }
+
+    /// A publish deferred again waits longer each time, doubling from the first backoff up to the last; once it is
+    /// acknowledged its deferrals are forgotten (finding C).
+    #[tokio::test(start_paused = true)]
+    async fn a_publish_deferred_again_waits_longer_each_time_up_to_the_last_backoff() {
+        let rig = rig(10).await;
+        registered(&rig, "reg-1");
+        settle().await;
+        rig.facade.cast(publish("later")).unwrap();
+        settle().await;
+        let a = sent(&rig.spawner.latest().1)[0].clone();
+        let count = || sent(&rig.spawner.latest().1).len();
+        for (n, wait) in [(1, 1), (2, 2), (3, 4), (4, 8), (5, 16), (6, 30), (7, 30)] {
+            rig.facade
+                .cast(TcpClientMessage::Deferred { id: a.1 })
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(wait) - Duration::from_millis(100)).await;
+            assert_eq!(count(), n, "deferral {n}: not sent again before {wait} s");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(count(), n + 1, "deferral {n}: sent again after {wait} s");
+        }
+        rig.facade
+            .cast(TcpClientMessage::Acknowledged { id: a.1 })
+            .unwrap();
+        rig.facade.cast(publish("next")).unwrap();
+        settle().await;
+        let b = sent(&rig.spawner.latest().1).last().unwrap().clone();
+        rig.facade
+            .cast(TcpClientMessage::Deferred { id: b.1 })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert_eq!(
+            sent(&rig.spawner.latest().1).last(),
+            Some(&b),
+            "a new publish starts from the first backoff"
+        );
+        assert_eq!(count(), 10);
     }
 
     /// A publish that took buffer room, but reaches the facade after the acknowledgements emptied the outbox, is sent:

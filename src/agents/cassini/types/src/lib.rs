@@ -724,9 +724,10 @@ pub enum ClientEvent {
         topic: String,
         reason: String,
     },
-    /// The broker could not take a publish on `topic` now (`reason` says why: it is shutting down, or its memory budget
-    /// is exhausted): it is not refused, and the client's facade keeps it and sends it again, on its next registration
-    /// or after a wait. A client with no facade does not send it again.
+    /// The broker could not take a publish on `topic` now: it is not refused. `reason` says why (it is shutting down,
+    /// or its memory budget is exhausted), and who sends it again: through the client's facade it is kept and sent
+    /// again, on its next registration or after a wait; a transport with no facade keeps nothing, and `reason` says
+    /// its caller must send it again (`cassini_client::DEFERRED_AND_KEPT`, `DEFERRED_NOT_KEPT`).
     PublishDeferred {
         topic: String,
         reason: String,

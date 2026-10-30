@@ -64,6 +64,11 @@ pub const REGISTRATION_EXPECTED: &str =
     "Expected client to be registered to conduct this operation.";
 
 pub const CLIENT_DISCONNECTED: &str = "CLIENT_DISCONNECTED";
+/// What a deferral (`ClientEvent::PublishDeferred`) adds to the broker's reason when a facade keeps the publish.
+pub const DEFERRED_AND_KEPT: &str = "kept, and sent again after a wait or on the next registration";
+/// What it adds when the transport has no facade: nothing keeps the publish, so its caller must send it again.
+pub const DEFERRED_NOT_KEPT: &str =
+    "not kept: this transport has no outbox, so whoever published it must send it again";
 
 /// A new epoch for a client's numbering of what it publishes: random, so a client that starts again does not reuse
 /// the numbers of the one before (docs/architecture/cassini-client-reliability.md, section 4). Never zero, which the
@@ -480,9 +485,11 @@ pub enum TcpClientMessage {
     Deferred {
         id: MessageId,
     },
-    /// The facade's own: send the publish numbered `id` again, if the outbox still holds it.
+    /// The facade's own: send the publish numbered `id` again, if the outbox still holds it and `timer` is still the
+    /// one armed for it (a later deferral or a registration replaces or cancels it).
     Resend {
         id: MessageId,
+        timer: u64,
     },
     /// Tell the broker this client has the delivery numbered `delivery_id`, so it lets go of it
     /// (`ClientMessage::PublishResponseAck`).
@@ -956,19 +963,31 @@ impl TcpClientActor {
                 } else if let (Err(reason), Some(cassini_types::PublishRefusal::Unavailable)) =
                     (&result, refusal)
                 {
-                    // Not a refusal of this publish, but of now: it is kept and sent again. The agent's topic is not
-                    // taken as refused.
+                    // Not a refusal of this publish, but of now: a facade keeps it and sends it again, and the agent's
+                    // topic is not taken as refused. A bare transport keeps nothing: its caller is told so.
                     info!("The broker could not take a publish on {topic} now: {reason}");
-                    if let (Some(answers), Some(id)) = (answers, origin)
-                        && let Err(e) = answers.send_message(TcpClientMessage::Deferred { id })
-                    {
-                        warn!("the deferral of a publish on {topic} could not be passed on: {e}");
-                    }
+                    let kept = match (answers, origin) {
+                        (Some(answers), Some(id)) => {
+                            if let Err(e) = answers.send_message(TcpClientMessage::Deferred { id })
+                            {
+                                warn!(
+                                    "the deferral of a publish on {topic} could not be passed on: {e}"
+                                );
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
+                    let after = if kept {
+                        DEFERRED_AND_KEPT
+                    } else {
+                        DEFERRED_NOT_KEPT
+                    };
                     TcpClientActor::dispatch_event(
                         delivery,
                         ClientEvent::PublishDeferred {
                             topic: topic.clone(),
-                            reason: reason.clone(),
+                            reason: format!("{reason}: {after}"),
                         },
                     );
                 } else if let Err(reason) = result {
@@ -2112,6 +2131,48 @@ mod process_client_message_tests {
             refused, 1,
             "only the denied one is told to the agent as refused"
         );
+    }
+
+    /// What a deferral says is true for whoever has the transport: through a facade the publish is kept and sent again;
+    /// a bare transport keeps nothing, so its caller is told it must send it again (second review, finding D).
+    #[tokio::test]
+    async fn a_deferral_says_who_sends_the_publish_again() {
+        let deferred = |answers: bool| async move {
+            let (myself, _) = spawn_fake_tcp_client().await;
+            let (facade, _) = spawn_fake_tcp_client().await;
+            let (delivery, captured) = broadcast_delivery().await;
+            TcpClientActor::process_client_message(
+                myself,
+                &delivery,
+                answers.then_some(&facade),
+                ClientMessage::PublishResponse {
+                    topic: "news".to_string(),
+                    payload: Vec::new().into(),
+                    result: Err("Broker is shutting down".to_string()),
+                    trace_ctx: None,
+                    published_by: None,
+                    origin: Some(MessageId { epoch: 5, seq: 1 }),
+                    delivery_id: None,
+                    refusal: Some(cassini_types::PublishRefusal::Unavailable),
+                },
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let events = captured.lock().unwrap().clone();
+            events
+                .into_iter()
+                .find_map(|e| match e {
+                    ClientEvent::PublishDeferred { reason, .. } => Some(reason),
+                    _ => None,
+                })
+                .expect("a deferral is told")
+        };
+        let kept = deferred(true).await;
+        assert!(kept.starts_with("Broker is shutting down"), "{kept}");
+        assert!(kept.contains(DEFERRED_AND_KEPT), "{kept}");
+        let bare = deferred(false).await;
+        assert!(bare.starts_with("Broker is shutting down"), "{bare}");
+        assert!(bare.contains(DEFERRED_NOT_KEPT), "{bare}");
+        assert!(!bare.contains(DEFERRED_AND_KEPT), "{bare}");
     }
 
     /// The events the client dispatches for one message from the broker.
