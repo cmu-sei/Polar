@@ -170,6 +170,22 @@ Decided where the design was silent (by the agent that built it, by the preceden
     `JiraIssue`, and jira-processor declares the six labels with fixed names it writes. The `JiraIssue_<field>` labels
     it makes from custom fields carry Jira's names and are not declared.
 
+## Seen on a cluster (u7c, sandbox-local, 2026-10-30)
+
+Against a fake Jira Data Center in its own namespace (120 issues two hours apart, their `updated` alternating `+0000`
+and `-0400`; it logged each JQL and honoured `updated >= -Nm`):
+
+- The render's two passes over the scaffolds ran against the in-cluster registry; soft-state-observer started on the
+  writers node and loaded its floor (`workloads=2 readers=1`).
+- First start, empty graph: jira-observer asked, was told the graph has no issue, and pulled all 120 in three pages, each
+  `ORDER BY updated ASC`. jira-processor wrote 120 `JiraIssue` with `updated_ms`; the newest was the fake's newest
+  instant (`19:22:07-0400` = `23:22:07Z`), so the offsets were read as instants.
+- After its own rejuvenation 42 minutes later: "the graph's newest issue was updated at 1793402527000 ms; the first pull
+  starts there", and Jira was asked `updated >= -47m ORDER BY updated ASC` (41.9 minutes plus the 300 s overlap, rounded
+  up): one issue, not 120.
+- While the fake answered `/field` without the fields a real Jira sends, the observer stayed up and retried (30 s
+  doubling), as `jira.md` describes; jira-observer exits only on a configuration refusal (the placeholder `JIRA_URL`).
+
 ## Gaps kept open
 
 - Neo4j has one superuser for every agent (`infra/config/capabilities.nuon:77-97`); "reader only" is the code's
