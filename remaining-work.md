@@ -588,6 +588,12 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   `.unwrap()` of `config.submit(..)` (`credentials-agent/consume/src/authority_judge.rs:822`); the binary took 50 s
   where it takes 5 s alone, and the test passed 3 of 3 alone on the same commit. The submit's error was not captured;
   find which wait in the ConfigurationActor's submit path gives up under load before changing anything.
+- [ ] MULTI-INSTANCE WORKLOADS (asked by Blitz 2026-10-31; analysis in `docs/architecture/authority-model.md`, open
+  question 11; NOT DECIDED). Blitz's build jobs publish provenance from each run, and per-build ServiceAccounts get no
+  topics while a shared one supersedes. Recommended instead of their family of identities: one exact workload marked
+  multi-instance in the catalog, supersession keyed by `(identity, instance_binding)` for it alone, the instance in the
+  certificate and beside `published_by`. Touches the broker's sessions and the credentials agent's ledger: after the
+  backpressure merge. A reply to Blitz was drafted for the maintainer.
 - [ ] THE BROKER AS A USER OF SOFT STATE (agreed with the maintainer 2026-10-30). The broker's runtime budget
   controller (cassini-backpressure.md, "Runtime budget") exposes a typed snapshot and accepts a warm-start value
   (built in backpressure round 4). Next, after the StateActor and pulled health exist: the snapshot goes into the graph

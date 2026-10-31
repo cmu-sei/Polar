@@ -661,6 +661,35 @@ To settle one at a time, before building:
     audited"); the three that proved nothing were removed; every request is also judged by Cedar, built with the model
     ("Decisions", 2026-10-22). All settled.
 
+11. **Workloads that run as many concurrent instances (open, 2026-10-31).** Asked by Blitz, a fork building on `1b82f624`:
+    build-orchestrator runs each build as a Job in `build-jobs`, and each build's pipeline publishes
+    `polar.provenance.events` to Cassini itself (a plain `cassini-client` daemon in the job), so that the event is made
+    where the work happened. With a ServiceAccount per build (`build-<uuid>`), the model has no entry for the identity, so
+    the certificate carries no `p:` names and the broker refuses the publish
+    (`a_workload_the_model_does_not_have_this_agent_issue_carries_no_topics_or_groups`, `credentials-agent/consume/src/issuance.rs`);
+    with one shared identity, two concurrent builds supersede each other, at the broker (`cassini/broker/src/session.rs`,
+    `supersede_older`) and at the credentials agent ("a reissue for the same identity supersedes", `credentials-agent-architecture.md`).
+    Their proposal: a model entry for a family of identities (a namespace and a ServiceAccount-name prefix), an exact
+    workload winning over a family.
+
+    *Analysis (2026-10-31, for the maintainer's decision):* the family would put a pattern on identities into every place
+    that decides which workload an identity is (`workload_of`, `Model::parse` and `workload`, the issuance lookup, the
+    judge's map, the builder's `own_name`, and Cedar, whose `Identity` is exact), against the decision that an identity
+    maps to its agent mechanically (`policy-enforcement.md`, 2026-10-21), and it makes the orchestrator create a
+    ServiceAccount per build. What must be distinct per build is the INSTANCE, which Polar already models: the issuer takes
+    the pod UID from the bound token as `instance_binding` (`instance_binding_claim`, `cert-issuer/server/src/config.rs:93`),
+    the ledger keys renewal on `(identity, instance_binding, type)`, and supersession ignores it on purpose because every
+    catalog agent is one instance at a time (a Deployment with `Recreate`). The counter-proposal: one exact workload
+    (`build-job`), in the catalog with its topics and groups; the catalog marks it multi-instance (a workload field, or a
+    property of the `run` kind); for such a workload only, the broker and the credentials agent key supersession by
+    `(identity, instance_binding)`; the certificate carries the instance and the broker stamps it beside `published_by`,
+    so a provenance event names the workload and the pod it ran in. Costs: "at most one non-revoked certificate per
+    identity" no longer holds for such a workload, so the certificate lookup is not offered for it; sessions of ended
+    pods wait out R instead of being superseded (pulled health and the Reaper see them unresponsive). Their questions,
+    under it: (1) neither a namespace prefix nor a ServiceAccount label; the token already names the pod; (2) implied
+    topics are the workload's, none per instance; (3) no way exists today: the `run` kind uses fixed catalog identities.
+    After the backpressure merge a refused publish reaches their client as a typed `Denied`, not a timeout. Not decided.
+
 ## Build order, tests first
 
 *Proposed 2026-10-22, to be cleared before it starts.* Slices in order, each committed when its tests pass, each test
