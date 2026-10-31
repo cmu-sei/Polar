@@ -218,6 +218,8 @@ let makeCertIssuer
                     , setting "TLS_CA_CERT" C.certPaths.ca
                     , setting "BROKER_ADDR" C.cassiniAddr
                     , setting "CASSINI_SERVER_NAME" C.cassiniServerName
+                    -- What it requires of the deployment, and so what it is told the deployment provides.
+                    , setting "POLAR_CAPABILITIES" "cassini"
                     , setting "RUST_LOG" "info,cert_issuer=debug"
                     , setting "KUBERNETES_CA_CERT" "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
                     ]

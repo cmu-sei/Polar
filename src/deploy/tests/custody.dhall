@@ -99,6 +99,7 @@ let offWorkloadEnv =
             , "CASSINI_SERVER_NAME"
             ]
           # healthNames
+          # [ "POLAR_CAPABILITIES" ]
 
 -- ── The daemon: a native sidecar before polar-init, the key is its, and the pod says where to sign ────────
 let on = Builder.makePolarAgent withCustody agent
@@ -135,6 +136,7 @@ let onWorkloadEnv =
             , "POLAR_CUSTODY_SOCKET"
             ]
           # healthNames
+          # [ "POLAR_CAPABILITIES" ]
 
 -- The sidecar is told its socket, the CA it judges certificates by, who it serves, and where the broker is.
 let sidecarEnv =
@@ -185,7 +187,27 @@ let serverArgs =
 let serverEnv =
       assert :
           names server.spec.pod.env
-        ≡ [ "POLAR_CUSTODY_SOCKET", "POLAR_HEALTH_FILE", "POLAR_HEALTH_CERTS" ]
+        ≡ [ "POLAR_CUSTODY_SOCKET", "POLAR_HEALTH_FILE", "POLAR_HEALTH_CERTS", "POLAR_CAPABILITIES" ]
+
+-- The deployment says what it provides, as the agent's builder wants it: the capabilities, comma-joined, last of the
+-- workload's variables.
+let capabilitiesAreProvided =
+      assert :
+          Prelude.Optional.concat
+            Text
+            ( Prelude.Optional.map
+                kubernetes.EnvVar.Type
+                (Optional Text)
+                (λ(e : kubernetes.EnvVar.Type) → e.value)
+                ( Prelude.List.last
+                    kubernetes.EnvVar.Type
+                    ( Builder.makePolarAgent
+                        withCustody
+                        (agent // { provides = [ "cassini", "graph-write" ] })
+                      ).spec.pod.env
+                )
+            )
+        ≡ Some "cassini,graph-write"
 
 -- An agent that cannot use the daemon says so, and is as it was.
 let optedOut = Builder.makePolarAgent withCustody (agent // { custody = False })

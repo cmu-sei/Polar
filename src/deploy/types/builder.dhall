@@ -291,6 +291,14 @@ let tlsEnv
           , envValue "CASSINI_SERVER_NAME" platform.cassiniServerName
           ]
 
+--| What the deployment provides, which the agent's builder compares with what its code requires and exits
+--| non-zero on a mismatch (the fork's catalog derives it from `needs`; here it is `provides`). Always set: an
+--| agent that requires nothing is told it is given nothing.
+let capabilitiesEnv
+    : BuilderAgent.Type → List kubernetes.EnvVar.Type
+    = λ(agent : BuilderAgent.Type) →
+        [ envValue "POLAR_CAPABILITIES" (Prelude.Text.concatSep "," agent.provides) ]
+
 --| What the agent's health actor watches: its own certificate, and the broker's while the agent
 --| depends on it.
 let healthEnv
@@ -318,6 +326,7 @@ let clientEnv
           )
         # custodySocketEnv platform agent
         # healthEnv platform agent
+        # capabilitiesEnv agent
 
 --| The CA polar-init verifies what it is issued against, when the platform pins one.
 let pinnedCaEnv
