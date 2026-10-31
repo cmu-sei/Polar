@@ -187,8 +187,20 @@ export def system_of [arch: string] {
 
 # Where a published image lives: `<from>/polar-<image>:<tag>-<arch>`. Public registries such as Docker Hub give an account one
 # level of names, so the image name carries the `polar-` prefix and the architecture is in the tag. `import` and `publish` agree on this.
-export def published_ref [from: string, row: record, arch: string] {
-    $"($from | str trim --right --char '/')/polar-($row.image):($row.tag)-(arch_of $arch)"
+export def published_ref [from: string, row: record, arch: string, tag: string = ""] {
+    let t = if ($tag | is-empty) { $row.tag } else { $tag }
+    $"($from | str trim --right --char '/')/polar-($row.image):($t)-(arch_of $arch)"
+}
+
+# The tags a publish writes for an image: the table's, then each one also asked for (a release's version beside `latest`), each
+# once. A tag must be one an OCI registry takes before the architecture is added: letters, digits, `_`, `.` and `-`, not first.
+export def publish_tags [row: record, also: list<string>] {
+    for t in $also {
+        if ($t | find --regex '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,119}$' | is-empty) {
+            error make --unspanned { msg: $"not a tag an image can be published under: '($t)'" }
+        }
+    }
+    [$row.tag] ++ $also | uniq
 }
 
 # The rows `import` copies: those `publish` handles, and the images built elsewhere (Neo4j, published from its own repository as
@@ -544,6 +556,7 @@ def "main import" [
     --src-insecure               # the source serves plain HTTP or a certificate that is not trusted
     --skip-mirrors
     --target: string = ""   # use this target's registry (infra/targets/<target>), as up.nu does
+    --tag: string = ""      # read the images published under this tag (a release's version) instead of the table's
 ] {
     use_target $target
     if ($from | is-empty) { error make --unspanned { msg: "say where the images are published: --from docker.io/<account>" } }
@@ -556,7 +569,7 @@ def "main import" [
     mut failures = []
     for it in ($rows | enumerate) {
         let row = $it.item
-        let ref = (published_ref $from $row $want)
+        let ref = (published_ref $from $row $want $tag)
         print $"  [($it.index + 1)/($rows | length)] ($ref)"
         let r = (do { ^skopeo ...(tmpdir_flags) copy --retry-times 3 --format v2s2 ...$auth --dest-tls-verify=false $"docker://($ref)" $"docker://(registry)/(dest $row)" } | complete)
         if $r.exit_code != 0 {
@@ -586,13 +599,15 @@ def "main import" [
 }
 
 # Builds the images for an architecture (cross-built with Nix when it is not this machine's) and pushes each to
-# `<to>/polar-<image>:<tag>-<arch>`, which `import` reads. The account's login comes from --authfile (a skopeo/docker auth file)
+# `<to>/polar-<image>:<tag>-<arch>`, which `import` reads, and under each `--also-tag` as well (a release publishes its version
+# beside latest; `import --tag <version>` reads it). The account's login comes from --authfile (a skopeo/docker auth file)
 # or skopeo's usual places; it is never printed.
 def "main publish" [
     ...names: string             # only these images (default: every image this repository builds)
     --to: string                 # e.g. docker.io/<account>
     --arch: string = ""          # amd64 or arm64 (default: this machine's)
     --authfile: string = ""
+    --also-tag: list<string> = []  # publish under these tags too (a release's version beside latest), the same image each time
 ] {
     if ($to | is-empty) { error make --unspanned { msg: "say where to publish: --to docker.io/<account>" } }
     let want = if ($arch | is-empty) { arch } else { arch_of $arch }
@@ -602,14 +617,16 @@ def "main publish" [
     mut failures = []
     for it in ($rows | enumerate) {
         let row = $it.item
-        let ref = (published_ref $to $row $want)
-        print $"  [($it.index + 1)/($rows | length)] ($row.image) -> ($ref)"
+        let refs = (publish_tags $row $also_tag | each {|t| published_ref $to $row $want $t })
+        print $"  [($it.index + 1)/($rows | length)] ($row.image) -> ($refs | str join ', ')"
         let err = (try {
             # What this repository builds goes up from the archive it built; a mirror goes up as its upstream's image for the architecture.
             let source = if $row.kind == "mirror" { $"docker://($row.upstream)" } else { $"docker-archive:(archive $row $system)" }
             let platform = if $row.kind == "mirror" { ["--override-os" "linux" "--override-arch" $want] } else { [] }
-            let r = (do { ^skopeo ...(tmpdir_flags) copy --retry-times 3 --format v2s2 ...$platform ...$auth $source $"docker://($ref)" } | complete)
-            if $r.exit_code != 0 { error make --unspanned { msg: ($r.stderr | lines | last 1 | str join "") } }
+            for ref in $refs {
+                let r = (do { ^skopeo ...(tmpdir_flags) copy --retry-times 3 --format v2s2 ...$platform ...$auth $source $"docker://($ref)" } | complete)
+                if $r.exit_code != 0 { error make --unspanned { msg: ($r.stderr | lines | last 1 | str join "") } }
+            }
             null
         } catch {|e| $e.msg })
         if $err != null {

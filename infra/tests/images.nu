@@ -24,7 +24,7 @@
 # How images are named when they are published and imported, and which ones.
 
 use std/assert
-use ../images.nu [arch_of, external_source, import_rows, node_containers_of, unprepared, ours, published_ref, published_rows, split_ref, system_of]
+use ../images.nu [arch_of, external_source, import_rows, node_containers_of, unprepared, ours, publish_tags, published_ref, published_rows, split_ref, system_of]
 
 def sample [] {
     [
@@ -90,6 +90,25 @@ def main [] {
                 let row = { image: "cassini", tag: "latest", kind: "nix" }
                 assert equal (published_ref "docker.io/acme" $row "arm64") "docker.io/acme/polar-cassini:latest-arm64"
                 assert equal (published_ref "docker.io/acme/" $row "x86_64") "docker.io/acme/polar-cassini:latest-amd64"
+            }
+        }
+        {
+            name: "a tag given replaces the table's in the published name, so a release can be published beside latest"
+            body: {
+                let row = { image: "cassini", tag: "latest", kind: "nix" }
+                assert equal (published_ref "docker.io/acme" $row "arm64" "2.0.0") "docker.io/acme/polar-cassini:2.0.0-arm64"
+                assert equal (published_ref "docker.io/acme" $row "amd64" "") "docker.io/acme/polar-cassini:latest-amd64"
+            }
+        }
+        {
+            name: "a publish writes the table's tag, then each tag also asked for, each once; a tag that is not a tag is an error"
+            body: {
+                let row = { image: "cassini", tag: "latest", kind: "nix" }
+                assert equal (publish_tags $row []) ["latest"]
+                assert equal (publish_tags $row ["2.0.0"]) ["latest" "2.0.0"]
+                assert equal (publish_tags $row ["2.0.0" "latest" "2.0.0"]) ["latest" "2.0.0"]
+                assert ((try { publish_tags $row ["2.0.0/x"]; false } catch { true }))
+                assert ((try { publish_tags $row [""]; false } catch { true }))
             }
         }
         {
