@@ -70,10 +70,9 @@ use crate::environment;
 use crate::graph_schema::{GraphDecl, GraphEntry};
 use crate::runtime::RuntimeSection;
 use crate::startup::{self, Startup};
-use crate::topics::{Facts, FamilyDecl, Over, TopicDecl, TopicEntry, TopicSet};
+use crate::topics::{Facts, FamilyDecl, TopicDecl, TopicEntry, TopicSet};
 use polar_env::{DocValue, Document, DocumentError, Env, FileEnv, ProcessEnv, Section, Source};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -307,8 +306,7 @@ pub struct AgentDocument {
     /// certificate carries them as `g:` names.
     #[serde(default)]
     pub groups: Vec<String>,
-    /// The agent's topic families, unexpanded: what `POLAR_SERVED_WORKLOADS` (or the variable a family names in
-    /// `over`) expands.
+    /// The agent's topic families, unexpanded: what `POLAR_SERVED_WORKLOADS` expands.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub topic_families: Vec<FamilyDocument>,
     /// The graph labels the agent owns and reads ([`PolarAgent::GRAPH`]), each (label, access) once. Written only
@@ -438,43 +436,27 @@ pub fn topic_set<A: PolarAgent>() -> TopicSet {
     topic_set_serving::<A>(&[])
 }
 
-/// As [`topic_set`], with every one of `A`'s families expanded for each of `workloads`.
+/// As [`topic_set`], with `A`'s families expanded for each of `workloads`.
 pub fn topic_set_serving<A: PolarAgent>(workloads: &[String]) -> TopicSet {
     TopicSet::compute_with(&topic_facts::<A>(), A::TOPICS, A::TOPIC_FAMILIES, workloads)
 }
 
-/// As [`topic_set`], with each of `A`'s families expanded for the workloads `served` gives its [`Over`].
-pub fn topic_set_over<A: PolarAgent>(served: &BTreeMap<Over, Vec<String>>) -> TopicSet {
-    TopicSet::compute_over(&topic_facts::<A>(), A::TOPICS, A::TOPIC_FAMILIES, served)
-}
-
-/// The sets `A`'s families are expanded over, each once, in order.
-fn overs_of<A: PolarAgent>() -> Vec<Over> {
-    let mut overs: Vec<Over> = A::TOPIC_FAMILIES.iter().map(|f| f.over).collect();
-    overs.sort();
-    overs.dedup();
-    overs
-}
-
-/// The workloads of each set `A`'s families are expanded over, from its configuration; none for an agent that
-/// declares no family.
-fn served_by<A: PolarAgent>(
-    config: &polar_env::Config,
-) -> Result<BTreeMap<Over, Vec<String>>, String> {
-    let mut served = BTreeMap::new();
-    for over in overs_of::<A>() {
-        let text = config.read(over.variable()).map_err(|e| e.to_string())?;
-        served.insert(over, crate::topics::served_workloads(&text));
+/// The workloads `A` serves, from its configuration; none for an agent that declares no family.
+fn served_by<A: PolarAgent>(config: &polar_env::Config) -> Result<Vec<String>, String> {
+    if A::TOPIC_FAMILIES.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(served)
+    let text = config
+        .read(&crate::topics::SERVED_WORKLOADS)
+        .map_err(|e| e.to_string())?;
+    Ok(crate::topics::served_workloads(&text))
 }
 
-/// The variables `A` reads itself, and the builder's for its topic families when it declares any: one section for
-/// each set they are expanded over.
+/// The variables `A` reads itself, and the builder's for its topic families when it declares any.
 fn own_sections<A: PolarAgent>() -> Vec<&'static Section> {
     let mut sections: Vec<&'static Section> = A::SECTIONS.to_vec();
-    for over in overs_of::<A>() {
-        sections.push(over.section());
+    if !A::TOPIC_FAMILIES.is_empty() {
+        sections.push(&crate::topics::FAMILY_SECTION);
     }
     sections
 }
@@ -569,7 +551,7 @@ pub fn scaffold_document<A: PolarAgent>() -> AgentDocument {
                 pattern: f.pattern.to_string(),
                 access: f.access,
                 purpose: f.purpose.to_string(),
-                over: f.over.variable().name().to_string(),
+                over: crate::topics::SERVED_WORKLOADS.name().to_string(),
             })
             .collect(),
         graph: crate::graph_schema::graph_set(A::GRAPH),
@@ -672,13 +654,11 @@ pub fn scaffold_json<A: PolarAgent>(
     if config.is_none() && !A::TOPIC_FAMILIES.is_empty() {
         // Asked with no document, a family is expanded for the workloads the environment names, which is how
         // the render asks it, with the list it writes into the agent's document.
-        let mut builder = polar_env::Config::builder(&process);
-        for over in overs_of::<A>() {
-            builder = builder.register(over.section());
-        }
-        let env = builder.build();
+        let env = polar_env::Config::builder(&process)
+            .register(&crate::topics::FAMILY_SECTION)
+            .build();
         if let Ok(served) = served_by::<A>(&env) {
-            document.topics = topic_set_over::<A>(&served).entries();
+            document.topics = topic_set_serving::<A>(&served).entries();
         }
     }
     if let Some(path) = config {
@@ -692,7 +672,7 @@ pub fn scaffold_json<A: PolarAgent>(
         let filled = builder.build();
         let report = filled.report();
         if let Ok(served) = served_by::<A>(&filled) {
-            document.topics = topic_set_over::<A>(&served).entries();
+            document.topics = topic_set_serving::<A>(&served).entries();
         }
 
         let written: std::collections::HashMap<&str, &DocValue> = loaded
@@ -1064,7 +1044,7 @@ fn start<A: PolarAgent>(process: impl Env + 'static) -> u8 {
     };
     startup.health.expects_cassini = A::DEPENDS_ON_CASSINI;
     let configured = Configured {
-        topics: Arc::new(topic_set_over::<A>(&served)),
+        topics: Arc::new(topic_set_serving::<A>(&served)),
         startup,
         optional_off: A::OPTIONAL
             .iter()
@@ -1232,7 +1212,7 @@ mod tests {
             &[
                 FamilyDecl::publish("answers.{workload}", "each reader's answers")
                     .because(&[crate::topics::Cause::Topic("questions")])
-                    .over(Over::StateReaders),
+                    .waiting("a workload hears its answers only if it reads state"),
             ];
         const GRAPH: &'static [GraphDecl] = &[
             GraphDecl::reads("Thing", "where it left off"),
@@ -1630,42 +1610,34 @@ mod tests {
     }
 
     #[test]
-    fn a_family_over_the_readers_is_expanded_from_its_own_variable_and_no_other() {
-        let doc = scaffold_document::<Reading>();
-        assert_eq!(doc.topic_families[0].over, "POLAR_STATE_READERS");
-        let variables: Vec<String> = doc
-            .document
-            .sections
-            .iter()
-            .flat_map(|s| s.variables.iter().map(|v| v.name.clone()))
-            .collect();
-        assert!(variables.contains(&"POLAR_STATE_READERS".to_string()));
-        assert!(!variables.contains(&"POLAR_SERVED_WORKLOADS".to_string()));
-        // The capability brings the graph's variables, as graph-write's does.
-        assert!(variables.contains(&"GRAPH_ENDPOINT".to_string()));
-        let env = |name: &str| match name {
-            "POLAR_STATE_READERS" => Some("jira-observer".to_string()),
-            "POLAR_SERVED_WORKLOADS" => Some("kube-observer,jira-observer".to_string()),
-            _ => None,
+    fn a_family_that_waits_says_why_on_each_topic_it_expands_into() {
+        let env = |name: &str| {
+            (name == "POLAR_SERVED_WORKLOADS").then(|| "jira-observer,kube-observer".to_string())
         };
         let doc: AgentDocument =
             serde_json::from_str(&scaffold_json::<Reading>(None, env).unwrap()).unwrap();
-        let expanded: Vec<String> = doc
+        let expanded: Vec<(String, Option<String>)> = doc
             .topics
             .iter()
-            .filter(|t| matches!(t.origin, crate::topics::Origin::Family { .. }))
-            .map(|t| t.name.clone())
+            .filter_map(|t| match &t.origin {
+                crate::topics::Origin::Family { waits, .. } => {
+                    Some((t.name.clone(), waits.clone()))
+                }
+                _ => None,
+            })
             .collect();
-        assert_eq!(expanded, ["answers.jira-observer"]);
-        // The scheduler's family is not expanded over the readers.
-        let env = |name: &str| (name == "POLAR_STATE_READERS").then(|| "a-agent".to_string());
-        let doc: AgentDocument =
-            serde_json::from_str(&scaffold_json::<Scheduling>(None, env).unwrap()).unwrap();
-        assert!(
-            doc.topics
-                .iter()
-                .all(|t| !matches!(t.origin, crate::topics::Origin::Family { .. }))
+        let why = Some("a workload hears its answers only if it reads state".to_string());
+        assert_eq!(
+            expanded,
+            [
+                ("answers.jira-observer".to_string(), why.clone()),
+                ("answers.kube-observer".to_string(), why)
+            ]
         );
+        // The scheduler's family says nothing of waiting, so its scaffold is as it was.
+        let env = |name: &str| (name == "POLAR_SERVED_WORKLOADS").then(|| "a-agent".to_string());
+        let json = scaffold_json::<Scheduling>(None, env).unwrap();
+        assert!(!json.contains("\"waits\""), "{json}");
     }
 
     #[test]

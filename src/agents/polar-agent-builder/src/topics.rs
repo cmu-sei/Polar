@@ -209,39 +209,9 @@ pub struct FamilyDecl {
     pub causes: &'static [Cause],
     /// For a publish nothing causes, why the agent publishes it of its own accord.
     pub unprompted: Option<&'static str>,
-    /// Which workloads it is expanded for: those the agent serves, unless it says otherwise ([`over`](Self::over)).
-    pub over: Over,
-}
-
-/// The workloads a family is expanded for, each named by the variable the render writes them into.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Over {
-    /// The workloads the agent serves ([`SERVED_WORKLOADS`]): every agent of the catalog that reads a document.
-    Served,
-    /// The workloads that read state through the state agent ([`crate::graph_schema::STATE_READERS`]): those whose
-    /// scaffolds declare a graph read (docs/architecture/soft-state.md).
-    StateReaders,
-}
-
-impl Over {
-    /// Every set a family can be expanded over.
-    pub const ALL: [Over; 2] = [Over::Served, Over::StateReaders];
-
-    /// The variable the render writes the workloads into.
-    pub fn variable(self) -> &'static Defaulted<String> {
-        match self {
-            Over::Served => &SERVED_WORKLOADS,
-            Over::StateReaders => &crate::graph_schema::STATE_READERS,
-        }
-    }
-
-    /// The builder's section that holds the variable.
-    pub fn section(self) -> &'static Section {
-        match self {
-            Over::Served => &FAMILY_SECTION,
-            Over::StateReaders => &crate::graph_schema::READERS_SECTION,
-        }
-    }
+    /// Why a topic of the family may have nothing in the catalog on its other side (the state agent's replies to a
+    /// workload that never asks), printed on each topic it expands into, as a declared topic's `waits` is.
+    pub waits: Option<&'static str>,
 }
 
 impl FamilyDecl {
@@ -252,7 +222,7 @@ impl FamilyDecl {
             purpose,
             causes: &[],
             unprompted: None,
-            over: Over::Served,
+            waits: None,
         }
     }
 
@@ -263,13 +233,16 @@ impl FamilyDecl {
             purpose,
             causes: &[],
             unprompted: None,
-            over: Over::Served,
+            waits: None,
         }
     }
 
-    /// The same family, expanded for the workloads of `over` instead of those the agent serves.
-    pub const fn over(self, over: Over) -> Self {
-        Self { over, ..self }
+    /// The same family, saying why one of its topics may have nothing in the catalog on its other side.
+    pub const fn waiting(self, reason: &'static str) -> Self {
+        Self {
+            waits: Some(reason),
+            ..self
+        }
     }
 
     /// The same family, saying what causes the agent to publish on it.
@@ -575,6 +548,9 @@ pub enum Origin {
         pattern: String,
         workload: String,
         purpose: String,
+        /// Why nothing in the catalog may be on its other side, when the family says.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        waits: Option<String>,
     },
     /// A rule implied it.
     Implied { rule: Rule, why: String },
@@ -612,28 +588,13 @@ impl TopicSet {
         Self::compute_with(facts, declared, &[], &[])
     }
 
-    /// As [`compute`](Self::compute), with every one of the agent's families expanded for each of `workloads`.
+    /// As [`compute`](Self::compute), with the agent's families expanded for each of `workloads`. A family
+    /// topic that is also declared is declared, and one that is implied is implied.
     pub fn compute_with(
         facts: &Facts,
         declared: &[TopicDecl],
         families: &[FamilyDecl],
         workloads: &[String],
-    ) -> Self {
-        let every: BTreeMap<Over, Vec<String>> = Over::ALL
-            .into_iter()
-            .map(|over| (over, workloads.to_vec()))
-            .collect();
-        Self::compute_over(facts, declared, families, &every)
-    }
-
-    /// As [`compute`](Self::compute), with each of the agent's families expanded for the workloads `served` gives
-    /// its [`Over`] (none, for one it does not give). A family topic that is also declared is declared, and one that
-    /// is implied is implied.
-    pub fn compute_over(
-        facts: &Facts,
-        declared: &[TopicDecl],
-        families: &[FamilyDecl],
-        served: &BTreeMap<Over, Vec<String>>,
     ) -> Self {
         let mut entries = BTreeMap::new();
         let mut causes = BTreeMap::new();
@@ -648,7 +609,7 @@ impl TopicSet {
             }
         }
         for family in families {
-            for workload in served.get(&family.over).into_iter().flatten() {
+            for workload in workloads {
                 let key = (family.topic_for(workload), family.access);
                 if let std::collections::btree_map::Entry::Vacant(slot) = entries.entry(key.clone())
                 {
@@ -656,6 +617,7 @@ impl TopicSet {
                         pattern: family.pattern.to_string(),
                         workload: workload.clone(),
                         purpose: family.purpose.to_string(),
+                        waits: family.waits.map(str::to_string),
                     });
                     causes.insert(
                         key,
@@ -760,6 +722,9 @@ pub fn family_problems(families: &[FamilyDecl]) -> Vec<String> {
             problems.push(format!(
                 "{what} has no purpose: say what the agent uses it for"
             ));
+        }
+        if family.waits.is_some_and(|reason| reason.trim().is_empty()) {
+            problems.push(format!("{what} waits, but gives no reason"));
         }
         if !seen.insert((family.pattern, family.access)) {
             problems.push(format!("{what} is declared twice"));

@@ -33,13 +33,14 @@
 use crate::decision::{self, Judged};
 use crate::floor::{self, Floor};
 use crate::query;
+use crate::settings;
 use cassini_client::{OfflineBehavior, PublishRequest};
 use cassini_types::{ClientEvent, WireTraceCtx};
 use polar::cassini::{CassiniClient, TcpClient};
 use polar::graph::controller::{GraphController, GraphSignal};
 use polar_agent_builder::topic_gate::PolicySaid;
 use polar_agent_builder::{
-    AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
+    AgentBuilder, ConfigurationHandle, Configured, HealthClient, HealthHandle, InfrastructureEvent,
     InfrastructureSupervisorMessage, LookupError, PolicyLookup, Subscription,
     spawn_graph_controller, stop_graph_controller,
 };
@@ -55,8 +56,8 @@ use tracing::{debug, error, info, warn};
 /// What it holds is a read in flight at most, so this is the read's bound plus the handshake's margin.
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(20);
 
-/// The longest a read of the graph is waited for before the asker is told to try again.
-pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the graph controller is given to stop.
+const GRAPH_STOP: Duration = Duration::from_secs(10);
 
 pub enum StateSupervisorMessage {
     ClientEvent {
@@ -68,6 +69,10 @@ pub enum StateSupervisorMessage {
         published_by: Option<String>,
     },
     Graph(GraphSignal),
+    /// A runtime section was replaced.
+    RuntimeChanged {
+        section: String,
+    },
     PrepareShutdown,
 }
 
@@ -104,11 +109,13 @@ pub async fn ask_policy(
     }
 }
 
-/// The answer to `request` from `published_by`: decided, then read from `graph` if admitted.
+/// The answer to `request` from `published_by`: decided against the schema in force (`None` before a version has
+/// arrived), then read from `graph` within `timeout` if admitted.
 pub async fn answer(
-    floor: &Floor,
+    floor: Option<&Floor>,
     policy: &PolicyLookup,
     graph: &GraphController,
+    timeout: Duration,
     published_by: Option<&str>,
     request: &StateRequest,
 ) -> StateReply {
@@ -118,9 +125,7 @@ pub async fn answer(
         Err(_) => PolicySaid::NotRunning,
     };
     match decision::decide(floor, published_by, request, &said) {
-        Judged::Max { label, property } => {
-            query::read_max(graph, &label, &property, READ_TIMEOUT).await
-        }
+        Judged::Max { label, property } => query::read_max(graph, &label, &property, timeout).await,
         Judged::Refused(why) => StateReply::Refused(why),
         Judged::Unavailable(why) => StateReply::Unavailable(why),
     }
@@ -145,6 +150,17 @@ fn publish_reply(client: &TcpClient, topic: String, envelope: &Envelope<StateRep
     }
 }
 
+/// What the health actor is told about the graph: the state agent stays up, healthy, while the graph is down, and its
+/// health file says the graph is not connected (the state agent does not expect the graph, so the actor never makes
+/// it unhealthy for it). The closest the health actor has to `Degraded` with reason `Graph`, which health in the graph
+/// will name (remaining-work.md, "HEALTH IN THE GRAPH, PULLED").
+pub fn report_graph(health: &dyn HealthClient, signal: &GraphSignal) {
+    let _ = match signal {
+        GraphSignal::Available => health.graph_available(),
+        GraphSignal::OpFailed(_) => health.graph_disconnected(),
+    };
+}
+
 pub struct StateSupervisor;
 
 pub struct StateSupervisorState {
@@ -152,7 +168,10 @@ pub struct StateSupervisorState {
     healthcheck: HealthHandle,
     infrastructure: ActorRef<InfrastructureSupervisorMessage>,
     graph: Option<GraphController>,
-    floor: Arc<Floor>,
+    graph_timeout: Duration,
+    configuration: ConfigurationHandle,
+    /// The schema in force; `None` until a version has arrived.
+    floor: Option<Arc<Floor>>,
     policy: PolicyLookup,
     shutting_down: bool,
 }
@@ -170,20 +189,8 @@ impl Actor for StateSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         debug!("{myself:?} starting");
         // Judged with the rest of the configuration before the agent started, so it reads.
-        let text = configured
-            .config()
-            .read(&floor::FLOOR)
-            .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
-        let floor = Arc::new(Floor::parse(&text).map_err(ActorProcessingErr::from)?);
-        info!(
-            workloads = floor.workloads.len(),
-            readers = floor
-                .workloads
-                .iter()
-                .filter(|e| !e.reads.is_empty())
-                .count(),
-            "the floor is loaded"
-        );
+        let graph_timeout =
+            settings::graph_timeout(&**configured.config()).map_err(ActorProcessingErr::from)?;
 
         let deliver_to = myself.clone();
         let requests = Subscription::new(REQUESTS_TOPIC, move |incoming| {
@@ -207,6 +214,18 @@ impl Actor for StateSupervisor {
                     Some(StateSupervisorMessage::PrepareShutdown)
                 }
             });
+        resources
+            .configuration
+            .runtime_changes()
+            .subscribe(myself.clone(), |changed| {
+                Some(StateSupervisorMessage::RuntimeChanged {
+                    section: changed.section,
+                })
+            });
+        // A schema already held (the replay was quick) is read now.
+        myself.cast(StateSupervisorMessage::RuntimeChanged {
+            section: floor::SECTION_NAME.to_string(),
+        })?;
         let graph = spawn_graph_controller(
             &myself,
             format!("{OBSERVER_NAME}.graph_controller"),
@@ -220,7 +239,9 @@ impl Actor for StateSupervisor {
             healthcheck: resources.healthcheck,
             infrastructure: resources.infrastructure,
             graph: Some(graph),
-            floor,
+            graph_timeout,
+            configuration: resources.configuration,
+            floor: None,
             policy: PolicyLookup::for_service(OBSERVER_NAME),
             shutting_down: false,
         })
@@ -243,11 +264,43 @@ impl Actor for StateSupervisor {
                 }
                 _ => (),
             },
-            // The graph is not the agent's health: a read that fails is answered as unavailable.
-            StateSupervisorMessage::Graph(signal) => match signal {
-                GraphSignal::Available => debug!("the graph answers"),
-                GraphSignal::OpFailed(reason) => debug!("the graph did not answer: {reason}"),
-            },
+            // The graph does not end the agent: a read that fails is answered as unavailable.
+            StateSupervisorMessage::Graph(signal) => {
+                if let GraphSignal::OpFailed(reason) = &signal {
+                    debug!("the graph did not answer: {reason}");
+                }
+                report_graph(&state.healthcheck, &signal);
+            }
+            StateSupervisorMessage::RuntimeChanged { section } => {
+                if section == floor::SECTION_NAME {
+                    match state.configuration.runtime(floor::SECTION_NAME).await {
+                        Ok(Some(value)) => match Floor::from_body(&value.body) {
+                            Ok(schema) => {
+                                info!(
+                                    version = value.version,
+                                    workloads = schema.workloads.len(),
+                                    readers = schema
+                                        .workloads
+                                        .iter()
+                                        .filter(|e| !e.reads.is_empty())
+                                        .count(),
+                                    "the schema is loaded"
+                                );
+                                state.floor = Some(Arc::new(schema));
+                            }
+                            // The configuration actor judged it with the same function, so this is a disagreement
+                            // between the two, not an author's mistake; the schema in force stays.
+                            Err(problems) => error!(
+                                version = value.version,
+                                "the schema does not read, so the earlier one stays: {}",
+                                problems.join("; ")
+                            ),
+                        },
+                        Ok(None) => {}
+                        Err(e) => warn!("could not read the schema: {e}"),
+                    }
+                }
+            }
             StateSupervisorMessage::Request {
                 payload,
                 published_by,
@@ -276,13 +329,15 @@ impl Actor for StateSupervisor {
                     return Ok(());
                 };
                 let floor = state.floor.clone();
+                let timeout = state.graph_timeout;
                 let policy = state.policy.clone();
                 let client = state.tcp_client.clone();
                 tokio::spawn(async move {
                     let reply = answer(
-                        &floor,
+                        floor.as_deref(),
                         &policy,
                         &graph,
+                        timeout,
                         published_by.as_deref(),
                         &envelope.payload,
                     )
@@ -315,7 +370,7 @@ impl Actor for StateSupervisor {
                 info!("PrepareShutdown received, stopping the graph controller");
                 state.shutting_down = true;
                 if let Some(graph) = state.graph.take() {
-                    stop_graph_controller(graph, READ_TIMEOUT).await;
+                    stop_graph_controller(graph, GRAPH_STOP).await;
                 }
                 let _ = state
                     .infrastructure
@@ -393,7 +448,6 @@ mod tests {
 
     fn floor() -> Floor {
         Floor {
-            format: 1,
             workloads: vec![Entry {
                 workload: "jira-observer".into(),
                 identity: id("jira-observer"),
@@ -402,6 +456,8 @@ mod tests {
             }],
         }
     }
+
+    const T: Duration = Duration::from_secs(5);
 
     fn max(label: &str) -> StateRequest {
         StateRequest::Max {
@@ -417,18 +473,95 @@ mod tests {
         let policy = PolicyLookup::named("no-such-policy-actor");
         let asker = id("jira-observer");
         assert_eq!(
-            answer(&floor(), &policy, &graph, Some(&asker), &max("JiraIssue")).await,
+            answer(
+                Some(&floor()),
+                &policy,
+                &graph,
+                T,
+                Some(&asker),
+                &max("JiraIssue")
+            )
+            .await,
             StateReply::Unavailable("the graph could not be read".to_string())
         );
         assert!(matches!(
-            answer(&floor(), &policy, &graph, Some(&asker), &max("JiraUser")).await,
+            answer(
+                Some(&floor()),
+                &policy,
+                &graph,
+                T,
+                Some(&asker),
+                &max("JiraUser")
+            )
+            .await,
             StateReply::Refused(_)
         ));
         assert!(matches!(
-            answer(&floor(), &policy, &graph, None, &max("JiraIssue")).await,
+            answer(Some(&floor()), &policy, &graph, T, None, &max("JiraIssue")).await,
             StateReply::Refused(ref why) if why.contains("no verified asker")
         ));
+        // Before a schema has arrived, nothing is decided: ask again.
+        assert!(matches!(
+            answer(None, &policy, &graph, T, Some(&asker), &max("JiraIssue")).await,
+            StateReply::Unavailable(ref why) if why.contains("no schema yet")
+        ));
         graph.stop(None);
+    }
+
+    /// Records what the health actor is told.
+    #[derive(Default)]
+    struct Told(std::sync::Mutex<Vec<&'static str>>);
+
+    impl HealthClient for Told {
+        fn cassini_connected(
+            &self,
+        ) -> Result<(), ractor::MessagingErr<polar_health::HealthCheckMessage>> {
+            self.0.lock().unwrap().push("cassini_connected");
+            Ok(())
+        }
+        fn cassini_disconnected(
+            &self,
+        ) -> Result<(), ractor::MessagingErr<polar_health::HealthCheckMessage>> {
+            self.0.lock().unwrap().push("cassini_disconnected");
+            Ok(())
+        }
+        fn graph_connected(
+            &self,
+        ) -> Result<(), ractor::MessagingErr<polar_health::HealthCheckMessage>> {
+            self.0.lock().unwrap().push("graph_connected");
+            Ok(())
+        }
+        fn graph_disconnected(
+            &self,
+        ) -> Result<(), ractor::MessagingErr<polar_health::HealthCheckMessage>> {
+            self.0.lock().unwrap().push("graph_disconnected");
+            Ok(())
+        }
+        fn graph_available(
+            &self,
+        ) -> Result<(), ractor::MessagingErr<polar_health::HealthCheckMessage>> {
+            self.0.lock().unwrap().push("graph_available");
+            Ok(())
+        }
+        fn graph_op_failed(
+            &self,
+            _reason: String,
+        ) -> Result<(), ractor::MessagingErr<polar_health::HealthCheckMessage>> {
+            self.0.lock().unwrap().push("graph_op_failed");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_graph_that_is_down_is_reported_as_not_connected_never_as_a_failure() {
+        let told = Told::default();
+        report_graph(&told, &GraphSignal::OpFailed("refused".into()));
+        report_graph(&told, &GraphSignal::Available);
+        // Never graph_op_failed, which writes the health file unhealthy.
+        assert_eq!(
+            *told.0.lock().unwrap(),
+            ["graph_disconnected", "graph_available"]
+        );
     }
 
     #[test]

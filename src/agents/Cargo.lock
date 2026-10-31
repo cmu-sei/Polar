@@ -7750,6 +7750,7 @@ dependencies = [
  "polar",
  "polar-agent-builder",
  "polar-env",
+ "polar-health",
  "polar-policy",
  "polar-scudo",
  "polar-test-graph",

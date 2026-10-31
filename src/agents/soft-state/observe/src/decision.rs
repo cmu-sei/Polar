@@ -24,7 +24,8 @@
 //! Whether the state agent answers a request, as one pure function (docs/architecture/soft-state.md, "The rules it
 //! keeps"): a request with no verified asker is refused, and so is one whose label or property is not a plain
 //! identifier; then Cedar decides (`Action::"read-state"` on `Label::"<label>"`), a permit adding a read and a forbid
-//! removing one; where policy is silent, the floor decides; and what nothing admits is refused. Policy that could not be
+//! removing one; where policy is silent, the floor (the signed `schema` section) decides, and before any version of it
+//! has arrived nothing is decided, so the asker is told to ask again; what nothing admits is refused. Policy that could not be
 //! consulted is no decision, so the asker is told to try again.
 //!
 //! A refusal names only what the asker sent and its own identity: never another label, another workload, or what the
@@ -68,7 +69,7 @@ impl PolicyQuestion<'_> {
 /// The request's label and property, and its asker, if the request is one the state agent will put to policy: an
 /// asker the broker vouched for, and names that can go into a query. A refusal otherwise.
 pub fn checked<'a>(
-    floor: &Floor,
+    floor: Option<&Floor>,
     identity: Option<&'a str>,
     request: &'a StateRequest,
 ) -> Result<PolicyQuestion<'a>, String> {
@@ -85,13 +86,13 @@ pub fn checked<'a>(
     Ok(PolicyQuestion {
         identity,
         label,
-        declared: floor.declares_read(identity, label),
+        declared: floor.is_some_and(|floor| floor.declares_read(identity, label)),
     })
 }
 
 /// The decision about `request` from `identity`, given what policy `said` about [`checked`]'s question. Pure.
 pub fn decide(
-    floor: &Floor,
+    floor: Option<&Floor>,
     identity: Option<&str>,
     request: &StateRequest,
     said: &PolicySaid,
@@ -116,9 +117,13 @@ pub fn decide(
         | PolicySaid::NotRunning => {
             if question.declared {
                 admitted()
+            } else if floor.is_none() {
+                // No version of the schema has arrived yet (the seed is pushed after the agent starts): not a
+                // decision, so the asker asks again.
+                Judged::Unavailable("the state agent has no schema yet; ask again".to_string())
             } else {
                 Judged::Refused(format!(
-                    "{} may not read {}: the catalog does not say it does, and no policy permits it",
+                    "{} may not read {}: the schema does not say it does, and no policy permits it",
                     question.identity, question.label
                 ))
             }
@@ -149,7 +154,6 @@ mod tests {
 
     fn floor() -> Floor {
         Floor {
-            format: 1,
             workloads: vec![
                 Entry {
                     workload: "jira-observer".into(),
@@ -175,7 +179,7 @@ mod tests {
         let asker = id("jira-observer");
         assert_eq!(
             decide(
-                &floor,
+                Some(&floor),
                 Some(&asker),
                 &max("JiraIssue", "updated_ms"),
                 &SILENT
@@ -186,13 +190,13 @@ mod tests {
             }
         );
         assert!(matches!(
-            decide(&floor, Some(&asker), &max("JiraUser", "x"), &SILENT),
+            decide(Some(&floor), Some(&asker), &max("JiraUser", "x"), &SILENT),
             Judged::Refused(_)
         ));
         // The owner does not read through the state agent unless it says so.
         assert!(matches!(
             decide(
-                &floor,
+                Some(&floor),
                 Some(&id("jira-processor")),
                 &max("JiraIssue", "x"),
                 &SILENT
@@ -201,7 +205,7 @@ mod tests {
         ));
         for said in [PolicySaid::NoPolicyLoaded, PolicySaid::NotRunning] {
             assert!(matches!(
-                decide(&floor, Some(&asker), &max("JiraIssue", "x"), &said),
+                decide(Some(&floor), Some(&asker), &max("JiraIssue", "x"), &said),
                 Judged::Max { .. }
             ));
         }
@@ -213,7 +217,7 @@ mod tests {
         let asker = id("jira-observer");
         assert!(matches!(
             decide(
-                &floor,
+                Some(&floor),
                 Some(&asker),
                 &max("JiraIssue", "x"),
                 &PolicySaid::Decided(Decision::Deny)
@@ -222,7 +226,7 @@ mod tests {
         ));
         assert!(matches!(
             decide(
-                &floor,
+                Some(&floor),
                 Some(&asker),
                 &max("KubePod", "x"),
                 &PolicySaid::Decided(Decision::Allow)
@@ -231,7 +235,7 @@ mod tests {
         ));
         assert!(matches!(
             decide(
-                &floor,
+                Some(&floor),
                 Some(&asker),
                 &max("JiraIssue", "x"),
                 &PolicySaid::Unavailable("timeout talking to KubePod's agent".into())
@@ -245,7 +249,7 @@ mod tests {
         let floor = floor();
         let allow = PolicySaid::Decided(Decision::Allow);
         assert!(matches!(
-            decide(&floor, None, &max("JiraIssue", "updated_ms"), &allow),
+            decide(Some(&floor), None, &max("JiraIssue", "updated_ms"), &allow),
             Judged::Refused(ref why) if why.contains("no verified asker")
         ));
         let asker = id("jira-observer");
@@ -257,15 +261,15 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    decide(&floor, Some(&asker), &max(label, property), &allow),
+                    decide(Some(&floor), Some(&asker), &max(label, property), &allow),
                     Judged::Refused(_)
                 ),
                 "{label} {property}"
             );
-            assert!(checked(&floor, Some(&asker), &max(label, property)).is_err());
+            assert!(checked(Some(&floor), Some(&asker), &max(label, property)).is_err());
         }
         let request = max("JiraIssue", "updated_ms");
-        let question = checked(&floor, Some(&asker), &request).unwrap();
+        let question = checked(Some(&floor), Some(&asker), &request).unwrap();
         assert!(question.declared);
         assert_eq!(question.resource(), r#"Label::"JiraIssue""#);
     }
@@ -294,7 +298,6 @@ mod tests {
             WORKLOADS.len(),
         )
         .prop_map(|labels| Floor {
-            format: 1,
             workloads: WORKLOADS
                 .iter()
                 .zip(labels)
@@ -334,18 +337,21 @@ mod tests {
     proptest! {
         /// The decision is the stated rule for every input: no asker or a name that is not an identifier, refused;
         /// then a permit admits, a forbid refuses, an unavailable policy decides nothing; where policy is silent the
-        /// floor admits exactly the reads it declares for that very identity; anything else is refused.
+        /// floor admits exactly the reads it declares for that very identity; before any schema has arrived nothing is
+        /// decided; anything else is refused.
         #[test]
         fn the_decision_follows_the_rule(
             floor in floor_strategy(),
+            arrived in any::<bool>(),
             asker in asker(),
             label in name(),
             property in name(),
             said in said(),
         ) {
             let request = max(&label, &property);
-            let got = decide(&floor, asker.as_deref(), &request, &said);
-            let declared = asker.as_deref().is_some_and(|a| {
+            let schema = arrived.then_some(&floor);
+            let got = decide(schema, asker.as_deref(), &request, &said);
+            let declared = arrived && asker.as_deref().is_some_and(|a| {
                 floor.workloads.iter().any(|e| e.identity == a && e.reads.contains(&label))
             });
             let expected = if asker.is_none() || !plain(&label) || !plain(&property) {
@@ -356,6 +362,8 @@ mod tests {
                     PolicySaid::Decided(Decision::Deny) => "refused",
                     PolicySaid::Unavailable(_) => "unavailable",
                     _ if declared => "read",
+                    // No schema has arrived: nothing is decided yet.
+                    _ if !arrived => "unavailable",
                     _ => "refused",
                 }
             };
@@ -386,7 +394,7 @@ mod tests {
         ) {
             let undeclared = asker.as_deref().is_none_or(|a| !floor.declares_read(a, &label));
             prop_assume!(undeclared);
-            let got = decide(&floor, asker.as_deref(), &max(&label, "p"), &said);
+            let got = decide(Some(&floor), asker.as_deref(), &max(&label, "p"), &said);
             prop_assert!(matches!(got, Judged::Refused(_)), "{:?}", got);
         }
 
@@ -400,7 +408,7 @@ mod tests {
             property in name(),
             said in said(),
         ) {
-            let why = match decide(&floor, asker.as_deref(), &max(&label, &property), &said) {
+            let why = match decide(Some(&floor), asker.as_deref(), &max(&label, &property), &said) {
                 Judged::Refused(why) | Judged::Unavailable(why) => why,
                 Judged::Max { .. } => return Ok(()),
             };

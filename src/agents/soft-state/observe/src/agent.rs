@@ -25,7 +25,7 @@
 
 use crate::SERVICE_NAME;
 use crate::supervisor::{SHUTDOWN_BUDGET, StateSupervisor};
-use polar_agent_builder::topics::{FamilyDecl, Over};
+use polar_agent_builder::topics::FamilyDecl;
 use polar_agent_builder::{Capability, Cause, Configured, PolarAgent, StartError, TopicDecl};
 use polar_env::Section;
 use ractor::Actor;
@@ -44,21 +44,28 @@ impl PolarAgent for SoftStateObserver {
         REQUESTS_TOPIC,
         "an agent's request for state it may read",
     )];
-    // One reply topic for each workload that reads state, and none for one that does not
-    // (docs/architecture/soft-state.md, "Shape").
+    // A reply topic for each workload it serves, as the scheduler's family (docs/architecture/soft-state.md, "Revised by
+    // the maintainer's review"). A workload subscribes to its own only when it reads state (the soft-state rule), so
+    // the others' say why nothing is on their other side.
     const TOPIC_FAMILIES: &'static [FamilyDecl] = &[FamilyDecl::publish(
         REPLIES_FAMILY,
         "the answer to the workload's request, on its own topic",
     )
     .because(&[Cause::Topic(REQUESTS_TOPIC)])
-    .over(Over::StateReaders)];
-    const SECTIONS: &'static [&'static Section] = &[&crate::floor::SECTION];
+    .waiting(
+        "a workload subscribes to its own reply topic only when it reads its soft state (the soft-state rule); one \
+         that does not is never answered",
+    )];
+    const SECTIONS: &'static [&'static Section] = &[&crate::settings::SECTION];
+    const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] =
+        &[&crate::floor::SCHEMA];
     const HELP: Option<&'static str> = Some(
         "soft-state-observer answers the requests other agents publish on soft-state-requests for state that is \
          not authoritative (a poller's cursor, an observer's checkpoint), reading it from the graph. It decides \
          each request by the identity the broker vouches for: Cedar first (Action::\"read-state\" on \
-         Label::\"<label>\"), then the floor in SOFT_STATE_FLOOR, which the render writes from every agent's \
-         declared graph labels; anything else is refused. It builds the query itself from a label the asker may \
+         Label::\"<label>\"), then its signed runtime section `schema` (who owns and who reads which label, \
+         seeded from every agent's declared graph labels); anything else is refused, and before a schema has \
+         arrived nothing is decided. It builds the query itself from a label the asker may \
          read and a property name that is a plain identifier, and never writes the graph. Each answer goes to the \
          asker's own topic, soft-state-replies.<workload>.",
     );
@@ -87,25 +94,35 @@ mod tests {
     polar_agent_builder::polar_agent_tests!(SoftStateObserver);
 
     #[test]
-    fn its_family_is_the_topic_each_reader_is_answered_on_and_only_readers_get_one() {
-        let readers: std::collections::BTreeMap<Over, Vec<String>> = [
-            (Over::StateReaders, vec!["jira-observer".to_string()]),
-            (
-                Over::Served,
-                vec!["jira-observer".to_string(), "kube-observer".to_string()],
-            ),
-        ]
-        .into();
-        let set = polar_agent_builder::agent::topic_set_over::<SoftStateObserver>(&readers);
-        assert!(set.allows(
-            &soft_state_common::replies_topic("jira-observer"),
-            Access::Publish
-        ));
-        assert!(!set.allows(
-            &soft_state_common::replies_topic("kube-observer"),
-            Access::Publish
-        ));
+    fn its_family_is_each_served_workload_s_reply_topic_as_the_scheduler_s_is() {
+        let served = ["jira-observer".to_string(), "kube-observer".to_string()];
+        let set = polar_agent_builder::agent::topic_set_serving::<SoftStateObserver>(&served);
+        for workload in &served {
+            assert!(set.allows(&soft_state_common::replies_topic(workload), Access::Publish));
+        }
         assert!(set.allows(REQUESTS_TOPIC, Access::Subscribe));
+    }
+
+    #[test]
+    fn its_floor_is_a_signed_runtime_section_and_no_variable() {
+        let scaffold = polar_agent_builder::agent::scaffold_document::<SoftStateObserver>();
+        assert_eq!(
+            scaffold
+                .runtime
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            ["schema"]
+        );
+        let variables: Vec<&str> = scaffold
+            .document
+            .sections
+            .iter()
+            .flat_map(|s| s.variables.iter().map(|v| v.name.as_str()))
+            .collect();
+        assert!(!variables.contains(&"SOFT_STATE_FLOOR"));
+        assert!(!variables.contains(&"POLAR_STATE_READERS"));
+        assert!(variables.contains(&"POLAR_STATE_GRAPH_TIMEOUT_SECS"));
     }
 
     #[test]
@@ -114,6 +131,6 @@ mod tests {
         assert_eq!(scaffold.requires, ["cassini", "graph-read"]);
         // It reads on behalf of others, and declares no label of its own.
         assert!(scaffold.graph.is_empty());
-        assert_eq!(scaffold.topic_families[0].over, "POLAR_STATE_READERS");
+        assert_eq!(scaffold.topic_families[0].over, "POLAR_SERVED_WORKLOADS");
     }
 }

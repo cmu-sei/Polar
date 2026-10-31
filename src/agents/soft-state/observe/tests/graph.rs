@@ -124,7 +124,6 @@ async fn the_largest_value_is_read_from_the_graph_and_only_for_an_admitted_asker
     // Through the agent's own answer, with the floor deciding (no policy actor runs here).
     let (graph, _) = Actor::spawn(None, ContainerGraph, ()).await.unwrap();
     let floor = Floor {
-        format: 1,
         workloads: vec![Entry {
             workload: "jira-observer".into(),
             identity: id("jira-observer"),
@@ -136,9 +135,10 @@ async fn the_largest_value_is_read_from_the_graph_and_only_for_an_admitted_asker
     let asker = id("jira-observer");
     assert_eq!(
         answer(
-            &floor,
+            Some(&floor),
             &policy,
             &graph,
+            std::time::Duration::from_secs(10),
             Some(&asker),
             &max("JiraIssue", "updated_ms")
         )
@@ -148,9 +148,10 @@ async fn the_largest_value_is_read_from_the_graph_and_only_for_an_admitted_asker
     // Not declared: refused, though the graph has the nodes.
     assert!(matches!(
         answer(
-            &floor,
+            Some(&floor),
             &policy,
             &graph,
+            std::time::Duration::from_secs(10),
             Some(&asker),
             &max("JiraUser", "updated_ms")
         )
@@ -160,9 +161,10 @@ async fn the_largest_value_is_read_from_the_graph_and_only_for_an_admitted_asker
     // A name that would change the query never reaches the graph, which keeps its nodes.
     assert!(matches!(
         answer(
-            &floor,
+            Some(&floor),
             &policy,
             &graph,
+            std::time::Duration::from_secs(10),
             Some(&asker),
             &max("JiraIssue", "updated_ms`) DETACH DELETE n //")
         )

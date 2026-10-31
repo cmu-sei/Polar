@@ -51,5 +51,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# A stand-in for the health actor, which the graph's signals are reported to.
+polar-health.workspace = true
 polar-test-graph.workspace = true
 proptest.workspace = true

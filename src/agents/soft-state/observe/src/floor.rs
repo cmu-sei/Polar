@@ -21,45 +21,35 @@
    DM26-0670
 */
 
-//! The state agent's floor: every workload of the target by its one identity, with the labels its scaffold declares it
-//! owns and reads (`PolarAgent::GRAPH`). The render writes it into `SOFT_STATE_FLOOR` from the scaffolds
-//! (`infra/graph.nu`, `state_floor`), as it writes the credentials agent's authority model, so applying the catalog is
-//! its sign-off (docs/architecture/policy-enforcement.md, "Decisions"). Read once, at start.
+//! The state agent's floor: who owns and who reads which graph label, by each workload's one identity. It is a signed
+//! runtime section of the state agent, `schema` (docs/architecture/soft-state.md, "Revised by the maintainer's
+//! review"), read with `ConfigurationHandle::runtime` and replaced whole by each version, so a change reaches the
+//! running agent without a render or a rollout. Its first version is seeded from the agents' scaffolds by
+//! `infra/seed.nu`, as the credentials agent's `policy` is; later ones are signed by an author holding
+//! `c:update-runtime`.
 
-use polar_env::{Defaulted, Described, Env, Section};
+use polar_agent_builder::RuntimeSection;
+use polar_agent_builder::graph_schema::is_identifier;
+use polar_agent_builder::runtime::SectionAuthority;
 use serde::{Deserialize, Serialize};
 
-/// The one format the agent reads.
-pub const FORMAT: u32 = 1;
+/// What the section is called in a document.
+pub const SECTION_NAME: &str = "schema";
 
-/// The floor, as JSON.
-pub static FLOOR: Defaulted<String> = Defaulted::text(
-    "SOFT_STATE_FLOOR",
-    "who may read which graph label: every workload of the target by its identity, with the labels it owns and \
-     reads, as JSON {format: 1, workloads: [{workload, identity, owns, reads}]}. The render writes it from the \
-     agents' scaffolds (docs/architecture/soft-state.md); empty, no one may read anything unless policy permits it. \
-     Read once, at start",
-    "",
-);
+/// The most workloads one version may name.
+pub const MAX_WORKLOADS: usize = 500;
 
-static VARIABLES: &[&dyn Described] = &[&FLOOR];
-
-/// The section the state agent reads.
-pub static SECTION: Section = Section {
-    name: "soft-state",
-    vars: VARIABLES,
-    relations,
+pub static SCHEMA: RuntimeSection = RuntimeSection {
+    authority: SectionAuthority::Runtime,
+    name: SECTION_NAME,
+    doc: "Who owns and who reads which graph label, by each workload's identity: whom the state agent answers about \
+          what. Replaced whole by each version.",
+    body: r#"{"workloads": {"list_of": {"workload": {"type": "workload name", "required": true}, "identity": {"type": "<workload>.<namespace>.serviceaccount.<domain>", "required": true, "doc": "the identity the broker names the workload by; the entry is matched on it exactly"}, "owns": {"type": "list of graph labels", "required": false, "doc": "the labels the workload writes"}, "reads": {"type": "list of graph labels", "required": false, "doc": "the labels the state agent answers the workload about"}}}}"#,
+    validate,
 };
 
-/// A floor that cannot be read is a configuration problem, named before the agent starts.
-fn relations(env: &dyn Env) -> Vec<String> {
-    match env.var(FLOOR.name()) {
-        Some(text) => match Floor::parse(&text) {
-            Ok(_) => Vec::new(),
-            Err(why) => vec![format!("{}: {why}", FLOOR.name())],
-        },
-        None => Vec::new(),
-    }
+fn validate(body: &serde_json::Value) -> Result<(), Vec<String>> {
+    Floor::from_body(body).map(|_| ())
 }
 
 /// One workload of the floor.
@@ -75,44 +65,52 @@ pub struct Entry {
     pub reads: Vec<String>,
 }
 
-/// Who may read which label.
+/// Who may read which label: a version of the `schema` section.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Floor {
-    pub format: u32,
     pub workloads: Vec<Entry>,
 }
 
 impl Floor {
-    /// The floor in `text`: empty text is the empty floor; otherwise JSON of [`FORMAT`], whose entries each name the
-    /// workload their identity names, once.
-    pub fn parse(text: &str) -> Result<Self, String> {
-        if text.trim().is_empty() {
-            return Ok(Self {
-                format: FORMAT,
-                workloads: Vec::new(),
-            });
-        }
-        let floor: Floor = serde_json::from_str(text).map_err(|e| format!("not a floor: {e}"))?;
-        if floor.format != FORMAT {
-            return Err(format!(
-                "format {} is not the format this agent reads ({FORMAT})",
-                floor.format
+    /// The floor a section body describes, or every problem with it: a body that is not one, more than
+    /// [`MAX_WORKLOADS`] entries, an identity that names another workload, one named twice, a label that is not a plain
+    /// identifier. Names only, never a value of anything else.
+    pub fn from_body(body: &serde_json::Value) -> Result<Self, Vec<String>> {
+        let floor: Floor = serde_json::from_value(body.clone())
+            .map_err(|e| vec![format!("the body is not a schema: {e}")])?;
+        let mut problems = Vec::new();
+        if floor.workloads.len() > MAX_WORKLOADS {
+            problems.push(format!(
+                "`workloads` has {} entries, and at most {MAX_WORKLOADS} are taken",
+                floor.workloads.len()
             ));
         }
         let mut seen = std::collections::BTreeSet::new();
-        for entry in &floor.workloads {
+        for (i, entry) in floor.workloads.iter().enumerate() {
             if cert_issuer_common::identity::workload_of(&entry.identity) != Some(&entry.workload) {
-                return Err(format!(
-                    "the entry for {} has the identity {}, which names another workload",
-                    entry.workload, entry.identity
+                problems.push(format!(
+                    "entry {i}: the identity of {} names another workload",
+                    entry.workload
                 ));
             }
             if !seen.insert(entry.identity.as_str()) {
-                return Err(format!("{} is in the floor twice", entry.identity));
+                problems.push(format!("entry {i}: {} is named twice", entry.identity));
+            }
+            for label in entry.owns.iter().chain(entry.reads.iter()) {
+                if !is_identifier(label) {
+                    problems.push(format!(
+                        "entry {i}: a label of {} is not a plain identifier",
+                        entry.workload
+                    ));
+                }
             }
         }
-        Ok(floor)
+        if problems.is_empty() {
+            Ok(floor)
+        } else {
+            Err(problems)
+        }
     }
 
     /// The entry of the asker whose identity is `identity`, exactly: a workload of the same name in another namespace
@@ -131,16 +129,16 @@ impl Floor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     const ID: &str = "jira-observer.polar.serviceaccount.cluster.local";
 
     fn floor() -> Floor {
-        Floor::parse(&format!(
-            r#"{{"format":1,"workloads":[
-                {{"workload":"jira-observer","identity":"{ID}","reads":["JiraIssue"]}},
-                {{"workload":"jira-processor","identity":"jira-processor.polar.serviceaccount.cluster.local",
-                  "owns":["JiraIssue","JiraUser"]}}]}}"#
-        ))
+        Floor::from_body(&json!({ "workloads": [
+            { "workload": "jira-observer", "identity": ID, "reads": ["JiraIssue"] },
+            { "workload": "jira-processor", "identity": "jira-processor.polar.serviceaccount.cluster.local",
+              "owns": ["JiraIssue", "JiraUser"] }
+        ] }))
         .unwrap()
     }
 
@@ -163,34 +161,37 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_floor_admits_no_one_and_a_bad_one_is_refused() {
-        assert!(Floor::parse("").unwrap().workloads.is_empty());
-        assert!(Floor::parse("  ").unwrap().workloads.is_empty());
+    fn a_body_that_is_not_a_schema_is_refused_with_every_problem_named() {
+        assert!(
+            Floor::from_body(&json!({ "workloads": [] }))
+                .unwrap()
+                .workloads
+                .is_empty()
+        );
         for (bad, why) in [
-            ("{", "not a floor"),
-            (r#"{"format":2,"workloads":[]}"#, "format 2"),
-            (r#"{"format":1,"workloads":[],"extra":1}"#, "not a floor"),
+            (json!("text"), "not a schema"),
+            (json!({ "workloads": [], "extra": 1 }), "not a schema"),
             (
-                r#"{"format":1,"workloads":[{"workload":"a","identity":"b.polar.serviceaccount.cluster.local"}]}"#,
+                json!({ "workloads": [{ "workload": "a", "identity": "b.polar.serviceaccount.x" }] }),
                 "names another workload",
             ),
             (
-                r#"{"format":1,"workloads":[{"workload":"a","identity":"a.polar.serviceaccount.x"},
-                                            {"workload":"a","identity":"a.polar.serviceaccount.x"}]}"#,
-                "twice",
+                json!({ "workloads": [{ "workload": "a", "identity": "a.p.serviceaccount.x" },
+                                    { "workload": "a", "identity": "a.p.serviceaccount.x" }] }),
+                "named twice",
+            ),
+            (
+                json!({ "workloads": [{ "workload": "a", "identity": "a.p.serviceaccount.x", "reads": ["Jira Issue"] }] }),
+                "not a plain identifier",
             ),
         ] {
-            let error = Floor::parse(bad).unwrap_err();
-            assert!(error.contains(why), "{bad}: {error}");
+            let problems = Floor::from_body(&bad).unwrap_err();
+            assert!(
+                problems.iter().any(|p| p.contains(why)),
+                "{bad}: {problems:?}"
+            );
+            assert!((SCHEMA.validate)(&bad).is_err());
         }
-    }
-
-    #[test]
-    fn a_floor_that_cannot_be_read_is_a_configuration_problem() {
-        let env = |name: &str| (name == "SOFT_STATE_FLOOR").then(|| "{".to_string());
-        let problems = relations(&env);
-        assert_eq!(problems.len(), 1);
-        assert!(problems[0].starts_with("SOFT_STATE_FLOOR"), "{problems:?}");
-        assert!(relations(&|_: &str| None).is_empty());
+        assert!(serde_json::from_str::<serde_json::Value>(SCHEMA.body).is_ok());
     }
 }

@@ -28,7 +28,6 @@
 //! asker; an owned label is one whose nodes the agent writes, so a read of a label no workload owns has nothing behind
 //! it and fails the render's check, like a topic with no other side.
 
-use polar_env::{Defaulted, Described, Section};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -86,27 +85,6 @@ pub struct GraphEntry {
     pub access: GraphAccess,
     pub purpose: String,
 }
-
-/// The workloads whose scaffolds declare a read, comma-separated: the render writes them here for an agent with a
-/// topic family over them (the state agent's replies, docs/architecture/soft-state.md), as it writes the served
-/// workloads into `POLAR_SERVED_WORKLOADS`.
-pub static STATE_READERS: Defaulted<String> = Defaulted::text(
-    "POLAR_STATE_READERS",
-    "the workloads that read state through the state agent (their scaffolds declare a graph read), \
-     comma-separated, from the catalog: a topic family over them is expanded into one exact topic per workload \
-     (docs/architecture/soft-state.md)",
-    "",
-);
-
-static READERS_VARIABLES: &[&dyn Described] = &[&STATE_READERS];
-
-/// The builder's section for an agent with a topic family over the state readers; an agent with none does not have
-/// it.
-pub static READERS_SECTION: Section = Section {
-    name: "state-readers",
-    vars: READERS_VARIABLES,
-    relations: |_| Vec::new(),
-};
 
 /// Whether `name` is a label or a property name the state agent will put in a query: `[A-Za-z_][A-Za-z0-9_]*`.
 /// Cypher cannot take either as a parameter, so this is what stands between a name and the query text.

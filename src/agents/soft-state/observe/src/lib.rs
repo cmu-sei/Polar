@@ -25,7 +25,7 @@
 //! requests for soft state from the graph, deciding each by who asks (the broker's `published_by`) against the labels
 //! the catalog says that workload reads, Cedar first. It reads the graph and never writes it.
 //!
-//! - [`floor`]: who may read which label, as the render wrote it from every workload's scaffold;
+//! - [`floor`]: who may read which label, the signed runtime section `schema`;
 //! - [`decision`]: the decision, a pure function;
 //! - [`query`]: the Cypher it builds itself, from checked names;
 //! - [`supervisor`]: the input and output around them.
@@ -36,6 +36,7 @@ pub mod agent;
 pub mod decision;
 pub mod floor;
 pub mod query;
+pub mod settings;
 pub mod supervisor;
 
 /// The name the agent logs and traces under.
