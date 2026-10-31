@@ -1113,9 +1113,20 @@ Dev cluster `u7s`, images rebuilt from this branch (`up.nu local-minimal --dev`,
   signing moved to p256 0.14 (48f81ecc). Remove the ignore when jsonwebtoken releases on elliptic-curve 0.14 (upstream
   issue Keats/jsonwebtoken#549, waiting on rsa 0.10), or switch jsonwebtoken to its aws_lc_rs backend, which also
   drops rsa 0.9 and the RUSTSEC-2023-0071 ignore. Either swap moves RSA verification to 2048 to 8192-bit keys, so
-  first add the token tests that are missing: every existing one is RS256 (ES256, ES384, EdDSA and PS* accepted, RSA
-  key sizes at the bounds). The ignore cannot be scoped to crypto-bigint 0.5: cargo-deny 0.19 takes only `id` and
+  first add the token tests that are missing. Done 2026-10-31 for the algorithms:
+  `cert-issuer/server/tests/oidc_algorithms_test.rs` pins, for every name `parse_allowed_algorithms` maps (RS256/384/512,
+  PS256/384/512, ES256, ES384, EdDSA), acceptance when allowed and `ForbiddenAlgorithm` before any fetch when not; the
+  deployed list (RS256, ES256, EdDSA); `none` in any case and HS* refused whatever the configuration; an `alg`
+  jsonwebtoken has no variant for (ES512, `hs256`) as `InvalidToken`; keys of the wrong family or curve; expiry with
+  jsonwebtoken's 60-second leeway; audience; issuer; and the `kubernetes.io` claim paths. Still open: RSA key sizes at
+  the bounds. The ignore cannot be scoped to crypto-bigint 0.5: cargo-deny 0.19 takes only `id` and
   `reason` (later releases add `allow`), so until then check `cargo tree -i crypto-bigint` when the lockfile moves.
+- [ ] **Found pinning the token tests (2026-10-31), not fixed, for the maintainer:** the validator accepts a token whose
+  `nbf` is in the future (an hour, a year). `oidc.rs` builds `Validation::new(alg)`, whose `validate_nbf` is false, and
+  `set_required_spec_claims` does not turn it on; `map_jwt_error` maps `ImmatureSignature`, so refusing it seems to
+  have been meant (RFC 7519 4.1.5: the token MUST NOT be accepted before `nbf`). The token must still be signed by a
+  trusted issuer, and Kubernetes sets `nbf` to `iat`. A future `iat` and an `exp` a century out are accepted too
+  (no maximum lifetime). Fixing it is one line (`validation.validate_nbf = true`) and a test; not pinned either way.
 - Flaky test: `polar-agent-builder` `agent::tests::an_agent_started_after_polar_init_takes_the_marker_and_starts`
   shares the static `MARKED_STARTED` with
   `an_agent_started_without_polar_init_having_run_exits_one_and_is_not_started`. The unmarked test resets the flag
