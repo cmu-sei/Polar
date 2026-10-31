@@ -50,6 +50,8 @@
     breaking_note: "The Polar git server's administrators come from infra/targets/<target>/cluster-input, which up.nu records, not from an edit to a tracked file." }
   { sha: "ad91451f", reason: "QUERY_DATE applies only to an empty graph", breaking: true,
     breaking_note: "jira-observer starts each issue pull from the graph's newest issue; QUERY_DATE applies only while the graph holds no issues, so a script that moves it as a cursor has no effect after the first pull and is no longer needed." }
+  { sha: "ccc0f888", reason: "its footer said cert-issuer is a catalog Job; since 24cc4fea it is a Deployment, as every agent is", breaking: true,
+    breaking_note: "Targets deploy cert-issuer as a catalog workload of the kind `ca` (cert-issuer.yaml, cert-issuer-resources.yaml), not the chart. A cluster that ran the chart must lose the chart's cert-issuer when it switches: Flux prunes it on sandbox-local; on a target applied by up.nu it is deleted by hand." }
   { sha: "964d7217", reason: "the broker's memory budget is set at run time", breaking: true,
     breaking_note: "CASSINI_MEMORY_BUDGET_BYTES is now a cap on the runtime budget, not its value; the broker refuses to start with less than 256 MiB (four 64 MiB frames) available." }
 ]
