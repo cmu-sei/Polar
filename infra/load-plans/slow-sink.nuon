@@ -26,8 +26,10 @@
 # limit by default) plus a fixed overhead, and nothing is lost below the stall bound. 6 runs.
 #
 # Until acknowledgements are the domain's, the sink's client acknowledges a delivery when it hands it to the sink, so
-# a slow sink's backlog waits in the sink's mailbox, not the broker (cassini-backpressure.md, "As built"); the
-# broker's side of a slow reader is what cassini/broker/tests/backpressure.rs tests. To measure under other bounds, add
+# by default (`sink_slow: "after_ack"`) a slow sink's backlog waits in the sink's mailbox, not the broker
+# (cassini-backpressure.md, "As built"). With `sink_slow: "before_ack"` the delay is spent in the sink's client's reader
+# before each delivery is handed over and acknowledged (cassini_client::hand_off), so the acknowledgements come at the
+# sink's pace and the backlog waits in the broker's delivery outbox. To measure under other bounds, add
 # `broker: { CASSINI_MEMORY_BUDGET_BYTES: [...], CASSINI_STALL_SECS: [...] }` (with Flux's polar-agents suspended).
 #
 #   nu infra/load-harness.nu run infra/load-plans/slow-sink.nuon

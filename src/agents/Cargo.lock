@@ -3147,6 +3147,7 @@ dependencies = [
 name = "harness-sink"
 version = "1.0.0"
 dependencies = [
+ "cassini-client",
  "cassini-types",
  "harness-common",
  "polar-agent-builder",

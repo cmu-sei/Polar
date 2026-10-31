@@ -28,6 +28,8 @@ license.workspace = true
 [dependencies]
 polar-scudo.workspace = true
 cassini-types.workspace = true
+# Only for its slow hand-off (HARNESS_SINK_SLOW=before_ack): the client is the builder's, this sink tells it how slow.
+cassini-client = { workspace = true, features = ["slow-hand-off"] }
 harness-common.workspace = true
 polar-agent-builder.workspace = true
 polar-env.workspace = true

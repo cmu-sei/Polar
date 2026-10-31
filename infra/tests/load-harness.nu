@@ -134,7 +134,15 @@ def main [] {
                 let sink = (values_for $run "sink" 0)
                 assert equal $sink.HARNESS_WARMUP ($DEFAULTS.warmup | into string)
                 assert equal $sink.HARNESS_SINK_DELAY_US "0"
+                assert equal $sink.HARNESS_SINK_SLOW "after_ack"
                 assert ("HARNESS_RATE" not-in ($sink | columns))
+                assert ("HARNESS_SINK_SLOW" not-in ($producer | columns))
+                # A sink slow before it acknowledges, as a plan's field.
+                let slow = ((expand { name: "s", runs: [{ sink_delay_us: 500, sink_slow: "before_ack" }] }) | first)
+                let slowed = (values_for $slow "sink" 0)
+                assert equal [$slowed.HARNESS_SINK_DELAY_US $slowed.HARNESS_SINK_SLOW] ["500" "before_ack"]
+                assert equal (summarise [{ run: $slow, results: [], nodes: [], one_node: true }] | first).sink "500us before_ack"
+                assert equal (summarise [{ run: $run, results: [], nodes: [], one_node: true }] | first).sink ""
             }
         }
         {

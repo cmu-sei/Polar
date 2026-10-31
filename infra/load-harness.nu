@@ -66,6 +66,7 @@ export const DEFAULTS = {
     idle_secs: 30
     first_wait_secs: 300
     sink_delay_us: 0
+    sink_slow: "after_ack"
 }
 
 # Every combination of the lists in `axes` (a list of records sets several fields at once); with none, one empty one.
@@ -128,6 +129,7 @@ export def values_for [run: record, role: string, index: int]: nothing -> record
             HARNESS_IDLE_SECS: $run.idle_secs
             HARNESS_FIRST_WAIT_SECS: $run.first_wait_secs
             HARNESS_SINK_DELAY_US: $run.sink_delay_us
+            HARNESS_SINK_SLOW: $run.sink_slow
         }
     }
     $shared | merge $own | transpose name value | each {|r| { name: $r.name value: ($r.value | into string) } }
@@ -250,6 +252,7 @@ export def summarise [records: list]: nothing -> list<record> {
             lost: (do $total $sinks lost)
             refused: (do $total $producers refused)
             reported: $"($r.results | length)/($r.run.producers + $r.run.sinks)"
+            sink: (if ($r.run.sink_delay_us? | default 0) == 0 { "" } else { $"($r.run.sink_delay_us)us ($r.run.sink_slow? | default 'after_ack')" })
             broker: ($r.run.broker? | default {} | transpose name value | each {|v| $"($v.name)=($v.value)" } | str join " ")
             broker_cpu_s: ($r.broker_usage?.cpu_s? | default null)
             broker_us_per_msg: ($r.broker_usage?.us_per_msg? | default null)

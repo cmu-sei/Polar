@@ -106,6 +106,9 @@ impl Actor for SinkSupervisor {
     ) -> Result<Self::State, ActorProcessingErr> {
         let run = Run::read(configured.config())?;
         let settings = SinkSettings::read(configured.config())?;
+        // A sink slow before it acknowledges (HARNESS_SINK_SLOW=before_ack): its client's reader spends the delay on
+        // each delivery before handing it over, so it must be told before the client is built.
+        cassini_client::hand_off::slow(settings.hand_off_delay());
         let topic = run.topic();
         let producers = producers_on(lane_of(run.index, run.lanes), run.producers, run.lanes);
         let delivered = myself.clone();
@@ -169,12 +172,13 @@ impl Actor for SinkSupervisor {
                         state.finish("complete");
                     }
                 }
-                // A slow sink (HARNESS_SINK_DELAY_US) spends this on each message before it takes the next. Its client
-                // acknowledges a delivery when it hands it here, not when this is done, so until acknowledgements are
-                // the domain's what waits for it waits in this mailbox (docs/architecture/cassini-backpressure.md,
-                // "As built").
-                if !state.settings.delay.is_zero() {
-                    ractor::concurrency::sleep(state.settings.delay).await;
+                // A slow sink after its acknowledgements (HARNESS_SINK_SLOW=after_ack) spends this on each message
+                // before it takes the next. Its client acknowledged the delivery when it handed it here, not when this
+                // is done, so what waits for it waits in this mailbox (docs/architecture/cassini-backpressure.md, "As
+                // built"). Slow before them, it spent the delay in its client's reader instead, and spends none here.
+                let delay = state.settings.handler_delay();
+                if !delay.is_zero() {
+                    ractor::concurrency::sleep(delay).await;
                 }
             }
             SinkMessage::Registered => {

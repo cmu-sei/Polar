@@ -28,6 +28,8 @@ mod connect;
 pub mod credit;
 pub mod environment;
 pub mod facade;
+#[cfg(feature = "slow-hand-off")]
+pub mod hand_off;
 pub mod outbox;
 pub mod refused;
 
@@ -774,6 +776,10 @@ impl TcpClientActor {
         let read_loop_span =
             info_span!("cassini.tcp_client.read_loop", broker_addr = %broker_addr,);
 
+        // The load harness's slow consumer, when it asked for one (hand_off.rs); nothing otherwise.
+        #[cfg(feature = "slow-hand-off")]
+        let mut pace = hand_off::pace();
+
         let abort = tokio::spawn(
             async move {
                 let mut msg_count = 0;
@@ -816,6 +822,8 @@ impl TcpClientActor {
 
                                 trace!("Reading {incoming_msg_length} byte(s).");
                                 if buf_reader.read_exact(&mut buffer).await.is_ok() {
+                                    #[cfg(feature = "slow-hand-off")]
+                                    hand_off::before_hand_off(&mut pace, &buffer).await;
                                     let _fg = trace_span!(
                                         "tcp_client.read_frame",
                                         len = incoming_msg_length,

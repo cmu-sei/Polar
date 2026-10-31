@@ -54,7 +54,44 @@ pub static DELAY_US: Defaulted<u64> = Defaulted::number(
     "0",
 );
 
-static VARIABLES: &[&dyn Described] = &[&WARMUP, &IDLE_SECS, &FIRST_WAIT_SECS, &DELAY_US];
+/// Where a slow sink spends its delay (docs/architecture/broker-baseline.md, the fifth set).
+pub static SLOW: Defaulted<String> = Defaulted::text(
+    "HARNESS_SINK_SLOW",
+    "where a slow sink (HARNESS_SINK_DELAY_US) spends its delay: `after_ack`, after its client has handed the \
+     message over and acknowledged it, so what waits for it waits in the sink and the broker never feels it; or \
+     `before_ack`, in its client's reader before each delivery is handed over and acknowledged, so the \
+     acknowledgements come at its pace and what waits for it waits in the broker",
+    "after_ack",
+);
+
+static VARIABLES: &[&dyn Described] = &[&WARMUP, &IDLE_SECS, &FIRST_WAIT_SECS, &DELAY_US, &SLOW];
+
+/// Where a slow sink spends its delay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slow {
+    /// In the sink's own handler, after the client acknowledged the delivery.
+    AfterAck,
+    /// In the client's reader, before the delivery is handed over and acknowledged
+    /// (`cassini_client::hand_off`).
+    BeforeAck,
+}
+
+impl Slow {
+    fn parse(text: &str) -> Result<Self, ConfigError> {
+        match text.trim() {
+            "after_ack" => Ok(Slow::AfterAck),
+            "before_ack" => Ok(Slow::BeforeAck),
+            other => Err(ConfigError::Env(polar_env::EnvError {
+                name: "HARNESS_SINK_SLOW",
+                doc: "where a slow sink spends its delay",
+                problem: polar_env::Problem::Malformed {
+                    shown: other.to_string(),
+                    reason: "must be after_ack or before_ack".to_string(),
+                },
+            })),
+        }
+    }
+}
 
 pub static SECTION: Section = Section {
     name: "harness-sink",
@@ -68,6 +105,8 @@ pub struct SinkSettings {
     pub first_wait: Duration,
     /// Spent on each message; zero for none.
     pub delay: Duration,
+    /// Where it is spent.
+    pub slow: Slow,
 }
 
 impl SinkSettings {
@@ -77,7 +116,24 @@ impl SinkSettings {
             idle: Duration::from_secs(config.read(&IDLE_SECS)?),
             first_wait: Duration::from_secs(config.read(&FIRST_WAIT_SECS)?),
             delay: Duration::from_micros(config.read(&DELAY_US)?),
+            slow: Slow::parse(&config.read(&SLOW)?)?,
         })
+    }
+
+    /// The delay the sink's own handler spends on each message: none when it is spent before the acknowledgement.
+    pub fn handler_delay(&self) -> Duration {
+        match self.slow {
+            Slow::AfterAck => self.delay,
+            Slow::BeforeAck => Duration::ZERO,
+        }
+    }
+
+    /// The delay its client's reader spends on each delivery before handing it over and acknowledging it.
+    pub fn hand_off_delay(&self) -> Duration {
+        match self.slow {
+            Slow::AfterAck => Duration::ZERO,
+            Slow::BeforeAck => self.delay,
+        }
     }
 }
 
@@ -108,12 +164,43 @@ mod tests {
         assert_eq!(s.idle, Duration::from_secs(5));
         assert_eq!(s.first_wait, Duration::from_secs(60));
         assert_eq!(s.delay, Duration::from_micros(250));
+        assert_eq!(s.slow, Slow::AfterAck);
     }
 
     #[test]
     fn a_sink_is_not_slowed_unless_it_is_asked_to_be() {
         let vars: HashMap<String, String> = HashMap::new();
         let config = Config::builder(&vars).register(&SECTION).build();
-        assert_eq!(SinkSettings::read(&config).unwrap().delay, Duration::ZERO);
+        let s = SinkSettings::read(&config).unwrap();
+        assert_eq!(s.delay, Duration::ZERO);
+        assert_eq!(s.slow, Slow::AfterAck);
+    }
+
+    fn with_slow(slow: &str) -> Result<SinkSettings, ConfigError> {
+        let vars: HashMap<String, String> = [
+            ("HARNESS_SINK_DELAY_US", "250"),
+            ("HARNESS_SINK_SLOW", slow),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        SinkSettings::read(&Config::builder(&vars).register(&SECTION).build())
+    }
+
+    /// The mode is read, and the delay goes to one place only: the sink's handler after the acknowledgement, or its
+    /// client's reader before it.
+    #[test]
+    fn the_mode_says_where_the_delay_is_spent() {
+        let after = with_slow("after_ack").unwrap();
+        assert_eq!(after.slow, Slow::AfterAck);
+        assert_eq!(after.handler_delay(), Duration::from_micros(250));
+        assert_eq!(after.hand_off_delay(), Duration::ZERO);
+        let before = with_slow("before_ack").unwrap();
+        assert_eq!(before.slow, Slow::BeforeAck);
+        assert_eq!(before.handler_delay(), Duration::ZERO);
+        assert_eq!(before.hand_off_delay(), Duration::from_micros(250));
+        let refused = with_slow("sometimes").err().unwrap().to_string();
+        assert!(refused.contains("HARNESS_SINK_SLOW"), "{refused}");
+        assert!(refused.contains("before_ack"), "{refused}");
     }
 }

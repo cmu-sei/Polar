@@ -37,6 +37,11 @@ path = "src/lib.rs"
 name = "cassini-client"
 path = "src/main.rs"
 
+[features]
+# The load harness's slow consumer (src/hand_off.rs): a delay a connection's reader spends on each delivery before it
+# hands it over and acknowledges it. Only harness-sink enables it, and it acts only when that sink asks.
+slow-hand-off = []
+
 [dev-dependencies]
 rstest.workspace = true
 assert_matches.workspace = true
