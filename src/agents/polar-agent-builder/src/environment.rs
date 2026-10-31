@@ -117,6 +117,7 @@ pub fn sections_for(capabilities: &[Capability]) -> Vec<&'static Section> {
             }
             Capability::Encryption => Some(&polar_crypto::environment::SECTION),
             Capability::KubeApiRead => None,
+            Capability::SoftState => Some(&crate::state::SECTION),
         })
         .collect()
 }
@@ -281,6 +282,7 @@ mod tests {
         assert_eq!(names(&[Capability::Encryption]), ["crypto"]);
         // Its component is not on polar-env yet; recorded in remaining-work.md.
         assert!(names(&[Capability::KubeApiRead]).is_empty());
+        assert_eq!(names(&[Capability::SoftState]), ["soft-state"]);
     }
 
     #[test]

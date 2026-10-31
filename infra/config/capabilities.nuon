@@ -118,6 +118,19 @@
     resources: {}
   }
 
+  # The agent reads its own soft state back through the state agent (docs/architecture/soft-state.md): never listed by
+  # hand, the builder adds it to the scaffold's `requires` for an agent that declares a graph read, and starts its state
+  # actor. Nothing in the pod: the questions and answers travel over Cassini. Its dependency is the state agent itself,
+  # a workload, not a service with a certificate to wait for: `resolve.nu check` refuses a target that runs an agent
+  # needing it without running soft-state-observer.
+  soft-state: {
+    pod: {}
+    identity: {}
+    dependency: { workload: "soft-state-observer" }
+    init: {}
+    resources: {}
+  }
+
   # The agent uses CryptoActor to encrypt payloads and decrypt what was escrowed for it (the Rust
   # builder's `.with_encryption()`). Opt-in: observers publish without encrypting. The crypto actor
   # opens what is sealed to the workload's escrow keypair through the custody daemon, so the daemon's

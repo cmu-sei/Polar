@@ -37,9 +37,9 @@ use jira_observer::projects::JiraProjectObserver;
 use jira_observer::users::JiraUserObserver;
 use jira_observer::{JiraAuth, JiraDeployment, JiraObserverArgs, JiraObserverMessage};
 use polar::cassini::TcpClient;
+use polar_agent_builder::{SoftValue, StateClient, StateError, StateQuery};
 use ractor::{Actor, ActorProcessingErr, ActorRef, ActorStatus, async_trait};
 use serde_json::json;
-use soft_state_common::{Answer, StateReply};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -108,7 +108,7 @@ fn args(server: &MockServer, client: ActorRef<TcpClientMessage>) -> JiraObserver
         },
         clock: Instant::now,
         // A graph with no issue in it, as a fresh cluster's.
-        cursor: Some(answers(vec![], Answer::Replied(StateReply::Value(None))).0),
+        cursor: Some(answers(vec![], Ok(SoftValue::of(None))).0),
         wall_clock: || NOW_MS,
     }
 }
@@ -116,19 +116,36 @@ fn args(server: &MockServer, client: ActorRef<TcpClientMessage>) -> JiraObserver
 /// The wall clock of these tests, in epoch milliseconds.
 const NOW_MS: i64 = 1_704_164_645_000;
 
-/// A stand-in state agent: it gives `script`'s answers in turn, then `then` for ever, and counts the questions.
-fn answers(script: Vec<Answer>, then: Answer) -> (AskCursor, Arc<AtomicU64>) {
-    let asked = Arc::new(AtomicU64::new(0));
-    let counter = asked.clone();
-    let script = Arc::new(Mutex::new(std::collections::VecDeque::from(script)));
-    let ask: AskCursor = Arc::new(move || {
-        counter.fetch_add(1, Ordering::SeqCst);
-        let answer = script
+/// What a stand-in state agent answers.
+type Answer = Result<SoftValue, StateError>;
+
+/// A stand-in for the agent's state actor: it gives `script`'s answers in turn, then `then` for ever, and counts the
+/// questions, each of which must be the cursor's.
+struct Scripted {
+    script: Mutex<std::collections::VecDeque<Answer>>,
+    then: Answer,
+    asked: Arc<AtomicU64>,
+}
+
+#[async_trait]
+impl StateClient for Scripted {
+    async fn get(&self, query: StateQuery) -> Answer {
+        assert_eq!(query, jira_observer::issues::cursor_query());
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        self.script
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or_else(|| then.clone());
-        Box::pin(async move { answer })
+            .unwrap_or_else(|| self.then.clone())
+    }
+}
+
+fn answers(script: Vec<Answer>, then: Answer) -> (AskCursor, Arc<AtomicU64>) {
+    let asked = Arc::new(AtomicU64::new(0));
+    let ask: AskCursor = Arc::new(Scripted {
+        script: Mutex::new(script.into()),
+        then,
+        asked: asked.clone(),
     });
     (ask, asked)
 }
@@ -410,15 +427,17 @@ async fn the_first_issue_pull_waits_for_the_state_agent_and_starts_at_the_graph_
     let newest = NOW_MS - 2 * 3_600_000 - 30_000;
     let (ask, asked) = answers(
         vec![
-            Answer::Replied(StateReply::Unavailable(
+            Err(StateError::Unavailable(
                 "the graph could not be read".into(),
             )),
-            Answer::NoReply("the state agent did not answer within 8s".into()),
-            Answer::Replied(StateReply::Refused(
+            Err(StateError::NoReply(
+                "the state agent did not answer within 8s".into(),
+            )),
+            Err(StateError::Refused(
                 "jira-observer may not read JiraIssue".into(),
             )),
         ],
-        Answer::Replied(StateReply::Value(Some(newest))),
+        Ok(SoftValue::of(Some(newest))),
     );
     let mut args = args(&server, client);
     args.cursor = Some(ask);
@@ -455,7 +474,7 @@ async fn without_an_answer_the_issue_observer_never_pulls_everything() {
     let (client, topics) = recorder().await;
     let (ask, asked) = answers(
         vec![],
-        Answer::Replied(StateReply::Unavailable(
+        Err(StateError::Unavailable(
             "the graph could not be read".into(),
         )),
     );
@@ -493,7 +512,7 @@ async fn with_no_issue_in_the_graph_the_first_pull_is_from_query_date_or_full() 
         let server = MockServer::start().await;
         mount_site(&server).await;
         let (client, topics) = recorder().await;
-        let (ask, asked) = answers(vec![], Answer::Replied(StateReply::Value(None)));
+        let (ask, asked) = answers(vec![], Ok(SoftValue::of(None)));
         let mut args = args(&server, client);
         args.cursor = Some(ask);
         args.query_date = query_date.map(str::to_string);
@@ -511,7 +530,7 @@ async fn the_other_observers_do_not_ask_the_state_agent() {
     let server = MockServer::start().await;
     mount_site(&server).await;
     let (client, topics) = recorder().await;
-    let (ask, asked) = answers(vec![], Answer::NoReply("never".into()));
+    let (ask, asked) = answers(vec![], Err(StateError::NoReply("never".into())));
     let mut args = args(&server, client);
     args.cursor = Some(ask);
     let (projects, _) = Actor::spawn(None, JiraProjectObserver, args.clone())

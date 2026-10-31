@@ -22,91 +22,24 @@
 */
 use crate::groups::JiraGroupObserver;
 use crate::issues::JiraIssueObserver;
-use crate::issues::{AskCursor, CURSOR_LABEL, CURSOR_PROPERTY};
 use crate::projects::JiraProjectObserver;
 use crate::users::JiraUserObserver;
 use crate::{
     BROKER_CLIENT_NAME, JIRA_GROUP_OBSERVER, JIRA_ISSUE_OBSERVER, JIRA_PROJECT_OBSERVER,
     JIRA_USER_OBSERVER, JiraAuth, JiraDeployment, JiraObserverArgs, JiraObserverMessage, RETRY,
 };
-use cassini_client::{OfflineBehavior, PublishRequest};
-use cassini_types::{ClientEvent, WireTraceCtx};
-use polar::cassini::{CassiniClient, TcpClient};
+use cassini_types::ClientEvent;
+use polar::cassini::TcpClient;
 use polar::egress::Egress;
 use polar_agent_builder::{
     AgentBuilder, Configured, HealthClient, HealthHandle, InfrastructureEvent,
-    InfrastructureSupervisorMessage, Subscription,
+    InfrastructureSupervisorMessage, StateClient,
 };
 use ractor::concurrency::Duration;
 use ractor::{Actor, ActorId, ActorProcessingErr, ActorRef, SupervisionEvent, async_trait};
 use reqwest::{Client, ClientBuilder};
-use soft_state_common::{ReplyRouter, StateReply, StateRequest};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
-
-/// Where the state agent answers this observer (docs/architecture/soft-state.md): its own topic of the reply family,
-/// `soft-state-replies.jira-observer`, which it alone subscribes to.
-pub const STATE_REPLIES_TOPIC: &str = "soft-state-replies.jira-observer";
-
-/// How long one question to the state agent is waited for; one that is not answered in time is asked again on the
-/// observer's backoff, with a fresh correlation id. Under the observers' stop bound, so a stop is not held up by it.
-pub const CURSOR_TIMEOUT: Duration = Duration::from_secs(8);
-
-/// Whether a reply came from the state agent, as the broker names its publisher: replies from anyone else, or from
-/// no one the broker vouched for, are dropped.
-pub fn from_state_agent(published_by: Option<&str>) -> bool {
-    published_by.and_then(cert_issuer_common::identity::workload_of)
-        == Some(soft_state_common::OBSERVER_NAME)
-}
-
-/// The subscription to this observer's reply topic, handing each reply from the state agent to `router`.
-pub fn state_replies(router: Arc<ReplyRouter<StateReply>>) -> Subscription {
-    Subscription::new(STATE_REPLIES_TOPIC, move |incoming| {
-        if !from_state_agent(incoming.published_by.as_deref()) {
-            warn!(
-                publisher = incoming.published_by.as_deref().unwrap_or("unverified"),
-                "dropped a message on {STATE_REPLIES_TOPIC} that is not the state agent's"
-            );
-            return;
-        }
-        if let Err(why) = soft_state_common::deliver(&router, &incoming.payload) {
-            warn!("dropped a message on {STATE_REPLIES_TOPIC}: {why}");
-        }
-    })
-}
-
-/// How the issue observer asks the state agent where its first pull starts: `Max { JiraIssue, updated_ms }` on
-/// `soft-state-requests` through `client`, a fresh correlation id each time, the reply awaited on `router` for at
-/// most [`CURSOR_TIMEOUT`].
-pub fn state_asker(router: Arc<ReplyRouter<StateReply>>, client: TcpClient) -> AskCursor {
-    Arc::new(move || {
-        let router = router.clone();
-        let client = client.clone();
-        Box::pin(async move {
-            soft_state_common::ask(
-                &router,
-                StateRequest::Max {
-                    label: CURSOR_LABEL.to_string(),
-                    property: CURSOR_PROPERTY.to_string(),
-                },
-                || uuid::Uuid::new_v4().to_string(),
-                CURSOR_TIMEOUT,
-                move |payload| {
-                    client
-                        .publish(PublishRequest {
-                            topic: soft_state_common::REQUESTS_TOPIC.to_string(),
-                            payload,
-                            trace_ctx: WireTraceCtx::from_current_span(),
-                            offline_behavior: OfflineBehavior::default(),
-                            share_identity: true,
-                        })
-                        .map_err(|e| format!("{e:?}"))
-                },
-            )
-            .await
-        })
-    })
-}
 
 /// How long a child observer gets to stop before the supervisor moves on.
 /// An observer in the middle of a Jira pull only sees the stop between
@@ -151,8 +84,8 @@ pub struct ObserverSupervisorState {
     query_date: Option<String>,
     web_client: Client,
     tcp_client: TcpClient,
-    /// Where the state agent's replies are handed to the issue observer's question.
-    state_replies: Arc<ReplyRouter<StateReply>>,
+    /// The agent's soft state, which the issue observer's cursor is read from (its state actor).
+    state: Option<Arc<dyn StateClient>>,
     healthcheck: HealthHandle,
     /// Sent ProceedWithShutdown once the observers have stopped.
     infrastructure: ActorRef<InfrastructureSupervisorMessage>,
@@ -186,10 +119,7 @@ impl ObserverSupervisorState {
             query_date: self.query_date.clone(),
             retry: RETRY,
             clock: std::time::Instant::now,
-            cursor: Some(state_asker(
-                self.state_replies.clone(),
-                self.tcp_client.clone(),
-            )),
+            cursor: self.state.clone(),
             wall_clock: crate::issues::wall_clock_ms,
         }
     }
@@ -324,11 +254,9 @@ impl Actor for ObserverSupervisor {
             ObserverSupervisor::get_client(&args.egress, CONNECT_TIMEOUT, REQUEST_TIMEOUT).await?;
 
         // Health check, router and broker client in one call. Observers only
-        // depend on Cassini, which is the default capability; the one
-        // subscription is the state agent's replies to the issue observer.
-        let state_replies = Arc::new(ReplyRouter::new());
+        // depend on Cassini, which is the default capability; the issue
+        // observer's soft state comes with the state actor the builder starts.
         let resources = AgentBuilder::new(myself.clone(), BROKER_CLIENT_NAME)
-            .with_subscription(self::state_replies(state_replies.clone()))
             .with_lifecycle_handler(|event| Some(ObserverSupervisorMessage::ClientEvent { event }))
             .into_configured(args.configured)
             .build()
@@ -350,7 +278,9 @@ impl Actor for ObserverSupervisor {
             query_date: args.query_date,
             web_client,
             tcp_client: resources.tcp_client,
-            state_replies,
+            state: resources
+                .state
+                .map(|handle| Arc::new(handle) as Arc<dyn StateClient>),
             healthcheck: resources.healthcheck,
             infrastructure: resources.infrastructure,
             projects: None,
@@ -448,102 +378,8 @@ impl Actor for ObserverSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cassini_client::TcpClientMessage;
     use polar::egress::testing::{TestCa, given, https_server, rerun};
-    use soft_state_common::{Answer, Envelope, decode_request, encode_reply};
-    use std::sync::Mutex;
 
-    /// Each publish: its topic and its payload.
-    type Sent = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
-
-    /// Stands in for the broker client: keeps every publish, and answers a question on the state agent's behalf.
-    struct StateAgent {
-        sent: Sent,
-        answer: Option<(Arc<ReplyRouter<StateReply>>, StateReply)>,
-    }
-
-    #[async_trait]
-    impl Actor for StateAgent {
-        type Msg = TcpClientMessage;
-        type State = ();
-        type Arguments = ();
-        async fn pre_start(&self, _: ActorRef<Self::Msg>, _: ()) -> Result<(), ActorProcessingErr> {
-            Ok(())
-        }
-        async fn handle(
-            &self,
-            _: ActorRef<Self::Msg>,
-            message: Self::Msg,
-            _: &mut (),
-        ) -> Result<(), ActorProcessingErr> {
-            if let TcpClientMessage::Publish { topic, payload, .. } = message {
-                self.sent.lock().unwrap().push((topic, payload.clone()));
-                if let Some((router, reply)) = &self.answer {
-                    let asked = decode_request(&payload).unwrap();
-                    let bytes = encode_reply(&Envelope {
-                        correlation_id: asked.correlation_id,
-                        payload: reply.clone(),
-                    });
-                    soft_state_common::deliver(router, &bytes).unwrap();
-                }
-            }
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn the_question_is_the_largest_updated_ms_of_the_issues_with_a_fresh_id_each_time() {
-        let router = Arc::new(ReplyRouter::new());
-        let sent = Arc::new(Mutex::new(Vec::new()));
-        let (client, _) = Actor::spawn(
-            None,
-            StateAgent {
-                sent: sent.clone(),
-                answer: Some((router.clone(), StateReply::Value(Some(42)))),
-            },
-            (),
-        )
-        .await
-        .unwrap();
-        let ask = state_asker(router, TcpClient::from_actor_ref(client.clone()));
-        assert_eq!(ask().await, Answer::Replied(StateReply::Value(Some(42))));
-        assert_eq!(ask().await, Answer::Replied(StateReply::Value(Some(42))));
-        let sent = sent.lock().unwrap().clone();
-        assert_eq!(sent.len(), 2);
-        let ids: Vec<String> = sent
-            .iter()
-            .map(|(topic, payload)| {
-                assert_eq!(topic, soft_state_common::REQUESTS_TOPIC);
-                let asked = decode_request(payload).unwrap();
-                assert_eq!(
-                    asked.payload,
-                    StateRequest::Max {
-                        label: "JiraIssue".into(),
-                        property: "updated_ms".into()
-                    }
-                );
-                asked.correlation_id
-            })
-            .collect();
-        assert_ne!(ids[0], ids[1]);
-        client.stop(None);
-    }
-
-    #[test]
-    fn its_reply_topic_is_its_own_of_the_state_agent_s_family_and_only_the_state_agent_is_heard_on_it()
-     {
-        assert_eq!(
-            STATE_REPLIES_TOPIC,
-            soft_state_common::replies_topic(BROKER_CLIENT_NAME)
-        );
-        assert!(from_state_agent(Some(
-            "soft-state-observer.polar.serviceaccount.cluster.local"
-        )));
-        assert!(!from_state_agent(Some(
-            "jira-processor.polar.serviceaccount.cluster.local"
-        )));
-        assert!(!from_state_agent(None));
-    }
     use std::time::Instant;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};

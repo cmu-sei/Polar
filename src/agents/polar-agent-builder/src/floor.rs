@@ -295,11 +295,12 @@ mod tests {
             cassini_client in any::<bool>(),
             self_test in any::<bool>(),
             encryption in any::<bool>(),
+            soft_state in any::<bool>(),
             declared in decls(),
             asked in proptest::sample::select(TOPICS),
             publish in any::<bool>(),
         ) {
-            let facts = Facts { name: "kube-observer", cassini_client, self_test, encryption };
+            let facts = Facts { name: "kube-observer", cassini_client, self_test, encryption, soft_state };
             let set = TopicSet::compute(&facts, &declared);
             let mut names: Vec<String> = vec![IDENTITY.to_string()];
             names.extend(declared.iter().map(|d| match d.access {

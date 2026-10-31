@@ -67,19 +67,10 @@ impl PolarAgent for JiraObserver {
             "the issues it reads from Jira",
         )
         .because(&[Cause::Timer("poll")]),
-        // Where its first issue pull starts: the newest update of an issue in the graph, asked of the state agent
-        // (docs/architecture/soft-state.md, "The Jira cursor").
-        TopicDecl::publish(
-            soft_state_common::REQUESTS_TOPIC,
-            "the question where its first issue pull starts",
-        )
-        .because(&[Cause::Timer("poll")]),
-        TopicDecl::subscribe(
-            crate::supervisor::STATE_REPLIES_TOPIC,
-            "the state agent's answer, on its own reply topic",
-        )
-        .answers(&[Cause::Timer("poll")]),
     ];
+    // Where its first issue pull starts: the newest update of an issue in the graph, asked of the state agent through
+    // its state actor (docs/architecture/soft-state.md, "The Jira cursor"). The read gives it the soft-state
+    // capability, and with it its request and reply topics.
     const GRAPH: &'static [GraphDecl] = &[GraphDecl::reads(
         crate::issues::CURSOR_LABEL,
         "the newest updated_ms of an issue, where its first issue pull starts",

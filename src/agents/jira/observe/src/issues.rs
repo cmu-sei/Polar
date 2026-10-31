@@ -27,13 +27,11 @@ use crate::{
 use jira_common::JIRA_ISSUES_CONSUMER_TOPIC;
 use jira_common::types::{JiraData, JiraField, JsonString};
 use polar::cassini::TcpClient;
+use polar_agent_builder::{SoftValue, StateClient, StateError, StateQuery};
 use ractor::{Actor, ActorProcessingErr, ActorRef, async_trait};
 use reqwest::Url;
 use serde_json::Value;
-use soft_state_common::{Answer, StateReply};
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -56,9 +54,16 @@ pub const ORDER: &str = "ORDER BY updated ASC";
 pub const CURSOR_LABEL: &str = "JiraIssue";
 pub const CURSOR_PROPERTY: &str = "updated_ms";
 
-/// One question to the state agent, where issue pulls start: an [`Answer`] for each call, a fresh correlation id each
-/// time (`supervisor.rs`, `state_asker`).
-pub type AskCursor = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Answer> + Send>> + Send + Sync>;
+/// How the issue observer reads where its first pull starts: the agent's state actor, or a test's stand-in.
+pub type AskCursor = Arc<dyn StateClient>;
+
+/// The question: the newest update of an issue the graph has.
+pub fn cursor_query() -> StateQuery {
+    StateQuery::Max {
+        label: CURSOR_LABEL.to_string(),
+        property: CURSOR_PROPERTY.to_string(),
+    }
+}
 
 /// Where the first issue pull starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,19 +77,13 @@ pub enum Start {
 /// What the state agent's answer means for the first pull: where it starts, or why it cannot start yet. Only a value
 /// says where; a refusal, an unavailable graph or no answer is retried, and never taken for an empty graph, since a
 /// full pull is what the cursor is there to avoid.
-pub fn start_from(answer: &Answer) -> Result<Start, String> {
+pub fn start_from(answer: &Result<SoftValue, StateError>) -> Result<Start, String> {
     match answer {
-        Answer::Replied(StateReply::Value(Some(newest_ms))) => Ok(Start::Since(*newest_ms)),
-        Answer::Replied(StateReply::Value(None)) => Ok(Start::Scratch),
-        Answer::Replied(StateReply::Refused(why)) => Err(format!(
-            "the state agent refused to say where issue pulls start: {why}"
-        )),
-        Answer::Replied(StateReply::Unavailable(why)) => Err(format!(
-            "the state agent could not say where issue pulls start: {why}"
-        )),
-        Answer::NoReply(why) => Err(format!(
-            "no answer from the state agent on where issue pulls start: {why}"
-        )),
+        Ok(value) => Ok(match value.largest() {
+            Some(newest_ms) => Start::Since(newest_ms),
+            None => Start::Scratch,
+        }),
+        Err(why) => Err(format!("cannot tell where issue pulls start: {why}")),
     }
 }
 
@@ -133,7 +132,7 @@ impl JiraIssueObserver {
     /// of something else) starts as it did before there was one.
     async fn learn_start(state: &JiraObserverState) -> Result<Start, String> {
         match &state.cursor {
-            Some(ask) => start_from(&ask().await),
+            Some(state) => start_from(&state.get(cursor_query()).await),
             None => Ok(Start::Scratch),
         }
     }
@@ -558,17 +557,14 @@ mod tests {
     #[test]
     fn only_a_value_says_where_to_start_and_anything_else_is_tried_again() {
         assert_eq!(
-            start_from(&Answer::Replied(StateReply::Value(Some(NOW)))),
+            start_from(&Ok(SoftValue::of(Some(NOW)))),
             Ok(Start::Since(NOW))
         );
-        assert_eq!(
-            start_from(&Answer::Replied(StateReply::Value(None))),
-            Ok(Start::Scratch)
-        );
+        assert_eq!(start_from(&Ok(SoftValue::of(None))), Ok(Start::Scratch));
         for answer in [
-            Answer::Replied(StateReply::Refused("not declared".into())),
-            Answer::Replied(StateReply::Unavailable("graph down".into())),
-            Answer::NoReply("timed out".into()),
+            Err(StateError::Refused("not declared".into())),
+            Err(StateError::Unavailable("graph down".into())),
+            Err(StateError::NoReply("timed out".into())),
         ] {
             assert!(start_from(&answer).is_err(), "{answer:?}");
         }

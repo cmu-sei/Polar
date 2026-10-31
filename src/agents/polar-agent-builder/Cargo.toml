@@ -43,6 +43,8 @@ polar-router.workspace = true
 polar-permissions.workspace = true
 polar-policy.workspace = true
 polar-scheduler-common.workspace = true
+# The state agent's questions and answers, which the state actor asks and hears (state.rs).
+soft-state-common.workspace = true
 polar-signing.workspace = true
 rand.workspace = true
 rsa.workspace = true

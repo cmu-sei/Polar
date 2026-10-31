@@ -333,11 +333,19 @@ pub enum Rule {
     SelfTest,
     /// An agent that needs `Encryption` has a crypto actor, which makes the credentials agent's requests.
     Encryption,
+    /// An agent with the `SoftState` capability (it declares a graph read) has a state actor, which asks the state
+    /// agent and hears it on the agent's own reply topic (docs/architecture/soft-state.md).
+    SoftState,
 }
 
 impl Rule {
     /// Every rule there is.
-    pub const ALL: [Rule; 3] = [Rule::Agent, Rule::SelfTest, Rule::Encryption];
+    pub const ALL: [Rule; 4] = [
+        Rule::Agent,
+        Rule::SelfTest,
+        Rule::Encryption,
+        Rule::SoftState,
+    ];
 
     /// The group whose members the rule applies to (docs/architecture/policy-enforcement.md, "Decisions"): the
     /// certificate carries it as `g:<group>`, so the broker knows what the agent knows.
@@ -346,6 +354,7 @@ impl Rule {
             Rule::Agent => "cassini-client",
             Rule::SelfTest => "self-test",
             Rule::Encryption => "encryption",
+            Rule::SoftState => "soft-state",
         }
     }
 
@@ -359,6 +368,7 @@ impl Rule {
             Rule::Agent => "every agent that is a Cassini client",
             Rule::SelfTest => "the agent's self-test is on",
             Rule::Encryption => "the agent needs encryption (its crypto actor)",
+            Rule::SoftState => "the agent reads its own soft state (its state actor)",
         }
     }
 }
@@ -371,6 +381,8 @@ pub struct Facts<'a> {
     pub cassini_client: bool,
     pub self_test: bool,
     pub encryption: bool,
+    /// The agent has the `SoftState` capability: it declares a graph read.
+    pub soft_state: bool,
 }
 
 /// The topics a rule implies for an agent.
@@ -419,6 +431,13 @@ pub fn implied_by(rule: Rule, name: &str) -> Vec<(String, Access)> {
                     .map(|t| (t.to_string(), Access::Subscribe)),
             )
             .collect(),
+        Rule::SoftState => vec![
+            (
+                soft_state_common::REQUESTS_TOPIC.to_string(),
+                Access::Publish,
+            ),
+            (soft_state_common::replies_topic(name), Access::Subscribe),
+        ],
     }
 }
 
@@ -493,6 +512,18 @@ fn implied_causes(rule: Rule, name: &str) -> BTreeMap<(String, Access), Causes> 
                 )
             })
             .collect(),
+        Rule::SoftState => BTreeMap::from([(
+            (
+                soft_state_common::REQUESTS_TOPIC.to_string(),
+                Access::Publish,
+            ),
+            Causes {
+                unprompted: Some(
+                    "its state actor asks the state agent when the agent reads its own soft state".to_string(),
+                ),
+                ..Causes::default()
+            },
+        )]),
     }
 }
 
@@ -521,6 +552,9 @@ pub fn rules_for(facts: &Facts) -> Vec<Rule> {
         }
         if facts.encryption {
             rules.push(Rule::Encryption);
+        }
+        if facts.soft_state {
+            rules.push(Rule::SoftState);
         }
     }
     rules
@@ -879,6 +913,7 @@ mod tests {
             cassini_client: true,
             self_test: true,
             encryption: false,
+            soft_state: false,
         }
     }
 
@@ -1148,9 +1183,10 @@ mod tests {
         })
     }
 
-    fn facts_strategy() -> impl Strategy<Value = (String, bool, bool, bool)> {
+    fn facts_strategy() -> impl Strategy<Value = (String, bool, bool, bool, bool)> {
         (
             "[a-z][a-z0-9-]{0,16}",
+            any::<bool>(),
             any::<bool>(),
             any::<bool>(),
             any::<bool>(),
@@ -1177,10 +1213,10 @@ mod tests {
         #[test]
         fn the_set_does_not_depend_on_the_order_of_the_declarations(
             raw in decls(),
-            (name, cassini, self_test, encryption) in facts_strategy(),
+            (name, cassini, self_test, encryption, soft_state) in facts_strategy(),
             seed in any::<u64>(),
         ) {
-            let facts = Facts { name: &name, cassini_client: cassini, self_test, encryption };
+            let facts = Facts { name: &name, cassini_client: cassini, self_test, encryption, soft_state };
             let declared = leak(&raw);
             let mut shuffled = declared.clone();
             // A deterministic permutation from the seed.
@@ -1228,9 +1264,9 @@ mod tests {
         /// of the set the agent computes, for any agent.
         #[test]
         fn the_broker_s_implied_topics_are_the_agent_s(
-            (name, cassini, self_test, encryption) in facts_strategy(),
+            (name, cassini, self_test, encryption, soft_state) in facts_strategy(),
         ) {
-            let facts = Facts { name: &name, cassini_client: cassini, self_test, encryption };
+            let facts = Facts { name: &name, cassini_client: cassini, self_test, encryption, soft_state };
             let from_certificate: std::collections::BTreeSet<(String, Access)> =
                 implied_topics(&name, &groups_for(&facts)).into_iter().map(|(key, _)| key).collect();
             let from_agent: std::collections::BTreeSet<(String, Access)> = TopicSet::compute(&facts, &[])
@@ -1246,9 +1282,9 @@ mod tests {
         #[test]
         fn the_set_is_the_union_of_the_declared_and_the_implied(
             raw in decls(),
-            (name, cassini, self_test, encryption) in facts_strategy(),
+            (name, cassini, self_test, encryption, soft_state) in facts_strategy(),
         ) {
-            let facts = Facts { name: &name, cassini_client: cassini, self_test, encryption };
+            let facts = Facts { name: &name, cassini_client: cassini, self_test, encryption, soft_state };
             let declared = leak(&raw);
             let set = TopicSet::compute(&facts, &declared);
             let implied: std::collections::BTreeSet<(String, Access)> = rules_for(&facts)
@@ -1469,9 +1505,9 @@ mod tests {
         /// an entry the agent takes. For any agent.
         #[test]
         fn the_topics_used_by_rule_meet_the_checks_on_causes(
-            (name, cassini, self_test, encryption) in facts_strategy(),
+            (name, cassini, self_test, encryption, soft_state) in facts_strategy(),
         ) {
-            let facts = Facts { name: &name, cassini_client: cassini, self_test, encryption };
+            let facts = Facts { name: &name, cassini_client: cassini, self_test, encryption, soft_state };
             prop_assert!(cause_problems(&TopicSet::compute(&facts, &[]).entries()).is_empty());
             for entry in TopicSet::compute(&facts, &[]).entries() {
                 if entry.access == Access::Publish {

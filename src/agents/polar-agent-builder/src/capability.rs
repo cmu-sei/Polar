@@ -51,16 +51,20 @@ pub enum Capability {
     Encryption,
     /// Reads the Kubernetes API with the workload's own ServiceAccount token.
     KubeApiRead,
+    /// Reads its own soft state back through the state agent (docs/architecture/soft-state.md). Never listed by hand:
+    /// the builder adds it for an agent that declares a graph read (`PolarAgent::GRAPH`), and starts its state actor.
+    SoftState,
 }
 
 impl Capability {
     /// Every capability, in the order the catalog lists them.
-    pub const ALL: [Capability; 5] = [
+    pub const ALL: [Capability; 6] = [
         Capability::Cassini,
         Capability::GraphWrite,
         Capability::GraphRead,
         Capability::Encryption,
         Capability::KubeApiRead,
+        Capability::SoftState,
     ];
 
     /// The capability a name in `POLAR_CAPABILITIES` stands for, if this code knows it.
@@ -85,6 +89,7 @@ impl Capability {
             Capability::GraphRead => "graph-read",
             Capability::Encryption => "encryption",
             Capability::KubeApiRead => "kube-api-read",
+            Capability::SoftState => "soft-state",
         }
     }
 }

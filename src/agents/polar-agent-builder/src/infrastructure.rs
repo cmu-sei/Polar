@@ -197,6 +197,9 @@ pub struct InfrastructureSupervisorArgs {
     pub config: Arc<polar_env::Config>,
     pub subscriptions: Vec<Subscription>,
     pub wants_crypto: bool,
+    /// For an agent with the `soft-state` capability, the state agent's identity, which its replies must come from:
+    /// the builder starts a state actor for it (`state.rs`).
+    pub(crate) state_agent: Option<String>,
     /// Whether this is a Cassini client: a router, a client and its subscriptions. A service
     /// that is the broker, or otherwise not a client, has none of them.
     pub(crate) with_client: bool,
@@ -263,6 +266,7 @@ struct SelfTestState {
 struct ClientSetup {
     subscriptions: Vec<Subscription>,
     wants_crypto: bool,
+    state_agent: Option<String>,
     self_test: bool,
     tcp_spawner: Arc<dyn TcpClientSpawner>,
     config: Arc<polar_env::Config>,
@@ -277,6 +281,7 @@ struct ClientParts {
     router: ActorRef<polar_router::RouterMessage>,
     tcp_client: TcpClient,
     crypto: Option<CryptoHandle>,
+    state: Option<crate::state::StateHandle>,
 }
 
 pub struct InfrastructureSupervisorState {
@@ -450,6 +455,16 @@ impl InfrastructureSupervisor {
         // And the credentials agent's policy and permissions: a live update, and a snapshot (asked for or
         // republished). Whether either is believed, and from whom, is the authority actor's to decide.
         subscriptions.extend(crate::authority::subscriptions(&setup.authority));
+        // An agent that reads its own soft state hears the state agent on its own reply topic.
+        let state_replies = setup.state_agent.map(|expected| {
+            let router = Arc::new(soft_state_common::ReplyRouter::new());
+            subscriptions.push(crate::state::replies_subscription(
+                service_name,
+                expected,
+                router.clone(),
+            ));
+            router
+        });
         let self_test = if setup.self_test {
             let instance: [u8; 16] = rand::random();
             let topic = self_test_topic(service_name);
@@ -547,12 +562,33 @@ impl InfrastructureSupervisor {
             None
         };
 
+        let state = match state_replies {
+            Some(replies) => {
+                let (state_actor, _) = ractor::Actor::spawn_linked(
+                    Some(format!("{service_name}.state")),
+                    crate::state::StateActor,
+                    crate::state::StateArgs {
+                        client: tcp_client.clone(),
+                        router: replies,
+                        settings: crate::state::StateSettings::from_env(&*setup.config)
+                            .map_err(ActorProcessingErr::from)?,
+                    },
+                    myself.get_cell(),
+                )
+                .await
+                .map_err(ActorProcessingErr::from)?;
+                Some(crate::state::StateHandle::new(state_actor))
+            }
+            None => None,
+        };
+
         Ok((
             ClientParts {
                 events_output,
                 router,
                 tcp_client,
                 crypto,
+                state,
             },
             self_test,
         ))
@@ -581,6 +617,13 @@ impl InfrastructureSupervisor {
             .is_some_and(|crypto| crypto.as_actor_ref().get_id() == id)
         {
             Child::Other("the crypto actor".to_string())
+        } else if state
+            .client
+            .as_ref()
+            .and_then(|client| client.state.as_ref())
+            .is_some_and(|handle| handle.as_actor_ref().get_id() == id)
+        {
+            Child::Other("the state actor".to_string())
         } else {
             Child::Other(match cell.get_name() {
                 Some(name) => name,
@@ -739,6 +782,7 @@ impl Actor for InfrastructureSupervisor {
                 ClientSetup {
                     subscriptions: args.subscriptions,
                     wants_crypto: args.wants_crypto,
+                    state_agent: args.state_agent.clone(),
                     self_test: args.self_test,
                     tcp_spawner: args.tcp_spawner,
                     config: args.config.clone(),
@@ -1001,6 +1045,7 @@ impl Actor for InfrastructureSupervisor {
                         tcp_client: client.tcp_client.clone(),
                         healthcheck: state.healthcheck.clone(),
                         crypto: client.crypto.clone(),
+                        state: client.state.clone(),
                         events_output: client.events_output.clone(),
                         infrastructure_events: state.infrastructure_events.clone(),
                         infrastructure: myself.clone(),
@@ -1312,6 +1357,22 @@ mod tests {
             .await
         }
 
+        /// A rig whose agent reads its own soft state: the builder starts a state actor for it.
+        async fn with_state(service: &str) -> Self {
+            Self::build_with(
+                service,
+                Duration::from_secs(20),
+                &[],
+                false,
+                false,
+                None,
+                vec![],
+                &[],
+                Some("soft-state-observer.polar.serviceaccount.cluster.local".to_string()),
+            )
+            .await
+        }
+
         #[allow(clippy::too_many_arguments)]
         async fn build(
             service: &str,
@@ -1325,6 +1386,35 @@ mod tests {
                 Arc<dyn crate::command_actor::CommandHandler>,
             )>,
             runtime: &'static [&'static crate::runtime::RuntimeSection],
+        ) -> Self {
+            Self::build_with(
+                service,
+                budget,
+                health_env,
+                listen_for_signals,
+                crypto,
+                self_test,
+                commands,
+                runtime,
+                None,
+            )
+            .await
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn build_with(
+            service: &str,
+            budget: Duration,
+            health_env: &[(&str, &str)],
+            listen_for_signals: bool,
+            crypto: bool,
+            self_test: Option<bool>,
+            commands: Vec<(
+                crate::command::CommandSpec,
+                Arc<dyn crate::command_actor::CommandHandler>,
+            )>,
+            runtime: &'static [&'static crate::runtime::RuntimeSection],
+            state_agent: Option<String>,
         ) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let certificate = dir.path().join("cert.pem");
@@ -1358,6 +1448,9 @@ mod tests {
                 );
                 required.push(crate::Capability::Encryption);
             }
+            if state_agent.is_some() {
+                required.push(crate::Capability::SoftState);
+            }
             let startup = crate::startup::prepare(&vars, &[], &required, None).unwrap();
 
             let exits = Arc::new(Mutex::new(Vec::new()));
@@ -1377,6 +1470,7 @@ mod tests {
                     config: startup.config,
                     subscriptions: vec![],
                     wants_crypto: crypto,
+                    state_agent,
                     with_client: true,
                     shutdown_budget: budget,
                     listen_for_signals,
@@ -2632,6 +2726,20 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn an_agent_that_reads_its_soft_state_is_given_a_state_actor_and_one_that_does_not_is_not()
+     {
+        let rig = Rig::with_state("infra-state").await;
+        assert!(rig.resources.state.is_some());
+        assert!(
+            Rig::standard("infra-no-state")
+                .await
+                .resources
+                .state
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn the_crypto_actor_dying_starts_an_orderly_shutdown() {
         let rig = Rig::with_crypto("infra-crypto-dies").await;
         let crypto = rig
@@ -2834,6 +2942,7 @@ mod service_tests {
                     config: startup.config,
                     subscriptions: vec![],
                     wants_crypto: false,
+                    state_agent: None,
                     with_client: false,
                     shutdown_budget: budget,
                     listen_for_signals: false,

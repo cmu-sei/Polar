@@ -616,6 +616,7 @@ async fn agent(
             cassini_client: true,
             self_test: false,
             encryption: false,
+            soft_state: false,
         },
         declared,
     );

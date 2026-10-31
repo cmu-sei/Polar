@@ -167,6 +167,7 @@ mod tests {
                 cassini_client: true,
                 self_test: true,
                 encryption: false,
+                soft_state: false,
             },
             &[TopicDecl::publish(
                 "kubernetes.cluster.consumer.Pod",

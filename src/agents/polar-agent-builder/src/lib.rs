@@ -76,6 +76,8 @@ pub mod runtime;
 pub use runtime::{RuntimeChanged, RuntimeSection, RuntimeValue};
 pub mod selftest;
 pub mod shutdown;
+pub mod state;
+pub use state::{SoftValue, StateClient, StateError, StateHandle, StateQuery};
 pub mod signed;
 mod start_marker;
 pub use signed::{Rejection, UpdateVerifier};
@@ -141,6 +143,9 @@ pub struct AgentResources {
     pub tcp_client: TcpClient,
     pub healthcheck: crate::health::HealthHandle,
     pub crypto: Option<crate::crypto::CryptoHandle>,
+    /// The agent's way to its own soft state, for an agent with the `soft-state` capability (it declares a graph
+    /// read): see [`state::StateClient`].
+    pub state: Option<crate::state::StateHandle>,
     /// Every real ClientEvent this agent's own TcpClient produces --
     /// subscribe with your own, real mapping closure, exactly the
     /// same, established pattern as prepare_shutdown_port/
@@ -175,6 +180,8 @@ pub struct AgentBuilder<M: ractor::Message> {
     requires: Vec<Capability>,
     map_lifecycle_event: Option<Box<dyn Fn(ClientEvent) -> Option<M> + Send + Sync>>,
     wants_crypto: bool,
+    /// Start a state actor (the `soft-state` capability).
+    wants_state: bool,
     self_test: bool,
     shutdown_budget: Option<std::time::Duration>,
     environment: Vec<&'static polar_env::Section>,
@@ -241,6 +248,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
             requires: Vec::new(),
             map_lifecycle_event: None,
             wants_crypto: false,
+            wants_state: false,
             self_test: false,
             shutdown_budget: None,
             environment: Vec::new(),
@@ -397,6 +405,7 @@ impl<M: ractor::Message> AgentBuilder<M> {
     pub fn into_configured(mut self, configured: Configured) -> ConfiguredAgent<M> {
         self.requires = configured.required.clone();
         self.wants_crypto = configured.required.contains(&Capability::Encryption);
+        self.wants_state = configured.required.contains(&Capability::SoftState);
         self.self_test = configured.self_test;
         self.declared_commands = configured.commands;
         self.declared_runtime = configured.runtime;
@@ -460,6 +469,17 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
             .map_err(|e| ActorProcessingErr::from(e.to_string()))?;
         let own = own_name::check_certificate(&this.service_name, &certificate)
             .map_err(ActorProcessingErr::from)?;
+        // Its soft state's answers come from the state agent of its own namespace and domain.
+        let state_agent = if this.wants_state {
+            Some(state::state_agent_identity(&own.identity).ok_or_else(|| {
+                ActorProcessingErr::from(format!(
+                    "{} names no workload, so the state agent cannot be found",
+                    own.identity
+                ))
+            })?)
+        } else {
+            None
+        };
         // Each publish and subscribe is checked before it leaves: the agent's policy, then its topics.
         let gate = this
             .topics
@@ -482,6 +502,7 @@ impl<M: ractor::Message> ConfiguredAgent<M> {
                 config: startup.config,
                 subscriptions: this.subscriptions,
                 wants_crypto: this.wants_crypto,
+                state_agent,
                 with_client: true,
                 self_test: this.self_test,
                 shutdown_budget: startup.shutdown_budget,
@@ -626,6 +647,7 @@ impl<M: ractor::Message> ConfiguredService<M> {
                 config: startup.config,
                 subscriptions: Vec::new(),
                 wants_crypto: false,
+                state_agent: None,
                 with_client: false,
                 self_test: false,
                 shutdown_budget: startup.shutdown_budget,

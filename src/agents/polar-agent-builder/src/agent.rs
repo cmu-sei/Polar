@@ -369,17 +369,34 @@ pub struct AgentInfo {
 }
 
 /// What `A` needs, with the Cassini client first: every agent built here is one, so the agent
-/// does not have to say so and cannot forget to.
+/// does not have to say so and cannot forget to. See [`computed_needs`].
 pub(crate) fn needs_of<A: PolarAgent>() -> Vec<Capability> {
-    let mut needs = if A::CASSINI_CLIENT {
+    computed_needs(A::CASSINI_CLIENT, A::NEEDS, A::GRAPH)
+}
+
+/// What an agent needs, from how it is declared: `Cassini` first for a Cassini client, then what it lists, then
+/// `SoftState` for an agent that declares a graph read, which the builder gives a state actor for
+/// (docs/architecture/soft-state.md). Each once, in that order.
+pub fn computed_needs(
+    cassini_client: bool,
+    listed: &[Capability],
+    graph: &[GraphDecl],
+) -> Vec<Capability> {
+    let mut needs = if cassini_client {
         vec![Capability::Cassini]
     } else {
         Vec::new()
     };
-    for capability in A::NEEDS {
+    for capability in listed {
         if !needs.contains(capability) {
             needs.push(*capability);
         }
+    }
+    let reads = graph
+        .iter()
+        .any(|d| d.access == crate::graph_schema::GraphAccess::Reads);
+    if reads && !needs.contains(&Capability::SoftState) {
+        needs.push(Capability::SoftState);
     }
     needs
 }
@@ -411,6 +428,7 @@ fn topic_facts<A: PolarAgent>() -> Facts<'static> {
         cassini_client: A::CASSINI_CLIENT || cassini_optional::<A>(),
         self_test: A::SELF_TEST,
         encryption: A::NEEDS.contains(&Capability::Encryption),
+        soft_state: needs_of::<A>().contains(&Capability::SoftState),
     }
 }
 
@@ -891,6 +909,13 @@ pub fn declaration_problems<A: PolarAgent>() -> Vec<String> {
         problems.push(
             "cassini is optional but CASSINI_CLIENT is on: an agent that is always a client cannot \
              do without it; set CASSINI_CLIENT = false"
+                .to_string(),
+        );
+    }
+    if A::NEEDS.contains(&Capability::SoftState) || A::OPTIONAL.contains(&Capability::SoftState) {
+        problems.push(
+            "soft-state is listed by hand: the builder adds it for an agent that declares a graph read \
+             (GRAPH), and only then"
                 .to_string(),
         );
     }
@@ -1487,6 +1512,95 @@ mod tests {
                 .contains(&"POLAR_SERVED_WORKLOADS".to_string())
         );
         assert!(declaration_problems::<Scheduling>().is_empty());
+    }
+
+    #[test]
+    fn an_agent_that_reads_state_is_given_soft_state_and_its_topics_and_no_other_is() {
+        let doc = scaffold_document::<Reading>();
+        assert_eq!(doc.requires, ["cassini", "graph-read", "soft-state"]);
+        assert!(doc.groups.contains(&"soft-state".to_string()));
+        let set = topic_set::<Reading>();
+        assert!(set.allows("soft-state-requests", crate::topics::Access::Publish));
+        assert!(set.allows(
+            "soft-state-replies.reading",
+            crate::topics::Access::Subscribe
+        ));
+        assert!(!set.allows("soft-state-replies.other", crate::topics::Access::Subscribe));
+        let doc = scaffold_document::<Example>();
+        assert!(!doc.requires.contains(&"soft-state".to_string()));
+        assert!(
+            !topic_set::<Example>().allows("soft-state-requests", crate::topics::Access::Publish)
+        );
+    }
+
+    #[test]
+    fn soft_state_listed_by_hand_is_a_declaration_problem() {
+        struct Listing;
+        impl PolarAgent for Listing {
+            const NAME: &'static str = "listing";
+            const PURPOSE: &'static str = "Lists what is computed";
+            const NEEDS: &'static [Capability] = &[Capability::SoftState];
+            const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+            async fn start(_: Configured) -> Result<(), StartError> {
+                Ok(())
+            }
+        }
+        let problems = declaration_problems::<Listing>();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("soft-state is listed by hand")),
+            "{problems:?}"
+        );
+    }
+
+    fn capability() -> impl proptest::strategy::Strategy<Value = Capability> {
+        proptest::sample::select(Capability::ALL.to_vec())
+    }
+
+    fn graph_decl() -> impl proptest::strategy::Strategy<Value = GraphDecl> {
+        use proptest::prelude::*;
+        (prop::sample::select(vec!["A", "B", "C"]), any::<bool>()).prop_map(|(label, owns)| {
+            if owns {
+                GraphDecl::owns(label, "p")
+            } else {
+                GraphDecl::reads(label, "p")
+            }
+        })
+    }
+
+    proptest::proptest! {
+        /// What an agent needs is computed from how it is declared: Cassini first for a client, then what it lists in
+        /// its order, then soft-state exactly when it declares a read; each once; nothing else.
+        #[test]
+        fn the_computed_needs_follow_the_declaration(
+            cassini in proptest::prelude::any::<bool>(),
+            listed in proptest::collection::vec(capability(), 0..6),
+            graph in proptest::collection::vec(graph_decl(), 0..5),
+        ) {
+            let needs = computed_needs(cassini, &listed, &graph);
+            let reads = graph.iter().any(|d| d.access == crate::graph_schema::GraphAccess::Reads);
+            proptest::prop_assert_eq!(needs.first() == Some(&Capability::Cassini), cassini || listed.first() == Some(&Capability::Cassini));
+            proptest::prop_assert_eq!(needs.contains(&Capability::SoftState), reads || listed.contains(&Capability::SoftState));
+            let mut unique = needs.clone();
+            unique.dedup();
+            let distinct: std::collections::BTreeSet<&str> = needs.iter().map(|c| c.as_str()).collect();
+            proptest::prop_assert_eq!(distinct.len(), needs.len());
+            for capability in &listed {
+                proptest::prop_assert!(needs.contains(capability));
+            }
+            for capability in &needs {
+                proptest::prop_assert!(
+                    listed.contains(capability)
+                        || (*capability == Capability::Cassini && cassini)
+                        || (*capability == Capability::SoftState && reads)
+                );
+            }
+            // Deterministic, and independent of how the graph declarations are ordered.
+            let mut reversed = graph.clone();
+            reversed.reverse();
+            proptest::prop_assert_eq!(&needs, &computed_needs(cassini, &listed, &reversed));
+        }
     }
 
     #[test]
