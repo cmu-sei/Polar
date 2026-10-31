@@ -40,7 +40,18 @@ pub static CACHE_ROOT: Defaulted<String> = Defaulted::text(
     DEFAULT_CACHE_ROOT,
 );
 
-static VARIABLES: &[&dyn Described] = &[&CACHE_ROOT];
+/// How many events a worker publishes at once, between moves of a ref's checkpoint (cassini-backpressure.md, the
+/// decisions reviewed with the maintainer, 17): what it holds at once is one batch's events, not a whole walk's.
+pub const DEFAULT_PUBLISH_BATCH: usize = 32;
+
+pub static PUBLISH_BATCH: Defaulted<u64> = Defaulted::number(
+    "POLAR_GIT_PUBLISH_BATCH",
+    "how many commits a repository worker publishes at once, oldest first, before it moves the ref's checkpoint; \
+     what it holds at once is one batch, not a whole walk",
+    "32",
+);
+
+static VARIABLES: &[&dyn Described] = &[&CACHE_ROOT, &PUBLISH_BATCH];
 
 /// The section the git observer registers.
 pub static SECTION: Section = Section {
@@ -51,12 +62,14 @@ pub static SECTION: Section = Section {
 
 pub struct ObserverSettings {
     pub cache_root: PathBuf,
+    pub publish_batch: usize,
 }
 
 impl ObserverSettings {
     pub fn read(config: &Config) -> Result<Self, ConfigError> {
         Ok(Self {
             cache_root: PathBuf::from(config.read(&CACHE_ROOT)?),
+            publish_batch: (config.read(&PUBLISH_BATCH)? as usize).max(1),
         })
     }
 

@@ -219,6 +219,7 @@ impl Actor for RootSupervisor {
             GitRepoSupervisorArgs {
                 tcp_client: resources.tcp_client.clone(),
                 cache_root,
+                publish_batch: settings.publish_batch,
                 crypto: Arc::new(crypto.clone()),
                 clone: crate::GitRepoWorker::open_or_clone_bare,
                 egress,

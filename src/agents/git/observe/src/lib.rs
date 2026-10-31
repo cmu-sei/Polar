@@ -201,6 +201,8 @@ struct RunningWorker {
 
 pub struct GitRepoSupervisorState {
     cache_root: PathBuf,
+    /// How many events each worker publishes at once (`settings::PUBLISH_BATCH`).
+    publish_batch: usize,
     workers: HashMap<RepoId, RunningWorker>,
     tcp_client: TcpClient,
     crypto: Arc<dyn CryptoClient>,
@@ -210,6 +212,8 @@ pub struct GitRepoSupervisorState {
 
 pub struct GitRepoSupervisorArgs {
     cache_root: PathBuf,
+    /// How many events each worker publishes at once (`settings::PUBLISH_BATCH`).
+    pub publish_batch: usize,
     tcp_client: TcpClient,
     /// Where each worker asks for the credential its repository names.
     crypto: Arc<dyn CryptoClient>,
@@ -296,6 +300,7 @@ impl GitRepoSupervisor {
             clone: state.clone,
             repo_path: state.cache_root.join(repo_id.to_string()),
             tcp_client: state.tcp_client.clone(),
+            publish_batch: state.publish_batch,
         };
 
         match Actor::spawn_linked(
@@ -342,6 +347,7 @@ impl Actor for GitRepoSupervisor {
 
         Ok(GitRepoSupervisorState {
             cache_root: args.cache_root,
+            publish_batch: args.publish_batch,
             tcp_client: args.tcp_client,
             crypto: args.crypto,
             clone: args.clone,
@@ -452,7 +458,10 @@ pub struct GitRepoWorkerState {
     /// Cloned or opened by the first attempt that has what it needs, not before: a repository whose
     /// credential has not arrived has no clone yet.
     repo: Option<Repository>,
-    last_seen: HashMap<String, Oid>,
+    /// Each ref's checkpoint: what of it was published.
+    checkpoints: HashMap<String, Checkpoint>,
+    /// How many events are published at once (`settings::PUBLISH_BATCH`).
+    publish_batch: usize,
     /// The last attempt could not go ahead (its credential is missing or unusable, or the clone or the fetch
     /// failed).
     waiting: bool,
@@ -470,6 +479,8 @@ pub struct GitRepoWorkerArgs {
     clone: CloneFn,
     /// The proxy the repository is reached through, or none (`Egress::proxy_for` its URL).
     proxy: Option<String>,
+    /// How many events are published at once (`settings::PUBLISH_BATCH`).
+    publish_batch: usize,
 }
 
 /// The event a commit found on `ref_name` is published as.
@@ -530,35 +541,151 @@ impl EventSink for TcpClient {
     }
 }
 
-/// Publishes what a walk found, a ref at a time and in order, and moves `last_seen` to a ref's tip only once every
-/// event of that ref was accepted. A ref with an event refused keeps the `last_seen` it had, so the next attempt walks
-/// it again from there (what was accepted before the refusal is published again: the consumers' writes are
-/// MERGE-style, docs/architecture/cassini-client-reliability.md, 5a). Returns how many refs were left behind.
-pub async fn publish_observed(
-    sink: &impl EventSink,
-    found: Vec<(String, GitRepositoryMessage)>,
-    tips: Vec<(String, Oid)>,
-    last_seen: &mut HashMap<String, Oid>,
-) -> usize {
-    let mut left_behind = 0;
-    for (ref_name, tip) in tips {
-        let mut accepted = true;
-        for (_, event) in found.iter().filter(|(r, _)| *r == ref_name) {
-            if let Err(e) = sink.publish(event).await {
-                error!(
-                    "{ref_name}: an event was not accepted ({e}); the ref is walked again from where it was next time"
-                );
-                accepted = false;
-                break;
-            }
+/// Where a ref's next walk starts: what of it was published.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Checkpoint {
+    /// The tip last published whole, its update accepted: what the next update says the ref moved from.
+    pub tip: Option<Oid>,
+    /// The published commits that no other published commit descends from: the walk hides them, and so everything
+    /// they descend from. One commit on a linear history (the last of the last batch taken); the tip, once all of it
+    /// is published. A single last commit would do for a linear history; with merges it would hide only its own
+    /// ancestors, and a sibling branch's commits published before it would be published again.
+    pub frontier: Vec<Oid>,
+}
+
+/// What one walk of a ref will publish: its tip, and the commits its checkpoint does not cover, oldest first (reverse
+/// topological order: every commit after its parents). At most `max_depth` back from the tip; deeper ones are skipped,
+/// as before. Only their ids are held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefPlan {
+    pub tip: Oid,
+    pub oids: Vec<Oid>,
+}
+
+/// Plans a walk of `ref_name` from its checkpoint.
+pub fn plan_ref(
+    repo: &Repository,
+    ref_name: &str,
+    checkpoint: &Checkpoint,
+    max_depth: usize,
+) -> Result<RefPlan, git2::Error> {
+    let tip = repo
+        .find_reference(ref_name)?
+        .target()
+        .ok_or_else(|| git2::Error::from_str("ref has no target"))?;
+    let mut walk = repo.revwalk()?;
+    walk.set_sorting(git2::Sort::TOPOLOGICAL)?;
+    walk.push(tip)?;
+    for published in &checkpoint.frontier {
+        let _ = walk.hide(*published);
+    }
+    // Children before parents, nearest the tip first: the first `max_depth` are those nearest it.
+    let mut oids = Vec::new();
+    for oid in walk {
+        if oids.len() >= max_depth {
+            break;
         }
-        if accepted {
-            last_seen.insert(ref_name, tip);
-        } else {
-            left_behind += 1;
+        oids.push(oid?);
+    }
+    oids.reverse();
+    Ok(RefPlan { tip, oids })
+}
+
+/// One batch's events, each with its commit and the commit's parents (for the checkpoint).
+pub type Batch = Vec<(GitRepositoryMessage, Oid, Vec<Oid>)>;
+
+/// The events of `oids`, in order.
+pub fn batch_events(
+    repo: &Repository,
+    repo_id: &RepoId,
+    ref_name: &str,
+    oids: &[Oid],
+) -> Result<Batch, git2::Error> {
+    oids.iter()
+        .map(|oid| {
+            let commit = repo.find_commit(*oid)?;
+            Ok((
+                commit_event(repo_id.clone(), ref_name, &commit),
+                commit.id(),
+                commit.parent_ids().collect(),
+            ))
+        })
+        .collect()
+}
+
+/// Publishes one batch, in order, and moves the checkpoint past it if the client took all of it. A batch refused
+/// leaves the checkpoint after the last batch taken: nothing is lost, and only this batch's events taken before the
+/// refusal are published again (the consumers' writes are MERGE-style, cassini-client-reliability.md, 5a).
+pub async fn publish_batch(
+    sink: &impl EventSink,
+    ref_name: &str,
+    batch: Batch,
+    checkpoint: &mut Checkpoint,
+) -> bool {
+    for (event, _, _) in &batch {
+        if let Err(e) = sink.publish(event).await {
+            error!(
+                "{ref_name}: a commit was not accepted ({e}); the next walk starts after the last batch taken"
+            );
+            return false;
         }
     }
-    left_behind
+    for (_, oid, parents) in batch {
+        checkpoint
+            .frontier
+            .retain(|published| !parents.contains(published));
+        checkpoint.frontier.push(oid);
+    }
+    true
+}
+
+/// Publishes the ref's update once all its commits were taken, and moves its checkpoint to the tip.
+pub async fn publish_ref_update(
+    sink: &impl EventSink,
+    repo_id: &RepoId,
+    ref_name: &str,
+    checkpoint: &mut Checkpoint,
+    tip: Oid,
+) -> bool {
+    if let Err(e) = sink
+        .publish(&ref_update_event(
+            repo_id.clone(),
+            ref_name,
+            checkpoint.tip,
+            tip,
+        ))
+        .await
+    {
+        error!("{ref_name}: its update was not accepted ({e}); it is published again next time");
+        return false;
+    }
+    checkpoint.tip = Some(tip);
+    checkpoint.frontier = vec![tip];
+    true
+}
+
+/// Publishes what `ref_name` has that its checkpoint does not, oldest first, in batches of `batch` events, moving the
+/// checkpoint after each batch the client took, then the ref's update; returns whether all of it was taken. What is
+/// held at once is the walk's commit ids and one batch's events, not a whole walk's (cassini-backpressure.md, the
+/// decisions reviewed with the maintainer, 17). The worker does the same a step at a time, borrowing its repository
+/// only between publishes (`Repository` is not `Sync`).
+pub async fn publish_ref(
+    sink: &impl EventSink,
+    repo: &Repository,
+    repo_id: &RepoId,
+    ref_name: &str,
+    checkpoint: &mut Checkpoint,
+    max_depth: usize,
+    batch: usize,
+) -> Result<bool, git2::Error> {
+    let plan = plan_ref(repo, ref_name, checkpoint, max_depth)?;
+    for chunk in plan.oids.chunks(batch.max(1)) {
+        let events = batch_events(repo, repo_id, ref_name, chunk)?;
+        if !publish_batch(sink, ref_name, events, checkpoint).await {
+            return Ok(false);
+        }
+    }
+    Ok(publish_ref_update(sink, repo_id, ref_name, checkpoint, plan.tip).await)
 }
 
 impl GitRepoWorker {
@@ -745,49 +872,68 @@ impl GitRepoWorker {
             }
         }
 
-        let Some(repo) = state.repo.as_ref() else {
-            return Outcome::CloneFailed("no clone".into());
-        };
-        // The walk only collects: what it found is published after it, where a publish may wait for room, and a ref's
-        // `last_seen` moves only once all it found was accepted.
-        let mut found: Vec<(String, GitRepositoryMessage)> = Vec::new();
-        let mut moved: Vec<(String, GitRepositoryMessage)> = Vec::new();
+        // Fetched, each ref is walked and published a batch at a time, oldest first, its checkpoint moving after each
+        // batch taken (`publish_ref`).
         let repo_id = state.config.repo_id.clone();
-        let observed = Self::observe_refs(
-            repo,
-            &provider,
-            &state.config,
-            state.proxy.as_deref(),
-            &state.last_seen,
-            |ref_name, commit| {
-                found.push((
-                    ref_name.to_string(),
-                    commit_event(repo_id.clone(), ref_name, commit),
-                ))
-            },
-            |ref_name, old, new| {
-                moved.push((
-                    ref_name.to_string(),
-                    ref_update_event(repo_id.clone(), ref_name, old, new),
-                ))
-            },
-        );
-        let observed = match observed {
-            Ok(tips) => {
-                found.extend(moved);
-                publish_observed(&state.tcp_client, found, tips, &mut state.last_seen).await;
-                Ok(())
-            }
-            Err(e) => Err(e),
+        let mut observed = {
+            let Some(repo) = state.repo.as_ref() else {
+                return Outcome::CloneFailed("no clone".into());
+            };
+            Self::fetch_with_optional_depth(
+                repo,
+                provider.clone(),
+                &state.config.remotes,
+                state.config.shallow_depth,
+                state.proxy.as_deref(),
+            )
         };
+        if observed.is_ok() {
+            // The repository is borrowed only between publishes: it is not Sync, and this future must be Send.
+            'refs: for ref_name in state.config.refs.clone() {
+                let checkpoint = state.checkpoints.entry(ref_name.clone()).or_default();
+                let plan = match state.repo.as_ref() {
+                    Some(repo) => plan_ref(repo, &ref_name, checkpoint, state.config.max_depth),
+                    None => break,
+                };
+                let plan = match plan {
+                    Ok(plan) => plan,
+                    Err(e) => {
+                        warn!("ref {ref_name} could not be walked ({e}), skipping");
+                        continue;
+                    }
+                };
+                for chunk in plan.oids.chunks(state.publish_batch.max(1)) {
+                    let events = match state.repo.as_ref() {
+                        Some(repo) => batch_events(repo, &repo_id, &ref_name, chunk),
+                        None => break 'refs,
+                    };
+                    let events = match events {
+                        Ok(events) => events,
+                        Err(e) => {
+                            observed = Err(e);
+                            break 'refs;
+                        }
+                    };
+                    let checkpoint = state.checkpoints.entry(ref_name.clone()).or_default();
+                    if !publish_batch(&state.tcp_client, &ref_name, events, checkpoint).await {
+                        continue 'refs;
+                    }
+                }
+                let checkpoint = state.checkpoints.entry(ref_name.clone()).or_default();
+                publish_ref_update(&state.tcp_client, &repo_id, &ref_name, checkpoint, plan.tip)
+                    .await;
+            }
+        }
         match observed {
             Ok(()) => {
                 state.waiting = false;
                 Outcome::Observed {
                     tips: state
-                        .last_seen
+                        .checkpoints
                         .iter()
-                        .map(|(name, oid)| (name.clone(), oid.to_string()))
+                        .filter_map(|(name, checkpoint)| {
+                            Some((name.clone(), checkpoint.tip?.to_string()))
+                        })
                         .collect(),
                 }
             }
@@ -910,7 +1056,8 @@ impl Actor for GitRepoWorker {
             clone: args.clone,
             proxy: args.proxy,
             repo: None,
-            last_seen: HashMap::new(),
+            checkpoints: HashMap::new(),
+            publish_batch: args.publish_batch,
             waiting: false,
             status: StatusTracker::new(config.repo_id.clone()),
             config,
@@ -1078,6 +1225,7 @@ mod tests {
                 crypto: crypto.clone(),
                 clone,
                 proxy: None,
+                publish_batch: crate::settings::DEFAULT_PUBLISH_BATCH,
             },
         )
         .await
@@ -1469,6 +1617,7 @@ mod tests {
             GitRepoSupervisor,
             GitRepoSupervisorArgs {
                 cache_root: cache.path().to_path_buf(),
+                publish_batch: crate::settings::DEFAULT_PUBLISH_BATCH,
                 tcp_client: TcpClient::from_actor_ref(sink),
                 crypto: crypto.clone(),
                 clone: refusing_clone,

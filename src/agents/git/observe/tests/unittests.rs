@@ -277,66 +277,35 @@ impl EventSink for RefusingSink {
     }
 }
 
-/// A ref with an event the client did not accept keeps the `last_seen` it had, so its commits are walked, and
+/// A ref with an event the client did not accept keeps the checkpoint it had, so its commits are walked, and
 /// published, again; a ref all of whose events were accepted moves on. Until 2026-10-30 a refused publish was logged
-/// and dropped inside the walk, and `last_seen` moved past it: the commit was lost.
+/// and dropped inside the walk, and the ref moved past it: the commit was lost.
 #[tokio::test]
 async fn an_event_the_client_refused_leaves_its_ref_s_last_seen_where_it_was() {
     init_logging();
     let (_dir, repo) = bare_repo();
     let main_commits = linear_history(&repo, "refs/heads/main", 2);
     let dev_commits = linear_history(&repo, "refs/heads/dev", 3);
-    let config = dummy_config(vec!["refs/heads/main".into(), "refs/heads/dev".into()]);
-    let provider = noop_provider();
-    let mut last_seen = HashMap::new();
-    let mut found = Vec::new();
-    let mut moved = Vec::new();
-    let tips = GitRepoWorker::observe_refs(
-        &repo,
-        &provider,
-        &config,
-        None,
-        &last_seen,
-        |r, c| {
-            found.push((
-                r.to_string(),
-                git_agent_common::GitRepositoryMessage::CommitDiscovered {
-                    ref_name: r.to_string(),
-                    observed_at: String::new(),
-                    repo: RepoId::from_url("local"),
-                    oid: c.id().to_string(),
-                    committer: String::new(),
-                    time: 0,
-                    message: String::new(),
-                    parents: Vec::new(),
-                },
-            ))
-        },
-        |r, old, new| {
-            moved.push((
-                r.to_string(),
-                git_agent_common::GitRepositoryMessage::RefUpdated {
-                    repo: RepoId::from_url("local"),
-                    ref_name: r.to_string(),
-                    old: old.map(|o| o.to_string()),
-                    new: new.to_string(),
-                    observed_at: String::new(),
-                },
-            ))
-        },
-    )
-    .unwrap();
-    assert!(last_seen.is_empty(), "the walk alone moves nothing");
-    found.extend(moved);
+    let repo_id = RepoId::from_url("local");
     let sink = RefusingSink {
         refuse_on: "refs/heads/dev",
         accepted: Default::default(),
     };
-    let left_behind = publish_observed(&sink, found, tips, &mut last_seen).await;
-    assert_eq!(left_behind, 1);
-    assert_eq!(last_seen.get("refs/heads/main"), main_commits.last());
+    let mut main = Checkpoint::default();
+    let mut dev = Checkpoint::default();
+    assert!(
+        publish_ref(&sink, &repo, &repo_id, "refs/heads/main", &mut main, 100, 1)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !publish_ref(&sink, &repo, &repo_id, "refs/heads/dev", &mut dev, 100, 1)
+            .await
+            .unwrap()
+    );
+    assert_eq!(main.tip.as_ref(), main_commits.last());
     assert_eq!(
-        last_seen.get("refs/heads/dev"),
+        dev.tip,
         None,
         "dev's second event was refused: dev stays where it was ({:?})",
         dev_commits.last()
@@ -357,4 +326,211 @@ fn a_worker_that_is_already_running_is_not_an_error() {
     let repo = RepoId::new("again".into());
     let dup = ractor::SpawnErr::ActorAlreadyRegistered("worker".into());
     assert!(git_repo_observer::tolerate_spawn_failure(&repo, dup).is_ok());
+}
+
+/// Takes events until it has taken `room`, then refuses them: a client whose room ran out.
+struct RoomFor {
+    room: usize,
+    /// What it took: a commit's oid, or none for a ref's update.
+    taken: std::sync::Mutex<Vec<Option<String>>>,
+}
+
+impl RoomFor {
+    fn new(room: usize) -> Self {
+        Self {
+            room,
+            taken: Default::default(),
+        }
+    }
+
+    fn commits(&self) -> Vec<String> {
+        self.taken
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    fn ref_updates(&self) -> usize {
+        self.taken
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.is_none())
+            .count()
+    }
+}
+
+impl EventSink for RoomFor {
+    async fn publish(&self, event: &git_agent_common::GitRepositoryMessage) -> Result<(), String> {
+        let mut taken = self.taken.lock().unwrap();
+        if taken.len() >= self.room {
+            return Err("the client's outbox and buffer are full".to_string());
+        }
+        taken.push(match event {
+            git_agent_common::GitRepositoryMessage::CommitDiscovered { oid, .. } => {
+                Some(oid.clone())
+            }
+            git_agent_common::GitRepositoryMessage::RefUpdated { .. } => None,
+        });
+        Ok(())
+    }
+}
+
+/// Builds a history from `parents`: commit `i` has the commits `parents[i]` (all earlier) as its parents; the ref
+/// points at the last. Returns every commit.
+fn history(repo: &Repository, ref_name: &str, parents: &[Vec<usize>]) -> Vec<Oid> {
+    let mut oids: Vec<Oid> = Vec::new();
+    for (i, of) in parents.iter().enumerate() {
+        let commits: Vec<Commit> = of
+            .iter()
+            .map(|p| repo.find_commit(oids[*p]).unwrap())
+            .collect();
+        let oid = make_commit(repo, &format!("c{i}"), &commits.iter().collect::<Vec<_>>());
+        oids.push(oid);
+    }
+    repo.reference(ref_name, *oids.last().unwrap(), true, "init")
+        .unwrap();
+    oids
+}
+
+/// The commits reachable from `tip`.
+fn reachable(repo: &Repository, tip: Oid) -> std::collections::BTreeSet<String> {
+    let mut walk = repo.revwalk().unwrap();
+    walk.push(tip).unwrap();
+    walk.map(|oid| oid.unwrap().to_string()).collect()
+}
+
+/// Every commit of `order` comes after those of its parents that are in it.
+fn parents_first(repo: &Repository, order: &[String]) -> bool {
+    order.iter().enumerate().all(|(i, oid)| {
+        let commit = repo.find_commit(Oid::from_str(oid).unwrap()).unwrap();
+        commit.parent_ids().all(|parent| {
+            let parent = parent.to_string();
+            order
+                .iter()
+                .position(|o| *o == parent)
+                .is_none_or(|p| p < i)
+        })
+    })
+}
+
+/// A walk larger than one batch, cut after its first accepted batch, resumes with nothing lost and nothing
+/// published twice, merges included: commits go oldest first, and the checkpoint moves after each accepted batch
+/// (cassini-backpressure.md, the decisions reviewed with the maintainer, 17).
+#[tokio::test]
+async fn a_walk_larger_than_a_batch_cut_after_its_first_batch_resumes_with_nothing_lost_or_duplicated()
+ {
+    init_logging();
+    let (_dir, repo) = bare_repo();
+    // root; a branch of four and one of three from it, merged; three more; a merge of a branch of two.
+    let parents = vec![
+        vec![],
+        vec![0],
+        vec![1],
+        vec![2],
+        vec![3],
+        vec![0],
+        vec![5],
+        vec![6],
+        vec![4, 7],
+        vec![8],
+        vec![9],
+        vec![8],
+        vec![10, 11],
+    ];
+    let oids = history(&repo, "refs/heads/main", &parents);
+    let repo_id = RepoId::from_url("local");
+    let mut checkpoint = Checkpoint::default();
+    let first = RoomFor::new(4);
+    let done = publish_ref(
+        &first,
+        &repo,
+        &repo_id,
+        "refs/heads/main",
+        &mut checkpoint,
+        100,
+        4,
+    )
+    .await
+    .unwrap();
+    assert!(!done, "the second batch was refused");
+    assert_eq!(first.commits().len(), 4, "one batch was taken");
+    let rest = RoomFor::new(usize::MAX);
+    let done = publish_ref(
+        &rest,
+        &repo,
+        &repo_id,
+        "refs/heads/main",
+        &mut checkpoint,
+        100,
+        4,
+    )
+    .await
+    .unwrap();
+    assert!(done);
+    let mut order = first.commits();
+    order.extend(rest.commits());
+    let published: std::collections::BTreeSet<String> = order.iter().cloned().collect();
+    assert_eq!(
+        published.len(),
+        order.len(),
+        "nothing published twice: {order:?}"
+    );
+    assert_eq!(
+        published,
+        reachable(&repo, *oids.last().unwrap()),
+        "nothing lost"
+    );
+    assert!(parents_first(&repo, &order), "oldest first");
+    assert_eq!(
+        rest.ref_updates(),
+        1,
+        "the ref's update once, after its commits"
+    );
+    assert_eq!(checkpoint.tip, oids.last().copied());
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+    /// Over any history, any batch size and a cut after any number of accepted batches, the two walks together
+    /// publish every commit once, each after its parents.
+    #[test]
+    fn any_history_cut_after_any_batch_resumes_with_nothing_lost_or_duplicated(
+        shape in proptest::collection::vec((0usize..1000, 0usize..1000, proptest::bool::ANY), 1..16),
+        batch in 1usize..6,
+        batches_taken in 0usize..6,
+    ) {
+        // Commit i > 0 has one or two parents among those before it.
+        let parents: Vec<Vec<usize>> = std::iter::once(Vec::new())
+            .chain(shape.iter().enumerate().map(|(i, (a, b, two))| {
+                let i = i + 1;
+                let first = a % i;
+                let second = b % i;
+                if *two && second != first { vec![first, second] } else { vec![first] }
+            }))
+            .collect();
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let (_dir, repo) = bare_repo();
+        let oids = history(&repo, "refs/heads/main", &parents);
+        let repo_id = RepoId::from_url("local");
+        let mut checkpoint = Checkpoint::default();
+        let first = RoomFor::new(batch * batches_taken);
+        runtime
+            .block_on(publish_ref(&first, &repo, &repo_id, "refs/heads/main", &mut checkpoint, 1000, batch))
+            .unwrap();
+        let rest = RoomFor::new(usize::MAX);
+        let done = runtime
+            .block_on(publish_ref(&rest, &repo, &repo_id, "refs/heads/main", &mut checkpoint, 1000, batch))
+            .unwrap();
+        proptest::prop_assert!(done);
+        let mut order = first.commits();
+        order.extend(rest.commits());
+        let published: std::collections::BTreeSet<String> = order.iter().cloned().collect();
+        proptest::prop_assert_eq!(published.len(), order.len());
+        proptest::prop_assert_eq!(published, reachable(&repo, *oids.last().unwrap()));
+        proptest::prop_assert!(parents_first(&repo, &order));
+    }
 }
