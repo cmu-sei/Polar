@@ -362,6 +362,176 @@ uncut until the budget is exhausted, when the watchdog ends it (spared at most o
 bare transport are told to its caller and not sent again. The client's frame count in its read loop is not reached by a
 test (the broker never writes a frame that does not decode); `on_frame`, which it numbers, is.
 
+## Decisions reviewed with the maintainer (2026-10-30)
+
+The maintainer reviewed the decisions of the three rounds with the coordinator. Paths relative to `src/agents/`.
+
+**Kept as built:** the budget's defaults (13; since replaced by the runtime budget below, its floor four frames); the
+dead-letter queue replaced by the delivery outbox (15); an untyped refusal treated as `Denied` (16); the sparing of a
+connection whose reader waits, the one-frame overshoot of a refused large frame, and the bound on a client that never
+reads (18, 22, 24); `FrameUndecodable` (23, sound once the protocol version below exists).
+
+**Changed:**
+
+1. **The watchdog is one supervised actor, and the stall policy is one function.** Three rounds of special cases on
+   one loop said the shape was wrong: a bare task outside the supervision tree, finding the session manager through the
+   registry and the Listener through a mutex in the budget, setting subscriber state from outside, and duplicating the
+   topic's stall rule. Now:
+   - **The `PressureManager`** (`cassini/broker/src/pressure.rs:79`) is spawned linked under the broker
+     (`broker.rs:691`). It ends with the drain (`PressureMsg::Drain`). If it ends or fails otherwise, the broker starts
+     a new one (`broker.rs:717`), but never while the broker itself stops.
+   - **It writes no other actor's state.** At each stall check (`look`, `pressure.rs:213`) it tells the subscriber
+     manager, which tells each subscriber: `BudgetExhausted` while the budget is exhausted, `StallCheck` otherwise.
+   - **A subscriber looks at its own backlog** (`look_for_stall`, `subscriber.rs:897`). It reports a stall when it is
+     above its high water for the stall bound, or, under an exhausted budget, has had nothing acknowledged for it. It
+     tells its session (`SubscriberStalled`). Away under an exhausted budget, it sheds (`shed_if_away`,
+     `subscriber.rs:929`).
+   - **It tells its topic whether it holds the topic back** (`TopicHold`, `subscriber.rs:880`, to the ref the topic
+     gave it in `TopicAttached`). The topic reads no subscriber's atomics and has no stall check of its own
+     (`topic.rs:697`).
+   - **The session decides by the one policy**, `pressure::verdict` (`pressure.rs:279`), from its own facts
+     (`judge_stall`, `session.rs:921`).
+     - Its connection's reader tells it, beside the Listener's mailbox, when it reads an acknowledgement and when it
+       waits for room (`ConnectionProgress`, `ConnectionWaiting`; `listener.rs:111, 157`).
+     - Its Listener gives it the connection's control (`ConnectionOpened`, a weak handle, `listener.rs:188`), so the
+       connection still closes with its Listener.
+     - It spares (refuse for now) or cuts the connection. A connection it ends is logged with its identity by the
+       session manager, and counted by the subscriber.
+   - **The budget is accounting only.** Its list of holders is read for its report alone.
+   - **Tests.** The finding tests were the specification and pass with their assertions untouched (plumbing changes are
+     listed in the commit). New: `the_pressure_manager_is_started_again_when_it_ends_and_the_checks_go_on` (fails
+     without the restart), the policy's example test, and two properties (`a_connection_is_ended_only_when_nothing_spares_it`,
+     `a_client_that_never_progresses_is_spared_at_most_once`).
+   - **Mutations killed:** no refusal window, no connection progress, no sparing, progress or waiting not kept, no
+     exhausted rule, no high-water rule, the topic never told.
+   - **Removed:** one mutant survived, restarting a spared subscriber's stall clock (the refusal window covers it). It
+     was removed.
+   - **Also stopped:** a stalled subscriber is now judged when it is above its high water for the stall bound, whether
+     or not a publish waits on its topic (the topic's rule ran only while one did).
+2. **(14) A session shed under an exhausted budget ends, and its client is told.**
+   - **The flow.** A subscriber that sheds tells its session (`SessionShed`). The session asks to be ended
+     (`EndSession`, `session.rs:271`). The session manager logs it with the identity and keeps the reason for the
+     retention window.
+   - **The client is told.** A registration asking to resume that session is answered first with
+     `ClientMessage::SessionEnded { registration_id, reason }` (`session.rs:747`; the last variant, so no tag moves),
+     then given a new session. The client raises `ClientEvent::SessionEnded`.
+   - **jira-observer** resynchronises: its next issue pull starts from the graph's cursor, asking the state agent again
+     (`JiraObserverMessage::Resync`, `jira/observe/src/issues.rs`).
+   - **The other agents**, on a new session today: the agent builder resubscribes every `with_subscription` topic and
+     asks for its configuration again (`ConfigurationReplayRequest`). What a subscriber was owed is lost, and none of
+     them replays it. By agent:
+     - jira-processor, kube-consumer, git-processor, provenance resolver, polar-scheduler processor, git controller and
+       soft-state: health only (the builder resubscribes); held messages are lost.
+     - kube-observer and git-repo-observer (whose repository set is re-announced every 60 s) heal by their own polling.
+     - gitlab-observer, gitlab-consumer, openapi-observer, openapi-processor and the build processor (provenance
+       linker): spawn named actors on every `Registered`, so a second registration collides on names. That is a
+       pre-existing fault, recorded here, not fixed.
+     - polar-scheduler observer: replays what it queued; a replay request missed while away is lost.
+     - polar-custody daemon: re-pulls its authority.
+   - **Test:** `a_subscriber_away_when_the_budget_is_exhausted_lets_go_of_all_it_was_owed` now asserts the returning
+     client is told, with why, before a new session (it asserted a resume before; the decision changes that).
+3. **(17) git-repo-observer publishes oldest first, in bounded batches.**
+   - **The walk.** A ref is walked in reverse topological order (every commit after its parents), at most `max_depth`
+     from the tip, holding only commit ids (`plan_ref`, `git/observe/src/lib.rs:566`). It is published
+     `POLAR_GIT_PUBLISH_BATCH` (32) events at a time.
+   - **The checkpoint** (`Checkpoint`, `lib.rs:546`) moves after each batch taken.
+     - It is the frontier of what was published (the published commits no published commit descends from), not the
+       batch's last commit alone. With merges, the last commit hides only its ancestors, and a sibling branch's commits
+       published before it would be published again.
+     - On a linear history the frontier is the last commit; when the whole ref is published, its tip.
+     - The walk hides it, so after a partial walk nothing is lost and nothing taken is walked again.
+   - **Tests:** a history with two merges cut after its first batch, and a property over random DAGs, batch sizes and
+     cut points.
+   - **Mutations killed:** the last-commit checkpoint (caught by the property), newest first, the checkpoint not moved,
+     not hidden.
+4. **(19) A protocol version at registration.**
+   - **The version.** `cassini_types::PROTOCOL_VERSION` (1) is sent in `RegistrationRequest { protocol }`.
+   - **A mismatch is refused by name.** `RefusalCode::ProtocolMismatch` gives both versions, the broker logs it with the
+     identity and closes the connection (`listener.rs:1554`). A refused client waits `PROTOCOL_RETRY` (30 s) before
+     each reconnect.
+   - **An older client:** its registration (laid out without the field) does not decode. The broker answers its first
+     undecodable frame with a refusal of code `Other`, which it can decode, naming the protocol, and closes. It logs
+     "Failed to register session with the server. protocol mismatch: …" and emits `RegistrationRefused`. A bare
+     transport then stays idle; a facade retries with its backoff.
+5. **(20)** `polar-scudo/tests/every_clippy_toml.rs` fails if any clippy.toml in the workspace lacks
+   `await-holding-invalid-types` for `tracing::span::Entered` and `EnteredSpan`.
+
+## Runtime budget (2026-10-30)
+
+**Decided** (the maintainer): memory is a shared resource the broker may not control. The budget is set at run time
+from what the host and the container show and from how fast subscribers drain, not fixed at start. The pressure manager
+is its controller (`cassini/broker/src/runtime_budget.rs`, pure, given the time, memory's sample and the budget's
+counters; `PressureManager::sample`, `pressure.rs:169`).
+
+- **Floor:** four frames, 256 MiB (`Tunables::floor_frames`).
+  - **At start**, the lesser of `memory.max − memory.current` (when there is a limit) and `MemAvailable` must give it,
+    or the broker does not start, naming the numbers and what to give (`startup_check`, `runtime_budget.rs:201`). A cap
+    under it is refused too.
+  - **At run time**, a ceiling below it starves the budget: it admits nothing (`Budget::set_starved`), says so, and
+    recovers when memory returns. The broker does not exit.
+- **Ceiling,** sampled every second through a `MemorySource`: the least of
+  - a share of `MemAvailable` above a reserve, plus what is held: `held + (MemAvailable − reserve) × share`;
+  - `memory.max − (memory.current − held)`, the limit less the broker's working memory outside the budget;
+  - under pressure, the budget cut by a factor. Pressure is PSI `some avg10` above a threshold, or new `high` or
+    `oom_kill` counts in `memory.events`. A first reading of the counts is not news. Both files are optional.
+- **Target,** Little's law: the smoothed drain rate (bytes refunded a second) × the latency target. The latency target
+  is the stall bound: the stall rule acts at the bound, so holding more than the subscribers drain within it buys
+  backlog, not throughput.
+- **The budget** starts at the floor, there being no demand yet. Each sample it:
+  - grows by a step while it is used (held at its used share) and below the target;
+  - falls by a step toward the target when it is over the target by more than the hysteresis;
+  - is cut by the factor on pressure;
+  - is clipped to the floor, the ceiling and the cap. `CASSINI_MEMORY_BUDGET_BYTES` is now that cap.
+- **A shrinking budget evicts nothing:** held over the new limit, the alarm stops admission until it drains
+  (`Budget::set_limit`, `budget.rs:267`). Windows and high waters follow the budget as it is now, keeping their ratios
+  and minimums (`Bounds::window`, `high_water`, `budget.rs:95, 100`; `Window::of`; a subscriber's
+  `Backlog::set_high_water` at each check).
+- **A broker built from `Bounds` directly** (a test's) keeps a fixed budget.
+
+**Defaults, MARKED FOR THE MAINTAINER'S REVIEW** (`Tunables`, `runtime_budget.rs:132`):
+
+| Tunable | Default |
+|---|---|
+| sampling interval | 1 s |
+| floor | 4 frames (256 MiB) |
+| share of `MemAvailable` above the reserve | 1/2 |
+| reserve the host is never pushed below | 512 MiB |
+| PSI `some avg10` threshold | 10 % |
+| growth (and fall) step | 16 MiB a sample |
+| cut factor on pressure | 1/2 |
+| latency target | 1 × the stall bound |
+| smoothing of the drain rate | 1/4 of each new measure |
+| used share (above which it may grow) | 3/4 |
+| hysteresis over the target | 5/4 |
+
+**What u7c exposes** (the broker's cgroup, read 2026-10-30): `memory.max` = max, `memory.high` = max, `memory.current`
+≈ 27 MiB. There is no `memory.pressure` (no PSI in that nested, rootless cgroup). `/proc/meminfo` shows the host:
+`MemTotal` 62 GiB, `MemAvailable` 49 GiB. There the ceiling is the `MemAvailable` share, and pressure comes only from
+`memory.events`, when the file is present.
+
+**Visible:**
+- The controller logs its decision (budget, ceiling, target, what limited it, drain rate, held, alarm, starvation) when
+  what limits it changes, and every ten samples otherwise. It warns when memory falls below the floor.
+- `PressureMsg::Snapshot` answers a typed `BudgetSnapshot` (budget, ceiling, target, `LimitedBy`: `Floor`,
+  `Ceiling(MemAvailable | Limit | Pressure)`, `Target`, `Cap`; drain rate, recent pressure events, starvation, alarm,
+  held) for pulled health to read.
+- `PressureMsg::WarmStart` takes a learned value (the last stable budget and drain rate) whenever it comes, within the
+  floor, ceiling and cap. Nothing waits for it. A restarted manager warm-starts from the budget as it is.
+
+**Tests:**
+- `runtime_budget.rs`'s: start-up refusal with the numbers; missing PSI and events; the target follows the drain rate
+  and quiet use grows the budget; pressure cuts; starvation and recovery; warm starts clipped, late or never; a property
+  that the budget lies within its floor, ceiling and cap.
+- `budget.rs`'s: a shrinking budget evicts nothing and admits again once drained; starvation; a window follows its
+  budget.
+- `pressure.rs`'s: the manager sets the budget, takes a warm start, tells its state, and leaves a fixed budget alone.
+- Mutations killed: no ceiling clip, no cut, no floor, the target not from the stall bound, never starving, no cap,
+  shrinking or starving still admitting.
+
+**Planned next, not built:** the broker publishing in-process into its own topics, stamped with its own identity, so
+that soft-state's StateActor and pulled health reach it. The learned warm start is to come from soft-state, which itself
+needs the broker; hence nothing waits for it.
+
 ## Open decisions
 
 1. **A subscriber that stays slow** past `T_stall`: end its connection (recommended; lossless until then, and the

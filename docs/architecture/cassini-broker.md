@@ -277,15 +277,20 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
   (`TcpClientActor::frame`, and `TcpClient::publish` returns `TooLarge` for a payload over `MAX_PAYLOAD_BYTES`). The
   accept loop waits 100 ms after a failed accept (EMFILE) instead of spinning.
 - **One budget** (`broker/src/budget.rs`, `Budget`): every payload byte the broker holds. A reader charges a frame
-  before it goes on (`Budget::try_charge`, `charge`, `budget.rs:252-286`); the charge travels with the payload
-  (`cassini_types::Payload`, `types/src/held.rs:80`), which every hop shares, and is refunded when its last holder
-  drops it, so a message fanned out to many subscribers is counted once. **Default:** half the container's cgroup v2
-  `memory.max` (`budget::default_budget`, read from `/sys/fs/cgroup/memory.max`); 256 MiB when it is `max` or cannot
-  be read (`FALLBACK_BUDGET`, `budget.rs:52`); `CASSINI_MEMORY_BUDGET_BYTES` overrides it (`settings.rs:77`). A budget
-  under one frame refuses to start, saying why (`Bounds::new`, `budget.rs:83`; the settings check says it too).
+  before it goes on (`Budget::try_charge`, `charge`); the charge travels with the payload (`cassini_types::Payload`,
+  `types/src/held.rs:80`), which every hop shares, and is refunded when its last holder drops it, so a message fanned
+  out to many subscribers is counted once. The budget is accounting only: what it holds, its alarm and its counters;
+  no decision across actors is made through it.
+- **Its limit is set at run time** (cassini-backpressure.md, "Runtime budget"; `broker/src/runtime_budget.rs`): from a
+  floor of four frames, which memory must give at start or the broker does not start, up to a ceiling sampled every
+  second from the host's `MemAvailable`, the container's `memory.max` and, when the kernel shows them, PSI and
+  `memory.events`, toward a target of the drain rate times the stall bound; `CASSINI_MEMORY_BUDGET_BYTES` caps it
+  (`settings.rs`). A limit set below what is held evicts nothing: the alarm stops admission until it drains
+  (`Budget::set_limit`); memory below the floor at run time stops admission until it returns (`set_starved`). A test's
+  broker, built from `Bounds` directly, keeps a fixed budget.
 - **Exhausted** when a frame cannot be charged: from then every reader waits (a memory alarm), until what is held
-  falls to three quarters of the budget (`low_water`, `budget.rs:224`). Raising it is logged once, with the five
-  largest holders by name (subscribers as `<registration id>:<topic>`, topics as `topic <name>`) (`raise_alarm`).
+  falls to three quarters of the budget. The pressure manager says when it rises (with the five largest holders by
+  name: subscribers as `<registration id>:<topic>`, topics as `topic <name>`) and when it lifts.
 - **Ingress credit per connection** (`Window`, `budget.rs:364`): a quarter of the budget, never less than one frame.
   A frame over 64 KiB (`SMALL_FRAME`) is admitted, window then budget, before its body is read; a smaller one is read
   first, so acknowledgements and subscriptions are never stuck behind the frames they would make room for, and a
@@ -296,33 +301,31 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
   acknowledgements from a task of its own per connection, beside the transport's mailbox, so they never wait behind its
   publishes there (`spawn_ack_writer`, `client/src/lib.rs:613`). The credit travels in the publish
   (`BrokerMessage::PublishRequest { window }`) and is released when the topic accepts it.
-- **Per-subscriber high water** (`cassini_types::Backlog`, `types/src/held.rs:170`): the bytes in the subscriber's
-  delivery outbox, delivered and not acknowledged, counted as their frames were charged (`Payload::weight`, so small
-  messages are counted with their overhead on the wire, as the budget counts them); the mark is an eighth of the budget (never under 1 MiB), with
-  hysteresis down to half of it. A topic accepts no publish (no fan-out, no acknowledgement) while a connected
-  subscriber of it is above its mark: the publish waits in the topic, in order, holding its connection's credit
-  (`topic.rs`, `pump` at 721, `accept` at 787); a subscriber that falls below its low water, goes away or ends tells
-  its topic (`TopicResume`).
-- **The stall bound** (`CASSINI_STALL_SECS`, default 30 s, more than 0 and under 60 s, `settings.rs:85`): a topic held
-  back checks every quarter of it (between 50 ms and 5 s) for a subscriber above its high water for longer
-  (`end_stalled`, `topic.rs:756`). The clock counts only time spent connected above the mark: a subscriber that went
-  above it while away starts it when it comes back (`Backlog::set_connected`, `held.rs:293`). That subscriber's
-  connection is ended: the session manager logs it with the identity, the topic, the bytes held and for how long, and
-  the session agent cuts the connection from outside its Listener (`listener::cut_connection`, `listener.rs:109`),
-  which may be waiting on a write to that client: the write and the reader give up, and the session detaches for `R`
-  as on any lost connection. The topic moves again. A subscriber whose own reader waits for an admission is spared
-  instead (`ConnWriter::spare`, `listener.rs:153`): its acknowledgements may be what the broker is not reading, so its
-  publishes are refused for now for the stall bound and its reader reads on, and it is given the bound again to drain
-  (`topic.rs:769`). It is spared again only once it has made progress since.
-- **The watchdog** (`spawn_watchdog`, `budget.rs:389`, started by the broker): subscribers each under their mark can
-  hold the whole budget with no topic held back, so no topic looks for a stall. Every stall check while the budget
-  is exhausted, the watchdog tells the Listeners again (so a subscriber that went away since the alarm rose lets go
-  of what it held), and ends, as above, the connection of every subscriber that holds anything and has made no
-  progress for the stall bound (`stalled_while_exhausted`; `Backlog::stalled_for`, `held.rs:217`). Progress is the
-  connection's: an acknowledgement on any topic, read by its reader (`ConnWriter::idle_for`, `listener.rs:177`),
-  however long its Listener takes to pass it on. A connection whose reader waits for an admission is spared as under
-  the stall bound above, once a session a look (`budget.rs:448-470`). It stops when the broker's drain begins
-  (`Budget::begin_drain`). Recovery from an exhausted budget is so bounded by the stall bound.
+- **Per-subscriber high water** (`cassini_types::Backlog`, `types/src/held.rs`): the bytes in the subscriber's
+  delivery outbox, delivered and not acknowledged, counted as their frames were charged (`Payload::weight`); the mark is
+  an eighth of the budget as it is now (never under 1 MiB; each subscriber follows it at each stall check), with
+  hysteresis down to half of it. A topic accepts no publish (no fan-out, no acknowledgement) while a subscriber of it
+  says it holds the topic back (`TopicHold`: connected and above its mark; told to the ref the topic gave it,
+  `TopicAttached`): the publish waits in the topic, in order, holding its connection's credit (`topic.rs`, `pump`,
+  `accept`). The topic reads no subscriber's state.
+- **The pressure manager** (`broker/src/pressure.rs`), the broker's linked child: at each stall check (a quarter of the
+  stall bound, between 50 ms and 5 s) it tells the subscriber manager, which tells each subscriber, `BudgetExhausted`
+  while the budget is exhausted and `StallCheck` otherwise; every second it samples memory and sets the budget's
+  limit. It ends with the drain; one that ends otherwise is started again by the broker. It answers a typed snapshot
+  (`PressureMsg::Snapshot`) and takes a warm start (`PressureMsg::WarmStart`).
+- **The stall bound** (`CASSINI_STALL_SECS`, default 30 s, more than 0 and under 60 s): a subscriber looks at its own
+  backlog (`look_for_stall`, `subscriber.rs`), and has stalled when it is above its high water for the bound, or, while
+  the budget is exhausted, holds anything with nothing acknowledged for the bound. The clock counts only time spent
+  connected: a subscriber that went above its mark while away starts it when it comes back (`Backlog::set_connected`).
+  It tells its session (`SubscriberStalled`), which decides by the one stall policy (`pressure::verdict`) from its own
+  facts: what its connection's reader told it, beside the Listener's mailbox (`ConnectionProgress` when it reads an
+  acknowledgement, `ConnectionWaiting` when it waits for an admission). A connection spared less than the bound ago is
+  not judged again; while the budget is exhausted, an acknowledgement on any topic within the bound is progress; a
+  connection whose reader waits for room is spared (its reader refuses for now, and reads on), again only once it has
+  made progress since; otherwise the session cuts it, from outside its Listener (which may be waiting on a write to
+  that client) through the control the Listener gave it (`ConnectionOpened`, a weak handle), and the session manager
+  logs it with the identity, the topic, the bytes held and for how long. The session detaches for `R` as on any lost
+  connection, and the topic moves again. Recovery from an exhausted budget is so bounded by the stall bound.
 - **Refused for now** (`admit_or_refuse`, `listener.rs:391`): a spared connection's reader refuses each publish it
   cannot admit at once (`PublishRefusal::Unavailable`, `REFUSED_FOR_NOW`), and reads on; a large one's body is read
   past under one global slot within the stall bound and let go (`REFUSED_BODY`), so the budget is passed by at most
@@ -332,12 +335,16 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
 - **Frames are numbered** on each connection, from one, by the Listener's writes and the client's reader: a client that
   cannot decode a frame names it (`ClientMessage::FrameUndecodable`), and the delivery it carried is let go as
   acknowledged (`listener.rs:1681`).
-- **Holders bounded by the budget:** while it is exhausted, a topic's queue for no subscribers refuses the newest
-  (`topic.rs:837`), answering its publisher with a refusal for now (`PublishRefusal::Unavailable`), which its client
-  keeps and sends again, not an acknowledgement; and a subscriber whose client is away refuses the newest
-  (`subscriber.rs:948`), counted and logged; and on the alarm (raised, and told again by the watchdog) every
-  subscriber whose client is away lets go of all it held (`shed_if_away`, `subscriber.rs:852`), counted and logged, so
-  what a subscriber is owed is kept only while the budget allows. The age bounds (`R`, the queue's 180 s) stay.
+- **Holders bounded by the budget:** while it is exhausted, a topic's queue for no subscribers refuses the newest,
+  answering its publisher with a refusal for now (`PublishRefusal::Unavailable`), which its client keeps and sends
+  again, not an acknowledgement; a subscriber whose client is away refuses the newest, counted and logged; and at each
+  stall check every subscriber whose client is away lets go of all it held (`shed_if_away`), counted and logged. Its
+  session then ends at once, not at `R` (`EndSession`), logged with the identity: a client that comes back asking for
+  it is told, with why (`ClientMessage::SessionEnded`), before it is given a new session. The age bounds (`R`, the
+  queue's 180 s) stay.
+- **A protocol version** at registration (`cassini_types::PROTOCOL_VERSION`): a registration of another version is
+  refused by name (`RefusalCode::ProtocolMismatch`), and a first frame that does not decode (an older client's
+  registration) with a refusal such a client can decode; either connection is closed.
 - **Observable:** the budget's report every 30 s while something is held, waits or was counted
   (`broker/src/budget_report.rs`: use, peak, readers waiting, refusals, slow-subscriber disconnections, alarms, the
   largest holders), and the log lines above. There is no metrics path in the broker to add them to: `metrics.rs` is
@@ -358,11 +365,12 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
 - **Known limits:** a large frame's body is not read before it is admitted, so an acknowledgement behind it waits,
   as does any frame behind the one kept while a small publish waits, until its connection is spared and refuses for
   now. A client that never reads blocks its own Listener on a write, so its publishes never reach a topic: it holds up
-  to its window and high water until the budget is exhausted and the watchdog ends it. The
-  broker's own working memory (the copy a write makes of a frame, TLS buffers, mailboxes of small messages) is outside
-  the budget, hence the share of half; and per-message overhead is not charged (cassini-backpressure.md, review
-  finding 6). High water is soft: a topic resuming pumps what waits before it looks again, so a subscriber can pass
-  its mark by the connections' windows; the budget still bounds the whole (finding 7).
+  to its window and high water until the budget is exhausted and it is ended. The broker's own working memory (the
+  copy a write makes of a frame, TLS buffers, mailboxes of small messages) is outside the budget, and the runtime
+  ceiling counts it (`memory.current − held`) only where the container has a limit; per-message overhead is not charged
+  (cassini-backpressure.md, review finding 6). High water is soft: a subscriber tells its topic it holds it back by a
+  message, and a topic resuming pumps what waits before it hears again, so a subscriber can pass its mark by the
+  connections' windows; the budget still bounds the whole (finding 7).
 
 ## Running it on its own
 
