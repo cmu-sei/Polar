@@ -79,3 +79,64 @@ async fn a_client_refuses_to_send_a_publish_over_the_limit_and_keeps_its_connect
     })
     .await;
 }
+
+/// What a registration was answered with within five seconds: the refusal, if it was refused.
+async fn refusal(raw: &mut RawConnection) -> Option<cassini_types::Refusal> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match raw.read().await? {
+                cassini_types::ClientMessage::RegistrationResponse { result, .. } => {
+                    return result.err();
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// A client of another protocol version is refused by name, with both versions, and its connection closed
+/// (docs/architecture/cassini-backpressure.md, "Decisions reviewed with the maintainer", 19).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_of_another_protocol_version_is_refused_by_name() {
+    with_broker(|broker| async move {
+        let mut raw = RawConnection::open(&broker, "newer.test", None).await;
+        raw.send(&cassini_types::ClientMessage::RegistrationRequest {
+            registration_id: None,
+            trace_ctx: None,
+            protocol: cassini_types::PROTOCOL_VERSION + 1,
+        })
+        .await;
+        let refused = refusal(&mut raw).await.expect("refused");
+        assert_eq!(refused.code, cassini_types::RefusalCode::ProtocolMismatch);
+        assert!(
+            refused
+                .reason
+                .contains(&cassini_types::PROTOCOL_VERSION.to_string())
+                && refused
+                    .reason
+                    .contains(&(cassini_types::PROTOCOL_VERSION + 1).to_string()),
+            "{}",
+            refused.reason
+        );
+        assert!(raw.closed_within(Duration::from_secs(5)).await);
+    })
+    .await;
+}
+
+/// A connection whose first frame does not decode (a client older than protocol versions sends a registration this
+/// broker cannot read) is told so, in a refusal such a client can decode, and closed, rather than left waiting.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_frame_that_does_not_decode_is_refused_as_a_protocol_mismatch() {
+    with_broker(|broker| async move {
+        let mut raw = RawConnection::open(&broker, "older.test", None).await;
+        raw.send_frame_bytes(&[0xAB; 40]).await;
+        let refused = refusal(&mut raw).await.expect("refused, not left waiting");
+        assert_eq!(refused.code, cassini_types::RefusalCode::Other);
+        assert!(refused.reason.contains("protocol"), "{}", refused.reason);
+        assert!(raw.closed_within(Duration::from_secs(5)).await);
+    })
+    .await;
+}

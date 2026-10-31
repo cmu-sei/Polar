@@ -64,6 +64,18 @@ pub const REGISTRATION_EXPECTED: &str =
     "Expected client to be registered to conduct this operation.";
 
 pub const CLIENT_DISCONNECTED: &str = "CLIENT_DISCONNECTED";
+/// How long a transport the broker refused for its protocol version waits before it tries again: a client and broker
+/// of different versions do not agree by trying (they must be built together).
+pub const PROTOCOL_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a transport waits before it reconnects: at once, unless the broker refused its protocol.
+pub fn reconnect_wait(protocol_refused: bool) -> std::time::Duration {
+    if protocol_refused {
+        PROTOCOL_RETRY
+    } else {
+        std::time::Duration::ZERO
+    }
+}
 /// What a deferral (`ClientEvent::PublishDeferred`) adds to the broker's reason when a facade keeps the publish.
 pub const DEFERRED_AND_KEPT: &str = "kept, and sent again after a wait or on the next registration";
 /// What it adds when the transport has no facade: nothing keeps the publish, so its caller must send it again.
@@ -485,6 +497,9 @@ pub enum TcpClientMessage {
     Deferred {
         id: MessageId,
     },
+    /// From the reader to the transport: the broker refused this client's protocol version; it waits
+    /// `PROTOCOL_RETRY` before each later try, rather than reconnecting at once.
+    ProtocolRefused,
     /// The facade's own: send the publish numbered `id` again, if the outbox still holds it and `timer` is still the
     /// one armed for it (a later deferral or a registration replaces or cancels it).
     Resend {
@@ -541,6 +556,7 @@ impl TcpClientMessage {
             TcpClientMessage::Refused { .. } => "Refused",
             TcpClientMessage::Deferred { .. } => "Deferred",
             TcpClientMessage::Resend { .. } => "Resend",
+            TcpClientMessage::ProtocolRefused => "ProtocolRefused",
             TcpClientMessage::AcknowledgeDelivery { .. } => "AcknowledgeDelivery",
             TcpClientMessage::PublishWith { .. } => "PublishWith",
             TcpClientMessage::NotSent { .. } => "NotSent",
@@ -662,6 +678,8 @@ pub struct TcpClientState {
     /// of its own, and the next seq in it.
     epoch: u64,
     next_seq: u64,
+    /// The broker refused this client's protocol version: it waits `PROTOCOL_RETRY` before each later try.
+    protocol_refused: bool,
 }
 
 pub struct TcpClientArgs {
@@ -941,6 +959,15 @@ impl TcpClientActor {
                             .expect("Could not forward message to {myself:?");
                     }
                     Err(refusal) => {
+                        if refusal.code == cassini_types::RefusalCode::ProtocolMismatch {
+                            error!(
+                                ours = cassini_types::PROTOCOL_VERSION,
+                                "the broker refused this client's protocol version: {}; it tries again every {:?}",
+                                refusal.reason,
+                                PROTOCOL_RETRY
+                            );
+                            let _ = myself.send_message(TcpClientMessage::ProtocolRefused);
+                        }
                         warn!(
                             code = ?refusal.code,
                             "Failed to register session with the server. {}", refusal.reason
@@ -1335,7 +1362,10 @@ impl TcpClientActor {
         let server_name = state.server_name.clone();
         let client_config = state.client_config.clone();
         let myself_clone = myself.clone();
+        // A broker that refused this client's protocol is not asked again at once.
+        let wait = reconnect_wait(state.protocol_refused);
         tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
             match TcpClientActor::connect_with_backoff(addr, server_name, &client_config).await {
                 Ok(tls_stream) => {
                     let (reader, write_half) = split(tls_stream);
@@ -1364,6 +1394,7 @@ impl TcpClientActor {
         let envelope = ClientMessage::RegistrationRequest {
             registration_id: None,
             trace_ctx: Self::current_trace_ctx(),
+            protocol: cassini_types::PROTOCOL_VERSION,
         };
         TcpClientActor::send_or_fail(myself, state, envelope).await
     }
@@ -1396,6 +1427,7 @@ impl TcpClientActor {
         let envelope = ClientMessage::RegistrationRequest {
             registration_id: Some(registration_id.to_owned()),
             trace_ctx: Self::current_trace_ctx(),
+            protocol: cassini_types::PROTOCOL_VERSION,
         };
         TcpClientActor::send_or_fail(myself, state, envelope).await
     }
@@ -1689,6 +1721,7 @@ impl Actor for TcpClientActor {
             answers: args.answers,
             epoch: new_epoch(),
             next_seq: 1,
+            protocol_refused: false,
         };
 
         Ok(state)
@@ -1771,6 +1804,8 @@ impl Actor for TcpClientActor {
                 self.handle_reconnected(myself, state, reader, writer)
                     .await?
             }
+
+            (_, TcpClientMessage::ProtocolRefused) => state.protocol_refused = true,
 
             // ---- SessionInvalidated (always handled) ----
             (_, TcpClientMessage::SessionInvalidated) => {
@@ -2246,6 +2281,43 @@ mod process_client_message_tests {
         }
     }
 
+    /// A refusal of this client's protocol version is told as such, the transport is told to wait before its next
+    /// try, and that wait is `PROTOCOL_RETRY`, not a tight loop (cassini-backpressure.md, the decisions, 19).
+    #[tokio::test]
+    async fn a_protocol_refusal_is_said_and_the_next_try_waits() {
+        let (myself, received) = spawn_fake_tcp_client().await;
+        let (delivery, captured) = broadcast_delivery().await;
+        TcpClientActor::process_client_message(
+            myself,
+            &delivery,
+            None,
+            ClientMessage::RegistrationResponse {
+                result: Err(cassini_types::Refusal::protocol(
+                    cassini_types::PROTOCOL_VERSION + 1,
+                )),
+                trace_ctx: None,
+            },
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(captured.lock().unwrap().iter().any(|e| matches!(
+            e,
+            ClientEvent::RegistrationRefused {
+                code: cassini_types::RefusalCode::ProtocolMismatch,
+                ..
+            }
+        )));
+        assert!(
+            received
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m.kind() == "ProtocolRefused"),
+            "the transport is told"
+        );
+        assert_eq!(reconnect_wait(false), std::time::Duration::ZERO);
+        assert_eq!(reconnect_wait(true), PROTOCOL_RETRY);
+    }
+
     /// The events the client dispatches for one message from the broker.
     async fn dispatched_for(message: ClientMessage) -> Vec<ClientEvent> {
         let (myself, _received) = spawn_fake_tcp_client().await;
@@ -2554,6 +2626,7 @@ mod registration_tests {
             answers: None,
             epoch: 1,
             next_seq: 1,
+            protocol_refused: false,
         };
         (state, events)
     }
@@ -2711,6 +2784,7 @@ mod frame_tests {
             answers: None,
             epoch: 1,
             next_seq: 1,
+            protocol_refused: false,
         };
         struct Idle;
         #[async_trait]

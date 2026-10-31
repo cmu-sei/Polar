@@ -279,11 +279,12 @@ fn test_client_message_registration_request() {
     let msg = ClientMessage::RegistrationRequest {
         registration_id: None,
         trace_ctx: None,
+        protocol: cassini_types::PROTOCOL_VERSION,
     };
 
     assert_eq!(
         format!("{:?}", msg),
-        "RegistrationRequest { registration_id: None, trace_ctx: None }"
+        "RegistrationRequest { registration_id: None, trace_ctx: None, protocol: 1 }"
     );
 }
 
@@ -423,6 +424,7 @@ fn test_broker_message_from_client_message() {
     let client_msg = ClientMessage::RegistrationRequest {
         registration_id: Some("client-id".to_string()),
         trace_ctx: None,
+        protocol: cassini_types::PROTOCOL_VERSION,
     };
 
     let broker_msg = BrokerMessage::from_client_message(client_msg, "client1".to_string(), None);

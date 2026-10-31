@@ -1186,6 +1186,17 @@ impl RawConnection {
         self.stream.flush().await.unwrap();
     }
 
+    /// Writes `body` as one frame, whatever it is.
+    pub async fn send_frame_bytes(&mut self, body: &[u8]) {
+        use tokio::io::AsyncWriteExt;
+        self.stream
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        self.stream.write_all(body).await.unwrap();
+        self.stream.flush().await.unwrap();
+    }
+
     /// Writes `message` as one frame.
     pub async fn send(&mut self, message: &cassini_types::ClientMessage) {
         use tokio::io::AsyncWriteExt;
@@ -1221,6 +1232,7 @@ impl RawConnection {
         self.send(&cassini_types::ClientMessage::RegistrationRequest {
             registration_id,
             trace_ctx: None,
+            protocol: cassini_types::PROTOCOL_VERSION,
         })
         .await;
         loop {

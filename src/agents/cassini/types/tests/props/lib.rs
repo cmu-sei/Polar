@@ -122,7 +122,7 @@ proptest! {
         registration_id in proptest::option::of("[a-z0-9-]{1,36}"),
     ) {
         use cassini_types::{BrokerMessage, ClientMessage};
-        let sent = ClientMessage::RegistrationRequest { registration_id: registration_id.clone(), trace_ctx: None };
+        let sent = ClientMessage::RegistrationRequest { registration_id: registration_id.clone(), trace_ctx: None, protocol: cassini_types::PROTOCOL_VERSION };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&sent).unwrap();
         let received = rkyv::from_bytes::<ClientMessage, rkyv::rancor::Error>(&bytes).unwrap();
         match BrokerMessage::from_client_message(received, "c".to_string(), None) {

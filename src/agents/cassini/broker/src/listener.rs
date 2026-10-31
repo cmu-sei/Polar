@@ -1289,6 +1289,12 @@ impl Actor for Listener {
 
                 // A frame read while a publish waited for admission, to go on with.
                 let mut next: Option<Next> = None;
+                // A registration of this broker's protocol has been read: until then a frame that does not decode
+                // is most likely an older client's registration, and is refused as a protocol mismatch.
+                let mut registered = false;
+                let refuse = |refusal: cassini_types::Refusal| {
+                    let _ = myself.send_message(BrokerMessage::RefuseRegistration { refusal });
+                };
                 loop {
                     let (len, read) = match next.take() {
                         Some(Next::Header(len)) => (len, None),
@@ -1358,6 +1364,10 @@ impl Actor for Listener {
                             };
                             match body {
                                 Ok(Some(message)) => message,
+                                Ok(None) if !registered => {
+                                    refuse(cassini_types::Refusal::undecodable_registration());
+                                    return;
+                                }
                                 Ok(None) => continue,
                                 Err(gone) => {
                                     disconnect(gone.reason(&writer));
@@ -1367,6 +1377,13 @@ impl Actor for Listener {
                         }
                     };
 
+                    if let ClientMessage::RegistrationRequest { protocol, .. } = &deserialized {
+                        if *protocol != cassini_types::PROTOCOL_VERSION {
+                            refuse(cassini_types::Refusal::protocol(*protocol));
+                            return;
+                        }
+                        registered = true;
+                    }
                     if matches!(
                         deserialized,
                         ClientMessage::PublishResponseAck { .. }
@@ -1518,6 +1535,26 @@ impl Actor for Listener {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            // A registration this broker cannot take for its protocol: told by name, and the connection closed.
+            BrokerMessage::RefuseRegistration { refusal } => {
+                warn!(
+                    client_id = %state.client_id,
+                    identity = ?state.peer_identity,
+                    code = ?refusal.code,
+                    reason = %refusal.reason,
+                    "a registration of another protocol version is refused"
+                );
+                let msg = ClientMessage::RegistrationResponse {
+                    result: Err(refusal.clone()),
+                    trace_ctx: None,
+                };
+                if let Err(e) =
+                    Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+                {
+                    debug!(error = ?e, "the refusal of a registration was not written");
+                }
+                myself.stop(Some(refusal.reason));
+            }
             BrokerMessage::SetListenerSessionRef { session_ref } => {
                 // The session is given its connection, and from now on its reader tells it what it reads and when it
                 // waits, beside this Listener's mailbox (which waits behind its writes).

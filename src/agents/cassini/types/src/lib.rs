@@ -255,6 +255,9 @@ pub enum BrokerMessage {
     PublishResponseAck { delivery_id: u64 },
     /// The client could not decode the `frame`th frame its Listener wrote (`ClientMessage::FrameUndecodable`).
     FrameUndecodable { frame: u64 },
+    /// Internal, from a Listener's reader to its Listener: the client's registration is of another protocol version,
+    /// or does not decode; it is refused by name, and the connection closed.
+    RefuseRegistration { refusal: Refusal },
     /// Subscribe request from the client.
     SubscribeRequest {
         registration_id: String,
@@ -491,9 +494,11 @@ impl BrokerMessage {
         peer_identity: Option<String>,
     ) -> Self {
         match msg {
+            // Its protocol is judged by the Listener's reader before it is converted.
             ClientMessage::RegistrationRequest {
                 registration_id,
                 trace_ctx,
+                ..
             } => BrokerMessage::RegistrationRequest {
                 registration_id,
                 client_id,
@@ -660,7 +665,15 @@ pub enum RefusalCode {
     Revoked,
     /// Any other refusal: the broker shutting down, or a session it could not find or make.
     Other,
+    /// The client speaks another protocol version than the broker (`PROTOCOL_VERSION`): a client and broker must be
+    /// built together; the broker closes the connection, and the client waits before it tries again. Last, so no
+    /// earlier code's tag moves.
+    ProtocolMismatch,
 }
+
+/// The version of the protocol between Cassini's clients and its broker: sent at registration, refused by the broker
+/// when it is not its own. Raised with every change to the wire.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// What a refused publish means, for the client to act on (a reader never acts on the refusal's words).
 #[derive(
@@ -706,6 +719,27 @@ impl Refusal {
             code: RefusalCode::Other,
             reason: reason.into(),
         }
+    }
+
+    /// The refusal of a client of protocol version `theirs`, by its name and with both versions.
+    pub fn protocol(theirs: u32) -> Self {
+        Refusal {
+            code: RefusalCode::ProtocolMismatch,
+            reason: format!(
+                "protocol mismatch: this broker speaks Cassini protocol version {PROTOCOL_VERSION} and the client \
+                 version {theirs}; build the client with this broker's cassini crates"
+            ),
+        }
+    }
+
+    /// The refusal of a connection whose first frame does not decode: most likely a client older than protocol
+    /// versions. Its code is `Other`, which such a client can decode, and its words name the protocol.
+    pub fn undecodable_registration() -> Self {
+        Refusal::other(format!(
+            "protocol mismatch: this broker speaks Cassini protocol version {PROTOCOL_VERSION} and could not decode \
+             the client's registration (a client built before protocol versions?); build the client with this \
+             broker's cassini crates"
+        ))
     }
 }
 
@@ -782,6 +816,8 @@ pub enum ClientMessage {
     RegistrationRequest {
         registration_id: Option<String>,
         trace_ctx: Option<WireTraceCtx>,
+        /// The client's `PROTOCOL_VERSION`.
+        protocol: u32,
     },
     /// Response to an attempt to register.
     /// Ok contains the value of the registration id,
