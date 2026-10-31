@@ -263,4 +263,24 @@ mod build_cap {
         let k = serde_json::json!({ "namespace": "build-jobs" });
         assert_eq!(config(3, k).build_cap(), 3);
     }
+
+    #[test]
+    fn the_accounts_survive_the_loader() {
+        let dir = std::env::temp_dir().join(format!("bo-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("build-orchestrator.yaml");
+        std::fs::write(
+            &file,
+            r#"{"max_concurrent_builds": 2,
+                "backend": {"driver": "kubernetes", "command": ["nu"],
+                  "kubernetes": {"namespace": "build-jobs", "identity": "{}", "accounts": ["build-job-1", "build-job-2"]}},
+                "storage": {"endpoint_url": "http://localhost:9000", "bucket": "b", "region": "r", "access_key": "abcdefghijklmnop", "secret_key": "abcdefghijklmnop"}}"#,
+        )
+        .unwrap();
+        let c = OrchestratorConfig::load_from(file.to_str().unwrap()).expect("loads");
+        let k = c.backend.kubernetes.as_ref().unwrap();
+        assert_eq!(k.accounts, vec!["build-job-1".to_string(), "build-job-2".to_string()]);
+        assert_eq!(c.build_cap(), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
