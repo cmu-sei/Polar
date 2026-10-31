@@ -1100,3 +1100,21 @@ Dev cluster `u7s`, images rebuilt from this branch (`up.nu local-minimal --dev`,
 - `[workspace.package] version` in `src/agents/Cargo.toml` (1.0.0) is not the platform version and a release does not
   change it; nothing reports `CARGO_PKG_VERSION` any more. Bumping it would change `Cargo.lock` and every crate at a
   release, which the release changes anyway; decide whether it follows VERSION or is left as it is.
+
+## Left by the release advisory fixes (2026-10-31; `src/deny.toml`)
+
+- RUSTSEC-2026-0387 (crypto-bigint timing variability) is ignored in `src/deny.toml`, the one advisory not fixed. It
+  is reached only through jsonwebtoken 10.x on its rust_crypto backend, which still pulls p256/p384 0.13 and with them
+  elliptic-curve 0.13 and crypto-bigint 0.5.5 (no patched 0.5.x or elliptic-curve 0.13.x exists). In production
+  jsonwebtoken only verifies tokens (`cert-issuer/server/src/oidc.rs`), on public values only. Polar's own P-256
+  signing moved to p256 0.14 (48f81ecc). Remove the ignore when jsonwebtoken releases on elliptic-curve 0.14 (upstream
+  issue Keats/jsonwebtoken#549, waiting on rsa 0.10), or switch jsonwebtoken to its aws_lc_rs backend, which also
+  drops rsa 0.9 and the RUSTSEC-2023-0071 ignore. Either swap moves RSA verification to 2048 to 8192-bit keys, so
+  first add the token tests that are missing: every existing one is RS256 (ES256, ES384, EdDSA and PS* accepted, RSA
+  key sizes at the bounds). The ignore cannot be scoped to crypto-bigint 0.5: cargo-deny 0.19 takes only `id` and
+  `reason` (later releases add `allow`), so until then check `cargo tree -i crypto-bigint` when the lockfile moves.
+- Flaky test: `polar-agent-builder` `agent::tests::an_agent_started_after_polar_init_takes_the_marker_and_starts`
+  shares the static `MARKED_STARTED` with
+  `an_agent_started_without_polar_init_having_run_exits_one_and_is_not_started`. The unmarked test resets the flag
+  while the marked one runs, so under parallel load the marked test fails with "it was started". It failed once in a
+  full `cargo test --workspace` and passed three reruns. Give each test its own flag, or run the two serially.

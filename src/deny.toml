@@ -97,6 +97,10 @@ ignore = [
     #{ crate = "a-crate-that-is-yanked@0.1.1", reason = "you can specify why you are ignoring the yanked crate" },
     "duplicate",
     { id = "RUSTSEC-2023-0071", reason = "Marvin attack on the rsa crate's private-key operations; rsa arrives only through jsonwebtoken, which here verifies signatures with public keys, and key generation is not a timing oracle. No patched version exists." },
+    # Not scoped to crypto-bigint 0.5: cargo-deny 0.19 takes only `id` and `reason` on an advisory ignore (later
+    # releases add `allow`, the crates that may depend on the affected one). Until then a new path to an affected
+    # crypto-bigint would pass unseen, so check `cargo tree -i crypto-bigint` when the lockfile moves.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint timing variability; crypto-bigint 0.5.5 arrives only through jsonwebtoken 10.x (rust_crypto backend), which still pulls p256/p384 0.13 and with them elliptic-curve 0.13 and crypto-bigint 0.5.5. In production jsonwebtoken only verifies tokens (cert-issuer/server/src/oidc.rs), which uses public values only. Polar's own P-256 signing moved to p256 0.14 (48f81ecc). Remove this when jsonwebtoken releases on elliptic-curve 0.14 (upstream issue #549, waiting on rsa 0.10), or switch jsonwebtoken to its aws_lc_rs backend, which would also drop rsa 0.9 and the RUSTSEC-2023-0071 ignore." },
     # Unmaintained, not vulnerable; each is pulled in by a dependency and goes when that dependency moves.
     { id = "RUSTSEC-2024-0384", reason = "instant: unmaintained; pulled in by cassini-backoff (our backoff fork)." },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile: unmaintained; thin wrapper over rustls-pki-types, to migrate." },
