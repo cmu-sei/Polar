@@ -202,6 +202,10 @@ pub struct JiraIssue {
     #[serde(rename = "renderedFields")]
     pub rendered_fields: Option<String>,
     pub changelog: JiraIssueChangeLog,
+    /// The value of the system field `updated`, as the observer found it ([`crate::SYSTEM_UPDATED_KEY`]); `None` from
+    /// an observer that did not say, or for an issue without it.
+    #[serde(default, rename = "polar_updated")]
+    pub system_updated: Option<String>,
 }
 
 #[derive(

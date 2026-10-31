@@ -46,11 +46,7 @@ fn sanitize_label(raw: &str) -> String {
         .replace('#', "num")
 }
 
-/// The field an issue's last update is in: Jira's system field `updated`, under its display name, which the observer
-/// puts in place of the id (`jira/observe/src/issues.rs`, `rename_fields`).
-pub const UPDATED_FIELD: &str = "Updated";
-
-/// The property the issue's last update is written to as epoch milliseconds, beside the text of `Updated`: a number,
+/// The property the issue's last update is written to as epoch milliseconds: a number,
 /// so times Jira wrote with different UTC offsets compare as instants. The state agent reads its largest value as the
 /// observer's cursor (docs/architecture/soft-state.md, "The Jira cursor").
 pub const UPDATED_MS: &str = "updated_ms";
@@ -352,16 +348,18 @@ fn build_ops_for_issue(issue: &JiraIssue) -> Vec<GraphOp> {
         }
     }
 
-    match issue.fields.get(UPDATED_FIELD) {
-        Some(FieldValue::OptionValue(Some(text))) => match parse_updated_ms(text) {
+    // The system field `updated`, as the observer passed it beside the fields (jira_common::SYSTEM_UPDATED_KEY):
+    // never a display name, which is the site's language.
+    match &issue.system_updated {
+        Some(text) => match parse_updated_ms(text) {
             Some(ms) => issue_props.push(Property(UPDATED_MS.to_string(), GraphValue::I64(ms))),
             None => debug!(
-                "Issue {}: its {UPDATED_FIELD} is not a time as Jira writes one, so no {UPDATED_MS} is written",
+                "Issue {}: its system field `updated` is not a time as Jira writes one, so no {UPDATED_MS} is written",
                 issue.key
             ),
         },
-        _ => debug!(
-            "Issue {}: it has no {UPDATED_FIELD}, so no {UPDATED_MS} is written",
+        None => debug!(
+            "Issue {}: the observer gave no system field `updated`, so no {UPDATED_MS} is written",
             issue.key
         ),
     }
@@ -495,6 +493,7 @@ mod tests {
             key: key.to_string(),
             fields: HashMap::new(),
             rendered_fields: None,
+            system_updated: None,
             changelog: JiraIssueChangeLog {
                 start_at: 0.0,
                 max_results: 0.0,
@@ -567,9 +566,10 @@ mod tests {
     fn updated(text: &str) -> JiraIssue {
         let mut issue = empty_issue("PROJ-9");
         issue.fields.insert(
-            UPDATED_FIELD.to_string(),
+            "Updated".to_string(),
             FieldValue::OptionValue(Some(text.to_string())),
         );
+        issue.system_updated = Some(text.to_string());
         issue
     }
 
@@ -628,6 +628,31 @@ mod tests {
             );
         }
         let ops = build_ops_for_issue(&empty_issue("PROJ-10"));
+        assert!(issue_props(&ops).iter().all(|p| p.0 != UPDATED_MS));
+    }
+
+    #[test]
+    fn the_time_comes_from_the_system_field_the_observer_passed_and_not_from_a_display_name() {
+        // A German site: the display name is "Aktualisiert", and a custom field is named "Updated".
+        let issue: JiraIssue = serde_json::from_value(serde_json::json!({
+            "expand": "", "id": "1", "self": "", "key": "PROJ-11",
+            "fields": {
+                "Aktualisiert": "2024-01-02T03:04:05.000+0000",
+                "Updated": "2030-01-01T00:00:00.000+0000"
+            },
+            "changelog": { "startAt": 0.0, "maxResults": 0.0, "total": 0.0, "histories": [] },
+            "polar_updated": "2024-01-02T03:04:05.000+0000"
+        }))
+        .unwrap();
+        let ops = build_ops_for_issue(&issue);
+        assert!(issue_props(&ops).contains(&Property(
+            UPDATED_MS.to_string(),
+            GraphValue::I64(1_704_164_645_000)
+        )));
+        // Without it, a field named "Updated" is not read for the cursor.
+        let mut without = updated("2024-01-02T03:04:05.000+0000");
+        without.system_updated = None;
+        let ops = build_ops_for_issue(&without);
         assert!(issue_props(&ops).iter().all(|p| p.0 != UPDATED_MS));
     }
 

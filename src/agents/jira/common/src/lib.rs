@@ -29,3 +29,8 @@ pub const JIRA_PROJECTS_CONSUMER_TOPIC: &str = "jira:consumer:projects";
 pub const JIRA_GROUPS_CONSUMER_TOPIC: &str = "jira:consumer:groups";
 pub const JIRA_USERS_CONSUMER_TOPIC: &str = "jira:consumer:users";
 pub const JIRA_ISSUES_CONSUMER_TOPIC: &str = "jira:consumer:issues";
+
+/// Where the observer puts an issue's last update for the processor, beside `fields`: the value of Jira's system field
+/// `updated`, found by its schema (`/field`'s `schema.system`), never by its display name, which is the site's language
+/// (docs/architecture/soft-state.md, "The as-built decisions, reviewed").
+pub const SYSTEM_UPDATED_KEY: &str = "polar_updated";

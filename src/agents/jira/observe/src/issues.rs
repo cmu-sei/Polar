@@ -148,6 +148,7 @@ impl JiraIssueObserver {
         let fields: Vec<JiraField> = state
             .get_json(&format!("{}/rest/api/2/field", state.jira_url))
             .await?;
+        let updated_id = system_field_id(&fields, "updated");
         let names: HashMap<String, String> = fields
             .into_iter()
             .map(|f| (f.id.to_string(), f.name.to_string()))
@@ -190,7 +191,8 @@ impl JiraIssueObserver {
                     debug!("{url}");
 
                     let res: Value = state.get_json(url.as_str()).await?;
-                    let fetched = publish_issues(&res, &names, &state.tcp_client)?;
+                    let fetched =
+                        publish_issues(&res, &names, updated_id.as_deref(), &state.tcp_client)?;
                     let total = res["total"].as_u64().unwrap_or(0) as usize;
 
                     start_at += fetched;
@@ -226,7 +228,7 @@ impl JiraIssueObserver {
                     debug!("{url}");
 
                     let res: Value = state.get_json(url.as_str()).await?;
-                    publish_issues(&res, &names, &state.tcp_client)?;
+                    publish_issues(&res, &names, updated_id.as_deref(), &state.tcp_client)?;
 
                     if res["isLast"].as_bool().unwrap_or(true) {
                         break;
@@ -404,6 +406,38 @@ fn rename_fields(issue: &mut Value, names: &HashMap<String, String>) -> bool {
     true
 }
 
+/// The id of the field Jira's schema calls `system` (`updated`), whatever the site's language names it; `None` when
+/// `/field` lists no such field.
+pub fn system_field_id(fields: &[JiraField], system: &str) -> Option<String> {
+    fields
+        .iter()
+        .find(|f| {
+            f.schema
+                .as_ref()
+                .and_then(|s| s.system.as_deref())
+                .is_some_and(|s| s == system)
+        })
+        .map(|f| f.id.clone())
+}
+
+/// Puts the issue's last update, the value of the field `updated_id`, beside its fields under
+/// [`jira_common::SYSTEM_UPDATED_KEY`], before the fields are renamed: the processor reads the cursor's time from there,
+/// never from a display name. An issue without it, or a site whose `/field` names no such field, gets nothing.
+pub fn mark_updated(issue: &mut Value, updated_id: Option<&str>) {
+    let Some(id) = updated_id else {
+        return;
+    };
+    let Some(updated) = issue["fields"][id].as_str().map(str::to_string) else {
+        return;
+    };
+    if let Some(object) = issue.as_object_mut() {
+        object.insert(
+            jira_common::SYSTEM_UPDATED_KEY.to_string(),
+            Value::String(updated),
+        );
+    }
+}
+
 /// Publishes every issue on a page, one message each. Returns how many
 /// issues the page held, which is what pagination advances by. An issue
 /// without a fields object is logged and skipped rather than failing the
@@ -411,6 +445,7 @@ fn rename_fields(issue: &mut Value, names: &HashMap<String, String>) -> bool {
 fn publish_issues(
     res: &Value,
     names: &HashMap<String, String>,
+    updated_id: Option<&str>,
     tcp_client: &TcpClient,
 ) -> Result<usize, ActorProcessingErr> {
     let items = res["issues"]
@@ -419,6 +454,7 @@ fn publish_issues(
 
     for issue in items {
         let mut issue = issue.clone();
+        mark_updated(&mut issue, updated_id);
         if !rename_fields(&mut issue, names) {
             warn!("Skipping issue {} with no fields", issue["key"]);
             continue;
@@ -445,6 +481,58 @@ mod tests {
             ("customfield_10010".to_string(), "Sprint".to_string()),
             ("summary".to_string(), "Summary".to_string()),
         ])
+    }
+
+    fn field(id: &str, name: &str, system: Option<&str>) -> JiraField {
+        serde_json::from_value(json!({
+            "id": id, "name": name, "custom": false, "navigable": true, "orderable": false, "searchable": true,
+            "schema": system.map(|s| json!({ "type": "datetime", "system": s })),
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_last_update_is_found_by_its_system_field_whatever_the_site_s_language_names_it() {
+        // A Jira in German: the system field `updated` is "Aktualisiert".
+        let fields = [
+            field("summary", "Zusammenfassung", Some("summary")),
+            field("updated", "Aktualisiert", Some("updated")),
+            field("customfield_10010", "Updated", None),
+        ];
+        let id = system_field_id(&fields, "updated");
+        assert_eq!(id.as_deref(), Some("updated"));
+        let names: HashMap<String, String> = fields
+            .iter()
+            .map(|f| (f.id.clone(), f.name.clone()))
+            .collect();
+        let mut issue = json!({
+            "key": "PLAT-1",
+            "fields": { "updated": "2024-01-02T03:04:05.000+0000", "customfield_10010": "not it" }
+        });
+        mark_updated(&mut issue, id.as_deref());
+        assert!(rename_fields(&mut issue, &names));
+        assert_eq!(issue["polar_updated"], "2024-01-02T03:04:05.000+0000");
+        assert_eq!(
+            issue["fields"]["Aktualisiert"],
+            "2024-01-02T03:04:05.000+0000"
+        );
+        // A custom field that happens to be named "Updated" is not the cursor.
+        assert_eq!(issue["fields"]["Updated"], "not it");
+    }
+
+    #[test]
+    fn without_the_system_field_nothing_is_marked() {
+        assert_eq!(
+            system_field_id(&[field("updated", "Updated", None)], "updated"),
+            None
+        );
+        let mut issue =
+            json!({ "key": "PLAT-1", "fields": { "updated": "2024-01-02T03:04:05.000+0000" } });
+        mark_updated(&mut issue, None);
+        assert!(issue.get("polar_updated").is_none());
+        let mut issue = json!({ "key": "PLAT-1", "fields": {} });
+        mark_updated(&mut issue, Some("updated"));
+        assert!(issue.get("polar_updated").is_none());
     }
 
     #[test]
