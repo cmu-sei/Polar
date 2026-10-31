@@ -64,7 +64,29 @@ pub static ATTEMPTS: Defaulted<u64> = Defaulted::number(
     "3",
 );
 
-static VARIABLES: &[&dyn Described] = &[&REPLY_TIMEOUT_SECS, &ATTEMPTS];
+/// How soon an `Unavailable` (the graph down, no schema yet) is asked again, by the state actor itself.
+pub static UNAVAILABLE_RETRY_SECS: Defaulted<u64> = Defaulted::seconds(
+    "POLAR_STATE_UNAVAILABLE_RETRY_SECS",
+    "how soon the agent's state actor asks the state agent again when it answers that it cannot answer yet (its graph \
+     is down, it has no schema yet), in seconds; the agent hears nothing until a value or a refusal comes, or \
+     POLAR_STATE_UNAVAILABLE_LIMIT_SECS has passed",
+    "10",
+);
+
+/// For how long the state actor keeps asking again after `Unavailable` before the agent is told.
+pub static UNAVAILABLE_LIMIT_SECS: Defaulted<u64> = Defaulted::seconds(
+    "POLAR_STATE_UNAVAILABLE_LIMIT_SECS",
+    "for how long, in seconds, the agent's state actor keeps asking again while the state agent cannot answer yet, \
+     before the agent hears that it is unavailable; 0 tells the agent at once",
+    "120",
+);
+
+static VARIABLES: &[&dyn Described] = &[
+    &REPLY_TIMEOUT_SECS,
+    &ATTEMPTS,
+    &UNAVAILABLE_RETRY_SECS,
+    &UNAVAILABLE_LIMIT_SECS,
+];
 
 /// The section the `soft-state` capability brings.
 pub static SECTION: Section = Section {
@@ -81,6 +103,12 @@ fn relations(env: &dyn Env) -> Vec<String> {
     if REPLY_TIMEOUT_SECS.read(env).is_ok_and(|n| n == 0) {
         problems.push(format!("{} must be at least 1", REPLY_TIMEOUT_SECS.name()));
     }
+    if UNAVAILABLE_RETRY_SECS.read(env).is_ok_and(|n| n == 0) {
+        problems.push(format!(
+            "{} must be at least 1",
+            UNAVAILABLE_RETRY_SECS.name()
+        ));
+    }
     problems
 }
 
@@ -89,6 +117,10 @@ fn relations(env: &dyn Env) -> Vec<String> {
 pub struct StateSettings {
     pub reply_timeout: Duration,
     pub attempts: u64,
+    /// How soon an `Unavailable` is asked again.
+    pub unavailable_retry: Duration,
+    /// For how long `Unavailable` is asked again before the agent hears it.
+    pub unavailable_limit: Duration,
 }
 
 impl StateSettings {
@@ -101,6 +133,17 @@ impl StateSettings {
                     .max(1),
             ),
             attempts: ATTEMPTS.read(env).map_err(|e| e.to_string())?.max(1),
+            unavailable_retry: Duration::from_secs(
+                UNAVAILABLE_RETRY_SECS
+                    .read(env)
+                    .map_err(|e| e.to_string())?
+                    .max(1),
+            ),
+            unavailable_limit: Duration::from_secs(
+                UNAVAILABLE_LIMIT_SECS
+                    .read(env)
+                    .map_err(|e| e.to_string())?,
+            ),
         })
     }
 }
@@ -285,6 +328,33 @@ pub async fn ask_until_answered(
     Err(StateError::NoReply(last))
 }
 
+/// One question, asked until the state agent can answer it: an `Unavailable` (its graph down, no schema yet) is asked
+/// again every `unavailable_retry`, by the state actor itself, for up to `unavailable_limit`, so the agent's own
+/// backoff sees only a refusal, no answer, or an unavailable that outlasted the limit (docs/architecture/soft-state.md,
+/// "Found by it"). A value or a refusal is returned at once, and each round keeps its attempts at an answer.
+pub async fn ask_until_available(
+    router: &ReplyRouter<StateReply>,
+    query: &StateQuery,
+    settings: StateSettings,
+    publish: impl Fn(Vec<u8>) -> Result<(), String>,
+) -> Result<SoftValue, StateError> {
+    let started = tokio::time::Instant::now();
+    loop {
+        match ask_until_answered(router, query, settings, &publish).await {
+            Err(StateError::Unavailable(why))
+                if started.elapsed() + settings.unavailable_retry <= settings.unavailable_limit =>
+            {
+                debug!(
+                    "the state agent cannot answer yet ({why}); asking again in {:?}",
+                    settings.unavailable_retry
+                );
+                tokio::time::sleep(settings.unavailable_retry).await;
+            }
+            answered => return answered,
+        }
+    }
+}
+
 pub struct StateArgs {
     pub client: TcpClient,
     pub router: Arc<ReplyRouter<StateReply>>,
@@ -319,7 +389,7 @@ impl Actor for StateActor {
         let client = state.client.clone();
         let settings = state.settings;
         tokio::spawn(async move {
-            let result = ask_until_answered(&router, &query, settings, |payload| {
+            let result = ask_until_available(&router, &query, settings, |payload| {
                 client
                     .publish(PublishRequest {
                         topic: soft_state_common::REQUESTS_TOPIC.to_string(),
@@ -344,15 +414,15 @@ mod tests {
     use soft_state_common::{Envelope, decode_request, encode_reply};
     use std::sync::Mutex;
 
-    /// Each publish: its topic and its payload.
-    type Sent = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+    /// Each publish: its topic, its payload and when it was made.
+    type Sent = Arc<Mutex<Vec<(String, Vec<u8>, std::time::Instant)>>>;
 
-    /// Stands in for the broker client: keeps every publish, and answers the `answer_on`th question (counting from
-    /// one) on the state agent's behalf, through `deliver`, as the agent's reply subscription would.
+    /// Stands in for the broker client: keeps every publish, and answers the n-th question (counting from one) with
+    /// `script[n - 1]` on the state agent's behalf, through `deliver`, as the agent's reply subscription would; `None`,
+    /// or past the script's end, is no answer.
     struct Broker {
         sent: Sent,
-        answer_on: usize,
-        reply: StateReply,
+        script: Vec<Option<StateReply>>,
         publisher: Option<String>,
         deliver: Arc<dyn Fn(polar_router::IncomingMessage) + Send + Sync>,
     }
@@ -374,16 +444,16 @@ mod tests {
             if let TcpClientMessage::Publish { topic, payload, .. } = message {
                 let count = {
                     let mut sent = self.sent.lock().unwrap();
-                    sent.push((topic, payload.clone()));
+                    sent.push((topic, payload.clone(), std::time::Instant::now()));
                     sent.len()
                 };
-                if count == self.answer_on {
+                if let Some(Some(reply)) = self.script.get(count - 1) {
                     let asked = decode_request(&payload).unwrap();
                     (self.deliver)(polar_router::IncomingMessage {
                         topic: soft_state_common::replies_topic("asker"),
                         payload: encode_reply(&Envelope {
                             correlation_id: asked.correlation_id,
-                            payload: self.reply.clone(),
+                            payload: reply.clone(),
                         }),
                         published_by: self.publisher.clone(),
                         trace_ctx: None,
@@ -404,11 +474,34 @@ mod tests {
     }
 
     /// A state actor whose broker answers the `answer_on`th question with `reply`, as `publisher`.
+    /// Quick settings for a test: a 100 ms wait per attempt, `attempts` of them, and `Unavailable` asked again every
+    /// 30 ms for up to `unavailable_for`.
+    fn settings(attempts: u64, unavailable_for: Duration) -> StateSettings {
+        StateSettings {
+            reply_timeout: Duration::from_millis(100),
+            attempts,
+            unavailable_retry: Duration::from_millis(30),
+            unavailable_limit: unavailable_for,
+        }
+    }
+
+    /// A state actor whose broker answers the `answer_on`th question with `reply`, as `publisher`.
     async fn actor(
         answer_on: usize,
         reply: StateReply,
         publisher: Option<&str>,
         attempts: u64,
+    ) -> (StateHandle, Sent) {
+        let mut script = vec![None; answer_on - 1];
+        script.push(Some(reply));
+        scripted(script, publisher, settings(attempts, Duration::ZERO)).await
+    }
+
+    /// A state actor whose broker answers as `script` says, as `publisher`.
+    async fn scripted(
+        script: Vec<Option<StateReply>>,
+        publisher: Option<&str>,
+        settings: StateSettings,
     ) -> (StateHandle, Sent) {
         let router = Arc::new(ReplyRouter::new());
         let subscription = replies_subscription("asker", STATE_AGENT.to_string(), router.clone());
@@ -420,8 +513,7 @@ mod tests {
             None,
             Broker {
                 sent: sent.clone(),
-                answer_on,
-                reply,
+                script,
                 publisher: publisher.map(str::to_string),
                 deliver,
             },
@@ -435,10 +527,7 @@ mod tests {
             StateArgs {
                 client: TcpClient::from_actor_ref(broker),
                 router,
-                settings: StateSettings {
-                    reply_timeout: Duration::from_millis(100),
-                    attempts,
-                },
+                settings,
             },
         )
         .await
@@ -450,7 +539,7 @@ mod tests {
         sent.lock()
             .unwrap()
             .iter()
-            .map(|(topic, payload)| {
+            .map(|(topic, payload, _)| {
                 assert_eq!(topic, soft_state_common::REQUESTS_TOPIC);
                 let asked = decode_request(payload).unwrap();
                 assert_eq!(
@@ -475,10 +564,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_answer_is_never_asked_again() {
+    async fn a_value_or_a_refusal_is_never_asked_again() {
         for reply in [
             StateReply::Refused("not declared".into()),
-            StateReply::Unavailable("graph down".into()),
             StateReply::Value(None),
         ] {
             let (state, sent) = actor(1, reply.clone(), Some(STATE_AGENT), 3).await;
@@ -486,6 +574,86 @@ mod tests {
             assert_eq!(got, outcome(Answer::Replied(reply)));
             assert_eq!(sent.lock().unwrap().len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn unavailable_is_asked_again_at_its_interval_until_a_value_comes() {
+        let no_schema = || {
+            Some(StateReply::Unavailable(
+                "the state agent has no schema yet; ask again".into(),
+            ))
+        };
+        let (state, sent) = scripted(
+            vec![
+                no_schema(),
+                no_schema(),
+                no_schema(),
+                Some(StateReply::Value(Some(7))),
+            ],
+            Some(STATE_AGENT),
+            settings(3, Duration::from_secs(5)),
+        )
+        .await;
+        assert_eq!(state.get(max()).await, Ok(SoftValue::of(Some(7))));
+        let sent = sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 4);
+        for pair in sent.windows(2) {
+            assert!(
+                pair[1].2.duration_since(pair[0].2) >= Duration::from_millis(30),
+                "asked again sooner than its interval"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_past_its_limit_is_what_the_caller_hears() {
+        let started = std::time::Instant::now();
+        let (state, sent) = scripted(
+            vec![Some(StateReply::Unavailable("graph down".into())); 100],
+            Some(STATE_AGENT),
+            settings(3, Duration::from_millis(150)),
+        )
+        .await;
+        assert!(matches!(
+            state.get(max()).await,
+            Err(StateError::Unavailable(ref why)) if why == "graph down"
+        ));
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_millis(120), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+        // Asked at 0, 30, 60, 90, 120 (and 150) ms: never past the limit.
+        let asked = sent.lock().unwrap().len();
+        assert!((5..=6).contains(&asked), "{asked}");
+        // With no time for it, the first unavailable is the answer.
+        let (state, sent) = scripted(
+            vec![Some(StateReply::Unavailable("graph down".into())); 10],
+            Some(STATE_AGENT),
+            settings(3, Duration::ZERO),
+        )
+        .await;
+        assert!(matches!(
+            state.get(max()).await,
+            Err(StateError::Unavailable(_))
+        ));
+        assert_eq!(sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_after_unavailable_is_returned_at_once() {
+        let (state, sent) = scripted(
+            vec![
+                Some(StateReply::Unavailable("no schema yet".into())),
+                Some(StateReply::Refused("not declared".into())),
+            ],
+            Some(STATE_AGENT),
+            settings(3, Duration::from_secs(5)),
+        )
+        .await;
+        assert!(matches!(
+            state.get(max()).await,
+            Err(StateError::Refused(_))
+        ));
+        assert_eq!(sent.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -531,9 +699,14 @@ mod tests {
             StateSettings::from_env(&none).unwrap(),
             StateSettings {
                 reply_timeout: Duration::from_secs(8),
-                attempts: 3
+                attempts: 3,
+                unavailable_retry: Duration::from_secs(10),
+                unavailable_limit: Duration::from_secs(120),
             }
         );
+        let zero_retry =
+            |name: &str| (name == "POLAR_STATE_UNAVAILABLE_RETRY_SECS").then(|| "0".to_string());
+        assert_eq!(relations(&zero_retry).len(), 1);
         let zero = |name: &str| (name == "POLAR_STATE_ATTEMPTS").then(|| "0".to_string());
         assert_eq!(relations(&zero).len(), 1);
         assert!(relations(&none).is_empty());
