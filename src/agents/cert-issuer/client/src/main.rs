@@ -70,6 +70,7 @@ struct Args {
 }
 #[tokio::main]
 async fn main() {
+    polar_version::exit_if_asked("cert-client");
     let args = Args::parse();
     std::process::exit(run(args).await);
 }

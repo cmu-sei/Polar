@@ -63,6 +63,7 @@ const HARD_CEILING: Duration = Duration::from_secs(300);
 
 #[tokio::main]
 async fn main() {
+    polar_version::exit_if_asked("user-cert-fetcher");
     let args = Args::parse();
     std::process::exit(run(args).await);
 }

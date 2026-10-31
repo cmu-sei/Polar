@@ -65,6 +65,7 @@ members = [
     "polar-git-server/server",
     "polar-health",
     "polar-scudo",
+    "polar-version",
     "polar-healthcheck",
     "polar-init",
     "polar-kernel-keyring",
@@ -177,6 +178,8 @@ bytes = "1.11.1"
 cassini-broker = { path = "cassini/broker" }
 # Every binary's allocator (docs/architecture/broker-baseline.md, "Decided").
 polar-scudo = { path = "polar-scudo" }
+# What every binary reports as its version, and its traces as service.version (polar-version/src/lib.rs).
+polar-version = { path = "polar-version" }
 cassini-client = { path = "cassini/client" }
 cassini-tracing = { path = "cassini/cassini-tracing" }
 cassini-types = { path = "cassini/types" }

@@ -96,8 +96,30 @@
         # The pinned remote imports of the repository's Dhall, so a render fetches nothing (src/flake/dhall-cache.nix).
         dhallCache = import ./src/flake/dhall-cache.nix { inherit pkgs lib; roots = [ ./infra ./src ]; };
 
+        # ── The platform version ───────────────────────────────────────────────
+        # The repository's VERSION, the one place it is written: X.Y.Z at a release, X.Y.Z+dev between them
+        # (infra/INFRA.md, "The release"). The Rust builds embed it (src/agents/polar-version), and every image made with
+        # the container lib carries it as the label org.opencontainers.image.version. Only the file's contents are used,
+        # so a commit that leaves it alone changes no binary and no image. The commit is never a label: it would change
+        # every image's digest at every commit, a documentation commit included, and a release's lock could not be
+        # reproduced from its tag. It is in the release's lock and changelog instead.
+        polarVersion = lib.fileContents ./VERSION;
+        versionLabels = { "org.opencontainers.image.version" = polarVersion; };
+
+        # The container lib, with the version label on every image it makes (its extraConfig is merged over its own
+        # Labels, so the title and the rest stay).
+        containerLib = nix-container-lib // {
+          lib = nix-container-lib.lib // {
+            ${system} = nix-container-lib.lib.${system} // {
+              mkContainer = args: nix-container-lib.lib.${system}.mkContainer (args // {
+                extraConfig = lib.recursiveUpdate { Labels = versionLabels; } (args.extraConfig or { });
+              });
+            };
+          };
+        };
+
         # ── Container lib helper ───────────────────────────────────────────────
-        mkPolarContainer = configNixPath: nix-container-lib.lib.${system}.mkContainer {
+        mkPolarContainer = configNixPath: containerLib.lib.${system}.mkContainer {
           inherit system pkgs;
           inputs = {
             inherit staticanalysis dotacat myNeovimOverlay rust-overlay;
@@ -138,7 +160,7 @@
         # ── Agent containers ───────────────────────────────────────────────────
         # Regenerate with: cd src/flake && just render-agent
         mkAgentContainer = llamaCppPkg: extraPkgs:
-          nix-container-lib.lib.${system}.mkContainer {
+          containerLib.lib.${system}.mkContainer {
             inherit system pkgs;
             inputs = {
               inherit staticanalysis dotacat myNeovimOverlay rust-overlay;
@@ -151,16 +173,19 @@
 
         # ── Workspace binaries + agent images ─────────────────────────────────
         polarPkgs = import ./src/agents/workspace.nix {
-          inherit pkgs lib crane rust-overlay nix-container-lib inputs system;
+          inherit pkgs lib crane rust-overlay inputs system polarVersion;
+          nix-container-lib = containerLib;
         };
 
         containerPkgs = import ./src/containers/workspace.nix {
-          inherit pkgs lib nix-container-lib inputs system;
+          inherit pkgs lib inputs system;
+          nix-container-lib = containerLib;
         };
 
         # ── ACE dashboard (Python, uv2nix, nix-container-lib) ──────────────────
         acePkgs = import ./src/ace/package.nix {
-          inherit pkgs lib system pyproject-nix uv2nix pyproject-build-systems nix-container-lib;
+          inherit pkgs lib system pyproject-nix uv2nix pyproject-build-systems;
+          nix-container-lib = containerLib;
           inputs = {
             inherit staticanalysis dotacat myNeovimOverlay rust-overlay;
           };

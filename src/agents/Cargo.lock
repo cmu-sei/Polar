@@ -1027,6 +1027,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "polar-version",
  "proptest",
  "tracing",
  "tracing-glog",
@@ -1145,6 +1146,7 @@ dependencies = [
  "jsonwebtoken",
  "polar-custody",
  "polar-scudo",
+ "polar-version",
  "rand 0.10.3",
  "rcgen",
  "reqwest 0.12.28",
@@ -5791,6 +5793,7 @@ dependencies = [
  "polar-health",
  "polar-router",
  "polar-test-graph",
+ "polar-version",
  "proptest",
  "ractor",
  "rcgen",
@@ -5822,6 +5825,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "polar-scudo",
+ "polar-version",
  "reqwest 0.12.28",
  "serde_json",
  "tokio",
@@ -5848,6 +5852,7 @@ dependencies = [
  "polar-router",
  "polar-scheduler-common",
  "polar-signing",
+ "polar-version",
  "proptest",
  "ractor",
  "rand 0.10.3",
@@ -6059,6 +6064,7 @@ dependencies = [
  "polar-env",
  "polar-health",
  "polar-scudo",
+ "polar-version",
  "proptest",
  "rcgen",
  "rsa 0.10.0-rc.18",
@@ -6210,6 +6216,7 @@ dependencies = [
  "polar-policy",
  "polar-scudo",
  "polar-signing",
+ "polar-version",
  "proptest",
  "rand 0.10.3",
  "reqwest 0.12.28",
@@ -6249,6 +6256,15 @@ dependencies = [
  "testcontainers",
  "testcontainers-modules",
  "tokio",
+]
+
+[[package]]
+name = "polar-version"
+version = "1.0.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -8684,6 +8700,7 @@ dependencies = [
  "credentials-agent-client",
  "credentials_agent_common",
  "polar-scudo",
+ "polar-version",
  "reqwest 0.12.28",
  "serde_json",
  "thiserror 1.0.69",

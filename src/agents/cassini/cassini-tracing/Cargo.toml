@@ -29,6 +29,8 @@ license.workspace = true
 cassini-types.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
+# service.version is the platform version.
+polar-version.workspace = true
 opentelemetry.workspace = true
 tracing-glog.workspace = true
 tracing-opentelemetry.workspace = true

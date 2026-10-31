@@ -31,6 +31,8 @@
 //!
 //! - no arguments: judge the configuration, then start the agent;
 //! - `--help`: what the agent is, for a person;
+//! - `--version`: the platform version, the target and the allocator, in a line; with `--json`, as the record the
+//!   scaffold also carries as `agent.version` (polar-version). Never the commit;
 //! - `--scaffold`: the configuration document, as JSON: every variable of every section that
 //!   applies, with its type, default, secrecy and documentation, and each value empty. With
 //!   `--config FILE` it is the same document filled from FILE, with where each value came from
@@ -364,6 +366,10 @@ pub struct ArgDocument {
 pub struct AgentInfo {
     pub name: String,
     pub purpose: String,
+    /// What the binary is, as `--version --json` prints it: the platform version, the Cassini protocol version, the
+    /// target and the allocator, never the commit (polar-version). A scaffold written before it reads as None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<polar_version::VersionRecord>,
 }
 
 /// What `A` needs, with the Cassini client first: every agent built here is one, so the agent
@@ -502,6 +508,7 @@ pub fn scaffold_document<A: PolarAgent>() -> AgentDocument {
         agent: AgentInfo {
             name: A::NAME.to_string(),
             purpose: A::PURPOSE.to_string(),
+            version: Some(polar_version::record(A::NAME)),
         },
         requires: needs_of::<A>()
             .iter()
@@ -712,11 +719,19 @@ pub fn check<A: PolarAgent>(config: &Path, process: impl Env + 'static) -> Vec<S
 pub enum Command {
     Run,
     Help,
-    Scaffold { config: Option<PathBuf> },
-    Check { config: PathBuf },
+    /// `--version`, and with `--json` the record (polar-version).
+    Version {
+        json: bool,
+    },
+    Scaffold {
+        config: Option<PathBuf>,
+    },
+    Check {
+        config: PathBuf,
+    },
 }
 
-const USAGE: &str = "usage: <agent> [--help | --scaffold [--config FILE] | --check --config FILE]";
+const USAGE: &str = "usage: <agent> [--help | --version [--json] | --scaffold [--config FILE] | --check --config FILE]";
 
 pub fn parse_command(args: &[String]) -> Result<Command, String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -731,6 +746,8 @@ pub fn parse_command(args: &[String]) -> Result<Command, String> {
     match args.as_slice() {
         [] => Ok(Command::Run),
         ["--help"] | ["-h"] => Ok(Command::Help),
+        ["--version"] => Ok(Command::Version { json: false }),
+        ["--version", "--json"] => Ok(Command::Version { json: true }),
         ["--scaffold", rest @ ..] => Ok(Command::Scaffold {
             config: config_of(rest)?,
         }),
@@ -824,6 +841,8 @@ pub fn help_text<A: PolarAgent>() -> String {
          scaffold.\n\n\
          Flags:\n\
          \x20 --help                    this text\n\
+         \x20 --version                 the platform version, target and allocator, in a line\n\
+         \x20 --version --json          the same, as JSON\n\
          \x20 --scaffold                the configuration document, every value empty, as JSON\n\
          \x20 --scaffold --config FILE  the same, filled from FILE, with sources and problems\n\
          \x20 --check --config FILE     judge FILE the way the agent does when it starts\n\
@@ -962,6 +981,11 @@ pub fn run_with<A: PolarAgent>(args: &[String], process: impl Env + 'static) -> 
     match command {
         Command::Help => {
             print!("{}", help_text::<A>());
+            0
+        }
+        Command::Version { json } => {
+            let record = polar_version::record(A::NAME);
+            println!("{}", if json { record.json() } else { record.line() });
             0
         }
         Command::Scaffold { config } => match scaffold_json::<A>(config.as_deref(), process) {
@@ -1370,6 +1394,55 @@ mod tests {
                 config: PathBuf::from("f.json")
             })
         );
+        assert_eq!(
+            parse_command(&strings(&["--version"])),
+            Ok(Command::Version { json: false })
+        );
+        assert_eq!(
+            parse_command(&strings(&["--version", "--json"])),
+            Ok(Command::Version { json: true })
+        );
+    }
+
+    #[test]
+    fn a_version_request_is_one_of_two_forms_and_anything_else_is_the_usage() {
+        for other in [
+            &["--json"][..],
+            &["--json", "--version"][..],
+            &["--version", "--yaml"][..],
+            &["--version", "--json", "--json"][..],
+            &["--version", "--config", "f.json"][..],
+            &["-V"][..],
+        ] {
+            let refused = parse_command(&strings(other)).unwrap_err();
+            assert!(
+                refused.contains("--version [--json]"),
+                "{other:?}: {refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_scaffold_carries_the_version_record_of_the_agent() {
+        let doc = scaffold_document::<Example>();
+        let record = doc.agent.version.clone().expect("agent.version");
+        assert_eq!(record, polar_version::record("example-agent"));
+        let json: serde_json::Value = serde_json::to_value(&doc).unwrap();
+        let version = &json["agent"]["version"];
+        assert_eq!(version["name"], "example-agent");
+        assert_eq!(version["version"], polar_version::PLATFORM);
+        assert_eq!(version["target"], polar_version::TARGET);
+        assert_eq!(version["allocator"], "scudo");
+        assert!(version["release"].is_boolean());
+        assert!(version.get("cassini_protocol").is_some());
+        assert!(version.get("commit").is_none() && version.get("revision").is_none());
+        // A scaffold written before the field reads as one without it.
+        let mut older = json.clone();
+        older["agent"].as_object_mut().unwrap().remove("version");
+        let read: AgentDocument = serde_json::from_value(older).unwrap();
+        assert_eq!(read.agent.version, None);
+        let back: AgentDocument = serde_json::from_value(json).unwrap();
+        assert_eq!(back.agent.version, Some(record));
     }
 
     #[test]
@@ -1397,6 +1470,8 @@ mod tests {
             "30",
             "--scaffold",
             "--check",
+            "--version",
+            "--version --json",
         ] {
             assert!(text.contains(expected), "missing {expected:?} in\n{text}");
         }
@@ -1954,6 +2029,14 @@ mod tests {
         );
         assert_eq!(
             run_with::<Watched>(&strings(&["--scaffold"]), with_secrets()),
+            0
+        );
+        assert_eq!(
+            run_with::<Watched>(&strings(&["--version"]), with_secrets()),
+            0
+        );
+        assert_eq!(
+            run_with::<Watched>(&strings(&["--version", "--json"]), with_secrets()),
             0
         );
         assert_eq!(

@@ -215,7 +215,7 @@ pub fn init_with(service_name: String, settings: &LoggingSettings) {
                     .with_service_name(service_name.clone())
                     .with_attributes([
                         KeyValue::new("service.name", service_name.clone()),
-                        KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+                        KeyValue::new("service.version", polar_version::PLATFORM),
                     ])
                     .build(),
             )

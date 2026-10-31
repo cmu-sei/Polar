@@ -123,7 +123,7 @@ pub fn init_tracing_with(service_name: &str, settings: &TracingSettings) {
             .with_resource(
                 Resource::builder()
                     .with_service_name(service_name.to_string())
-                    .with_attributes([KeyValue::new("service.version", env!("CARGO_PKG_VERSION"))])
+                    .with_attributes([KeyValue::new("service.version", polar_version::PLATFORM)])
                     .build(),
             )
             .build();

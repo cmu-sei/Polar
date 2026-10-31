@@ -43,6 +43,8 @@ rustls.workspace = true
 polar-env.workspace = true
 polar-health.workspace = true
 polar-router.workspace = true
+# service.version is the platform version (logging.rs).
+polar-version.workspace = true
 ractor.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 rkyv.workspace = true

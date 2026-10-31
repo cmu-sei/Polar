@@ -121,6 +121,8 @@ let
       ];
       Labels = {
         "org.opencontainers.image.title"       = "cert-issuer";
+        # The platform version (flake.nix, "The platform version"); never the commit.
+        "org.opencontainers.image.version"     = crateArgs.POLAR_VERSION;
         "org.opencontainers.image.description" = "Polar internal CA and OIDC-backed cert issuer";
       };
     };

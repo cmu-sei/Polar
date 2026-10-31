@@ -251,6 +251,7 @@ fn write_or_print(text: &str, out: Option<&std::path::Path>, what: &str) -> Resu
 }
 
 fn main() -> Result<()> {
+    polar_version::exit_if_asked("polar-sign");
     match Cli::parse().command {
         Command::Template {
             agent,

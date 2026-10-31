@@ -203,6 +203,7 @@ fn require_observer_url(observer_url: Option<String>) -> Result<String, String> 
 
 #[tokio::main]
 async fn main() {
+    polar_version::exit_if_asked("polar-admin-grant");
     let args = Args::parse();
     std::process::exit(run(args).await);
 }

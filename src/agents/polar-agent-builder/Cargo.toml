@@ -46,6 +46,8 @@ polar-scheduler-common.workspace = true
 # The state agent's questions and answers, which the state actor asks and hears (state.rs).
 soft-state-common.workspace = true
 polar-signing.workspace = true
+# What `--version` prints and the scaffold carries as `agent.version`.
+polar-version.workspace = true
 rand.workspace = true
 rsa.workspace = true
 ractor.workspace = true

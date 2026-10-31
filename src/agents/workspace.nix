@@ -19,7 +19,9 @@
 #
 # DM26-0670
 
-{ pkgs, lib, crane, nix-container-lib, inputs, system, ... }:
+# `nix-container-lib` is flake.nix's, which puts the platform version label on every image; `polarVersion` is the
+# repository's VERSION.
+{ pkgs, lib, crane, nix-container-lib, inputs, system, polarVersion, ... }:
 
 let
 
@@ -113,6 +115,10 @@ let
         # Here and not in commonArgs: buildDepsOnly replaces the workspace's build scripts with dummies, so
         # polar-scudo's never reads it there, and in commonArgs a change to Scudo rebuilt every dependency.
         POLAR_SCUDO_LIB_DIR = "${scudo}/lib/polar/scudo";
+        # The platform version, which polar-version embeds: crane's source is rooted here, so the repository's VERSION is
+        # not in it, and polar-version's build.rs takes the contents from this variable instead. Here and not in
+        # commonArgs for the same reason as the Scudo directory: the dependencies' build never reads it.
+        POLAR_VERSION = polarVersion;
         # NB: we disable tests since we'll run them all via cargo-nextest
         doCheck = false;
     };

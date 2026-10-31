@@ -27,6 +27,8 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+# `--version` and `--version --json`.
+polar-version.workspace = true
 polar-scudo.workspace = true
 cassini-client = { workspace = true }
 cert-issuer-common = { path = "../cert-issuer/common" }

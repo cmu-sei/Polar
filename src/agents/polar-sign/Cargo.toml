@@ -26,6 +26,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# `--version` and `--version --json`.
+polar-version.workspace = true
 polar-scudo.workspace = true
 anyhow.workspace = true
 clap.workspace = true

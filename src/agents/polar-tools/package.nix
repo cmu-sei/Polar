@@ -95,7 +95,7 @@ let
   cargoArtifacts = craneStatic.buildDepsOnly staticArgs;
 
   # The Scudo directory in the package's build only, as workspace.nix has it: the dependencies' build never reads it.
-  tools = craneStatic.buildPackage (staticArgs // { inherit cargoArtifacts; inherit (crateArgs) POLAR_SCUDO_LIB_DIR; });
+  tools = craneStatic.buildPackage (staticArgs // { inherit cargoArtifacts; inherit (crateArgs) POLAR_SCUDO_LIB_DIR POLAR_VERSION; });
 
   image = pkgs.dockerTools.buildLayeredImage {
     name = "polar-tools";
@@ -108,6 +108,8 @@ let
     config = {
       Labels = {
         "org.opencontainers.image.title" = "polar-tools";
+        # The platform version (flake.nix, "The platform version"); never the commit.
+        "org.opencontainers.image.version" = crateArgs.POLAR_VERSION;
         "org.opencontainers.image.description" =
           "Static Polar command-line tools in /opt/polar/bin; copy them out, there is nothing to run";
       };

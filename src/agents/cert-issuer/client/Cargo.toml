@@ -27,6 +27,8 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+# `--version` and `--version --json`.
+polar-version.workspace = true
 polar-scudo.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
