@@ -129,7 +129,10 @@ notify = "7"
 # Neo4j the custody daemon's key, which is in no file (docs/architecture/key-custody.md, "The neo4rs patch"). Pinned
 # to a specific commit, as the other forks are.
 neo4rs = { version = "0.9.0-rc.10", git = "https://github.com/daveman1010221/neo4rs", rev = "4117f5a" }
-oci-client = "0.15.0"                                     # used in resolver
+# Used in resolver and build-processor. 0.18 reads a registry token's expiry itself, without the unmaintained jwt
+# crate (RUSTSEC-2016-0007). native-tls, as 0.15's defaults chose: 0.18's defaults would move the client to rustls
+# on aws-lc-rs with the platform root store.
+oci-client = { version = "0.18.0", default-features = false, features = ["native-tls"] }
 opentelemetry = "0.32.0"
 opentelemetry-otlp = "0.32.0"
 opentelemetry_sdk = "0.32.1"

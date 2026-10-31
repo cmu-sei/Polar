@@ -77,7 +77,7 @@ async fn push_minimal_image(registry_host: &str, repo: &str, tag: &str) -> Strin
     let config_data = b"{}".to_vec();
 
     let config = Config {
-        data: config_data,
+        data: config_data.into(),
         media_type: "application/vnd.oci.image.config.v1+json".to_string(),
         annotations: None,
     };

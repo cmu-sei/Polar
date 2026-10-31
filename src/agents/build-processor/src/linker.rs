@@ -23,7 +23,7 @@
 
 use chrono::Utc;
 use neo4rs::BoltType;
-use oci_client::manifest::OciManifest;
+use oci_client::manifest::{OciManifest, Platform};
 use polar::graph::controller::IntoGraphKey;
 use polar::graph::controller::{GraphControllerMsg, GraphOp, GraphValue, Property, rel};
 use polar::graph::nodes::builds::ArtifactNodeKey;
@@ -36,6 +36,12 @@ use ractor::ActorRef;
 use ractor::async_trait;
 use ractor::{Actor, ActorProcessingErr};
 use tracing::{debug, trace, warn};
+
+/// The os and architecture an image index gives for an entry, as the manifest spelled them: oci-spec
+/// parses both into enums, and their `Display` gives the manifest's string back, unknown values too.
+fn platform_os_and_arch(platform: &Platform) -> (String, String) {
+    (platform.os.to_string(), platform.architecture.to_string())
+}
 
 pub struct ProvenanceLinker;
 
@@ -1069,13 +1075,14 @@ impl Actor for ProvenanceLinker {
                             ];
 
                             if let Some(platform) = entry.platform {
+                                let (os, arch) = platform_os_and_arch(&platform);
                                 edge_props.push(Property(
                                     "platform_os".into(),
-                                    GraphValue::String(platform.os),
+                                    GraphValue::String(os),
                                 ));
                                 edge_props.push(Property(
                                     "platform_arch".into(),
-                                    GraphValue::String(platform.architecture),
+                                    GraphValue::String(arch),
                                 ));
 
                                 if let Some(variant) = platform.variant {
@@ -1138,5 +1145,58 @@ impl Actor for ProvenanceLinker {
             _ => warn!("unexpected linker command {message:?}"),
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::platform_os_and_arch;
+    use oci_client::manifest::OciImageIndex;
+    use proptest::prelude::*;
+
+    /// An image index with one entry for the given platform.
+    fn index_for(os: &str, architecture: &str) -> OciImageIndex {
+        serde_json::from_value(serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [{
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "size": 1,
+                "platform": { "architecture": architecture, "os": os }
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn recorded(index: &OciImageIndex) -> (String, String) {
+        platform_os_and_arch(index.manifests[0].platform.as_ref().unwrap())
+    }
+
+    #[test]
+    fn an_index_edge_records_the_platform_strings_the_manifest_gave() {
+        for (os, arch) in [("linux", "amd64"), ("linux", "386"), ("windows", "arm64")] {
+            assert_eq!(
+                recorded(&index_for(os, arch)),
+                (os.to_string(), arch.to_string())
+            );
+        }
+        // Values oci-spec has no variant for are kept too, not dropped or renamed.
+        assert_eq!(
+            recorded(&index_for("plan10", "quantum")),
+            ("plan10".to_string(), "quantum".to_string())
+        );
+    }
+
+    proptest! {
+        /// oci-spec 0.10 parses os and architecture into enums; what the linker records is still
+        /// exactly the string the manifest gave, a known value or not, as with 0.8's plain strings.
+        #[test]
+        fn any_platform_is_recorded_as_the_manifest_gave_it(
+            os in "[a-z0-9]{1,12}",
+            arch in "[a-z0-9]{1,12}",
+        ) {
+            prop_assert_eq!(recorded(&index_for(&os, &arch)), (os, arch));
+        }
     }
 }

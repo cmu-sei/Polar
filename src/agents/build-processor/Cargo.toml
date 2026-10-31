@@ -43,3 +43,6 @@ serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 oci-client.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
