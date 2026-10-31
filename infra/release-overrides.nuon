@@ -27,6 +27,29 @@
 #
 #   { sha: "1a2b3c4", reason: "why", type: "feat", breaking: true }
 #
-# `type` replaces the commit's type (feat, fix, docs, chore, ...); `breaking` replaces whether it is breaking; `ignore: true`
-# leaves it out (a commit that changes nothing that ships). Every field but `sha` and `reason` is optional.
-[]
+# `type` replaces the commit's type (feat, fix, docs, chore, ...); `breaking` replaces whether it is breaking; `breaking_note`
+# says what to do about the break, as a `BREAKING CHANGE:` footer would, and the changelog shows it under the change;
+# `ignore: true` leaves it out (a commit that changes nothing that ships). Every field but `sha` and `reason` is optional.
+[
+  # Breaking changes since v1.0.0 that were not written as `type!:` (reviewed with the maintainer, 2026-10-31).
+  { sha: "e97bf286", reason: "the Cassini wire protocol changed (numbered publishes, acknowledged deliveries)", breaking: true,
+    breaking_note: "Rebuild and redeploy every image together: a client and a broker from before 2.0.0 cannot talk; from 2.0.0 a mismatch is refused at registration, naming both protocol versions." }
+  { sha: "24cc4fea", reason: "agents are Deployments, not Jobs", breaking: true,
+    breaking_note: "Re-render and apply, and delete the old Jobs; tooling that looked for an agent's Job must look for its Deployment." }
+  { sha: "aca90ec1", reason: "an agent's service name is its workload name", breaking: true,
+    breaking_note: "Signed documents addressed to an agent's old name (credentials-agent-consumer and the other renamed agents) are no longer delivered: sign them again for the workload name; agent.<old>.* topics are agent.<workload>.*." }
+  { sha: "4d63e5b6", reason: "an agent starts only as the workload its certificate names", breaking: true,
+    breaking_note: "Run each agent under the ServiceAccount of its workload name; under any other it refuses to start." }
+  { sha: "c0559229", reason: "topics are enforced: declared and implied only, the broker deciding each", breaking: true,
+    breaking_note: "An agent publishes and subscribes only on its declared and implied topics; a client whose identity is not a catalog workload gets a certificate with no topics and is refused. Declare a workload's topics in its agent, and put the workload in the catalog." }
+  { sha: "96d902ad", reason: "escrow needs the custody daemon", breaking: true,
+    breaking_note: "A pod's escrow key is fetched by its custody daemon (on by default); a target with escrow and custody switched off no longer renders." }
+  { sha: "645f23f8", reason: "an escrow certificate is not an mTLS certificate", breaking: true,
+    breaking_note: "An escrow certificate can no longer be presented as a TLS client certificate; use the workload's client certificate." }
+  { sha: "4d6c2289", reason: "the git server's administrators are a recorded cluster input", breaking: true,
+    breaking_note: "The Polar git server's administrators come from infra/targets/<target>/cluster-input, which up.nu records, not from an edit to a tracked file." }
+  { sha: "ad91451f", reason: "QUERY_DATE applies only to an empty graph", breaking: true,
+    breaking_note: "jira-observer starts each issue pull from the graph's newest issue; QUERY_DATE applies only while the graph holds no issues, so a script that moves it as a cursor has no effect after the first pull and is no longer needed." }
+  { sha: "964d7217", reason: "the broker's memory budget is set at run time", breaking: true,
+    breaking_note: "CASSINI_MEMORY_BUDGET_BYTES is now a cap on the runtime budget, not its value; the broker refuses to start with less than 256 MiB (four 64 MiB frames) available." }
+]

@@ -152,14 +152,16 @@ export def classify [c: record, overrides: list = []] {
         { kind: $i.how, type: $i.type, breaking: $footer }
     }
     let hits = ($overrides | where {|o| ($o.sha | str length) >= 7 and ($c.sha | str starts-with $o.sha) })
+    let footer_note = (breaking_note $c.body)
     let fin = if ($hits | is-empty) {
-        $base | insert note ""
+        $base | insert note "" | insert breaking_note $footer_note
     } else {
         let o = ($hits | first)
         if ($o.ignore? | default false) {
-            { kind: "override", type: "chore", breaking: false, note: $"ignored: ($o.reason)" }
+            { kind: "override", type: "chore", breaking: false, note: $"ignored: ($o.reason)", breaking_note: "" }
         } else {
-            { kind: "override", type: ($o.type? | default $base.type), breaking: ($o.breaking? | default $base.breaking), note: $o.reason }
+            # What to do about a break, when the commit's message cannot say it: the override's own, else its footer's.
+            { kind: "override", type: ($o.type? | default $base.type), breaking: ($o.breaking? | default $base.breaking), note: $o.reason, breaking_note: ($o.breaking_note? | default $footer_note) }
         }
     }
     {
@@ -170,7 +172,7 @@ export def classify [c: record, overrides: list = []] {
         scope: (if $conventional != null { $conventional.scope } else { "" })
         description: (description_of $c.subject)
         breaking: $fin.breaking
-        breaking_note: (breaking_note $c.body)
+        breaking_note: $fin.breaking_note
         significance: (significance_of $fin.type $fin.breaking)
         note: $fin.note
     }

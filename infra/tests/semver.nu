@@ -157,6 +157,17 @@ def main [] {
             }
         }
         {
+            name: "an override that makes a commit breaking can say what to do, which the changelog shows as a footer's would be"
+            body: {
+                let c = (commit $SHA_A "feat(cassini): numbered publishes")
+                let o = { sha: "aaaaaaa", reason: "the wire changed", breaking: true, breaking_note: "Redeploy every image together." }
+                assert equal (classify $c [$o]).breaking_note "Redeploy every image together."
+                let footer = (commit $SHA_A "feat(x): y" "BREAKING CHANGE: from the footer")
+                assert equal (classify $footer [{ sha: "aaaaaaa", reason: "r", breaking: true }]).breaking_note "from the footer" "with no note of its own, an override keeps the footer's"
+                assert equal (classify $footer [$o]).breaking_note "Redeploy every image together." "an override's note replaces the footer's"
+            }
+        }
+        {
             name: "an override can replace the type or leave a commit out"
             body: {
                 let c = (commit $SHA_A "Made some changes")
