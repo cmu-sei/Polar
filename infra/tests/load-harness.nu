@@ -101,11 +101,85 @@ def main [] {
             }
         }
         {
+            name: "a run's own broker settings go over its pass's, as text, from a run or a record of the grid"
+            body: {
+                let runs = (expand {
+                    name: "p"
+                    runs: [{ size: 1, broker: { CASSINI_STALL_SECS: 10 } }]
+                    grid: { size: [2], tune: [{ broker: { CASSINI_MEMORY_BUDGET_BYTES: 536870912 } } { broker: {} }] }
+                    broker: { CASSINI_DECISION_CACHE_SECS: [5] }
+                })
+                assert equal ($runs | get broker) [
+                    { CASSINI_DECISION_CACHE_SECS: "5", CASSINI_STALL_SECS: "10" }
+                    { CASSINI_DECISION_CACHE_SECS: "5", CASSINI_MEMORY_BUDGET_BYTES: "536870912" }
+                    { CASSINI_DECISION_CACHE_SECS: "5" }
+                ]
+                assert equal (expand { name: "q", runs: [{ broker: { CASSINI_STALL_SECS: 50 } }] } | get broker) [{ CASSINI_STALL_SECS: "50" }]
+            }
+        }
+        {
+            name: "the broker's controller decisions, reports and events are read from its log, each with its time"
+            body: {
+                let esc = (char --integer 27)
+                let logs = ([
+                    "2026-10-31T23:05:36.456558000Z I1031 23:05:36.456558     1 cassini/broker/src/pressure.rs:215] [Actor{id:0.7, name:PRESSURE_MANAGER}] the broker's memory budget, budget:268435456, ceiling:26574232744, target:870, limited_by:Floor, drain_rate:29, held:1192, alarm:false, starved:false"
+                    $"2026-10-31T23:05:46.000000000Z ($esc)[32mI1031($esc)[0m 23:05:46.0  1 pressure.rs:215] [Actor] the broker's memory budget, budget:285212672, ceiling:26574232744, target:900000000, limited_by:Ceiling\(MemAvailable\), drain_rate:30000000, held:250000000, alarm:true, starved:false"
+                    "2026-10-31T23:05:55.455972000Z I1031 23:05:55.455972     1 cassini/broker/src/budget_report.rs:47] [Actor] the broker's memory budget, used:1192, limit:268435456, peak:4762264, exhausted:false, readers_waiting:0, refused:3, slow_disconnections:1, alarms:0, largest:[(\"topic a\", 1192), (\"b:c\", 7)]"
+                    "2026-10-31T23:05:57.000000000Z W1031 23:05:57.0  1 session.rs:320] [Actor] a subscriber held its topic back past the stall bound: its connection is ended, and its session kept for the retention window, registration_id:r, topic:t"
+                    "2026-10-31T23:05:58.000000000Z W1031 23:05:58.0  1 pressure.rs:240] [Actor] the broker's memory budget is exhausted: every reader waits until what is held falls"
+                    "2026-10-31T23:05:59.000000000Z I1031 23:05:59.0  1 listener.rs:1] [Actor] unrelated"
+                ] | str join "\n")
+                let b = (budget_lines $logs)
+                assert equal ($b.controller | length) 2
+                assert equal $b.controller.0 { at: ("2026-10-31T23:05:36.456558Z" | into datetime), budget: 268435456, ceiling: 26574232744, target: 870, limited_by: "Floor", drain_rate: 29, held: 1192, alarm: false, starved: false }
+                assert equal $b.controller.1.limited_by "Ceiling(MemAvailable)"
+                assert equal $b.controller.1.alarm true
+                assert equal ($b.reports | length) 1
+                assert equal [$b.reports.0.peak $b.reports.0.refused $b.reports.0.slow_disconnections] [4762264 3 1]
+                assert equal $b.reports.0.largest '[("topic a", 1192), ("b:c", 7)]'
+                assert equal ($b.events | get kind) [stall_ended alarm]
+                assert equal $b.events.0.at ("2026-10-31T23:05:57Z" | into datetime)
+                let brief = (budget_brief $b)
+                assert equal $brief { budget_max: 285212672, held_max: 250000000, target_max: 900000000, limited_by: ["Floor" "Ceiling(MemAvailable)"], peak: 4762264, slow_disconnections: 1, events: { stall_ended: 1, alarm: 1 } }
+                assert equal (budget_brief null) null
+                let quiet = (budget_brief (budget_lines "nothing here"))
+                assert equal [$quiet.budget_max $quiet.limited_by $quiet.events] [null [] {}]
+                let run = ((expand { name: "p", runs: [{}] }) | first)
+                let s = (summarise [{ run: $run, results: [], nodes: [], one_node: true, budget: $brief }] | first)
+                assert equal [$s.budget_max $s.held_max $s.limited_by $s.stall_ended] [285212672 250000000 "Floor Ceiling(MemAvailable)" 1]
+                let none = (summarise [{ run: $run, results: [], nodes: [], one_node: true }] | first)
+                assert equal [$none.budget_max $none.limited_by $none.stall_ended] [null "" 0]
+            }
+        }
+        {
+            name: "an image tag replaces the harness container's image, digest or tag, and nothing else"
+            body: {
+                let job = { spec: { template: { spec: {
+                    initContainers: [{ name: "polar-init", image: "localhost:30500/polar-init:latest@sha256:aa" }]
+                    containers: [
+                        { name: "harness-sink", image: "localhost:30500/harness-sink:latest@sha256:bb" }
+                        { name: "polar-custody", image: "localhost:30500/polar-custody:latest@sha256:cc" }
+                    ]
+                } } } }
+                let tagged = (with_image_tag $job "s4m")
+                assert equal ($tagged.spec.template.spec.containers | get image) ["localhost:30500/harness-sink:s4m" "localhost:30500/polar-custody:latest@sha256:cc"]
+                assert equal $tagged.spec.template.spec.initContainers $job.spec.template.spec.initContainers
+                let plain = ($job | update spec.template.spec.containers.0.image "reg/harness-producer:latest")
+                assert equal (with_image_tag $plain "new").spec.template.spec.containers.0.image "reg/harness-producer:new"
+                assert equal (with_image_tag $job "") $job
+            }
+        }
+        {
             name: "the broker's settings are variables its scaffold declares, so a rename fails before the broker restarts"
             body: {
                 let document = (with_values (scaffold_of "cassini-broker" "cassini-server") { CASSINI_DECISION_CACHE_SECS: "0" })
                 let set = ($document.sections | each {|s| $s.variables } | flatten | where name == "CASSINI_DECISION_CACHE_SECS")
                 assert equal ($set | get value) ["0"]
+                # The bounds and the memory controller's settings a tunables plan gives.
+                let bounds = { CASSINI_MEMORY_BUDGET_BYTES: "536870912", CASSINI_STALL_SECS: "10", CASSINI_BUDGET_LATENCY_PERCENT: "50", CASSINI_BUDGET_STEP_BYTES: "67108864" }
+                let tuned = (with_values (scaffold_of "cassini-broker" "cassini-server") $bounds)
+                let given = ($tuned.sections | each {|s| $s.variables } | flatten | where {|v| $v.name in ($bounds | columns) })
+                assert equal ($given | length) 4
             }
         }
         {

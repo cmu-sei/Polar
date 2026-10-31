@@ -83,15 +83,18 @@ def combinations [axes: record]: nothing -> list<record> {
 # The runs a plan asks for: each of its `runs`, then every combination of its `grid`'s lists, each over the plan's
 # `defaults` over DEFAULTS, numbered `<plan>-<n>`, with its count. A plan's `broker` lists settings of the broker's
 # (variables its configuration document declares) to measure under: every run is made once for each combination of
-# them, in turn, with the combination as its `broker`, as text; without any, once, with `broker` empty.
+# them, in turn, with the combination as its `broker`, as text; without any, once, with `broker` empty. A run may give
+# settings of its own (`broker: {..}` in a run, or in a record of the grid), over the pass's; the broker is restarted
+# with them before it.
 export def expand [plan: record]: nothing -> list<record> {
     let defaults = ($DEFAULTS | merge ($plan.defaults? | default {}))
     let grid = ($plan.grid? | default {})
     let combos = if ($grid | is-empty) { [] } else { combinations $grid }
-    let passes = (combinations ($plan.broker? | default {}) | each {|c|
-        $c | transpose name value | reduce --fold {} {|v, acc| $acc | insert $v.name ($v.value | into string) }
-    })
-    $passes | each {|broker| ($plan.runs? | default []) | append $combos | each {|r| $r | upsert broker $broker } }
+    let as_text = {|settings| $settings | transpose name value | reduce --fold {} {|v, acc| $acc | insert $v.name ($v.value | into string) } }
+    let passes = (combinations ($plan.broker? | default {}) | each {|c| do $as_text $c })
+    $passes | each {|broker|
+        ($plan.runs? | default []) | append $combos | each {|r| $r | upsert broker ($broker | merge (do $as_text ($r.broker? | default {}))) }
+    }
     | flatten | enumerate | each {|e|
         let run = ($defaults | merge $e.item)
         $run | merge { id: $"($plan.name)-($e.index)", count: (count_for $run) }
@@ -228,6 +231,85 @@ export def run_usage [before: any, after: any, received: int]: nothing -> any {
     }
 }
 
+# The broker's log lines a run keeps as events, and what each is.
+export const EVENT_MARKS = [
+    { kind: "alarm", mark: "the broker's memory budget is exhausted: every reader waits" }
+    { kind: "alarm_lifted", mark: "the broker's memory budget is below its low water again" }
+    { kind: "spared", mark: "a stalled subscriber's connection waits for room" }
+    { kind: "stall_ended", mark: "a subscriber held its topic back past the stall bound" }
+    { kind: "session_ended", mark: "a session is ended before its retention window" }
+    { kind: "shed", mark: "a subscriber whose client is away lets go of what it held" }
+    { kind: "starved", mark: "the memory the broker can have is below its floor" }
+]
+
+# What the broker's bounds said over a run, from its log read with `--timestamps` (docs/architecture/cassini-broker.md,
+# "The bounds, as built"): each of its memory controller's decisions (`controller`: budget, ceiling, target, limited_by,
+# drain_rate, held, alarm, starved; logged when what limits it changes, and every ten samples otherwise), each bounds'
+# report (`reports`, every 30 s: used, limit, peak, refusals, slow disconnections, alarms), and each event (`events`:
+# the alarm rising and lifting, a stalled subscriber spared or ended, a session ended or shed), each with its time.
+export def budget_lines [logs: string]: nothing -> record {
+    let lines = ($logs | ansi strip | lines | where {|l| ($l | str contains "the broker's memory budget") or ($EVENT_MARKS | any {|m| $l | str contains $m.mark }) })
+    let at_of = {|l| try { $l | split row " " | first | into datetime } catch { null } }
+    let fields_of = {|text|
+        $text | split row ", " | each {|kv| $kv | parse --regex '^(?P<k>[a-z_]+):(?P<v>.*)$' } | flatten
+        | reduce --fold {} {|kv, acc|
+            let v = ($kv.v | str trim)
+            $acc | insert $kv.k (if ($v =~ '^-?[0-9]+$') { $v | into int } else if $v in ["true" "false"] { $v == "true" } else { $v })
+        }
+    }
+    let marked = "the broker's memory budget, "
+    let decisions = ($lines | where {|l| $l | str contains $"($marked)budget:" } | each {|l|
+        { at: (do $at_of $l) } | merge (do $fields_of ($l | split row $marked | last))
+    })
+    let reports = ($lines | where {|l| $l | str contains $"($marked)used:" } | each {|l|
+        # Its largest holders are a list with commas in it: kept as written, apart from the rest.
+        let body = ($l | split row $marked | last)
+        let parts = ($body | split row ", largest:")
+        { at: (do $at_of $l) } | merge (do $fields_of ($parts | first)) | insert largest ($parts | get -o 1 | default "")
+    })
+    let events = ($lines | each {|l|
+        let kind = ($EVENT_MARKS | where {|m| $l | str contains $m.mark } | get -o 0.kind)
+        if $kind == null { null } else { { at: (do $at_of $l), kind: $kind, line: ($l | split row "] " | last) } }
+    } | compact)
+    { controller: $decisions, reports: $reports, events: $events }
+}
+
+# A run's budget, in brief: the most it reached and held, what limited it (each, in the order seen), and how many of
+# each event. Null for a run without the broker's log.
+export def budget_brief [budget: any]: nothing -> any {
+    if $budget == null { return null }
+    let c = $budget.controller
+    let most = {|rows, field| if ($rows | is-empty) { null } else { $rows | get $field | math max } }
+    {
+        budget_max: (do $most $c budget)
+        held_max: (do $most $c held)
+        target_max: (do $most $c target)
+        limited_by: ($c | get -o limited_by | default [] | uniq)
+        peak: (do $most $budget.reports peak)
+        slow_disconnections: (do $most $budget.reports slow_disconnections)
+        events: ($budget.events | group-by kind | transpose kind rows | each {|g| { $g.kind: ($g.rows | length) } } | reduce --fold {} {|e, acc| $acc | merge $e })
+    }
+}
+
+# A run's Job with its harness container's image at `tag` in place of what the target rendered (a digest, or a tag), so
+# rounds of one plan can run one build's harness against that build's broker; the other containers (the custody
+# daemon, polar-init) are left as rendered. An empty tag leaves the Job as it is.
+export def with_image_tag [job: record, tag: string]: nothing -> record {
+    if ($tag | is-empty) { return $job }
+    $job | update spec.template.spec.containers {|j|
+        $j.spec.template.spec.containers | each {|c|
+            if ($c.name | str starts-with "harness-") {
+                # `<registry>/<name>:<tag>@sha256:…` or `<registry>/<name>:<tag>`: the name is all before the last ':' of
+                # the part before any '@' (a registry may have a port).
+                let bare = ($c.image | split row "@" | first)
+                let slash = ($bare | split row "/" )
+                let last = ($slash | last | split row ":" | first)
+                $c | update image ($slash | drop 1 | append $"($last):($tag)" | str join "/")
+            } else { $c }
+        }
+    }
+}
+
 # One row per run: what was asked, what the producers reached, what the sinks received, the worst sink's latencies, and
 # what was lost or refused.
 export def summarise [records: list]: nothing -> list<record> {
@@ -258,6 +340,10 @@ export def summarise [records: list]: nothing -> list<record> {
             broker_us_per_msg: ($r.broker_usage?.us_per_msg? | default null)
             broker_ws_mb: ($r.broker_usage?.working_set_mb? | default null)
             broker_peak_mb: ($r.broker_usage?.peak_mb? | default null)
+            budget_max: ($r.budget?.budget_max? | default null)
+            held_max: ($r.budget?.held_max? | default null)
+            limited_by: ($r.budget?.limited_by? | default [] | str join " ")
+            stall_ended: ($r.budget?.events?.stall_ended? | default 0)
             one_node: $r.one_node
             error: ($r.error? | default "")
         }
@@ -364,10 +450,15 @@ def broker_usage_after [since: datetime] {
 # suspended, as the procedure has it for measuring (docs/architecture/broker-baseline.md), or Flux would put the
 # rendered one back; resuming it does, after a run that failed before it could.
 def set_broker [config_map: record, document: record] {
-    let flux = (^kubectl -n flux-system get kustomization polar-agents -o json | complete)
-    let suspended = if $flux.exit_code == 0 { $flux.stdout | from json | get -o spec.suspend | default false } else { false }
-    if not $suspended {
-        error make { msg: "the broker's settings are changed for a run only with Flux's polar-agents suspended" }
+    # The broker is polar-cassini's where the target has that kustomization (the first allocator set found it put the
+    # rendered broker back mid-run, broker-baseline.md), polar-agents' otherwise.
+    for name in [polar-agents polar-cassini] {
+        let flux = (^kubectl -n flux-system get kustomization $name -o json | complete)
+        if $flux.exit_code != 0 and $name == "polar-cassini" { continue }
+        let suspended = if $flux.exit_code == 0 { $flux.stdout | from json | get -o spec.suspend | default false } else { false }
+        if not $suspended {
+            error make { msg: $"the broker's settings are changed for a run only with Flux's ($name) suspended" }
+        }
     }
     let before = (kube get pods -l $BROKER_SELECTOR -o json | from json | get items | get metadata.name)
     kube patch configmap $config_map.metadata.name --type merge -p ({ data: { "config.json": ($document | to json) } } | to json --raw) | ignore
@@ -383,8 +474,26 @@ def remove_run [run_id: string] {
     ^kubectl -n $NAMESPACE delete job,configmap -l $"($RUN_LABEL)=($run_id)" --wait=false | complete | ignore
 }
 
-# Runs one run: its sinks, then once they are ready its producers; collects every result line; deletes the Jobs.
-def run_one [run: record, templates: record, kept: string] {
+# The broker's running pod and its image, now.
+def broker_pod [] {
+    kube get pods -l $BROKER_SELECTOR -o json | from json | get items
+    | where {|p| ($p.status.phase? | default "") == "Running" and $p.metadata.deletionTimestamp? == null }
+    | get -o 0 | if $in == null { null } else {
+        { name: $in.metadata.name, image: ($in.status.containerStatuses? | default [] | where name == $BROKER_CONTAINER | get -o 0.imageID) }
+    }
+}
+
+# What the broker's bounds said since `since`, from pod `pod`'s log, or null when it cannot be read.
+def broker_budget_since [pod: string, since: datetime] {
+    let stamp = ($since | date to-timezone UTC | format date "%Y-%m-%dT%H:%M:%SZ")
+    let r = (^kubectl -n $NAMESPACE logs $pod -c $BROKER_CONTAINER --timestamps $"--since-time=($stamp)" | complete)
+    if $r.exit_code != 0 { return null }
+    budget_lines $r.stdout
+}
+
+# Runs one run: its sinks, then once they are ready its producers; collects every result line, the broker's usage and
+# what its bounds said over the run; deletes the Jobs.
+def run_one [run: record, templates: record, kept: string, image_tag: string = ""] {
     let parts = (
         (0..<$run.sinks | each {|i| { role: "sink", index: $i } })
         | append (0..<$run.producers | each {|i| { role: "producer", index: $i } })
@@ -394,10 +503,12 @@ def run_one [run: record, templates: record, kept: string] {
         let t = ($templates | get $p.role)
         let document = (with_values $t.document (values_for $run $p.role $p.index))
         apply (config_map_for $t.config_map $"($p.name)-config" $document $run.id)
-        apply (job_for $t.job $p.name $"($p.name)-config" $run.id)
+        apply (with_image_tag (job_for $t.job $p.name $"($p.name)-config" $run.id) $image_tag)
     }
     let container = {|p| $"harness-($p.role)" }
     try {
+        let began = (date now)
+        let pod = (broker_pod)
         let before = (broker_usage)
         let sinks = ($parts | where role == "sink")
         $sinks | each {|p| do $start $p } | ignore
@@ -414,7 +525,14 @@ def run_one [run: record, templates: record, kept: string] {
         let received = ($results | where role == "sink" | reduce --fold 0 {|r, acc| $acc + $r.received })
         let usage = (run_usage $before (broker_usage_after $ended) $received)
         if $usage == null { print -e "  the broker's usage could not be read for this run" }
-        { run: $run, results: $results, nodes: $nodes, one_node: (($nodes | length) == 1), broker_usage: $usage }
+        let after = (broker_pod)
+        let log = if $pod == null { null } else { broker_budget_since $pod.name $began }
+        if $log == null { print -e "  the broker's log could not be read for this run" }
+        {
+            run: $run, results: $results, nodes: $nodes, one_node: (($nodes | length) == 1), broker_usage: $usage
+            broker_pod: $pod, broker_restarted: (($pod | get -o name) != ($after | get -o name))
+            broker_log: $log, budget: (budget_brief $log)
+        }
     } catch {|e|
         let dir = ($kept | path join $run.id)
         try { keep_failed $run.id $parts $dir } catch {|k| print -e $"  could not keep the failed run's logs: ($k.msg)" }
@@ -424,8 +542,10 @@ def run_one [run: record, templates: record, kept: string] {
     }
 }
 
-# Every run of the plan in `plan_file`, in turn, on `target`; the records are saved after each run.
-def "main run" [plan_file: string, --target: string = "local-minimal"] {
+# Every run of the plan in `plan_file`, in turn, on `target`; the records are saved after each run. `--image-tag` runs
+# the harness's producer and sink from their images under that tag in the target's registry, in place of what the
+# target rendered (to run another build's harness against that build's broker).
+def "main run" [plan_file: string, --target: string = "local-minimal", --image-tag: string = ""] {
     let plan = (open $plan_file)
     let runs = (expand $plan)
     let templates = (templates $target)
@@ -440,25 +560,29 @@ def "main run" [plan_file: string, --target: string = "local-minimal"] {
         commit: (^git -C $ROOT rev-parse HEAD | str trim)
         dirty: ((^git -C $ROOT status --porcelain | str trim) != "")
         broker_image: (broker_image)
+        image_tag: $image_tag
     }
     let broker_config = (kube get configmap cassini-config -o json | from json)
     let broker_document = ($broker_config.data."config.json" | from json)
     mut records = []
     mut broker = {}
+    # A plan's `fresh_broker: true` restarts the broker before every run, so each begins where its memory budget does
+    # (at its floor, with no drain measured), not where the run before it left it.
+    let fresh = ($plan.fresh_broker? | default false)
     for run in $runs {
-        if $run.broker != $broker {
+        if $run.broker != $broker or $fresh {
             print $"the broker restarts with ($run.broker | to nuon)"
             set_broker $broker_config (with_values $broker_document $run.broker)
             $broker = $run.broker
         }
         let pace = if $run.rate == 0 { "as fast as the window allows" } else { $"at ($run.rate)/s" }
         print $"($run.id): ($run.producers)p ($run.sinks)s ($run.lanes)l, ($run.count) x ($run.size) bytes ($pace)"
-        let record = ((run_one $run $templates ($out | str replace ".nuon" "-failed")) | insert context $context)
+        let record = ((run_one $run $templates ($out | str replace ".nuon" "-failed") $image_tag) | insert context $context)
         $records = ($records | append $record)
         $records | save --force $out
         if not $record.one_node { print -e "  the pods were on more than one node: latencies compare two clocks" }
     }
-    if $broker != {} {
+    if $broker != {} or $fresh {
         print "the broker restarts as the target rendered it"
         set_broker $broker_config $broker_document
     }
