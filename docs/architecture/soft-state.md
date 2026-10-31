@@ -98,6 +98,56 @@ not broadcast to the others (reply topics are otherwise shared, `cassini-request
 - Every issue pull orders `ORDER BY updated ASC`, so a pull cut short leaves the graph's newest `updated` meaning that
   everything older was written.
 
+## Revised by the maintainer's review (2026-10-30): to rebuild
+
+The as-built version below delivered the floor as an env var, `SOFT_STATE_FLOOR`, rendered by `resolve.nu`, and gave
+the reply topics a family over the readers (`Over::StateReaders`), which needed the state agent's image to be asked for
+its scaffold a second time. The maintainer: "completely not how polar is designed to work". Polar distributes control
+through signed configuration at run time; authority updates (`polar-authority-updates`) are only for
+security-sensitive authority. Decided instead:
+
+- **The floor is a signed runtime section of the state agent** (who owns and who reads which label), read with
+  `ConfigurationHandle::runtime`, its first version seeded from the scaffolds by `infra/seed.nu` (as the credentials
+  agent's `policy` is) and later versions signed in polar-schedules. No `SOFT_STATE_FLOOR`, no second scaffold pass;
+  a change reaches the running agent without a re-render or a rollout.
+- **Health is pulled, not pushed.** The `agent` rule implies, for every agent, a subscribe to `agent.<name>.health`
+  and a publish to `polar-health-replies`; the builder routes a query to the HealthCheckActor, which answers with its
+  snapshot (status, phase, reason enum and a sanitized message, connections, counters, uptime). The state agent's
+  writer half asks over a family `agent.{workload}.health` on `POLAR_SERVED_WORKLOADS` (the scheduler's precedent),
+  alone subscribes to the replies, and writes the latest report and the recent transitions. Who may ask is decided by
+  the request gate (Cedar `request` on `Request::"agent.X.health"`, `published_by`, then the floor). No heartbeat timer
+  in each agent. This replaces the push design recorded earlier the same day.
+- **The set of agents asked is the state agent's signed configuration** (seeded from the catalog's workloads,
+  changed by a signed version), not an env var. Each expected workload is answering (with its status), unresponsive (no
+  answer within the timeout: the observable the Reaper needs), or expected but unreachable (named by the configuration,
+  outside the family the state agent was deployed with: drift, reported).
+- **Self-state keeps its request and reply.** An agent that uses soft state for itself (jira-observer's cursor) has
+  the capability `SoftState`, computed by the builder from how the agent is built, as `needs_of` adds `Cassini` for a
+  Cassini client (`polar-agent-builder/src/agent.rs:373-385`), and printed under `requires`. Its reply topic,
+  `soft-state-replies.<name>`, is implied by the capability's rule; the state agent publishes replies over a family on
+  `POLAR_SERVED_WORKLOADS`. Topics stay exact names; privacy is on the subscribe side (only workload X subscribes to
+  its reply topic).
+- **Services that are not Cassini clients** (the broker) cannot be asked over Cassini; their health does not reach the
+  graph yet.
+
+### Proposed (to confirm): self-state and introspection
+
+Two kinds of state pass through the state agent, and they are kept apart:
+
+- **Self-state:** written and read back by an agent's own domain (or its own pair), under labels the domain owns and
+  declares. The state agent is a store with an access rule; it does not interpret the content.
+- **Introspection:** what is known about an agent from outside (health, connectivity, configuration in force, refused
+  topics). It comes only from the builder's infrastructure actors, with a schema the framework defines and sanitizes.
+
+Rules: a query is answered only by an infrastructure actor, and nothing from outside ever addresses a domain actor; a
+domain makes a fact known only by publishing it as its own observation or by telling the infrastructure through a
+typed, declared builder API (as it can send `GraphOpFailed` to the health actor), never by being looked into; the
+state agent's writer writes only its own labels (`AgentHealth`). Domain introspection would make a domain's internals an
+API, let its data out by a path its owned labels and topics do not govern, and put that data under another owner's
+name. Debugging what an actor is doing belongs to logs and traces, not to the state channel. To watch: agent-specific
+health counters (such as issues pulled) are domain facts, and come only through the declared API or the domain's own
+graph writes.
+
 ## As built (2026-10-30)
 
 Paths relative to `src/agents/`; the line numbers are those of the commit that built each piece.
