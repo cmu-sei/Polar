@@ -89,6 +89,24 @@ pub static STALL_SECS: Defaulted<u64> = Defaulted::seconds(
     "30",
 );
 
+/// The runtime budget's latency target, as a share of the stall bound (docs/architecture/cassini-backpressure.md,
+/// "Runtime budget"; `Tunables::latency_share`). Its default is the controller's own, marked for the maintainer's
+/// review; a variable so the benchmark can measure others (broker-baseline.md, the fifth set).
+pub static BUDGET_LATENCY_PERCENT: Defaulted<u64> = Defaulted::number(
+    "CASSINI_BUDGET_LATENCY_PERCENT",
+    "the memory budget's latency target, as a percentage of the stall bound (CASSINI_STALL_SECS): the budget grows \
+     toward the subscribers' drain rate times this; more than 0",
+    "100",
+);
+
+/// How much the runtime budget grows, or falls toward its target, in one sample (`Tunables::step`). Its default is the
+/// controller's own, marked for the maintainer's review.
+pub static BUDGET_STEP_BYTES: Defaulted<u64> = Defaulted::number(
+    "CASSINI_BUDGET_STEP_BYTES",
+    "how much the memory budget grows, or falls toward its target, in one sample (a second), in bytes; more than 0",
+    "16777216",
+);
+
 static VARIABLES: &[&dyn Described] = &[
     &SERVER_CERT_CHAIN,
     &SERVER_KEY,
@@ -99,6 +117,8 @@ static VARIABLES: &[&dyn Described] = &[
     &DECISION_CACHE_SECS,
     &MEMORY_BUDGET_BYTES,
     &STALL_SECS,
+    &BUDGET_LATENCY_PERCENT,
+    &BUDGET_STEP_BYTES,
 ];
 
 /// The section the broker registers.
@@ -129,6 +149,17 @@ pub static SECTION: Section = Section {
         {
             problems.push(why);
         }
+        for (variable, value) in [
+            (&BUDGET_LATENCY_PERCENT, BUDGET_LATENCY_PERCENT.read(env)),
+            (&BUDGET_STEP_BYTES, BUDGET_STEP_BYTES.read(env)),
+        ] {
+            if value == Ok(0) {
+                problems.push(format!(
+                    "{} is 0: the memory budget could never grow; give more than 0",
+                    variable.desc().name
+                ));
+            }
+        }
         problems
     },
 };
@@ -153,6 +184,10 @@ pub struct BrokerSettings {
     /// The cap the deployment puts on the memory budget, if it puts one.
     pub memory_budget: Option<u64>,
     pub stall: std::time::Duration,
+    /// The runtime budget's latency target, in percent of the stall bound.
+    pub budget_latency_percent: u64,
+    /// The runtime budget's step, in bytes a sample.
+    pub budget_step: u64,
 }
 
 impl BrokerSettings {
@@ -166,7 +201,18 @@ impl BrokerSettings {
             decision_cache: std::time::Duration::from_secs(config.read(&DECISION_CACHE_SECS)?),
             memory_budget: config.read(&MEMORY_BUDGET_BYTES)?,
             stall: std::time::Duration::from_secs(config.read(&STALL_SECS)?),
+            budget_latency_percent: config.read(&BUDGET_LATENCY_PERCENT)?,
+            budget_step: config.read(&BUDGET_STEP_BYTES)?,
         })
+    }
+
+    /// The controller's tunables: its defaults, with the latency target and step as set.
+    pub fn tunables(&self) -> crate::runtime_budget::Tunables {
+        crate::runtime_budget::Tunables {
+            latency_share: lowest_terms(self.budget_latency_percent, 100),
+            step: self.budget_step,
+            ..crate::runtime_budget::Tunables::default()
+        }
     }
 
     /// The broker's bounds: the budget starts at its floor (there is no demand yet to measure), and the stall bound.
@@ -179,10 +225,8 @@ impl BrokerSettings {
     /// The runtime budget, reading the host's and the container's memory: refused, saying what it found and what to
     /// give, when memory cannot give the floor at start or the cap is under it.
     pub fn budget_control(&self) -> Result<crate::pressure::BudgetControl, String> {
-        use crate::runtime_budget::{
-            Controller, MemorySource, SystemMemory, Tunables, startup_check,
-        };
-        let tunables = Tunables::default();
+        use crate::runtime_budget::{Controller, MemorySource, SystemMemory, startup_check};
+        let tunables = self.tunables();
         let memory = SystemMemory::default();
         startup_check(&memory.sample(), &tunables, self.memory_budget)?;
         Ok(crate::pressure::BudgetControl {
@@ -190,6 +234,16 @@ impl BrokerSettings {
             memory: std::sync::Arc::new(memory),
         })
     }
+}
+
+/// `num / den` in lowest terms, so a percentage of 100 is the controller's default share of 1 / 1.
+fn lowest_terms(num: u64, den: u64) -> (u64, u64) {
+    let (mut a, mut b) = (num, den);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    let g = a.max(1);
+    (num / g, den / g)
 }
 
 #[cfg(test)]
@@ -228,6 +282,45 @@ mod tests {
         assert_eq!(settings.decision_cache, std::time::Duration::from_secs(5));
         assert_eq!(settings.memory_budget, None);
         assert_eq!(settings.stall, std::time::Duration::from_secs(30));
+        // Unset, the controller's tunables are its own defaults, unchanged.
+        assert_eq!(
+            settings.tunables(),
+            crate::runtime_budget::Tunables::default()
+        );
+    }
+
+    /// The latency target and the step are the controller's, as set; the rest stay its defaults; 0 is refused.
+    #[test]
+    fn the_controller_s_latency_target_and_step_are_read_and_judged() {
+        let mut vars = MINIMUM.to_vec();
+        vars.extend([
+            ("CASSINI_BUDGET_LATENCY_PERCENT", "50"),
+            ("CASSINI_BUDGET_STEP_BYTES", "67108864"),
+        ]);
+        assert!(config(&vars).check().is_empty());
+        let tunables = BrokerSettings::read(&config(&vars)).unwrap().tunables();
+        assert_eq!(tunables.latency_share, (1, 2));
+        assert_eq!(tunables.step, 67_108_864);
+        assert_eq!(
+            crate::runtime_budget::Tunables {
+                latency_share: (1, 1),
+                step: 16 * 1024 * 1024,
+                ..tunables
+            },
+            crate::runtime_budget::Tunables::default()
+        );
+        for name in [
+            "CASSINI_BUDGET_LATENCY_PERCENT",
+            "CASSINI_BUDGET_STEP_BYTES",
+        ] {
+            let mut vars = MINIMUM.to_vec();
+            vars.push((name, "0"));
+            let problems = config(&vars).check().join(" | ");
+            assert!(
+                problems.contains(name) && problems.contains("never grow"),
+                "{problems}"
+            );
+        }
     }
 
     #[test]

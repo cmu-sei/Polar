@@ -307,7 +307,9 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
   floor of four frames, which memory must give at start or the broker does not start, up to a ceiling sampled every
   second from the host's `MemAvailable`, the container's `memory.max` and, when the kernel shows them, PSI and
   `memory.events`, toward a target of the drain rate times the stall bound; `CASSINI_MEMORY_BUDGET_BYTES` caps it
-  (`settings.rs`). A limit set below what is held evicts nothing: the alarm stops admission until it drains
+  (`settings.rs`). The target's share of the stall bound (`CASSINI_BUDGET_LATENCY_PERCENT`, 100) and the step a sample
+  (`CASSINI_BUDGET_STEP_BYTES`, 16 MiB) are settings too, their defaults the controller's own, for the benchmark to
+  measure others (broker-baseline.md, the fifth set). A limit set below what is held evicts nothing: the alarm stops admission until it drains
   (`Budget::set_limit`); memory below the floor at run time stops admission until it returns (`set_starved`). A test's
   broker, built from `Bounds` directly, keeps a fixed budget.
 - **Exhausted** when a frame cannot be charged: from then every reader waits (a memory alarm), until what is held
