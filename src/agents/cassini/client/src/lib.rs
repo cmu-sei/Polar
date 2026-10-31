@@ -983,6 +983,21 @@ impl TcpClientActor {
                     }
                 }
             }
+            // The session it asked to resume was ended early (what it held was let go): the agent is told, to
+            // resynchronise; the broker gives it a new session next.
+            ClientMessage::SessionEnded {
+                registration_id,
+                reason,
+            } => {
+                warn!(%registration_id, "the broker ended this client's session: {reason}");
+                TcpClientActor::dispatch_event(
+                    delivery,
+                    ClientEvent::SessionEnded {
+                        registration_id,
+                        reason,
+                    },
+                );
+            }
             ClientMessage::PublishResponse {
                 topic,
                 payload,
@@ -2316,6 +2331,24 @@ mod process_client_message_tests {
         );
         assert_eq!(reconnect_wait(false), std::time::Duration::ZERO);
         assert_eq!(reconnect_wait(true), PROTOCOL_RETRY);
+    }
+
+    /// The broker's word that a session was ended early reaches the agent as a typed event it can act on (the
+    /// decisions, 14).
+    #[tokio::test]
+    async fn a_session_the_broker_ended_is_told_to_the_agent() {
+        let events = dispatched_for(ClientMessage::SessionEnded {
+            registration_id: "old".to_string(),
+            reason: "let go".to_string(),
+        })
+        .await;
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ClientEvent::SessionEnded { registration_id, reason }] if registration_id == "old" && reason == "let go"
+            ),
+            "{events:?}"
+        );
     }
 
     /// The events the client dispatches for one message from the broker.

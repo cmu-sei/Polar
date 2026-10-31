@@ -558,6 +558,10 @@ pub enum Command {
 /// Messages that observers send themselves to prompt the retrieval of resources
 pub enum JiraObserverMessage {
     Tick(Command),
+    /// The broker ended this agent's session while it was away (`ClientEvent::SessionEnded`): what it was owed is
+    /// lost. The issue observer's next pull starts from the graph's cursor again, as its first did; the others pull
+    /// everything each time, and need nothing.
+    Resync,
 }
 
 #[cfg(test)]

@@ -85,6 +85,9 @@ pub struct SessionManagerState {
     retention: std::time::Duration,
     /// Superseded sessions, oldest first.
     held: Vec<HeldSession>,
+    /// Sessions ended before their retention window, with why and when: a client that comes back asking for one is
+    /// told (`ClientMessage::SessionEnded`) before it is given a new session. Kept for the retention window.
+    ended_early: HashMap<String, (String, tokio::time::Instant)>,
     /// Questions about an identity with a takeover still in progress, answered when it is done.
     parked: Vec<(String, ractor::RpcReplyPort<Vec<String>>)>,
     is_shutting_down: bool,
@@ -130,6 +133,7 @@ impl Actor for SessionManager {
             sessions: HashMap::new(),
             retention: args.retention,
             held: Vec::new(),
+            ended_early: HashMap::new(),
             parked: Vec::new(),
             is_shutting_down: false,
             drain_phase_active: false,
@@ -260,6 +264,31 @@ impl Actor for SessionManager {
                 registration_id, ..
             } => {
                 Self::detach_session(state, &registration_id);
+            }
+            // A session whose subscriber let go of what it held while its client was away and the budget was
+            // exhausted ends now, not at the retention window: what it would resume is gone (cassini-backpressure.md,
+            // the decisions, 14).
+            BrokerMessage::EndSession {
+                registration_id,
+                reason,
+            } => {
+                warn!(
+                    %registration_id,
+                    identity = ?state.sessions.get(&registration_id).and_then(|s| s.identity.clone()),
+                    %reason,
+                    "a session is ended before its retention window"
+                );
+                state.ended_early.insert(
+                    registration_id.clone(),
+                    (reason, tokio::time::Instant::now()),
+                );
+                Self::end_session(
+                    state,
+                    &registration_id,
+                    "shed".to_string(),
+                    DisconnectReason::RemoteClosed,
+                    None,
+                );
             }
             BrokerMessage::SessionExpiryTick => {
                 Self::end_expired_sessions(state);
@@ -485,6 +514,10 @@ impl SessionManager {
     /// Ends every session that has been without its client for longer than the retention window,
     /// and lets go of what superseded sessions held once their window has passed.
     fn end_expired_sessions(state: &mut SessionManagerState) {
+        let retention = state.retention;
+        state
+            .ended_early
+            .retain(|_, (_, since)| since.elapsed() < retention);
         let lapsed: Vec<String> = state
             .held
             .iter()
@@ -710,6 +743,13 @@ impl SessionManager {
                     }
                 } else {
                     warn!(registration_id = %existing_id, "requested session not found, creating new one");
+                    // Ended early: its client is told, and why, before it is given a new one.
+                    if let Some((reason, _)) = state.ended_early.remove(existing_id) {
+                        let _ = listener_ref.send_message(BrokerMessage::SessionEnded {
+                            registration_id: existing_id.clone(),
+                            reason,
+                        });
+                    }
                 }
             }
 
@@ -1050,6 +1090,19 @@ impl Actor for SessionAgent {
                     let _ = manager.send_message(BrokerMessage::SessionPendingUpdate {
                         registration_id: state.registration_id.clone(),
                         delta: -1,
+                    });
+                }
+            }
+            // A subscriber let go of what it held while its client was away and the budget was exhausted: this session
+            // asks to be ended now.
+            BrokerMessage::SessionShed { topic, count } => {
+                if let Some(manager) = myself.try_get_supervisor() {
+                    let _ = manager.send_message(BrokerMessage::EndSession {
+                        registration_id: state.registration_id.clone(),
+                        reason: format!(
+                            "the broker's memory budget was exhausted while this client was away: what its session \
+                             held on {topic} ({count} messages) was let go, and the session ended"
+                        ),
                     });
                 }
             }

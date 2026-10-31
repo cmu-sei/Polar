@@ -514,8 +514,8 @@ async fn acknowledgements_behind_a_publish_that_waits_for_the_budget_are_read() 
 }
 
 /// A subscriber away when the budget is exhausted lets go of what it was owed, all of it as it was counted (its
-/// messages' frames, not only their payloads): back, it owes nothing once it has acknowledged what it is given
-/// (review finding 1).
+/// messages' frames, not only their payloads), and its session is ended: back, it is told so, with why, before it is
+/// given a new session (review finding 1; the decisions reviewed with the maintainer, 14).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_subscriber_away_when_the_budget_is_exhausted_lets_go_of_all_it_was_owed() {
     let stall = Duration::from_secs(20);
@@ -546,13 +546,16 @@ async fn a_subscriber_away_when_the_budget_is_exhausted_lets_go_of_all_it_was_ow
             publisher.acknowledged(&topic)
         })
         .await;
-
-        // Back, it reads and acknowledges what it is given.
-        let mut back = RawConnection::open(&broker, "away.test", None).await;
-        assert_eq!(back.register_resuming(Some(session.clone())).await, session);
-        while let Some(delivery) = back.next_delivery(&topic, Duration::from_secs(1)).await {
-            back.acknowledge(delivery.delivery_id).await;
+        // At the pressure manager's next look what it held is let go (counted as refused).
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while budget.stats().refused == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        assert!(
+            budget.stats().refused > 0,
+            "what it held was let go: {:?}",
+            budget.stats()
+        );
         let owes = || {
             budget
                 .holders()
@@ -561,15 +564,46 @@ async fn a_subscriber_away_when_the_budget_is_exhausted_lets_go_of_all_it_was_ow
                 .map(|b| b.bytes())
         };
         let deadline = Instant::now() + Duration::from_secs(5);
-        while owes() != Some(0) && Instant::now() < deadline {
+        while owes().unwrap_or(0) != 0 && Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert_eq!(
-            owes(),
-            Some(0),
-            "it owes nothing once it has acknowledged all it was given: {:?}",
+            owes().unwrap_or(0),
+            0,
+            "it owes nothing: {:?}",
             budget.stats()
         );
+
+        // Back, it is told its session was ended, and why, before it is given a new one.
+        let mut back = RawConnection::open(&broker, "away.test", None).await;
+        back.send(&cassini_types::ClientMessage::RegistrationRequest {
+            registration_id: Some(session.clone()),
+            trace_ctx: None,
+            protocol: cassini_types::PROTOCOL_VERSION,
+        })
+        .await;
+        let mut ended = None;
+        let given = loop {
+            match tokio::time::timeout(Duration::from_secs(5), back.read())
+                .await
+                .ok()
+                .flatten()
+                .expect("its registration is answered")
+            {
+                cassini_types::ClientMessage::SessionEnded {
+                    registration_id,
+                    reason,
+                } => ended = Some((registration_id, reason)),
+                cassini_types::ClientMessage::RegistrationResponse { result, .. } => {
+                    break result.expect("a new session");
+                }
+                _ => {}
+            }
+        };
+        let (ended, why) = ended.expect("told its session was ended, before its new one");
+        assert_eq!(ended, session);
+        assert!(why.contains("exhausted"), "{why}");
+        assert_ne!(given, session, "a new session");
     })
     .await;
 }

@@ -1535,6 +1535,21 @@ impl Actor for Listener {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            // The session the client asked to resume was ended early: it is told, before its new session.
+            BrokerMessage::SessionEnded {
+                registration_id,
+                reason,
+            } => {
+                let msg = ClientMessage::SessionEnded {
+                    registration_id,
+                    reason,
+                };
+                if let Err(e) =
+                    Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
+                {
+                    debug!(error = ?e, "the end of a session was not written");
+                }
+            }
             // A registration this broker cannot take for its protocol: told by name, and the connection closed.
             BrokerMessage::RefuseRegistration { refusal } => {
                 warn!(

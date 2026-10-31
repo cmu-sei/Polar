@@ -935,6 +935,11 @@ impl SubscriberAgent {
         // All it was owed, as it was counted (its frames' bytes; the outbox counts payloads).
         state.backlog.remove(state.backlog.bytes());
         state.bounds.budget.count_refused(shed.len() as u64);
+        // What it would resume is gone: its session ends now, and its client is told when it comes back.
+        let _ = state.session_ref.send_message(BrokerMessage::SessionShed {
+            topic: state.topic.clone(),
+            count: shed.len(),
+        });
         warn!(
             subscriber = state.backlog.name(),
             count = shed.len(),

@@ -141,6 +141,7 @@ impl Actor for JiraGroupObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            JiraObserverMessage::Resync => {}
             JiraObserverMessage::Tick(command) => {
                 if let Command::GetGroups(op) = command {
                     let pulled = JiraGroupObserver::pull(&op, state).await;

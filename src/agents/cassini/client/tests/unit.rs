@@ -94,6 +94,7 @@ async fn test_client_event_forwarder_mailbox() -> Result<(), ActorProcessingErr>
             }),
             CassiniClientEvent::ClientSubscribed { .. } => None,
             CassiniClientEvent::RegistrationRefused { .. } => None,
+            CassiniClientEvent::SessionEnded { .. } => None,
             CassiniClientEvent::SubscribeRefused { topic, reason }
             | CassiniClientEvent::PublishRefused { topic, reason }
             | CassiniClientEvent::PublishDropped { topic, reason }
@@ -158,6 +159,7 @@ async fn test_client_event_forwarder_multiple_events() -> Result<(), ActorProces
             }),
             CassiniClientEvent::ClientSubscribed { .. } => None,
             CassiniClientEvent::RegistrationRefused { .. } => None,
+            CassiniClientEvent::SessionEnded { .. } => None,
             CassiniClientEvent::SubscribeRefused { topic, reason }
             | CassiniClientEvent::PublishRefused { topic, reason }
             | CassiniClientEvent::PublishDropped { topic, reason }

@@ -288,6 +288,16 @@ impl Actor for JiraIssueObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            // Its session was ended (what it was owed is lost): its next pull starts from the graph's cursor, asked
+            // again, as its first did.
+            JiraObserverMessage::Resync => {
+                info!(
+                    "the broker ended this agent's session: the next issue pull starts from the graph's cursor"
+                );
+                state.full_pull_done = false;
+                state.start = None;
+                state.last_pull_started = None;
+            }
             JiraObserverMessage::Tick(command) => {
                 if let Command::GetIssues(op) = command {
                     // Before the first pull, where it starts: the graph's newest issue, through the state agent. Until

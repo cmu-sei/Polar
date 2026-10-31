@@ -316,6 +316,17 @@ impl Actor for ObserverSupervisor {
                 ClientEvent::MessagePublished { .. } => {
                     warn!("OBSERVER_SUPERVISOR: unexpected MessagePublished event, ignoring");
                 }
+                // The broker ended its session while it was away: the issue observer pulls from the graph's cursor
+                // next (what it was owed is lost).
+                ClientEvent::SessionEnded {
+                    registration_id,
+                    reason,
+                } => {
+                    warn!(%registration_id, "the broker ended this agent's session: {reason}");
+                    if let Some(issues) = &state.issues {
+                        let _ = issues.cast(JiraObserverMessage::Resync);
+                    }
+                }
                 ClientEvent::TransportError { reason } => {
                     warn!("Transport error occurred (non-fatal, awaiting reconnect): {reason}");
                     let _ = state.healthcheck.cassini_disconnected();

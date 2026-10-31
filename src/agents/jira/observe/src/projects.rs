@@ -109,6 +109,7 @@ impl Actor for JiraProjectObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            JiraObserverMessage::Resync => {}
             JiraObserverMessage::Tick(command) => {
                 if let Command::GetProjects(op) = command {
                     let pulled = JiraProjectObserver::pull(&op, state).await;

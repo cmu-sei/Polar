@@ -258,6 +258,22 @@ pub enum BrokerMessage {
     /// Internal, from a Listener's reader to its Listener: the client's registration is of another protocol version,
     /// or does not decode; it is refused by name, and the connection closed.
     RefuseRegistration { refusal: Refusal },
+    /// Internal, from a subscriber whose client is away to its session: the budget was exhausted, and it let go of
+    /// what it held (`count` messages on `topic`). The session asks to be ended (cassini-backpressure.md, the
+    /// decisions, 14).
+    SessionShed { topic: String, count: usize },
+    /// Internal, from a session agent to the session manager: end this session now, before the retention window, for
+    /// `reason`; a client that comes back asking for it is told.
+    EndSession {
+        registration_id: String,
+        reason: String,
+    },
+    /// Internal, from the session manager to a Listener: the session its client asked to resume was ended early, for
+    /// `reason` (written to the client as `ClientMessage::SessionEnded`, before its new session).
+    SessionEnded {
+        registration_id: String,
+        reason: String,
+    },
     /// Subscribe request from the client.
     SubscribeRequest {
         registration_id: String,
@@ -808,6 +824,14 @@ pub enum ClientEvent {
         topic: String,
         reason: String,
     },
+    /// The session this client asked to resume, `registration_id`, was ended by the broker before its retention window,
+    /// for `reason`: what it held for this client was let go while it was away (cassini-backpressure.md, the
+    /// decisions, 14). The client has a new session (`Registered` follows); what it was owed is lost, and the agent
+    /// resynchronises as it can.
+    SessionEnded {
+        registration_id: String,
+        reason: String,
+    },
 }
 /// External Messages for client comms
 /// These messages are serialized/deserialized to/from JSON
@@ -911,6 +935,14 @@ pub enum ClientMessage {
     /// From the client: the `frame`th frame the broker wrote on this connection (counting from one) did not decode,
     /// so the client cannot name what it was. A delivery is let go as acknowledged: the client will never decode it,
     /// and holding it would hold the budget and stall the session for good (cassini-backpressure.md, second review,
-    /// finding B). Last, so no earlier variant's tag moves.
+    /// finding B). Last but one, so no earlier variant's tag moves.
     FrameUndecodable { frame: u64 },
+    /// From the broker, before the answer to a registration that asked to resume `registration_id`: that session was
+    /// ended before its retention window, for `reason` (what it held was let go while the client was away and the
+    /// broker's memory budget was exhausted). The client is given a new session, and resynchronises. Last, so no
+    /// earlier variant's tag moves.
+    SessionEnded {
+        registration_id: String,
+        reason: String,
+    },
 }

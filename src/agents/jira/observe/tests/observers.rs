@@ -548,3 +548,40 @@ async fn the_other_observers_do_not_ask_the_state_agent() {
         observer.stop(None);
     }
 }
+
+/// After the broker ended its session (what it was owed is lost), the issue observer's next pull starts from the
+/// graph's cursor again, asking the state agent where, as its first did, rather than from its last pull
+/// (cassini-backpressure.md, the decisions reviewed with the maintainer, 14).
+#[tokio::test]
+async fn after_its_session_ended_the_issue_observer_pulls_from_the_graph_s_cursor_again() {
+    let server = MockServer::start().await;
+    mount_site(&server).await;
+    let (client, topics) = recorder().await;
+    let (ask, asked) = answers(vec![], Ok(SoftValue::of(None)));
+    let mut args = args(&server, client);
+    args.cursor = Some(ask);
+    let (observer, _) = Actor::spawn(None, JiraIssueObserver, args).await.unwrap();
+    assert!(published(&topics, JIRA_ISSUES_CONSUMER_TOPIC, 1).await);
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    observer.cast(JiraObserverMessage::Resync).unwrap();
+    observer
+        .cast(JiraObserverMessage::Tick(
+            jira_observer::Command::GetIssues("/rest/api/2/search".to_string()),
+        ))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while searches(&server).await.len() < 2 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        2,
+        "it asked where to start again"
+    );
+    assert_eq!(
+        searches(&server).await,
+        ["ORDER BY updated ASC", "ORDER BY updated ASC"],
+        "from the graph's cursor (none: everything), not from its last pull"
+    );
+    observer.stop(None);
+}

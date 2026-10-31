@@ -141,6 +141,7 @@ impl Actor for JiraUserObserver {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            JiraObserverMessage::Resync => {}
             JiraObserverMessage::Tick(command) => {
                 if let Command::GetUsers(op) = command {
                     let pulled = JiraUserObserver::pull(&op, state).await;
