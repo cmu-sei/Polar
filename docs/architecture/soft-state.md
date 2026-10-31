@@ -127,6 +127,15 @@ security-sensitive authority. Decided instead:
   `soft-state-replies.<name>`, is implied by the capability's rule; the state agent publishes replies over a family on
   `POLAR_SERVED_WORKLOADS`. Topics stay exact names; privacy is on the subscribe side (only workload X subscribes to
   its reply topic).
+- **Self-state has a builder actor of its own, beside the ConfigurationActor, not inside it:** a `StateActor` with a
+  `StateHandle` under the InfrastructureSupervisor (`state.get(key)` at start, `state.changes()`, later
+  `state.put(key, value)` when the writer half takes self-state writes). It owns the request and reply, the correlation
+  ids, the timeouts and the retries, as the CryptoActor owns encryption; building with it is what makes the builder add
+  `SoftState` to `requires`. Not the ConfigurationActor: what that holds is signed, verified against the pinned CA,
+  versioned upwards and recorded as outcomes, and soft state is an unsigned hint that may be lost; one actor for both
+  would put values from the graph beside signed configuration ("signed configuration is never rebuilt from the
+  graph"). Separate types (`RuntimeValue` and a soft-state value) keep one from being used for the other. jira-observer's
+  cursor is rebuilt on it.
 - **Services that are not Cassini clients** (the broker) cannot be asked over Cassini; their health does not reach the
   graph yet.
 
