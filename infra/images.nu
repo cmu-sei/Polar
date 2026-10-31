@@ -192,6 +192,12 @@ export def published_ref [from: string, row: record, arch: string, tag: string =
     $"($from | str trim --right --char '/')/polar-($row.image):($t)-(arch_of $arch)"
 }
 
+# Tags given on the command line: comma-separated text, which a shell can pass (a `list<string>` flag of a script's `main`
+# cannot be given from a shell: it arrives as the text "[...]").
+export def tags_given [text: string] {
+    $text | split row "," | each {|t| $t | str trim } | where {|t| $t | is-not-empty }
+}
+
 # The tags a publish writes for an image: the table's, then each one also asked for (a release's version beside `latest`), each
 # once. A tag must be one an OCI registry takes before the architecture is added: letters, digits, `_`, `.` and `-`, not first.
 export def publish_tags [row: record, also: list<string>] {
@@ -600,14 +606,14 @@ def "main import" [
 
 # Builds the images for an architecture (cross-built with Nix when it is not this machine's) and pushes each to
 # `<to>/polar-<image>:<tag>-<arch>`, which `import` reads, and under each `--also-tag` as well (a release publishes its version
-# beside latest; `import --tag <version>` reads it). The account's login comes from --authfile (a skopeo/docker auth file)
+# beside latest, `--also-tag 2.0.0`; `import --tag 2.0.0` reads it). The account's login comes from --authfile (a skopeo/docker auth file)
 # or skopeo's usual places; it is never printed.
 def "main publish" [
     ...names: string             # only these images (default: every image this repository builds)
     --to: string                 # e.g. docker.io/<account>
     --arch: string = ""          # amd64 or arm64 (default: this machine's)
     --authfile: string = ""
-    --also-tag: list<string> = []  # publish under these tags too (a release's version beside latest), the same image each time
+    --also-tag: string = ""      # comma-separated: publish under these tags too (a release's version beside latest), the same image each time
 ] {
     if ($to | is-empty) { error make --unspanned { msg: "say where to publish: --to docker.io/<account>" } }
     let want = if ($arch | is-empty) { arch } else { arch_of $arch }
@@ -617,7 +623,7 @@ def "main publish" [
     mut failures = []
     for it in ($rows | enumerate) {
         let row = $it.item
-        let refs = (publish_tags $row $also_tag | each {|t| published_ref $to $row $want $t })
+        let refs = (publish_tags $row (tags_given $also_tag) | each {|t| published_ref $to $row $want $t })
         print $"  [($it.index + 1)/($rows | length)] ($row.image) -> ($refs | str join ', ')"
         let err = (try {
             # What this repository builds goes up from the archive it built; a mirror goes up as its upstream's image for the architecture.

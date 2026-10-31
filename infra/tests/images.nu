@@ -24,7 +24,7 @@
 # How images are named when they are published and imported, and which ones.
 
 use std/assert
-use ../images.nu [arch_of, external_source, import_rows, node_containers_of, unprepared, ours, publish_tags, published_ref, published_rows, split_ref, system_of]
+use ../images.nu [arch_of, external_source, import_rows, node_containers_of, unprepared, ours, publish_tags, published_ref, tags_given, published_rows, split_ref, system_of]
 
 def sample [] {
     [
@@ -98,6 +98,14 @@ def main [] {
                 let row = { image: "cassini", tag: "latest", kind: "nix" }
                 assert equal (published_ref "docker.io/acme" $row "arm64" "2.0.0") "docker.io/acme/polar-cassini:2.0.0-arm64"
                 assert equal (published_ref "docker.io/acme" $row "amd64" "") "docker.io/acme/polar-cassini:latest-amd64"
+            }
+        }
+        {
+            name: "tags given on the command line are comma-separated text, as a shell can pass them"
+            body: {
+                assert equal (tags_given "") []
+                assert equal (tags_given "2.0.0") ["2.0.0"]
+                assert equal (tags_given "2.0.0, stable,") ["2.0.0" "stable"]
             }
         }
         {

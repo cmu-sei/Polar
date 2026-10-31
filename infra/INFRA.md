@@ -160,7 +160,7 @@ just images-all                             # every stage for everything in the 
 # registry is the one in its cluster, through a forward the recipe starts. `just target= ...` uses POLAR_REGISTRY instead.
 nu infra/images.nu import --from docker.io/<account>    # copy published images into your registry (this machine's architecture)
 nu infra/images.nu publish --to docker.io/<account> --arch arm64    # publish them (a mirror only when named)
-nu infra/images.nu publish --to docker.io/<account> --also-tag [2.0.0]   # a release: its version beside latest
+nu infra/images.nu publish --to docker.io/<account> --also-tag 2.0.0     # a release: its version beside latest
 nu infra/images.nu import --from docker.io/<account> --tag 2.0.0         # stay on that release
 
 # A Flux (gitops) target: up.nu runs these; each can be run alone
