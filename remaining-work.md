@@ -754,6 +754,12 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   multi-instance in the catalog, supersession keyed by `(identity, instance_binding)` for it alone, the instance in the
   certificate and beside `published_by`. Touches the broker's sessions and the credentials agent's ledger: after the
   backpressure merge. A reply to Blitz was drafted for the maintainer.
+- [ ] DELIVERY IS BEST ATTEMPT (the maintainer, 2026-10-31): Polar does not guarantee delivery, but the broker and its
+  clients must handle messages and acknowledgements correctly, with no stray resends from a lost acknowledgement. Every
+  publish carries `MessageId { epoch, seq }` and every delivery a `delivery_id` and its `origin`
+  (`cassini/types/src/lib.rs:110`), used today only to match acknowledgements; deduplication on them (reliability step 4)
+  is NOT pursued until an issue is shown. Known path to a duplicate: an accepted publish whose acknowledgement is lost with
+  its connection is sent again from the outbox after the next registration.
 - [ ] BACKPRESSURE AS A POLAR CRATE (the maintainer, 2026-10-31: "back-pressure management is something other agents are
   probably going to want ... This is likely getting pulled out as a polar crate"). What would come out is what knows
   nothing of Cassini: the budget (reference-counted charges, the alarm and its hysteresis), the runtime controller
