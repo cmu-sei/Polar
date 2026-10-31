@@ -76,6 +76,16 @@ let CoreValues =
           -- credentials agent has provisioned them (the first administrator, see the runbook). Empty
           -- until then.
           , gitServerAdmins : List Text
+          -- What Cassini's topic rules are written from, as JSON the fork's catalog would generate from the agents'
+          -- scaffolds (Blitz: infra/tools/authority.nu). The authority model goes to the credentials agent, which
+          -- writes each workload's topics into the certificates it issues; the floor goes to cert-issuer, which does
+          -- the same for the bootstrap services. `None`: no certificate carries a topic.
+          , authorityModel : Optional Text
+          , issuanceFloor : Optional Text
+          -- The workloads the scheduler publishes a configuration topic for, comma-separated: the agents that read a
+          -- configuration document. The scheduler pair computes the topics it may use from it, so it must be what the
+          -- model's certificates carry.
+          , servedWorkloads : Optional Text
           }
       }
 
@@ -140,6 +150,7 @@ let core
                 -- The one identity allowed to ask it to sign on another's behalf. The fork fixes this name.
                 , internalCaller = "credentials-agent.${ns}.serviceaccount.cluster.local"
                 , caSecret = v.caSecret
+                , floor = v.issuanceFloor
                 }
 
         let graph =
@@ -207,6 +218,13 @@ let core
                    -- settings are required all the same.
                    ]
                    # graphSettings
+                   # merge
+                       { Some =
+                           λ(model : Text) →
+                             [ setting "CREDENTIALS_AGENT_AUTHORITY_MODEL" model ]
+                       , None = [] : List kubernetes.EnvVar.Type
+                       }
+                       v.authorityModel
                  }
 
         let observer =
@@ -264,15 +282,23 @@ let core
               }
 
         -- The scheduler. The processor records schedules in the graph and tells the agents they affect;
-        -- the observer watches the schedules repository and publishes what changes in it.
+        -- the observer watches the schedules repository and publishes what changes in it. Both publish a
+        -- configuration topic per workload that reads a document, which they are told (the topic family).
+        let served =
+              merge
+                { Some = λ(names : Text) → [ setting "POLAR_SERVED_WORKLOADS" names ]
+                , None = [] : List kubernetes.EnvVar.Type
+                }
+                v.servedWorkloads
+
         let schedulerProcessor =
               Builder.BuilderAgent::{
-              , name = "polar-scheduler-processor"
+              , name = "polar-scheduler"
               , namespace = ns
               , image = v.images.schedulerProcessor
               , provides = [ "cassini", "graph-write" ]
               , shutdownBudgetSecs = 50
-              , settings = graphSettings
+              , settings = graphSettings # served
               }
 
         let schedulerObserver =
@@ -302,6 +328,7 @@ let core
                 -- git wants a home to write to, and only /tmp is writable.
                 , setting "HOME" "/tmp"
                 ]
+                # served
               }
 
         let account = λ(name : Text) → kubernetes.Resource.ServiceAccount (Builder.makeServiceAccount ns name)
@@ -439,13 +466,13 @@ let core
                 , shared = True
                 , objects =
                       P.k8s
-                        [ account "polar-scheduler-processor", account "polar-scheduler-observer" ]
+                        [ account "polar-scheduler", account "polar-scheduler-observer" ]
                     # P.agents
                         [ Builder.makePolarAgent (platform v) schedulerProcessor
                         , Builder.makePolarAgent (platform v) schedulerObserver
                         ]
                 , waits =
-                  [ P.waitForAgent ns "polar-scheduler-processor"
+                  [ P.waitForAgent ns "polar-scheduler"
                   , P.waitForAgent ns "polar-scheduler-observer"
                   ]
                 }

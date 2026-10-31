@@ -9,7 +9,10 @@ use crate::settings::{BuildOrchestratorSettings, SECTION};
 use orchestrator_backend_k8s::backend::KubernetesBackend;
 use orchestrator_backend_k8s::job::{JobIdentity, JobOptions};
 use orchestrator_core::backend::BuildBackend;
-use polar_agent_builder::{Capability, Configured, PolarAgent, StartError};
+use orchestrator_core::types::subjects::BUILD_REQUESTS_TOPIC;
+use polar::topics::GIT_REPOSITORY_EVENTS;
+use polar::BUILD_EVENTS_TOPIC;
+use polar_agent_builder::{Capability, Cause, Configured, PolarAgent, StartError, TopicDecl};
 use ractor::Actor;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +35,25 @@ impl PolarAgent for BuildOrchestrator {
     // repository's builds may be cloned with, which arrive sealed to this agent.
     const NEEDS: &'static [Capability] = &[Capability::KubeApiRead, Capability::Encryption];
     const SHUTDOWN_BUDGET: Duration = SHUTDOWN_BUDGET;
+    // What Cassini lets it publish and subscribe to is written into its certificate from these (and from what the
+    // builder implies for a Cassini client), so a topic it uses and does not declare is refused.
+    const TOPICS: &'static [TopicDecl] = &[
+        TopicDecl::subscribe(
+            GIT_REPOSITORY_EVENTS,
+            "the git observer reports that a ref of an observed repository moved, which builds it if a mapping names it",
+        ),
+        TopicDecl::subscribe(
+            BUILD_REQUESTS_TOPIC,
+            "a request to build a repository at a commit, from anything that may ask",
+        )
+        .waiting("nothing in the catalog requests builds yet; a build is started by hand, or by the analysis scheduler to come"),
+        TopicDecl::publish(
+            BUILD_EVENTS_TOPIC,
+            "what a build did: started, completed, and the provenance it reports itself",
+        )
+        .because(&[Cause::Topic(GIT_REPOSITORY_EVENTS), Cause::Topic(BUILD_REQUESTS_TOPIC)])
+        .waiting("the build processor reads it and is not yet an agent built on the builder, so the catalog cannot see it"),
+    ];
     const SECTIONS: &'static [&'static polar_env::Section] = &[&SECTION];
     const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] = &[&MAPPINGS, &CREDENTIALS];
     const HELP: Option<&'static str> = Some(

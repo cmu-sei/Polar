@@ -30,6 +30,11 @@ let values
       , pinnedCa = Some "polar-ca"
       , caSecret = Some "cert-issuer-ca"
       , gitServerAdmins = [] : List Text
+      -- Cassini enforces topics from the certificate: without these documents no agent may publish. They are generated
+      -- from the agents' scaffolds by the consumer (Blitz: infra/tools/authority.nu).
+      , authorityModel = None Text
+      , issuanceFloor = None Text
+      , servedWorkloads = None Text
       }
 
 in  values

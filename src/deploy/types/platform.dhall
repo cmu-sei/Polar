@@ -80,6 +80,11 @@ let CertIssuer =
           -- operator step). `None`: the issuer makes its own CA on its volume at first start, which nothing can
           -- pin, so it is not enough for a platform whose pods have the custody daemon.
           , caSecret : Optional Text
+          -- The floor: who may be signed what on a token alone, and the topics each bootstrap service's certificate
+          -- carries, as the JSON list `CERT_ISSUER_BOOTSTRAP` takes (the fork's catalog writes it from the agents'
+          -- scaffolds; see docs/ace-catch-up.md). With none, the floor is open and no certificate it signs carries a
+          -- topic, so a broker that enforces topics refuses the service everything.
+          , floor : Optional Text
           }
       , default =
         { imagePullPolicy = None Text
@@ -94,6 +99,7 @@ let CertIssuer =
         , userLifetimeSecs = 31536000
         , serviceLifetimeSecs = 31536000
         , caSecret = None Text
+        , floor = None Text
         }
       }
 
@@ -223,6 +229,11 @@ let makeCertIssuer
                     , setting "RUST_LOG" "info,cert_issuer=debug"
                     , setting "KUBERNETES_CA_CERT" "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
                     ]
+                    # merge
+                        { Some = λ(floor : Text) → [ setting "CERT_ISSUER_BOOTSTRAP" floor ]
+                        , None = [] : List kubernetes.EnvVar.Type
+                        }
+                        v.floor
                   , volumes =
                       [ kubernetes.Volume::{
                         , name = "ca"
