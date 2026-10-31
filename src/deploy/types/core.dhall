@@ -62,12 +62,14 @@ let CoreValues =
           -- The custody daemon's image: with it, every pod's mTLS keys are the daemon's (a native sidecar), and an
           -- agent that encrypts can run at all. `None`: key files, and no agent that encrypts.
           , custodyImage : Optional Text
-          -- The ConfigMap, in the namespace of every pod that has a certificate, that holds the cluster's CA. The
-          -- CA is made once, outside the plan (`polar-admin-grant bootstrap-ca`), which also makes these.
+          -- The ConfigMap, in the namespace of every pod that has a certificate, that holds the cluster's CA. With
+          -- `caSecret`, the plan makes the one in the core's namespace; the others are the application's to declare
+          -- (`Plan.pinnedCa`), in the stage that makes their namespace.
           , pinnedCa : Optional Text
-          -- The Secret that holds the CA and its key, for the issuer to load. `None`: the issuer makes its own CA
-          -- (nothing can pin it, so not for a platform with the daemon, or one whose pods are issued through the
-          -- credentials agent).
+          -- The Secret that holds the CA and its key, for the issuer to load; the plan makes it, once, and never
+          -- replaces it (to replace the CA, delete the Secret: every certificate is then reissued). `None`: the issuer
+          -- makes its own CA (nothing can pin it, so not for a platform with the daemon, or one whose pods are
+          -- issued through the credentials agent).
           , caSecret : Optional Text
           -- The people who may write to the configuration git server, and so author the signed documents
           -- the scheduler carries: the DNS name in each one's certificate, which only exists once the
@@ -318,19 +320,30 @@ let core
                         λ(secret : Text) →
                           [ P.Stage::{
                             , name = "ca"
-                            , description = Some "the cluster's CA, made once outside the plan; the plan waits for it"
+                            , description = Some
+                                "the cluster's CA, made once, with the certificate every namespace's agents verify against"
                             , shared = True
-                            , waits =
-                              [ P.Wait::{
-                                , apiVersion = "v1"
-                                , kind = "Secret"
-                                , namespace = Some ns
-                                , name = secret
-                                , field = "metadata.name"
-                                , equals = secret
-                                , timeoutSecs = 900
-                                }
+                            , secrets =
+                              [ P.certificateAuthority
+                                  { namespace = ns
+                                  , name = secret
+                                  , commonName = C.ca.commonName
+                                  , validityDays = C.ca.validityDays
+                                  }
                               ]
+                            , configMaps =
+                                merge
+                                  { Some =
+                                      λ(pinned : Text) →
+                                        [ P.pinnedCa
+                                            { namespace = ns
+                                            , name = pinned
+                                            , secret = { namespace = ns, name = secret }
+                                            }
+                                        ]
+                                  , None = [] : List P.ConfigMap.Type
+                                  }
+                                  v.pinnedCa
                             }
                           ]
                     , None = [] : List P.Stage.Type

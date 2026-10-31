@@ -11,7 +11,11 @@
     Object  any Kubernetes object, or a PolarAgent, applied server-side so that running it again is
             a no-op
     Secret  made only when it is absent, with values that are never printed. Secrets in one `group`
-            are made together, sharing the random values they name, or not at all
+            are made together, sharing the random values they name, or not at all. A key may be half of
+            a certificate authority made for it (`certificateAuthority`): the cluster's own CA is made
+            by the plan, once, and never replaced by running it again
+    ConfigMap  written every run to hold a literal or a copy of a Secret's key, so the public half of
+            the CA in each namespace follows the Secret it came from
     Wait    until a field of an object has a value: a Deployment's readiness, a PolarAgent's phase
 
   A stage that is `optional` runs only when asked for (`polar up --with <stage>`). A stage that is
@@ -42,6 +46,16 @@ let Value =
       | Random : { random : Natural, id : Optional Text }
       | Template : { template : Text }
       | Copy : { copy : { namespace : Text, name : Text, key : Text } }
+      -- Half of a certificate authority made for the secret, `part` being "certificate" or "key". Keys with
+      -- the same `id` in one secret (or one group) are one pair, made together.
+      | Ca :
+          { ca :
+              { id : Text
+              , part : Text
+              , commonName : Text
+              , validityDays : Natural
+              }
+          }
       >
 
 let Secret =
@@ -52,6 +66,17 @@ let Secret =
           , keys : List { mapKey : Text, mapValue : Value }
           }
       , default.group = None Text
+      }
+
+--| A ConfigMap of the plan: unlike a Secret it is written every time, and it holds only a literal or
+--| a copy of a key of a Secret, since a ConfigMap is readable by every pod in its namespace.
+let ConfigMap =
+      { Type =
+          { namespace : Text
+          , name : Text
+          , keys : List { mapKey : Text, mapValue : Value }
+          }
+      , default = {=}
       }
 
 let Wait =
@@ -77,6 +102,7 @@ let Stage =
           , shared : Bool
           , installCrd : Bool
           , secrets : List Secret.Type
+          , configMaps : List ConfigMap.Type
           , objects : List Object
           , waits : List Wait.Type
           }
@@ -86,6 +112,7 @@ let Stage =
         , shared = False
         , installCrd = False
         , secrets = [] : List Secret.Type
+        , configMaps = [] : List ConfigMap.Type
         , objects = [] : List Object
         , waits = [] : List Wait.Type
         }
@@ -147,6 +174,48 @@ let randomSecret
           ]
         }
 
+--| A certificate authority, made with the secret and kept in it: `ca.crt` and `ca.key`, the names the
+--| certificate issuer loads. Made once, when the secret is absent; the key never leaves the secret.
+let certificateAuthority
+    : { namespace : Text, name : Text, commonName : Text, validityDays : Natural } → Secret.Type
+    = λ(v : { namespace : Text, name : Text, commonName : Text, validityDays : Natural }) →
+        let half =
+              λ(part : Text) →
+                Value.Ca
+                  { ca =
+                    { id = "root"
+                    , part
+                    , commonName = v.commonName
+                    , validityDays = v.validityDays
+                    }
+                  }
+
+        in  Secret::{
+            , namespace = v.namespace
+            , name = v.name
+            , keys =
+              [ { mapKey = "ca.crt", mapValue = half "certificate" }
+              , { mapKey = "ca.key", mapValue = half "key" }
+              ]
+            }
+
+--| The certificate half of a certificate authority (`certificateAuthority`), in a ConfigMap of the namespace
+--| of every pod that verifies certificates against it, as `ca.pem`.
+let pinnedCa
+    : { namespace : Text, name : Text, secret : { namespace : Text, name : Text } } → ConfigMap.Type
+    = λ(v : { namespace : Text, name : Text, secret : { namespace : Text, name : Text } }) →
+        ConfigMap::{
+        , namespace = v.namespace
+        , name = v.name
+        , keys =
+          [ { mapKey = "ca.pem"
+            , mapValue =
+                Value.Copy
+                  { copy = { namespace = v.secret.namespace, name = v.secret.name, key = "ca.crt" } }
+            }
+          ]
+        }
+
 --| The stage that installs the operator: the CRD, then its namespace (created here, since it is the
 --| first stage), access and Deployment.
 let operatorStage
@@ -181,11 +250,14 @@ in  { Plan
     , Object
     , Value
     , Secret
+    , ConfigMap
     , Wait
     , k8s
     , agents
     , waitForDeployment
     , waitForAgent
     , randomSecret
+    , certificateAuthority
+    , pinnedCa
     , operatorStage
     }

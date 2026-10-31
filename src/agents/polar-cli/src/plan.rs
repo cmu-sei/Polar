@@ -37,6 +37,9 @@ pub struct Stage {
     pub install_crd: bool,
     #[serde(default)]
     pub secrets: Vec<Secret>,
+    /// ConfigMaps whose keys are copied from Secrets: public by nature, kept the same as their source.
+    #[serde(default)]
+    pub config_maps: Vec<ConfigMap>,
     #[serde(default)]
     pub objects: Vec<Object>,
     #[serde(default)]
@@ -115,6 +118,17 @@ pub struct Secret {
     pub keys: BTreeMap<String, Value>,
 }
 
+/// A ConfigMap to make, or to bring into line with what it is copied from. Unlike a Secret it is
+/// written every time: it holds nothing private, and it must not outlive the value it copies.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigMap {
+    pub namespace: String,
+    pub name: String,
+    /// Only `literal` and `copy` are allowed: the rest make values, and nothing made belongs here.
+    pub keys: BTreeMap<String, Value>,
+}
+
 /// Where a key gets its value. Told apart by field name: the Dhall union renders untagged.
 #[derive(Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
@@ -123,6 +137,7 @@ pub enum Value {
     Random(Random),
     Template(Template),
     Copy(Copy),
+    Ca(Ca),
 }
 
 #[derive(Clone, PartialEq, Deserialize)]
@@ -154,6 +169,33 @@ pub struct Copy {
     pub copy: Source,
 }
 
+/// Half of a certificate authority made for the secret: its certificate or its private key. The two
+/// halves with the same `id`, in one secret or one group, are one generated pair.
+#[derive(Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ca {
+    pub ca: CaSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CaSpec {
+    pub id: String,
+    pub part: CaPart,
+    pub common_name: String,
+    pub validity_days: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaPart {
+    Certificate,
+    Key,
+}
+
+/// The longest a CA may last: a century. Anything longer is a typo.
+pub const MAX_CA_DAYS: u32 = 36500;
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Source {
@@ -171,6 +213,7 @@ impl fmt::Debug for Value {
             Value::Random(r) => write!(f, "random({} bytes)", r.random),
             Value::Template(_) => write!(f, "template"),
             Value::Copy(c) => write!(f, "copy({}/{}:{})", c.copy.namespace, c.copy.name, c.copy.key),
+            Value::Ca(c) => write!(f, "ca({}: {:?})", c.ca.common_name, c.ca.part),
         }
     }
 }
@@ -329,6 +372,83 @@ impl Plan {
                     }
                 }
             }
+            // The authorities made in each group, or in each secret that is in none: what they are called,
+            // which halves are there, and what each was asked to be.
+            let mut authorities: BTreeMap<String, BTreeMap<String, (BTreeSet<CaPart>, (String, u32))>> =
+                BTreeMap::new();
+            for secret in &stage.secrets {
+                let name = format!("{}/{}", secret.namespace, secret.name);
+                let scope_key = match &secret.group {
+                    Some(group) => format!("group '{group}'"),
+                    None => format!("secret {name}"),
+                };
+                for (key, value) in &secret.keys {
+                    let Value::Ca(ca) = value else { continue };
+                    let ca = &ca.ca;
+                    if ca.id.trim().is_empty() {
+                        problems.push(format!("{at}: {name} key '{key}' makes a CA with no id"));
+                        continue;
+                    }
+                    if ca.common_name.trim().is_empty() {
+                        problems.push(format!("{at}: {name} key '{key}': the CA '{}' has no common name", ca.id));
+                    }
+                    if ca.validity_days == 0 || ca.validity_days > MAX_CA_DAYS {
+                        problems.push(format!(
+                            "{at}: {name} key '{key}': the CA '{}' would last {} days; 1 to {MAX_CA_DAYS}",
+                            ca.id, ca.validity_days
+                        ));
+                    }
+                    let asked = (ca.common_name.clone(), ca.validity_days);
+                    let known = authorities.entry(scope_key.clone()).or_default();
+                    match known.get_mut(&ca.id) {
+                        None => {
+                            known.insert(ca.id.clone(), (BTreeSet::from([ca.part]), asked));
+                        }
+                        Some((parts, first)) => {
+                            if !parts.insert(ca.part) {
+                                problems.push(format!(
+                                    "{at}: the {:?} of the CA '{}' is defined twice in {scope_key}",
+                                    ca.part, ca.id
+                                ));
+                            }
+                            if *first != asked {
+                                problems.push(format!(
+                                    "{at}: the halves of the CA '{}' in {scope_key} disagree about its name or lifetime",
+                                    ca.id
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut config_map_names: BTreeSet<(String, String)> = BTreeSet::new();
+            for config_map in &stage.config_maps {
+                let name = format!("{}/{}", config_map.namespace, config_map.name);
+                if config_map.namespace.trim().is_empty() || config_map.name.trim().is_empty() {
+                    problems.push(format!("{at}: a configMap needs a namespace and a name"));
+                } else if !config_map_names.insert((config_map.namespace.clone(), config_map.name.clone())) {
+                    problems.push(format!("{at}: configMap {name} is in the plan twice"));
+                }
+                if config_map.keys.is_empty() {
+                    problems.push(format!("{at}: configMap {name} has no keys"));
+                }
+                for (key, value) in &config_map.keys {
+                    match value {
+                        Value::Literal(_) | Value::Copy(_) => {}
+                        other => problems.push(format!(
+                            "{at}: configMap {name} key '{key}' is {other:?}; a ConfigMap is public, so it may only \
+                             hold a literal or a copy of a Secret's key"
+                        )),
+                    }
+                    if let Value::Copy(copy) = value
+                        && copy.copy.key.trim().is_empty()
+                    {
+                        problems.push(format!("{at}: configMap {name} key '{key}' copies a key with no name"));
+                    }
+                }
+            }
+
             for secret in &stage.secrets {
                 let name = format!("{}/{}", secret.namespace, secret.name);
                 let defined = group_ids.get(&secret.group).cloned().unwrap_or_default();
@@ -446,6 +566,10 @@ impl Plan {
                 let group = secret.group.as_deref().map(|g| format!(" (group {g})")).unwrap_or_default();
                 let keys: Vec<String> = secret.keys.iter().map(|(k, v)| format!("{k}: {v:?}")).collect();
                 out.push_str(&format!("   secret   {}/{}{group}  [{}]\n", secret.namespace, secret.name, keys.join(", ")));
+            }
+            for config_map in &stage.config_maps {
+                let keys: Vec<String> = config_map.keys.iter().map(|(k, v)| format!("{k}: {v:?}")).collect();
+                out.push_str(&format!("   configmap {}/{}  [{}]\n", config_map.namespace, config_map.name, keys.join(", ")));
             }
             for object in &stage.objects {
                 match object.id() {
@@ -657,5 +781,88 @@ stages:
         .describe();
         assert!(described.contains("n/a"));
         assert!(!described.contains("hunter2"), "{described}");
+    }
+
+    fn problems_of(secrets_and_maps: &str) -> Vec<String> {
+        plan(&format!("name: p\nstages:\n  - name: s\n{secrets_and_maps}")).problems()
+    }
+
+    const CA_HALVES: &str = "    secrets:
+      - { namespace: n, name: ca, keys: {
+            ca.crt: { ca: { id: root, part: certificate, commonName: CA, validityDays: 30 } },
+            ca.key: { ca: { id: root, part: key, commonName: CA, validityDays: 30 } } } }
+";
+
+    #[test]
+    fn a_ca_of_two_halves_is_sound() {
+        assert_eq!(problems_of(CA_HALVES), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_halves_of_a_ca_must_agree_and_each_be_there_once() {
+        let disagree = CA_HALVES.replace("validityDays: 30 } } } }", "validityDays: 31 } } } }");
+        assert!(problems_of(&disagree).iter().any(|p| p.contains("disagree about its name or lifetime")), "{:?}", problems_of(&disagree));
+
+        let twice = CA_HALVES.replace("part: key", "part: certificate");
+        assert!(problems_of(&twice).iter().any(|p| p.contains("Certificate of the CA 'root' is defined twice")), "{:?}", problems_of(&twice));
+    }
+
+    #[test]
+    fn two_secrets_may_each_have_a_ca_of_the_same_id_but_a_group_shares_one() {
+        let two = "    secrets:
+      - { namespace: n, name: a, keys: { c: { ca: { id: root, part: certificate, commonName: CA, validityDays: 1 } } } }
+      - { namespace: n, name: b, keys: { c: { ca: { id: root, part: certificate, commonName: CA, validityDays: 1 } } } }
+";
+        assert_eq!(problems_of(two), Vec::<String>::new(), "no group: each secret is its own scope");
+        let grouped = two.replace("name: a,", "name: a, group: g,").replace("name: b,", "name: b, group: g,");
+        assert!(problems_of(&grouped).iter().any(|p| p.contains("defined twice in group 'g'")), "{:?}", problems_of(&grouped));
+    }
+
+    #[test]
+    fn a_ca_needs_a_name_and_a_sane_lifetime() {
+        for (change, expected) in [
+            ("validityDays: 30", "validityDays: 0", "would last 0 days"),
+            ("validityDays: 30", "validityDays: 99999", "would last 99999 days"),
+            ("commonName: CA", "commonName: ''", "has no common name"),
+        ]
+        .map(|(from, to, why)| (CA_HALVES.replace(from, to), why))
+        {
+            assert!(problems_of(&change).iter().any(|p| p.contains(expected)), "{expected}: {:?}", problems_of(&change));
+        }
+    }
+
+    #[test]
+    fn a_configmap_copies_or_states_and_makes_nothing() {
+        let good = "    configMaps:
+      - { namespace: n, name: c, keys: { a: { copy: { namespace: p, name: s, key: k } }, b: { literal: x } } }
+";
+        assert_eq!(problems_of(good), Vec::<String>::new());
+
+        let random = "    configMaps:
+      - { namespace: n, name: c, keys: { a: { random: 4 } } }
+";
+        assert!(
+            problems_of(random).iter().any(|p| p.contains("a ConfigMap is public, so it may only hold a literal or a copy")),
+            "{:?}",
+            problems_of(random)
+        );
+
+        let ca = "    configMaps:
+      - { namespace: n, name: c, keys: { a: { ca: { id: r, part: key, commonName: CA, validityDays: 1 } } } }
+";
+        assert!(problems_of(ca).iter().any(|p| p.contains("may only hold a literal or a copy")), "a CA's key never goes in a ConfigMap");
+
+        let twice = format!("{good}{}", good.trim_start_matches("    configMaps:\n"));
+        assert!(problems_of(&twice).iter().any(|p| p.contains("configMap n/c is in the plan twice")), "{:?}", problems_of(&twice));
+    }
+
+    #[test]
+    fn describing_a_plan_names_its_configmaps_and_shows_no_key() {
+        let both = format!("{CA_HALVES}    configMaps:
+      - {{ namespace: n, name: polar-ca, keys: {{ ca.pem: {{ copy: {{ namespace: n, name: ca, key: ca.crt }} }} }} }}
+");
+        let said = plan(&format!("name: p\nstages:\n  - name: s\n{both}")).describe();
+        assert!(said.contains("configmap n/polar-ca") && said.contains("copy(n/ca:ca.crt)"), "{said}");
+        assert!(said.contains("ca(CA: Certificate)") && said.contains("ca(CA: Key)"), "{said}");
     }
 }

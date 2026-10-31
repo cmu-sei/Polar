@@ -77,6 +77,9 @@ let BuildOrchestratorValues =
           -- re-signs TLS. The plan copies it into the jobs' namespace, and each job's git, curl and nix
           -- use it. `None`: the images' own bundles.
           , trustedCa : Optional Text
+          -- The Secret the cluster's CA is kept in (the core's `caSecret`), which the plan copies the certificate of
+          -- into the jobs' namespace for polar-init to verify against, when the platform pins one.
+          , caSecret : Optional Text
           }
       }
 
@@ -336,6 +339,25 @@ let buildOrchestrator
                     , None = [] : List P.Secret.Type
                     }
                     v.trustedCa
+              , configMaps =
+                  merge
+                    { Some =
+                        λ(pinned : Text) →
+                          merge
+                            { Some =
+                                λ(secret : Text) →
+                                  [ P.pinnedCa
+                                      { namespace = jobsNamespace
+                                      , name = pinned
+                                      , secret = { namespace = ns, name = secret }
+                                      }
+                                  ]
+                            , None = [] : List P.ConfigMap.Type
+                            }
+                            v.caSecret
+                    , None = [] : List P.ConfigMap.Type
+                    }
+                    v.platform.pinnedCa
               , objects =
                     P.k8s
                       [ kubernetes.Resource.Namespace

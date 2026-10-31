@@ -8,7 +8,8 @@
 //! Nothing here prints a value. [`Secret`] shows `<secret>` for itself in `Debug`, and an error names
 //! secrets and keys, never what they hold.
 
-use crate::plan::{self, Source, Value};
+use crate::ca::Authority;
+use crate::plan::{self, CaPart, CaSpec, Source, Value};
 use anyhow::{Result, anyhow, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -74,12 +75,14 @@ pub fn hex(bytes: &[u8]) -> String {
 /// Decide what to do about each Secret of a stage.
 ///
 /// `present` is the namespace and name of each that exists; `copies` holds what each copy source
-/// holds; `random` makes that many random bytes.
+/// holds; `random` makes that many random bytes; `authority` makes a CA. A CA is made once for each
+/// id in a group (or in a secret that is in none), whichever halves of it the keys take.
 pub fn decide(
     secrets: &[plan::Secret],
     present: &BTreeSet<(String, String)>,
     copies: &BTreeMap<Source, String>,
     random: &mut dyn FnMut(usize) -> Vec<u8>,
+    authority: &mut dyn FnMut(&CaSpec) -> Result<Authority>,
 ) -> Result<Vec<Action>> {
     // The units that are made together, in the order they first appear: a group, or one secret.
     let mut units: Vec<Vec<&plan::Secret>> = Vec::new();
@@ -135,12 +138,21 @@ pub fn decide(
 
         // None exist: make the values, naming the shared ones once.
         let mut ids: BTreeMap<String, String> = BTreeMap::new();
+        let mut authorities: BTreeMap<String, Authority> = BTreeMap::new();
         for secret in &unit {
             for value in secret.keys.values() {
-                if let Value::Random(r) = value
-                    && let Some(id) = &r.id
-                {
-                    ids.insert(id.clone(), hex(&random(r.random)));
+                match value {
+                    Value::Random(r) => {
+                        if let Some(id) = &r.id {
+                            ids.insert(id.clone(), hex(&random(r.random)));
+                        }
+                    }
+                    Value::Ca(c) if !authorities.contains_key(&c.ca.id) => {
+                        let made = authority(&c.ca)
+                            .map_err(|e| anyhow!("{}/{}: cannot make the CA '{}': {e:#}", secret.namespace, secret.name, c.ca.id))?;
+                        authorities.insert(c.ca.id.clone(), made);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -153,6 +165,13 @@ pub fn decide(
                         Some(id) => ids[id].clone(),
                         None => hex(&random(r.random)),
                     },
+                    Value::Ca(c) => {
+                        let made = &authorities[&c.ca.id];
+                        match c.ca.part {
+                            CaPart::Certificate => made.certificate.clone(),
+                            CaPart::Key => made.key.expose().to_string(),
+                        }
+                    }
                     Value::Template(t) => fill(&t.template, &ids)
                         .map_err(|e| anyhow!("{}/{} key '{key}': {e}", secret.namespace, secret.name))?,
                     Value::Copy(c) => copies.get(&c.copy).cloned().ok_or_else(|| {
@@ -200,6 +219,22 @@ mod tests {
             .secrets
     }
 
+    /// No test but the CA's makes one; this one refuses, so a test that needs none shows it needs none.
+    fn no_ca() -> impl FnMut(&CaSpec) -> Result<Authority> {
+        |_| bail!("this test makes no CA")
+    }
+
+    /// A CA that is not real, whose halves tell which was asked for and how often one was made.
+    fn counted_ca(made: &std::cell::Cell<u32>) -> impl FnMut(&CaSpec) -> Result<Authority> + '_ {
+        move |spec| {
+            made.set(made.get() + 1);
+            Ok(Authority {
+                certificate: format!("CERT-{}-{}", spec.common_name, made.get()),
+                key: Secret::new(format!("KEY-{}-{}", spec.common_name, made.get())),
+            })
+        }
+    }
+
     /// Random bytes that count up, so a test can tell values apart without a real source.
     fn counting() -> impl FnMut(usize) -> Vec<u8> {
         let mut next = 0u8;
@@ -228,7 +263,7 @@ mod tests {
 
     #[test]
     fn a_group_shares_its_random_value_and_a_plain_secret_has_its_own() {
-        let actions = decide(&stage_secrets(GRAPH), &BTreeSet::new(), &BTreeMap::new(), &mut counting()).unwrap();
+        let actions = decide(&stage_secrets(GRAPH), &BTreeSet::new(), &BTreeMap::new(), &mut counting(), &mut no_ca()).unwrap();
         assert_eq!(actions.len(), 3);
         assert_eq!(data(&actions[0])["secret"], "0102");
         assert_eq!(data(&actions[1])["secret"], "neo4j/0102", "the template uses the group's value");
@@ -238,7 +273,7 @@ mod tests {
     #[test]
     fn a_secret_that_exists_is_left_alone() {
         let present = BTreeSet::from([("polar".to_string(), "token".to_string())]);
-        let actions = decide(&stage_secrets(GRAPH), &present, &BTreeMap::new(), &mut counting()).unwrap();
+        let actions = decide(&stage_secrets(GRAPH), &present, &BTreeMap::new(), &mut counting(), &mut no_ca()).unwrap();
         assert!(matches!(&actions[2], Action::Exists { name, .. } if name == "token"));
         assert!(matches!(&actions[0], Action::Create { .. }));
     }
@@ -249,7 +284,7 @@ mod tests {
             ("polar".to_string(), "pw".to_string()),
             ("polar".to_string(), "auth".to_string()),
         ]);
-        let actions = decide(&stage_secrets(GRAPH), &present, &BTreeMap::new(), &mut counting()).unwrap();
+        let actions = decide(&stage_secrets(GRAPH), &present, &BTreeMap::new(), &mut counting(), &mut no_ca()).unwrap();
         assert!(matches!(&actions[0], Action::Exists { .. }));
         assert!(matches!(&actions[1], Action::Exists { .. }));
     }
@@ -257,7 +292,7 @@ mod tests {
     #[test]
     fn a_group_that_is_partly_there_is_an_error_that_names_both_halves() {
         let present = BTreeSet::from([("polar".to_string(), "pw".to_string())]);
-        let error = decide(&stage_secrets(GRAPH), &present, &BTreeMap::new(), &mut counting())
+        let error = decide(&stage_secrets(GRAPH), &present, &BTreeMap::new(), &mut counting(), &mut no_ca())
             .unwrap_err()
             .to_string();
         assert!(error.contains("group 'graph'"), "{error}");
@@ -270,17 +305,17 @@ mod tests {
         let source = copy_sources(&secrets);
         assert_eq!(source.len(), 1);
         let copies = BTreeMap::from([(source[0].clone(), "swordfish-not-real".to_string())]);
-        let actions = decide(&secrets, &BTreeSet::new(), &copies, &mut counting()).unwrap();
+        let actions = decide(&secrets, &BTreeSet::new(), &copies, &mut counting(), &mut no_ca()).unwrap();
         assert_eq!(data(&actions[0])["password"], "swordfish-not-real");
 
-        let error = decide(&secrets, &BTreeSet::new(), &BTreeMap::new(), &mut counting()).unwrap_err().to_string();
+        let error = decide(&secrets, &BTreeSet::new(), &BTreeMap::new(), &mut counting(), &mut no_ca()).unwrap_err().to_string();
         assert!(error.contains("polar/pw key 'secret', which is not there"), "{error}");
     }
 
     #[test]
     fn a_literal_is_used_as_written() {
         let secrets = stage_secrets("      - { namespace: n, name: admin, keys: { username: { literal: admin } } }\n");
-        let actions = decide(&secrets, &BTreeSet::new(), &BTreeMap::new(), &mut counting()).unwrap();
+        let actions = decide(&secrets, &BTreeSet::new(), &BTreeMap::new(), &mut counting(), &mut no_ca()).unwrap();
         assert_eq!(data(&actions[0])["username"], "admin");
     }
 
@@ -288,10 +323,52 @@ mod tests {
     fn nothing_that_is_made_can_be_read_back_from_a_debug_print_or_an_error() {
         let secrets = stage_secrets("      - { namespace: n, name: a, keys: { k: { random: 4 } } }\n      - { namespace: n, name: b, keys: { k: { copy: { namespace: x, name: y, key: z } } } }\n");
         let copies = BTreeMap::from([(copy_sources(&secrets)[0].clone(), "hunter2-not-real".to_string())]);
-        let actions = decide(&secrets, &BTreeSet::new(), &copies, &mut counting()).unwrap();
+        let actions = decide(&secrets, &BTreeSet::new(), &copies, &mut counting(), &mut no_ca()).unwrap();
         let shown = format!("{actions:?}");
         assert!(!shown.contains("hunter2") && !shown.contains("01020304"), "{shown}");
         assert!(shown.contains("<secret>"));
+    }
+
+    const CA: &str = "
+      - { namespace: polar, name: cert-issuer-ca, keys: {
+            ca.crt: { ca: { id: root, part: certificate, commonName: Test CA, validityDays: 30 } },
+            ca.key: { ca: { id: root, part: key, commonName: Test CA, validityDays: 30 } } } }
+";
+
+    #[test]
+    fn a_ca_is_made_once_and_its_halves_are_one_pair() {
+        let made = std::cell::Cell::new(0);
+        let actions = decide(&stage_secrets(CA), &BTreeSet::new(), &BTreeMap::new(), &mut counting(), &mut counted_ca(&made)).unwrap();
+        assert_eq!(made.get(), 1, "one pair, not one for each key");
+        let held = data(&actions[0]);
+        assert_eq!(held["ca.crt"], "CERT-Test CA-1");
+        assert_eq!(held["ca.key"], "KEY-Test CA-1", "the key that goes with that certificate");
+    }
+
+    #[test]
+    fn a_ca_that_exists_is_never_made_again() {
+        // Replacing it would orphan every certificate it signed; only deleting the secret does that.
+        let present = BTreeSet::from([("polar".to_string(), "cert-issuer-ca".to_string())]);
+        let made = std::cell::Cell::new(0);
+        let actions = decide(&stage_secrets(CA), &present, &BTreeMap::new(), &mut counting(), &mut counted_ca(&made)).unwrap();
+        assert_eq!(made.get(), 0);
+        assert!(matches!(&actions[0], Action::Exists { .. }));
+    }
+
+    #[test]
+    fn a_ca_that_cannot_be_made_is_an_error_that_names_the_secret() {
+        let error = decide(&stage_secrets(CA), &BTreeSet::new(), &BTreeMap::new(), &mut counting(), &mut no_ca())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("polar/cert-issuer-ca") && error.contains("'root'"), "{error}");
+    }
+
+    #[test]
+    fn the_private_half_of_a_ca_is_not_in_a_debug_print() {
+        let made = std::cell::Cell::new(0);
+        let actions = decide(&stage_secrets(CA), &BTreeSet::new(), &BTreeMap::new(), &mut counting(), &mut counted_ca(&made)).unwrap();
+        let shown = format!("{actions:?}");
+        assert!(!shown.contains("KEY-Test") && !shown.contains("CERT-Test"), "{shown}");
     }
 
     #[test]

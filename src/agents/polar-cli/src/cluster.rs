@@ -49,6 +49,21 @@ pub trait Cluster {
     ) -> Result<()>;
 
     async fn delete_secret(&self, namespace: &str, name: &str) -> Result<Deleted>;
+
+    /// The keys of a ConfigMap and what they hold, or `None` if it is not there.
+    async fn config_map(&self, namespace: &str, name: &str) -> Result<Option<BTreeMap<String, String>>>;
+
+    /// Make a ConfigMap hold these keys, creating it if it is absent. Applied server-side, so keys that
+    /// someone else put there are left alone.
+    async fn write_config_map(
+        &self,
+        namespace: &str,
+        name: &str,
+        data: &BTreeMap<String, String>,
+        dry_run: bool,
+    ) -> Result<()>;
+
+    async fn delete_config_map(&self, namespace: &str, name: &str) -> Result<Deleted>;
 }
 
 #[cfg(test)]
@@ -67,6 +82,7 @@ pub mod fake {
         pub calls: RefCell<Vec<String>>,
         pub objects: RefCell<BTreeMap<Id, Json>>,
         pub secrets: RefCell<BTreeMap<(String, String), BTreeMap<String, String>>>,
+        pub config_maps: RefCell<BTreeMap<(String, String), BTreeMap<String, String>>>,
         pub gets: RefCell<BTreeMap<Id, usize>>,
         pub script: RefCell<Option<Script>>,
         /// Kinds the cluster does not know until the CRD is installed.
@@ -166,6 +182,43 @@ pub mod fake {
             self.log(format!("delete secret {namespace}/{name}"));
             Ok(
                 if self.secrets.borrow_mut().remove(&(namespace.to_string(), name.to_string())).is_some() {
+                    Deleted::Removed
+                } else {
+                    Deleted::Absent
+                },
+            )
+        }
+
+        async fn config_map(&self, namespace: &str, name: &str) -> Result<Option<BTreeMap<String, String>>> {
+            Ok(self.config_maps.borrow().get(&(namespace.to_string(), name.to_string())).cloned())
+        }
+
+        async fn write_config_map(
+            &self,
+            namespace: &str,
+            name: &str,
+            data: &BTreeMap<String, String>,
+            dry_run: bool,
+        ) -> Result<()> {
+            self.log(format!(
+                "configmap {namespace}/{name} [{}]{}",
+                data.keys().cloned().collect::<Vec<_>>().join(","),
+                if dry_run { " (dry run)" } else { "" }
+            ));
+            if !dry_run {
+                self.config_maps
+                    .borrow_mut()
+                    .entry((namespace.to_string(), name.to_string()))
+                    .or_default()
+                    .extend(data.clone());
+            }
+            Ok(())
+        }
+
+        async fn delete_config_map(&self, namespace: &str, name: &str) -> Result<Deleted> {
+            self.log(format!("delete configmap {namespace}/{name}"));
+            Ok(
+                if self.config_maps.borrow_mut().remove(&(namespace.to_string(), name.to_string())).is_some() {
                     Deleted::Removed
                 } else {
                     Deleted::Absent

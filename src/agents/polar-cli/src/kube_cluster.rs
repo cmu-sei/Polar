@@ -5,7 +5,7 @@ use crate::plan::{Id, Object};
 use crate::secrets::Secret;
 use anyhow::{Context, Result, anyhow, bail};
 use k8s_openapi::ByteString;
-use k8s_openapi::api::core::v1::Secret as KubeSecret;
+use k8s_openapi::api::core::v1::{ConfigMap as KubeConfigMap, Secret as KubeSecret};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams, PostParams};
@@ -197,6 +197,50 @@ impl Cluster for KubeCluster {
             Ok(_) => Ok(Deleted::Removed),
             Err(kube::Error::Api(e)) if e.code == 404 => Ok(Deleted::Absent),
             Err(e) => Err(anyhow!(e).context(format!("cannot delete secret {namespace}/{name}"))),
+        }
+    }
+
+    async fn config_map(&self, namespace: &str, name: &str) -> Result<Option<BTreeMap<String, String>>> {
+        let config_maps: Api<KubeConfigMap> = Api::namespaced(self.client.clone(), namespace);
+        match config_maps.get_opt(name).await {
+            Ok(found) => Ok(found.map(|c| c.data.unwrap_or_default())),
+            // A namespace that is not there yet holds no ConfigMaps.
+            Err(kube::Error::Api(e)) if e.code == 404 => Ok(None),
+            Err(e) => Err(anyhow!(e).context(format!("cannot read configmap {namespace}/{name}"))),
+        }
+    }
+
+    async fn write_config_map(
+        &self,
+        namespace: &str,
+        name: &str,
+        data: &BTreeMap<String, String>,
+        dry_run: bool,
+    ) -> Result<()> {
+        let config_map = KubeConfigMap {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
+                labels: Some(BTreeMap::from([("app.kubernetes.io/managed-by".to_string(), MANAGER.to_string())])),
+                ..ObjectMeta::default()
+            },
+            data: Some(data.clone()),
+            ..KubeConfigMap::default()
+        };
+        let config_maps: Api<KubeConfigMap> = Api::namespaced(self.client.clone(), namespace);
+        config_maps
+            .patch(name, &patch_params(dry_run), &Patch::Apply(&config_map))
+            .await
+            .with_context(|| format!("cannot write configmap {namespace}/{name}"))?;
+        Ok(())
+    }
+
+    async fn delete_config_map(&self, namespace: &str, name: &str) -> Result<Deleted> {
+        let config_maps: Api<KubeConfigMap> = Api::namespaced(self.client.clone(), namespace);
+        match config_maps.delete(name, &DeleteParams::default()).await {
+            Ok(_) => Ok(Deleted::Removed),
+            Err(kube::Error::Api(e)) if e.code == 404 => Ok(Deleted::Absent),
+            Err(e) => Err(anyhow!(e).context(format!("cannot delete configmap {namespace}/{name}"))),
         }
     }
 }

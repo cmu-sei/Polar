@@ -1,16 +1,17 @@
 //! Running a plan.
 //!
 //! Within a stage the order is always the same, so a plan reads the way it runs: the CRD if asked
-//! for, then the namespaces (everything else lives in one), then the secrets, then the other objects,
-//! then the waits. The next stage starts when the waits of
+//! for, then the namespaces (everything else lives in one), then the secrets, then the ConfigMaps (which
+//! may copy what the secrets just made), then the other objects, then the waits. The next stage starts when the waits of
 //! this one have passed. `down` is the same plan backwards, and never removes the CRD.
 //!
 //! Written against [`Cluster`] and reporting through a callback, so the order, the waits and the
 //! reports are tested with no cluster and no terminal.
 
 use crate::cluster::{Applied, Cluster, Deleted};
-use crate::plan::{Id, Object, Plan, Stage, Wait};
+use crate::plan::{self, Id, Object, Plan, Stage, Wait};
 use crate::secrets::{self, Action};
+use crate::{ca, configmaps};
 use anyhow::{Result, bail};
 use serde_json::Value as Json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -139,9 +140,9 @@ pub async fn up_all<C: Cluster>(
         }
     }
 
-    // The namespaces the plans create, so that a dry run, which creates none, can tell a namespace
-    // that is missing because the plan has not got there from one that is missing by mistake.
-    let mut planned = BTreeSet::new();
+    // What the plans create, so that a dry run, which creates nothing, can tell something that is missing
+    // because the plan has not got there from something that is missing by mistake.
+    let mut planned = Planned::default();
     let mut applied: BTreeMap<&str, &str> = BTreeMap::new();
     for (plan, stages) in plans.iter().zip(&selected) {
         say(out, format!("plan {}{}", plan.name, if options.dry_run { " (dry run: nothing is changed)" } else { "" }));
@@ -163,10 +164,17 @@ fn is_namespace(object: &Object) -> bool {
     object.api_version() == Some("v1") && object.kind() == Some("Namespace")
 }
 
+/// What a run has said it will create, in a dry run where nothing is created.
+#[derive(Default)]
+struct Planned {
+    namespaces: BTreeSet<String>,
+    secrets: BTreeSet<(String, String)>,
+}
+
 /// In a dry run: is this namespace one the plan creates and the cluster does not have yet? Then
 /// nothing in it can be judged by the cluster, and the tool says so instead of failing.
-async fn pending<C: Cluster>(cluster: &C, namespace: &str, planned: &BTreeSet<String>) -> Result<bool> {
-    if !planned.contains(namespace) {
+async fn pending<C: Cluster>(cluster: &C, namespace: &str, planned: &Planned) -> Result<bool> {
+    if !planned.namespaces.contains(namespace) {
         return Ok(false);
     }
     let id = Id {
@@ -184,7 +192,7 @@ async fn run_stage<C: Cluster>(
     options: &Options,
     random: &mut dyn FnMut(usize) -> Vec<u8>,
     out: &mut dyn FnMut(String),
-    planned: &mut BTreeSet<String>,
+    planned: &mut Planned,
 ) -> Result<()> {
     let dry = options.dry_run;
     say(out, format!("\n== {}{}", stage.name, stage.description.as_ref().map(|d| format!(" - {d}")).unwrap_or_default()));
@@ -197,7 +205,7 @@ async fn run_stage<C: Cluster>(
     // Namespaces first: the secrets and most objects of the stage live in them.
     for object in stage.objects.iter().filter(|o| is_namespace(o)) {
         if let Some(name) = object.name() {
-            planned.insert(name.to_string());
+            planned.namespaces.insert(name.to_string());
         }
         apply_one(cluster, object, dry, None, out).await?;
     }
@@ -217,17 +225,70 @@ async fn run_stage<C: Cluster>(
                 copies.insert(source, value.clone());
             }
         }
-        for action in secrets::decide(&stage.secrets, &present, &copies, random)? {
+        let mut authority = |spec: &plan::CaSpec| ca::generate(&spec.common_name, spec.validity_days);
+        for action in secrets::decide(&stage.secrets, &present, &copies, random, &mut authority)? {
             match action {
                 Action::Exists { .. } => say(out, format!("   secret {} exists", action.name())),
                 Action::Create { namespace, name, data } => {
                     let keys = data.keys().cloned().collect::<Vec<_>>().join(", ");
+                    planned.secrets.insert((namespace.clone(), name.clone()));
                     if dry && pending(cluster, &namespace, planned).await? {
                         say(out, format!("   secret {namespace}/{name} would be created ({keys}); its namespace is created by this plan"));
                         continue;
                     }
                     cluster.create_secret(&namespace, &name, &data, dry).await?;
                     say(out, format!("   secret {namespace}/{name} {} ({keys})", if dry { "would be created" } else { "created" }));
+                }
+            }
+        }
+    }
+
+    if !stage.config_maps.is_empty() {
+        let mut held = BTreeMap::new();
+        for config_map in &stage.config_maps {
+            if let Some(data) = cluster.config_map(&config_map.namespace, &config_map.name).await? {
+                held.insert((config_map.namespace.clone(), config_map.name.clone()), data);
+            }
+        }
+        // The Secrets are read after the stage's own were made, so a ConfigMap can copy what they hold.
+        let mut copies = BTreeMap::new();
+        for source in configmaps::copy_sources(&stage.config_maps) {
+            if let Some(found) = cluster.secret(&source.namespace, &source.name).await?
+                && let Some(value) = found.get(&source.key)
+            {
+                copies.insert(source, value.clone());
+            }
+        }
+        for action in configmaps::decide(&stage.config_maps, &held, &copies)? {
+            match action {
+                configmaps::Action::Unchanged { .. } => say(out, format!("   configmap {} is as it should be", action.name())),
+                configmaps::Action::Blocked { namespace, name, source } => {
+                    let made_by_the_plan = planned.secrets.contains(&(source.namespace.clone(), source.name.clone()));
+                    if dry && made_by_the_plan {
+                        say(out, format!("   configmap {namespace}/{name} would be written once secret {}/{} is made", source.namespace, source.name));
+                        continue;
+                    }
+                    bail!(
+                        "configmap {namespace}/{name} copies key '{}' of secret {}/{}, which is not there",
+                        source.key,
+                        source.namespace,
+                        source.name
+                    );
+                }
+                configmaps::Action::Write { namespace, name, existed, data } => {
+                    let keys = data.keys().cloned().collect::<Vec<_>>().join(", ");
+                    if dry && pending(cluster, &namespace, planned).await? {
+                        say(out, format!("   configmap {namespace}/{name} would be created ({keys}); its namespace is created by this plan"));
+                        continue;
+                    }
+                    cluster.write_config_map(&namespace, &name, &data, dry).await?;
+                    let did = match (dry, existed) {
+                        (true, false) => "would be created",
+                        (true, true) => "would be updated",
+                        (false, false) => "created",
+                        (false, true) => "updated to match its source",
+                    };
+                    say(out, format!("   configmap {namespace}/{name} {did} ({keys})"));
                 }
             }
         }
@@ -316,7 +377,7 @@ async fn wait_for<C: Cluster>(
     }
 }
 
-/// The plan backwards: each stage's objects, then its secrets, last stage first. The CRD stays.
+/// The plan backwards: each stage's objects, then its ConfigMaps, then its secrets, last stage first. The CRD stays.
 ///
 /// A shared stage belongs to every plan that includes it, so it stays unless `core` is asked for.
 pub async fn down<C: Cluster>(cluster: &C, plan: &Plan, core: bool, out: &mut dyn FnMut(String)) -> Result<()> {
@@ -330,6 +391,10 @@ pub async fn down<C: Cluster>(cluster: &C, plan: &Plan, core: bool, out: &mut dy
         for object in stage.objects.iter().rev() {
             let Some(id) = object.id() else { continue };
             report_delete(out, &id.to_string(), cluster.delete(&id).await?);
+        }
+        for config_map in stage.config_maps.iter().rev() {
+            let name = format!("configmap {}/{}", config_map.namespace, config_map.name);
+            report_delete(out, &name, cluster.delete_config_map(&config_map.namespace, &config_map.name).await?);
         }
         for secret in stage.secrets.iter().rev() {
             let name = format!("secret {}/{}", secret.namespace, secret.name);
@@ -706,5 +771,139 @@ stages:
         assert_eq!(field_value(&object, "status.list.0.name").as_deref(), Some("a"));
         assert_eq!(field_value(&object, "status.missing"), None);
         assert_eq!(field_value(&object, "status"), None, "an object is not a value");
+    }
+
+    const CA_PLAN: &str = r#"
+name: ca
+stages:
+  - name: ca
+    shared: true
+    secrets:
+      - { namespace: polar, name: cert-issuer-ca, keys: {
+            ca.crt: { ca: { id: root, part: certificate, commonName: Test CA, validityDays: 30 } },
+            ca.key: { ca: { id: root, part: key, commonName: Test CA, validityDays: 30 } } } }
+    configMaps:
+      - { namespace: polar, name: polar-ca, keys: { ca.pem: { copy: { namespace: polar, name: cert-issuer-ca, key: ca.crt } } } }
+  - name: app
+    configMaps:
+      - { namespace: blitz, name: polar-ca, keys: { ca.pem: { copy: { namespace: polar, name: cert-issuer-ca, key: ca.crt } } } }
+"#;
+
+    async fn run_ca(cluster: &Fake, options: Options) -> (Result<()>, Vec<String>) {
+        let plan = Plan::from_yaml(CA_PLAN).unwrap();
+        let mut lines = Vec::new();
+        let result = up(cluster, &plan, &options, &mut counting(), &mut |l| lines.push(l)).await;
+        (result, lines)
+    }
+
+    fn ca_pair(cluster: &Fake) -> (String, String) {
+        let secrets = cluster.secrets.borrow();
+        let held = &secrets[&("polar".to_string(), "cert-issuer-ca".to_string())];
+        (held["ca.crt"].clone(), held["ca.key"].clone())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_cluster_gets_a_ca_and_every_namespace_the_certificate_and_only_that() {
+        let cluster = Fake::default();
+        let (result, lines) = run_ca(&cluster, fast()).await;
+        result.unwrap();
+
+        let (certificate, key) = ca_pair(&cluster);
+        assert!(certificate.contains("BEGIN CERTIFICATE") && key.contains("PRIVATE KEY"));
+        for namespace in ["polar", "blitz"] {
+            let maps = cluster.config_maps.borrow();
+            let held = &maps[&(namespace.to_string(), "polar-ca".to_string())];
+            assert_eq!(held["ca.pem"], certificate, "{namespace} pins the certificate the issuer signs with");
+            assert!(!held.values().any(|v| v.contains("PRIVATE")), "a ConfigMap is readable by every pod in its namespace");
+        }
+        assert_eq!(
+            cluster.calls(),
+            ["secret polar/cert-issuer-ca [ca.crt,ca.key]", "configmap polar/polar-ca [ca.pem]", "configmap blitz/polar-ca [ca.pem]"],
+            "the secret first, then what copies it"
+        );
+        let said = lines.join("\n");
+        assert!(!said.contains(&key) && !said.contains("PRIVATE"), "the key never reaches the output");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn running_it_again_keeps_the_ca_and_touches_nothing() {
+        let cluster = Fake::default();
+        run_ca(&cluster, fast()).await.0.unwrap();
+        let first = ca_pair(&cluster);
+        cluster.calls.borrow_mut().clear();
+
+        let (result, lines) = run_ca(&cluster, fast()).await;
+        result.unwrap();
+        assert_eq!(ca_pair(&cluster), first, "a new CA would orphan every certificate already issued");
+        assert!(cluster.calls().is_empty(), "{:?}", cluster.calls());
+        let said = lines.join("\n");
+        assert!(said.contains("secret polar/cert-issuer-ca exists") && said.contains("configmap blitz/polar-ca is as it should be"), "{said}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_configmap_that_pins_a_ca_that_is_gone_follows_the_new_one() {
+        let cluster = Fake::default();
+        run_ca(&cluster, fast()).await.0.unwrap();
+        let old = ca_pair(&cluster).0;
+        // An admin deleted the Secret on purpose, to replace the CA.
+        cluster.secrets.borrow_mut().clear();
+
+        let (result, lines) = run_ca(&cluster, fast()).await;
+        result.unwrap();
+        let new = ca_pair(&cluster).0;
+        assert_ne!(new, old);
+        let maps = cluster.config_maps.borrow();
+        assert_eq!(maps[&("polar".to_string(), "polar-ca".to_string())]["ca.pem"], new);
+        assert_eq!(maps[&("blitz".to_string(), "polar-ca".to_string())]["ca.pem"], new);
+        assert!(lines.join("\n").contains("configmap blitz/polar-ca updated to match its source"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dry_run_makes_no_ca_and_says_what_waits_on_it() {
+        let cluster = Fake::default();
+        let (result, lines) = run_ca(&cluster, Options { dry_run: true, ..fast() }).await;
+        result.unwrap();
+        assert!(cluster.secrets.borrow().is_empty() && cluster.config_maps.borrow().is_empty());
+        let said = lines.join("\n");
+        assert!(said.contains("secret polar/cert-issuer-ca would be created (ca.crt, ca.key)"), "{said}");
+        assert!(said.contains("configmap polar/polar-ca would be written once secret polar/cert-issuer-ca is made"), "{said}");
+        assert!(said.contains("configmap blitz/polar-ca would be written once secret polar/cert-issuer-ca is made"), "{said}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_configmap_that_copies_a_secret_nothing_makes_is_an_error_that_names_it() {
+        let cluster = Fake::default();
+        let plan = Plan::from_yaml(
+            "name: p\nstages:\n  - name: s\n    configMaps:\n      - { namespace: n, name: c, keys: { k: { copy: { namespace: x, name: y, key: z } } } }\n",
+        )
+        .unwrap();
+        let error = up(&cluster, &plan, &fast(), &mut counting(), &mut |_| {}).await.unwrap_err().to_string();
+        assert!(error.contains("configmap n/c copies key 'z' of secret x/y, which is not there"), "{error}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn down_removes_configmaps_before_the_secrets_they_copy() {
+        let cluster = Fake::default();
+        run_ca(&cluster, fast()).await.0.unwrap();
+        cluster.calls.borrow_mut().clear();
+
+        let plan = Plan::from_yaml(CA_PLAN).unwrap();
+        down(&cluster, &plan, true, &mut |_| {}).await.unwrap();
+        assert_eq!(
+            cluster.calls(),
+            ["delete configmap blitz/polar-ca", "delete configmap polar/polar-ca", "delete secret polar/cert-issuer-ca"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_ca_is_shared_so_down_leaves_it_unless_the_core_is_asked_for() {
+        let cluster = Fake::default();
+        run_ca(&cluster, fast()).await.0.unwrap();
+        cluster.calls.borrow_mut().clear();
+
+        let plan = Plan::from_yaml(CA_PLAN).unwrap();
+        down(&cluster, &plan, false, &mut |_| {}).await.unwrap();
+        assert_eq!(cluster.calls(), ["delete configmap blitz/polar-ca"], "the application's pin goes; the core's CA stays");
+        assert!(cluster.secrets.borrow().contains_key(&("polar".to_string(), "cert-issuer-ca".to_string())));
     }
 }

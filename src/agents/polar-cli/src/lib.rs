@@ -4,7 +4,9 @@
 //! the agents the operator keeps alive. It knows nothing about what is being deployed; if a feature
 //! needs to, it does not belong here.
 
+pub mod ca;
 pub mod cluster;
+pub mod configmaps;
 pub mod exec;
 pub mod kube_cluster;
 pub mod plan;

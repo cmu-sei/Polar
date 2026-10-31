@@ -75,7 +75,7 @@ let CertIssuer =
           -- it and is issued once for an identity, so an hour (the server lifetime it used to get) made a secret
           -- unsealable an hour after an agent's first start. The fork's setting; required by cert-issuer.
           , serviceLifetimeSecs : Natural
-          -- The Secret that holds the CA, made once by `polar-admin-grant bootstrap-ca` before anything runs.
+          -- The Secret that holds the CA, made by the plan (`P.certificateAuthority`) before the issuer starts.
           -- `Some`: the issuer only loads it (the CA is then pinned by every agent, from a ConfigMap of the same
           -- operator step). `None`: the issuer makes its own CA on its volume at first start, which nothing can
           -- pin, so it is not enough for a platform whose pods have the custody daemon.

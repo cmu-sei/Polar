@@ -25,6 +25,10 @@ let values
         }
       , imagePullPolicy = Some "IfNotPresent"
       , storageClass = None Text
+      -- Every pod's mTLS key is the custody daemon's; the plan makes the cluster's CA once, and the issuer loads it.
+      , custodyImage = Some "polar-custody:latest"
+      , pinnedCa = Some "polar-ca"
+      , caSecret = Some "cert-issuer-ca"
       , gitServerAdmins = [] : List Text
       }
 
