@@ -601,7 +601,7 @@ asks for the version (the default is the suggestion; it must be after the previo
 highlights. Then three commits. `chore(release): prepare vX.Y.Z` writes `X.Y.Z` into `VERSION` and nothing else, so the release's
 images are built from a commit whose `VERSION` is the release; it builds and pushes every image once from that commit, writes the
 committed `infra/images.lock.nuon` (saying which commit it was built from) and the changelog section, and commits
-`chore(release): vX.Y.Z` with an annotated tag. The tagged commit differs from the prepare commit only in the lock and `CHANGELOG.md`,
+`chore(release): vX.Y.Z` with an annotated tag. Its commits end with the trailers in `POLAR_RELEASE_TRAILERS` (one a line), and with none when it is unset. The tagged commit differs from the prepare commit only in the lock and `CHANGELOG.md`,
 which no image is built from: the crates' source is `src/agents` alone, and on 2026-10-31 every image's derivation in
 `infra/images.nuon` evaluated the same with the lock, `CHANGELOG.md`, the docs and `infra/*.nu` changed, and every one changed with
 `VERSION`. So building the tag gives the locked digests again; `release.nu` checks the difference before it tags. Last,

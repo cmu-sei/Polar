@@ -24,7 +24,7 @@
 # The decisions a release makes: versions, what is checked first, which gates run, and what the secret scan may show.
 
 use std/assert
-use ../release.nu [compare_versions, dev_version, looks_like_placeholder, preflight_problems, read_version_text, release_diff_problems, release_message, release_plan_lines, release_steps, secret_rows, select_gates, unaccepted, version_file_status, version_file_text, version_problems]
+use ../release.nu [compare_versions, dev_version, looks_like_placeholder, preflight_problems, read_version_text, release_diff_problems, release_message, release_plan_lines, release_steps, release_trailers, secret_rows, select_gates, unaccepted, version_file_status, version_file_text, version_problems]
 
 def config [] {
     { gates: [
@@ -36,6 +36,14 @@ def config [] {
 
 def main [] {
     let tests = [
+        {
+            name: "a release's commits end with the trailers whoever cuts it gives, one a line, and with none when none are given"
+            body: {
+                assert equal (with-env { POLAR_RELEASE_TRAILERS: null } { release_trailers }) []
+                assert equal (with-env { POLAR_RELEASE_TRAILERS: "" } { release_trailers }) []
+                assert equal (with-env { POLAR_RELEASE_TRAILERS: "A: one\n\n  B: two  \n" } { release_trailers }) ["A: one" "B: two"]
+            }
+        }
         {
             name: "versions compare by major, then minor, then patch, as numbers"
             body: {

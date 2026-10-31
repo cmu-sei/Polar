@@ -324,13 +324,19 @@ def head_sha [] { ^git rev-parse HEAD | str trim }
 
 def head_subject [] { ^git log -1 --format=%s | str trim }
 
-const FOOTER = "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+# The trailers a release's commits end with: whatever whoever cuts the release puts in POLAR_RELEASE_TRAILERS, one a line
+# (an attribution, a sign-off); none when it is unset. The tool names no author of its own.
+export def release_trailers [] {
+    $env.POLAR_RELEASE_TRAILERS? | default "" | lines | each {|l| $l | str trim } | where {|l| $l | is-not-empty }
+}
 
 # Commits exactly `files` (whatever else is staged stays out) with `message`.
 def commit_files [files: list<string>, message: string] {
     let root = (repo_root)
     ^git -C $root add ...$files
-    ^git -C $root commit -q -m $message -m $FOOTER -- ...$files
+    let trailers = (release_trailers)
+    let footer = if ($trailers | is-empty) { [] } else { ["-m" ($trailers | str join "\n")] }
+    ^git -C $root commit -q -m $message ...$footer -- ...$files
 }
 
 # Writes what a step puts into VERSION and commits it.
