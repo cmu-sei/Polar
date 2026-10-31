@@ -182,6 +182,7 @@ describes, and it reads its configuration from a document:
 ```text
 cargo build -p polar-agent-builder --example hello_agent
 hello_agent --help                          # what it is, needs and reads
+hello_agent --version                       # the platform version, target and allocator (--json: as a record)
 hello_agent --scaffold > config.json        # the document, every value empty
                                             # fill it in: the resolver will, by hand here
 hello_agent --check --config config.json    # ok: the configuration is sound

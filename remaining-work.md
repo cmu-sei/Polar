@@ -1086,3 +1086,17 @@ Dev cluster `u7s`, images rebuilt from this branch (`up.nu local-minimal --dev`,
 - `gitlab/observe/src/lib.rs`: `GitlabObserverState.tcp_client` is given and never read (the observers send through the
   client registered as `BROKER_CLIENT_NAME`). Removing it changes the state's constructor and its callers.
 
+
+## Left by the platform version (2026-10-31; infra/INFRA.md, "The version a binary reports")
+
+- The Cassini protocol version: `cassini_types::PROTOCOL_VERSION` is not on main (another branch adds it), so
+  `polar_version::CASSINI_PROTOCOL` is a marked hook that says `None`, and every record's `cassini_protocol` is null.
+  When it lands, polar-version depends on cassini-types and the hook becomes `Some(...)`.
+- Binaries that do not answer `--version` yet: `cassini-client` and `cassini-c2` (their own parsing; left alone while
+  the Cassini branch is open), `cert-issuer-setup` and `discover_repo` (developer tools), and the binaries that are not
+  on the builder and parse no arguments, which would start on `--version`: gitlab-observer, gitlab-consumer,
+  openapi-observer, openapi-processor, build-processor, the logger, polar-healthcheck and polar-custody's daemon. Each is
+  one line, `polar_version::exit_if_asked("<name>")`, or nothing once it moves onto the builder.
+- `[workspace.package] version` in `src/agents/Cargo.toml` (1.0.0) is not the platform version and a release does not
+  change it; nothing reports `CARGO_PKG_VERSION` any more. Bumping it would change `Cargo.lock` and every crate at a
+  release, which the release changes anyway; decide whether it follows VERSION or is left as it is.

@@ -283,6 +283,7 @@ document. With no arguments it runs the agent, so a container's default command 
 | Flag | For | What it does |
 | --- | --- | --- |
 | `--help` | people | the agent's purpose and long help text (generated and generic when the agent has none), the capabilities it needs, its variables in brief, and these flags |
+| `--version` | people | one line: the agent's name, the platform version (`X.Y.Z`, or `X.Y.Z+dev` between releases), the target and the allocator. With `--json` the same as a record, `{name, version, release, cassini_protocol, target, allocator}`, which `--scaffold` also carries as `agent.version`. Never the commit (`src/agents/polar-version`; infra/INFRA.md, "The version a binary reports") |
 | `--scaffold` | tools and people | prints the configuration document as JSON: the schema with every variable's type, default, secrecy, mutability and documentation, the capabilities required, the minimum shutdown budget, and each value empty. With `--config FILE` it prints the same document filled from FILE, with where each value came from and every problem found |
 | `--check --config FILE` | the resolver, CI | the judgement the agent makes when it starts, on FILE; exit 0 or 1, every problem on stderr |
 

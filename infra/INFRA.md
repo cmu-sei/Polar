@@ -578,11 +578,36 @@ conventional commits. A type that was inferred from a commit's wording carries a
 count per scope with the entries collapsed, which is how the first release, 368 features, stays readable. Writing replaces only that
 version's section; older sections, including hand edits, are untouched. The look is `infra/changelog.nuon`.
 
+**The version a binary reports.** `VERSION`, at the repository's root, is the platform version as one line: `X.Y.Z` on a release's
+commits and `<last release>+dev` between releases (semver build metadata, so a development build never passes for a release; it
+reads `1.0.0+dev` after v1.0.0). Every binary embeds it at compile time through `src/agents/polar-version` and reports it when asked:
+`<agent> --version` prints one line (`jira-observer 1.0.0+dev (development build, x86_64-unknown-linux-musl, allocator scudo)`),
+`--version --json` the record `{name, version, release, cassini_protocol, target, allocator}`, which an agent's scaffold also carries
+as `agent.version`, and its traces carry the version as `service.version`. A binary embeds only what changes at a release, never the
+git commit: the commit would change every binary, and every image digest, at every commit, a documentation commit included, which
+defeats Nix's cache for the final crates and this release's check that its artifacts really changed (it compares the lock's
+digests). The workspace's Nix build sees only `src/agents`, so `flake.nix` reads `VERSION` and passes its contents to the build
+(`POLAR_VERSION`); a cargo build in the development shell or a container reads the file. Every image carries the version as the label
+`org.opencontainers.image.version` (`flake.nix`, "The platform version"), and none carries `org.opencontainers.image.revision`: a
+label is in the image's config, so the commit there would change every digest at every commit just as it would in the binary, and a
+release's lock could not be reproduced from its tag (whose commit is not the one the images were built from). The commit a release
+was built from is in its lock (the comment line), its changelog section and its tag's message instead. `VERSION` has no licence
+banner: it is a one-line value read whole by Nix, by `polar-version`'s build script and by `release.nu`, as the lock files and the
+JSON have none.
+
 **The release.** `nu infra/release.nu run` cuts one, and never pushes. It checks the tree is clean and on a branch, runs the gates
 (`gates` alone runs them without releasing; `--only` and `--skip-gate a,b` choose), shows the calculated version and its evidence and
-asks for the version (the default is the suggestion; it must be after the previous release and not yet a tag), asks for the highlights,
-builds and pushes every image once, writes the committed `infra/images.lock.nuon` and the changelog section, and commits
-`chore(release): vX.Y.Z` with an annotated tag. `--dry-run` stops after the changelog preview. The gates (`infra/release.nuon`):
+asks for the version (the default is the suggestion; it must be after the previous release and not yet a tag), and asks for the
+highlights. Then three commits. `chore(release): prepare vX.Y.Z` writes `X.Y.Z` into `VERSION` and nothing else, so the release's
+images are built from a commit whose `VERSION` is the release; it builds and pushes every image once from that commit, writes the
+committed `infra/images.lock.nuon` (saying which commit it was built from) and the changelog section, and commits
+`chore(release): vX.Y.Z` with an annotated tag. The tagged commit differs from the prepare commit only in the lock and `CHANGELOG.md`,
+which no image is built from: the crates' source is `src/agents` alone, and on 2026-10-31 every image's derivation in
+`infra/images.nuon` evaluated the same with the lock, `CHANGELOG.md`, the docs and `infra/*.nu` changed, and every one changed with
+`VERSION`. So building the tag gives the locked digests again; `release.nu` checks the difference before it tags. Last,
+`chore: X.Y.Z+dev` writes the development version back into `VERSION`. A run whose build failed finds the prepare commit at HEAD
+and builds from it again. `--dry-run` shows all of it, the changelog preview included, and commits nothing; `release.nu plan` shows
+what `VERSION` reads and whether it agrees with the last tag. The gates (`infra/release.nuon`):
 `unit` (the infra tests), `deny` (advisories, licenses, bans, sources), `secrets` (nothing in the published history beyond
 `infra/release-secrets-baseline.nuon`), `clippy` (report-only until the workspace's warnings are cleared), `resolve` and
 `determinism` (two renders identical). The secret scan shows a finding's rule, path and commit, never what it matched;
