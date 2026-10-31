@@ -432,7 +432,11 @@ reads (18, 22, 24); `FrameUndecodable` (23, sound once the protocol version belo
      - kube-observer and git-repo-observer (whose repository set is re-announced every 60 s) heal by their own polling.
      - gitlab-observer, gitlab-consumer, openapi-observer, openapi-processor and the build processor (provenance
        linker): spawn named actors on every `Registered`, so a second registration collides on names. That is a
-       pre-existing fault, recorded here, not fixed.
+       pre-existing fault, recorded here, not fixed. *Since 2026-10-31* gitlab-consumer is safe: its consumers
+       subscribe in `pre_start`, so keeping them would leave them deaf on the new session; at a registration after the
+       first the supervisor stops them and its graph controller, waits for each, and starts them again, and the stops
+       (reason `re-registered`) are not taken for failures (`ConsumerSupervisor::stop_children`,
+       `gitlab/consume/src/supervisor.rs`; tested by registering twice).
      - polar-scheduler observer: replays what it queued; a replay request missed while away is lost.
      - polar-custody daemon: re-pulls its authority.
    - **Test:** `a_subscriber_away_when_the_budget_is_exhausted_lets_go_of_all_it_was_owed` now asserts the returning

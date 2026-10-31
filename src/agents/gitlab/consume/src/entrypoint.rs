@@ -21,7 +21,7 @@
    DM26-0670
 */
 
-use gitlab_consumer::supervisor::ConsumerSupervisor;
+use gitlab_consumer::supervisor::{ConsumerSupervisor, ConsumerSupervisorArgs};
 use polar::init_logging;
 use ractor::Actor;
 use std::error::Error;
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (_, handle) = Actor::spawn(
         Some(GITLAB_CONSUMER_SUPERVISOR.to_string()),
         ConsumerSupervisor,
-        (),
+        ConsumerSupervisorArgs::default(),
     )
     .await
     .expect("Expected to start consumer agent");
