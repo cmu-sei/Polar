@@ -2085,25 +2085,27 @@ mod tests {
         );
     }
 
-    /// An agent that notes that it was started, for the fresh-start marker's tests alone.
-    static MARKED_STARTED: AtomicBool = AtomicBool::new(false);
+    /// Whether `Marked::<SLOT>` was started, a record for each slot. Each of the fresh-start marker's tests has a
+    /// slot of its own, so tests that run at once never see, or reset, each other's record.
+    static MARKED_STARTED: [AtomicBool; 4] = [const { AtomicBool::new(false) }; 4];
 
-    struct Marked;
+    /// An agent that notes in its slot that it was started, for the fresh-start marker's tests alone.
+    struct Marked<const SLOT: usize>;
 
-    impl PolarAgent for Marked {
+    impl<const SLOT: usize> PolarAgent for Marked<SLOT> {
         const NAME: &'static str = "marked-agent";
         const PURPOSE: &'static str = "Notes that it was started";
         const NEEDS: &'static [Capability] = &[Capability::Cassini];
         const SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
         async fn start(_: Configured) -> Result<(), StartError> {
-            MARKED_STARTED.store(true, Ordering::SeqCst);
+            MARKED_STARTED[SLOT].store(true, Ordering::SeqCst);
             Ok(())
         }
     }
 
     /// `Marked`'s document, sound, with POLAR_START_MARKER at `marker`, and the process environment that points to it.
     fn marked_process(name: &str, marker: &std::path::Path) -> impl Env + 'static {
-        let mut doc = scaffold_document::<Marked>();
+        let mut doc = scaffold_document::<Marked<0>>();
         for variable in doc
             .document
             .sections
@@ -2126,28 +2128,53 @@ mod tests {
         move |var: &str| (var == "POLAR_CONFIG").then(|| config.clone())
     }
 
+    /// `Marked::<SLOT>` run with no marker, as when polar-init has not run: it exits 1 and is not started.
+    fn run_unmarked<const SLOT: usize>(name: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started-by-polar-init");
+        let status = run_with::<Marked<SLOT>>(&[], marked_process(name, &marker));
+        assert_eq!(status, 1);
+        assert!(
+            !MARKED_STARTED[SLOT].load(Ordering::SeqCst),
+            "it was not started"
+        );
+    }
+
+    /// `Marked::<SLOT>` run with the marker polar-init leaves: its exit status, and whether the marker is left.
+    fn run_marked<const SLOT: usize>(name: &str) -> (u8, bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started-by-polar-init");
+        std::fs::write(&marker, b"").unwrap();
+        let status = run_with::<Marked<SLOT>>(&[], marked_process(name, &marker));
+        (status, marker.exists())
+    }
+
     /// docs/architecture/deployments.md, step 4: an agent's container restarted alone (its liveness probe's kill) finds
     /// no marker, since polar-init has not run, and exits 1, so the pod's restart rule restarts the whole pod.
     #[test]
     fn an_agent_started_without_polar_init_having_run_exits_one_and_is_not_started() {
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("started-by-polar-init");
-        MARKED_STARTED.store(false, Ordering::SeqCst);
-        let status = run_with::<Marked>(&[], marked_process("unmarked", &marker));
-        assert_eq!(status, 1);
-        assert!(!MARKED_STARTED.load(Ordering::SeqCst), "it was not started");
+        run_unmarked::<0>("unmarked");
     }
 
     #[test]
     fn an_agent_started_after_polar_init_takes_the_marker_and_starts() {
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("started-by-polar-init");
-        std::fs::write(&marker, b"").unwrap();
-        MARKED_STARTED.store(false, Ordering::SeqCst);
-        let status = run_with::<Marked>(&[], marked_process("marked", &marker));
-        assert!(MARKED_STARTED.load(Ordering::SeqCst), "it was started");
-        assert!(!marker.exists(), "the marker is used once");
+        let (status, marker_left) = run_marked::<1>("marked");
+        assert!(MARKED_STARTED[1].load(Ordering::SeqCst), "it was started");
+        assert!(!marker_left, "the marker is used once");
         assert_eq!(status, 1, "and, ending, it exits 1 as every agent does");
+    }
+
+    /// The two tests above at once, in the order that failed the second when they shared one record: the first runs
+    /// whole, on a thread of its own, between the second's start and its check that it was started.
+    #[test]
+    fn the_marker_tests_keep_their_own_record_when_they_run_at_once() {
+        let (status, marker_left) = run_marked::<2>("marked-at-once");
+        std::thread::spawn(|| run_unmarked::<3>("unmarked-at-once"))
+            .join()
+            .unwrap();
+        assert!(MARKED_STARTED[2].load(Ordering::SeqCst), "it was started");
+        assert!(!marker_left, "the marker is used once");
+        assert_eq!(status, 1);
     }
 
     #[test]
