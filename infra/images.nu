@@ -192,6 +192,12 @@ export def published_ref [from: string, row: record, arch: string, tag: string =
     $"($from | str trim --right --char '/')/polar-($row.image):($t)-(arch_of $arch)"
 }
 
+# The arguments of an `import` of `names` from `from`, the third-party images left to the caller, reading the images
+# published under `tag` (a release's version) when one is given and the table's tags otherwise. up.nu runs it so.
+export def import_args [names: list<string>, from: string, tag: string] {
+    $names ++ ["--from" $from "--skip-mirrors"] ++ (if ($tag | is-empty) { [] } else { ["--tag" $tag] })
+}
+
 # Tags given on the command line: comma-separated text, which a shell can pass (a `list<string>` flag of a script's `main`
 # cannot be given from a shell: it arrives as the text "[...]").
 export def tags_given [text: string] {

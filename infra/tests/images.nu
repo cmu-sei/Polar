@@ -24,7 +24,7 @@
 # How images are named when they are published and imported, and which ones.
 
 use std/assert
-use ../images.nu [arch_of, external_source, import_rows, node_containers_of, unprepared, ours, publish_tags, published_ref, tags_given, published_rows, split_ref, system_of]
+use ../images.nu [arch_of, external_source, import_rows, node_containers_of, unprepared, import_args, ours, publish_tags, published_ref, tags_given, published_rows, split_ref, system_of]
 
 def sample [] {
     [
@@ -98,6 +98,13 @@ def main [] {
                 let row = { image: "cassini", tag: "latest", kind: "nix" }
                 assert equal (published_ref "docker.io/acme" $row "arm64" "2.0.0") "docker.io/acme/polar-cassini:2.0.0-arm64"
                 assert equal (published_ref "docker.io/acme" $row "amd64" "") "docker.io/acme/polar-cassini:latest-amd64"
+            }
+        }
+        {
+            name: "an import names its images and source, and its release tag only when one is given"
+            body: {
+                assert equal (import_args ["cassini" "jira-observer"] "docker.io/acme" "") ["cassini" "jira-observer" "--from" "docker.io/acme" "--skip-mirrors"]
+                assert equal (import_args ["cassini"] "docker.io/acme" "2.0.0") ["cassini" "--from" "docker.io/acme" "--skip-mirrors" "--tag" "2.0.0"]
             }
         }
         {

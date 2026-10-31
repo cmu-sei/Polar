@@ -455,12 +455,12 @@ def target_images [target: string] {
 # (--import-from; a third-party image from its own registry), then built from this checkout and pushed (--dev). The render asks
 # the agents' images for their scaffolds, and a target that pins its images by digest names the ones just pushed. Returns the
 # images it prepared, which the render is checked against.
-def step_images [target: string, in_cluster: bool, dev: bool, import_from: string] {
+def step_images [target: string, in_cluster: bool, dev: bool, import_from: string, import_tag: string] {
     let rows = (target_images $target)
     print $"  ($rows | length) image\(s\) this target runs"
     if ($import_from | is-not-empty) {
         let published = ($rows | where kind != "mirror" | get image)
-        ^$nu.current-exe infra/images.nu import ...$published --from $import_from --skip-mirrors
+        ^$nu.current-exe infra/images.nu import ...(images import_args $published $import_from $import_tag)
         if $env.LAST_EXIT_CODE != 0 { fail $"importing the images from ($import_from) failed \(above\)" }
         if not $dev {
             try { images sync ($rows | where kind == "mirror") } catch {|e| fail $e.msg }
@@ -789,6 +789,7 @@ def main [
     --email: string         # Email for the first admin account
     --allow-dirty           # Publish a gitops target from a working tree with uncommitted changes (the provenance records it)
     --import-from: string = ""  # Copy the published images into the registry first, e.g. docker.io/<account> (infra/images.nu import)
+    --import-tag: string = ""   # With --import-from: the release to import, e.g. 2.0.0 (images published as polar-<image>:<tag>-<arch>)
 ] {
     if not ("infra/render.nu" | path exists) {
         fail "run this from the repo root (infra/render.nu not found)"
@@ -807,6 +808,9 @@ def main [
     # The registry as this target's nodes name it, for every script this run starts (images.nu evicts a node's cached copy by it).
     $env.POLAR_NODE_REGISTRY = (node_registry $target)
 
+    if ($import_tag | is-not-empty) and ($import_from | is-empty) {
+        fail "--import-tag names a release to import: give --import-from too"
+    }
     let plan = (build_plan $config $dev { in_cluster: $in_cluster, import_from: $import_from })
     let enabled = ($plan | where on)
     let waits = (build_waits $config)
@@ -828,7 +832,7 @@ def main [
         match $s.id {
             "preflight" => { step_preflight $config (needs_runtime $plan) }
             "registry" => { cluster-registry ensure $target | ignore }
-            "images" => { $prepared = (step_images $target $in_cluster $dev $import_from) }
+            "images" => { $prepared = (step_images $target $in_cluster $dev $import_from $import_tag) }
             "render" => { step_render $target $prepared $config }
             "namespaces" => { apply_file $config.output_dir "namespaces.yaml" }
             "ca" => { step_ca }
