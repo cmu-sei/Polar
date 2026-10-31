@@ -27,6 +27,9 @@
 //! RustCrypto, matching the rest of this crate.
 
 use crate::admin_action::{AdminActionBody, AdminActionError, SignedAdminAction};
+// ed25519-dalek and p256 are on different `signature` and `pkcs8` majors, so each brings its own traits.
+use ed25519_dalek::Signer as _;
+use ed25519_dalek::pkcs8::DecodePrivateKey as _;
 use p256::ecdsa::signature::{Signer as _, Verifier as _};
 use p256::pkcs8::DecodePrivateKey as _;
 
@@ -118,7 +121,7 @@ pub fn sign(
         Alg::EcdsaP256 => {
             let key = p256::ecdsa::SigningKey::from_pkcs8_der(&der)
                 .map_err(|e| SigningError::BadKey(e.to_string()))?;
-            let point = key.verifying_key().to_encoded_point(false);
+            let point = key.verifying_key().to_sec1_point(false);
             if point.as_bytes() != info.public_key.as_slice() {
                 return Err(SigningError::KeyCertificateMismatch);
             }
@@ -231,6 +234,53 @@ mod tests {
     fn key_that_does_not_match_the_certificate_is_refused() {
         let (cert, _) = identity(&PKCS_ED25519);
         let (_, other_key) = identity(&PKCS_ED25519);
+        assert!(matches!(
+            sign(&body(), &cert, &other_key),
+            Err(SigningError::KeyCertificateMismatch)
+        ));
+    }
+
+    // The same refusals for ECDSA P-256, whose path moved from p256 0.13 to 0.14.
+
+    #[test]
+    fn a_tampered_p256_payload_or_signature_does_not_verify() {
+        let (cert, key) = identity(&PKCS_ECDSA_P256_SHA256);
+        let signed = sign(&body(), &cert, &key).unwrap();
+
+        let mut payload = signed.clone();
+        payload.payload[0] ^= 0xff;
+        assert!(matches!(
+            verify(&payload, &cert),
+            Err(SigningError::BadSignature)
+        ));
+
+        let mut signature = signed.clone();
+        signature.signature[0] ^= 0xff;
+        assert!(matches!(
+            verify(&signature, &cert),
+            Err(SigningError::BadSignature)
+        ));
+
+        let mut short = signed;
+        short.signature.truncate(10);
+        assert!(matches!(
+            verify(&short, &cert),
+            Err(SigningError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn another_p256_authors_certificate_does_not_verify() {
+        let (cert, key) = identity(&PKCS_ECDSA_P256_SHA256);
+        let (other_cert, _) = identity(&PKCS_ECDSA_P256_SHA256);
+        let signed = sign(&body(), &cert, &key).unwrap();
+        assert!(verify(&signed, &other_cert).is_err());
+    }
+
+    #[test]
+    fn a_p256_key_that_does_not_match_the_certificate_is_refused() {
+        let (cert, _) = identity(&PKCS_ECDSA_P256_SHA256);
+        let (_, other_key) = identity(&PKCS_ECDSA_P256_SHA256);
         assert!(matches!(
             sign(&body(), &cert, &other_key),
             Err(SigningError::KeyCertificateMismatch)

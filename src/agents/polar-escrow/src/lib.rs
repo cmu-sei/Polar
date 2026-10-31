@@ -114,9 +114,9 @@ const P256_ENCAPSULATED_LEN: usize = 65;
 pub const P256_WRAPPED_KEY_LEN: usize = P256_ENCAPSULATED_LEN + 32 + 16;
 
 fn wrap_p256(aes_key: &[u8], recipient: &p256::PublicKey) -> Result<Vec<u8>, EscrowError> {
-    use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+    use p256::elliptic_curve::sec1::ToSec1Point as _;
     let recipient =
-        <HpkeKem as hpke::Kem>::PublicKey::from_bytes(recipient.to_encoded_point(false).as_bytes())
+        <HpkeKem as hpke::Kem>::PublicKey::from_bytes(recipient.to_sec1_point(false).as_bytes())
             .map_err(|e| EscrowError::InvalidPublicKey(e.to_string()))?;
     let (encapsulated, sealed) = hpke::single_shot_seal::<HpkeAead, HpkeKdf, HpkeKem>(
         &hpke::OpModeS::Base,

@@ -1601,7 +1601,7 @@ dependencies = [
  "ed25519-dalek",
  "hkdf 0.12.4",
  "neo4rs",
- "p256 0.13.2",
+ "p256 0.14.0",
  "polar",
  "polar-escrow",
  "polar-signing",
@@ -1687,6 +1687,7 @@ checksum = "9c035cb64cba03dad2fb921f3e218785e8cf9a41790da5eb3a1400f62fa2be11"
 dependencies = [
  "cpubits",
  "ctutils",
+ "getrandom 0.4.3",
  "hybrid-array",
  "num-traits",
  "rand_core 0.10.1",
@@ -2314,9 +2315,24 @@ dependencies = [
  "der 0.7.10",
  "digest 0.10.7",
  "elliptic-curve 0.13.8",
- "rfc6979",
+ "rfc6979 0.4.0",
  "signature 2.2.0",
  "spki 0.7.3",
+]
+
+[[package]]
+name = "ecdsa"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0681a4fc24c767085329728d8dfba959af91228aa4610cca4f8ce317ba46ae0"
+dependencies = [
+ "der 0.8.2",
+ "digest 0.11.3",
+ "elliptic-curve 0.14.1",
+ "rfc6979 0.6.0",
+ "signature 3.0.0",
+ "spki 0.8.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -2408,6 +2424,8 @@ dependencies = [
  "group 0.14.0",
  "hkdf 0.13.0",
  "hybrid-array",
+ "pem-rfc7468 1.0.0",
+ "pkcs8 0.11.0",
  "rand_core 0.10.1",
  "sec1 0.8.1",
  "subtle",
@@ -5339,7 +5357,7 @@ version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9863ad85fa8f4460f9c48cb909d38a0d689dba1f6f6988a5e3e0d31071bcd4b"
 dependencies = [
- "ecdsa",
+ "ecdsa 0.16.9",
  "elliptic-curve 0.13.8",
  "primeorder 0.13.6",
  "sha2 0.10.9",
@@ -5351,9 +5369,11 @@ version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2c9239b2dbc807adbbe147e8cf72ea7450c3a0aabe62cb8e75ff4ec22e1f72a"
 dependencies = [
+ "ecdsa 0.17.0",
  "elliptic-curve 0.14.1",
  "primefield",
  "primeorder 0.14.0",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -5362,7 +5382,7 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe42f1670a52a47d448f14b6a5c61dd78fce51856e68edaa38f7ae3a46b8d6b6"
 dependencies = [
- "ecdsa",
+ "ecdsa 0.16.9",
  "elliptic-curve 0.13.8",
  "primeorder 0.13.6",
  "sha2 0.10.9",
@@ -5858,7 +5878,7 @@ dependencies = [
  "cert-issuer-common",
  "credentials-agent-client",
  "credentials_agent_common",
- "p256 0.13.2",
+ "p256 0.14.0",
  "polar",
  "polar-custody",
  "polar-env",
@@ -5888,7 +5908,7 @@ version = "1.0.0"
 dependencies = [
  "cert-issuer-common",
  "libc",
- "p256 0.13.2",
+ "p256 0.14.0",
  "polar-env",
  "polar-escrow",
  "proptest",
@@ -5951,7 +5971,7 @@ dependencies = [
  "aes-gcm",
  "base64 0.22.1",
  "hpke",
- "p256 0.13.2",
+ "p256 0.14.0",
  "proptest",
  "rand 0.10.3",
  "rkyv",
@@ -6216,7 +6236,7 @@ dependencies = [
  "base64 0.22.1",
  "cert-issuer-common",
  "ed25519-dalek",
- "p256 0.13.2",
+ "p256 0.14.0",
  "polar-signing",
  "proptest",
  "rcgen",
@@ -6383,7 +6403,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c9f42978c78a00e3d68f69fc03e57a234debae69da4020a4fb588fcdcd07b06"
 dependencies = [
  "elliptic-curve 0.14.1",
+ "once_cell",
  "primefield",
+ "serdect",
  "wnaf",
 ]
 
@@ -6933,6 +6955,16 @@ checksum = "f8dd2a808d456c4a54e300a23e9f5a67e122c3024119acbfd73e3bf664491cb2"
 dependencies = [
  "hmac 0.12.1",
  "subtle",
+]
+
+[[package]]
+name = "rfc6979"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4a459cddafb3fe76b31fd8f1108007566c40301feb64dc7b54656eb7388172b"
+dependencies = [
+ "crypto-bigint 0.7.10",
+ "hmac 0.13.0",
 ]
 
 [[package]]

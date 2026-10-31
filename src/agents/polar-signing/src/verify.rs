@@ -32,7 +32,7 @@ use crate::canonical::CanonicalError;
 use crate::cert;
 use crate::document::{Algorithm, Document, Domain, signing_input_in};
 use cert_issuer_common::capability::{Capability, extract_capabilities};
-use ed25519_dalek::Verifier as _;
+use p256::ecdsa::signature::Verifier as _;
 use x509_parser::certificate::X509Certificate;
 use x509_parser::der_parser::oid::Oid;
 use x509_parser::time::ASN1Time;

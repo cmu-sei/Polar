@@ -26,8 +26,11 @@
 use crate::canonical::CanonicalError;
 use crate::cert;
 use crate::document::{Algorithm, Document, Domain, SignatureBlock, signing_input_in};
+// ed25519-dalek and p256 are on different `signature` and `pkcs8` majors, so each brings its own traits.
 use ed25519_dalek::Signer as _;
 use ed25519_dalek::pkcs8::DecodePrivateKey as _;
+use p256::ecdsa::signature::Signer as _;
+use p256::pkcs8::DecodePrivateKey as _;
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -96,7 +99,7 @@ pub fn sign_in(
         Algorithm::EcdsaP256Sha256 => {
             let key = p256::ecdsa::SigningKey::from_pkcs8_der(&key_der)
                 .map_err(|e| SignError::BadKey(e.to_string()))?;
-            let point = key.verifying_key().to_encoded_point(false);
+            let point = key.verifying_key().to_sec1_point(false);
             if point.as_bytes() != public_key.as_slice() {
                 return Err(SignError::KeyCertificateMismatch);
             }
