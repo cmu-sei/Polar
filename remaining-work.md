@@ -267,7 +267,10 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
   fixes above: alone, main 0 of 3 and fixed 2 of 3; under load (five copies, twelve busy loops) 0 of 15 each. So it is
   on main, and not made by those fixes (they touch registration, the custody report and another test). Its topic's
   stall rule should refuse the processor's publishes for now rather than end it (second review, finding A). To do:
-  capture its debug log and find whether the verdict ends it before the reader's waiting reaches the session. "the budget was exhausted" (`tests/backpressure.rs:680`): the processor did
+  capture its debug log and find whether the verdict ends it before the reader's waiting reaches the session. Rerun 2026-10-31 on a quiet machine (load average 1 to 3,
+  after the arm64 build): 10 of 10 alone and the whole binary 3 of 3 (17 tests each). It fails only at a load average of
+  15 to 40, where the processor itself is starved of CPU and really does not acknowledge within `T_stall`; whether ending
+  it then is wrong (a starved client looks stalled) or right is the open question, not a race seen on a quiet machine. "the budget was exhausted" (`tests/backpressure.rs:680`): the processor did
   not exhaust the budget within its 10 s. It fails the same on main (`e3d0a29e`, 2 of 3 runs alone with the load
   average 10 to 20 from another build), so it is not the names race. Once, with the names fix in (3 runs alone; not
   seen in main's 3), "a processor holding back its own topic is not cut for acknowledgements the broker has not read"
