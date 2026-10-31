@@ -7,11 +7,12 @@ use crate::client::StorageClient;
 use crate::config::RepoMapping;
 use crate::credentials;
 use crate::mappings;
+use crate::observed::Observed;
 use cassini_types::ClientEvent;
 use git_agent_common::GitRepositoryMessage;
 use orchestrator_core::{
     backend::BuildBackend,
-    types::{BuildRequest, SourceRef, SourceRefError, subjects::BUILD_REQUESTS_TOPIC},
+    types::{BuildRequest, BuildState, SourceRef, SourceRefError, subjects::BUILD_REQUESTS_TOPIC},
 };
 use polar::RkyvError;
 use polar::cassini::CassiniClient;
@@ -31,6 +32,9 @@ use uuid::Uuid;
 
 const REGISTRY_ACTOR_NAME: &str = "build-registry";
 
+/// How many commits the supervisor remembers having taken for a build (see `Observed`).
+const OBSERVED_COMMITS: usize = 1024;
+
 /// What the supervisor is told: the broker's events, and the builder's.
 #[derive(Debug)]
 pub enum SupervisorMessage {
@@ -41,6 +45,8 @@ pub enum SupervisorMessage {
     PrepareShutdown,
     /// A runtime section was replaced.
     RuntimeChanged { section: String },
+    /// Time to remove the finished jobs that are past their retention.
+    SweepJobs,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -73,6 +79,8 @@ pub struct SupervisorState {
     mappings: Vec<RepoMapping>,
     /// How many builds run at once, and who waits.
     admission: Admission,
+    /// The commits the git observer has shown, so that one is not built twice for being reported twice.
+    observed: Observed,
     draining: bool,
 }
 
@@ -149,26 +157,47 @@ impl OrchestratorSupervisor {
                     GitRepositoryMessage::RefUpdated {
                         repo,
                         ref_name,
+                        old,
                         new,
                         observed_at,
-                        ..
-                    } => match Self::build_request_from_ref_update(
-                        &Self::current_config(state),
-                        &repo,
-                        &ref_name,
-                        &new,
-                        &observed_at,
-                    ) {
-                        Ok(Some(request)) => request,
-                        Ok(None) => {
-                            tracing::debug!(repo = ?repo, "ref update on unmapped repo — not building");
+                    } => {
+                        // The observer reports every ref each time it looks, moved or not. Nothing moved.
+                        if old.as_deref() == Some(new.as_str()) {
+                            tracing::debug!(ref_name = %ref_name, commit = %new, "ref reported unchanged; not building");
                             return Ok(());
                         }
-                        Err(e) => {
-                            warn!(error = %e, "ignored malformed RefUpdated");
-                            return Ok(());
+                        match Self::build_request_from_ref_update(
+                            &Self::current_config(state),
+                            &repo,
+                            &ref_name,
+                            &new,
+                            &observed_at,
+                        ) {
+                            Ok(Some(request)) => {
+                                // A restarted observer reports each ref from nothing, so a commit already built
+                                // arrives again with no `old`.
+                                if let SourceRef::Git { url, commit_sha } = &request.source {
+                                    if !state.observed.first_sight(url, commit_sha) {
+                                        tracing::info!(
+                                            ref_name = %ref_name,
+                                            commit = %commit_sha,
+                                            "this commit was already taken for a build; not building it again"
+                                        );
+                                        return Ok(());
+                                    }
+                                }
+                                request
+                            }
+                            Ok(None) => {
+                                tracing::debug!(repo = ?repo, "ref update on unmapped repo — not building");
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "ignored malformed RefUpdated");
+                                return Ok(());
+                            }
                         }
-                    },
+                    }
                     // Commits are built when a ref moves to them, not on discovery.
                     GitRepositoryMessage::CommitDiscovered { .. } => return Ok(()),
                 }
@@ -180,7 +209,6 @@ impl OrchestratorSupervisor {
             }
         };
 
-        // TODO: deduplicate requests (e.g. a ref observed twice) before building.
         if let Err(e) = Self::handle_build_requested(self, myself, state, request).await {
             tracing::error!(error = %e, "failed to handle build request");
         }
@@ -262,6 +290,15 @@ impl Actor for OrchestratorSupervisor {
         let mappings = args.config.repo_mappings.clone();
         let admission = Admission::new(args.config.build_cap());
         tracing::info!(cap = admission.cap(), "builds run at most this many at once; the rest wait");
+        let retention = args.config.retention();
+        let sweep = args.config.sweep_interval();
+        tracing::info!(
+            succeeded_secs = retention.succeeded.as_secs(),
+            failed_secs = retention.failed.as_secs(),
+            sweep_secs = sweep.as_secs(),
+            "finished jobs are removed when they are this old, by how they ended"
+        );
+        myself.send_interval(sweep, || SupervisorMessage::SweepJobs);
         Ok(SupervisorState {
             backend: args.backend,
             registry,
@@ -273,6 +310,7 @@ impl Actor for OrchestratorSupervisor {
             crypto: Arc::new(crypto),
             mappings,
             admission,
+            observed: Observed::new(OBSERVED_COMMITS),
             draining: false,
         })
     }
@@ -316,6 +354,20 @@ impl Actor for OrchestratorSupervisor {
                     Self::load_mappings(state).await;
                 } else if section == credentials::SECTION_NAME {
                     Self::apply_credentials(state).await;
+                }
+            }
+            SupervisorMessage::SweepJobs => {
+                if !state.draining {
+                    // Off the supervisor's own turn: listing and deleting are the cluster's to answer.
+                    let backend = Arc::clone(&state.backend);
+                    let retention = state.config.retention();
+                    tokio::spawn(async move {
+                        match backend.reap(&retention).await {
+                            Ok(removed) if removed.is_empty() => tracing::debug!("no finished job is past its retention"),
+                            Ok(removed) => info!(removed = removed.len(), "finished jobs past their retention were removed"),
+                            Err(e) => warn!("could not remove the finished jobs past their retention: {e}"),
+                        }
+                    });
                 }
             }
             SupervisorMessage::PrepareShutdown => {
@@ -529,6 +581,14 @@ impl OrchestratorSupervisor {
         };
         if state.draining {
             return Ok(());
+        }
+        // A commit whose build did not succeed is tried again when it is next reported.
+        if let Ok(Some(record)) = ractor::call_t!(state.registry, RegistryMessage::Get, 5000, id) {
+            if record.state != BuildState::Succeeded {
+                if let SourceRef::Git { url, commit_sha } = &record.request.source {
+                    state.observed.forget(url, commit_sha);
+                }
+            }
         }
         if let Some(next) = state.admission.finished(id) {
             tracing::info!(build_id = %next.build_id, "a place is free; the next build starts");

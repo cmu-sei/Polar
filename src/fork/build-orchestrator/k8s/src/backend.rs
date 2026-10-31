@@ -1,14 +1,14 @@
 use async_trait::async_trait;
 use kube::{Client, Config};
 use orchestrator_core::backend::{
-    BackendJobHandle, BuildBackend, JobGraphIdentity, JobStatus, LogStream, SubmittedJob,
+    BackendJobHandle, BuildBackend, JobGraphIdentity, JobStatus, LogStream, Retention, SubmittedJob,
 };
 use orchestrator_core::error::BackendError;
 use orchestrator_core::types::{BuildSpec, SourceRef};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{error, info, instrument};
 
-use crate::job::{JobOptions, build_job_manifest_as, free_account, git_secret_name_for_build, job_name_for_build};
+use crate::job::{JobOptions, build_job_manifest_as, expired, free_account, git_secret_name_for_build, job_name_for_build};
 
 pub struct KubernetesBackend {
     client: Client,
@@ -241,6 +241,49 @@ impl BuildBackend for KubernetesBackend {
 
         tracing::info!(handle = %handle, "kubernetes Job deleted for cancellation");
         Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn reap(&self, retention: &Retention) -> Result<Vec<String>, BackendError> {
+        use k8s_openapi::api::batch::v1::Job;
+        use kube::api::{Api, DeleteParams, ListParams, Preconditions};
+
+        let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.options.namespace);
+        // Only this orchestrator's own jobs: whatever else is in the namespace is not its to remove.
+        let listed = jobs
+            .list(&ListParams::default().labels("app.kubernetes.io/managed-by=build-orchestrator"))
+            .await
+            .map_err(|e| BackendError::Unreachable(format!("could not list the jobs to remove the old ones: {e}")))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+            .unwrap_or_default();
+
+        let mut removed = Vec::new();
+        for job in expired(&listed.items, now, retention) {
+            let (Some(name), Some(uid)) = (&job.metadata.name, &job.metadata.uid) else {
+                continue;
+            };
+            // Background, so that the Job's pods go with it (a Job deleted through the API alone leaves them), and
+            // the uid, so that a Job made again under the same name is not the one removed.
+            let params = DeleteParams {
+                preconditions: Some(Preconditions {
+                    uid: Some(uid.clone()),
+                    resource_version: None,
+                }),
+                ..DeleteParams::background()
+            };
+            match jobs.delete(name, &params).await {
+                Ok(_) => {
+                    info!(job = %name, "removed a finished job that is past its retention");
+                    removed.push(name.clone());
+                }
+                // Something else removed it first, which is the outcome wanted.
+                Err(kube::Error::Api(status)) if status.code == 404 || status.code == 409 => {}
+                Err(e) => tracing::warn!(job = %name, error = %e, "could not remove a finished job"),
+            }
+        }
+        Ok(removed)
     }
 
     async fn logs(&self, handle: &BackendJobHandle) -> Result<LogStream, BackendError> {

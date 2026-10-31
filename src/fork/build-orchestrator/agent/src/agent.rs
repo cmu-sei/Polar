@@ -88,6 +88,7 @@ impl PolarAgent for BuildOrchestrator {
                 options.workspace_size_limit = k8s.workspace_size_limit.clone();
                 options.image_pull_policy = k8s.image_pull_policy.clone();
                 options.keep_git = k8s.keep_git;
+                options.retention = config.retention();
                 options.identity = k8s
                     .identity
                     .as_deref()

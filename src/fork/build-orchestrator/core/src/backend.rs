@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use rkyv::Archive;
 use serde::{Deserialize, Serialize};
@@ -68,6 +70,32 @@ pub enum JobStatus {
     Unknown,
 }
 
+/// How long a finished job is kept, by how it ended. A job that failed is kept longer than one that succeeded:
+/// its pod and events are what someone reads to find out why, while a success has said all it has to (its logs
+/// went to the object store, and its provenance to the graph, as it finished).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retention {
+    pub succeeded: Duration,
+    pub failed: Duration,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self {
+            succeeded: Duration::from_secs(60 * 60),
+            failed: Duration::from_secs(24 * 60 * 60),
+        }
+    }
+}
+
+impl Retention {
+    /// The longest any finished job is kept: what a backend's own expiry (Kubernetes' TTL) is set to, so that
+    /// jobs are still collected if nothing is applying this policy.
+    pub fn longest(&self) -> Duration {
+        self.succeeded.max(self.failed)
+    }
+}
+
 /// Boxed async log stream. Erases the backend-specific concrete type.
 pub type LogStream = Box<dyn AsyncRead + Send + Unpin>;
 
@@ -101,6 +129,12 @@ pub trait BuildBackend: Send + Sync {
     /// Stream logs from a running or recently completed job.
     /// May fail if the job has not yet started or logs have been GC'd by TTL.
     async fn logs(&self, handle: &BackendJobHandle) -> Result<LogStream, BackendError>;
+
+    /// Remove the finished jobs that are older than `retention` allows, and return their names. A job that has
+    /// not finished is never touched. A backend with nothing to clean up keeps this default.
+    async fn reap(&self, _retention: &Retention) -> Result<Vec<String>, BackendError> {
+        Ok(Vec::new())
+    }
 
     /// Human-readable backend identifier for structured logs.
     fn name(&self) -> &'static str;

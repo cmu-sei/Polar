@@ -97,6 +97,11 @@ let BuildOrchestratorValues =
           -- The most builds at once, which a build's pipeline makes costly (CPU, memory, disk on the node). Requests
           -- over it wait their turn. No more run than there are slots.
           , maxConcurrentBuilds : Natural
+          -- How long a finished job (and its pod) stays in the cluster, by how it ended, in seconds. Its logs are in
+          -- the object store and its provenance in the graph by then, so a success need stay only briefly; a failure
+          -- longer, for someone to read what Kubernetes recorded. The orchestrator removes jobs as they pass it, and
+          -- Kubernetes' own expiry on each job is the longer of the two, for when the orchestrator is not running.
+          , jobRetention : { succeededSeconds : Natural, failedSeconds : Natural }
           }
       }
 
@@ -204,6 +209,13 @@ let configuration =
                                       , workspace_size_limit = JSON.string v.workspaceSizeLimit
                                       -- The pipeline records which commit and tree it built, so it needs the repository.
                                       , keep_git = JSON.bool True
+                                      , retention =
+                                          JSON.object
+                                            ( toMap
+                                                { succeeded_secs = JSON.natural v.jobRetention.succeededSeconds
+                                                , failed_secs = JSON.natural v.jobRetention.failedSeconds
+                                                }
+                                            )
                                       , resources =
                                           merge
                                             { Some =

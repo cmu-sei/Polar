@@ -54,6 +54,7 @@
 //!   not Kubernetes's. A failed job is a terminal event from k8s's perspective.
 
 use orchestrator_core::WORKSPACE_PATH;
+use orchestrator_core::backend::Retention;
 use std::collections::BTreeMap;
 
 use k8s_openapi::{
@@ -128,6 +129,45 @@ pub fn free_account<'a>(accounts: &'a [String], jobs: &[Job]) -> Option<&'a Stri
     accounts.iter().find(|a| !held.contains(a))
 }
 
+/// How a finished Job ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    Succeeded,
+    Failed,
+}
+
+/// How a Job ended and when (seconds since the epoch), if it has: its Complete or Failed condition, once true. A
+/// Job that has not finished, or whose condition has no time, has no end.
+pub fn ended(job: &Job) -> Option<(Ended, i64)> {
+    job.status.as_ref()?.conditions.as_ref()?.iter().find_map(|c| {
+        let how = match c.type_.as_str() {
+            "Complete" => Ended::Succeeded,
+            "Failed" => Ended::Failed,
+            _ => return None,
+        };
+        if c.status != "True" {
+            return None;
+        }
+        Some((how, c.last_transition_time.as_ref()?.0.as_second()))
+    })
+}
+
+/// The Jobs that finished longer ago than `retention` allows for how they ended. A Job still running is never one.
+pub fn expired<'a>(jobs: &'a [Job], now: i64, retention: &Retention) -> Vec<&'a Job> {
+    jobs.iter()
+        .filter(|job| {
+            let Some((how, at)) = ended(job) else {
+                return false;
+            };
+            let keep = match how {
+                Ended::Succeeded => retention.succeeded,
+                Ended::Failed => retention.failed,
+            };
+            now.saturating_sub(at) > i64::try_from(keep.as_secs()).unwrap_or(i64::MAX)
+        })
+        .collect()
+}
+
 /// The pod additions that give each job a certificate of its own: the library's `polar-init` init container
 /// with its projected token, the volume the certificate is written to, and what the main container is told.
 /// Read from the configuration file as JSON (`serde_json`), since the file's loader lowercases the keys of a
@@ -199,6 +239,10 @@ pub struct JobOptions {
     /// Keep the repository's `.git` in the workspace. The instrumented pipeline records which commit and tree it
     /// built, so it needs it; a pipeline that only reads source does not.
     pub keep_git: bool,
+    /// How long finished jobs are kept. The orchestrator applies it by outcome (`expired`); Kubernetes' own expiry
+    /// on each Job is set to the longest of them, so that jobs are still collected if the orchestrator is not
+    /// running to apply it.
+    pub retention: Retention,
 }
 
 impl JobOptions {
@@ -214,6 +258,7 @@ impl JobOptions {
             identity: None,
             accounts: Vec::new(),
             keep_git: false,
+            retention: Retention::default(),
         }
     }
 }
@@ -355,7 +400,7 @@ pub fn build_job_manifest_as(spec: &BuildSpec, options: &JobOptions, account: Op
         ..Default::default()
     };
 
-    assemble_job(job_name, namespace, labels, annotations, pod_spec)
+    assemble_job(job_name, namespace, labels, annotations, pod_spec, options.retention.longest())
 }
 
 // ── Init container ────────────────────────────────────────────────────────────
@@ -809,6 +854,7 @@ fn assemble_job(
     labels: BTreeMap<String, String>,
     annotations: BTreeMap<String, String>,
     pod_spec: PodSpec,
+    keep_finished: std::time::Duration,
 ) -> Job {
     let pod_template = PodTemplateSpec {
         metadata: Some(ObjectMeta {
@@ -831,9 +877,10 @@ fn assemble_job(
             // No retries — a failed job is a terminal event. The orchestrator
             // decides whether to retry at a higher level.
             backoff_limit: Some(0),
-            // Clean up completed jobs after one hour. Logs should be
-            // collected by Polar before this TTL fires.
-            ttl_seconds_after_finished: Some(3600),
+            // Kubernetes removes a finished job after the longest the retention policy keeps one. The orchestrator
+            // removes them sooner by how they ended (`expired`); this is for when it is not running. A job's
+            // logs go to the object store as it finishes, before either fires.
+            ttl_seconds_after_finished: Some(i32::try_from(keep_finished.as_secs()).unwrap_or(i32::MAX)),
             ..Default::default()
         }),
         ..Default::default()
@@ -1342,6 +1389,64 @@ mod tests {
     fn a_job_without_an_identity_holds_no_account() {
         let job = build_job_manifest(&git_spec(), &JobOptions::new("polar-builds"));
         assert_eq!(account_held_by(&job), None);
+    }
+
+    /// A Job whose one condition became true at `at` (seconds since the epoch).
+    fn a_job_that_ended(condition: &str, at: i64) -> Job {
+        use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+        let mut job = a_job_as("build-job-1", &[]);
+        job.status = Some(JobStatus {
+            conditions: Some(vec![JobCondition {
+                type_: condition.to_string(),
+                status: "True".to_string(),
+                last_transition_time: Some(Time(k8s_openapi::jiff::Timestamp::from_second(at).unwrap())),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        job
+    }
+
+    const HOUR: i64 = 60 * 60;
+
+    #[test]
+    fn a_job_is_kept_for_as_long_as_its_outcome_is_retained() {
+        let retention = Retention::default();
+        let now = 100 * 24 * HOUR;
+        let jobs = [
+            a_job_that_ended("Complete", now - 2 * HOUR),
+            a_job_that_ended("Complete", now - HOUR / 2),
+            a_job_that_ended("Failed", now - 2 * HOUR),
+            a_job_that_ended("Failed", now - 25 * HOUR),
+        ];
+        let gone: Vec<usize> = expired(&jobs, now, &retention)
+            .iter()
+            .map(|j| jobs.iter().position(|k| std::ptr::eq(k, *j)).unwrap())
+            .collect();
+        assert_eq!(gone, vec![0, 3], "an old success and a very old failure; a recent one of each stays");
+    }
+
+    #[test]
+    fn a_job_that_has_not_finished_is_never_expired() {
+        let now = 100 * 24 * HOUR;
+        let running = a_job_as("build-job-1", &[]);
+        let not_true = a_job_as("build-job-1", &[("Failed", "False")]);
+        // A finished one with no time on its condition cannot be shown to be old.
+        let mut untimed = a_job_as("build-job-1", &[("Complete", "True")]);
+        untimed.status.as_mut().unwrap().conditions.as_mut().unwrap()[0].last_transition_time = None;
+        assert!(expired(&[running, not_true, untimed], now, &Retention::default()).is_empty());
+    }
+
+    #[test]
+    fn kubernetes_keeps_a_finished_job_as_long_as_the_longest_retention() {
+        let mut options = JobOptions::new("polar-builds");
+        options.retention = Retention {
+            succeeded: std::time::Duration::from_secs(600),
+            failed: std::time::Duration::from_secs(7200),
+        };
+        let job = build_job_manifest(&git_spec(), &options);
+        assert_eq!(job.spec.unwrap().ttl_seconds_after_finished, Some(7200));
     }
 
     #[test]

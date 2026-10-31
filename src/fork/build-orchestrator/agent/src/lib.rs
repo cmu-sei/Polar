@@ -7,5 +7,6 @@ pub mod credentials;
 pub mod error;
 pub mod keys;
 pub mod mappings;
+pub mod observed;
 pub mod settings;
 mod test;

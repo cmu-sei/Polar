@@ -95,6 +95,49 @@ pub struct KubernetesBackendConfig {
     /// Leave the repository's `.git` in each job's workspace, for a pipeline that records which commit it built.
     #[serde(default)]
     pub keep_git: bool,
+
+    /// How long finished jobs are kept. Unset, the defaults of `RetentionConfig`.
+    #[serde(default)]
+    pub retention: RetentionConfig,
+}
+
+/// How long finished jobs stay in the cluster, and how often the orchestrator looks for those past it. A job's logs
+/// are in the object store and its provenance is in the graph by the time it finishes, so what stays is the Job and
+/// its pod, for someone to read what Kubernetes recorded: briefly for a build that succeeded, longer for one that
+/// failed.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionConfig {
+    /// Seconds a job that succeeded is kept. An hour unless set.
+    #[serde(default = "an_hour")]
+    pub succeeded_secs: u64,
+    /// Seconds a job that failed is kept. A day unless set.
+    #[serde(default = "a_day")]
+    pub failed_secs: u64,
+    /// Seconds between looks for jobs past their retention. Five minutes unless set, and never under ten.
+    #[serde(default = "five_minutes")]
+    pub sweep_secs: u64,
+}
+
+fn an_hour() -> u64 {
+    60 * 60
+}
+
+fn a_day() -> u64 {
+    24 * 60 * 60
+}
+
+fn five_minutes() -> u64 {
+    5 * 60
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            succeeded_secs: an_hour(),
+            failed_secs: a_day(),
+            sweep_secs: five_minutes(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -106,6 +149,24 @@ pub struct ResourceConfig {
 }
 
 impl OrchestratorConfig {
+    /// How long finished jobs are kept, by how they ended.
+    pub fn retention(&self) -> orchestrator_core::backend::Retention {
+        let r = self.retention_config();
+        orchestrator_core::backend::Retention {
+            succeeded: std::time::Duration::from_secs(r.succeeded_secs),
+            failed: std::time::Duration::from_secs(r.failed_secs),
+        }
+    }
+
+    /// How often to look for jobs past their retention.
+    pub fn sweep_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.retention_config().sweep_secs.max(10))
+    }
+
+    fn retention_config(&self) -> RetentionConfig {
+        self.backend.kubernetes.as_ref().map(|k| k.retention).unwrap_or_default()
+    }
+
     /// How many builds may run at once: the configured cap, and no more than there are ServiceAccounts for jobs to
     /// hold when their certificates come from those.
     pub fn build_cap(&self) -> usize {
@@ -282,5 +343,47 @@ mod build_cap {
         assert_eq!(k.accounts, vec!["build-job-1".to_string(), "build-job-2".to_string()]);
         assert_eq!(c.build_cap(), 2);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod retention {
+    use super::*;
+    use std::time::Duration;
+
+    fn config(kubernetes: serde_json::Value) -> OrchestratorConfig {
+        serde_json::from_value(serde_json::json!({
+            "backend": { "driver": "kubernetes", "command": [], "kubernetes": kubernetes },
+            "storage": {
+                "endpoint_url": "http://localhost:9000", "bucket": "b", "region": "r",
+                "access_key": "abcdefghijklmnop", "secret_key": "abcdefghijklmnop"
+            },
+        }))
+        .expect("a configuration")
+    }
+
+    #[test]
+    fn a_success_is_kept_an_hour_and_a_failure_a_day_unless_set() {
+        let c = config(serde_json::json!({ "namespace": "build-jobs" }));
+        assert_eq!(c.retention().succeeded, Duration::from_secs(3600));
+        assert_eq!(c.retention().failed, Duration::from_secs(86400));
+        assert_eq!(c.sweep_interval(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn what_is_set_is_what_applies_and_the_rest_keeps_its_default() {
+        let c = config(serde_json::json!({
+            "namespace": "build-jobs",
+            "retention": { "succeeded_secs": 600, "failed_secs": 172800 }
+        }));
+        assert_eq!(c.retention().succeeded, Duration::from_secs(600));
+        assert_eq!(c.retention().failed, Duration::from_secs(172800));
+        assert_eq!(c.sweep_interval(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn the_sweep_is_never_more_often_than_every_ten_seconds() {
+        let c = config(serde_json::json!({ "namespace": "build-jobs", "retention": { "sweep_secs": 0 } }));
+        assert_eq!(c.sweep_interval(), Duration::from_secs(10));
     }
 }
