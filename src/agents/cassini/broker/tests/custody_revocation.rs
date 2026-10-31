@@ -362,6 +362,29 @@ async fn a_custodian_the_broker_refuses_as_revoked_destroys_every_key() {
     broker.stop().await;
 }
 
+/// The broker refuses the certificate the custodian connects with, its own, so that is the one the daemon reports
+/// revoked, as when a set it believes names it: its workload's certificate was not revoked. Every key goes all the same.
+/// (The custodian's own revocation reaches it either way: the broker hears the set as it passes and closes the
+/// custodian's connection, perhaps before the set is delivered on it, and then refuses it at its next registration.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custodian_refused_as_revoked_reports_only_its_own_certificate_revoked() {
+    let _serial = serial().await;
+    let broker = TestBroker::start().await;
+    let credentials = Arc::new(CredentialsAgent::connect(&broker).await);
+    let pod = pod(&broker).await;
+    // As above: the broker's refusal is the only word the custodian has.
+    credentials.revoke(std::slice::from_ref(&pod.custodian_serial));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut told = watch(&broker, &pod).await;
+    assert_eq!(
+        told_revoked(&mut told).await,
+        vec![Slot::Custodian],
+        "the workload's certificate, which it also held, was not revoked"
+    );
+    assert!(the_daemon_refuses_to_sign(&pod), "every key goes");
+    broker.stop().await;
+}
+
 /// The custodian's bootstrap through a broker enforcing its floor, with no policy (docs/architecture/key-custody.md,
 /// "Part A's bootstrap: the custodian"): the custodian asks for its workload's client certificate on its own session,
 /// the credentials agent answers, and the certificate is installed for the workload to sign with.

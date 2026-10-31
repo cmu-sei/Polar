@@ -1223,6 +1223,12 @@ another agent stays in the workload: it needs no key the daemon holds, and the c
    driving a pure state machine (`polar-custody/daemon/src/bootstrap.rs`); a registration refused as revoked
    destroying every key. Through a broker enforcing its floor with no policy, a custodian fetches and installs its
    workload's certificate (`cassini/broker/tests/custody_revocation.rs`).
+   *Found 2026-10-31:* the custodian's own revocation reaches the daemon one of two ways, whichever is first: the set,
+   delivered on its session, or the broker closing that session as it hears the set and refusing the next
+   registration (`cassini-broker.md`, "Revoked certificates"). Both destroy every key. The refusal reported every
+   certificate the daemon held as revoked, its workload's too (`[Custodian, Client]`, in either order), where the set
+   reports the custodian's alone; it now reports the custodian's, the certificate the broker refused
+   (`Watcher::refused_as_revoked`).
 5. `polar-init` (`9d51ee7a`): the custodian's certificate through the observer (or, for a bootstrap service, from
    cert-issuer with nothing in it), the plan, `Ready` within four minutes, the bundle from `Certificate`.
 6. `polar-crypto` (`37000c3e`): the daemon holder, one opening path, no bootstrap with a daemon; and the recipient's

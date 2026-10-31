@@ -307,14 +307,20 @@ impl WatcherState {
         }
     }
 
-    /// The broker refused this session as revoked: the custodian's own certificate is. Every key goes.
+    /// The broker refused this session as revoked: the custodian's own certificate is, the one it connects with
+    /// (`polar_custody::own`). Every key goes, and that certificate alone is reported revoked, as when a set it believes
+    /// names it: the workload's were not. (A custody with no custodian certificate cannot have connected; were it told,
+    /// every certificate it holds is taken for revoked.)
     fn refused_as_revoked(&mut self) -> Option<Vec<Slot>> {
         let serials: Vec<String> = {
             let custody = self.args.custody.read().ok()?;
-            [Slot::Custodian, Slot::Client, Slot::Server]
-                .into_iter()
-                .filter_map(|slot| custody.serial(slot))
-                .collect()
+            match custody.serial(Slot::Custodian) {
+                Some(own) => vec![own],
+                None => [Slot::Client, Slot::Server]
+                    .into_iter()
+                    .filter_map(|slot| custody.serial(slot))
+                    .collect(),
+            }
         };
         let revoked = self
             .args
