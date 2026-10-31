@@ -596,7 +596,12 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   Cassini client, so it would publish in-process into its own topics, stamped with its own identity; how the broker
   stamps its own `published_by` needs its own decision. The learned value is optional and late: the state agent needs
   the broker, so the broker never waits for it. This also closes the gap that the broker's health cannot be asked over
-  Cassini.
+  Cassini. The bounds are then observable through the state agent and CONFIGURABLE BY SIGNED CONFIGURATION (the
+  maintainer, 2026-10-30): the controller's tunables and cap are declared variables, changed by a signed configuration
+  document (`c:update-configuration`, polar-schedules, the broker's own ConfigurationActor, reached by the same
+  in-process path on `agent.cassini.configuration`); a one-off action (resetting what the controller learned) would be a
+  signed command. The state agent's warm-start value is an unsigned hint adopted only inside the signed bounds; it can
+  never widen one.
 - [ ] HEALTH IN THE GRAPH, PULLED (decided by the maintainer 2026-10-30, replacing the same day's push design;
   `docs/architecture/soft-state.md`, "Revised by the maintainer's review"). The state agent's writer half asks every
   workload named in its signed configuration on `agent.<name>.health` (implied for every agent; answered by the
