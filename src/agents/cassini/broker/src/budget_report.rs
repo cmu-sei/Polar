@@ -21,61 +21,46 @@
    DM26-0670
 */
 
-//! What the broker's bounds hold and have counted, as a log line every half minute while there is something to say.
-//! The broker has no metrics path of its own (`metrics.rs` is not a module, and `ControlOp::GetBrokerStats` answers
-//! that it is not implemented), so the log is where it goes.
+//! What the broker's bounds hold and have counted, as a log line every half minute while there is something to say,
+//! from the pressure manager (`crate::pressure`, `PressureMsg::Report`). The broker has no metrics path of its own
+//! (`metrics.rs` is not a module, and `ControlOp::GetBrokerStats` answers that it is not implemented), so the log is
+//! where it goes.
 
 use crate::budget::{Budget, BudgetStats};
-use cassini_types::BrokerMessage;
-use ractor::ActorRef;
 use std::time::Duration;
 use tracing::{debug, info};
 
 /// How often the bounds are reported.
 pub const REPORT_EVERY: Duration = Duration::from_secs(30);
 
-/// Reports `budget` every [`REPORT_EVERY`] for as long as `broker` runs: at INFO when anything is held, waits or was
-/// counted since the last report, at DEBUG otherwise.
-pub fn spawn(budget: Budget, broker: ActorRef<BrokerMessage>) {
-    tokio::spawn(async move {
-        let mut last: Option<BudgetStats> = None;
-        let mut every = tokio::time::interval(REPORT_EVERY);
-        every.tick().await;
-        loop {
-            every.tick().await;
-            if matches!(
-                broker.get_status(),
-                ractor::ActorStatus::Stopping | ractor::ActorStatus::Stopped
-            ) {
-                return;
-            }
-            let now = budget.stats();
-            let changed = last.as_ref().is_none_or(|before| {
-                before.refused != now.refused
-                    || before.slow_disconnections != now.slow_disconnections
-                    || before.alarms != now.alarms
-                    || before.charges != now.charges
-            });
-            if now.used > 0 || now.readers_waiting > 0 || changed {
-                info!(
-                    used = now.used,
-                    limit = now.limit,
-                    peak = now.peak,
-                    exhausted = now.exhausted,
-                    readers_waiting = now.readers_waiting,
-                    refused = now.refused,
-                    slow_disconnections = now.slow_disconnections,
-                    alarms = now.alarms,
-                    largest = ?budget.largest_holders(5),
-                    "the broker's memory budget"
-                );
-            } else {
-                debug!(
-                    limit = now.limit,
-                    "the broker's memory budget holds nothing"
-                );
-            }
-            last = Some(now);
-        }
+/// Reports `budget`: at INFO when anything is held, waits or was counted since `last`, at DEBUG otherwise. Returns
+/// what it reported, the next report's `last`.
+pub fn report(budget: &Budget, last: Option<&BudgetStats>) -> BudgetStats {
+    let now = budget.stats();
+    let changed = last.is_none_or(|before| {
+        before.refused != now.refused
+            || before.slow_disconnections != now.slow_disconnections
+            || before.alarms != now.alarms
+            || before.charges != now.charges
     });
+    if now.used > 0 || now.readers_waiting > 0 || changed {
+        info!(
+            used = now.used,
+            limit = now.limit,
+            peak = now.peak,
+            exhausted = now.exhausted,
+            readers_waiting = now.readers_waiting,
+            refused = now.refused,
+            slow_disconnections = now.slow_disconnections,
+            alarms = now.alarms,
+            largest = ?budget.largest_holders(5),
+            "the broker's memory budget"
+        );
+    } else {
+        debug!(
+            limit = now.limit,
+            "the broker's memory budget holds nothing"
+        );
+    }
+    now
 }

@@ -73,6 +73,10 @@ pub enum PressureMsg {
     WarmStart(WarmStart),
     /// The runtime budget's state, for pulled health; none with a fixed budget.
     Snapshot(RpcReplyPort<Option<BudgetSnapshot>>),
+    /// Its own, every `report_every`: report what the bounds hold and have counted (`budget_report::report`).
+    Report,
+    /// What it last reported, none before its first report.
+    Reported(RpcReplyPort<Option<crate::budget::BudgetStats>>),
 }
 
 /// The broker's pressure: the budget's alarm, and the pace of the stall checks.
@@ -84,6 +88,8 @@ pub struct PressureManagerArgs {
     pub subscribers: Option<ActorRef<BrokerMessage>>,
     /// The runtime budget; none keeps the budget as it was given.
     pub control: Option<BudgetControl>,
+    /// How often it reports the bounds (`budget_report::REPORT_EVERY`).
+    pub report_every: Duration,
 }
 
 pub struct PressureState {
@@ -96,6 +102,8 @@ pub struct PressureState {
     /// What the controller last said: what limited the budget, whether it starved, and samples since its last line.
     said: Option<(LimitedBy, bool)>,
     samples_since_said: u32,
+    /// What it last reported.
+    reported: Option<crate::budget::BudgetStats>,
 }
 
 #[ractor::async_trait]
@@ -110,6 +118,7 @@ impl Actor for PressureManager {
         args: PressureManagerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         drop(myself.send_interval(args.bounds.stall_check(), || PressureMsg::Tick));
+        drop(myself.send_interval(args.report_every, || PressureMsg::Report));
         if let Some(control) = &args.control {
             drop(
                 myself.send_interval(control.controller.tunables().sample_every, || {
@@ -125,6 +134,7 @@ impl Actor for PressureManager {
             started: tokio::time::Instant::now(),
             said: None,
             samples_since_said: 0,
+            reported: None,
         })
     }
 
@@ -149,6 +159,15 @@ impl Actor for PressureManager {
                         budget, "the broker's memory budget starts from what was learned"
                     );
                 }
+            }
+            PressureMsg::Report => {
+                state.reported = Some(crate::budget_report::report(
+                    &state.bounds.budget,
+                    state.reported.as_ref(),
+                ));
+            }
+            PressureMsg::Reported(reply) => {
+                let _ = reply.send(state.reported.clone());
             }
             PressureMsg::Snapshot(reply) => {
                 let budget = &state.bounds.budget;
@@ -484,6 +503,33 @@ mod tests {
         }
     }
 
+    /// The bounds are reported by the manager, at its pace, with what they hold; there is no other reporter.
+    #[tokio::test]
+    async fn the_manager_reports_the_bounds() {
+        let bounds = Bounds::new(MAX_FRAME_BYTES, Duration::from_secs(2)).unwrap();
+        let (manager, _) = ractor::Actor::spawn(
+            None,
+            PressureManager,
+            PressureManagerArgs {
+                bounds: bounds.clone(),
+                subscribers: None,
+                control: None,
+                report_every: Duration::from_millis(30),
+            },
+        )
+        .await
+        .unwrap();
+        let _held = bounds.budget.try_charge(1024).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let reported = ractor::call!(manager, PressureMsg::Reported).unwrap();
+        assert_eq!(
+            reported.map(|stats| (stats.used, stats.limit)),
+            Some((1024, MAX_FRAME_BYTES)),
+            "what the bounds hold, reported"
+        );
+        manager.stop(None);
+    }
+
     /// Memory as a test says it is.
     struct Fake(std::sync::Mutex<crate::runtime_budget::MemorySample>);
 
@@ -519,6 +565,7 @@ mod tests {
                     controller: Controller::new(tunables, Duration::from_secs(2), Some(cap)),
                     memory: memory.clone(),
                 }),
+                report_every: crate::budget_report::REPORT_EVERY,
             },
         )
         .await
@@ -573,6 +620,7 @@ mod tests {
                 bounds: fixed.clone(),
                 subscribers: None,
                 control: None,
+                report_every: crate::budget_report::REPORT_EVERY,
             },
         )
         .await
@@ -649,6 +697,7 @@ mod tests {
                 bounds: bounds.clone(),
                 subscribers: Some(listener.clone()),
                 control: None,
+                report_every: crate::budget_report::REPORT_EVERY,
             },
             broker.get_cell(),
         )

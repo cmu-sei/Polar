@@ -450,7 +450,6 @@ impl Actor for Broker {
             })?;
 
             info!("Broker startup complete");
-            crate::budget_report::spawn(args.bounds.budget.clone(), myself.clone());
 
             Ok::<BrokerState, ActorProcessingErr>(BrokerState {
                 listener_mgr: Some(listener_mgr),
@@ -475,21 +474,10 @@ impl Actor for Broker {
         _: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         debug!(actor = ?myself, "Broker started");
-        // Start periodic shutdown check (every 1s while shutting down)
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
-            loop {
-                interval.tick().await;
-                if myself
-                    .send_message(BrokerMessage::CheckShutdownComplete)
-                    .is_err()
-                {
-                    // Broker is gone, exit loop
-                    break;
-                }
-                // Continue loop
-            }
-        });
+        // A periodic shutdown check (every 1s), the broker's own: it ends with the broker.
+        drop(myself.send_interval(Duration::from_secs(1), || {
+            BrokerMessage::CheckShutdownComplete
+        }));
         Ok(())
     }
 
@@ -701,6 +689,7 @@ impl Broker {
                 bounds: bounds.clone(),
                 subscribers: Some(subscribers),
                 control,
+                report_every: crate::budget_report::REPORT_EVERY,
             },
             myself.clone().into(),
         )

@@ -495,7 +495,8 @@ counters; `PressureManager::sample`, `pressure.rs:169`).
   `Backlog::set_high_water` at each check).
 - **A broker built from `Bounds` directly** (a test's) keeps a fixed budget.
 
-**Defaults, MARKED FOR THE MAINTAINER'S REVIEW** (`Tunables`, `runtime_budget.rs:132`):
+**Defaults, MARKED FOR THE MAINTAINER'S REVIEW** (`Tunables`, `runtime_budget.rs:132`). Reviewed 2026-10-31: they
+stay as set until the benchmark (saturated and slow-sink loads) informs them; every one is a variable.
 
 | Tunable | Default |
 |---|---|
@@ -517,6 +518,9 @@ counters; `PressureManager::sample`, `pressure.rs:169`).
 `memory.events`, when the file is present.
 
 **Visible:**
+- The bounds' report (use, peak, readers waiting, refusals, slow-subscriber disconnections, alarms, the largest
+  holders) is the pressure manager's own, every 30 s (`PressureMsg::Report`; `budget_report::report`), and what it
+  last reported is answered (`PressureMsg::Reported`): no task outside the supervision tree reports or decides.
 - The controller logs its decision (budget, ceiling, target, what limited it, drain rate, held, alarm, starvation) when
   what limits it changes, and every ten samples otherwise. It warns when memory falls below the floor.
 - `PressureMsg::Snapshot` answers a typed `BudgetSnapshot` (budget, ceiling, target, `LimitedBy`: `Floor`,

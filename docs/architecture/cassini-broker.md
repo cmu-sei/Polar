@@ -346,8 +346,8 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
 - **A protocol version** at registration (`cassini_types::PROTOCOL_VERSION`): a registration of another version is
   refused by name (`RefusalCode::ProtocolMismatch`), and a first frame that does not decode (an older client's
   registration) with a refusal such a client can decode; either connection is closed.
-- **Observable:** the budget's report every 30 s while something is held, waits or was counted
-  (`broker/src/budget_report.rs`: use, peak, readers waiting, refusals, slow-subscriber disconnections, alarms, the
+- **Observable:** the budget's report every 30 s while something is held, waits or was counted, from the pressure
+  manager (`PressureMsg::Report`, `broker/src/budget_report.rs`: use, peak, readers waiting, refusals, slow-subscriber disconnections, alarms, the
   largest holders), and the log lines above. There is no metrics path in the broker to add them to: `metrics.rs` is
   not a module and `ControlOp::GetBrokerStats` is not implemented.
 - **Also changed:** the Listener's read loop and its delivery write no longer hold an entered span across a wait
