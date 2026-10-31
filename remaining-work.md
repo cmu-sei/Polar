@@ -588,6 +588,17 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   `.unwrap()` of `config.submit(..)` (`credentials-agent/consume/src/authority_judge.rs:822`); the binary took 50 s
   where it takes 5 s alone, and the test passed 3 of 3 alone on the same commit. The submit's error was not captured;
   find which wait in the ConfigurationActor's submit path gives up under load before changing anything.
+- [ ] MERGE UPSTREAM (github.com/cmu-sei/Polar) BEFORE MIGRATING THE BUILD PROCESSOR (the maintainer, 2026-10-31:
+  Vaughn may have been working there). Read 2026-10-31 (fetch only): the merge base is `9aea62f6` (2026-08-07); ours has
+  1058 commits since, `origin/main` 14 (Vaughn, to 2026-10-17, 161 files, +22.7k/-5.9k): the build orchestrator (56
+  files; Blitz's per-run identity request is about its builds), the build processor restructured around cyclops
+  (`312d5dec`, also nufmt and nu-lint), the Kubernetes agents (nodes, namespaces, cluster-scoped identity and
+  multi-observer discovery, a projection cache; ours moved them to the builder since, the hardest part), cert-issuer
+  (liveness and readiness, an eager JWKS fetch), the resolver's configuration schema, `lib`'s graph controller sync
+  operations, pipeline scripts. `origin/polar-operator` (`3c3a4b78`, 2026-10-18): a PolarAgent CRD and operator that
+  keep agents alive with their lifecycle in the graph; it overlaps decisions made since (the health actor's verdict and
+  restart in place, the Reaper owning housekeeping, pulled health in the graph) and needs a design conversation, not
+  only a merge. A plan first: area by area, which side's design holds, tests first.
 - [ ] TYPED RUNTIME DOCUMENTS FROM THE DECLARATIONS (decided by the maintainer 2026-10-31). `polar-sign` renders a
   runtime section from the agent's declared body type (its scaffold), so a missing optional field in a list entry
   becomes `None T` and a present one `Some x`, and the scheduler reads them back as absent. Today (since `50baf2f6`)
