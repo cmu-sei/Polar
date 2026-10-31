@@ -618,6 +618,18 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   multi-instance in the catalog, supersession keyed by `(identity, instance_binding)` for it alone, the instance in the
   certificate and beside `published_by`. Touches the broker's sessions and the credentials agent's ledger: after the
   backpressure merge. A reply to Blitz was drafted for the maintainer.
+- [ ] BACKPRESSURE AS A POLAR CRATE (the maintainer, 2026-10-31: "back-pressure management is something other agents are
+  probably going to want ... This is likely getting pulled out as a polar crate"). What would come out is what knows
+  nothing of Cassini: the budget (reference-counted charges, the alarm and its hysteresis), the runtime controller
+  (the ceiling from MemAvailable, the cgroup limit and PSI; the Little's-law target; additive growth and halving cuts;
+  the floor; the typed snapshot and the warm-start input), the pure stall verdict (`pressure::verdict`), and on the client
+  side the outbox as credit and `publish_when_ready`. Likely users: the processors (Cassini in, Neo4j out, so the
+  drain rate is the graph's write throughput, and the gap waits unbounded today in their mailboxes and the graph
+  controller's queue), git-repo-observer's batches, the credentials agent's ledger under bursts. Shape: a builder
+  facility like the StateActor, a `PressureManager` under the InfrastructureSupervisor, its snapshot to health
+  (introspection), its learned values to the StateActor (self-state), its tunables declared variables changed by signed
+  configuration. Extract when a second user comes, not before; until then keep broker types out of the controller's and
+  the budget's signatures (checked when backpressure merges) so that the move stays mechanical.
 - [ ] THE BROKER AS A USER OF SOFT STATE (agreed with the maintainer 2026-10-30). The broker's runtime budget
   controller (cassini-backpressure.md, "Runtime budget") exposes a typed snapshot and accepts a warm-start value
   (built in backpressure round 4). Next, after the StateActor and pulled health exist: the snapshot goes into the graph
