@@ -408,6 +408,13 @@ reads (18, 22, 24); `FrameUndecodable` (23, sound once the protocol version belo
      was removed.
    - **Also stopped:** a stalled subscriber is now judged when it is above its high water for the stall bound, whether
      or not a publish waits on its topic (the topic's rule ran only while one did).
+   - **A two-step end.** The reader's facts reach the session by message, in order with the stall reports. A reader
+     that began waiting just after its subscriber reported was judged on facts a moment stale, and its processor was
+     ended rather than spared. This was found when the suite ran without logging, failing two runs in three; round 3's
+     tip passed three in three. Now a connection the policy would end is first condemned (`Verdict::Condemn`). It is
+     ended only by a later look, at least an eighth of the stall bound on (`pressure::confirmation`), that still finds
+     so; a look that finds otherwise clears it. This gives the reader's facts a check's time to arrive, and delays a
+     real end by at most one check. After the change, six runs in six passed.
 2. **(14) A session shed under an exhausted budget ends, and its client is told.**
    - **The flow.** A subscriber that sheds tells its session (`SessionShed`). The session asks to be ended
      (`EndSession`, `session.rs:271`). The session manager logs it with the identity and keeps the reason for the

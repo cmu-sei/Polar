@@ -910,6 +910,8 @@ struct Connection {
     waiting: bool,
     /// When it was last spared, and when its last progress before that was.
     spared: Option<(tokio::time::Instant, tokio::time::Instant)>,
+    /// When a judgement first found it should be ended, if one did and none has found otherwise since.
+    condemned: Option<tokio::time::Instant>,
 }
 
 impl SessionAgent {
@@ -941,10 +943,15 @@ impl SessionAgent {
             progressed_since_spared: connection
                 .spared
                 .is_some_and(|(_, before)| connection.progress_at > before),
+            since_condemned: connection.condemned.map(|at| now - at),
         };
         match verdict(stall, facts) {
-            Verdict::Ignore => {}
+            Verdict::Ignore => connection.condemned = None,
+            Verdict::Condemn => {
+                connection.condemned.get_or_insert(now);
+            }
             Verdict::Spare => {
+                connection.condemned = None;
                 connection.control.refuse_for(stall);
                 connection.spared = Some((now, connection.progress_at));
                 info!(
@@ -1113,6 +1120,7 @@ impl Actor for SessionAgent {
                     progress_at: tokio::time::Instant::now(),
                     waiting: false,
                     spared: None,
+                    condemned: None,
                 });
             }
             BrokerMessage::ConnectionProgress { client_id } => {

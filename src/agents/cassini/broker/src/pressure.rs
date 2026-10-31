@@ -255,6 +255,8 @@ pub struct StallFacts {
     pub since_spared: Option<Duration>,
     /// It has made progress since it was last spared.
     pub progressed_since_spared: bool,
+    /// How long since a judgement first found it should be ended, if one did and none has found otherwise since.
+    pub since_condemned: Option<Duration>,
 }
 
 /// What a session does about a stalled subscriber.
@@ -265,8 +267,18 @@ pub enum Verdict {
     /// Spare its connection: its reader refuses for now, for the stall bound, what it cannot admit at once, and reads
     /// on; it is not judged again within that refusal window.
     Spare,
+    /// It would be ended, but its reader's facts may not have reached the session yet (they come in the session's
+    /// mailbox, in order with the stall reports): ended only if a later look still finds so.
+    Condemn,
     /// End its connection.
     End,
+}
+
+/// How long after a connection is first condemned a later look may end it: an eighth of the stall bound, so a
+/// subscriber's reports of one stall check (several subscriptions of a session report together) do not confirm each
+/// other, and the next check's do.
+pub fn confirmation(stall: Duration) -> Duration {
+    stall / 8
 }
 
 /// The one stall policy (cassini-backpressure.md, the second review and the decisions reviewed with the maintainer):
@@ -275,7 +287,8 @@ pub enum Verdict {
 ///   bound is progress for every subscription of the session;
 /// - a connection whose reader waits for room may be stalled by the broker, not by its client: it is spared, and spared
 ///   again only once it has made progress since;
-/// - otherwise its connection is ended.
+/// - otherwise it is condemned, and ended at a later look that still finds so: the reader's facts reach the session
+///   by message, and one that began waiting just after the subscriber reported has a check's time to say so.
 pub fn verdict(stall: Duration, facts: StallFacts) -> Verdict {
     if facts.since_spared.is_some_and(|since| since < stall) {
         return Verdict::Ignore;
@@ -286,7 +299,10 @@ pub fn verdict(stall: Duration, facts: StallFacts) -> Verdict {
     if facts.reader_waiting && (facts.since_spared.is_none() || facts.progressed_since_spared) {
         return Verdict::Spare;
     }
-    Verdict::End
+    match facts.since_condemned {
+        Some(since) if since >= confirmation(stall) => Verdict::End,
+        _ => Verdict::Condemn,
+    }
 }
 
 #[cfg(test)]
@@ -306,6 +322,7 @@ mod tests {
             reader_waiting: false,
             since_spared: None,
             progressed_since_spared: false,
+            since_condemned: Some(STALL),
         }
     }
 
@@ -315,6 +332,28 @@ mod tests {
             verdict(STALL, facts()),
             Verdict::End,
             "no progress, not waiting"
+        );
+        assert_eq!(
+            verdict(
+                STALL,
+                StallFacts {
+                    since_condemned: None,
+                    ..facts()
+                }
+            ),
+            Verdict::Condemn,
+            "first condemned, then ended at a later look"
+        );
+        assert_eq!(
+            verdict(
+                STALL,
+                StallFacts {
+                    since_condemned: Some(confirmation(STALL) - Duration::from_millis(1)),
+                    ..facts()
+                }
+            ),
+            Verdict::Condemn,
+            "not by a report of the same look"
         );
         let progressing = StallFacts {
             since_progress: STALL - Duration::from_millis(1),
@@ -383,29 +422,32 @@ mod tests {
             any::<bool>(),
             proptest::option::of(0u64..5_000),
             any::<bool>(),
+            proptest::option::of(0u64..5_000),
         )
             .prop_map(
-                |(exhausted, progress, reader_waiting, spared, progressed)| StallFacts {
+                |(exhausted, progress, reader_waiting, spared, progressed, condemned)| StallFacts {
                     exhausted,
                     since_progress: Duration::from_millis(progress),
                     reader_waiting,
                     since_spared: spared.map(Duration::from_millis),
                     progressed_since_spared: progressed,
+                    since_condemned: condemned.map(Duration::from_millis),
                 },
             )
     }
 
     proptest! {
         /// A connection is ended only if it is out of its refusal window, made no progress within the bound while the
-        /// budget is exhausted, and cannot be spared (its reader does not wait, or it was spared and made no progress
-        /// since).
+        /// budget is exhausted, cannot be spared (its reader does not wait, or it was spared and made no progress
+        /// since), and was condemned at an earlier look.
         #[test]
         fn a_connection_is_ended_only_when_nothing_spares_it(facts in any_facts()) {
             let ended = verdict(STALL, facts) == Verdict::End;
             let in_window = facts.since_spared.is_some_and(|s| s < STALL);
             let progressing = facts.exhausted && facts.since_progress < STALL;
             let sparable = facts.reader_waiting && (facts.since_spared.is_none() || facts.progressed_since_spared);
-            prop_assert_eq!(ended, !in_window && !progressing && !sparable);
+            let confirmed = facts.since_condemned.is_some_and(|s| s >= confirmation(STALL));
+            prop_assert_eq!(ended, !in_window && !progressing && !sparable && confirmed);
         }
 
         /// A client that never makes progress is spared at most once, however its reader waits, and is ended within
@@ -414,6 +456,7 @@ mod tests {
         fn a_client_that_never_progresses_is_spared_at_most_once(waits in proptest::collection::vec(any::<bool>(), 1..40)) {
             let tick = STALL / 4;
             let mut since_spared: Option<Duration> = None;
+            let mut since_condemned: Option<Duration> = None;
             let mut spares = 0;
             let mut ended_at = None;
             for (n, reader_waiting) in waits.iter().enumerate() {
@@ -423,17 +466,20 @@ mod tests {
                     reader_waiting: *reader_waiting,
                     since_spared,
                     progressed_since_spared: false,
+                    since_condemned,
                 };
                 match verdict(STALL, facts) {
-                    Verdict::Spare => { spares += 1; since_spared = Some(Duration::ZERO); }
+                    Verdict::Spare => { spares += 1; since_spared = Some(Duration::ZERO); since_condemned = None; }
                     Verdict::End => { ended_at = Some(n); break; }
-                    Verdict::Ignore => {}
+                    Verdict::Condemn => { since_condemned.get_or_insert(Duration::ZERO); }
+                    Verdict::Ignore => since_condemned = None,
                 }
                 since_spared = since_spared.map(|s| s + tick);
+                since_condemned = since_condemned.map(|s| s + tick);
             }
             prop_assert!(spares <= 1);
-            if waits.len() > 9 {
-                prop_assert!(ended_at.is_some_and(|n| n <= 8), "ended within two stall bounds: {:?}", ended_at);
+            if waits.len() > 10 {
+                prop_assert!(ended_at.is_some_and(|n| n <= 9), "ended within two stall bounds and a look: {:?}", ended_at);
             }
         }
     }

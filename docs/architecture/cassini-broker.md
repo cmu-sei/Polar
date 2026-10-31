@@ -322,7 +322,8 @@ Phase 1 of cassini-backpressure.md with its decisions, on top of the numbered pu
   acknowledgement, `ConnectionWaiting` when it waits for an admission). A connection spared less than the bound ago is
   not judged again; while the budget is exhausted, an acknowledgement on any topic within the bound is progress; a
   connection whose reader waits for room is spared (its reader refuses for now, and reads on), again only once it has
-  made progress since; otherwise the session cuts it, from outside its Listener (which may be waiting on a write to
+  made progress since; otherwise it is condemned, and a later look (an eighth of the bound on) that still finds so cuts
+  it, from outside its Listener (which may be waiting on a write to
   that client) through the control the Listener gave it (`ConnectionOpened`, a weak handle), and the session manager
   logs it with the identity, the topic, the bytes held and for how long. The session detaches for `R` as on any lost
   connection, and the topic moves again. Recovery from an exhausted budget is so bounded by the stall bound.
