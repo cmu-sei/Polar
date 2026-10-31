@@ -79,6 +79,17 @@ used to record, fixed.)
 - **Register:** Listener (960) → Broker (`broker.rs:679`) → SessionManager (`session.rs:558`): reuses a session
   (595-641) or creates one with the peer identity (662-670) and supersedes older ones (679-683); the Listener stores the
   registration id and the session's address (`listener.rs:1011-1059`).
+  *Since 2026-10-31* the session's address comes with the answer (`BrokerMessage::RegistrationResponse { session }`,
+  from the SessionManager, or the SessionAgent on a re-registration), and the Listener binds its connection to it
+  (`Listener::bind_session`: the session given `ConnectionOpened`, the reader's facts and the publishes sent to it)
+  before it writes the client its registration. Before, it wrote first and then asked the SessionManager for the
+  address from a task (`GetSessionRef`, 100 ms timeout), so a publish the client sent the moment it was told (a facade
+  sends its whole outbox then) could reach the Listener first and was dropped with only an error in the log ("No
+  session ref for listener ... dropping publish"), unanswered: the client's outbox kept it for a next registration that
+  might never come. A publish on a connection with no session bound is now refused for now (`PublishRefusal::
+  Unavailable`, kept and sent again by a facade), never dropped, though a client that waits to be told cannot reach
+  that. Tests: `broker/tests/restart.rs`, the two "taken" tests, with the binding made slow
+  (`cassini_broker::testing::SessionBindingDelay`, feature `testing`, the crate's own tests only).
 - **Subscribe:** Listener (1279) → SessionAgent (`session.rs:1236`) → Broker (`broker.rs:724`) → TopicManager
   (`topic.rs:482`, `ensure_topic_and_subscribe` 103) → SubscriberManager `CreateSubscriber` (`subscriber.rs:391`) →
   TopicAgent `AddSubscriber` (`topic.rs:797`).
@@ -111,6 +122,13 @@ Read 2026-10-22, after stage 5a found the first while measuring (`broker-baselin
   on each change of authority every connection whose certificate is now revoked is closed; the session is kept for the
   retention window, for the identity's next certificate to claim. Tests: `broker/tests/revocation.rs`,
   `custody_revocation.rs`. (Until 2026-10-28 a revoked certificate could still register a watcher: below.)
+  *A revoked connection may be closed before the set that revokes it is delivered on it (2026-10-31).* The broker
+  hears the set in the publisher's Listener, before it passes it on (`handle_publish_request`, `authority.hear`), and
+  the change reaches every Listener (`JudgeSubscriptions`) while the set is still on its way to the subscribers, so a
+  subscriber whose own certificate it names may lose its connection first. Only that connection closes (each Listener
+  judges its own `peer_serial`); its client learns of it from the refusal at its next registration. The custody
+  daemon's custodian is such a subscriber: either way it destroys every key, and either way it now reports only its
+  own certificate revoked ("Watcher sessions", below).
 - **Why:** a replaced pod (a rollout, a Job retry) usually registers before the broker sees the old connection is dead.
   The replacement takes over and inherits what was waiting for the old one.
 - **Fan-out.** A topic delivers every message to every subscriber (`topic.rs:728`). There are no consumer groups.
@@ -138,7 +156,11 @@ custodian's, `custody.<X>`, under a certificate of its own whose key only the da
 - a revoked custodian is refused and closed like any revoked certificate, and the daemon, refused as revoked
   (`ClientEvent::RegistrationRefused` with `RefusalCode::Revoked`, whatever its words), destroys every key and exits; X
   revoked leaves the custodian's session open to
-  hear it;
+  hear it. *Since 2026-10-31* the refused daemon reports its custodian's certificate alone revoked, the one the broker
+  refused (`Watcher::refused_as_revoked`, `polar-custody/daemon/src/watch.rs`); it reported every certificate it held,
+  its workload's too, so the custodian's revocation was reported two ways depending on whether the set or the closed
+  connection reached it first (`custody_revocation.rs`, `the_custodian_s_own_certificate_revoked_destroys_every_key`,
+  and `a_custodian_refused_as_revoked_reports_only_its_own_certificate_revoked`, which failed every time before);
 - a workload cannot open a session as its custodian (it cannot sign as one), so there is nothing to cap.
 
 Removed (2026-10-28): the `watcher` field of both `RegistrationRequest`s and `peer_serial` of the broker's,

@@ -197,17 +197,32 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
   exactly `CUSTODIAN_WINDOW_SECS`: its `record` stamps `now_millis() - age` and `judge` is given a later
   `now_millis()`, so at the boundary any millisecond between them closes the window, and the property's "refused as
   window closed only past the window" fails. To do: give `record` and `judge` one `now`.
-- **`custody_revocation`'s "the custodian's own certificate revoked destroys every key" is told of both slots**
-  (found 2026-10-31, not fixed). Under load it gets `[Custodian, Client]` (or `[Client, Custodian]`) where it expects
+- [x] **`custody_revocation`'s "the custodian's own certificate revoked destroys every key" is told of both slots**
+  (found 2026-10-31; fixed 2026-10-31). Under load it gets `[Custodian, Client]` (or `[Client, Custodian]`) where it expects
   `[Custodian]` (`tests/custody_revocation.rs:340`): 1 of 15 on main and 1 of 15 after the names fix, side by side, and
-  2 of 10 in the loaded runs above. Not the names race. To do: find whether the daemon's report of the custodian's
-  revocation may carry the workload's slot too (its keys go with the custodian's) or the test reads a second report.
+  2 of 10 in the loaded runs above. Not the names race. Cause: the daemon is told of the custodian's revocation one of
+  two ways, whichever is first. The set, delivered on the custodian's session, revokes only the serials it names
+  (`[Custodian]`); but the broker hears the same set in the publisher's Listener before passing it on and closes every
+  connection whose own certificate it names (`JudgeSubscriptions`), so the custodian's connection may close before the
+  set is delivered on it, and its next registration is refused as revoked. That refusal path,
+  `Watcher::refused_as_revoked` (`polar-custody/daemon/src/watch.rs`), revoked every serial the daemon held and
+  reported them all, its workload's certificate too, in the order of a hash map. Not a security fault: only the
+  custodian's connection is closed (each Listener judges its own `peer_serial`; no workload session is touched), and
+  every key goes either way, by design. Nor an extra session: the second slot is the refusal's report. The set alone
+  cannot give two slots, it names one serial. No condition in the test decides which of the broker's two paths is
+  first, so the report is fixed instead: refused, the daemon reports the certificate the broker refused, the
+  custodian's (every key still goes: `Custody::revoke` clears every slot when one matches; a custody with no
+  custodian certificate, which cannot have connected, keeps the old rule). Proof:
+  `a_custodian_refused_as_revoked_reports_only_its_own_certificate_revoked` (the refusal path made certain: revoked
+  before it connects, the credentials agent answering nobody) got `[Custodian, Client]` 5 of 5 before and passes
+  after; the daemon's own tests unchanged. The binary after: 10 of 10 alone, 10 of 10 under load (five copies, twelve
+  busy loops). Main's binary did not show the flake in 30 runs of the test alone under load or 18 of the binary.
 - **A read of the configuration actor waits behind a judgement** (found 2026-10-31 fixing the item above, not fixed).
   The actor judges a runtime document inside its handler, so a read sent meanwhile (`runtime`, `current`, `history`)
   waits for the judgement and fails after `CALL_TIMEOUT` (5 s) if it is longer. In release builds a judgement is well
   under that today; it grows with the model (workloads, topics, persons). To do: judge off the actor's loop (keeping
   documents in order), or have the reader that matters (`pass_on_section`) retry instead of waiting for a republish.
-- **A publish sent right after a re-registration can be dropped** (found 2026-10-31, not fixed). `restart`'s "a publish
+- [x] **A publish sent right after a re-registration can be dropped** (found 2026-10-31; fixed 2026-10-31). `restart`'s "a publish
   made while the broker is away arrives when it returns" failed 2 of 20 runs alone and 3 of 36 under load ("timed out
   waiting for 1 message(s) on news", `tests/support/mod.rs:1039`), before the names fix as after it (side by side
   under the same load, main 1 of 15, fixed 2 of 15). The log of a
@@ -216,9 +231,43 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
   arrives at once and is dropped: "No session ref for listener ... dropping publish" (`cassini/broker/src/listener.rs:2054`,
   ERROR). The listener had not yet been given its session when the client, told it was registered, published. Nothing
   tells the client, so its message is lost. To do: have the listener hold (or refuse, so the client resends) what
-  arrives before its session is set, rather than drop it.
-- **`backpressure`'s "a processor publishing large frames under an exhausted budget is not cut" fails on a loaded
-  machine** (found 2026-10-31, not fixed). "the budget was exhausted" (`tests/backpressure.rs:680`): the processor did
+  arrives before its session is set, rather than drop it. Cause: the Listener wrote the client its registration and
+  only then, from a spawned task, asked the SessionManager for the session's address (`GetSessionRef`, a 100 ms
+  timeout, so under load it could fail and leave the connection unbound for good) and bound it on a later message; a
+  publish the client sent on hearing it was registered (a facade sends its whole outbox then) reached the Listener
+  first. Dropped with no answer, it stayed in the facade's outbox, which resends only on a registration, so with none
+  after it was lost to its caller. Fixed at the cause, neither by holding nor by refusing: the session's address
+  travels with the answer (`BrokerMessage::RegistrationResponse { session }`), and the Listener binds its connection
+  (`bind_session`) before it writes the registration, so there is no window; a publish on an unbound connection, which
+  a client that waits to be told can no longer send, is refused for now (`Unavailable`) rather than dropped. Holding
+  would have needed a buffer outside the budget; refusing would have left a window the facade crosses with a 1 s
+  backoff each time. The client needs no change: the broker answers every publish it reads or the connection ends,
+  and a resend on silence would duplicate publishes backpressure leaves unacknowledged on purpose (no deduplication).
+  Proof: `tests/restart.rs`'s two "taken" tests, with the binding made 2 s slow by a test hook
+  (`cassini_broker::testing::SessionBindingDelay`, feature `testing`, the crate's own tests only): 0 of 5 each before
+  (the drop logged each time), pass after. The `restart` binary after: 30 of 30 alone, 10 of 10 under load (five
+  copies, twelve busy loops).
+- [x] **`backpressure`'s "a processor publishing large frames under an exhausted budget is not cut" fails on a loaded
+  machine** (found 2026-10-31; fixed 2026-10-31, the test). On main 3 of 8 alone failed, each at "the budget was
+  exhausted" with nothing later reached. Cause: its 270 frames of 262,320 bytes are 70.8 MB against a 67,108,864-byte
+  budget, so the budget is exhausted only if the slow subscribers have had at most 14 acknowledged when the last publish
+  is read. The budget's counters every 100 ms: a passing run's alarm rose with exactly 14 refunded; under load the
+  processor took 4.5 s to publish, 46 were refunded, the peak was 58.8 MB, no reader waited and nothing was refused, so
+  the broker took everything as it came (the publisher was not starved, and no one was cut). The fix, in the test:
+  after its rounds, the processor publishes one round more at a time, each once every publish before it is taken and
+  while every topic stays under its high water, until the budget is exhausted; every later check is unchanged, over the
+  rounds published (cassini-backpressure.md, second review, "made certain"). Before, 0 of 9 under load (three copies,
+  eight busy loops); after, 9 of 9 there, 30 of 30 alone, 10 of 10 under load (five copies, twelve busy loops); the
+  small-frames variant 5 of 5 and the whole binary 5 of 5 alone. Not looked at: the end of "a processor holding back
+  its own topic" below, which is now the binary's real flake (next item).
+- **`backpressure`'s "a processor holding back its own topic is not cut for acknowledgements the broker has not read"
+  has its connection ended** (seen once 2026-10-31, counted the same day; not fixed). "its connection is not ended
+  (162 accepted, 0 deferred, 162 given back)", `slow_disconnections: 1`, the budget not exhausted
+  (`tests/backpressure.rs:840`). It failed in the loaded workspace run, and side by side on main and with the three
+  fixes above: alone, main 0 of 3 and fixed 2 of 3; under load (five copies, twelve busy loops) 0 of 15 each. So it is
+  on main, and not made by those fixes (they touch registration, the custody report and another test). Its topic's
+  stall rule should refuse the processor's publishes for now rather than end it (second review, finding A). To do:
+  capture its debug log and find whether the verdict ends it before the reader's waiting reaches the session. "the budget was exhausted" (`tests/backpressure.rs:680`): the processor did
   not exhaust the budget within its 10 s. It fails the same on main (`e3d0a29e`, 2 of 3 runs alone with the load
   average 10 to 20 from another build), so it is not the names race. Once, with the names fix in (3 runs alone; not
   seen in main's 3), "a processor holding back its own topic is not cut for acknowledgements the broker has not read"
