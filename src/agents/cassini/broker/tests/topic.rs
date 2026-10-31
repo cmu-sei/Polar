@@ -493,4 +493,42 @@ mod tests {
         );
         assert_eq!(bounds.budget.stats().refused, 1);
     }
+
+    /// A topic registers under its topic's name in the process-wide registry, so one still running after its
+    /// manager stopped holds the name a broker started next in the same process needs for that topic
+    /// (`ActorAlreadyRegistered`). A stopped manager has stopped every topic by the time its stop returns.
+    #[tokio::test]
+    async fn a_stopped_topic_manager_has_freed_every_topic_s_name_when_its_stop_returns() {
+        let topics: Vec<String> = (0..256).map(|i| format!("names-freed-{i}")).collect();
+        let (manager, _) = Actor::spawn(
+            None,
+            cassini_broker::topic::TopicManager,
+            cassini_broker::topic::TopicManagerArgs {
+                topics: Some(topics.clone()),
+                subscriber_mgr: None,
+                bounds: cassini_broker::budget::Bounds::fallback(),
+            },
+        )
+        .await
+        .unwrap();
+        let held = || -> Vec<String> {
+            topics
+                .iter()
+                .filter(|topic| ractor::registry::where_is((*topic).clone()).is_some())
+                .cloned()
+                .collect()
+        };
+        assert_eq!(held().len(), topics.len(), "every topic is registered");
+        manager
+            .stop_and_wait(None, Some(std::time::Duration::from_secs(10)))
+            .await
+            .unwrap();
+        let still = held();
+        assert!(
+            still.is_empty(),
+            "{} topics still hold their names, among them {:?}",
+            still.len(),
+            &still[..still.len().min(3)]
+        );
+    }
 }

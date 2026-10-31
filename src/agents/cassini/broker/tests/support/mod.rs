@@ -594,15 +594,44 @@ impl TestBroker {
         false
     }
 
-    /// Stops the broker and waits until its names are free for the next test.
+    /// Stops the broker, checks that it holds none of its names once its stop has returned, and waits until the
+    /// authority's are free for the next test.
     pub async fn stop(&self) {
         let broker = self.broker.lock().unwrap().clone();
-        broker
+        let held = held_names();
+        let stopped = broker
             .stop_and_wait(None, Some(Duration::from_secs(10)))
-            .await
-            .ok();
+            .await;
+        let still: Vec<String> = held
+            .into_iter()
+            .filter(|name| ractor::registry::where_is(name.clone()).is_some())
+            .collect();
+        assert!(
+            still.is_empty(),
+            "the stopped broker ({stopped:?}) still holds {} names, among them {:?}",
+            still.len(),
+            &still[..still.len().min(5)]
+        );
         clear_names().await;
     }
+}
+
+/// The names the running broker's actors hold: its own, its managers', and those of the topics, sessions and
+/// subscribers under them, each registered under its topic, registration or subscriber ID.
+fn held_names() -> Vec<String> {
+    let mut names = Vec::new();
+    for name in NAMES {
+        if let Some(actor) = ractor::registry::where_is(name.to_string()) {
+            names.push(name.to_string());
+            names.extend(
+                actor
+                    .get_children()
+                    .iter()
+                    .filter_map(|child| child.get_name()),
+            );
+        }
+    }
+    names
 }
 
 /// As `with_broker`, with a shutdown token a request to shut down over the wire must present.

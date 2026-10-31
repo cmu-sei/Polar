@@ -229,6 +229,22 @@ impl Actor for TopicManager {
         Ok(())
     }
 
+    /// Each topic is registered under its topic's name, and ractor ends a stopped actor's children with a kill it
+    /// does not wait for: left to that, a topic could still hold its name when the broker's stop returned, and a
+    /// broker started next in the process would be refused the name (`ActorAlreadyRegistered`). So the topics are
+    /// stopped, and waited for, before this stop is done.
+    async fn post_stop(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        _: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        myself
+            .get_cell()
+            .stop_children_and_wait(None, Some(Duration::from_secs(5)))
+            .await;
+        Ok(())
+    }
+
     async fn handle(
         &self,
         myself: ActorRef<Self::Msg>,

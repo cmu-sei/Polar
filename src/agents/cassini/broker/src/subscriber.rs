@@ -103,6 +103,21 @@ impl Actor for SubscriberManager {
         Ok(())
     }
 
+    /// Each subscriber is registered under its subscriber ID, and ractor ends a stopped actor's children with a kill
+    /// it does not wait for, so the subscribers are stopped, and waited for, before this stop is done: a stopped
+    /// broker holds no names.
+    async fn post_stop(
+        &self,
+        myself: ActorRef<Self::Msg>,
+        _: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        myself
+            .get_cell()
+            .stop_children_and_wait(None, Some(std::time::Duration::from_secs(5)))
+            .await;
+        Ok(())
+    }
+
     async fn handle(
         &self,
         myself: ActorRef<BrokerMessage>,
