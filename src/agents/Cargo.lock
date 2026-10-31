@@ -6210,6 +6210,7 @@ dependencies = [
  "polar-policy",
  "polar-scudo",
  "polar-signing",
+ "proptest",
  "rand 0.10.3",
  "reqwest 0.12.28",
  "rsa 0.10.0-rc.18",
