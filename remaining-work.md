@@ -588,6 +588,17 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   `.unwrap()` of `config.submit(..)` (`credentials-agent/consume/src/authority_judge.rs:822`); the binary took 50 s
   where it takes 5 s alone, and the test passed 3 of 3 alone on the same commit. The submit's error was not captured;
   find which wait in the ConfigurationActor's submit path gives up under load before changing anything.
+- [ ] TYPED RUNTIME DOCUMENTS FROM THE DECLARATIONS (decided by the maintainer 2026-10-31). `polar-sign` renders a
+  runtime section from the agent's declared body type (its scaffold), so a missing optional field in a list entry
+  becomes `None T` and a present one `Some x`, and the scheduler reads them back as absent. Today (since `50baf2f6`)
+  polar-sign refuses, at signing, a list whose records set different fields; Dhall already refused them at the
+  scheduler. Affected: git `repositories` (`credential`, `refs`, `shallow_depth`, `max_depth`, `frequency_secs`) and
+  git-observer `credentials` (`username`). It is the start of the typed Dhall templates generated from the declarations
+  that runtime sections were meant to have (git-controller.md, "The `runtime` document type", not built).
+- [ ] THE STATEACTOR RETRIES "NO SCHEMA YET" ITSELF (decided by the maintainer 2026-10-31): `Unavailable` is retried by
+  the StateActor at a short fixed interval (a declared variable) before the caller hears anything, so the domain's
+  backoff sees only real failures. Found on u7c: jira-observer's Jira backoff (to 15 minutes) delayed the first cursor
+  pull 14 minutes after the schema arrived (soft-state.md, "The rebuild, seen on a cluster").
 - [ ] MULTI-INSTANCE WORKLOADS (asked by Blitz 2026-10-31; analysis in `docs/architecture/authority-model.md`, open
   question 11; NOT DECIDED). Blitz's build jobs publish provenance from each run, and per-build ServiceAccounts get no
   topics while a shared one supersedes. Recommended instead of their family of identities: one exact workload marked
