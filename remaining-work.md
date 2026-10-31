@@ -588,6 +588,15 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   `.unwrap()` of `config.submit(..)` (`credentials-agent/consume/src/authority_judge.rs:822`); the binary took 50 s
   where it takes 5 s alone, and the test passed 3 of 3 alone on the same commit. The submit's error was not captured;
   find which wait in the ConfigurationActor's submit path gives up under load before changing anything.
+- [ ] THE BROKER AS A USER OF SOFT STATE (agreed with the maintainer 2026-10-30). The broker's runtime budget
+  controller (cassini-backpressure.md, "Runtime budget") exposes a typed snapshot and accepts a warm-start value
+  (built in backpressure round 4). Next, after the StateActor and pulled health exist: the snapshot goes into the graph
+  through pulled health (introspection), and the learned values (the last stable budget, the smoothed drain rate)
+  through the StateActor (self-state), so a restarted broker starts warm instead of from the floor. The broker is not a
+  Cassini client, so it would publish in-process into its own topics, stamped with its own identity; how the broker
+  stamps its own `published_by` needs its own decision. The learned value is optional and late: the state agent needs
+  the broker, so the broker never waits for it. This also closes the gap that the broker's health cannot be asked over
+  Cassini.
 - [ ] HEALTH IN THE GRAPH, PULLED (decided by the maintainer 2026-10-30, replacing the same day's push design;
   `docs/architecture/soft-state.md`, "Revised by the maintainer's review"). The state agent's writer half asks every
   workload named in its signed configuration on `agent.<name>.health` (implied for every agent; answered by the
