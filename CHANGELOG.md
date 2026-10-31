@@ -25,6 +25,713 @@
 
 All notable changes to the platform are documented in this file, newest first. It is generated at each release by `nu infra/changelog.nu`, from the same classification of commits that chooses the version. A release is one version for every Polar image.
 
+## [2.0.0] - 2026-10-31
+
+Images built from `55f97ed2c3c9`, the commit that set VERSION to 2.0.0.
+
+> Cassini now bounds its own memory: every publish and every delivery is numbered and acknowledged, the broker sets a memory budget at run time from what the machine can spare and how fast its subscribers drain, a stalled subscriber is ended after a bound instead of filling memory, and a client and broker of different protocol versions refuse each other by name. A new state agent keeps what agents need to remember across restarts, decided by each agent's identity and its signed runtime configuration, and Jira's issue pulls now resume from the graph's newest issue instead of starting over. Authority became policy: certificates carry each workload's declared topics, Cedar decides above them, and signed documents are checked against a strict schema. Every binary is one static musl artifact per target with the Scudo allocator and LLVM's memcpy, and reports its version with --version.
+
+### 💥 Breaking changes
+
+- *(infra)* The git server's administrators are a recorded cluster input, not an edit to a tracked file
+  The Polar git server's administrators come from infra/targets/<target>/cluster-input, which up.nu records, not from an edit to a tracked file.
+- *(agents)* Seven agents take their workload name as their service name
+  Signed documents addressed to an agent's old name (credentials-agent-consumer and the other renamed agents) are no longer delivered: sign them again for the workload name; agent.<old>.* topics are agent.<workload>.*.
+- *(agent-builder)* An agent starts only as the workload its certificate names
+  Run each agent under the ServiceAccount of its workload name; under any other it refuses to start.
+- *(polar-scheduler)* The scheduler handles signed documents only
+- *(polar-policy)* Policies speak a strict schema, checked on arrival and at every decision
+- *(broker)* The broker decides every publish and subscribe, Cedar first, then the certificate's floor
+  An agent publishes and subscribes only on its declared and implied topics; a client whose identity is not a catalog workload gets a certificate with no topics and is refused. Declare a workload's topics in its agent, and put the workload in the catalog.
+- *(credentials-agent)* Remove the three unsigned topics that appended whatever event they carried
+  the credentials agent no longer subscribes to credentials-grants, credentials-revocations or credentials-account-provisioning, and credentials_agent_common no longer exports their constants. Grants, revocations and provisioning go only through signed admin actions on credentials-admin-action-requests.
+- *(credentials-agent)* Remove the issuance floor, which the authority model replaces
+  the credentials agent no longer reads CREDENTIALS_AGENT_ISSUANCE_TOPICS. It writes into a workload's certificates what CREDENTIALS_AGENT_AUTHORITY_MODEL gives that workload, and with no model a certificate carries no topics or groups.
+- *(cert-issuer)* Cert-issuer is a Polar agent on the builder, speaking over Cassini without depending on it
+  cert-issuer no longer reads CERT_ISSUER_CONFIG. Its settings are the variables `cert-issuer --help` lists, and the chart renders them; conf/ describes the old file format (remaining-work.md).
+- *(catalog)* Cert-issuer is a catalog workload of a kind of its own, `ca`, rendered with no polar-init
+  Targets deploy cert-issuer as a catalog workload of the kind `ca` (cert-issuer.yaml, cert-issuer-resources.yaml), not the chart. A cluster that ran the chart must lose the chart's cert-issuer when it switches: Flux prunes it on sandbox-local; on a target applied by up.nu it is deleted by hand.
+- *(cert-issuer)* An escrow certificate is for encrypting to, and no longer an mTLS certificate
+  An escrow certificate can no longer be presented as a TLS client certificate; use the workload's client certificate.
+- *(polar-init)* Drop its own escrow bootstrap; the custodian fetches the key
+  A pod's escrow key is fetched by its custody daemon (on by default); a target with escrow and custody switched off no longer renders.
+- *(infra)* The agents as Deployments of one that restart in place
+  Re-render and apply, and delete the old Jobs; tooling that looked for an agent's Job must look for its Deployment.
+- *(jira-observer)* Start the first issue pull from the graph's newest issue
+  jira-observer starts each issue pull from the graph's newest issue; QUERY_DATE applies only while the graph holds no issues, so a script that moves it as a cursor has no effect after the first pull and is no longer needed.
+- *(cassini)* Numbered publishes, acknowledged one by one, and the client's outbox
+  Rebuild and redeploy every image together: a client and a broker from before 2.0.0 cannot talk; from 2.0.0 a mismatch is refused at registration, naming both protocol versions.
+- *(cassini-broker)* The memory budget is set at run time from memory and the drain rate
+  CASSINI_MEMORY_BUDGET_BYTES is now a cap on the runtime budget, not its value; the broker refuses to start with less than 256 MiB (four 64 MiB frames) available.
+
+### 📦 Images
+
+| Image | Change |
+|---|---|
+| `ace-viz:latest` | `sha256:f593d481b916` -> `sha256:ed7c637a795e` |
+| `build-processor:latest` | `sha256:1706f19107fc` -> `sha256:7f1298582b08` |
+| `cassini:latest` | `sha256:bf9a277828e2` -> `sha256:19471a5ed1d7` |
+| `cert-issuer:latest` | `sha256:9b4f104ea885` -> `sha256:06ab51683dd4` |
+| `credentials-agent-consumer:latest` | `sha256:bf70f353c78c` -> `sha256:e66933fa6a68` |
+| `credentials-agent-observer:latest` | `sha256:e00a2f05d872` -> `sha256:d1bf25c5502d` |
+| `dev:latest` | new, `sha256:37ca3648d68e` |
+| `git-controller:latest` | `sha256:8f463d6b334b` -> `sha256:bbcf74fb8548` |
+| `git-observer:latest` | `sha256:7c9bdc6c3b9d` -> `sha256:e751b943f851` |
+| `git-processor:latest` | `sha256:bd2b1bdba70b` -> `sha256:c8b6b1a20507` |
+| `gitlab-consumer:latest` | `sha256:676c6fa4c44c` -> `sha256:f4e99b02fb47` |
+| `gitlab-observer:latest` | `sha256:fb5a13a3416e` -> `sha256:67816dde4540` |
+| `harness-producer:latest` | `sha256:4e875cf93533` -> `sha256:475422bc9ae4` |
+| `harness-sink:latest` | `sha256:2a2e94f7a0b5` -> `sha256:414f27babb07` |
+| `jira-observer:latest` | `sha256:b517469c7698` -> `sha256:569b1477f38e` |
+| `jira-processor:latest` | `sha256:976918df3b03` -> `sha256:c85bdd156f54` |
+| `kube-consumer:latest` | `sha256:86b578117152` -> `sha256:8534efcfc43b` |
+| `kube-observer:latest` | `sha256:f7230aae267d` -> `sha256:da8284746b5c` |
+| `oci-resolver:latest` | `sha256:9d69c091912f` -> `sha256:52527d87916c` |
+| `openapi-observer:latest` | `sha256:5859b4e5074c` -> `sha256:7069531a0f1a` |
+| `openapi-processor:latest` | `sha256:bf17c71c9f1e` -> `sha256:2ebc795c4b91` |
+| `polar-custody:latest` | new, `sha256:c59e5a859eda` |
+| `polar-git-server:latest` | `sha256:42ce87efaabc` -> `sha256:129413f8642d` |
+| `polar-init:latest` | `sha256:a619fd616e62` -> `sha256:79d20132be9e` |
+| `polar-nu-init:latest` | `sha256:e38b30b38815` -> `sha256:ddf4ec503bc6` |
+| `polar-tools:latest` | `sha256:3a46b0a70f6b` -> `sha256:0fa696960cea` |
+| `postgres:16` | `sha256:75adc2a65806` -> `sha256:b95b87e93ceb` |
+| `scheduler-observer:latest` | `sha256:ae83174cc8d8` -> `sha256:7fa564bb190e` |
+| `scheduler-processor:latest` | `sha256:59203f830e5d` -> `sha256:19a8e0d5b01a` |
+| `secret-harness-intruder:latest` | new, `sha256:1aad7c08ec88` |
+| `secret-harness-owner:latest` | new, `sha256:2616e00fa0d9` |
+| `soft-state-observer:latest` | new, `sha256:376cdaf437ee` |
+
+### 🚀 Features
+
+- **admin**: 1
+- **agent**: 1
+- **agent-builder**: 5
+- **agents**: 3
+- **authority**: 1
+- **broker**: 1
+- **builder**: 7
+- **cassini**: 9
+- **cassini-broker**: 1
+- **cassini-client**: 2
+- **cert-issuer**: 11
+- **cert-issuer-common**: 1
+- **credentials**: 2
+- **credentials-agent**: 10
+- **crypto**: 1
+- **custody**: 3
+- **custody-daemon**: 1
+- **dev-container**: 1
+- **dev-pod**: 2
+- **egress**: 2
+- **escrow**: 1
+- **git**: 1
+- **git-repo-observer**: 2
+- **graph**: 1
+- **harness**: 3
+- **harness-common**: 1
+- **images**: 1
+- **infra**: 35
+- **init**: 1
+- **jira**: 1
+- **jira-observer**: 1
+- **jira-processor**: 1
+- **kube**: 1
+- **load-harness**: 2
+- **oci-resolver**: 2
+- **pipeline**: 1
+- **polar-custody**: 3
+- **polar-git-server**: 1
+- **polar-health**: 1
+- **polar-init**: 4
+- **polar-permissions**: 1
+- **polar-scheduler**: 1
+- **polar-scudo**: 2
+- **polar-sign**: 1
+- **policy**: 2
+- **release**: 2
+- **render**: 1
+- **soft-state**: 3
+- **version**: 2
+
+<details><summary>All 144 entries</summary>
+
+**admin**
+
+- The first admin can revoke certificates
+
+**agent**
+
+- A refused topic is kept as wanted, judged again on a change of authority, and in the health file
+
+**agent-builder**
+
+- An agent's topics are one computed set, printed in its scaffold
+- Topic families expand into exact names per served workload
+- Every publish and subscribe is checked, the agent's policy first
+- A declared topic may say why it waits, and a bare scaffold expands families
+- Implied topics come from groups, by one function the broker will share
+
+**agents**
+
+- The nine topics with no other side in the catalog say why
+- Every agent declares what causes each publish, and a publish without one is refused
+- Every binary static for musl, allocating with mimalloc
+
+**authority**
+
+- The credentials agent's key is pinned under the CA, not on first use
+
+**broker**
+
+- Held subscriptions are judged again on a change of authority and on a resumed session
+
+**builder**
+
+- A topic says what causes its publish, and the builder checks that it fits
+- An agent may judge a runtime section before it is replaced, given the sections in force
+- An agent may speak over Cassini without its health depending on it
+- A custodian's floor is its own requests and the authority
+- The fresh-start marker, so a container restarted alone restarts its pod (also: polar-init)
+- Agents declare the graph labels they own and read, and graph-read
+- A StateActor and the computed soft-state capability; jira-observer asks through it
+
+**cassini**
+
+- The client hears whether the broker took a subscription or refused it
+- Step 5, the broker refuses and ends a revoked certificate's sessions, and admits watchers
+- One watcher per certificate, holding its place for a tenure
+- A refused registration is an event, with the broker's reason
+- A refused registration carries a code, and the daemon reads that
+- The allocator experiment's second set, Scudo from LLVM 23 and smalloc
+- Acknowledged deliveries, held by each subscriber until its client has them
+- A protocol version at registration, and a mismatch refused by name
+- A session shed under an exhausted budget ends, and its client is told when it returns
+
+**cassini-broker**
+
+- One memory budget, ingress credit, a high water per subscriber and the stall bound
+
+**cassini-client**
+
+- A topic gate is asked before each publish and subscribe
+- The outbox is the client's credit, and its callers wait for room
+
+**cert-issuer**
+
+- Its floor carries the bootstrap services' declared topics
+- Bootstrap services are signed with their floor's topics and groups
+- It writes the CA it signs under where its client reads it, and a scaffold says when an agent does not depend on Cassini
+- Every certificate it signs is recorded before it is returned
+- It answers the credentials agent's requests for the record, a page at a time
+- An escrow certificate has a lifetime of its own, a year
+- The floor state, in shadow, and its own entry for itself alone (floor step 2)
+- Held requests, and the floor obeys its state (floor step 3) (also: credentials-agent)
+- An escrow certificate's key usage follows its key
+- The custodian's certificate, and the custodians' space reserved
+- The successor ticket (also: credentials-agent)
+
+**cert-issuer-common**
+
+- Certificates can carry topics (p:pub:, p:sub:) and groups (g:)
+
+**credentials**
+
+- The renewal rule, a pod restarted in place is issued again within a bound
+- The published revoked set leaves out what has ended
+
+**credentials-agent**
+
+- The credentials agents declare their topics
+- An issuance floor of each workload's declared topics, written by the render
+- A workload's client certificate carries its floor's topics and groups
+- The authority model: the deployment as facts, Datalog rules over them, and the judging of a pair
+- Judge policy and groups documents by the authority model, a person written by username
+- A workload's certificate carries what the authority model gives it, by its one identity
+- It asks cert-issuer for its record and its ledger holds every certificate cert-issuer signed
+- Every request is judged by Cedar at its request gate, and the authority model judges requests too
+- Sign the session offer, and seal only to a signed one (floor step 1c)
+- Answer a custodian on its workload's behalf, and only it
+
+**crypto**
+
+- The custody daemon holds the escrow key, and a recipient's key is believed for its certificate
+
+**custody**
+
+- Step 4, the broker's and the git server's listeners take the daemon's server key
+- Step 5, a revoked pod's daemon destroys its keys and exits
+- The custodian slot, its plan, and the escrow key that only unwraps
+
+**custody-daemon**
+
+- The custodian's session fetches the workload's credentials
+
+**dev-container**
+
+- GNU sed and grep in the dev image
+
+**dev-pod**
+
+- Bin/polar-dev build-image, and up asks before it changes the pod's image
+- Bin/polar-dev says why the pod's SSH or the clone refuses you, and what to do
+
+**egress**
+
+- Polar::egress, the proxy, bypass list and CA an agent calls outside the cluster with
+- Cluster.egress, a target's proxy, bypass list and CA, rendered into the agents that declare it
+
+**escrow**
+
+- Seal to a P-256 key with HPKE, and say which suite a secret is under
+
+**git**
+
+- The git agents declare their topics
+
+**git-repo-observer**
+
+- Clone and fetch through the egress proxy, and give libgit2 the egress CA
+- A walk is published oldest first in bounded batches, its checkpoint moving after each
+
+**graph**
+
+- A graph writer shows Neo4j the custody daemon's key, through our neo4rs fork
+
+**harness**
+
+- The load harness's producer and sink are builder agents that measure, and the controller goes
+- The producer's window is counted in messages too, so a saturated run measures the broker
+- A plan can measure every run under each of several broker settings
+
+**harness-common**
+
+- What the load harness's producer and sink share, measured and tested
+
+**images**
+
+- Publish a release's version beside latest, and import a version by its tag
+
+**infra**
+
+- Up.nu writes the first admin into the git server's administrators
+- Deploy-repo.nu ensure makes the deployment PKI and runs the deployment git server
+- Deploy-repo.nu publish commits a target's layers, Flux objects and provenance, signed
+- Flux.nu install and wait
+- Up.nu gitops mode: publish, install Flux and wait in place of the apply loop
+- Images.nu publish can publish a mirror, copied from its upstream for the architecture
+- Agent-pods.nu asks an agent's image about itself, as a pod on the cluster
+- The agents are asked about themselves on the cluster, not with podman or cargo
+- The registry the nodes pull from is one setting, POLAR_NODE_REGISTRY
+- Images.nu import copies Neo4j too
+- A target can keep its registry in its own cluster
+- The deployment git server runs in the target's cluster
+- Sandbox-local keeps its registry in its cluster too
+- The dev container as a pod in the cluster, reached over SSH (bin/polar-dev)
+- Bin/polar-dev up says what it is doing while it waits
+- Images.nu takes --target for a target's registry
+- A render fetches no Dhall, from a cache built with the repo
+- Neo4j is copied from where it is published when there is no archive
+- Resolve.nu lists the catalog's images without reading a scaffold
+- Render.nu --charts-into renders the charts alone
+- Images.nu takes references from before a render, and keeps build logs back
+- Every image is built or copied once, before the render
+- The topic cross-check, catalog-wide in a test and per target in the render
+- Both floors carry each workload's groups beside its topics
+- The load harness is in the catalog, disabled until a target is measured
+- Load-harness.nu runs a plan's runs as Jobs, keeps their records, and compares them
+- Sandbox-local is where the broker is measured, so it runs the load harness's accounts
+- Step 4, the catalog gives pods the custody daemon, behind a switch that is on by default
+- The render refuses escrow without custody, and a mix of keys
+- Place each workload in its node pool where the target declares pools
+- The schema's Kubernetes types at dhall-kubernetes 1.35
+- The scripts wait on and roll the agents as Deployments
+- Check that every locked git source is fetchable anonymously
+- Jira-check.nu checks jira-observer's Jira connection from inside the cluster
+- Seed the state agent's schema from the scaffolds; one scaffold pass again
+
+**init**
+
+- A pod escrows a key only when its agent needs encryption, derived from its scaffold
+
+**jira**
+
+- The jira agents declare their topics
+
+**jira-observer**
+
+- Reach Jira through the egress settings, and trust the egress CA beside the image's roots
+
+**jira-processor**
+
+- Write each issue's last update as updated_ms, declare what it owns
+
+**kube**
+
+- The kube agents declare their topics
+
+**load-harness**
+
+- The broker's CPU and memory over each run
+- A sink that can be slowed, and the slow-sink plan
+
+**oci-resolver**
+
+- The resolver declares its topics
+- Pull through the egress proxy, and trust every certificate of the egress CA
+
+**pipeline**
+
+- Run the source check in ci.nu's static analysis phase
+
+**polar-custody**
+
+- The custody daemon, step 1: it holds a pod's mTLS keys and signs TLS 1.3 handshakes over a socket
+- Step 2, the workload signs through the daemon in place of TLS_CLIENT_KEY
+- Step 4, a slot is sealed once a certificate is installed in it
+
+**polar-git-server**
+
+- The git server declares its topic
+
+**polar-health**
+
+- Step 4, the health actor watches the custody daemon and rejuvenates on an empty one
+
+**polar-init**
+
+- Every pod pins cert-issuer's CA, and what the observer hands over is verified against it
+- Custody step 3, a certificate whose key is the daemon's, issued with no key file
+- The token buys the custodian's certificate, and the custodian the rest
+- With the custody daemon, every certificate's key is its
+
+**polar-permissions**
+
+- A certificate's groups are the principal's, unless the groups document names it
+
+**polar-scheduler**
+
+- The scheduler pair declares its exact topics
+
+**polar-scudo**
+
+- The CRC instructions everywhere, on request, and S3 and S4
+- Every binary allocates with Scudo, built by the nix-scudo flake input
+
+**polar-sign**
+
+- A policy is checked against Polar's schema before it is signed
+
+**policy**
+
+- Groups nest and roles hold capabilities, built into Cedar's hierarchy once per update
+- Action::"read-state" on Label, the vocabulary of soft-state reads
+
+**release**
+
+- A release commits its version into VERSION, and the development version after
+- An override can say what to do about a break, and ten unmarked breaks are recorded
+
+**render**
+
+- The credentials agent is given the authority model's facts, every workload by its one identity
+
+**soft-state**
+
+- The state agent's reader, soft-state-observer
+- The state agent in the catalog, its floor and readers rendered
+- The floor is the state agent's signed runtime section, its replies a family over the served workloads
+
+**version**
+
+- Every binary reports the platform version, and every image carries it
+- A binary's version record names the Cassini protocol it speaks
+
+</details>
+
+### 🐛 Bug fixes
+
+- **agents**: 1
+- **builder**: 1
+- **cassini**: 8
+- **cassini-broker**: 5
+- **cassini-client**: 2
+- **cert-issuer**: 1
+- **charts**: 1
+- **credentials-agent**: 5
+- **custody**: 2
+- **deps**: 6
+- **dev-container**: 6
+- **dev-pod**: 4
+- **flake**: 2
+- **forwards**: 1
+- **infra**: 32
+- **jira**: 1
+- **jira-observer**: 3
+- **lib**: 1
+- **load-harness**: 3
+- **load-plans**: 1
+- **logging**: 1
+- **neo4j**: 2
+- **nix**: 1
+- **pipeline**: 1
+- **polar-agent-builder**: 1
+- **polar-init**: 2
+- **polar-sign**: 1
+- **polar-test-graph**: 1
+- **ractor**: 1
+- **release**: 2
+- **scheduler-observer**: 1
+- **secrets**: 1
+- **test**: 1
+- **up**: 1
+- **Other**: 3
+
+<details><summary>All 106 entries</summary>
+
+**agents**
+
+- A second registration keeps the children still running instead of failing on their names
+
+**builder**
+
+- The StateActor asks again itself while the state agent cannot answer yet
+
+**cassini**
+
+- Set TCP_USER_TIMEOUT only where the platform has it
+- Only the identity that owns a session may resume it
+- The control plane's ListSessions answers
+- Instrument futures instead of holding entered spans across awaits
+- The stall clock counts only time a subscriber spends connected above high water
+- A refusal says whether it is for now, and the client keeps what is refused for now
+- An exhausted budget is recovered from within the stall bound
+- A client that reads and acknowledges is not cut for what the broker did not read
+
+**cassini-broker**
+
+- A subscription that cannot be made is refused, not a reason to shut the broker down
+- A topic drops a subscriber that has ended, and keeps what it could not deliver
+- A subscription is made off the topic manager, and the client always hears how it went
+- A wait given up is no longer counted, and the watchdog stops when the drain begins
+- A stalled connection is ended only by a second look, so its reader's facts can arrive
+
+**cassini-client**
+
+- A buffered publish that arrives after the outbox emptied is sent
+- A deferred publish is sent again once at a time, and a bare transport says who must
+
+**cert-issuer**
+
+- The credentials agent's custodian waits as the credentials agent does
+
+**charts**
+
+- A failed container leaves its last log lines as its termination message
+
+**credentials-agent**
+
+- Its service name is its workload name, credentials-agent
+- One holder for the ledger, so two credentials agents cannot fork its chain
+- A draining consumer takes nothing new and stops what acts on its own
+- An agent's P-256 escrow key is handed out from its certificate
+- Its escrow topics say they wait for custodians
+
+**custody**
+
+- The daemon logs at info unless RUST_LOG says otherwise
+- Lock memory as it is touched, not as it is mapped
+
+**deps**
+
+- Ctutils, rustls-webpki, webpki-roots and webpki-root-certs to their fixed versions
+- Crypto-bigint 0.7.5 to 0.7.10 for RUSTSEC-2026-0387
+- Libz-sys 1.1.29 to 1.1.31 for RUSTSEC-2026-0418
+- Yoke-derive 0.8.3 to 0.8.4, off a yanked release
+- Oci-client 0.15 to 0.18, dropping the unmaintained jwt crate
+- P256 0.13 to 0.14 for Polar's own signing and escrow keys
+
+**dev-container**
+
+- The dev image has diff, so kubectl diff can compare
+- The rendered container configs carry the license banner
+- The dev image has gpgsm, and a gitops target checks for it first
+- Dropbear has an ECDSA host key, for clients under a FIPS policy
+- Dropbear with AES-GCM, for clients under a FIPS policy
+- Root keeps its own XDG directories in a kubectl exec session
+
+**dev-pod**
+
+- Bin/polar-dev up keeps the class of the claims it already made
+- Bin/polar-dev runs the image of the cluster's architecture
+- Bin/polar-dev up stops first when the ssh agent holds no key
+- Bin/polar-dev clones main by default
+
+**flake**
+
+- Export tlsCerts again, which the dev shell's TLS hook builds
+- CloneImage is gone with the build orchestrator
+
+**forwards**
+
+- The observer hint names its Deployment's pod label
+
+**infra**
+
+- The shared secrets are encrypted to every listed key, and decrypting needs no .sops.yaml
+- The deployment git server's container gets a writable /tmp
+- Sandbox-local's data layer does not wait for Neo4j
+- A running agent is waited for through its Service's Endpoints, not its Job
+- Flux.nu wait ends a health-check wait begun under an older spec or revision
+- Registry_digest asks over HTTPS before plain HTTP
+- Images on a tag that moves are pulled Always, and a stale one is reported
+- An agent pod's pull back-off is waited for, up to 90 seconds
+- Up.nu --dev with the registry in the cluster, or images pinned by digest
+- Bin/polar-dev trusts a dev pod's SSH host keys per namespace
+- The dev pod's TMPDIR is /tmp, which its user can write
+- Skopeo is given TMPDIR as --tmpdir, since it does not read it
+- The registry's port-forward is replaced when it does not answer
+- The dev pod's browser step names bin/polar-dev forward
+- The images step says why it builds again, and not "no u7s node"
+- A clone retried while the git server comes back says so
+- The dev pod has no memory limit, as it has no CPU limit
+- Bin/polar-dev says when the cluster does not answer, and the forward hints fit the dev pod
+- Up.nu's prepared images hold a list, not only null
+- Quieter certificate import and sync from the dev pod
+- Load a Neo4j dump with the image the cluster runs, and through Flux
+- The seed's re-render and re-apply print what changed, not everything again
+- The dev pod trusts the checkout's .envrc, which does nothing there
+- The resolve tests ask a registry the cluster has
+- What a target renders and never applies is in no layer, in every layer check
+- Up.nu moves another cluster's certificates aside in the dev container too
+- A port-forward counts as running only when it reaches this cluster
+- Images are evicted from every node of a multi-node cluster
+- The targets' layers wait on the agents' Deployments
+- A run is an agent the scheduler serves, and the catalog's topics count it
+- User-cert-install finds Librewolf's profile on macOS too
+- The port-forwards on macOS, without setsid or /proc
+
+**jira**
+
+- The cursor's time comes from the system field `updated`, not its English name
+
+**jira-observer**
+
+- Check JIRA_URL at startup and notice a base64-encoded token
+- Bound connecting to Jira and each request
+- Check the token first and retry a failed pull instead of exiting
+
+**lib**
+
+- The graph controller's settings tests run on a runtime, as ractor's v2 output port needs
+
+**load-harness**
+
+- A resources file of one document is read as one
+- A failed run is kept and recorded, and the sweep goes on
+- Find the broker by its Deployment's pod label
+
+**load-plans**
+
+- The baseline measures one connection, since pods of one workload share an identity
+
+**logging**
+
+- Export only warnings as traces unless a deployment asks for more
+
+**neo4j**
+
+- Give its volumes to the user it runs as, before it starts
+- Its run directory, an emptyDir, so the PID file is written
+
+**nix**
+
+- A change to Scudo no longer rebuilds every dependency
+
+**pipeline**
+
+- Pipeline.dhall no longer lists the harness controller, as pipeline.nix already did not
+
+**polar-agent-builder**
+
+- Provisioned-ca is a deployment-only capability, as the catalog has it since 1c
+
+**polar-init**
+
+- The escrow bootstrap has a deadline, so a pod cannot wait in init for good
+- A pod restarted in place keeps the certificate it already holds
+
+**polar-sign**
+
+- An empty list takes its element type from its siblings
+
+**polar-test-graph**
+
+- Remove the Neo4j container with its anonymous volumes
+
+**ractor**
+
+- Output ports no longer drop a subscriber that falls behind, so no client loses its events
+
+**release**
+
+- The release's commits carry the trailers whoever cuts it gives, not a fixed one
+- Cert-issuer's breaking note says what 2.0.0 deploys, a Deployment, not the Job its footer named
+
+**scheduler-observer**
+
+- The first clone waits for a git server that does not answer yet
+
+**secrets**
+
+- Update Secrets from the SOPS files when they change
+
+**test**
+
+- Tests/charts.nu sets POLAR_NODE_REGISTRY, as render.nu does
+
+**up**
+
+- Step 1 checks the cluster's Kubernetes and this machine's openssl
+
+**Other**
+
+- Clear the lint findings that predate this work in every crate but three, which follow on their own
+- Clear the rest of the lint findings, so `cargo clippy --workspace --all-targets -- -D warnings` passes
+- Add fixes to put arbitrary cap on wire frame length and address potential busy-spin for accept loop †
+
+</details>
+
+### ⚡ Performance
+
+**broker**
+
+- Each connection keeps its decisions for a few seconds, and a change of authority ends them all
+
+**cassini-broker**
+
+- A publish's span is at debug, so the default filters do not create it
+
+**cassini-client**
+
+- A span records a message by its kind, not its Debug, so a publish no longer formats its payload
+
+**infra**
+
+- An agent's scaffold is cached under its image's digest
+- The hand-written charts' Dhall renders are kept in the render cache
+
+**polar-custody**
+
+- Sign with ring, five times the throughput, and wipe the key ring will not
+
+**polar-scudo**
+
+- Every binary copies with LLVM libc's memcpy and memmove
+
+† Classified from its wording: the commit was not written as a conventional commit.
+
+Also in this release, not listed: 196 documentation, 16 housekeeping, 12 refactoring, 5 build and 5 test commits.
+
 ## [1.0.0] - 2026-10-16
 
 > The first tracked release of Polar/ACE, after four years of development. It introduces a calculated platform version and this changelog, a lock that pins every image by digest, a render that is split into layers and identical on every run, Flux's controllers rendered into the repository, an optional-Cassini standalone git server, a static tools image, and images.nu import and publish for loading prebuilt images.
