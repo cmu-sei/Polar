@@ -28,7 +28,7 @@
 # target three times with the render cache off:
 #
 #   first and again   the same conditions, so the pipeline itself is deterministic
-#   other environment a different user, timezone, locale and CI variable, and no KUBECONFIG
+#   other environment a different user, timezone, locale and CI variable, and a KUBECONFIG that names no cluster
 #
 # and compares the three output directories byte for byte, and the per-layer split of each (infra/layers.nu). It then looks in the output for the checkout's
 # path, the home directory and the user's name, none of which belong in a manifest. The cache is a separate
@@ -36,13 +36,16 @@
 # also renders with a cold and then a warm cache and compares those.
 #
 # It runs the real render, so it needs what `up.nu` needs to render: the agents' images in the registry and a cluster
-# to ask them on (KUBECONFIG). Their scaffolds are collected once, before the first render, and every render reads that
-# directory, so the render without KUBECONFIG reads the same answers. It takes a few minutes. It replaces the target's
-# output directory (`manifests/`), as any render does.
+# to ask them on. That cluster is the one POLAR_TEST_CLUSTER_KUBECONFIG names, never the ambient KUBECONFIG
+# (infra/test-cluster.nu); without it the test is skipped, and says so. Their scaffolds are collected once, before the
+# first render, and every render reads that directory, so the render whose KUBECONFIG names no cluster reads the same
+# answers. It takes a few minutes. It replaces the target's output directory (`manifests/`), as any render does.
 #
-#   nu infra/tests/render-determinism.nu [target] [--with-cache]
+#   POLAR_TEST_CLUSTER_KUBECONFIG=<kubeconfig> nu infra/tests/render-determinism.nu [target] [--with-cache]
 
 use ../layers.nu [split_into]
+use ../test-cluster.nu
+use ../test-cluster.nu [NO_CLUSTER]
 
 def render [target: string, name: string, env_vars: record, hide: list<string>, work: string, cache: bool] {
     let base = { POLAR_SCAFFOLD_DIR: ($work | path join "scaffolds") }
@@ -69,6 +72,11 @@ def main [
     target: string = "local-minimal"
     --with-cache            # also compare a cold-cache and a warm-cache render with the uncached one
 ] {
+    let cluster = (test-cluster pin)
+    if $cluster == null {
+        print (test-cluster skip_line $"the render of ($target): its agents' scaffolds are collected on the cluster")
+        return
+    }
     let root = (^git rev-parse --show-toplevel | str trim)
     cd $root
     let work = (^mktemp -d | str trim)
@@ -76,15 +84,15 @@ def main [
 
     let collected = (do { ^nu infra/resolve.nu collect-scaffolds ($work | path join "scaffolds") --target $target } | complete)
     if $collected.exit_code != 0 {
-        error make --unspanned { msg: $"the agents could not be asked for their scaffolds \(this needs a cluster, KUBECONFIG, and their images in the registry\):\n($collected.stderr | lines | last 8 | str join "\n")" }
+        error make --unspanned { msg: $"the agents could not be asked for their scaffolds on ($cluster) \(this needs the cluster and their images in the registry\):\n($collected.stderr | lines | last 8 | str join "\n")" }
     }
 
     let first = (render $target "first" {} [] $work false)
     let again = (render $target "again" {} [] $work false)
     let other = (render $target "other-environment" {
         USER: "somebody-else", LOGNAME: "somebody-else", TZ: "Asia/Tokyo",
-        LC_ALL: "C", LANG: "C", CI_COMMIT_SHORT_SHA: "deadbeef"
-    } ["KUBECONFIG"] $work false)
+        LC_ALL: "C", LANG: "C", CI_COMMIT_SHORT_SHA: "deadbeef", KUBECONFIG: $NO_CLUSTER
+    } [] $work false)
 
     for pair in [["again" $again] ["other environment" $other]] {
         let d = (differences $first ($pair | get 1))

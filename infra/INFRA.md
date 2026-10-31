@@ -234,6 +234,7 @@ infra/
                          revision (just check-sources; also run by just static-analysis and ci.nu's phase 0)
   cassini-shutdown.nu  harness.nu  measure-render-cache.nu     asking the broker to stop; reading the secret harness; timing the cache
   tests/                 one test file per script: nu infra/tests/<name>.nu
+  test-cluster.nu        the only cluster a test may act on: POLAR_TEST_CLUSTER_KUBECONFIG, never the ambient KUBECONFIG
   config/                the catalog
     cluster.nuon         domain, namespaces, registry, token audience
     services.nuon        in-cluster services other things connect to
@@ -398,8 +399,10 @@ Read while planning cert-issuer's move into the catalog (`docs/architecture/cert
   image's digest, and on a cache miss runs `<image> --scaffold` in a pod on the cluster. `resolve.nu check` also runs
   each agent's `--check --config` there (`:211-221`). With the cluster down, `render.nu <target> --charts-into <dir>`
   renders the charts alone, and a full render works only when `POLAR_SCAFFOLD_DIR` already holds every scaffold.
-  `infra/tests/resolve.nu` collects them on the cluster, unless `POLAR_SCAFFOLD_DIR` is already set: then it uses that
-  directory and leaves it in place. The four tests that run the agents' own `--check` still need the cluster.
+  `infra/tests/resolve.nu` collects them on the cluster named for the tests (below, "Tests that need a cluster"),
+  unless `POLAR_SCAFFOLD_DIR` is already set: then it uses that directory and leaves it in place. The ten tests that
+  run `resolve.nu check`, whose agent checks run the agents' own `--check`, still need the cluster, and are skipped
+  without one.
   `rules.nu` and `charts.nu` need nothing. *Since 2026-10-27:* each agent binary prints its own scaffold
   (`<binary> --scaffold`), so the workspace's builds give a scaffold directory without a cluster.
 - **The state agent's schema is seeded, not rendered** (*since 2026-10-30*, `docs/architecture/soft-state.md`). Who
@@ -610,7 +613,8 @@ and builds from it again. `--dry-run` shows all of it, the changelog preview inc
 what `VERSION` reads and whether it agrees with the last tag. The gates (`infra/release.nuon`):
 `unit` (the infra tests), `deny` (advisories, licenses, bans, sources), `secrets` (nothing in the published history beyond
 `infra/release-secrets-baseline.nuon`), `clippy` (report-only until the workspace's warnings are cleared), `resolve` and
-`determinism` (two renders identical). The secret scan shows a finding's rule, path and commit, never what it matched;
+`determinism` (two renders identical, on the cluster `POLAR_TEST_CLUSTER_KUBECONFIG` names: "Tests that need a cluster").
+The secret scan shows a finding's rule, path and commit, never what it matched;
 `release.nu secrets accept ID... --reason` (or `--placeholder-like`) records one you have looked at, with the reason.
 
 A target can also group its files into **layers** (`apply_layers`; `local-minimal` has six: platform,
@@ -912,7 +916,7 @@ is an error, never a skipped check. (There used to be
 a separate program, `polar-config-check`, that judged an environment; it is retired, and a catalog
 workload is an agent that describes itself.)
 
-Run the catalog's tests with `nu infra/tests/rules.nu` and `nu infra/tests/resolve.nu`; the agent's own checks are tested by `cargo test -p polar-agent-builder`.
+Run the catalog's tests with `nu infra/tests/rules.nu` and `nu infra/tests/resolve.nu` (on the cluster `POLAR_TEST_CLUSTER_KUBECONFIG` names: "Tests that need a cluster"); the agent's own checks are tested by `cargo test -p polar-agent-builder`.
 
 In Rust an agent declares what its own code needs:
 
@@ -1058,6 +1062,31 @@ manifests.old` compares what the resolver says with a rendered manifest, and
 alongside the workload.
 
 Then bring it up on a cluster and look at the pods, not just the apply output.
+
+### Tests that need a cluster
+
+Most of `infra/tests` needs nothing (`nu infra/tests/<name>.nu`; the release's `unit` gate runs all of them but
+`resolve` and `render-determinism`). Two act on a cluster: `infra/tests/resolve.nu` (it collects the agents' scaffolds
+there, applies the in-cluster registry and its storage chart first when the target keeps one, and ten of its tests run
+`resolve.nu check`, whose agent checks run pods) and `infra/tests/render-determinism.nu` (it collects the scaffolds).
+They act only on the cluster you name for them, never on the one your shell's KUBECONFIG happens to point at
+(`infra/test-cluster.nu`):
+
+```fish
+POLAR_TEST_CLUSTER_KUBECONFIG=<kubeconfig> nu infra/tests/resolve.nu
+POLAR_TEST_CLUSTER_KUBECONFIG=<kubeconfig> nu infra/tests/render-determinism.nu local-minimal
+POLAR_SCAFFOLD_DIR=<dir> nu infra/tests/resolve.nu       # no cluster: the ten are skipped, the rest run
+```
+
+Without `POLAR_TEST_CLUSTER_KUBECONFIG` a test that needs the cluster prints `skip` with the reason and passes;
+`resolve.nu` without scaffolds given skips every test, and `render-determinism.nu` skips. The test sets KUBECONFIG, for
+itself and what it runs, to the named file, or, without one, to a path under `/dev/null` that kubectl refuses to load,
+so a call that slips through fails at once rather than falling back to `~/.kube/config`. A named file that does not
+exist is an error. The release's `determinism` gate fails without the variable, since a skip is no evidence. Other
+scripts (`up.nu`, `resolve.nu check` itself, the `resolve` gate) are tools, not tests, and use KUBECONFIG as before.
+`infra/tests/test-cluster.nu` runs both tests and the gate with a KUBECONFIG naming a cluster and a kubectl first on
+PATH that records every call and fails: nothing calls it. Run that way, every other file in `infra/tests` called no
+kubectl either (2026-10-31).
 
 ---
 

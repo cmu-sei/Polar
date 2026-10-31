@@ -27,9 +27,13 @@
 # grace period derived from it, and the health settings the agent reads. The pure
 # rules are in tests/rules.nu; these are about the wiring around them.
 #
-#   nu infra/tests/resolve.nu
+#   POLAR_TEST_CLUSTER_KUBECONFIG=<kubeconfig> nu infra/tests/resolve.nu
+#   POLAR_SCAFFOLD_DIR=<dir> nu infra/tests/resolve.nu      no cluster: the tests that need one are skipped
+#
+# It acts only on the cluster POLAR_TEST_CLUSTER_KUBECONFIG names, never the ambient KUBECONFIG (infra/test-cluster.nu).
 
 use std/assert
+use ../test-cluster.nu
 use ../cluster-registry.nu
 use ../registry.nu [node_registry]
 
@@ -168,15 +172,37 @@ def target_file [target: string, file: string, content: string] {
 
 const EGRESS_AGENTS = ["git-repo-observer" "jira-observer" "oci-registry-resolver"]
 
+# The tests that run `resolve.nu check`: its agent checks run each agent's image on the cluster (`agent_checks`), so
+# they run only on a cluster named for the tests (infra/test-cluster.nu), and are skipped otherwise.
+const CLUSTER_TESTS = [
+    "the state agent's first schema is made from every workload's scaffold, and a read nobody owns fails the check"
+    "a target that runs an agent needing the state agent and not the state agent fails the check"
+    "enabled is true or false and nothing else"
+    "a disabled workload that is still in the target's apply order is a problem, named"
+    "a target that disables a workload and leaves it out of its apply order checks clean"
+    "the real catalog passes `check`, including the agent's own environment check"
+    "a bootstrap identity cannot be moved onto the credentials agent"
+    "an issuer that is neither is refused"
+    "workloads still asking cert-issuer are listed as pending while the floor is off, and refused once it is enforced"
+    "on the local-minimal target no catalog workload asks cert-issuer directly but the bootstrap identities"
+]
+
 def main [] {
-    # The agents' scaffolds, asked of their images on the cluster once for the whole run (it needs KUBECONFIG and the images in
-    # the registry): every resolve below reads them. `local` runs the whole catalog, so its workloads cover every target's.
+    # The cluster this run may act on: only the one POLAR_TEST_CLUSTER_KUBECONFIG names, never the ambient KUBECONFIG.
+    # Without it, KUBECONFIG is pointed at a path kubectl cannot load, and the tests that need a cluster are skipped.
+    let cluster = (test-cluster pin)
+    # The agents' scaffolds, asked of their images on that cluster once for the whole run (it needs the images in the
+    # registry): every resolve below reads them. `local` runs the whole catalog, so its workloads cover every target's.
     # The images are asked of a registry the cluster has: the one in the cluster of POLAR_TEST_REGISTRY_TARGET (default
     # local-minimal), through its forward, as up.nu does; `local` names a registry on the host. An address already in the
     # environment wins.
     # Scaffolds already given (POLAR_SCAFFOLD_DIR set, say from the workspace's own binaries' `--scaffold`) are used as
-    # they are, and left in place.
+    # they are, and left in place: then the tests that need no cluster run without one.
     let preset = ($env.POLAR_SCAFFOLD_DIR? | default "")
+    if ($preset | is-empty) and $cluster == null {
+        print (test-cluster skip_line "every test here: they read the agents' scaffolds, collected on the cluster unless POLAR_SCAFFOLD_DIR gives them")
+        return
+    }
     let scaffolds = if ($preset | is-not-empty) { $preset } else {
         let registry_target = ($env.POLAR_TEST_REGISTRY_TARGET? | default "local-minimal")
         if (cluster-registry settings_of (cluster-registry cluster_of $registry_target)) != null {
@@ -187,7 +213,7 @@ def main [] {
         let collected = (do { ^nu $RESOLVER collect-scaffolds $collecting --target local } | complete)
         if $collected.exit_code != 0 {
             rm -rf $collecting
-            print -e $"cannot run: the agents could not be asked for their scaffolds \(this needs a cluster, KUBECONFIG, and their images in the registry\):\n($collected.stderr | lines | last 8 | str join "\n")"
+            print -e $"cannot run: the agents could not be asked for their scaffolds on ($cluster) \(this needs the cluster and their images in the registry\):\n($collected.stderr | lines | last 8 | str join "\n")"
             exit 1
         }
         $collecting
@@ -1142,18 +1168,26 @@ def main [] {
         }
     }
 
+    let names = ($tests | columns)
+    let unknown = ($CLUSTER_TESTS | where {|n| $n not-in $names })
     let results = ($tests | transpose name body | each {|t|
-        try {
-            do $t.body
-            { name: $t.name, error: null }
-        } catch {|e|
-            { name: $t.name, error: $e.msg }
+        if $cluster == null and $t.name in $CLUSTER_TESTS {
+            { name: $t.name, error: null, skipped: true }
+        } else {
+            try {
+                do $t.body
+                { name: $t.name, error: null, skipped: false }
+            } catch {|e|
+                { name: $t.name, error: $e.msg, skipped: false }
+            }
         }
-    })
+    }) ++ ($unknown | each {|n| { name: $n, error: "named in CLUSTER_TESTS, and no test has that name", skipped: false } })
     if ($preset | is-empty) { rm -rf $scaffolds }
 
     for r in $results {
-        if $r.error == null {
+        if $r.skipped {
+            print (test-cluster skip_line $r.name)
+        } else if $r.error == null {
             print $"  ok    ($r.name)"
         } else {
             print -e $"  FAIL  ($r.name): ($r.error)"
@@ -1161,9 +1195,11 @@ def main [] {
     }
 
     let failed = ($results | where error != null | length)
+    let skipped = ($results | where skipped | length)
     if $failed > 0 {
         print -e $"($failed) of ($results | length) failed"
         exit 1
     }
-    print $"all ($results | length) passed"
+    let ran = ($results | length) - $skipped
+    print $"all ($ran) run passed(if $skipped > 0 { $', ($skipped) skipped for want of a cluster' } else { '' })"
 }

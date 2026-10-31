@@ -211,7 +211,8 @@ The broker runs without the rest of Polar, as documented there and checked step 
   manifests only, not data, secrets or certificates.
   **Stage 1 done, 2026-10-16: the render is deterministic.** `infra/tests/render-determinism.nu [target] [--with-cache]`
   renders `local-minimal` with the cache off twice and once under another user, timezone, locale and CI variable
-  with no `KUBECONFIG`, and with a cold and a warm cache, and compares the 51 files byte for byte: all identical.
+  with no `KUBECONFIG` (since 2026-10-31, one that names no cluster), and with a cold and a warm cache, and compares
+  the 51 files byte for byte: all identical.
   A render from a second checkout at a different path was identical too (by hand). The output has no Secret documents
   (secrets are created apart from the render) and does not mention the checkout path, the home directory or the user.
   **Stage 3e done, 2026-10-19: the Flux target runs.** A clean `sandbox-local` bring-up (`nu infra/up.nu sandbox-local --user U --email E --allow-dirty`)
@@ -939,6 +940,15 @@ Principle: declare each environment variable once, with its type, default, docum
 - [ ] Evaluate an existing policy or constraint language for the config rules (decided not to build one): Rego with `regorus` (a Rust interpreter, 0.12, MIT, passes the OPA conformance suite apart from some builtins; a pre-1.0 API; about 1.9 MB with default features off), CEL (what Kubernetes `ValidatingAdmissionPolicy` uses), or CUE. Trigger to do it: the rules grow beyond a handful, rules need authors who are not us or a regulator to audit them, or we want admission-time enforcement in the cluster. Prerequisites: the agent exports its declared requirements as data, and the defaults have one home. Also considered and set aside: embedding Nushell in the agents (pre-1.0 engine, version coupling with the devshell, heavy, a shell in every startup path) and an in-pod Nushell preflight using `polar-nu-init` (still runtime, still duplicates the Rust check, cannot see the code's declarations)
 
 ## Dev environment and hygiene
+
+- [x] The infra tests act only on a cluster named for them (done 2026-10-31; one had just tried 127.0.0.1:6443):
+  `infra/tests/resolve.nu` (its scaffold collection, the in-cluster registry's storage chart, and the ten tests that
+  run `resolve.nu check`, whose agent checks run pods) and `infra/tests/render-determinism.nu` used whatever cluster the
+  ambient KUBECONFIG named. They now use only the one POLAR_TEST_CLUSTER_KUBECONFIG names (`infra/test-cluster.nu`), and
+  skip, saying so, without it; KUBECONFIG is pointed at a path kubectl cannot load, so nothing falls back to
+  `~/.kube/config`. The release's `determinism` gate fails without the variable (a skip proves nothing). No other
+  infra test called kubectl (every one run with a recording kubectl first on PATH). Tested in
+  `infra/tests/test-cluster.nu`; INFRA.md, "Tests that need a cluster".
 
 - [x] `cassini/broker/tests/supersede.rs` was flaky (fixed 2026-10-27): one run in six to eight failed "timed out
   waiting for its connection to be closed" (`support/mod.rs:610`, a 5 s wait for the superseded connection to close),

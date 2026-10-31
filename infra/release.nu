@@ -278,6 +278,11 @@ def run_gate [name: string, config: record] {
         }
         "resolve" => (run_nu [($HERE | path join "resolve.nu") check])
         "determinism" => {
+            # The test renders on the cluster the tests are given, never the ambient KUBECONFIG, and skips without one
+            # (infra/test-cluster.nu); a skip is no evidence, so without one the gate fails.
+            if ($env.POLAR_TEST_CLUSTER_KUBECONFIG? | default "" | is-empty) {
+                return { ok: false, detail: "it renders on a cluster: set POLAR_TEST_CLUSTER_KUBECONFIG to the kubeconfig of the one to use" }
+            }
             let failed = ($config.determinism_targets | each {|t| { target: $t, r: (run_nu [($HERE | path join "tests" "render-determinism.nu") $t]) } } | where {|x| not $x.r.ok })
             { ok: ($failed | is-empty), detail: ($failed | each {|x| $"($x.target): ($x.r.detail)" } | str join "; ") }
         }
