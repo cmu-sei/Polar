@@ -160,15 +160,17 @@ impl Actor for ConsumerSupervisor {
                     // --- NEW ---
                     let _ = state.healthcheck.cast(HealthCheckMessage::CassiniConnected);
                     // --- end NEW ---
-                    match Actor::spawn_linked(
-                        Some(OPENAPI_PROCESSOR_NAME.to_string()),
+                    // On every registration, as after a session the broker ended: a consumer still running is kept,
+                    // and its topic is subscribed again on the new session.
+                    match polar::spawn_linked_unless_running(
+                        OPENAPI_PROCESSOR_NAME,
                         ApiConsumer,
                         (),
                         myself.get_cell(),
                     )
                     .await
                     {
-                        Ok((agent, _)) => {
+                        Ok(agent) => {
                             state.consumer_agent = Some(agent);
                             state
                                 .cassini_client

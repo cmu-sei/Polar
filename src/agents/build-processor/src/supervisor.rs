@@ -170,8 +170,10 @@ impl Actor for BuildProcessorSupervisor {
                     graph_signal_port.subscribe(myself.clone(), |signal| {
                         Some(SupervisorMessage::GraphSignal(signal))
                     });
-                    let (controller, _) = Actor::spawn_linked(
-                        Some(format!("{BUILD_PROCESSOR_NAME}.graph.controller")),
+                    // On every registration, as after a session the broker ended: what is still running is kept,
+                    // and the topics are subscribed again on the new session.
+                    let controller = polar::spawn_linked_unless_running(
+                        &format!("{BUILD_PROCESSOR_NAME}.graph.controller"),
                         GraphControllerActor,
                         polar::graph::controller::GraphControllerArgs::new(graph_signal_port),
                         myself.clone().into(),
@@ -182,8 +184,8 @@ impl Actor for BuildProcessorSupervisor {
                     let _ = state.healthcheck.cast(HealthCheckMessage::GraphConnected);
 
                     // ── Build handler ───────────────────────────────────────────
-                    let (build_handler, _) = Actor::spawn_linked(
-                        Some(format!("{BUILD_PROCESSOR_NAME}.build_handler")),
+                    let build_handler = polar::spawn_linked_unless_running(
+                        &format!("{BUILD_PROCESSOR_NAME}.build_handler"),
                         BuildActor,
                         BuildActorArgs {
                             graph_controller: controller.clone(),
@@ -196,8 +198,8 @@ impl Actor for BuildProcessorSupervisor {
 
                     // ── Provenance linker ──────────────────────────────────────
                     // Owns Neo4j writes for artifact domain events.
-                    let (linker, _) = Actor::spawn_linked(
-                        Some(format!("{BUILD_PROCESSOR_NAME}.linker")),
+                    let linker = polar::spawn_linked_unless_running(
+                        &format!("{BUILD_PROCESSOR_NAME}.linker"),
                         ProvenanceLinker,
                         ProvenanceLinkerArgs {
                             compiler: controller,

@@ -150,8 +150,9 @@ impl Actor for ObserverSupervisor {
                         let args = ApiObserverArgs {
                             openapi_endpoint: state.openapi_endpoint.clone(),
                         };
-                        if let Err(e) = Actor::spawn_linked(
-                            Some("polar.web.observer".to_string()),
+                        // On every registration, as after a session the broker ended: one still running is kept.
+                        if let Err(e) = polar::spawn_linked_unless_running(
+                            "polar.web.observer",
                             ApiObserver,
                             args,
                             myself.get_cell(),

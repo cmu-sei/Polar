@@ -114,6 +114,27 @@ pub enum SupervisorMessage {
     ForceExit,
 }
 
+/// Spawns `actor` linked under `supervisor` as `name`, unless an actor of that name is already running: then that one is
+/// kept, and returned. For the children an agent spawns when its Cassini client registers, which it does again after a
+/// reconnection, and after the broker ended its session (cassini-backpressure.md, the decisions reviewed with the
+/// maintainer, 14): spawning again under the same name failed, and the agent with it. Whatever the agent does on each
+/// registration besides (its subscriptions) it goes on doing.
+pub async fn spawn_linked_unless_running<A: Actor>(
+    name: &str,
+    actor: A,
+    args: A::Arguments,
+    supervisor: ractor::ActorCell,
+) -> Result<ActorRef<A::Msg>, ActorProcessingErr> {
+    if let Some(running) = ractor::registry::where_is(name.to_string()) {
+        debug!(%name, "already running: kept");
+        return Ok(running.into());
+    }
+    let (spawned, _) = Actor::spawn_linked(Some(name.to_string()), actor, args, supervisor)
+        .await
+        .map_err(ActorProcessingErr::from)?;
+    Ok(spawned)
+}
+
 /// Spawn a TCP client to connect to the Cassini message broker.
 ///
 /// CAUTION: There is a known bug in the ractor framework that makes output
@@ -334,4 +355,57 @@ pub struct NormalizedSbom {
 
 pub fn init_logging(service_name: String) {
     logging::init_with(service_name, &logging::LoggingSettings::from_process_env());
+}
+
+#[cfg(test)]
+mod spawn_tests {
+    use super::*;
+
+    struct Child;
+
+    #[ractor::async_trait]
+    impl Actor for Child {
+        type Msg = ();
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(&self, _myself: ActorRef<()>, _: ()) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    struct Parent;
+
+    #[ractor::async_trait]
+    impl Actor for Parent {
+        type Msg = ();
+        type State = ();
+        type Arguments = ();
+
+        async fn pre_start(&self, _myself: ActorRef<()>, _: ()) -> Result<(), ActorProcessingErr> {
+            Ok(())
+        }
+    }
+
+    /// An agent's child spawned on each registration, registered twice (as after a session the broker ended): the
+    /// second keeps the first, and nothing fails; once it has ended, the next registration spawns it again.
+    #[tokio::test]
+    async fn a_child_spawned_on_each_registration_survives_a_second_registration() {
+        let (parent, _) = Actor::spawn(None, Parent, ()).await.unwrap();
+        let name = "polar.test.spawned-on-registration";
+        let first = spawn_linked_unless_running(name, Child, (), parent.get_cell())
+            .await
+            .expect("the first registration spawns it");
+        let second = spawn_linked_unless_running(name, Child, (), parent.get_cell())
+            .await
+            .expect("a second registration does not fail");
+        assert_eq!(first.get_id(), second.get_id(), "the running one is kept");
+        first.stop_and_wait(None, None).await.unwrap();
+        let third = spawn_linked_unless_running(name, Child, (), parent.get_cell())
+            .await
+            .expect("once ended, spawned again");
+        assert_ne!(third.get_id(), first.get_id());
+        third.stop_and_wait(None, None).await.unwrap();
+        parent.stop(None);
+    }
 }
