@@ -35,6 +35,8 @@ pub mod runtime_budget;
 pub mod session;
 pub mod settings;
 pub mod subscriber;
+#[cfg(feature = "testing")]
+pub mod testing;
 pub mod topic;
 
 /// Constant names of core supervisors, should remain constant

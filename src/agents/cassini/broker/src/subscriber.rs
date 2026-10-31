@@ -451,6 +451,7 @@ impl SubscriberManager {
                         client_id: client_id.clone(),
                         result: Err(err_msg.clone()),
                         trace_ctx: Some(span.context()),
+                        session: None,
                     }) {
                         warn!(error = %e, "{err_msg}");
                     }

@@ -872,6 +872,7 @@ impl Broker {
                     client_id,
                     result: Err("Broker is shutting down".to_string()),
                     trace_ctx: Some(span.context()),
+                    session: None,
                 })?;
             }
             return Ok(());

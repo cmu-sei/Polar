@@ -636,14 +636,12 @@ impl Actor for ListenerManager {
 
             info!("Server running on {bind_addr}");
             let shutdown_token = state.shutdown_token.clone();
-            let session_mgr = state.session_mgr.clone(); // clone for use in spawned tasks
             let authority = state.authority.clone();
             let bounds = state.bounds.clone();
 
             // Accept loop runs in its own task; do NOT keep an entered span alive forever.
             let join_handle = tokio::spawn({
                 let myself = myself.clone();
-                let session_mgr = session_mgr; // move into closure
                 let authority = authority;
                 let bounds = bounds;
                 async move {
@@ -684,7 +682,6 @@ impl Actor for ListenerManager {
 
                         let acceptor = acceptor.clone();
                         let myself = myself.clone();
-                        let session_mgr = session_mgr.clone(); // clone again for inner spawn
                         let authority = authority.clone();
                         let bounds = bounds.clone();
 
@@ -714,7 +711,6 @@ impl Actor for ListenerManager {
                                     reader: Some(reader),
                                     client_id: client_id.clone(),
                                     registration_id: None,
-                                    session_mgr,
                                     broker: myself
                                         .try_get_supervisor()
                                         .expect("ListenerManager must have a supervisor (the broker)")
@@ -861,6 +857,7 @@ impl Actor for ListenerManager {
                 client_id,
                 result,
                 trace_ctx,
+                session,
             } => {
                 self.handle_registration_response(
                     myself.clone(),
@@ -868,6 +865,7 @@ impl Actor for ListenerManager {
                     client_id,
                     result,
                     trace_ctx,
+                    session,
                 )
                 .await?;
             }
@@ -962,6 +960,7 @@ impl ListenerManager {
         client_id: String,
         result: Result<String, String>,
         trace_ctx: Option<opentelemetry::Context>,
+        session: Option<ActorRef<BrokerMessage>>,
     ) -> Result<(), ActorProcessingErr> {
         // Reject new registrations during shutdown
         if state.is_shutting_down {
@@ -980,6 +979,7 @@ impl ListenerManager {
                 client_id,
                 result,
                 trace_ctx: Some(span.context()),
+                session,
             }) {
                 error!(error = %e, "Failed to forward RegistrationResponse to listener");
             }
@@ -1039,7 +1039,6 @@ struct ListenerState {
     writer: SharedWriter,
     reader: Option<ReadHalf<TlsStream<TcpStream>>>,
     client_id: String,
-    session_mgr: ActorRef<BrokerMessage>,
     session_ref: Option<ActorRef<BrokerMessage>>,
     registration_id: Option<String>,
     task_handle: Option<JoinHandle<()>>,
@@ -1071,7 +1070,6 @@ struct ListenerArguments {
     writer: SharedWriter,
     reader: Option<ReadHalf<TlsStream<TcpStream>>>,
     client_id: String,
-    session_mgr: ActorRef<BrokerMessage>,
     registration_id: Option<String>,
     broker: ActorRef<BrokerMessage>,
     peer_identity: Option<String>,
@@ -1082,6 +1080,19 @@ struct ListenerArguments {
 }
 
 impl Listener {
+    /// Binds this connection to `session`: the session is given its connection, and from now on its reader tells it
+    /// what it reads and when it waits, beside this Listener's mailbox (which waits behind its writes); its
+    /// publishes go to it.
+    fn bind_session(state: &mut ListenerState, session: ActorRef<BrokerMessage>) {
+        let _ = session.send_message(BrokerMessage::ConnectionOpened {
+            client_id: state.client_id.clone(),
+            control: Arc::new(ConnHandle(Arc::downgrade(&state.writer))),
+        });
+        *state.writer.session.lock().unwrap() = Some(session.clone());
+        state.session_ref = Some(session);
+        debug!("the connection is bound to its session");
+    }
+
     /// Whether this connection's certificate is among those the credentials agent says are revoked.
     fn is_revoked(state: &ListenerState) -> bool {
         state
@@ -1209,7 +1220,6 @@ impl Actor for Listener {
             writer: args.writer,
             reader: args.reader,
             client_id: args.client_id,
-            session_mgr: args.session_mgr,
             session_ref: None,
             registration_id: args.registration_id,
             task_handle: None,
@@ -1570,16 +1580,6 @@ impl Actor for Listener {
                 }
                 myself.stop(Some(refusal.reason));
             }
-            BrokerMessage::SetListenerSessionRef { session_ref } => {
-                // The session is given its connection, and from now on its reader tells it what it reads and when it
-                // waits, beside this Listener's mailbox (which waits behind its writes).
-                let _ = session_ref.send_message(BrokerMessage::ConnectionOpened {
-                    client_id: state.client_id.clone(),
-                    control: Arc::new(ConnHandle(Arc::downgrade(&state.writer))),
-                });
-                *state.writer.session.lock().unwrap() = Some(session_ref.clone());
-                state.session_ref = Some(session_ref);
-            }
             BrokerMessage::JudgeSubscriptions { topics } => {
                 // Sent on every change of authority: a certificate revoked since is closed. Its session is kept for the
                 // retention window, as after any lost connection, for the identity's next certificate to claim; this
@@ -1645,9 +1645,12 @@ impl Actor for Listener {
                 client_id,
                 result,
                 trace_ctx,
+                session,
             } => {
-                self.handle_registration_response(myself, state, client_id, result, trace_ctx)
-                    .await?;
+                self.handle_registration_response(
+                    myself, state, client_id, result, trace_ctx, session,
+                )
+                .await?;
             }
             BrokerMessage::DisconnectRequest {
                 reason,
@@ -1860,6 +1863,7 @@ impl Listener {
         client_id: String,
         result: Result<String, String>,
         trace_ctx: Option<opentelemetry::Context>,
+        session: Option<ActorRef<BrokerMessage>>,
     ) -> Result<(), ActorProcessingErr> {
         let span = trace_span!("cassini.listener.registration_response", %client_id);
         try_set_parent_otel(&span, trace_ctx);
@@ -1870,6 +1874,19 @@ impl Listener {
                 Ok(registration_id) => {
                     let reg_id_clone = registration_id.clone();
                     state.registration_id = Some(registration_id.clone());
+
+                    // Bound before the client is told: a client publishes the moment it hears it is registered (a
+                    // front sends all it held), and what it sends must find this connection's session. Told first
+                    // and bound after, as it was, a publish that came in between was dropped, unanswered.
+                    #[cfg(feature = "testing")]
+                    crate::testing::before_session_binding().await;
+                    match session {
+                        Some(session) => Self::bind_session(state, session),
+                        None => error!(
+                            %registration_id,
+                            "registered with no session to bind: its publishes are refused for now"
+                        ),
+                    }
 
                     let msg = ClientMessage::RegistrationResponse {
                         result: Ok(registration_id.clone()),
@@ -1886,53 +1903,28 @@ impl Listener {
                             error: Some(e.to_string()),
                         });
                     } else {
-                        let session_mgr = state.session_mgr.clone();
                         let myself_clone = myself.clone();
                         tokio::spawn(async move {
-                            let result = session_mgr
-                                .call(
-                                    |reply_to| BrokerMessage::GetSessionRef {
-                                        registration_id: reg_id_clone.clone(),
-                                        reply_to,
-                                    },
-                                    Some(Duration::from_millis(100)),
-                                )
-                                .await;
-                            match result {
-                                Ok(CallResult::Success(Some(session_ref))) => {
-                                    let _ = myself_clone.send_message(
-                                        BrokerMessage::SetListenerSessionRef { session_ref },
-                                    );
-                                    debug!("Cached session ref for listener");
-                                    // A resumed session keeps the subscriptions it had, made under the certificate it
-                                    // had: they are judged again under this connection's.
-                                    if let Some(subscribers) =
-                                        where_is(crate::SUBSCRIBER_MANAGER_NAME.to_string())
-                                        && let Ok(CallResult::Success(topics)) =
-                                            ActorRef::<BrokerMessage>::from(subscribers)
-                                                .call(
-                                                    |reply_to| BrokerMessage::SubscriptionsOf {
-                                                        registration_id: reg_id_clone.clone(),
-                                                        reply_to,
-                                                    },
-                                                    Some(Duration::from_secs(2)),
-                                                )
-                                                .await
-                                        && !topics.is_empty()
-                                    {
-                                        let _ = myself_clone.send_message(
-                                            BrokerMessage::JudgeSubscriptions {
-                                                topics: Some(topics),
+                            // A resumed session keeps the subscriptions it had, made under the certificate it had:
+                            // they are judged again under this connection's.
+                            if let Some(subscribers) =
+                                where_is(crate::SUBSCRIBER_MANAGER_NAME.to_string())
+                                && let Ok(CallResult::Success(topics)) =
+                                    ActorRef::<BrokerMessage>::from(subscribers)
+                                        .call(
+                                            |reply_to| BrokerMessage::SubscriptionsOf {
+                                                registration_id: reg_id_clone.clone(),
+                                                reply_to,
                                             },
-                                        );
-                                    }
-                                }
-                                _ => {
-                                    error!(
-                                        "Failed to get session ref for registration {}",
-                                        reg_id_clone
-                                    );
-                                }
+                                            Some(Duration::from_secs(2)),
+                                        )
+                                        .await
+                                && !topics.is_empty()
+                            {
+                                let _ =
+                                    myself_clone.send_message(BrokerMessage::JudgeSubscriptions {
+                                        topics: Some(topics),
+                                    });
                             }
                         });
                     }
@@ -2047,13 +2039,35 @@ impl Listener {
                 return Ok(());
             }
 
+            // A registered connection is bound before its client is told (`handle_registration_response`), so this is
+            // never reached by a client that waits to be told. Should it be, the publish is refused for now, which a
+            // front keeps and sends again, never dropped unanswered.
             let session = match state.session_ref.as_ref() {
                 Some(s) => s.clone(),
                 None => {
                     error!(
-                        "No session ref for listener {} – dropping publish",
-                        state.client_id
+                        client_id = %state.client_id,
+                        %topic,
+                        "a publish on a connection not bound to its session: refused for now"
                     );
+                    let msg = ClientMessage::PublishResponse {
+                        topic,
+                        payload: Arc::new(Vec::new()),
+                        result: Err(format!(
+                            "{PUBLISH_REQ_FAILED_TXT}: the connection is not yet bound to its session"
+                        )),
+                        trace_ctx: WireTraceCtx::from_current_span(),
+                        published_by: None,
+                        origin: Some(id),
+                        delivery_id: None,
+                        refusal: Some(cassini_types::PublishRefusal::Unavailable),
+                    };
+                    if let Err(e) =
+                        Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer))
+                            .await
+                    {
+                        error!(error = ?e, "Failed to write a refusal for now");
+                    }
                     return Ok(());
                 }
             };

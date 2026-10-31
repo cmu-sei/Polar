@@ -201,6 +201,9 @@ pub enum BrokerMessage {
         client_id: String,
         result: Result<String, String>,
         trace_ctx: Option<opentelemetry::Context>,
+        /// With an `Ok`, the session registered: the Listener binds its connection to it before it tells the client,
+        /// so whatever the client sends once told reaches a bound connection. `None` with an `Err`.
+        session: Option<ActorRef<BrokerMessage>>,
     },
     /// Publish request from the client.
     PublishRequest {
@@ -416,10 +419,6 @@ pub enum BrokerMessage {
     GetSessionRef {
         registration_id: String,
         reply_to: RpcReplyPort<Option<ActorRef<BrokerMessage>>>,
-    },
-    /// Internal message for Listener to receive its session actor ref.
-    SetListenerSessionRef {
-        session_ref: ActorRef<BrokerMessage>,
     },
     /// Internal message for SessionManager to receive its listener manager ref.
     SetListenerManager {

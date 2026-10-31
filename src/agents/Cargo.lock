@@ -919,6 +919,7 @@ name = "cassini-broker"
 version = "1.0.0"
 dependencies = [
  "async-trait",
+ "cassini-broker",
  "cassini-client",
  "cassini-tracing",
  "cassini-types",

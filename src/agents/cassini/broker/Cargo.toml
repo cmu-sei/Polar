@@ -58,11 +58,18 @@ opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
 x509-parser.workspace = true
 
+[features]
+# Hooks for the broker's own tests (`cassini_broker::testing`): a point where a test holds the broker, so that an
+# order the scheduler otherwise decides is the same on every run. Never enabled in a build that ships.
+testing = []
+
 [[bin]]
 name = "cassini-server"
 path = "src/main.rs"
 
 [dev-dependencies]
+# The crate's own tests use its testing hooks.
+cassini-broker = { path = ".", features = ["testing"] }
 # The custody daemon's custodian session, end to end with the broker (docs/architecture/key-custody.md, step 5).
 polar-custody-daemon.workspace = true
 polar-router.workspace = true

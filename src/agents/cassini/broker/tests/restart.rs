@@ -171,6 +171,95 @@ async fn a_publish_made_while_the_broker_is_away_arrives_when_it_returns() {
     .await;
 }
 
+// -- a publish sent the moment its client is registered ------------------------------------------
+//
+// A client publishes as soon as it is told it is registered, and a front sends everything it held at that moment.
+// The broker binds the connection to its session at some point near the registration; these tests make that binding
+// slow (`cassini_broker::testing::SessionBindingDelay`), so a publish sent at once always arrives in the window if
+// there is one. Before the fix the Listener told the client first and bound after: the publish was dropped with only
+// a log line, and the front's outbox kept it unanswered until a next registration that never came.
+
+/// Long enough that a publish sent when its client hears it is registered arrives inside it, however loaded the machine.
+const SLOW_BINDING: Duration = Duration::from_secs(2);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_publish_sent_the_moment_its_client_is_registered_is_taken() {
+    with_broker(|broker| async move {
+        let reader = TestClient::connect(&broker, "reader.test").await;
+        reader.subscribe("news");
+        reader
+            .wait_for("its subscription", Duration::from_secs(10), |c| {
+                c.subscribed("news")
+            })
+            .await;
+
+        let _slow = cassini_broker::testing::SessionBindingDelay::hold(SLOW_BINDING);
+        let publisher = FacadeClient::connect(&broker, "publisher.test").await;
+        publisher.client.publish("news", b"sent at once");
+        assert_eq!(
+            reader.wait_for_messages("news", 1).await,
+            [b"sent at once".to_vec()],
+            "taken by the broker, not dropped while the connection was being bound"
+        );
+        publisher
+            .client
+            .wait_for("its acknowledgement", Duration::from_secs(10), |c| {
+                c.acknowledged("news") == 1
+            })
+            .await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_publish_held_while_the_broker_was_away_is_taken_however_slowly_the_new_connection_is_bound()
+ {
+    with_broker(|broker| async move {
+        let publisher = FacadeClient::connect(&broker, "publisher.test").await;
+        pause().await;
+
+        let broker_for_restart = broker.clone();
+        let away =
+            tokio::spawn(async move { broker_for_restart.restart(Duration::from_secs(3)).await });
+        publisher
+            .client
+            .wait_for("the front to go offline", Duration::from_secs(5), |_| {
+                !publisher.is_online()
+            })
+            .await;
+        // Held by the front, and sent the moment it is registered with the broker that returns.
+        let slow = cassini_broker::testing::SessionBindingDelay::hold(SLOW_BINDING);
+        publisher
+            .client
+            .publish("news", b"sent while the broker was away");
+        away.await.unwrap();
+        publisher
+            .client
+            .wait_for(
+                "the front to come back online",
+                Duration::from_secs(40),
+                |_| publisher.is_online(),
+            )
+            .await;
+        publisher
+            .client
+            .wait_for("its acknowledgement", Duration::from_secs(10), |c| {
+                c.acknowledged("news") == 1
+            })
+            .await;
+        drop(slow);
+
+        let reader = TestClient::connect(&broker, "reader.test").await;
+        reader.subscribe("news");
+        assert_eq!(
+            reader.wait_for_messages("news", 1).await,
+            [b"sent while the broker was away".to_vec()],
+            "held by the front, sent once it registered, and taken by the broker"
+        );
+    })
+    .await;
+}
+
 // -- what a broker restart loses ------------------------------------------------------------------
 //
 // The broker is best-effort (decided 2026-10-09; see remaining-work.md): what it holds is in

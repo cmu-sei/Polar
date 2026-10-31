@@ -105,6 +105,13 @@ Built with the backpressure plan's decisions (cassini-backpressure.md, "Decided"
 - **What it gives:** a message written to a connection that dies before its acknowledgement is sent again on the
   next registration, so it is no longer lost (section 1's loss while registered); delivery is at-least-once, with no
   deduplication (step 4) and no offline file (step 3): a facade that ends loses its outbox.
+- **What it relies on:** the broker answers every publish it reads (acknowledged, refused `Denied`, or refused for now
+  `Unavailable`) or the connection ends, which brings a registration and the resend. An entry the broker reads and
+  leaves unanswered on a live connection stays in the outbox, unsent, until a next registration. The client does not
+  resend on silence, by design: a topic holding a publish back leaves it unacknowledged on purpose (backpressure), and
+  with no deduplication a resend after a timeout would deliver it twice. One such silence was found and closed in the
+  broker on 2026-10-31: a publish sent the moment the client was told it was registered, dropped by a Listener not yet
+  bound to its session (cassini-broker.md, "The flows", Register).
 - **Tests:** `outbox.rs`'s own, the property `no_message_leaves_the_outbox_before_its_own_acknowledgement`
   (`cassini/client/tests/props.rs`), the facade's (numbered 1, 2, 3; sent again by the next transport, acknowledged
   out of order; a full outbox holding what follows; a refused one let go), the broker's

@@ -685,6 +685,7 @@ impl SessionManager {
                         client_id,
                         result: Err("Broker is shutting down".to_string()),
                         trace_ctx: Some(span.context()),
+                        session: None,
                     })?;
                     return Ok(());
                 } else {
@@ -736,6 +737,7 @@ impl SessionManager {
                             client_id: client_id.clone(),
                             result: Ok(existing_id.clone()),
                             trace_ctx: Some(span.context()),
+                            session: Some(session.agent_ref.clone()),
                         })?;
 
                         // Only now that the session agent has been told of the new connection are
@@ -819,6 +821,7 @@ impl SessionManager {
                         client_id,
                         result: Ok(new_id.clone()),
                         trace_ctx: Some(span.context()),
+                        session: Some(session_agent.clone()),
                     })?;
                 }
                 Err(e) => {
@@ -1325,6 +1328,7 @@ impl SessionAgent {
                         client_id: client_id.clone(),
                         result: Ok(registration_id.clone()),
                         trace_ctx: Some(span.context()),
+                        session: Some(myself.clone()),
                     })
                 {
                     error!("failed to send registration ack to listener: {e}");
@@ -1336,6 +1340,7 @@ impl SessionAgent {
                             client_id,
                             result: Ok(registration_id),
                             trace_ctx: Some(span.context()),
+                            session: Some(myself.clone()),
                         }) {
                             let err_msg = format!("{REGISTRATION_REQ_FAILED_TXT} {e}!");
                             error!("{err_msg}");
@@ -1344,6 +1349,7 @@ impl SessionAgent {
                                     client_id: state.client_ref.get_name().unwrap_or_default(),
                                     result: Err(err_msg),
                                     trace_ctx: Some(span.context()),
+                                    session: None,
                                 },
                             );
                             myself.stop(Some(e.to_string()));
