@@ -912,6 +912,8 @@ fn map_validation_error(e: &ValidationError) -> IssueOutcome {
         ValidationError::InvalidIssuer(_) => IssueOutcome::InvalidToken,
         ValidationError::ForbiddenAlgorithm(_) => IssueOutcome::InvalidToken,
         ValidationError::Expired => IssueOutcome::InvalidToken,
+        ValidationError::NotYetValid(_) => IssueOutcome::InvalidToken,
+        ValidationError::LifetimeTooLong { .. } => IssueOutcome::InvalidToken,
         ValidationError::MissingClaim(_) => IssueOutcome::InvalidToken,
         ValidationError::JwksUnavailable(_) => IssueOutcome::InternalError,
         ValidationError::InvalidToken => IssueOutcome::InvalidToken,

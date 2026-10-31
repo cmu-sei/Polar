@@ -120,6 +120,13 @@ pub static RECORD_PATH: Required<String> = Required::text(
      be recorded is not returned",
 );
 
+pub static MAX_TOKEN_LIFETIME_SECS: Defaulted<u64> = Defaulted::seconds(
+    "CERT_ISSUER_MAX_TOKEN_LIFETIME_SECS",
+    "the longest a presented token may live, `exp - iat` (or `exp - now` for a token without `iat`), to be accepted; \
+     a token issued to live longer is refused. Polar's own tokens live an hour at most",
+    "86400",
+);
+
 pub static KUBERNETES_CA_CERT: Optional<String> = Optional::text(
     "KUBERNETES_CA_CERT",
     "path to the Kubernetes API server's CA certificate, trusted beside the system's when an issuer's keys are \
@@ -149,6 +156,7 @@ static VARIABLES: &[&dyn Described] = &[
     &BOOTSTRAP,
     &OWN_TOKEN,
     &RECORD_PATH,
+    &MAX_TOKEN_LIFETIME_SECS,
     &KUBERNETES_CA_CERT,
     &KUBERNETES_SA_TOKEN,
 ];
@@ -184,6 +192,8 @@ pub struct Settings {
     /// What fetching an issuer's keys from the Kubernetes API server needs.
     pub kubernetes_ca_cert: Option<String>,
     pub kubernetes_sa_token: String,
+    /// The longest a presented token may live (`crate::oidc::Validator::with_max_token_lifetime`).
+    pub max_token_lifetime: Duration,
 }
 
 impl Settings {
@@ -218,6 +228,13 @@ impl Settings {
         let record_path = take!(RECORD_PATH, String::new());
         let kubernetes_ca_cert = take!(KUBERNETES_CA_CERT, None);
         let kubernetes_sa_token = take!(KUBERNETES_SA_TOKEN, String::new());
+        let max_token_lifetime = take!(MAX_TOKEN_LIFETIME_SECS, 0);
+        if max_token_lifetime == 0 && problems.is_empty() {
+            problems.push(format!(
+                "{}: 0 would refuse every token",
+                MAX_TOKEN_LIFETIME_SECS.name()
+            ));
+        }
 
         let issuers: Vec<IssuerConfig> =
             json(ISSUERS.name(), &issuers_text, &mut problems).unwrap_or_default();
@@ -270,6 +287,7 @@ impl Settings {
             record_path,
             kubernetes_ca_cert,
             kubernetes_sa_token,
+            max_token_lifetime: Duration::from_secs(max_token_lifetime),
         })
     }
 }
@@ -403,6 +421,28 @@ mod tests {
         .unwrap();
         assert_eq!(s.kubernetes_ca_cert.as_deref(), Some("/k/ca.crt"));
         assert_eq!(s.kubernetes_sa_token, "/k/token");
+    }
+
+    #[test]
+    fn the_longest_a_token_may_live_is_a_day_unless_set_and_never_nothing() {
+        let s = Settings::from_env(&whole()).unwrap();
+        assert_eq!(s.max_token_lifetime, Duration::from_secs(86_400));
+        assert_eq!(
+            s.max_token_lifetime,
+            crate::oidc::DEFAULT_MAX_TOKEN_LIFETIME
+        );
+        let s =
+            Settings::from_env(&with(&[("CERT_ISSUER_MAX_TOKEN_LIFETIME_SECS", "3600")])).unwrap();
+        assert_eq!(s.max_token_lifetime, Duration::from_secs(3600));
+        let zero = with(&[("CERT_ISSUER_MAX_TOKEN_LIFETIME_SECS", "0")]);
+        let refused = Settings::from_env(&zero).unwrap_err();
+        assert!(
+            refused
+                .iter()
+                .any(|p| p.contains("CERT_ISSUER_MAX_TOKEN_LIFETIME_SECS")),
+            "{refused:?}"
+        );
+        assert!(!checked(&zero).is_empty(), "--check refuses it too");
     }
 
     #[test]

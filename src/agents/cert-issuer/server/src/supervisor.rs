@@ -239,7 +239,8 @@ impl Actor for CertIssuerSupervisor {
                 settings.kubernetes_ca_cert.as_deref(),
                 &settings.kubernetes_sa_token,
             )),
-        );
+        )
+        .with_max_token_lifetime(settings.max_token_lifetime);
         let handler = Arc::new(Handler {
             validator: Arc::new(validator),
             ca: ca.clone(),

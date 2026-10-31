@@ -36,13 +36,16 @@
 //!   - `none` in any case and HS256/384/512 are `ForbiddenAlgorithm` before any fetch, whatever the configuration;
 //!     an `alg` jsonwebtoken cannot represent (ES512, lowercase hs256, ...) is `InvalidToken`, also before any fetch;
 //!   - a key of the wrong family or curve for the token's `alg` is `InvalidToken`;
-//!   - `exp` is required and checked with jsonwebtoken's default leeway of 60 seconds; `aud` and `iss` are required.
+//!   - `exp` is required and checked with jsonwebtoken's default leeway of 60 seconds; `aud` and `iss` are required;
+//!   - an `nbf` or an `iat` later than now by more than that leeway is `NotYetValid`, naming the claim;
+//!   - a token that lives longer than the maximum (`exp - iat`, or `exp - now` without `iat`) is `LifetimeTooLong`;
+//!     the maximum is a day unless the validator is given another (`CERT_ISSUER_MAX_TOKEN_LIFETIME_SECS`).
 
 mod helpers;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use cert_issuer::config::IssuerConfig;
-use cert_issuer::oidc::{ValidationError, Validator};
+use cert_issuer::oidc::{DEFAULT_MAX_TOKEN_LIFETIME, ValidationError, Validator};
 use cert_issuer_common::identity::IdentityNormalization;
 use helpers::*;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -647,6 +650,175 @@ async fn a_signature_from_another_key_of_the_same_kind_is_an_invalid_token() {
             "{alg:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Not before, issued at, and how long a token lives
+// ---------------------------------------------------------------------------
+
+/// The standard claims, with `changes` set (a null removes one).
+fn claims_with(changes: serde_json::Value) -> serde_json::Value {
+    let mut c = claims(300);
+    for (k, v) in changes.as_object().unwrap() {
+        if v.is_null() {
+            c.as_object_mut().unwrap().remove(k);
+        } else {
+            c[k] = v.clone();
+        }
+    }
+    c
+}
+
+#[tokio::test]
+async fn a_token_not_valid_before_a_time_still_to_come_is_refused_beyond_the_leeway() {
+    let (v, _) = validator(&every_mapped_name());
+    for (name, alg) in MAPPED {
+        for ahead in [120, 3600, 31_536_000] {
+            assert_eq!(
+                v.validate(&token(
+                    alg,
+                    &claims_with(serde_json::json!({ "nbf": now_plus(ahead) }))
+                ))
+                .await,
+                Err(ValidationError::NotYetValid("nbf".to_string())),
+                "{name}: nbf {ahead}s ahead"
+            );
+        }
+        // Within the 60 seconds of leeway, and in the past: accepted.
+        for at in [30, 0, -600] {
+            let got = v
+                .validate(&token(
+                    alg,
+                    &claims_with(serde_json::json!({ "nbf": now_plus(at) })),
+                ))
+                .await;
+            assert!(got.is_ok(), "{name}: nbf {at}s from now: {got:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_token_issued_in_the_future_is_refused_beyond_the_leeway() {
+    let (v, _) = validator(&every_mapped_name());
+    for (name, alg) in MAPPED {
+        for ahead in [120, 3600, 31_536_000] {
+            assert_eq!(
+                v.validate(&token(
+                    alg,
+                    &claims_with(serde_json::json!({ "iat": now_plus(ahead) }))
+                ))
+                .await,
+                Err(ValidationError::NotYetValid("iat".to_string())),
+                "{name}: iat {ahead}s ahead"
+            );
+        }
+        for at in [30, 0, -60] {
+            let got = v
+                .validate(&token(
+                    alg,
+                    &claims_with(serde_json::json!({ "iat": now_plus(at) })),
+                ))
+                .await;
+            assert!(got.is_ok(), "{name}: iat {at}s from now: {got:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_token_that_lives_longer_than_a_day_is_refused_and_one_that_lives_a_day_is_not() {
+    let (v, _) = validator(&every_mapped_name());
+    let day = DEFAULT_MAX_TOKEN_LIFETIME.as_secs() as i64;
+    assert_eq!(day, 86_400);
+    for (name, alg) in MAPPED {
+        // exp - iat, exactly at the maximum and one second past it.
+        let at_most = claims_with(
+            serde_json::json!({ "iat": now_plus(0) - 10, "exp": now_plus(0) - 10 + day }),
+        );
+        let got = v.validate(&token(alg, &at_most)).await;
+        assert!(got.is_ok(), "{name}: a day exactly: {got:?}");
+        let over = claims_with(
+            serde_json::json!({ "iat": now_plus(0) - 10, "exp": now_plus(0) - 10 + day + 1 }),
+        );
+        assert_eq!(
+            v.validate(&token(alg, &over)).await,
+            Err(ValidationError::LifetimeTooLong {
+                lifetime_secs: 86_401,
+                max_secs: 86_400
+            }),
+            "{name}: a day and a second"
+        );
+        // Issued long ago and near its end: what it was issued for is what counts.
+        let old =
+            claims_with(serde_json::json!({ "iat": now_plus(-80_000), "exp": now_plus(10_000) }));
+        assert_eq!(
+            v.validate(&token(alg, &old)).await,
+            Err(ValidationError::LifetimeTooLong {
+                lifetime_secs: 90_000,
+                max_secs: 86_400
+            }),
+            "{name}: issued for 25 hours"
+        );
+        // A century out, as the probe found accepted before.
+        let century =
+            claims_with(serde_json::json!({ "iat": now_plus(0), "exp": now_plus(3_153_600_000) }));
+        assert!(
+            matches!(
+                v.validate(&token(alg, &century)).await,
+                Err(ValidationError::LifetimeTooLong { .. })
+            ),
+            "{name}: a century"
+        );
+        // Without iat, what is left of it is bounded instead: exp - now.
+        let no_iat_far =
+            claims_with(serde_json::json!({ "iat": null, "exp": now_plus(day + 120) }));
+        assert!(
+            matches!(
+                v.validate(&token(alg, &no_iat_far)).await,
+                Err(ValidationError::LifetimeTooLong { .. })
+            ),
+            "{name}: no iat, a day and two minutes left"
+        );
+        let no_iat_near =
+            claims_with(serde_json::json!({ "iat": null, "exp": now_plus(day - 120) }));
+        let got = v.validate(&token(alg, &no_iat_near)).await;
+        assert!(got.is_ok(), "{name}: no iat, under a day left: {got:?}");
+    }
+}
+
+#[tokio::test]
+async fn the_maximum_lifetime_given_to_the_validator_is_the_one_it_holds_to() {
+    let (v, _) = validator(&every_mapped_name());
+    let v = v.with_max_token_lifetime(Duration::from_secs(3600));
+    let hour = claims_with(serde_json::json!({ "iat": now_plus(0), "exp": now_plus(3600) }));
+    let longer = claims_with(serde_json::json!({ "iat": now_plus(0), "exp": now_plus(3601) }));
+    for (name, alg) in MAPPED {
+        let got = v.validate(&token(alg, &hour)).await;
+        assert!(got.is_ok(), "{name}: an hour: {got:?}");
+        assert_eq!(
+            v.validate(&token(alg, &longer)).await,
+            Err(ValidationError::LifetimeTooLong {
+                lifetime_secs: 3601,
+                max_secs: 3600
+            }),
+            "{name}: an hour and a second"
+        );
+    }
+}
+
+#[test]
+fn the_refusals_say_what_is_wrong() {
+    assert_eq!(
+        ValidationError::NotYetValid("nbf".to_string()).to_string(),
+        "token is not yet valid: its 'nbf' is in the future"
+    );
+    assert_eq!(
+        ValidationError::LifetimeTooLong {
+            lifetime_secs: 90_000,
+            max_secs: 86_400
+        }
+        .to_string(),
+        "token lives 90000s, beyond the 86400s allowed"
+    );
 }
 
 // ---------------------------------------------------------------------------

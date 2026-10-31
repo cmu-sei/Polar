@@ -1134,12 +1134,18 @@ Dev cluster `u7s`, images rebuilt from this branch (`up.nu local-minimal --dev`,
   jsonwebtoken's 60-second leeway; audience; issuer; and the `kubernetes.io` claim paths. Still open: RSA key sizes at
   the bounds. The ignore cannot be scoped to crypto-bigint 0.5: cargo-deny 0.19 takes only `id` and
   `reason` (later releases add `allow`), so until then check `cargo tree -i crypto-bigint` when the lockfile moves.
-- [ ] **Found pinning the token tests (2026-10-31), not fixed, for the maintainer:** the validator accepts a token whose
+- [x] **Done 2026-10-31, as the maintainer decided:** a future `nbf` and a future `iat` (beyond the 60 s leeway) are
+  refused (`NotYetValid`), and so is a token that lives longer than `CERT_ISSUER_MAX_TOKEN_LIFETIME_SECS`, default 86400
+  (`LifetimeTooLong`; `exp - iat`, or `exp - now` for a token without `iat`, which bounds what is left of it as
+  `exp - iat` would). The default was checked against every token Polar presents: projected ServiceAccount tokens 3600 s,
+  the admin bootstrap TokenRequest 600 s, Keycloak's 300 s (realm default), `cert-issuer-setup`'s 3600 s; nothing
+  exceeds an hour. docs/architecture/cert-issuer-architecture.md, "Token lifetime". What was found:
+  the validator accepted a token whose
   `nbf` is in the future (an hour, a year). `oidc.rs` builds `Validation::new(alg)`, whose `validate_nbf` is false, and
   `set_required_spec_claims` does not turn it on; `map_jwt_error` maps `ImmatureSignature`, so refusing it seems to
   have been meant (RFC 7519 4.1.5: the token MUST NOT be accepted before `nbf`). The token must still be signed by a
   trusted issuer, and Kubernetes sets `nbf` to `iat`. A future `iat` and an `exp` a century out are accepted too
-  (no maximum lifetime). Fixing it is one line (`validation.validate_nbf = true`) and a test; not pinned either way.
+  (no maximum lifetime). Now pinned the other way by the four time tests in `oidc_algorithms_test.rs`.
 - Flaky test: `polar-agent-builder` `agent::tests::an_agent_started_after_polar_init_takes_the_marker_and_starts`
   shares the static `MARKED_STARTED` with
   `an_agent_started_without_polar_init_having_run_exits_one_and_is_not_started`. The unmarked test resets the flag

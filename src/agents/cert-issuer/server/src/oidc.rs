@@ -141,6 +141,13 @@ pub enum ValidationError {
     ForbiddenAlgorithm(String),
     #[error("token is expired")]
     Expired,
+    /// Its `nbf` (not before) or its `iat` (issued at) is later than now, beyond the leeway: the issuer says it is not
+    /// valid yet, or a clock is wrong. The value is the claim.
+    #[error("token is not yet valid: its '{0}' is in the future")]
+    NotYetValid(String),
+    /// It lives longer than the validator allows: `exp - iat`, or `exp - now` for a token with no `iat`.
+    #[error("token lives {lifetime_secs}s, beyond the {max_secs}s allowed")]
+    LifetimeTooLong { lifetime_secs: u64, max_secs: u64 },
     #[error("required claim '{0}' is missing or wrong type")]
     MissingClaim(String),
     #[error("JWKS unavailable: {0}")]
@@ -188,7 +195,14 @@ pub struct Validator {
     /// Pre-computed allowed-algorithm sets, one per issuer, keyed the
     /// same way as `issuers`.
     allowed_algorithms: HashMap<String, Vec<Algorithm>>,
+    /// The longest a token may live (`exp - iat`) to be accepted: DEFAULT_MAX_TOKEN_LIFETIME unless set.
+    max_token_lifetime: Duration,
 }
+
+/// The longest a token may live when nothing else is set (`CERT_ISSUER_MAX_TOKEN_LIFETIME_SECS`, `crate::settings`):
+/// a day. Every token Polar's issuers present lives an hour at most (docs/architecture/cert-issuer-architecture.md,
+/// "Token lifetime").
+pub const DEFAULT_MAX_TOKEN_LIFETIME: Duration = Duration::from_secs(86_400);
 
 impl Validator {
     /// Construct a validator with the default HTTP-backed JWKS source.
@@ -233,7 +247,14 @@ impl Validator {
             jwks_source,
             cache,
             allowed_algorithms,
+            max_token_lifetime: DEFAULT_MAX_TOKEN_LIFETIME,
         }
+    }
+
+    /// The same validator, refusing a token that lives longer than `max`.
+    pub fn with_max_token_lifetime(mut self, max: Duration) -> Self {
+        self.max_token_lifetime = max;
+        self
     }
 
     /// Validate a JWT. Returns extracted claims on success.
@@ -267,6 +288,9 @@ impl Validator {
     ///     signature, exp, iss, and aud checks here, all against the
     ///     selected issuer's own issuer string and audience list. We
     ///     map its errors to our variants.
+    ///     `nbf` is checked here too (`NotYetValid("nbf")`); then (7b) an
+    ///     `iat` still to come (`NotYetValid("iat")`) and a token that
+    ///     lives longer than the maximum (`LifetimeTooLong`) are refused.
     ///  8. Extract workload identity and instance binding from the
     ///     claims using the selected issuer's own configured paths.
     ///
@@ -380,6 +404,9 @@ impl Validator {
                 .collect::<Vec<_>>(),
         );
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+        // A token whose `nbf` is still to come is refused (RFC 7519 4.1.5), with the same leeway as `exp`
+        // (Validation::new: 60 s). jsonwebtoken leaves this off unless asked.
+        validation.validate_nbf = true;
         // We don't tighten `validation.algorithms` further here
         // because we've already gated on the allow-list. Trust
         // ourselves over the library's redundant check.
@@ -393,6 +420,30 @@ impl Validator {
             decode::<serde_json::Value>(token, &key, &validation).map_err(map_jwt_error)?;
 
         let raw_claims = token_data.claims;
+
+        // ---- Step 7b: issued at, and how long the token lives ----
+        //
+        // jsonwebtoken checks neither. An `iat` still to come, beyond the leeway, is refused as an `nbf` is. A token
+        // issued to live longer than the maximum (`exp - iat`) is refused whatever is left of it: a long-lived token
+        // is a standing credential, whoever holds it. One with no `iat` (RFC 7519 makes it optional) is held to what
+        // is left of it, `exp - now`: that bounds how long it can still be used exactly as `exp - iat` would, and
+        // refusing it outright would refuse an issuer for a claim that adds nothing once `exp - now` is bounded.
+        let now = jsonwebtoken::get_current_timestamp();
+        let exp = numeric_claim(&raw_claims, "exp")?.unwrap_or(now);
+        let iat = numeric_claim(&raw_claims, "iat")?;
+        if let Some(iat) = iat
+            && iat > now.saturating_add(validation.leeway)
+        {
+            return Err(ValidationError::NotYetValid("iat".to_string()));
+        }
+        let lifetime_secs = exp.saturating_sub(iat.unwrap_or(now));
+        let max_secs = self.max_token_lifetime.as_secs();
+        if lifetime_secs > max_secs {
+            return Err(ValidationError::LifetimeTooLong {
+                lifetime_secs,
+                max_secs,
+            });
+        }
 
         // ---- Step 8: extract identity claims ----
         //
@@ -885,7 +936,8 @@ fn map_jwt_error(err: jsonwebtoken::errors::Error) -> ValidationError {
             ValidationError::InvalidIssuer("unknown".to_string())
         }
         ErrorKind::InvalidAudience => ValidationError::InvalidAudience,
-        ErrorKind::ImmatureSignature => ValidationError::InvalidToken,
+        // The `nbf` is still to come (validate_nbf is on).
+        ErrorKind::ImmatureSignature => ValidationError::NotYetValid("nbf".to_string()),
         ErrorKind::InvalidSignature => ValidationError::InvalidToken,
         ErrorKind::MissingRequiredClaim(name) => ValidationError::MissingClaim(name.clone()),
         // Everything else collapses to InvalidToken. We deliberately
@@ -893,6 +945,19 @@ fn map_jwt_error(err: jsonwebtoken::errors::Error) -> ValidationError {
         // to distinguish "bad base64" from "wrong key type" from
         // "malformed JSON in claims."
         _ => ValidationError::InvalidToken,
+    }
+}
+
+/// A top-level numeric date claim (`exp`, `iat`) in whole seconds: `None` when absent, `MissingClaim` when it is not a
+/// non-negative number. A fractional value (RFC 7519 allows one) is taken down to the second.
+fn numeric_claim(claims: &serde_json::Value, name: &str) -> Result<Option<u64>, ValidationError> {
+    match claims.get(name) {
+        None => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .or_else(|| v.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64))
+            .map(Some)
+            .ok_or_else(|| ValidationError::MissingClaim(name.to_string())),
     }
 }
 

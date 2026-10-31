@@ -289,6 +289,7 @@ Check the projected token's `audiences` field first.
 |-----------------------------|---------------------------------------------------------------------------------|
 | `config_test.rs`            | Config validation rejects HS256 and "none" at load time                         |
 | `oidc_test.rs`              | Signature, audience, issuer, expiry, algorithm restrictions, JWKS caching       |
+| `oidc_algorithms_test.rs`   | Every allowed algorithm, refusals, key/alg mismatch, nbf, iat, maximum lifetime |
 | `csr_test.rs`               | CSR parsing, single-SAN enforcement, exact-string identity matching             |
 | `handler_unit_test.rs`      | Outcome-to-status-code mapping and wire serialization stability                 |
 | `handler_integration_test.rs` | End-to-end ordering: CA never called when upstream validation fails           |
