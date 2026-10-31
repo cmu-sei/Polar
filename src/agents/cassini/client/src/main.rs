@@ -51,6 +51,7 @@ fn resolve_socket_path(override_path: Option<&PathBuf>) -> PathBuf {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    polar_version::exit_if_asked("cassini-client");
     let cli = Cli::parse();
     let register_timeout = Duration::from_secs(cli.register_timeout);
     let format = &cli.format;

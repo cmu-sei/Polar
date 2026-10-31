@@ -27,6 +27,7 @@ license.workspace = true
 
 [dependencies]
 polar-scudo.workspace = true
+polar-version.workspace = true
 cassini-client.workspace = true
 cassini-types.workspace = true
 opentelemetry-otlp.workspace = true

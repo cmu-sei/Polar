@@ -1093,8 +1093,10 @@ Dev cluster `u7s`, images rebuilt from this branch (`up.nu local-minimal --dev`,
 - [x] The Cassini protocol version (done 2026-10-31, with the backpressure merge): polar-version depends on
   cassini-types and `CASSINI_PROTOCOL` is `cassini_types::PROTOCOL_VERSION`, so every record's `cassini_protocol` is
   the version a broker checks at registration.
-- Binaries that do not answer `--version` yet: `cassini-client` and `cassini-c2` (their own parsing; left alone while
-  the Cassini branch is open), `cert-issuer-setup` and `discover_repo` (developer tools), and the binaries that are not
+- [x] `cassini-client` and `cassini-c2` answer `--version` (done 2026-10-31): `polar_version::exit_if_asked` is the
+  first line of each `main`, before clap and tracing, as polar-sign's; tested by running the built binaries
+  (`cassini/client/tests/integration_tests.rs`, `cassini/cassini-c2/tests/version.rs`).
+- Binaries that do not answer `--version` yet: `cert-issuer-setup` and `discover_repo` (developer tools), and the binaries that are not
   on the builder and parse no arguments, which would start on `--version`: gitlab-observer, gitlab-consumer,
   openapi-observer, openapi-processor, build-processor, the logger, polar-healthcheck and polar-custody's daemon. Each is
   one line, `polar_version::exit_if_asked("<name>")`, or nothing once it moves onto the builder.

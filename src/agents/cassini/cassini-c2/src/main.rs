@@ -141,6 +141,7 @@ impl Actor for ShutdownController {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    polar_version::exit_if_asked("cassini-c2");
     // Initialize tracing (optional but helpful)
     cassini_client::init_tracing("shutdown-tool");
 
