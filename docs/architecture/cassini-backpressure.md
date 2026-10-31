@@ -278,6 +278,90 @@ frame behind the one a waiting small publish keeps; the watchdog bounds that by 
 **Not done:** a protocol version at registration (the wire note above). Every image is still rebuilt together; a
 mismatched client still fails to decode rather than being told.
 
+## Second review (2026-10-30): the watchdog cut healthy clients, fixed on the branch
+
+A second review of the branch (rebased onto main `98b1effb`) found that the watchdog of the first review's fix 1
+ended clients that read and acknowledge everything, and lost what they were owed. Paths relative to
+`src/agents/cassini/`. Each fix came with a test that failed first, and fails again with the fix mutated away.
+
+**A. A processor was cut for acknowledgements the broker had not read (confirmed).** A client that publishes and
+subscribes has its acknowledgements behind its own publishes on its one connection. The read-around stopped at the
+first frame that was not an acknowledgement, so a processor publishing small frames back to back always had one
+behind the waiting publish; behind a large frame waiting for its admission nothing at all is read; and on the client
+a blocked large write holds the writer, so the acknowledgement writer waits too. The processor showed no progress, the
+watchdog ended its connection, and the next alarm shed what it was owed.
+
+*The choice:* of the three ways the review offered, the first, made safe. Progress is the connection's (B below), and a
+connection whose reader waits for an admission is not ended for a stall: its missing acknowledgements are the broker's
+doing. Spared alone, though, such a connection could hold an exhausted budget for good (two processors each waiting
+behind the other's deliveries, or one behind its own), so a spared connection's reader *refuses for now*, for the
+stall bound, each publish it cannot admit at once and the one it waits for (`PublishRefusal::Unavailable`, which a
+facade keeps and sends again), and reads on, so its acknowledgements are read. A refused large frame's body is read
+past under one global slot and let go at once (`REFUSED_BODY`, within the stall bound), so the budget is passed by at
+most one frame, and only while connections refuse. The second way (a bounded queue of frames read ahead) cannot bound a
+run of publishes before the acknowledgements and holds what it reads outside the budget; the third (a separate write
+path on the client) cannot help while the broker does not read the connection, as everything the client writes is in
+that one stream: the client's blocked write ends as soon as the broker reads on. Goal 2 (pressure over TCP) stays the
+rule; refusing for now is the exception, for a connection the broker cannot otherwise make progress on.
+
+*Where:* the reader marks itself while it waits (`ConnWriter::is_admitting`, `broker/src/listener.rs:136`;
+`admit_or_refuse`, 391). `ConnWriter::spare` (153) spares a connection whose reader waits, and spares it again only
+once it has made progress since, so a client that acknowledges nothing is ended at the next look. The watchdog spares
+before it ends, deciding once per session a look (`budget.rs:448-470`); a topic's stall rule spares too, and gives the
+subscriber the stall bound again to drain (`topic.rs:769`, `Backlog::restart_stall_clock`, `types/src/held.rs:307`).
+
+*Tests* (`broker/tests/backpressure.rs`): `a_processor_publishing_small_frames_back_to_back_under_an_exhausted_budget_is_not_cut`
+and `a_processor_publishing_large_frames_under_an_exhausted_budget_is_not_cut` (nine topics, each under its high water,
+read at half a MiB a second by slow subscribers while the processor publishes to them and reads them: no one is cut,
+the processor is given everything and every publish is accepted; with B fixed first both failed on the processor cut
+and its deliveries shed; mutations: no sparing, the refusal ignored, the waiting reader unmarked, the decision per
+backlog instead of per session); `a_processor_holding_back_its_own_topic_is_not_cut_for_acknowledgements_the_broker_has_not_read`
+(the topic's rule, under a budget it cannot exhaust; mutations: no sparing, no fresh bound);
+`a_client_that_publishes_and_never_acknowledges_is_spared_once_and_then_ended` (the bound on sparing; mutation: spared
+without progress).
+
+**B. Progress was one subscription's (plausible, confirmed by its test).** A client acknowledging a large backlog on one
+topic was ended for a delivery on another waiting behind those writes past the stall bound; and the acknowledgements
+themselves wait in the Listener's mailbox behind its writes, so the subscriber learns of them late. Progress is now the
+connection's, recorded by its reader when it reads an acknowledgement (`ConnWriter::idle_for`, `listener.rs:177`), and
+the watchdog spares a connection that made any within the bound. *Test:*
+`a_client_acknowledging_one_topic_is_not_cut_for_a_delivery_waiting_behind_it_on_another` (fails with no connection
+progress, or with it not recorded). The slow subscribers of A's tests were themselves cut before this fix.
+
+**B, the poison delivery.** A frame the client cannot decode names nothing the client can read, so a delivery in it was
+never acknowledged, held, and sent again on every resume. Both ends now number a connection's frames from one (the
+Listener's writes, `listener.rs:1193`; the client's reader); the client names a frame that does not decode
+(`ClientMessage::FrameUndecodable`, the last variant, so no tag moves; `TcpClientActor::on_frame`,
+`client/src/lib.rs:877`), and the Listener lets the delivery it carried go as acknowledged, with a warning naming the
+identity (`listener.rs:1681`). *Tests:* `a_delivery_the_client_could_not_decode_is_let_go_when_it_says_so` (fails with
+the notice ignored, or with frames numbered from zero) and the client's `a_frame_that_does_not_decode_is_named_to_the_broker`.
+
+**C. Deferred resends chained (confirmed).** A deferral armed a resend at the first backoff every time; a registration
+before it fired sent the publish twice, and each deferral added a chain. The facade keeps one deferral per publish
+(`Deferral`, `client/src/facade.rs:213`): its wait doubles from 1 s to 30 s with each deferral, a later one replaces the
+armed timer (`Resend { timer }` does nothing unless it is the armed one), a registration cancels it (its retransmit
+sends the publish), and an acknowledgement or refusal forgets it. *Tests:*
+`a_deferred_publish_is_sent_again_once_however_deferrals_and_registrations_fall` and
+`a_publish_deferred_again_waits_longer_each_time_up_to_the_last_backoff` (mutations: the timer not cancelled, a
+replaced timer still firing, no growth).
+
+**D. A bare transport said it would resend (confirmed).** `PublishDeferred`'s reason now says who sends it again: kept
+and sent again through a facade (`DEFERRED_AND_KEPT`), or not kept, so its caller must (`DEFERRED_NOT_KEPT`,
+`client/src/lib.rs:68`). *Test:* `a_deferral_says_who_sends_the_publish_again`.
+
+**E. A wait dropped by a cut stayed counted.** `Budget::charge` counts a waiting reader with a guard (`Waiting`,
+`budget.rs:163`). *Test:* `a_wait_given_up_is_no_longer_counted`.
+
+**F. The watchdog ran through the drain.** The broker tells the budget when its drain begins (`Budget::begin_drain`,
+`budget.rs:258`, from the first shutdown phase), and the watchdog stops. *Test:* `the_watchdog_stops_when_the_drain_begins`
+(the budget's; the broker's one call is covered by reading only).
+
+**Known limits added:** a client that never reads blocks its own Listener on a write, so its publishes wait in that
+Listener's mailbox and never reach a topic: nothing is held back, and it holds up to its window and high water
+uncut until the budget is exhausted, when the watchdog ends it (spared at most once). Publishes refused for now on a
+bare transport are told to its caller and not sent again. The client's frame count in its read loop is not reached by a
+test (the broker never writes a frame that does not decode); `on_frame`, which it numbers, is.
+
 ## Open decisions
 
 1. **A subscriber that stays slow** past `T_stall`: end its connection (recommended; lossless until then, and the
