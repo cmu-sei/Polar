@@ -262,6 +262,24 @@ and `-0400`; it logged each JQL and honoured `updated >= -Nm`):
 - While the fake answered `/field` without the fields a real Jira sends, the observer stayed up and retried (30 s
   doubling), as `jira.md` describes; jira-observer exits only on a configuration refusal (the placeholder `JIRA_URL`).
 
+## The rebuild, seen on a cluster (u7c, sandbox-local, 2026-10-31)
+
+Deployed over the earlier test (the graph holding the fake Jira's 120 issues). The seed step signed and pushed
+`permanent/soft-state-observer-schema.dhall` version 1, which the scheduler observer could not evaluate: `polar-sign`
+wrote every empty list as `([] : List {})`, so jira-observer's empty `owns` and jira-processor's `owns : List Text` were
+two types in one list (`InvalidListElement`). Until a schema arrived the state agent answered "no schema yet; ask
+again" and jira-observer retried, as designed, never pulling everything. Fixed in `polar-sign` (`50baf2f6`: an empty
+list takes its element type from its siblings; a list that cannot be unified is refused at signing, naming its path).
+The seed skips a path that exists, so version 2 was signed by an author and pushed; "the schema is loaded version=2
+workloads=2 readers=1", and at jira-observer's next try "the graph's newest issue was updated at 1793402527000 ms; the
+first pull starts there", Jira asked `updated >= -331m ORDER BY updated ASC` (325.1 minutes plus the overlap, rounded
+up): one issue.
+
+Found by it, open: while the state agent has no schema, jira-observer's retries follow its Jira backoff (30 s doubling to
+15 minutes), so on a fresh cluster, where the seed lands minutes after the agents start, the first cursor pull can wait
+up to 15 minutes after the schema is there (here 14). A "no schema yet" belongs to the StateActor's own retry, not to
+the domain's.
+
 ## Gaps kept open
 
 - Neo4j has one superuser for every agent (`infra/config/capabilities.nuon:77-97`); "reader only" is the code's
