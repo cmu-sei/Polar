@@ -33,10 +33,30 @@
 //! (its reader refuses for now, and reads on), or end it.
 
 use crate::budget::Bounds;
+use crate::runtime_budget::{BudgetSnapshot, Controller, LimitedBy, MemorySource, WarmStart};
 use cassini_types::BrokerMessage;
-use ractor::{Actor, ActorProcessingErr, ActorRef};
+use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
+
+/// How many samples go by between two of the controller's log lines, when nothing it decides changes.
+pub const LOG_EVERY_SAMPLES: u32 = 10;
+
+/// The runtime budget: its controller and where memory is read.
+#[derive(Clone)]
+pub struct BudgetControl {
+    pub controller: Controller,
+    pub memory: Arc<dyn MemorySource>,
+}
+
+impl std::fmt::Debug for BudgetControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BudgetControl")
+            .field("controller", &self.controller)
+            .finish_non_exhaustive()
+    }
+}
 
 /// What the pressure manager is told.
 #[derive(Debug)]
@@ -47,6 +67,12 @@ pub enum PressureMsg {
     SetSubscribers(ActorRef<BrokerMessage>),
     /// The broker's drain has begun: the manager ends (what the drain lets go of is the drain's).
     Drain,
+    /// Its own, every `Tunables::sample_every`: sample memory and set the budget (with a runtime budget).
+    Sample,
+    /// A learned value to start from, whenever it comes: adopted within the floor, the ceiling and the cap.
+    WarmStart(WarmStart),
+    /// The runtime budget's state, for pulled health; none with a fixed budget.
+    Snapshot(RpcReplyPort<Option<BudgetSnapshot>>),
 }
 
 /// The broker's pressure: the budget's alarm, and the pace of the stall checks.
@@ -56,6 +82,8 @@ pub struct PressureManagerArgs {
     pub bounds: Bounds,
     /// The subscriber manager, if it is already running (otherwise `PressureMsg::SetSubscribers`).
     pub subscribers: Option<ActorRef<BrokerMessage>>,
+    /// The runtime budget; none keeps the budget as it was given.
+    pub control: Option<BudgetControl>,
 }
 
 pub struct PressureState {
@@ -63,6 +91,11 @@ pub struct PressureState {
     subscribers: Option<ActorRef<BrokerMessage>>,
     /// The budget was exhausted at the last look.
     exhausted: bool,
+    control: Option<BudgetControl>,
+    started: tokio::time::Instant,
+    /// What the controller last said: what limited the budget, whether it starved, and samples since its last line.
+    said: Option<(LimitedBy, bool)>,
+    samples_since_said: u32,
 }
 
 #[ractor::async_trait]
@@ -77,10 +110,21 @@ impl Actor for PressureManager {
         args: PressureManagerArgs,
     ) -> Result<Self::State, ActorProcessingErr> {
         drop(myself.send_interval(args.bounds.stall_check(), || PressureMsg::Tick));
+        if let Some(control) = &args.control {
+            drop(
+                myself.send_interval(control.controller.tunables().sample_every, || {
+                    PressureMsg::Sample
+                }),
+            );
+        }
         Ok(PressureState {
             bounds: args.bounds,
             subscribers: args.subscribers,
             exhausted: false,
+            control: args.control,
+            started: tokio::time::Instant::now(),
+            said: None,
+            samples_since_said: 0,
         })
     }
 
@@ -94,12 +138,77 @@ impl Actor for PressureManager {
             PressureMsg::Tick => Self::look(state),
             PressureMsg::SetSubscribers(subscribers) => state.subscribers = Some(subscribers),
             PressureMsg::Drain => myself.stop(Some("the broker's drain has begun".to_string())),
+            PressureMsg::Sample => Self::sample(state),
+            PressureMsg::WarmStart(learned) => {
+                if let Some(control) = state.control.as_mut() {
+                    control.controller.warm_start(learned);
+                    let budget = control.controller.budget() as usize;
+                    state.bounds.budget.set_limit(budget);
+                    info!(
+                        ?learned,
+                        budget, "the broker's memory budget starts from what was learned"
+                    );
+                }
+            }
+            PressureMsg::Snapshot(reply) => {
+                let budget = &state.bounds.budget;
+                let snapshot = state.control.as_ref().map(|c| {
+                    c.controller
+                        .snapshot(budget.is_exhausted(), budget.used() as u64)
+                });
+                let _ = reply.send(snapshot);
+            }
         }
         Ok(())
     }
 }
 
 impl PressureManager {
+    /// Samples memory and sets the budget from what the controller decides; says so when what limits it changes, or
+    /// memory falls below the floor or returns, and every `LOG_EVERY_SAMPLES` samples otherwise.
+    fn sample(state: &mut PressureState) {
+        let Some(control) = state.control.as_mut() else {
+            return;
+        };
+        let budget = &state.bounds.budget;
+        let memory = control.memory.sample();
+        let decision = control.controller.sample(
+            state.started.elapsed(),
+            &memory,
+            budget.used() as u64,
+            budget.refunded_bytes(),
+        );
+        budget.set_limit(decision.budget as usize);
+        budget.set_starved(decision.starved);
+        let snapshot = control
+            .controller
+            .snapshot(budget.is_exhausted(), budget.used() as u64);
+        let now = (snapshot.limited_by, snapshot.starved);
+        state.samples_since_said += 1;
+        if state.said != Some(now) || state.samples_since_said >= LOG_EVERY_SAMPLES {
+            if snapshot.starved && state.said.is_none_or(|(_, starved)| !starved) {
+                warn!(
+                    ?memory,
+                    floor = control.controller.tunables().floor(),
+                    "the memory the broker can have is below its floor: it admits nothing until memory returns"
+                );
+            }
+            info!(
+                budget = snapshot.budget,
+                ceiling = snapshot.ceiling,
+                target = snapshot.target,
+                limited_by = ?snapshot.limited_by,
+                drain_rate = snapshot.drain_rate,
+                held = snapshot.held,
+                alarm = snapshot.alarm,
+                starved = snapshot.starved,
+                "the broker's memory budget"
+            );
+            state.said = Some(now);
+            state.samples_since_said = 0;
+        }
+    }
+
     /// Looks at the budget, says when its alarm rises or lifts, and has every subscriber look whether it has stalled.
     fn look(state: &mut PressureState) {
         let budget = &state.bounds.budget;
@@ -329,6 +438,114 @@ mod tests {
         }
     }
 
+    /// Memory as a test says it is.
+    struct Fake(std::sync::Mutex<crate::runtime_budget::MemorySample>);
+
+    impl MemorySource for Fake {
+        fn sample(&self) -> crate::runtime_budget::MemorySample {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// The manager sets the budget from the controller at each sample, takes a warm start whenever it comes (clipped),
+    /// and tells its state; with a fixed budget it tells none.
+    #[tokio::test]
+    async fn the_manager_sets_the_budget_takes_a_warm_start_and_tells_its_state() {
+        use crate::runtime_budget::{MemorySample, Tunables};
+        let tunables = Tunables {
+            sample_every: Duration::from_millis(20),
+            ..Tunables::default()
+        };
+        let floor = tunables.floor();
+        let bounds = Bounds::new(floor as usize, Duration::from_secs(2)).unwrap();
+        let memory = Arc::new(Fake(std::sync::Mutex::new(MemorySample {
+            mem_available: Some(64 << 30),
+            ..MemorySample::default()
+        })));
+        let cap = 3 * floor;
+        let (manager, _) = ractor::Actor::spawn(
+            None,
+            PressureManager,
+            PressureManagerArgs {
+                bounds: bounds.clone(),
+                subscribers: None,
+                control: Some(BudgetControl {
+                    controller: Controller::new(tunables, Duration::from_secs(2), Some(cap)),
+                    memory: memory.clone(),
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            bounds.budget.limit() as u64,
+            floor,
+            "no demand yet: the floor"
+        );
+        manager
+            .cast(PressureMsg::WarmStart(WarmStart {
+                budget: 10 * floor,
+                drain_rate: 0,
+            }))
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let snapshot = ractor::call!(manager, PressureMsg::Snapshot)
+            .unwrap()
+            .unwrap();
+        assert!(
+            snapshot.budget <= cap,
+            "a warm start is clipped to the cap: {snapshot:?}"
+        );
+        // Memory falls below the floor: the budget admits nothing, and says so; it returns, and admission does.
+        *memory.0.lock().unwrap() = MemorySample {
+            mem_available: Some(0),
+            ..MemorySample::default()
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(bounds.budget.try_charge(1).is_none(), "starved");
+        let snapshot = ractor::call!(manager, PressureMsg::Snapshot)
+            .unwrap()
+            .unwrap();
+        assert!(
+            snapshot.starved && snapshot.limited_by == LimitedBy::Floor,
+            "{snapshot:?}"
+        );
+        *memory.0.lock().unwrap() = MemorySample {
+            mem_available: Some(64 << 30),
+            ..MemorySample::default()
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(bounds.budget.try_charge(1).is_some(), "memory returned");
+        manager.stop(None);
+
+        let fixed = Bounds::new(floor as usize, Duration::from_secs(2)).unwrap();
+        let (manager, _) = ractor::Actor::spawn(
+            None,
+            PressureManager,
+            PressureManagerArgs {
+                bounds: fixed.clone(),
+                subscribers: None,
+                control: None,
+            },
+        )
+        .await
+        .unwrap();
+        manager
+            .cast(PressureMsg::WarmStart(WarmStart {
+                budget: 10 * floor,
+                drain_rate: 0,
+            }))
+            .unwrap();
+        assert_eq!(ractor::call!(manager, PressureMsg::Snapshot).unwrap(), None);
+        assert_eq!(
+            fixed.budget.limit() as u64,
+            floor,
+            "a fixed budget stays as given"
+        );
+        manager.stop(None);
+    }
+
     /// An actor that records the messages it is sent, standing in for whoever the manager tells.
     struct Recorder;
 
@@ -385,6 +602,7 @@ mod tests {
             PressureManagerArgs {
                 bounds: bounds.clone(),
                 subscribers: Some(listener.clone()),
+                control: None,
             },
             broker.get_cell(),
         )

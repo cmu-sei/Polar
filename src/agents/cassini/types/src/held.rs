@@ -169,8 +169,8 @@ fn now_ms() -> u64 {
 #[derive(Debug)]
 pub struct Backlog {
     name: String,
-    high: usize,
-    low: usize,
+    /// Its high water (and its low water, half of it): set from the budget as it is now (`set_high_water`).
+    high: AtomicUsize,
     bytes: AtomicUsize,
     above: AtomicBool,
     /// When it went above its high water, in milliseconds since the epoch; zero when it is not above.
@@ -188,8 +188,7 @@ impl Backlog {
     pub fn new(name: impl Into<String>, high_water: usize) -> Self {
         Backlog {
             name: name.into(),
-            high: high_water,
-            low: high_water / 2,
+            high: AtomicUsize::new(high_water),
             bytes: AtomicUsize::new(0),
             above: AtomicBool::new(false),
             above_since_ms: AtomicU64::new(0),
@@ -231,7 +230,13 @@ impl Backlog {
     }
 
     pub fn high_water(&self) -> usize {
-        self.high
+        self.high.load(Ordering::SeqCst)
+    }
+
+    /// Its high water follows the budget: set by its subscriber, at each stall check, from the budget as it is now.
+    /// It goes above, or below its low water, at its next change.
+    pub fn set_high_water(&self, high_water: usize) {
+        self.high.store(high_water, Ordering::SeqCst);
     }
 
     /// Counts `n` more bytes held. True if that took it above its high water. The stall clock starts then only if the
@@ -243,7 +248,7 @@ impl Backlog {
             self.progress_ms.store(now_ms(), Ordering::SeqCst);
         }
         let now = before + n;
-        if now > self.high && !self.above.swap(true, Ordering::SeqCst) {
+        if now > self.high_water() && !self.above.swap(true, Ordering::SeqCst) {
             if self.is_connected() {
                 self.above_since_ms.store(now_ms().max(1), Ordering::SeqCst);
             }
@@ -263,7 +268,7 @@ impl Backlog {
             .unwrap_or(0);
         let now = before.saturating_sub(n);
         self.progress_ms.store(now_ms(), Ordering::SeqCst);
-        if now < self.low.max(1) && self.above.swap(false, Ordering::SeqCst) {
+        if now < (self.high_water() / 2).max(1) && self.above.swap(false, Ordering::SeqCst) {
             self.above_since_ms.store(0, Ordering::SeqCst);
             return true;
         }

@@ -45,16 +45,8 @@ use tokio::sync::Notify;
 
 const MIB: usize = 1024 * 1024;
 
-/// The share of the container's memory limit the budget takes when no setting gives it: a half, so the broker's own
-/// working memory (its actors, TLS, the copies a write makes) has the rest.
-pub const BUDGET_SHARE_OF_MEMORY_LIMIT: (u64, u64) = (1, 2);
-
-/// The budget where the container has no memory limit (`memory.max` is `max`, or there is no cgroup v2 to read): four
-/// frames' worth, for the small machines the broker runs on.
+/// A fixed budget for bounds built without the runtime budget (a test's): four frames, the runtime budget's floor.
 pub const FALLBACK_BUDGET: usize = 256 * MIB;
-
-/// Where the container's memory limit is read from (cgroup v2).
-pub const MEMORY_MAX_PATH: &str = "/sys/fs/cgroup/memory.max";
 
 /// How long a subscriber may hold its topic back above its high water when no setting says.
 pub const DEFAULT_STALL: Duration = Duration::from_secs(30);
@@ -71,11 +63,8 @@ pub const SMALL_FRAME: usize = 64 * 1024;
 /// What bounds the broker, as one value its actors share.
 #[derive(Clone, Debug)]
 pub struct Bounds {
+    /// The budget, whose limit the pressure manager may set at run time (`crate::runtime_budget`).
     pub budget: Budget,
-    /// Each connection's window: a quarter of the budget, and never less than one frame.
-    pub window: usize,
-    /// Each subscriber's high water: an eighth of the budget, and never less than 1 MiB.
-    pub high_water: usize,
     pub stall: Duration,
 }
 
@@ -98,10 +87,18 @@ impl Bounds {
         }
         Ok(Self {
             budget: Budget::new(budget),
-            window: (budget / 4).max(MAX_FRAME_BYTES),
-            high_water: (budget / 8).max(MIB),
             stall,
         })
+    }
+
+    /// Each connection's window, from the budget as it is now: a quarter of it, and never less than one frame.
+    pub fn window(&self) -> usize {
+        window_of(self.budget.limit())
+    }
+
+    /// Each subscriber's high water, from the budget as it is now: an eighth of it, and never less than 1 MiB.
+    pub fn high_water(&self) -> usize {
+        (self.budget.limit() / 8).max(MIB)
     }
 
     /// The bounds with no setting and no memory limit: the fallback budget and the default stall bound.
@@ -116,22 +113,9 @@ impl Bounds {
     }
 }
 
-/// The container's memory limit, from `memory.max` at `path`: `None` when there is none (`max`) or it cannot be read.
-pub fn read_memory_max(path: &str) -> Option<u64> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let text = text.trim();
-    if text == "max" {
-        return None;
-    }
-    text.parse().ok()
-}
-
-/// The budget when no setting gives it: the share of the memory limit, or [`FALLBACK_BUDGET`] with none.
-pub fn default_budget(memory_max: Option<u64>) -> usize {
-    let (numerator, denominator) = BUDGET_SHARE_OF_MEMORY_LIMIT;
-    memory_max
-        .map(|limit| (limit / denominator * numerator) as usize)
-        .unwrap_or(FALLBACK_BUDGET)
+/// A connection's window for a budget of `limit`: a quarter of it, never less than one frame.
+fn window_of(limit: usize) -> usize {
+    (limit / 4).max(MAX_FRAME_BYTES)
 }
 
 #[derive(Debug, Default)]
@@ -140,17 +124,22 @@ struct State {
     peak: usize,
     /// Exhausted: no charge is taken until what is held falls to the low water.
     alarm: bool,
+    /// What memory allows is below the floor: no charge is taken until it returns (`crate::runtime_budget`).
+    starved: bool,
     waiting: usize,
 }
 
 #[derive(Debug)]
 struct Inner {
-    limit: usize,
-    low_water: usize,
+    /// Set at run time by the pressure manager's controller, or fixed.
+    limit: std::sync::atomic::AtomicUsize,
     state: Mutex<State>,
     notify: Notify,
     charges: AtomicU64,
     refunds: AtomicU64,
+    /// The bytes refunded since the start: what holders let go (subscribers' acknowledgements, mostly), whose rate
+    /// the controller takes for the drain rate.
+    refunded_bytes: AtomicU64,
     refused: AtomicU64,
     slow: AtomicU64,
     alarms: AtomicU64,
@@ -215,15 +204,39 @@ pub struct BudgetStats {
 }
 
 impl Inner {
+    fn limit(&self) -> usize {
+        self.limit.load(Ordering::SeqCst)
+    }
+
+    /// Three quarters of the limit: where the alarm lifts.
+    fn low_water(&self) -> usize {
+        self.limit() / 4 * 3
+    }
+
     fn refund(&self, bytes: usize) {
         self.refunds.fetch_add(1, Ordering::Relaxed);
+        self.refunded_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
         state.used = state.used.saturating_sub(bytes);
-        if state.alarm && state.used <= self.low_water {
-            // Lifted: its readers read. The pressure manager says so when it next looks.
+        self.lift_if_drained(state);
+    }
+
+    /// Lifts the alarm if what is held has fallen to the low water and memory is not below the floor: its readers
+    /// read. The pressure manager says so when it next looks.
+    fn lift_if_drained(&self, mut state: std::sync::MutexGuard<'_, State>) {
+        if state.alarm && !state.starved && state.used <= self.low_water() {
             state.alarm = false;
             drop(state);
             self.notify.notify_waiters();
+        }
+    }
+
+    /// Raises the alarm, counting it, if it is not raised.
+    fn raise(&self, state: &mut State) {
+        if !state.alarm {
+            state.alarm = true;
+            self.alarms.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -232,12 +245,12 @@ impl Budget {
     /// A budget of `limit` bytes, whose alarm lifts at three quarters of it.
     pub fn new(limit: usize) -> Self {
         Budget(Arc::new(Inner {
-            limit,
-            low_water: limit / 4 * 3,
+            limit: std::sync::atomic::AtomicUsize::new(limit),
             state: Mutex::new(State::default()),
             notify: Notify::new(),
             charges: AtomicU64::new(0),
             refunds: AtomicU64::new(0),
+            refunded_bytes: AtomicU64::new(0),
             refused: AtomicU64::new(0),
             slow: AtomicU64::new(0),
             alarms: AtomicU64::new(0),
@@ -246,7 +259,35 @@ impl Budget {
     }
 
     pub fn limit(&self) -> usize {
-        self.0.limit
+        self.0.limit()
+    }
+
+    /// Sets the limit (the pressure manager's controller). A limit under what is held evicts nothing: the alarm stops
+    /// admission until what is held drains to the new low water.
+    pub fn set_limit(&self, limit: usize) {
+        self.0.limit.store(limit, Ordering::SeqCst);
+        let mut state = self.0.state.lock().unwrap();
+        if state.used > limit {
+            self.0.raise(&mut state);
+        } else {
+            self.0.lift_if_drained(state);
+        }
+    }
+
+    /// What memory allows is below the floor (`starved`), or no longer is: while it is, nothing is admitted.
+    pub fn set_starved(&self, starved: bool) {
+        let mut state = self.0.state.lock().unwrap();
+        state.starved = starved;
+        if starved {
+            self.0.raise(&mut state);
+        } else {
+            self.0.lift_if_drained(state);
+        }
+    }
+
+    /// The bytes refunded since the start.
+    pub fn refunded_bytes(&self) -> u64 {
+        self.0.refunded_bytes.load(Ordering::Relaxed)
     }
 
     pub fn used(&self) -> usize {
@@ -262,7 +303,7 @@ impl Budget {
     /// until what is held falls to its low water (counted; the pressure manager says so, with its largest holders).
     pub fn try_charge(&self, bytes: usize) -> Option<Charge> {
         let mut state = self.0.state.lock().unwrap();
-        if !state.alarm && state.used + bytes <= self.0.limit {
+        if !state.alarm && state.used + bytes <= self.0.limit() {
             state.used += bytes;
             state.peak = state.peak.max(state.used);
             drop(state);
@@ -272,11 +313,7 @@ impl Budget {
                 bytes,
             });
         }
-        if !state.alarm {
-            state.alarm = true;
-            drop(state);
-            self.0.alarms.fetch_add(1, Ordering::Relaxed);
-        }
+        self.0.raise(&mut state);
         None
     }
 
@@ -345,7 +382,7 @@ impl Budget {
     pub fn stats(&self) -> BudgetStats {
         let state = self.0.state.lock().unwrap();
         BudgetStats {
-            limit: self.0.limit,
+            limit: self.0.limit(),
             used: state.used,
             peak: state.peak,
             exhausted: state.alarm,
@@ -362,9 +399,16 @@ impl Budget {
 /// One connection's ingress window: the bytes of the publishes its reader admitted that no topic has accepted yet.
 #[derive(Debug)]
 pub struct Window {
-    limit: usize,
+    limit: WindowLimit,
     used: Mutex<usize>,
     notify: Notify,
+}
+
+/// A window's limit: fixed, or a budget's as it is now (`Bounds::window`).
+#[derive(Debug)]
+enum WindowLimit {
+    Fixed(usize),
+    Of(Budget),
 }
 
 /// Bytes taken from a connection's window, given back when dropped: when the topic accepts the publish.
@@ -385,10 +429,26 @@ impl Window {
     /// A window of `limit` bytes, never less than one frame.
     pub fn new(limit: usize) -> Arc<Self> {
         Arc::new(Window {
-            limit: limit.max(MAX_FRAME_BYTES),
+            limit: WindowLimit::Fixed(limit.max(MAX_FRAME_BYTES)),
             used: Mutex::new(0),
             notify: Notify::new(),
         })
+    }
+
+    /// A window that follows `budget`: a quarter of it as it is now, never less than one frame.
+    pub fn of(budget: &Budget) -> Arc<Self> {
+        Arc::new(Window {
+            limit: WindowLimit::Of(budget.clone()),
+            used: Mutex::new(0),
+            notify: Notify::new(),
+        })
+    }
+
+    fn limit(&self) -> usize {
+        match &self.limit {
+            WindowLimit::Fixed(limit) => *limit,
+            WindowLimit::Of(budget) => window_of(budget.limit()),
+        }
     }
 
     pub fn used(&self) -> usize {
@@ -398,7 +458,7 @@ impl Window {
     /// Takes `bytes` if they fit, or into an empty window whatever their size.
     pub fn try_take(self: &Arc<Self>, bytes: usize) -> Option<WindowCharge> {
         let mut used = self.used.lock().unwrap();
-        if *used == 0 || *used + bytes <= self.limit {
+        if *used == 0 || *used + bytes <= self.limit() {
             *used += bytes;
             return Some(WindowCharge {
                 window: self.clone(),
@@ -435,25 +495,17 @@ mod tests {
         assert!(Bounds::new(MAX_FRAME_BYTES, Duration::ZERO).is_err());
         let bounds = Bounds::new(MAX_FRAME_BYTES, DEFAULT_STALL).unwrap();
         assert_eq!(
-            bounds.window, MAX_FRAME_BYTES,
+            bounds.window(),
+            MAX_FRAME_BYTES,
             "a window is never less than a frame"
         );
-        assert_eq!(bounds.high_water, MAX_FRAME_BYTES / 8);
+        assert_eq!(bounds.high_water(), MAX_FRAME_BYTES / 8);
         let large = Bounds::new(8 * MAX_FRAME_BYTES, DEFAULT_STALL).unwrap();
-        assert_eq!(large.window, 2 * MAX_FRAME_BYTES);
-    }
-
-    #[test]
-    fn the_default_budget_is_half_the_memory_limit_or_the_fallback_with_none() {
-        assert_eq!(default_budget(Some(1 << 30)), 1 << 29);
-        assert_eq!(default_budget(None), FALLBACK_BUDGET);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("memory.max");
-        std::fs::write(&path, "max\n").unwrap();
-        assert_eq!(read_memory_max(path.to_str().unwrap()), None);
-        std::fs::write(&path, "536870912\n").unwrap();
-        assert_eq!(read_memory_max(path.to_str().unwrap()), Some(536_870_912));
-        assert_eq!(read_memory_max("/nowhere/memory.max"), None);
+        assert_eq!(large.window(), 2 * MAX_FRAME_BYTES);
+        // Re-derived from the budget as it is now, with their ratios and minimums.
+        large.budget.set_limit(16 * MAX_FRAME_BYTES);
+        assert_eq!(large.window(), 4 * MAX_FRAME_BYTES);
+        assert_eq!(large.high_water(), 2 * MAX_FRAME_BYTES);
     }
 
     #[test]
@@ -499,6 +551,50 @@ mod tests {
         drop(first);
         assert_eq!(next.await.unwrap(), 1);
         assert_eq!(window.used(), 0);
+    }
+
+    /// A budget set below what it holds evicts nothing: it admits nothing until what is held drains to the new low
+    /// water, then admits again (cassini-backpressure.md, "Runtime budget", 5).
+    #[test]
+    fn a_shrinking_budget_evicts_nothing_and_admits_again_once_drained() {
+        let budget = Budget::new(400);
+        let a = budget.try_charge(150).unwrap();
+        let b = budget.try_charge(150).unwrap();
+        budget.set_limit(200);
+        assert_eq!(budget.used(), 300, "nothing evicted");
+        assert!(budget.is_exhausted(), "held over the limit: the alarm");
+        assert!(budget.try_charge(1).is_none());
+        drop(a);
+        assert!(!budget.is_exhausted(), "150 is at the new low water");
+        assert!(budget.try_charge(50).is_some());
+        drop(b);
+        assert_eq!(budget.refunded_bytes(), 350);
+        budget.set_limit(400);
+        assert!(budget.try_charge(399).is_some(), "grown again");
+    }
+
+    /// While memory is below the floor nothing is admitted, whatever is held; when it returns, admission does.
+    #[test]
+    fn a_starved_budget_admits_nothing_until_memory_returns() {
+        let budget = Budget::new(400);
+        budget.set_starved(true);
+        assert!(budget.is_exhausted());
+        assert!(budget.try_charge(1).is_none(), "starved");
+        budget.set_starved(false);
+        assert!(!budget.is_exhausted());
+        assert!(budget.try_charge(1).is_some());
+    }
+
+    /// A window that follows its budget grows and shrinks with it.
+    #[test]
+    fn a_window_follows_its_budget() {
+        let budget = Budget::new(8 * MAX_FRAME_BYTES);
+        let window = Window::of(&budget);
+        let first = window.try_take(2 * MAX_FRAME_BYTES).unwrap();
+        assert!(window.try_take(1).is_none(), "a quarter of the budget");
+        budget.set_limit(16 * MAX_FRAME_BYTES);
+        assert!(window.try_take(1).is_some(), "the budget grew");
+        drop(first);
     }
 
     /// A reader that gives up waiting (its connection cut, its wait dropped) is no longer counted as waiting

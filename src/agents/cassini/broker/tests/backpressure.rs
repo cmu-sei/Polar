@@ -74,7 +74,7 @@ async fn stops_reading(size: usize) {
     let stall = Duration::from_secs(4);
     with_broker_bounded(ROOMY, stall, |broker| async move {
         let budget = broker.budget();
-        let high_water = broker.bounds().high_water;
+        let high_water = broker.bounds().high_water();
 
         // Subscribes, then keeps its socket open and reads nothing.
         let mut silent = RawConnection::open(&broker, "silent.test", Some(4096)).await;
@@ -199,7 +199,7 @@ async fn what_a_subscriber_is_owed_counts_each_message_s_frame_not_only_its_payl
     let stall = Duration::from_secs(20);
     with_broker_bounded(BUDGET, stall, |broker| async move {
         let budget = broker.budget();
-        let high_water = broker.bounds().high_water;
+        let high_water = broker.bounds().high_water();
         // Each publish's frame is some 4 KiB, of which its payload is 16 bytes.
         let topic = "n".repeat(4096);
         let mut silent = RawConnection::open(&broker, "silent.test", Some(4096)).await;

@@ -474,7 +474,7 @@ impl SubscriberManager {
         let backlog = Arc::new(Backlog::subscriber(
             &registration_id,
             &topic,
-            state.bounds.high_water,
+            state.bounds.high_water(),
         ));
         state.bounds.budget.register(&backlog);
 
@@ -792,10 +792,14 @@ impl Actor for SubscriberAgent {
             // The stall checks, from the pressure manager: away while the budget is exhausted, it lets go of what it
             // holds; connected, it looks whether it has stalled.
             BrokerMessage::BudgetExhausted => {
+                Self::follow_the_budget(state);
                 Self::shed_if_away(state);
                 Self::look_for_stall(&myself, state, true);
             }
-            BrokerMessage::StallCheck => Self::look_for_stall(&myself, state, false),
+            BrokerMessage::StallCheck => {
+                Self::follow_the_budget(state);
+                Self::look_for_stall(&myself, state, false);
+            }
             // Its session ended its connection for its stall: counted.
             BrokerMessage::StallEnded => state.bounds.budget.count_slow_disconnection(),
             BrokerMessage::RegistrationRequest {
@@ -864,6 +868,14 @@ impl Actor for SubscriberAgent {
 }
 
 impl SubscriberAgent {
+    /// Its high water follows the budget as it is now (the runtime budget may have moved it).
+    fn follow_the_budget(state: &mut SubscriberAgentState) {
+        let high_water = state.bounds.high_water();
+        if state.backlog.high_water() != high_water {
+            state.backlog.set_high_water(high_water);
+        }
+    }
+
     /// Tells its topic whether it holds the topic back (connected and above its high water), when that changed.
     fn tell_topic(state: &mut SubscriberAgentState) {
         let holds = state.backlog.holds_back();

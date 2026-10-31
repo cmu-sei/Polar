@@ -495,6 +495,8 @@ impl TestBroker {
                 shutdown_auth_token,
                 decision_cache,
                 bounds,
+                // A test's broker keeps the budget it is given.
+                budget_control: None,
                 configured,
             },
         )

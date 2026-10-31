@@ -1269,7 +1269,7 @@ impl Actor for Listener {
         // frame's) and its window credit (released when its topic accepts it). What still waits (a large frame, or a
         // frame behind the one kept) is bounded by the stall bound: the budget's watchdog ends the connections of the
         // subscribers that hold the budget and make no progress (budget.rs, `spawn_watchdog`).
-        let window = Window::new(state.bounds.window);
+        let window = Window::of(&state.bounds.budget);
         let budget = state.bounds.budget.clone();
         let stall = state.bounds.stall;
         let writer = state.writer.clone();

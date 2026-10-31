@@ -71,13 +71,13 @@ pub static DECISION_CACHE_SECS: Defaulted<u64> = Defaulted::seconds(
     "5",
 );
 
-/// The broker's memory budget (docs/architecture/cassini-backpressure.md, "Decided" 2): every payload byte it holds is
-/// counted against it, and when it is exhausted the broker stops reading until it has drained. Unset, it is half the
-/// container's memory limit, or 256 MiB where there is none (`crate::budget::default_budget`).
+/// A cap on the broker's memory budget (docs/architecture/cassini-backpressure.md, "Runtime budget"): the budget is set
+/// at run time from what memory allows and how fast subscribers drain (`crate::runtime_budget`), never above this.
 pub static MEMORY_BUDGET_BYTES: Optional<u64> = Optional::number(
     "CASSINI_MEMORY_BUDGET_BYTES",
-    "the payload bytes the broker holds at most, in bytes; unset, half the container's memory limit (cgroup v2 \
-     memory.max), or 256 MiB where there is none; at least one frame, 67108864, or the broker does not start",
+    "a cap on the payload bytes the broker holds, in bytes; the budget is set at run time from the memory the host \
+     and the container allow and how fast subscribers drain, never above this; unset, no cap; at least the floor, \
+     four frames (268435456), or the broker does not start",
 );
 
 /// How long a subscriber may hold its topics back above its high water before its connection is ended
@@ -112,12 +112,19 @@ pub static SECTION: Section = Section {
             .into_iter()
             .collect();
         if let Ok(stall) = STALL_SECS.read(env)
-            && let Ok(budget) = MEMORY_BUDGET_BYTES.read(env)
             && let Err(why) = crate::budget::Bounds::new(
-                budget
-                    .map(|b| b as usize)
-                    .unwrap_or(crate::budget::FALLBACK_BUDGET),
+                crate::runtime_budget::Tunables::default().floor() as usize,
                 std::time::Duration::from_secs(stall),
+            )
+        {
+            problems.push(why);
+        }
+        // A cap under the floor cannot work, whatever memory allows.
+        if let Ok(cap) = MEMORY_BUDGET_BYTES.read(env)
+            && let Err(why) = crate::runtime_budget::startup_check(
+                &crate::runtime_budget::MemorySample::default(),
+                &crate::runtime_budget::Tunables::default(),
+                cap,
             )
         {
             problems.push(why);
@@ -143,7 +150,7 @@ pub struct BrokerSettings {
     pub bind_addr: String,
     pub shutdown_auth_token: String,
     pub decision_cache: std::time::Duration,
-    /// The memory budget the deployment gives, if it gives one.
+    /// The cap the deployment puts on the memory budget, if it puts one.
     pub memory_budget: Option<u64>,
     pub stall: std::time::Duration,
 }
@@ -162,15 +169,26 @@ impl BrokerSettings {
         })
     }
 
-    /// The broker's bounds: the budget given, or half the container's memory limit, or the fallback with none; and
-    /// the stall bound. Refused, saying why, when they cannot work.
+    /// The broker's bounds: the budget starts at its floor (there is no demand yet to measure), and the stall bound.
+    /// Refused, saying why, when they cannot work.
     pub fn bounds(&self) -> Result<crate::budget::Bounds, String> {
-        use crate::budget::{Bounds, MEMORY_MAX_PATH, default_budget, read_memory_max};
-        let budget = match self.memory_budget {
-            Some(given) => given as usize,
-            None => default_budget(read_memory_max(MEMORY_MAX_PATH)),
+        let tunables = crate::runtime_budget::Tunables::default();
+        crate::budget::Bounds::new(tunables.floor() as usize, self.stall)
+    }
+
+    /// The runtime budget, reading the host's and the container's memory: refused, saying what it found and what to
+    /// give, when memory cannot give the floor at start or the cap is under it.
+    pub fn budget_control(&self) -> Result<crate::pressure::BudgetControl, String> {
+        use crate::runtime_budget::{
+            Controller, MemorySource, SystemMemory, Tunables, startup_check,
         };
-        Bounds::new(budget, self.stall)
+        let tunables = Tunables::default();
+        let memory = SystemMemory::default();
+        startup_check(&memory.sample(), &tunables, self.memory_budget)?;
+        Ok(crate::pressure::BudgetControl {
+            controller: Controller::new(tunables, self.stall, self.memory_budget),
+            memory: std::sync::Arc::new(memory),
+        })
     }
 }
 
@@ -216,28 +234,26 @@ mod tests {
     fn the_budget_and_the_stall_bound_are_read_and_judged() {
         let mut vars = MINIMUM.to_vec();
         vars.extend([
-            ("CASSINI_MEMORY_BUDGET_BYTES", "134217728"),
+            ("CASSINI_MEMORY_BUDGET_BYTES", "536870912"),
             ("CASSINI_STALL_SECS", "5"),
         ]);
         let settings = BrokerSettings::read(&config(&vars)).unwrap();
         let bounds = settings.bounds().unwrap();
-        assert_eq!(bounds.budget.limit(), 134_217_728);
+        // The budget starts at its floor, four frames; what is set is its cap.
+        assert_eq!(bounds.budget.limit(), 268_435_456);
+        assert_eq!(settings.memory_budget, Some(536_870_912));
         assert_eq!(bounds.stall, std::time::Duration::from_secs(5));
 
         for (name, value, why) in [
-            ("CASSINI_MEMORY_BUDGET_BYTES", "1048576", "below one frame"),
+            ("CASSINI_MEMORY_BUDGET_BYTES", "1048576", "below its floor"),
             ("CASSINI_STALL_SECS", "60", "TCP_USER_TIMEOUT"),
         ] {
             let mut vars = MINIMUM.to_vec();
             vars.push((name, value));
             let problems = config(&vars).check().join(" | ");
             assert!(problems.contains(why), "{name}={value}: {problems}");
-            assert!(
-                BrokerSettings::read(&config(&vars))
-                    .unwrap()
-                    .bounds()
-                    .is_err()
-            );
+            let settings = BrokerSettings::read(&config(&vars)).unwrap();
+            assert!(settings.bounds().is_err() || settings.budget_control().is_err());
         }
     }
 

@@ -31,6 +31,7 @@ pub mod control;
 pub mod deliveries;
 pub mod listener;
 pub mod pressure;
+pub mod runtime_budget;
 pub mod session;
 pub mod settings;
 pub mod subscriber;

@@ -70,6 +70,7 @@ pub struct BrokerState {
     pressure: Option<ActorRef<PressureMsg>>,
     /// What it is started with.
     bounds: crate::budget::Bounds,
+    budget_control: Option<crate::pressure::BudgetControl>,
 }
 
 /// What the broker is started with: where it listens and with what certificate, and the
@@ -97,6 +98,10 @@ pub struct BrokerArgs {
     /// (docs/architecture/cassini-backpressure.md).
     pub bounds: crate::budget::Bounds,
 
+    /// The runtime budget (docs/architecture/cassini-backpressure.md, "Runtime budget"): the pressure manager sets the
+    /// budget's limit from it. None keeps the budget as `bounds` gives it (a test's broker).
+    pub budget_control: Option<crate::pressure::BudgetControl>,
+
     /// The configuration `run` judged: the snapshot, the health settings and the shutdown budget,
     /// from which the broker builds its infrastructure (the health check, the signals, the
     /// shutdown handshake with its budget and watchdog).
@@ -111,10 +116,11 @@ impl BrokerArgs {
         configured: Configured,
     ) -> Result<Self, String> {
         let bounds = settings.bounds()?;
+        let budget_control = Some(settings.budget_control()?);
         info!(
             budget = bounds.budget.limit(),
-            window = bounds.window,
-            high_water = bounds.high_water,
+            window = bounds.window(),
+            high_water = bounds.high_water(),
             stall = ?bounds.stall,
             "the broker's bounds"
         );
@@ -127,6 +133,7 @@ impl BrokerArgs {
             shutdown_auth_token: Some(settings.shutdown_auth_token),
             decision_cache: settings.decision_cache,
             bounds,
+            budget_control,
             configured,
         })
     }
@@ -336,8 +343,13 @@ impl Actor for Broker {
 
             // The broker's pressure: the budget's alarm, and the stall checks, through the subscriber manager to each
             // subscriber.
-            let pressure =
-                Self::start_pressure(&myself, &args.bounds, subscriber_mgr.clone()).await?;
+            let pressure = Self::start_pressure(
+                &myself,
+                &args.bounds,
+                args.budget_control.clone(),
+                subscriber_mgr.clone(),
+            )
+            .await?;
 
             let topic_mgr_args = TopicManagerArgs {
                 topics: None,
@@ -450,6 +462,7 @@ impl Actor for Broker {
                 is_shutting_down: false,
                 pressure: Some(pressure),
                 bounds: args.bounds.clone(),
+                budget_control: args.budget_control.clone(),
             })
         }
         .instrument(span)
@@ -678,6 +691,7 @@ impl Broker {
     async fn start_pressure(
         myself: &ActorRef<BrokerMessage>,
         bounds: &crate::budget::Bounds,
+        control: Option<crate::pressure::BudgetControl>,
         subscribers: ActorRef<BrokerMessage>,
     ) -> Result<ActorRef<PressureMsg>, ActorProcessingErr> {
         let (pressure, _) = Actor::spawn_linked(
@@ -686,6 +700,7 @@ impl Broker {
             PressureManagerArgs {
                 bounds: bounds.clone(),
                 subscribers: Some(subscribers),
+                control,
             },
             myself.clone().into(),
         )
@@ -711,8 +726,18 @@ impl Broker {
         ) {
             return;
         }
+        // A new controller starts from the budget as it is, not from the floor.
+        let control = state.budget_control.clone().map(|mut control| {
+            control
+                .controller
+                .warm_start(crate::runtime_budget::WarmStart {
+                    budget: state.bounds.budget.limit() as u64,
+                    drain_rate: 0,
+                });
+            control
+        });
         let started = match state.subscriber_mgr.clone() {
-            Some(subscribers) => Self::start_pressure(myself, &state.bounds, subscribers)
+            Some(subscribers) => Self::start_pressure(myself, &state.bounds, control, subscribers)
                 .await
                 .ok(),
             None => None,
