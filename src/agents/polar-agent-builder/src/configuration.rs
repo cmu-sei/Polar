@@ -61,7 +61,9 @@ use tracing::{info, warn};
 /// How many of the latest updates are kept for [`ConfigurationHandle::history`].
 pub const HISTORY: usize = 100;
 
-/// How long a call to the actor may take before it is reported as failed.
+/// How long a read of the actor (the configuration, a runtime section, the history) may take before it is
+/// reported as failed: a read is answered at once, so one that waits this long is waiting behind other work or
+/// on an actor that no longer answers. A submit is not bounded by it (see [`ConfigurationHandle::submit`]).
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Why an update was not applied. Nothing changed.
@@ -646,12 +648,19 @@ impl ConfigurationHandle {
 
     /// Takes a signed document from outside: verifies it (see [`crate::signed`]), and applies it only
     /// if every check passes. This is the way an update gets in.
+    ///
+    /// The answer is the document's outcome, and it waits for the agent's judge however long the judgement
+    /// takes (the credentials agent's authority model takes seconds on a loaded machine), so it has no
+    /// [`CALL_TIMEOUT`]: it fails only if the actor stops before it answers.
     pub async fn submit(
         &self,
         document: serde_json::Value,
     ) -> Result<ApplyOutcome, ConfigurationError> {
-        self.call(|reply| ConfigurationMessage::Submit { document, reply })
-            .await
+        self.call_within(
+            |reply| ConfigurationMessage::Submit { document, reply },
+            None,
+        )
+        .await
     }
 
     /// Hands over a signed document without waiting for the outcome, in order with the others. The
@@ -699,7 +708,15 @@ impl ConfigurationHandle {
         &self,
         build: impl FnOnce(RpcReplyPort<T>) -> ConfigurationMessage,
     ) -> Result<T, ConfigurationError> {
-        match self.actor.call(build, Some(CALL_TIMEOUT)).await {
+        self.call_within(build, Some(CALL_TIMEOUT)).await
+    }
+
+    async fn call_within<T: Send + 'static>(
+        &self,
+        build: impl FnOnce(RpcReplyPort<T>) -> ConfigurationMessage,
+        timeout: Option<Duration>,
+    ) -> Result<T, ConfigurationError> {
+        match self.actor.call(build, timeout).await {
             Ok(ractor::rpc::CallResult::Success(value)) => Ok(value),
             Ok(ractor::rpc::CallResult::Timeout) => {
                 Err(ConfigurationError::Unavailable("timed out".to_string()))
@@ -1772,6 +1789,13 @@ mod tests {
     }
 
     async fn judged_handle(verifier: UpdateVerifier) -> ConfigurationHandle {
+        judged_handle_by(verifier, Arc::new(Gatekeeper)).await
+    }
+
+    async fn judged_handle_by(
+        verifier: UpdateVerifier,
+        judge: Arc<dyn crate::runtime::SectionJudge>,
+    ) -> ConfigurationHandle {
         struct Parent;
         #[ractor::async_trait]
         impl Actor for Parent {
@@ -1790,11 +1814,53 @@ mod tests {
             Some(verifier),
             &RUNTIME_SECTIONS,
             None,
-            Some(Arc::new(Gatekeeper)),
+            Some(judge),
             parent.get_cell(),
         )
         .await
         .unwrap()
+    }
+
+    /// A judge that takes longer than a read of the actor may wait, as the credentials agent's authority
+    /// model does on a loaded machine.
+    struct Slow;
+
+    #[ractor::async_trait]
+    impl crate::runtime::SectionJudge for Slow {
+        async fn judge(
+            &self,
+            candidate: &crate::runtime::Candidate<'_>,
+            _: &HashMap<String, RuntimeValue>,
+        ) -> Result<Vec<String>, Vec<String>> {
+            tokio::time::sleep(CALL_TIMEOUT * 3).await;
+            Ok(vec![format!("{} judged slowly", candidate.section)])
+        }
+    }
+
+    /// A submit's answer is its document's outcome, so it waits for the judge however long the judgement
+    /// takes; only the actor's end cuts it short.
+    #[tokio::test(start_paused = true)]
+    async fn a_submit_is_answered_however_long_its_judgement_takes() {
+        let signed = Signed::new();
+        let config = judged_handle_by(signed.verifier(), Arc::new(Slow)).await;
+        let outcome = config
+            .submit(signed.runtime("repositories", 1, repos(&["https://a.example/r.git"])))
+            .await;
+        assert_eq!(
+            outcome,
+            Ok(ApplyOutcome::Applied {
+                changed: vec!["repositories".to_string()],
+                notes: vec!["repositories judged slowly".to_string()],
+            })
+        );
+        assert_eq!(
+            config
+                .runtime("repositories")
+                .await
+                .unwrap()
+                .map(|held| held.version),
+            Some(1)
+        );
     }
 
     #[tokio::test]

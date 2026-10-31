@@ -794,7 +794,11 @@ mod tests {
 permit (principal == Identity::"alice", action == Action::"subscribe", resource == Topic::"credentials-workload-issuance-replies");"#,
             id("harness-sink")
         );
-        match config.submit(signed(1, &ordinary)).await.unwrap() {
+        match config
+            .submit(signed(1, &ordinary))
+            .await
+            .expect("the configuration actor answered the submit of version 1")
+        {
             ApplyOutcome::Applied { changed, notes } => {
                 assert_eq!(changed, ["policy"]);
                 assert!(
@@ -819,7 +823,11 @@ permit (principal == Identity::"alice", action == Action::"subscribe", resource 
             r#"forbid (principal == Identity::"{}", action == Action::"subscribe", resource == Topic::"polar-authority-updates");"#,
             id("kube-observer")
         );
-        match config.submit(signed(2, &cutting)).await.unwrap() {
+        match config
+            .submit(signed(2, &cutting))
+            .await
+            .expect("the configuration actor answered the submit of version 2")
+        {
             ApplyOutcome::Refused(Refusal::Invalid(reasons)) => {
                 assert!(
                     reasons[0].starts_with("hearing authority would stop"),
