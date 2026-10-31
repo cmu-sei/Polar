@@ -29,7 +29,9 @@
 #   nu infra/changelog.nu preview [--version V] [--highlights TEXT]   print the section for the next release
 #   nu infra/changelog.nu write   [--version V] [--highlights TEXT]   put it in CHANGELOG.md
 #
-# A section has, in this order and only when there is something to say: the highlights (written by a person at the release),
+# A section has, in this order and only when there is something to say: the commit the release's images were built from (the
+# `chore(release): prepare` commit: the images carry the version and never the commit, infra/INFRA.md, "The release"), the
+# highlights (written by a person at the release),
 # breaking changes with what each one says to do, the images that changed with their digests (from the lock), the features,
 # the fixes and the performance changes grouped by scope, a sentence that counts what is not listed (documentation,
 # housekeeping, refactoring, tests), and a collapsed list of the changes that were not written as conventional commits. A
@@ -155,7 +157,8 @@ def folded_sentence [entries: list, folded: record] {
 
 # ── A release's section ─────────────────────────────────────────────────────
 
-# release: { version, date, previous, highlights }; entries: what `suggest_version` returned as `entries`; images: image_changes.
+# release: { version, date, previous, highlights, built_from? }; entries: what `suggest_version` returned as `entries`; images:
+# image_changes. `built_from` is the commit the images were built from, when they were built for the release.
 export def render_section [release: record, entries: list, images: list, config: record] {
     let live = ($entries | where kind != "cancelled" | each {|e| $e | merge { primary: (primary_scope $e.scope), also: (also_scopes $e.scope) } })
     let breaking = ($live | where significance == "breaking")
@@ -167,6 +170,10 @@ export def render_section [release: record, entries: list, images: list, config:
     let head = $"## [($release.version)] - ($release.date)"
     let link = if ($config.repository | is-empty) or ($release.previous | is-empty) { "" } else {
         $"Full diff: ($config.repository)/compare/v($release.previous)...v($release.version)"
+    }
+    let built = ($release.built_from? | default "")
+    let built_line = if ($built | is-empty) { "" } else {
+        $"Images built from `($built | str substring 0..11)`, the commit that set VERSION to ($release.version)."
     }
     let highlights = if ($release.highlights | str trim | is-empty) { "" } else {
         $release.highlights | str trim | lines | each {|l| $"> ($l)" } | str join "\n"
@@ -195,7 +202,7 @@ export def render_section [release: record, entries: list, images: list, config:
         $"<details><summary>($what)</summary>\n\n($items)\n\n</details>"
     }
 
-    [$head $link $highlights] | append $blocks | append [$inferred_note $folded $unclass]
+    [$head $link $built_line $highlights] | append $blocks | append [$inferred_note $folded $unclass]
         | where {|b| $b | is-not-empty } | str join "\n\n"
 }
 
@@ -242,7 +249,7 @@ def previous_lock [prev: record] {
     if $r.exit_code == 0 { $r.stdout | from nuon } else { [] }
 }
 
-def build [version: string, highlights: string, date: string, from: string] {
+def build [version: string, highlights: string, date: string, from: string, built_from: string = ""] {
     let prev = (previous_release)
     let rev = (if ($from | is-empty) { $prev.rev } else { $from })
     let commits = (commits_between $rev)
@@ -252,7 +259,7 @@ def build [version: string, highlights: string, date: string, from: string] {
     if $v == null { error make --unspanned { msg: "nothing to release: only docs, tests and housekeeping since the previous release" } }
     let cluster = (open ($HERE | path join "config" "cluster.nuon"))
     let images = (image_changes (previous_lock $prev) (lock effective) $cluster.arch)
-    let release = { version: $v, date: $date, previous: (if $prev.from == "a release tag" { $prev.version } else { "" }), highlights: $highlights }
+    let release = { version: $v, date: $date, previous: (if $prev.from == "a release tag" { $prev.version } else { "" }), highlights: $highlights, built_from: $built_from }
     { version: $v, section: (render_section $release ($s.entries | reverse) $images (config_file)) }
 }
 
@@ -273,8 +280,9 @@ def "main write" [
     --highlights: string = ""
     --date: string = ""
     --from: string = ""
+    --built-from: string = ""    # the commit the release's images were built from
 ] {
-    let b = (build $version $highlights (if ($date | is-empty) { today } else { $date }) $from)
+    let b = (build $version $highlights (if ($date | is-empty) { today } else { $date }) $from $built_from)
     let root = (^git rev-parse --show-toplevel | str trim)
     let file = ($root | path join "CHANGELOG.md")
     let existing = (if ($file | path exists) { open --raw $file } else { "" })

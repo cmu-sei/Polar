@@ -34,9 +34,12 @@
 #   nu infra/release.nu secrets accept ID... --reason TEXT | --placeholder-like
 #
 # `run`, in order: it checks the tree and the branch; runs the gates and stops on a blocking failure; shows the evidence and asks for the
-# version (the one infra/semver.nu suggests is the default); asks for the highlights; builds and pushes every image once and makes
-# their digests the committed lock; writes the changelog section; and, once you say so, commits `chore(release): vX.Y.Z` and tags it. It
-# never pushes. `--dry-run` does everything up to the point of writing and says what it would have written.
+# version (the one infra/semver.nu suggests is the default); asks for the highlights; writes the version into VERSION and commits
+# `chore(release): prepare vX.Y.Z`, so the images are built from a commit whose VERSION is the release; builds and pushes every image
+# once and makes their digests the committed lock; writes the changelog section; and, once you say so, commits `chore(release): vX.Y.Z`
+# and tags it, then writes `X.Y.Z+dev` into VERSION and commits `chore: X.Y.Z+dev`. The tagged commit differs from the prepare commit
+# only in the lock and the changelog, which no image is built from, so building the tag gives the locked digests again. It never
+# pushes. `--dry-run` does everything up to the point of writing and says what it would have written and committed.
 
 use semver.nu [current_suggestion, parse_version, suggest_report]
 use lock.nu
@@ -133,6 +136,84 @@ export def unaccepted [rows: list, baseline: list] {
 }
 
 export def release_message [version: string] { $"chore\(release\): v($version)" }
+
+# ── The platform version file ───────────────────────────────────────────────
+# VERSION, at the repository's root, is the platform version every binary embeds (src/agents/polar-version) and every image carries as
+# org.opencontainers.image.version: `X.Y.Z` on a release's commits, `X.Y.Z+dev` between releases (semver build metadata, so a
+# development build never passes for a release).
+
+const PLATFORM_VERSION = r#'^(?<core>(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))(?<dev>\+dev)?$'#
+
+# The file VERSION's text: { version, release, development }, where `release` is X.Y.Z. An error for anything else.
+export def read_version_text [text: string] {
+    let t = ($text | str trim)
+    let m = ($t | parse --regex $PLATFORM_VERSION)
+    if ($m | is-empty) { error make --unspanned { msg: $"VERSION holds '($t)', which is not X.Y.Z or X.Y.Z+dev" } }
+    let g = ($m | first)
+    { version: $t, release: $g.core, development: ($g.dev | default "" | is-not-empty) }
+}
+
+# What VERSION holds for `version`: the version and a newline.
+export def version_file_text [version: string] {
+    read_version_text $version | ignore
+    $"($version)\n"
+}
+
+# What VERSION reads between a release and the next: the release with `+dev`.
+export def dev_version [release: string] {
+    let v = (read_version_text $release)
+    if $v.development { error make --unspanned { msg: $"($release) is already a development version" } }
+    $"($v.release)+dev"
+}
+
+# The commits a release of `version` makes, in order: what each writes into VERSION (null: it leaves VERSION alone), the files it
+# commits, its message and its tag. Only the prepare commit is built from: the release commit holds what the build wrote.
+export def release_steps [version: string] {
+    read_version_text $version | ignore
+    [
+        { step: "prepare", version_file: $version, files: ["VERSION"], message: $"chore\(release\): prepare v($version)", tag: null }
+        { step: "release", version_file: null, files: ["infra/images.lock.nuon" "CHANGELOG.md"], message: (release_message $version), tag: $"v($version)" }
+        { step: "development", version_file: (dev_version $version), files: ["VERSION"], message: $"chore: (dev_version $version)", tag: null }
+    ]
+}
+
+# Whether VERSION agrees with the previous release `last`: it does when it reads `last+dev` (between releases) or `last` itself (the
+# release's own commits). { version, agrees, note }.
+export def version_file_status [text: string, last: string] {
+    let v = (try { read_version_text $text } catch {|e| { problem: $e.msg } })
+    if ($v.problem? != null) {
+        { version: ($text | str trim), agrees: false, note: $v.problem }
+    } else if $v.release == $last and $v.development {
+        { version: $v.version, agrees: true, note: $"agrees with v($last): development since that release" }
+    } else if $v.release == $last {
+        { version: $v.version, agrees: true, note: $"agrees with v($last): the release's own version, as on its prepare and release commits" }
+    } else {
+        { version: $v.version, agrees: false, note: $"does not agree with v($last): between releases it reads ($last)+dev" }
+    }
+}
+
+# What is wrong with the release commit, given the files it changed from the prepare commit: anything but what the release step
+# commits is an input to an image, or could be, and building the tag would not give the locked digests.
+export def release_diff_problems [changed: list<string>, version: string] {
+    let allowed = (release_steps $version | where step == "release" | first | get files)
+    $changed | where {|f| $f not-in $allowed } | each {|f| $"the release commit changes ($f), which is not one of ($allowed | str join ', ')" }
+}
+
+# What a dry run says the release would do, a line each.
+export def release_plan_lines [version: string, skip_images: bool] {
+    let s = (release_steps $version)
+    let prepare = ($s | where step == "prepare" | first)
+    let release = ($s | where step == "release" | first)
+    let dev = ($s | where step == "development" | first)
+    [
+        $"    - write ($prepare.version_file) into VERSION and commit `($prepare.message)` \(VERSION alone\): the images are built from this commit"
+        (if $skip_images { "    - make the lock from the digests already recorded \(--skip-images: they were not built from the prepare commit, and the lock does not say they were\)" } else { "    - move this machine's lock aside, build and push every image once, and make their digests the lock, with the prepare commit as what they were built from" })
+        "    - write the changelog section:"
+        $"    - commit `($release.message)` with ($release.files | str join ' and '), check it changes nothing else since the prepare commit, and tag ($release.tag)"
+        $"    - write ($dev.version_file) into VERSION and commit `($dev.message)`"
+        "    - push nothing"
+    ]
+}
 
 # ── The gates ───────────────────────────────────────────────────────────────
 
@@ -235,6 +316,29 @@ def repo_state [] {
 
 def existing_tags [] { ^git tag | lines }
 
+def repo_root [] { ^git rev-parse --show-toplevel | str trim }
+
+def version_file [] { repo_root | path join "VERSION" }
+
+def head_sha [] { ^git rev-parse HEAD | str trim }
+
+def head_subject [] { ^git log -1 --format=%s | str trim }
+
+const FOOTER = "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+
+# Commits exactly `files` (whatever else is staged stays out) with `message`.
+def commit_files [files: list<string>, message: string] {
+    let root = (repo_root)
+    ^git -C $root add ...$files
+    ^git -C $root commit -q -m $message -m $FOOTER -- ...$files
+}
+
+# Writes what a step puts into VERSION and commits it.
+def commit_version_step [step: record] {
+    version_file_text $step.version_file | save --force (version_file)
+    commit_files $step.files $step.message
+}
+
 def csv [text: string] { $text | split row "," | each {|t| $t | str trim } | where {|t| $t != "" } }
 
 # ── Commands ────────────────────────────────────────────────────────────────
@@ -242,6 +346,9 @@ def csv [text: string] { $text | split row "," | each {|t| $t | str trim } | whe
 def "main plan" [] {
     let c = (current_suggestion)
     print (suggest_report $c.suggestion $c.previous $c.rev)
+    let file = (version_file)
+    let status = if ($file | path exists) { version_file_status (open --raw $file) $c.previous.version } else { { version: "(missing)", agrees: false, note: "there is no VERSION file at the repository's root" } }
+    print $"VERSION:     ($status.version) \(($status.note)\)"
     let cfg = (config_file)
     print ""
     print "gates:"
@@ -344,14 +451,32 @@ def "main run" [
 
     print ""
     print $"== release v($chosen)"
+    let steps = (release_steps $chosen)
+    let prepare = ($steps | where step == "prepare" | first)
+    let release = ($steps | where step == "release" | first)
+    let development = ($steps | where step == "development" | first)
     if $dry_run {
+        let lines = (release_plan_lines $chosen $skip_images)
         print "  dry run: nothing is built, written or committed. It would:"
-        print (if $skip_images { "    - make the lock from the digests already recorded" } else { "    - move this machine's lock aside, build and push every image once, and make their digests the lock" })
-        print "    - write the changelog section:\n"
+        print ($lines | take 3 | str join "\n")
+        print ""
         ^nu ($HERE | path join "changelog.nu") preview --version $chosen --highlights $notes
-        print $"\n    - commit (release_message $chosen) with infra/images.lock.nuon and CHANGELOG.md, and tag v($chosen)"
+        print ""
+        print ($lines | skip 3 | str join "\n")
         return
     }
+
+    # The prepare commit: the images are built from a commit whose VERSION is the release. A run that stopped after it (a failed
+    # build) finds it at HEAD and builds from it again.
+    if (head_subject) == $prepare.message and ((read_version_text (open --raw (version_file))).version == $chosen) {
+        print $"  ($prepare.message) is already HEAD: building from it"
+    } else {
+        let go = if $yes { true } else { (input $"write ($chosen) into VERSION, commit `($prepare.message)` and build from it? [y/N] " | str trim | str lowercase) in ["y" "yes"] }
+        if not $go { print "  stopped: nothing was changed."; return }
+        commit_version_step $prepare
+    }
+    let built_from = (head_sha)
+    let undo = $"the prepare commit ($built_from | str substring 0..11) is HEAD: run again to build from it, or drop it with git reset --keep HEAD~1"
 
     # The images: one coherent build. This machine's lock is moved aside so that only what this build pushes is in it.
     let dev = (lock dev_path)
@@ -362,32 +487,42 @@ def "main run" [
         print ($built.stdout | lines | last 12 | str join "\n")
         if $built.exit_code != 0 {
             if ($aside | path exists) { ^mv $aside $dev }
-            print -e $"  ERROR: building and pushing the images failed; nothing was committed.\n($built.stderr | lines | last 6 | str join "\n")"
+            print -e $"  ERROR: building and pushing the images failed; nothing else was committed: ($undo).\n($built.stderr | lines | last 6 | str join "\n")"
             exit 1
         }
     }
     let problems = (lock lock_problems (lock effective))
-    if ($problems | is-not-empty) { for p in $problems { print -e $"  ERROR: ($p)" }; exit 1 }
-    lock promote | ignore
+    if ($problems | is-not-empty) { for p in $problems { print -e $"  ERROR: ($p)" }; print -e $"  ($undo)"; exit 1 }
+    # Images that were not built here were not built from the prepare commit, and the lock does not say they were.
+    let lock_from = (if $skip_images { "" } else { $built_from })
+    lock promote --built-from $lock_from | ignore
     if ($aside | path exists) { ^rm -f $aside }
     if ($after_cfg.gates | is-not-empty) {
         print ""
         print "== gates that need the lock"
         let after = (run_gates $after_cfg [] ($skips | where {|n| $n in ($after_cfg.gates | get name) }))
         if ($after.failed_blocking | is-not-empty) {
-            print -e $"  ERROR: blocking gates failed: ($after.failed_blocking | str join ', '). infra/images.lock.nuon is written and uncommitted; nothing was committed or tagged."
+            print -e $"  ERROR: blocking gates failed: ($after.failed_blocking | str join ', '). infra/images.lock.nuon is written and uncommitted; nothing more was committed or tagged: ($undo)."
             exit 1
         }
     }
-    ^nu ($HERE | path join "changelog.nu") write --version $chosen --highlights $notes
+    ^nu ($HERE | path join "changelog.nu") write --version $chosen --highlights $notes --built-from $lock_from
 
-    let go = if $yes { true } else { (input $"commit and tag v($chosen)? [y/N] " | str trim | str lowercase) in ["y" "yes"] }
-    if not $go { print "  stopped before committing. infra/images.lock.nuon and CHANGELOG.md are written and uncommitted."; return }
-    let root = (^git rev-parse --show-toplevel | str trim)
-    ^git -C $root add infra/images.lock.nuon CHANGELOG.md
-    ^git -C $root commit -q -m (release_message $chosen) -m "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
-    ^git -C $root tag -a $"v($chosen)" -m $"Release v($chosen)"
-    print $"  committed and tagged v($chosen). Nothing was pushed: git push origin HEAD v($chosen)"
+    let go = if $yes { true } else { (input $"commit and tag ($release.tag)? [y/N] " | str trim | str lowercase) in ["y" "yes"] }
+    if not $go { print $"  stopped before committing. infra/images.lock.nuon and CHANGELOG.md are written and uncommitted; ($undo)."; return }
+    commit_files $release.files $release.message
+    # Building the tag must give the locked digests: the release commit changes nothing an image is built from.
+    let changed = (^git -C (repo_root) diff --name-only $built_from HEAD | lines | where {|l| $l | is-not-empty })
+    let diff_problems = (release_diff_problems $changed $chosen)
+    if ($diff_problems | is-not-empty) {
+        for p in $diff_problems { print -e $"  ERROR: ($p)" }
+        print -e "  the release commit is made and not tagged: look at it, and drop it with git reset --keep HEAD~1"
+        exit 1
+    }
+    ^git -C (repo_root) tag -a $release.tag -m $"Release ($release.tag)" -m $"Built from ($built_from) \(($prepare.message)\)."
+    commit_version_step $development
+    print $"  committed ($prepare.message), ($release.message) \(tagged ($release.tag)\) and ($development.message)."
+    print $"  Nothing was pushed: git push origin HEAD ($release.tag)"
 }
 
 def main [] {

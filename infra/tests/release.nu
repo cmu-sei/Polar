@@ -24,7 +24,7 @@
 # The decisions a release makes: versions, what is checked first, which gates run, and what the secret scan may show.
 
 use std/assert
-use ../release.nu [compare_versions, looks_like_placeholder, preflight_problems, release_message, secret_rows, select_gates, unaccepted, version_problems]
+use ../release.nu [compare_versions, dev_version, looks_like_placeholder, preflight_problems, read_version_text, release_diff_problems, release_message, release_plan_lines, release_steps, secret_rows, select_gates, unaccepted, version_file_status, version_file_text, version_problems]
 
 def config [] {
     { gates: [
@@ -125,6 +125,78 @@ def main [] {
             name: "the release commit is a chore, so it counts for nothing toward the next version"
             body: {
                 assert equal (release_message "0.2.0") "chore(release): v0.2.0"
+            }
+        }
+        {
+            name: "VERSION reads a release or a development version, and nothing else"
+            body: {
+                assert equal (read_version_text "1.0.0+dev\n") { version: "1.0.0+dev", release: "1.0.0", development: true }
+                assert equal (read_version_text "2.3.4") { version: "2.3.4", release: "2.3.4", development: false }
+                for bad in ["" "v1.0.0" "1.0" "1.0.0.0" "01.0.0" "1.0.0-rc.1" "1.0.0+dev2" "1.0.0+DEV" "1.0.0+build" "1.0.0 +dev"] {
+                    let r = (try { read_version_text $bad; "accepted" } catch {|e| $e.msg })
+                    assert ($r | str contains "not X.Y.Z or X.Y.Z+dev") $"($bad) was accepted"
+                }
+                assert equal (version_file_text "1.2.0") "1.2.0\n"
+                assert equal (version_file_text "1.2.0+dev") "1.2.0+dev\n"
+                assert equal (dev_version "1.2.0") "1.2.0+dev"
+                let twice = (try { dev_version "1.2.0+dev"; "accepted" } catch {|e| $e.msg })
+                assert ($twice | str contains "already a development version")
+            }
+        }
+        {
+            name: "a release writes the version into VERSION, commits the lock and the changelog with the tag, then writes the development version"
+            body: {
+                let s = (release_steps "1.2.0")
+                assert equal ($s | get step) ["prepare" "release" "development"]
+                assert equal ($s | get version_file) ["1.2.0" null "1.2.0+dev"] "what each commit writes into VERSION"
+                assert equal ($s | get message) ["chore(release): prepare v1.2.0" "chore(release): v1.2.0" "chore: 1.2.0+dev"]
+                assert equal ($s | get tag) [null "v1.2.0" null] "only the release commit is tagged"
+                assert equal ($s | where step == "prepare" | first | get files) ["VERSION"]
+                assert equal ($s | where step == "development" | first | get files) ["VERSION"]
+                let tagged = ($s | where step == "release" | first | get files)
+                assert ("VERSION" not-in $tagged) "the tagged commit leaves VERSION as the prepare commit wrote it"
+                assert equal ($tagged | sort) ["CHANGELOG.md" "infra/images.lock.nuon"]
+                # Every message is conventional, and none counts toward the next version.
+                for m in ($s | get message) { assert ($m | str starts-with "chore") $m }
+                let r = (try { release_steps "1.2.0+dev"; "accepted" } catch {|e| $e.msg })
+                assert ($r | str contains "already a development version")
+            }
+        }
+        {
+            name: "the tagged commit may change only the lock and the changelog since the prepare commit"
+            body: {
+                assert equal (release_diff_problems ["infra/images.lock.nuon" "CHANGELOG.md"] "1.2.0") []
+                assert equal (release_diff_problems [] "1.2.0") []
+                let p = (release_diff_problems ["CHANGELOG.md" "VERSION" "src/agents/lib/src/lib.rs"] "1.2.0")
+                assert equal ($p | length) 2
+                assert ($p | any {|x| $x | str contains "VERSION" })
+                assert ($p | any {|x| $x | str contains "src/agents/lib/src/lib.rs" })
+            }
+        }
+        {
+            name: "VERSION agrees with the last release when it reads that release, with or without +dev"
+            body: {
+                assert (version_file_status "1.0.0+dev\n" "1.0.0" | get agrees)
+                assert ((version_file_status "1.0.0+dev\n" "1.0.0" | get note) | str contains "development since")
+                assert (version_file_status "1.0.0\n" "1.0.0" | get agrees)
+                let ahead = (version_file_status "1.1.0+dev" "1.0.0")
+                assert (not $ahead.agrees)
+                assert ($ahead.note | str contains "1.0.0+dev")
+                assert (not (version_file_status "1.0.0+dev" "1.1.0" | get agrees))
+                let junk = (version_file_status "next" "1.0.0")
+                assert (not $junk.agrees)
+                assert equal $junk.version "next"
+            }
+        }
+        {
+            name: "a dry run says every commit it would make, and what it would write into VERSION"
+            body: {
+                let text = (release_plan_lines "1.2.0" false | str join "\n")
+                for expected in ["write 1.2.0 into VERSION" "chore(release): prepare v1.2.0" "chore(release): v1.2.0" "tag v1.2.0" "write 1.2.0+dev into VERSION" "chore: 1.2.0+dev" "push nothing" "with the prepare commit as what they were built from"] {
+                    assert ($text | str contains $expected) $"missing: ($expected)"
+                }
+                let skipped = (release_plan_lines "1.2.0" true | str join "\n")
+                assert ($skipped | str contains "not built from the prepare commit")
             }
         }
     ]

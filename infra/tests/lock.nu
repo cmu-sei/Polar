@@ -24,7 +24,7 @@
 # The image lock: pinning a manifest's images by digest, and keeping the lock itself.
 
 use std/assert
-use ../lock.nu [format_lock, lay_over, lock_problems, lookup, pin_text, upsert]
+use ../lock.nu [committed_what, format_lock, lay_over, lock_problems, lookup, pin_text, upsert]
 
 const REG = "10.0.2.2:5000"
 const D1 = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
@@ -37,6 +37,17 @@ def entry [image: string, tag: string, arch: string, digest: string] {
 
 def main [] {
     let tests = [
+        {
+            name: "the committed lock says the commit a release built it from, and only when it was built"
+            body: {
+                assert equal (committed_what) "What a release is made of: the digest each image has in the registry."
+                assert equal (committed_what "") (committed_what)
+                assert ((committed_what "abc123") | str ends-with "Built from commit abc123.")
+                # What it says is a comment: the entries read back the same.
+                let rows = [(entry "a" "latest" "amd64" $D1)]
+                assert equal ((format_lock $rows (committed_what "abc123")) | from nuon) $rows
+            }
+        }
         {
             name: "an image line is pinned in the plain and in the quoted spelling, and nothing else changes"
             body: {

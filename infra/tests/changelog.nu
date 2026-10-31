@@ -146,6 +146,16 @@ def main [] {
             }
         }
         {
+            name: "a release that built its images says the commit they were built from, and one that did not says nothing of it"
+            body: {
+                let sha = "0123456789abcdef0123456789abcdef01234567"
+                let text = (render_section { version: "1.3.0", date: "2026-11-02", previous: "", highlights: "", built_from: $sha } [] [] (config))
+                assert equal $text "## [1.3.0] - 2026-11-02\n\nImages built from `0123456789ab`, the commit that set VERSION to 1.3.0."
+                let without = (render_section { version: "1.3.0", date: "2026-11-02", previous: "", highlights: "", built_from: "" } [] [] (config))
+                assert equal $without "## [1.3.0] - 2026-11-02"
+            }
+        }
+        {
             name: "the sections come in the order the config gives them"
             body: {
                 let entries = [(e "1111111aaa" "fix" "a" "mend" "fix") (e "2222222bbb" "feat" "a" "add" "feature") (e "3333333ccc" "feat" "a" "break" "breaking" "conventional" true)]

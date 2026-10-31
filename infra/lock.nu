@@ -102,10 +102,17 @@ export def record [image: string, tag: string, arch: string, digest: string] {
     write_lock $DEV $rows "The digests this machine last pushed; they lie over images.lock.nuon in a render."
 }
 
+# What the committed lock says it is. A release that built its images says the commit they were built from: the images carry
+# the version and never the commit (infra/INFRA.md, "The release"), so this and the changelog are where it is.
+export def committed_what [built_from: string = ""] {
+    let base = "What a release is made of: the digest each image has in the registry."
+    if ($built_from | is-empty) { $base } else { $"($base) Built from commit ($built_from)." }
+}
+
 # Makes this machine's lock the committed one, for a release: the entries of the two, the dev ones winning.
-export def promote [] {
+export def promote [--built-from: string = ""] {
     let rows = (effective)
-    write_lock $COMMITTED $rows "What a release is made of: the digest each image has in the registry."
+    write_lock $COMMITTED $rows (committed_what $built_from)
     $rows
 }
 
