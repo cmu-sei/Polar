@@ -126,8 +126,8 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
   too, load average 1.5 to 22), with no "already closed" in any log. Of the load copies themselves, one `revocation`
   failed in the second round with its output discarded; the last two rounds kept every failing copy's log, and none
   was this panic (see the next item).
-- **The broker tests' names race under heavy load** (found 2026-10-30 loading the machine for the item above, not
-  fixed). With six copies of the broker suite running at once and twelve busy loops, single copies failed:
+- [x] **The broker tests' names race under heavy load** (found 2026-10-30 loading the machine for the item above;
+  fixed 2026-10-31). With six copies of the broker suite running at once and twelve busy loops, single copies failed:
   `end_to_end` (1 test) and `supersede` (3) with "timed out waiting for 1 message(s) on news", `custody_revocation`
   (2) with "timed out waiting for its subscription to requests" and then "the broker's names never became free"
   (`tests/support/mod.rs:286`) in the test after. Each time the new broker's TopicManager had logged
@@ -140,8 +140,90 @@ subscriber that falls behind (`92bc4822`), every publish formatting its payload 
   test's broker starts in that window. Most likely also the cause of one `revocation` load copy that failed with its
   output discarded (its proptest shrank to `[(false, false); 3]`, as every later case in a poisoned process fails), but
   that one is unconfirmed: 36 runs of the `revocation` binary alone, six at a time with twelve busy loops, all passed.
-  To do: give the managers a `post_stop` that stops their children and waits, as the Broker and ListenerManager do
-  (`stop_children_and_wait`), or have `clear_names` also wait for the topic actors' names.
+  Fixed in the broker, not in the tests, since a broker restarted in one process would collide the same way: the
+  TopicManager, SessionManager and SubscriberManager now have a `post_stop` that stops their children and waits
+  (`stop_children_and_wait`, 5 s, as the Broker and ListenerManager do), so a stopped broker holds none of its names
+  when its stop returns. The PressureManager and ControlManager have no child actors, and as the Broker's own children
+  they were already waited for by its `post_stop`. `TestBroker::stop` now checks that: it notes the names the broker's
+  actors hold (the seven of `NAMES` and every topic, session and subscriber under the managers) and fails, naming
+  them, if any is still registered once the stop returns; `clear_names` stays a check for a broker a failed test left
+  behind and for the authority's two names. Proof: `tests/topic.rs`, "a stopped topic manager has freed every topic's
+  name when its stop returns" (256 topics), failed every time before the fix (all 256 still registered, 0.01 s) and
+  passes after; the broker suite with the new check and the old managers failed at that check in five binaries
+  (`backpressure`, `custody_revocation`, `restart`, `revocation`, and the topic test: topics and session IDs left
+  registered), then "the broker's names never became free" in the tests after. After the fix, each binary 20 runs
+  alone (the load average 9 to 44 from another build): `topic`, `end_to_end`, `supersede`, `custody_revocation`,
+  `revocation` 20 of 20, `restart` 18 of 20; and 10 under load (five copies of all six at once, twice, twelve busy
+  loops, load 23 to 42): `topic`, `end_to_end`, `supersede`, `revocation` 10 of 10, `custody_revocation` 8, `restart`
+  9; no failure was at the new check, and no `ActorAlreadyRegistered`. The `restart` and `custody_revocation` failures
+  are other flakes, both on main too (the two items below). Side by side under the same load (five copies of each,
+  three rounds, twelve busy loops), main's `custody_revocation` failed 5 of 15 with the race's symptoms ("timed out
+  waiting for its subscription to requests", then "the broker's names never became free"; each of the five logged
+  `ActorAlreadyRegistered("polar-authority-snapshot-requests")`), the fixed one 1 of 15, not with them, and no log of
+  the fixed binaries has `ActorAlreadyRegistered`. A test that panics before its `broker.stop()` still leaves its broker running, and the next start's
+  `clear_names` can then wait out its 5 s ("never became free"; seen once after the fix, after such a panic): to do,
+  stop the broker when a test panics, and have `clear_names` say which names it waited for.
+- [x] **The fresh-start marker's two tests shared one record** (found 2026-10-30 in a loaded full-suite run; fixed
+  2026-10-31). `polar-agent-builder`'s "an agent started after polar-init takes the marker and starts" and the
+  "unmarked" test beside it both used the test agent `Marked`, which noted its start in one process-wide
+  `MARKED_STARTED`, and each reset it first: the unmarked test, run in the window between the other's start and its
+  check, reset the record and failed it. Only the test agent had the global; the production path
+  (`start_marker::take`, the marker's path from the agent's own configuration) has none and is unchanged. Fixed:
+  `Marked<const SLOT: usize>`, with a record per slot and a slot per test, none reset. Proof: "the marker tests keep
+  their own record when they run at once" forces that order (the unmarked run whole on another thread between the
+  marked run and its check); with the shared record it failed 10 of 10, after the fix it passes. The crate's unit
+  tests after: 20 of 20 alone, 10 of 10 under load (five copies at once, twice, twelve busy loops).
+- [x] **The credentials consumer's "through the configuration actor a refused policy leaves the one in force" timed
+  out under load** (found 2026-10-30, the binary 50 s in a loaded full suite against 5 s alone; fixed 2026-10-31).
+  With the `unwrap` made an `expect`, the error is `Unavailable("timed out")` from the first submit: the
+  ConfigurationHandle bounded every call to its actor by `CALL_TIMEOUT` (5 s, `polar-agent-builder/src/configuration.rs`),
+  and a submit's answer comes only after the agent's judge, here the authority model (`credentials_agent_model::judge`
+  over the sandbox fixture, a debug build) with the ledger's two calls, which took over 5 s on a loaded machine; it
+  failed 3 of 3 alone with the load average at 38 (the arm64 build). The 5 s exists so a read (the configuration, a
+  runtime section, the history), which is answered at once, does not wait forever on an actor that no longer answers;
+  for a submit it measured the judgement instead, which grows with the model and the machine. Fixed: `submit` waits
+  for its outcome with no timeout and fails only if the actor stops (its reply port dropped); the reads keep the 5 s.
+  Proof: "a submit is answered however long its judgement takes" (a judge sleeping three times `CALL_TIMEOUT`, paused
+  clock) failed with `Unavailable("timed out")` before and passes after. Production: nothing calls `submit` (documents
+  arrive by `deliver`, a cast with no timeout), so it had no exposure there; but a read that queues behind a
+  judgement has the same 5 s, and the consumer's `pass_on_section` (`credentials-agent/consume/src/supervisor.rs:707`)
+  reads a replaced section while a second authority document may be being judged: a judgement over 5 s would leave
+  that section unpublished until the next republish (it says so in a warning). Not changed; see the item below.
+  The consumer's unit tests after: 20 of 20 alone (56 to 151 s a run, the load average 15 to 40), and under load
+  (five copies at once, twice, twelve busy loops) 9 of 10, the one failure the custodian property below, not this
+  test.
+- **The custodian property reads the clock twice** (found 2026-10-31, not fixed). `credentials-agent/consume`'s
+  "a custodian is answered only by the rule" (`src/custodian.rs:542`) failed once under load with `age_secs = 300`,
+  exactly `CUSTODIAN_WINDOW_SECS`: its `record` stamps `now_millis() - age` and `judge` is given a later
+  `now_millis()`, so at the boundary any millisecond between them closes the window, and the property's "refused as
+  window closed only past the window" fails. To do: give `record` and `judge` one `now`.
+- **`custody_revocation`'s "the custodian's own certificate revoked destroys every key" is told of both slots**
+  (found 2026-10-31, not fixed). Under load it gets `[Custodian, Client]` (or `[Client, Custodian]`) where it expects
+  `[Custodian]` (`tests/custody_revocation.rs:340`): 1 of 15 on main and 1 of 15 after the names fix, side by side, and
+  2 of 10 in the loaded runs above. Not the names race. To do: find whether the daemon's report of the custodian's
+  revocation may carry the workload's slot too (its keys go with the custodian's) or the test reads a second report.
+- **A read of the configuration actor waits behind a judgement** (found 2026-10-31 fixing the item above, not fixed).
+  The actor judges a runtime document inside its handler, so a read sent meanwhile (`runtime`, `current`, `history`)
+  waits for the judgement and fails after `CALL_TIMEOUT` (5 s) if it is longer. In release builds a judgement is well
+  under that today; it grows with the model (workloads, topics, persons). To do: judge off the actor's loop (keeping
+  documents in order), or have the reader that matters (`pass_on_section`) retry instead of waiting for a republish.
+- **A publish sent right after a re-registration can be dropped** (found 2026-10-31, not fixed). `restart`'s "a publish
+  made while the broker is away arrives when it returns" failed 2 of 20 runs alone and 3 of 36 under load ("timed out
+  waiting for 1 message(s) on news", `tests/support/mod.rs:1039`), before the names fix as after it (side by side
+  under the same load, main 1 of 15, fixed 2 of 15). The log of a
+  failing run (each of the three kept has it): the front reconnects to the restarted broker with its old registration ID, the broker starts a new
+  session ("requested session not found, creating new one"), registration succeeds, and the front's held publish
+  arrives at once and is dropped: "No session ref for listener ... dropping publish" (`cassini/broker/src/listener.rs:2054`,
+  ERROR). The listener had not yet been given its session when the client, told it was registered, published. Nothing
+  tells the client, so its message is lost. To do: have the listener hold (or refuse, so the client resends) what
+  arrives before its session is set, rather than drop it.
+- **`backpressure`'s "a processor publishing large frames under an exhausted budget is not cut" fails on a loaded
+  machine** (found 2026-10-31, not fixed). "the budget was exhausted" (`tests/backpressure.rs:680`): the processor did
+  not exhaust the budget within its 10 s. It fails the same on main (`e3d0a29e`, 2 of 3 runs alone with the load
+  average 10 to 20 from another build), so it is not the names race. Once, with the names fix in (3 runs alone; not
+  seen in main's 3), "a processor holding back its own topic is not cut for acknowledgements the broker has not read"
+  had its connection ended (`backpressure.rs:802`), mid-test, where the fix (which acts only on a stop) does not
+  reach. To do: find whether the 10 s is a debug-build budget or the publisher is starved.
 - **One `infra/tests/resolve.nu` test fails against a cluster whose images predate the code** (2026-10-30): "workloads
   still asking cert-issuer are listed as pending while the floor is off, and refused once it is enforced" fails at its
   floor-off `check` with "the agents could not judge their documents: Eval block failed with pipeline input"
