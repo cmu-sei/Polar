@@ -77,9 +77,10 @@ because the render's `--check` runs on targets that still hold the placeholder.
    `token_looks_base64`); a Data Center token, itself base64-looking, decodes to binary and does not trip it.
 4. Projects, groups, users and issues each pull at once and then every 1800 s (`agent.rs:39`). **Before its first
    issue pull** the issue observer asks the state agent (`soft-state.md`) for the newest `updated_ms` of a `JiraIssue`
-   in the graph, which jira-processor writes for every issue: `Max { JiraIssue, updated_ms }` on `soft-state-requests`,
-   answered on its own `soft-state-replies.jira-observer` (`supervisor.rs`, `state_asker`, an 8 s wait, a fresh
-   correlation id each time). With a time `t`, the first pull asks `updated >= -Nm`, N the minutes from `t` to now
+   in the graph, which jira-processor writes for every issue from Jira's system field `updated` (found by its `/field`
+   schema, not by its display name, and passed as `polar_updated`): `Max { JiraIssue, updated_ms }`, through the state
+   actor the builder gives it (`polar-agent-builder/src/state.rs`: 8 s per attempt, three attempts, a fresh
+   correlation id each, `POLAR_STATE_REPLY_TIMEOUT_SECS` and `POLAR_STATE_ATTEMPTS`). With a time `t`, the first pull asks `updated >= -Nm`, N the minutes from `t` to now
    plus the 300 s overlap, rounded up, at least 1 (`issues.rs`, `cursor_minutes`); relative, so the Jira user's time
    zone does not enter. With no issue in the graph it is full, or from `QUERY_DATE`. A refusal, a graph the state
    agent cannot read, or no answer is retried on the backoff below, and nothing is pulled until it says: never a full
@@ -129,11 +130,11 @@ then what each pattern means. It never prints the host, URL, email or token (INF
 
 - The user picker sends `query=''` and may repeat pages (`users.rs`; remaining-work.md); not changed, because what an
   empty query lists differs between Jira versions.
-- The cursor: BUILT 2026-10-30 (`soft-state.md`, "The Jira cursor"). Before, whether the full pull was done was held
+- The cursor: BUILT 2026-10-30, and rebuilt the same day on the review (`soft-state.md`): the state actor asks, and the
+  time is the system field `updated`, so a Jira in another language works too. Before, whether the full pull was done was held
   in memory, so every restart (about every half hour, with rejuvenation) pulled everything again or from the fixed
   `QUERY_DATE`, and a user moved `QUERY_DATE` by script as a hand-made cursor. Now the first pull after a start begins
   at the graph's newest issue; `QUERY_DATE` applies only to a graph with no issue. Not yet seen on a cluster. Kept
-  open: pagination by `startAt` can skip an issue updated during a pull, as before; the display name `Updated` is
-  Jira's English one; and a graph whose issues were all written before jira-processor wrote `updated_ms` answers that
+  open: pagination by `startAt` can skip an issue updated during a pull, as before; and a graph whose issues were all written before jira-processor wrote `updated_ms` answers that
   none has it, so the first start after the upgrade pulls everything (or from `QUERY_DATE`) once, as before.
 - A failed container's cause outlives it only if written to a volume that survives the in-place restart.

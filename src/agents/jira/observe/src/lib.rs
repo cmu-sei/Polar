@@ -516,7 +516,7 @@ pub struct JiraObserverArgs {
     pub retry: Backoff,
     /// The time: `Instant::now`, or a test's clock.
     pub clock: fn() -> Instant,
-    /// How the issue observer asks the state agent where its first pull starts (`supervisor.rs`, `state_asker`).
+    /// How the issue observer reads where its first pull starts: the state actor the builder gives the agent.
     pub cursor: Option<issues::AskCursor>,
     /// The time in epoch milliseconds: the system clock, or a test's.
     pub wall_clock: fn() -> i64,

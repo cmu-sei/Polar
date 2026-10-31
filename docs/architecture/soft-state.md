@@ -24,10 +24,12 @@
 # Soft state: the state agent
 
 Status: DESIGN CLEARED by the maintainer 2026-10-30 (the reader half only for now; the cursor derived from the issues
-written, not an explicit cursor node). BUILT 2026-10-30, the reader and the Jira cursor (below, "As built"); unit-,
-property- and Neo4j-container-tested, its image built, not yet run on a cluster. The writer half is not built. Written
-from the code as it stood on `main` (`1b82f624`); paths are relative to `src/agents/`. First user: the Jira observer's
-issue cursor (`jira.md`, "What it does at start").
+written, not an explicit cursor node). BUILT 2026-10-30, then REVIEWED by the maintainer and REBUILT the same day
+(below, "Revised by the maintainer's review" for why, "As built" for what): the floor a signed runtime section seeded
+from the scaffolds, a `StateActor` in the builder, the `soft-state` capability computed by the builder. Unit-,
+property- and Neo4j-container-tested, its image built; the rebuild has not run on a cluster (the first build has,
+"Seen on a cluster"). The writer half is not built. Paths are relative to `src/agents/`. First user: the Jira
+observer's issue cursor (`jira.md`, "What it does at start").
 
 ## What it is for
 
@@ -44,17 +46,15 @@ for all of them, and decides each request by WHO asks against the graph schema t
   395-418`); a publisher can stay anonymous but never name another identity. It reaches a builder `Subscription` as
   `IncomingMessage.published_by` (`polar-router/src/lib.rs:66-71`). A request with no identity is refused, as the
   credentials agent's request gate refuses one (`credentials-agent/consume/src/request_gate.rs:73-75`).
-- **Ownership is declared by the agent and signed off by applying the catalog.** Each agent declares, beside its topics,
-  the graph labels it OWNS (writes) and the ones it READS (`PolarAgent::GRAPH`, below). `--scaffold` prints them; the
-  render writes them into the state agent's floor, as it writes declared topics into the issuance floor today
-  (`infra/resolve.nu:821-840`, `infra/rules.nu:260-280`). Applying the catalog is the administrator's approval
-  (`policy-enforcement.md`, "Decisions", 2026-10-21); there is no separate signed seed. This replaces the 2026-10-15
-  note that the schema be a reviewed seed never regenerated on deploy: the 2026-10-21 decision covers the same case for
-  topics, and an image that declares more than it should is the registry gate's and the review of the catalog's
-  business, as it is for topics.
+- **Ownership is declared by the agent; the floor is the state agent's signed configuration.** Each agent declares,
+  beside its topics, the graph labels it OWNS (writes) and the ones it READS (`PolarAgent::GRAPH`, below), and
+  `--scaffold` prints them. Who may read which label is the state agent's runtime section `schema`, signed like any
+  runtime configuration: its first version is made from the scaffolds' declarations and signed by the first
+  administrator at setup (`infra/seed.nu`, as the credentials agent's first `policy` is), and later versions are an
+  author's. (Built first as an env var the render wrote; the review replaced it, below.)
 - **Cedar overrides both ways** (`policy-enforcement.md`, 2026-10-21): a permit adds a read, a forbid removes one, and the
   floor decides where policy is silent. The vocabulary gains `Action::"read-state"` on `Label::"<label>"`, with
-  `context.declared` (the floor says so), as the topic actions carry it (`polar-policy/src/schema.rs:56-100`).
+  `context.declared` (the `schema` section says so), as the topic actions carry it (`polar-policy/src/schema.rs:56-100`).
 - **The graph is a projection.** A reply is a hint the asker may act on; nothing authoritative is decided from it.
 
 ## Shape
@@ -78,23 +78,24 @@ Envelope<StateReply>   { correlation_id, payload: Value(Option<i64>) | Refused(r
 decision (not allowed, malformed); `Unavailable` is the graph failing, and the asker retries.
 
 Topics: requests on `soft-state-requests` (every asker publishes, the observer subscribes). Replies on a FAMILY,
-`soft-state-replies.{workload}` (`topics.md`, "Families"): each asker subscribes only to its own, so one agent's state is
-not broadcast to the others (reply topics are otherwise shared, `cassini-request-reply-protocol.md:125-135`).
+`soft-state-replies.{workload}` over the served workloads (`topics.md`, "Families"): each asker subscribes only to its
+own, so one agent's state is not broadcast to the others (reply topics are otherwise shared,
+`cassini-request-reply-protocol.md:125-135`). An asker's two topics are implied by the `soft-state` rule.
 
 ## The Jira cursor (first user)
 
-- jira-processor writes `updated_ms` (epoch milliseconds, i64) on each `JiraIssue`, parsed from the issue's `Updated`
-  field (the system field `updated` under its display name after `rename_fields`, `jira/observe/src/issues.rs:276-293`;
-  stored today as the string property `Updated`, `jira/process/src/issues.rs:166+`). A number, so times written with
-  different UTC offsets compare correctly. It declares that it owns `JiraIssue`.
+- jira-processor writes `updated_ms` (epoch milliseconds, i64) on each `JiraIssue`, parsed from Jira's system field
+  `updated`, which the observer finds by its `/field` schema (`schema.system`), not by its display name, and passes
+  beside the fields as `polar_updated`. A number, so times written with different UTC offsets compare correctly. It
+  declares that it owns `JiraIssue`.
 - jira-observer declares that it reads `JiraIssue`. At start, before its first issue pull, it asks `Max { JiraIssue,
   updated_ms }`:
   - `Value(Some(t))`: the first pull asks `updated >= -Nm`, N the minutes from `t` to now plus the 300 s overlap
     (`INCREMENTAL_OVERLAP_SECS`), rounded up. Relative, so the Jira user's time zone (which JQL applies to an absolute
     date) does not enter; the skew between the clocks is what the overlap covers, as for every incremental pull.
   - `Value(None)`: the graph has no issues; the pull is full, or from `QUERY_DATE`. `QUERY_DATE` applies only here.
-  - `Unavailable`, `Refused` or no reply: retried with the observer's backoff (`lib.rs:403`, `settle`). It never falls
-    back to a full pull, which is what the cursor exists to avoid.
+  - `Unavailable`, `Refused` or no reply (the state actor's attempts spent): retried with the observer's backoff
+    (`lib.rs`, `settle`). It never falls back to a full pull, which is what the cursor exists to avoid.
 - Every issue pull orders `ORDER BY updated ASC`, so a pull cut short leaves the graph's newest `updated` meaning that
   everything older was written.
 
@@ -172,79 +173,76 @@ name. Debugging what an actor is doing belongs to logs and traces, not to the st
 health counters (such as issues pulled) are domain facts, and come only through the declared API or the domain's own
 graph writes.
 
-## As built (2026-10-30)
+## As built (rebuilt 2026-10-30, after the review)
 
-Paths relative to `src/agents/`; the line numbers are those of the commit that built each piece.
+Paths relative to `src/agents/`. Commits `9250bf10` (builder, jira-observer), `e1078d15` (state agent), `8ea49054`
+(infra), `0e7a30f7` (Jira's system field).
 
-- **Declarations.** `PolarAgent::GRAPH` (`polar-agent-builder/src/agent.rs:148`) holds `GraphDecl::owns` and
-  `GraphDecl::reads` (`polar-agent-builder/src/graph_schema.rs`); the scaffold prints them under `graph`, only when
-  there is one, so every other scaffold is byte-identical. The set is ordered by (label, access) and holds each pair
-  once, whatever the order of the declarations (`graph_set`, `:125`, proptests); a label that is not a plain
-  identifier (`is_identifier`, `:113`), one with no purpose, a pair declared twice, or a read by an agent that is not a
-  Cassini client is a declaration problem (`problems`, `:147`). Declared today: jira-processor owns `JiraIssue`,
-  `JiraProject`, `JiraUser`, `JiraGroup`, `JiraIssueType` and `JiraIssueChangeLog` (`jira/process/src/agent.rs:64`);
-  jira-observer reads `JiraIssue` (`jira/observe/src/agent.rs:83`).
-- **The capability.** `Capability::GraphRead` (`polar-agent-builder/src/capability.rs:49`), `graph-read` in
-  `infra/config/capabilities.nuon`: the graph section and the pod's one client certificate, as `graph-write` has, the
-  health check not watching the graph (`startup.rs`, `expects_graph` only for `GraphWrite`), and no `dependency`.
-- **The vocabulary.** `Action::"read-state"` on `Label::"<label>"` (`polar-policy/src/schema.rs:88`), its context the
-  topic actions' `{ now_secs, declared, implied }` (`policy-enforcement.md`, "Decisions").
-- **The messages.** `soft-state/common/src/lib.rs`: `StateRequest::Max`, `StateReply`, in the request/reply
-  `Envelope` over rkyv; `REQUESTS_TOPIC`, `REPLIES_FAMILY`, `replies_topic`; `ask` (`:111`), one attempt with a fresh
-  correlation id; `deliver` (`:138`).
-- **The reader.** `soft-state/observe`: a builder agent, `NEEDS [GraphRead]`, subscribing to `soft-state-requests`
-  and publishing on the family `soft-state-replies.{workload}` expanded over the readers
-  (`soft-state/observe/src/agent.rs:49`). The decision is `decision.rs` (`checked`, `:70`; `decide`, `:93`): no
-  verified asker, or a label or property that is not a plain identifier, refused; then Cedar; where policy is silent,
-  the floor (`floor.rs`, `declares_read`, `:125`), matched by the exact identity; anything else refused; policy that
-  cannot be consulted is `Unavailable`. The query is built in `query.rs` (`max_cypher`, `:34`): `MATCH (n:`L`) WHERE
-  n.`p` IS NOT NULL RETURN max(n.`p`) AS value`, a non-integer value refused (`reply_of`, `:45`), a graph that does not
-  answer within 10 s or fails `Unavailable` (`read_max`, `:57`). Each request is answered in a task of its own, on the
-  asker's reply topic (`supervisor.rs`, `answer`, `:108`; `reply_topic_for`, `:130`).
-- **The render.** `infra/graph.nu`: `readers`, `unowned_reads`, `state_floor`; `infra/resolve.nu`: `collect_into`
-  asks every image for its scaffold, then again, with `POLAR_STATE_READERS`, the images whose scaffold has a family over
-  the readers (`:226`); `resolve` writes `POLAR_STATE_READERS` (`:582`) and `SOFT_STATE_FLOOR` (`:604-614`) into the
-  state agent's document; `check_all` fails a read of a label no workload of the target owns. The catalog row is
-  `infra/config/workloads/soft-state.nuon`; the image `softStateObserverImage` (`soft-state/package.nix`).
-- **The Jira cursor.** jira-processor writes `updated_ms` (`jira/process/src/issues.rs`, `parse_updated_ms`, `:62`;
-  written at `:355`); jira-observer asks before its first issue pull (`jira/observe/src/issues.rs`, `learn_start`,
-  `:134`; `start_from`, `:75`; `cursor_minutes`, `:94`; `jql_filter`, `:352`; `issue_jql`, `:378`), through
-  `state_asker` (`jira/observe/src/supervisor.rs:81`) on its reply topic (`STATE_REPLIES_TOPIC`, `:49`), hearing only
-  the state agent (`from_state_agent`, `:57`); a state agent that has not said is retried as a failed pull is
-  (`lib.rs`, `JiraError::no_cursor`, `settle`).
+- **Declarations.** `PolarAgent::GRAPH` holds `GraphDecl::owns` and `GraphDecl::reads`
+  (`polar-agent-builder/src/graph_schema.rs`), printed under `graph`; unchanged from the first build. Declared today:
+  jira-processor owns `JiraIssue`, `JiraProject`, `JiraUser`, `JiraGroup`, `JiraIssueType` and `JiraIssueChangeLog`;
+  jira-observer reads `JiraIssue`.
+- **The `soft-state` capability, computed.** `computed_needs` (`polar-agent-builder/src/agent.rs:378`) gives an agent
+  `Cassini` first when it is a client, then what it lists, then `SoftState` when it declares a graph read, each once;
+  listing `SoftState` by hand is a declaration problem (`:897`). Its rule, `Rule::SoftState` (group `soft-state`,
+  `topics.rs:407`), implies publish `soft-state-requests` and subscribe `soft-state-replies.<name>`, through the one
+  `implied_topics` the broker's floor uses (`floor.rs`); the property test holding the two equal draws `soft_state`.
+  `infra/config/capabilities.nuon` `soft-state`: nothing in the pod, its `dependency` the workload
+  `soft-state-observer`, which `resolve.nu check` requires a target to run (`graph.nu` `needs_workload`).
+- **The `StateActor`** (`polar-agent-builder/src/state.rs:294`), under the InfrastructureSupervisor beside the
+  CryptoActor, started for an agent with the capability (`infrastructure.rs:459`, `:565`); `AgentResources::state` is
+  its `StateHandle`, behind the `StateClient` trait (`:169`). It owns the question: `ask_until_answered` (`:261`), a
+  fresh correlation id per attempt, `POLAR_STATE_REPLY_TIMEOUT_SECS` (8) per attempt and `POLAR_STATE_ATTEMPTS` (3)
+  (`:52`, `:60`, declared variables of the capability's section), an answer never asked again; its reply subscription
+  (`replies_subscription`, `:239`) believes only the state agent of the agent's own namespace and domain
+  (`state_agent_identity`, `:222`; `from_state_agent`, `:233`). `get(StateQuery::Max)` returns a `SoftValue` (`:128`),
+  a type of its own, never a `RuntimeValue`; `changes` and `put` come with the writer half.
+- **The vocabulary.** `Action::"read-state"` on `Label::"<label>"` (`polar-policy/src/schema.rs`), unchanged.
+- **The state agent.** `soft-state/observe`: `NEEDS [GraphRead]`; its floor the runtime section `schema`
+  (`floor.rs:42`, judged by `Floor::from_body`, `:79`), read at start and on each `runtime_changes`
+  (`supervisor.rs:274`); its reply family over `POLAR_SERVED_WORKLOADS`, saying why most have no subscriber
+  (`agent.rs:55`, `FamilyDecl::waiting`, `polar-agent-builder/src/topics.rs:241`). The decision (`decision.rs`) is as
+  before, and before a version of `schema` has arrived a read policy does not permit is `Unavailable` ("no schema yet",
+  `:123`). `POLAR_STATE_GRAPH_TIMEOUT_SECS` (10, `settings.rs`) bounds a read; a graph that is down is reported to the
+  health actor as not connected (`report_graph`, `supervisor.rs:157`), so the agent stays up and healthy, answers
+  `Unavailable`, and its health file says `graph_connected: false`.
+- **The seed.** `infra/seed.nu` `documents` holds `permanent/soft-state-observer-schema.dhall` (version 1,
+  `c:update-runtime`, its body `from: "scaffolds"`); `up.nu`'s `step_seed` asks `resolve.nu state-schema --target`
+  (`resolve.nu:1140`, `graph.nu` `state_schema`) for the body only when that path is not in polar-schedules yet. The
+  render gives the state agent nothing of its own, and asks the scaffolds once.
+- **The Jira cursor.** jira-observer asks through the `StateClient` it is given (`jira/observe/src/issues.rs`,
+  `cursor_query`, `:61`; `start_from`, `:80`): no request or reply code of its own. The observer finds the system field
+  `updated` (`system_field_id`, `:411`) and passes its value as `polar_updated` (`mark_updated`, `:426`,
+  `jira_common::SYSTEM_UPDATED_KEY`); jira-processor parses `updated_ms` from it alone
+  (`jira/process/src/issues.rs:353`).
 
-Decided where the design was silent (by the agent that built it, by the precedents named; to confirm):
+Decided where the review was silent (by the agent that rebuilt it; to confirm):
 
-1. **The reply family is expanded over the readers, not the served workloads.** Expanded over `POLAR_SERVED_WORKLOADS`,
-   every document agent would have a reply topic only the state agent publishes and nobody subscribes to, which the
-   catalog's cross-check fails (`topics.md`, "The cross-check"), and the state agent's certificate would carry a topic
-   for each. So a family can say what it is expanded over (`FamilyDecl::over`, `polar-agent-builder/src/topics.rs:218`,
-   `Over::StateReaders`), the render fills `POLAR_STATE_READERS` from the scaffolds' reads, and the state agent's
-   scaffold is asked a second time (above). The scheduler's families are unchanged.
-2. **The floor is a variable of the state agent's own document,** `SOFT_STATE_FLOOR` (JSON `{ format: 1, workloads:
-   [{ workload, identity, owns, reads }] }`), written by the render as it writes `CREDENTIALS_AGENT_AUTHORITY_MODEL`
-   (`infra/resolve.nu`), from every workload of the target that declares a label. Empty, no one may read anything
-   unless policy permits it; one that does not parse is a configuration problem at start (`floor.rs`, `relations`).
-3. **The asker is matched by its exact identity**, `<workload>.<namespace>.serviceaccount.<domain>` as the floor
-   writes it, not by `workload_of` alone: a service account of the same name in another namespace is not it.
-4. **Only a declared read is admitted by the floor;** owning a label is not reading it through the state agent
-   (an owner has the graph already). The state agent declares no label of its own.
-5. **`context.implied` is always false** for `read-state`, and the state agent asks policy with no certificate of
-   the asker's (it holds none), so a rule on `principal in Group::"x"` holds only through the signed groups document.
-6. **A request with no verified asker, or from an identity that names no workload, is dropped** with a warning: it has
-   no reply topic. A refusal names only what the asker sent and its own identity (a proptest holds it), and the reason
-   policy could not be consulted is logged, not sent.
-7. **`graph-read` has no `dependency`:** polar-init does not wait for Neo4j, and the health check does not watch its
-   certificate, so nothing about the state agent's health depends on the graph.
-8. **Placement:** the writers' pool, since it holds the graph password (`placement.md`).
-9. **Timeouts:** the state agent waits 10 s for the graph; jira-observer waits 8 s for an answer, under its observers'
-   10 s stop bound, and asks again on its backoff (30 s doubling to 15 minutes) with a fresh correlation id.
-10. **A value that is not an integer is refused**, not unavailable: asking again would not change it.
-11. **jira-observer accepts a reply only from the state agent's identity** (`published_by`); it declares that it reads
-    `JiraIssue`, and jira-processor declares the six labels with fixed names it writes. The `JiraIssue_<field>` labels
-    it makes from custom fields carry Jira's names and are not declared.
+1. **The `soft-state` capability is computed from `GRAPH` reads.** The scaffold is printed without building anything,
+   so "builds with the StateActor" is read as "declares a graph read", and the builder starts the actor exactly for an
+   agent whose `requires` has it.
+2. **The reply family over the served workloads has topics nobody subscribes to** (every served agent's but the
+   readers'), and the catalog's cross-check fails such a topic unless it says why it waits; so `FamilyDecl` gained
+   `waiting`, and the cross-check lists one wait per non-reader (about twenty lines). The alternative, implying every
+   agent's reply subscription in the `agent` rule, would have put the topic in every agent's set and changed the
+   broker's floor for all of them, against "implied by the capability's rule".
+3. **No `schema` yet means `Unavailable`, not `Refused`:** the seed is pushed after the state agent starts, and a
+   refusal says asking again changes nothing.
+4. **The capability's `dependency` is a workload** (`{ workload: "soft-state-observer" }`), checked by the render: the
+   dependency facet's `service` names a TLS endpoint to wait for, and the state agent has none.
+5. **The state agent of the asker's own namespace and domain** is the only publisher a reply is believed from (exact
+   identity, as the state agent matches askers).
+6. **`POLAR_STATE_ATTEMPTS` (3)**, after the request/reply protocol's three attempts: only no answer is asked again.
+7. **Degraded is `graph_disconnected`:** of what the health actor takes today, the one that records the graph down
+   without ever writing the file unhealthy (`GraphOpFailed` writes it unhealthy once, which a probe could catch).
+8. **The schema's body has no `format` field:** the section's version is the document's.
+9. **The system field is passed beside the fields, as `polar_updated`,** read by the processor from there only: a
+   custom field named "Updated" is not the cursor, and an observer that does not pass it gives no `updated_ms`.
 
-## Seen on a cluster (u7c, sandbox-local, 2026-10-30)
+The first build's decisions are in "The as-built decisions, reviewed" above; its floor variable, readers variable,
+`Over::StateReaders` and second scaffold pass are gone.
+
+## Seen on a cluster (u7c, sandbox-local, 2026-10-30), the first build
 
 Against a fake Jira Data Center in its own namespace (120 issues two hours apart, their `updated` alternating `+0000`
 and `-0400`; it logged each JQL and honoured `updated >= -Nm`):
@@ -266,10 +264,11 @@ and `-0400`; it logged each JQL and honoured `updated >= -Nm`):
   discipline until Neo4j roles exist.
 - Pagination by `startAt` can skip an issue updated during a pull (it moves to the end); the existing incremental pull
   has the same hazard. Not changed here.
-- The display name `Updated` is Jira's English name; a Jira in another language names it otherwise.
 - No index on `updated_ms`; `Max` scans the label once per observer start.
 - A graph whose issues all predate `updated_ms` answers that none has it, so the first start after the upgrade pulls
   everything (or from `QUERY_DATE`) once.
-- Not yet run on a cluster: the state agent's image is built, not deployed; the two-pass scaffold collection has run
-  only from the workspace's binaries (`infra/tests/catalog-topics.nu`), not against a registry.
+- The rebuild has not run on a cluster: the seeded `schema`, the StateActor and the system field are tested and the
+  images built, not deployed. The seed's `resolve.nu state-schema` has run from the workspace's scaffolds only.
+- Health is closest-fit: the health file says `graph_connected: false` with the status healthy; `Degraded` with reason
+  `Graph` waits for health in the graph (remaining-work.md, "HEALTH IN THE GRAPH, PULLED").
 - The writer half (`soft-state-processor`) and the git checkpoints are not built.
