@@ -949,6 +949,9 @@ Principle: declare each environment variable once, with its type, default, docum
   `~/.kube/config`. The release's `determinism` gate fails without the variable (a skip proves nothing). No other
   infra test called kubectl (every one run with a recording kubectl first on PATH). Tested in
   `infra/tests/test-cluster.nu`; INFRA.md, "Tests that need a cluster".
+- [x] `infra/tests/ca.nu` and `infra/tests/load-harness.nu` ran binaries from `src/agents/target/debug`, so the release's
+  `unit` gate failed (or ran a stale binary) under a custom CARGO_TARGET_DIR (done 2026-10-31): they ask `cargo
+  metadata` for the target directory, which is CARGO_TARGET_DIR when set and the workspace's `target` otherwise.
 
 - [x] `cassini/broker/tests/supersede.rs` was flaky (fixed 2026-10-27): one run in six to eight failed "timed out
   waiting for its connection to be closed" (`support/mod.rs:610`, a 5 s wait for the superseded connection to close),

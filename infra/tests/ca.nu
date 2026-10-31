@@ -89,6 +89,12 @@ def rendered [target: string] {
     $out
 }
 
+# Where the `cargo run` above put the binaries: cargo's own answer (`cargo metadata`), which is CARGO_TARGET_DIR when it is
+# set and the workspace's `target` otherwise, asked from the same directory so a relative CARGO_TARGET_DIR means the same.
+def cargo_target_dir [] {
+    ^cargo metadata --format-version 1 --no-deps --manifest-path ($AGENTS | path join "Cargo.toml") | from json | get target_directory
+}
+
 def job_pod [out: string] { open --raw ($out | path join "cert-issuer.yaml") | from yaml | get spec.template.spec }
 
 def main [] {
@@ -101,7 +107,7 @@ def main [] {
         $r.stdout | save --force ($scaffolds | path join $"($agent.name).json")
     }
     $env.POLAR_SCAFFOLD_DIR = $scaffolds
-    let cert_issuer = ($AGENTS | path join "target/debug/cert-issuer")
+    let cert_issuer = (cargo_target_dir | path join "debug" "cert-issuer")
 
     let tests = {
         "cert-issuer is a catalog workload of kind ca": {

@@ -53,7 +53,13 @@ def producer_result [index: int, refused: int] {
 def scaffold_of [package: string, binary?: string] {
     let built = (do { cd ($ROOT | path join "src/agents"); ^cargo build -q -p $package } | complete)
     if $built.exit_code != 0 { error make { msg: $"cannot build ($package): ($built.stderr | lines | last 5 | str join "\n")" } }
-    ^($ROOT | path join $"src/agents/target/debug/($binary | default $package)") --scaffold | from json
+    ^(cargo_target_dir | path join "debug" ($binary | default $package)) --scaffold | from json
+}
+
+# Where that build put the binary: cargo's own answer (`cargo metadata`), which is CARGO_TARGET_DIR when it is set and the
+# workspace's `target` otherwise, asked from the directory the build ran in so a relative CARGO_TARGET_DIR means the same.
+def cargo_target_dir [] {
+    do { cd ($ROOT | path join "src/agents"); ^cargo metadata --format-version 1 --no-deps } | from json | get target_directory
 }
 
 def main [] {
