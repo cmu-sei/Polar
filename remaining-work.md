@@ -606,7 +606,9 @@ Design: `docs/architecture/config-catalog-design.md`. Pattern per agent: migrate
   scheduler. Affected: git `repositories` (`credential`, `refs`, `shallow_depth`, `max_depth`, `frequency_secs`) and
   git-observer `credentials` (`username`). It is the start of the typed Dhall templates generated from the declarations
   that runtime sections were meant to have (git-controller.md, "The `runtime` document type", not built).
-- [ ] THE STATEACTOR RETRIES "NO SCHEMA YET" ITSELF (decided by the maintainer 2026-10-31): `Unavailable` is retried by
+- [x] THE STATEACTOR RETRIES "NO SCHEMA YET" ITSELF (decided by the maintainer 2026-10-31; DONE `bfede9ef`:
+  `ask_until_available`, `POLAR_STATE_UNAVAILABLE_RETRY_SECS` 10 and `POLAR_STATE_UNAVAILABLE_LIMIT_SECS` 120, not yet
+  seen on a cluster): `Unavailable` is retried by
   the StateActor at a short fixed interval (a declared variable) before the caller hears anything, so the domain's
   backoff sees only real failures. Found on u7c: jira-observer's Jira backoff (to 15 minutes) delayed the first cursor
   pull 14 minutes after the schema arrived (soft-state.md, "The rebuild, seen on a cluster").

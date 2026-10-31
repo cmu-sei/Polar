@@ -80,7 +80,8 @@ because the render's `--check` runs on targets that still hold the placeholder.
    in the graph, which jira-processor writes for every issue from Jira's system field `updated` (found by its `/field`
    schema, not by its display name, and passed as `polar_updated`): `Max { JiraIssue, updated_ms }`, through the state
    actor the builder gives it (`polar-agent-builder/src/state.rs`: 8 s per attempt, three attempts, a fresh
-   correlation id each, `POLAR_STATE_REPLY_TIMEOUT_SECS` and `POLAR_STATE_ATTEMPTS`). With a time `t`, the first pull asks `updated >= -Nm`, N the minutes from `t` to now
+   correlation id each, `POLAR_STATE_REPLY_TIMEOUT_SECS` and `POLAR_STATE_ATTEMPTS`; an `Unavailable`, such as no schema
+   yet, it asks again itself every 10 s for up to 2 minutes before the observer hears it). With a time `t`, the first pull asks `updated >= -Nm`, N the minutes from `t` to now
    plus the 300 s overlap, rounded up, at least 1 (`issues.rs`, `cursor_minutes`); relative, so the Jira user's time
    zone does not enter. With no issue in the graph it is full, or from `QUERY_DATE`. A refusal, a graph the state
    agent cannot read, or no answer is retried on the backoff below, and nothing is pulled until it says: never a full

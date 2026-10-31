@@ -194,7 +194,10 @@ Paths relative to `src/agents/`. Commits `9250bf10` (builder, jira-observer), `e
   CryptoActor, started for an agent with the capability (`infrastructure.rs:459`, `:565`); `AgentResources::state` is
   its `StateHandle`, behind the `StateClient` trait (`:169`). It owns the question: `ask_until_answered` (`:261`), a
   fresh correlation id per attempt, `POLAR_STATE_REPLY_TIMEOUT_SECS` (8) per attempt and `POLAR_STATE_ATTEMPTS` (3)
-  (`:52`, `:60`, declared variables of the capability's section), an answer never asked again; its reply subscription
+  (`:52`, `:60`, declared variables of the capability's section), a value or a refusal never asked again, and an
+  `Unavailable` asked again by the actor itself every `POLAR_STATE_UNAVAILABLE_RETRY_SECS` (10) for up to
+  `POLAR_STATE_UNAVAILABLE_LIMIT_SECS` (120) before the caller hears it (`ask_until_available`, since `bfede9ef`); its
+  reply subscription
   (`replies_subscription`, `:239`) believes only the state agent of the agent's own namespace and domain
   (`state_agent_identity`, `:222`; `from_state_agent`, `:233`). `get(StateQuery::Max)` returns a `SoftValue` (`:128`),
   a type of its own, never a `RuntimeValue`; `changes` and `put` come with the writer half.
@@ -275,10 +278,12 @@ workloads=2 readers=1", and at jira-observer's next try "the graph's newest issu
 first pull starts there", Jira asked `updated >= -331m ORDER BY updated ASC` (325.1 minutes plus the overlap, rounded
 up): one issue.
 
-Found by it, open: while the state agent has no schema, jira-observer's retries follow its Jira backoff (30 s doubling to
-15 minutes), so on a fresh cluster, where the seed lands minutes after the agents start, the first cursor pull can wait
-up to 15 minutes after the schema is there (here 14). A "no schema yet" belongs to the StateActor's own retry, not to
-the domain's.
+Found by it, FIXED 2026-10-31 (`bfede9ef`): while the state agent had no schema, jira-observer's retries followed its
+Jira backoff (30 s doubling to 15 minutes), so on a fresh cluster, where the seed lands minutes after the agents start,
+the first cursor pull could wait up to 15 minutes after the schema was there (here 14). A "no schema yet" belongs to the
+StateActor's own retry, not to the domain's: it now asks again itself after an `Unavailable`, every
+`POLAR_STATE_UNAVAILABLE_RETRY_SECS` (10) for up to `POLAR_STATE_UNAVAILABLE_LIMIT_SECS` (120), before the caller hears
+it (`polar-agent-builder/src/state.rs`, `ask_until_available`); a value or a refusal is returned at once.
 
 ## Gaps kept open
 
