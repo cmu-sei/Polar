@@ -30,6 +30,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+cassini-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

@@ -1089,9 +1089,9 @@ Dev cluster `u7s`, images rebuilt from this branch (`up.nu local-minimal --dev`,
 
 ## Left by the platform version (2026-10-31; infra/INFRA.md, "The version a binary reports")
 
-- The Cassini protocol version: `cassini_types::PROTOCOL_VERSION` is not on main (another branch adds it), so
-  `polar_version::CASSINI_PROTOCOL` is a marked hook that says `None`, and every record's `cassini_protocol` is null.
-  When it lands, polar-version depends on cassini-types and the hook becomes `Some(...)`.
+- [x] The Cassini protocol version (done 2026-10-31, with the backpressure merge): polar-version depends on
+  cassini-types and `CASSINI_PROTOCOL` is `cassini_types::PROTOCOL_VERSION`, so every record's `cassini_protocol` is
+  the version a broker checks at registration.
 - Binaries that do not answer `--version` yet: `cassini-client` and `cassini-c2` (their own parsing; left alone while
   the Cassini branch is open), `cert-issuer-setup` and `discover_repo` (developer tools), and the binaries that are not
   on the builder and parse no arguments, which would start on `--version`: gitlab-observer, gitlab-consumer,

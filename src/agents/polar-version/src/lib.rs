@@ -52,12 +52,9 @@ pub const TARGET: &str = env!("POLAR_TARGET");
 /// what makes this constant true (docs/architecture/broker-baseline.md, "Decided").
 pub const ALLOCATOR: &str = "scudo";
 
-/// The Cassini protocol version the binary speaks.
-///
-/// HOOK, not yet filled: `cassini_types::PROTOCOL_VERSION` does not exist on main; another branch adds it. When it
-/// lands, this crate depends on `cassini-types` and this becomes `Some(cassini_types::PROTOCOL_VERSION)` (formatted as
-/// text if it is a number). Until then every record says `null`, rather than a number made up here.
-pub const CASSINI_PROTOCOL: Option<&str> = None;
+/// The Cassini protocol version the binary speaks: `cassini_types::PROTOCOL_VERSION`, the one a broker checks at
+/// registration, so a mismatch can be read off the binary before it is refused.
+pub const CASSINI_PROTOCOL: u32 = cassini_types::PROTOCOL_VERSION;
 
 /// What `VERSION` ends with between releases.
 pub const DEVELOPMENT_SUFFIX: &str = "+dev";
@@ -198,7 +195,8 @@ pub struct VersionRecord {
     pub version: String,
     /// Whether the version is a release's (`X.Y.Z`) and not a development build's (`X.Y.Z+dev`).
     pub release: bool,
-    /// The Cassini protocol version; null until it is defined (see [`CASSINI_PROTOCOL`]).
+    /// The Cassini protocol version (see [`CASSINI_PROTOCOL`]). Optional, so a record from a binary that predates it
+    /// still reads.
     pub cassini_protocol: Option<String>,
     /// The target triple.
     pub target: String,
@@ -212,7 +210,7 @@ pub fn record(name: &str) -> VersionRecord {
         name: name.to_string(),
         version: PLATFORM.to_string(),
         release: PlatformVersion::parse(PLATFORM).is_ok_and(|v| v.is_release()),
-        cassini_protocol: CASSINI_PROTOCOL.map(str::to_string),
+        cassini_protocol: Some(CASSINI_PROTOCOL.to_string()),
         target: TARGET.to_string(),
         allocator: ALLOCATOR.to_string(),
     }
@@ -345,7 +343,10 @@ mod tests {
             r.release,
             PlatformVersion::parse(PLATFORM).unwrap().is_release()
         );
-        assert_eq!(r.cassini_protocol, None);
+        assert_eq!(
+            r.cassini_protocol.as_deref(),
+            Some(cassini_types::PROTOCOL_VERSION.to_string().as_str())
+        );
         assert_eq!(r.target, TARGET);
         assert_eq!(r.allocator, "scudo");
 
@@ -368,7 +369,10 @@ mod tests {
                 "version"
             ]
         );
-        assert_eq!(json["cassini_protocol"], serde_json::Value::Null);
+        assert_eq!(
+            json["cassini_protocol"],
+            serde_json::Value::String(cassini_types::PROTOCOL_VERSION.to_string())
+        );
         assert_eq!(json["release"], serde_json::Value::Bool(r.release));
         let back: VersionRecord = serde_json::from_str(&r.json()).unwrap();
         assert_eq!(back, r);
