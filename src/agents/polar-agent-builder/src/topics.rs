@@ -209,9 +209,6 @@ pub struct FamilyDecl {
     pub causes: &'static [Cause],
     /// For a publish nothing causes, why the agent publishes it of its own accord.
     pub unprompted: Option<&'static str>,
-    /// Why a topic of the family may have nothing in the catalog on its other side (the state agent's replies to a
-    /// workload that never asks), printed on each topic it expands into, as a declared topic's `waits` is.
-    pub waits: Option<&'static str>,
 }
 
 impl FamilyDecl {
@@ -222,7 +219,6 @@ impl FamilyDecl {
             purpose,
             causes: &[],
             unprompted: None,
-            waits: None,
         }
     }
 
@@ -233,15 +229,6 @@ impl FamilyDecl {
             purpose,
             causes: &[],
             unprompted: None,
-            waits: None,
-        }
-    }
-
-    /// The same family, saying why one of its topics may have nothing in the catalog on its other side.
-    pub const fn waiting(self, reason: &'static str) -> Self {
-        Self {
-            waits: Some(reason),
-            ..self
         }
     }
 
@@ -307,7 +294,8 @@ pub enum Rule {
     /// An agent that needs `Encryption` has a crypto actor, which makes the credentials agent's requests.
     Encryption,
     /// An agent with the `SoftState` capability (it declares a graph read) has a state actor, which asks the state
-    /// agent and hears it on the agent's own reply topic (docs/architecture/soft-state.md).
+    /// agent; it hears the answer on its own reply topic, which the `Agent` rule gives every client
+    /// (docs/architecture/soft-state.md).
     SoftState,
 }
 
@@ -390,6 +378,10 @@ pub fn implied_by(rule: Rule, name: &str) -> Vec<(String, Access)> {
                 AUTHORITY_SNAPSHOT_REQUESTS_TOPIC.to_string(),
                 Access::Publish,
             ),
+            // Its own reply topic of the state agent's family, so that family, over every served workload, has a
+            // subscriber for each topic (docs/architecture/soft-state.md). It hears nothing unless the agent asks,
+            // and an agent without the soft-state capability that asks is refused there.
+            (soft_state_common::replies_topic(name), Access::Subscribe),
         ],
         Rule::SelfTest => {
             let topic = crate::infrastructure::self_test_topic(name);
@@ -404,13 +396,10 @@ pub fn implied_by(rule: Rule, name: &str) -> Vec<(String, Access)> {
                     .map(|t| (t.to_string(), Access::Subscribe)),
             )
             .collect(),
-        Rule::SoftState => vec![
-            (
-                soft_state_common::REQUESTS_TOPIC.to_string(),
-                Access::Publish,
-            ),
-            (soft_state_common::replies_topic(name), Access::Subscribe),
-        ],
+        Rule::SoftState => vec![(
+            soft_state_common::REQUESTS_TOPIC.to_string(),
+            Access::Publish,
+        )],
     }
 }
 
@@ -548,9 +537,6 @@ pub enum Origin {
         pattern: String,
         workload: String,
         purpose: String,
-        /// Why nothing in the catalog may be on its other side, when the family says.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        waits: Option<String>,
     },
     /// A rule implied it.
     Implied { rule: Rule, why: String },
@@ -617,7 +603,6 @@ impl TopicSet {
                         pattern: family.pattern.to_string(),
                         workload: workload.clone(),
                         purpose: family.purpose.to_string(),
-                        waits: family.waits.map(str::to_string),
                     });
                     causes.insert(
                         key,
@@ -722,9 +707,6 @@ pub fn family_problems(families: &[FamilyDecl]) -> Vec<String> {
             problems.push(format!(
                 "{what} has no purpose: say what the agent uses it for"
             ));
-        }
-        if family.waits.is_some_and(|reason| reason.trim().is_empty()) {
-            problems.push(format!("{what} waits, but gives no reason"));
         }
         if !seen.insert((family.pattern, family.access)) {
             problems.push(format!("{what} is declared twice"));

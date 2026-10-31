@@ -60,10 +60,10 @@ and its client refuses a publish or subscribe outside its set unless its policy 
 
 | Rule (group) | Applies when | Topics, for an agent named `<name>` |
 |---|---|---|
-| `agent` (`cassini-client`) | the agent is a Cassini client (or may be one: `OPTIONAL` holds `Cassini`) | subscribe `agent.<name>.configuration`, `agent.<name>.command`, `polar-authority-updates`, `polar-authority-snapshot-replies`; publish `polar-configuration-replay`, `polar-configuration-outcome`, `polar-command-outcome`, `polar-authority-snapshot-requests` |
+| `agent` (`cassini-client`) | the agent is a Cassini client (or may be one: `OPTIONAL` holds `Cassini`) | subscribe `agent.<name>.configuration`, `agent.<name>.command`, `polar-authority-updates`, `polar-authority-snapshot-replies`, `soft-state-replies.<name>` (its own reply topic of the state agent's family, which hears nothing unless it asks, `soft-state.md`); publish `polar-configuration-replay`, `polar-configuration-outcome`, `polar-command-outcome`, `polar-authority-snapshot-requests` |
 | `self_test` (`self-test`) | `agent` applies and `SELF_TEST` is on | publish and subscribe `selftest.<name>` (a `:` in the name as `-`) |
 | `encryption` (`encryption`) | `agent` applies and the agent needs `Encryption` | publish the six request topics of its crypto actor, subscribe their six replies (`polar_crypto::REQUEST_TOPICS`, `REPLY_TOPICS`) |
-| `soft_state` (`soft-state`) | `agent` applies and the agent has the `soft-state` capability, which the builder computes from a graph read it declares (`PolarAgent::GRAPH`) | publish `soft-state-requests` (its state actor's questions, of its own accord), subscribe `soft-state-replies.<name>` (`soft-state.md`) |
+| `soft_state` (`soft-state`) | `agent` applies and the agent has the `soft-state` capability, which the builder computes from a graph read it declares (`PolarAgent::GRAPH`) | publish `soft-state-requests` (its state actor's questions, of its own accord; the answer comes on the reply topic the `agent` rule gives it, `soft-state.md`) |
 
 Each rule is a group (`policy-enforcement.md`, "Decisions"): the scaffold prints the agent's `groups`, the catalog writes
 them into its floor, and its certificate carries them as `g:` names, so the broker knows them as the agent does.
@@ -88,10 +88,9 @@ The scaffold shows the family unexpanded under `topic_families`, and, filled fro
 topics expanded for the workloads that document names, each with `from: family` and its workload. Built 2026-10-21.
 
 The state agent's replies, `soft-state-replies.{workload}`, are the second family, over the same served workloads
-(`soft-state.md`). Unlike the scheduler's, a workload subscribes to its topic only when the `soft-state` rule gives it
-that topic, so the family says why most have no other side (`FamilyDecl::waiting`, printed as `waits` on each topic it
-expands into, only when set). Built 2026-10-30, after a first build that expanded it over a readers-only variable,
-replaced on the maintainer's review.
+(`soft-state.md`). As with the scheduler's, every served agent subscribes to its own topic by the `agent` rule, so
+nothing in it is one-sided. Built 2026-10-30, after a first build that expanded it over a readers-only variable and a
+second that excused the topics nobody heard with a wait, both replaced on the maintainer's review.
 
 ## The cross-check
 
@@ -226,7 +225,7 @@ retrieval and decrypt, as before.
 | `gitlab.consumer.metadata`, `gitlab:consumer:{projects,groups,users,pipelines,repositories}` | the gitlab observer | the gitlab consumer (also `gitlab:consumer:runners`, which nobody publishes) |
 | `jira:consumer:{projects,groups,users,issues}` | the jira observer | the jira processor |
 | `soft-state-requests` | every agent with the `soft-state` capability (jira-observer), by rule | the state agent, soft-state-observer (`soft-state.md`) |
-| `soft-state-replies.{workload}` | the state agent, one topic for each workload it serves | that workload alone, by the `soft-state` rule (the others' wait) |
+| `soft-state-replies.{workload}` | the state agent, one topic for each workload it serves | that workload alone, by the `agent` rule |
 | `polar.web.consumer` | the openapi observer | nobody: the openapi processor subscribes `polar.openapi.processor`, a mismatch |
 | `logging:consumer:logs` | nobody | the logger |
 

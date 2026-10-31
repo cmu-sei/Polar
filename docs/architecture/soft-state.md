@@ -80,7 +80,7 @@ decision (not allowed, malformed); `Unavailable` is the graph failing, and the a
 Topics: requests on `soft-state-requests` (every asker publishes, the observer subscribes). Replies on a FAMILY,
 `soft-state-replies.{workload}` over the served workloads (`topics.md`, "Families"): each asker subscribes only to its
 own, so one agent's state is not broadcast to the others (reply topics are otherwise shared,
-`cassini-request-reply-protocol.md:125-135`). An asker's two topics are implied by the `soft-state` rule.
+`cassini-request-reply-protocol.md:125-135`). The request topic is implied by the `soft-state` rule; every Cassini client's own reply topic by the `agent` rule.
 
 ## The Jira cursor (first user)
 
@@ -185,7 +185,8 @@ Paths relative to `src/agents/`. Commits `9250bf10` (builder, jira-observer), `e
 - **The `soft-state` capability, computed.** `computed_needs` (`polar-agent-builder/src/agent.rs:378`) gives an agent
   `Cassini` first when it is a client, then what it lists, then `SoftState` when it declares a graph read, each once;
   listing `SoftState` by hand is a declaration problem (`:897`). Its rule, `Rule::SoftState` (group `soft-state`,
-  `topics.rs:407`), implies publish `soft-state-requests` and subscribe `soft-state-replies.<name>`, through the one
+  `topics.rs`), implies publish `soft-state-requests`; the `agent` rule gives every Cassini client a subscribe to its own
+  `soft-state-replies.<name>`, so the state agent's family has a subscriber for every topic. Both go through the one
   `implied_topics` the broker's floor uses (`floor.rs`); the property test holding the two equal draws `soft_state`.
   `infra/config/capabilities.nuon` `soft-state`: nothing in the pod, its `dependency` the workload
   `soft-state-observer`, which `resolve.nu check` requires a target to run (`graph.nu` `needs_workload`).
@@ -200,8 +201,8 @@ Paths relative to `src/agents/`. Commits `9250bf10` (builder, jira-observer), `e
 - **The vocabulary.** `Action::"read-state"` on `Label::"<label>"` (`polar-policy/src/schema.rs`), unchanged.
 - **The state agent.** `soft-state/observe`: `NEEDS [GraphRead]`; its floor the runtime section `schema`
   (`floor.rs:42`, judged by `Floor::from_body`, `:79`), read at start and on each `runtime_changes`
-  (`supervisor.rs:274`); its reply family over `POLAR_SERVED_WORKLOADS`, saying why most have no subscriber
-  (`agent.rs:55`, `FamilyDecl::waiting`, `polar-agent-builder/src/topics.rs:241`). The decision (`decision.rs`) is as
+  (`supervisor.rs:274`); its reply family over `POLAR_SERVED_WORKLOADS` (`agent.rs`), each topic heard by its
+  workload by the `agent` rule, so nothing in it is one-sided. The decision (`decision.rs`) is as
   before, and before a version of `schema` has arrived a read policy does not permit is `Unavailable` ("no schema yet",
   `:123`). `POLAR_STATE_GRAPH_TIMEOUT_SECS` (10, `settings.rs`) bounds a read; a graph that is down is reported to the
   health actor as not connected (`report_graph`, `supervisor.rs:157`), so the agent stays up and healthy, answers
@@ -221,11 +222,14 @@ Decided where the review was silent (by the agent that rebuilt it; to confirm):
 1. **The `soft-state` capability is computed from `GRAPH` reads.** The scaffold is printed without building anything,
    so "builds with the StateActor" is read as "declares a graph read", and the builder starts the actor exactly for an
    agent whose `requires` has it.
-2. **The reply family over the served workloads has topics nobody subscribes to** (every served agent's but the
-   readers'), and the catalog's cross-check fails such a topic unless it says why it waits; so `FamilyDecl` gained
-   `waiting`, and the cross-check lists one wait per non-reader (about twenty lines). The alternative, implying every
-   agent's reply subscription in the `agent` rule, would have put the topic in every agent's set and changed the
-   broker's floor for all of them, against "implied by the capability's rule".
+2. **Every Cassini client subscribes to its own reply topic, by the `agent` rule** (CHANGED on the maintainer's
+   review, 2026-10-30). Built first with the subscription in the `soft-state` rule, the family over the served
+   workloads had topics nobody subscribed to, and a `FamilyDecl::waiting` to excuse them in the cross-check. The
+   maintainer: a new concept added to paper over a gap is the wrong shape; pulled health will change every agent's
+   implied set anyway (`agent.<name>.health`); a subscription that never receives costs nothing; and an agent without a
+   declared read that asks is refused on its own topic. So `waiting` on families is gone, the `agent` rule implies
+   subscribe `soft-state-replies.<name>`, the `soft-state` rule keeps only the publish to `soft-state-requests` (and
+   remains what starts the StateActor), and the catalog's cross-check passes with no wait for a reply topic.
 3. **No `schema` yet means `Unavailable`, not `Refused`:** the seed is pushed after the state agent starts, and a
    refusal says asking again changes nothing.
 4. **The capability's `dependency` is a workload** (`{ workload: "soft-state-observer" }`), checked by the render: the

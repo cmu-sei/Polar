@@ -1211,8 +1211,7 @@ mod tests {
         const TOPIC_FAMILIES: &'static [FamilyDecl] =
             &[
                 FamilyDecl::publish("answers.{workload}", "each reader's answers")
-                    .because(&[crate::topics::Cause::Topic("questions")])
-                    .waiting("a workload hears its answers only if it reads state"),
+                    .because(&[crate::topics::Cause::Topic("questions")]),
             ];
         const GRAPH: &'static [GraphDecl] = &[
             GraphDecl::reads("Thing", "where it left off"),
@@ -1508,9 +1507,14 @@ mod tests {
         assert!(!set.allows("soft-state-replies.other", crate::topics::Access::Subscribe));
         let doc = scaffold_document::<Example>();
         assert!(!doc.requires.contains(&"soft-state".to_string()));
-        assert!(
-            !topic_set::<Example>().allows("soft-state-requests", crate::topics::Access::Publish)
-        );
+        let set = topic_set::<Example>();
+        assert!(!set.allows("soft-state-requests", crate::topics::Access::Publish));
+        // Every client hears its own reply topic, so the state agent's family has a subscriber for each; one that does
+        // not ask hears nothing on it.
+        assert!(set.allows(
+            "soft-state-replies.example-agent",
+            crate::topics::Access::Subscribe
+        ));
     }
 
     #[test]
@@ -1607,37 +1611,6 @@ mod tests {
             serde_json::from_str(&scaffold_json::<Example>(None, |_: &str| None).unwrap()).unwrap();
         assert!(json.get("graph").is_none(), "{json}");
         assert!(declaration_problems::<Reading>().is_empty());
-    }
-
-    #[test]
-    fn a_family_that_waits_says_why_on_each_topic_it_expands_into() {
-        let env = |name: &str| {
-            (name == "POLAR_SERVED_WORKLOADS").then(|| "jira-observer,kube-observer".to_string())
-        };
-        let doc: AgentDocument =
-            serde_json::from_str(&scaffold_json::<Reading>(None, env).unwrap()).unwrap();
-        let expanded: Vec<(String, Option<String>)> = doc
-            .topics
-            .iter()
-            .filter_map(|t| match &t.origin {
-                crate::topics::Origin::Family { waits, .. } => {
-                    Some((t.name.clone(), waits.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        let why = Some("a workload hears its answers only if it reads state".to_string());
-        assert_eq!(
-            expanded,
-            [
-                ("answers.jira-observer".to_string(), why.clone()),
-                ("answers.kube-observer".to_string(), why)
-            ]
-        );
-        // The scheduler's family says nothing of waiting, so its scaffold is as it was.
-        let env = |name: &str| (name == "POLAR_SERVED_WORKLOADS").then(|| "a-agent".to_string());
-        let json = scaffold_json::<Scheduling>(None, env).unwrap();
-        assert!(!json.contains("\"waits\""), "{json}");
     }
 
     #[test]

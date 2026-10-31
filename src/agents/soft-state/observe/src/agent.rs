@@ -45,17 +45,12 @@ impl PolarAgent for SoftStateObserver {
         "an agent's request for state it may read",
     )];
     // A reply topic for each workload it serves, as the scheduler's family (docs/architecture/soft-state.md, "Revised by
-    // the maintainer's review"). A workload subscribes to its own only when it reads state (the soft-state rule), so
-    // the others' say why nothing is on their other side.
+    // the maintainer's review"); every agent subscribes to its own by the `agent` rule.
     const TOPIC_FAMILIES: &'static [FamilyDecl] = &[FamilyDecl::publish(
         REPLIES_FAMILY,
         "the answer to the workload's request, on its own topic",
     )
-    .because(&[Cause::Topic(REQUESTS_TOPIC)])
-    .waiting(
-        "a workload subscribes to its own reply topic only when it reads its soft state (the soft-state rule); one \
-         that does not is never answered",
-    )];
+    .because(&[Cause::Topic(REQUESTS_TOPIC)])];
     const SECTIONS: &'static [&'static Section] = &[&crate::settings::SECTION];
     const RUNTIME: &'static [&'static polar_agent_builder::RuntimeSection] =
         &[&crate::floor::SCHEMA];

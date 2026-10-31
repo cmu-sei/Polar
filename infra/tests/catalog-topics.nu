@@ -94,18 +94,22 @@ def main [] {
             }
         }
         {
-            name: "the state agent's family is expanded for every agent the catalog serves, and each that reads state hears its own"
+            name: "the state agent's family is expanded for every agent the catalog serves, each hears its own, and only readers ask"
             body: {
                 let expected = ($served_list | split row "," | each {|w| $"soft-state-replies.($w)" } | sort)
                 let family = ($sets | where workload == "soft-state-observer" | first | get topics | where from == "family" | get name | sort)
                 assert equal $family $expected
-                # docs/architecture/soft-state.md: the soft-state rule gives a reader its own reply topic, and no other.
+                # docs/architecture/soft-state.md: the agent rule gives every client its own reply topic, and no other; the
+                # soft-state rule gives a reader, and only a reader, the request topic.
                 let readers = ($graphs | where {|g| $g.graph | any {|e| $e.access == "reads" } } | get workload)
                 assert ($readers | is-not-empty) "no catalog agent reads state"
                 for s in $sets {
                     let heard = ($s.topics | where access == "subscribe" | get name | where {|t| $t | str starts-with "soft-state-replies." })
-                    let own = (if $s.workload in $readers { [$"soft-state-replies.($s.workload)"] } else { [] })
+                    let cassini_client = ($s.topics | where name == $"agent.($s.workload).configuration" | is-not-empty)
+                    let own = (if $cassini_client { [$"soft-state-replies.($s.workload)"] } else { [] })
                     assert equal $heard $own $s.workload
+                    let asks = ($s.topics | where {|t| $t.access == "publish" and $t.name == "soft-state-requests" } | is-not-empty)
+                    assert equal $asks ($s.workload in $readers) $s.workload
                 }
             }
         }
@@ -132,6 +136,8 @@ def main [] {
             name: "every declared topic in the catalog has another side, or says why it waits"
             body: {
                 let j = (judge $sets)
+                # The state agent's replies wait for nothing: every served agent hears its own.
+                assert ($j.waiting | where {|w| $w.topic | str starts-with "soft-state-replies." } | is-empty) "a reply topic waits"
                 for w in $j.waiting { print $"        waits: ($w.workload) ($w.access) ($w.topic): ($w.waits)" }
                 let said = ($j.failures | each {|f| $"($f.workload) ($f.access) ($f.topic)" } | str join "; ")
                 assert ($j.failures | is-empty) $"one-sided, with no reason: ($said)"
