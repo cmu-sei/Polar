@@ -68,7 +68,9 @@ def main [] {
                 for d in $docs {
                     assert ($d.path | str ends-with ".dhall")
                     assert equal $d.version 1
-                    assert (((root) | path join $d.file) | path exists) $"($d.file) is missing"
+                    if not (from_scaffolds $d) {
+                        assert (((root) | path join $d.file) | path exists) $"($d.file) is missing"
+                    }
                 }
             }
         }
@@ -78,6 +80,20 @@ def main [] {
                 let p = (documents | where section == "policy" | first)
                 assert equal $p.agent "credentials-agent"
                 assert equal $p.field "source"
+            }
+        }
+        {
+            name: "the state agent's first schema is seeded from the scaffolds, signed for c:update-runtime, and is the schema as given"
+            body: {
+                let d = (documents | where section == "schema" | first)
+                assert equal $d.agent "soft-state-observer"
+                assert equal $d.capability "c:update-runtime"
+                assert (from_scaffolds $d)
+                let schema = { workloads: [{ workload: "jira-observer", identity: "jira-observer.polar.serviceaccount.cluster.local", owns: [], reads: ["JiraIssue"] }] }
+                assert equal (body_json $d (root) $schema | from json) $schema
+                let r = (try { body_json $d (root); "made" } catch {|e| $e.msg })
+                assert ($r | str contains "none was given") $r
+                assert (not (from_scaffolds (documents | where section == "policy" | first)))
             }
         }
         {
@@ -152,7 +168,7 @@ def main [] {
             body: {
                 let without = "X509v3 Subject Alternative Name:\n    DNS:abc, URI:p:u2s:x, URI:c:provision-account, URI:c:grant"
                 let with = "X509v3 Subject Alternative Name:\n    DNS:abc, URI:c:grant, URI:c:update-policy, URI:c:update-runtime"
-                assert equal (lacks $without (documents)) ["c:update-policy"]
+                assert equal (lacks $without (documents)) ["c:update-policy" "c:update-runtime"]
                 assert equal (lacks $with (documents)) []
                 assert ((lacks_hint "alice" ["c:update-policy"]) | str contains "c:update-policy")
             }

@@ -24,7 +24,7 @@
 #   nu infra/tests/graph.nu
 
 use std/assert
-use ../graph.nu [readers, unowned_reads, state_floor, over_readers]
+use ../graph.nu [unowned_reads, state_schema, needs_workload]
 
 def g [label: string, access: string] { { label: $label, access: $access, purpose: "for a test" } }
 
@@ -36,20 +36,6 @@ def record_of [who: string, graph: list, service_account?: string] {
 
 def main [] {
     let tests = [
-        {
-            name: "the readers are the workloads that read a label, by name, each once"
-            body: {
-                let sets = [
-                    (set "jira-processor" [(g "JiraIssue" "owns") (g "JiraUser" "owns")])
-                    (set "jira-observer" [(g "JiraIssue" "reads") (g "JiraUser" "reads")])
-                    (set "git-repo-observer" [(g "GitRepository" "reads")])
-                    (set "kube-observer" [])
-                    { workload: "cassini" }
-                ]
-                assert equal (readers $sets) "git-repo-observer,jira-observer"
-                assert equal (readers []) ""
-            }
-        }
         {
             name: "a read of a label no workload owns is named, with its reader, and an owned one is not"
             body: {
@@ -68,36 +54,41 @@ def main [] {
             }
         }
         {
-            name: "the floor lists every workload that declares a label, by its identity, owns and reads apart"
+            name: "the schema lists every workload that declares a label, by its identity, owns and reads apart"
             body: {
-                let floor = (state_floor [
+                let floor = (state_schema [
                     (record_of "jira-observer" [(g "JiraIssue" "reads")])
                     (record_of "kube-observer" [])
                     (record_of "jira-processor" [(g "JiraUser" "owns") (g "JiraIssue" "owns") (g "JiraIssue" "owns")])
                 ] "cluster.local")
                 assert equal $floor {
-                    format: 1
                     workloads: [
                         { workload: "jira-observer", identity: "jira-observer.polar.serviceaccount.cluster.local", owns: [], reads: ["JiraIssue"] }
                         { workload: "jira-processor", identity: "jira-processor.polar.serviceaccount.cluster.local", owns: ["JiraIssue" "JiraUser"], reads: [] }
                     ]
                 }
-                assert equal (state_floor [] "cluster.local") { format: 1, workloads: [] }
+                assert equal (state_schema [] "cluster.local") { workloads: [] }
             }
         }
         {
-            name: "a workload whose service account is not its name has no place in the floor"
+            name: "a workload whose service account is not its name has no place in the schema"
             body: {
-                let r = (try { state_floor [(record_of "jira-observer" [(g "JiraIssue" "reads")] "other")] "cluster.local"; "made" } catch {|e| $e.msg })
+                let r = (try { state_schema [(record_of "jira-observer" [(g "JiraIssue" "reads")] "other")] "cluster.local"; "made" } catch {|e| $e.msg })
                 assert ($r | str contains "jira-observer (service account other)") $r
             }
         }
         {
-            name: "a scaffold with a family over the readers is told apart from one over the served workloads"
+            name: "an agent that needs the state agent is refused in a target that does not run it, and nothing else is"
             body: {
-                assert (over_readers { topic_families: [{ pattern: "soft-state-replies.{workload}", over: "POLAR_STATE_READERS" }] })
-                assert not (over_readers { topic_families: [{ pattern: "agent.{workload}.configuration", over: "POLAR_SERVED_WORKLOADS" }] })
-                assert not (over_readers {})
+                let caps = {
+                    soft-state: { dependency: { workload: "soft-state-observer" } }
+                    graph-write: { dependency: { service: "neo4j", ttl_secs: 300 } }
+                    cassini: { dependency: { service: "cassini", ttl_secs: 300 } }
+                }
+                let found = (needs_workload "jira-observer" ["cassini" "soft-state"] $caps ["jira-observer" "jira-processor"])
+                assert equal $found ["jira-observer needs soft-state, which needs the workload soft-state-observer, and this target does not run it"]
+                assert equal (needs_workload "jira-observer" ["cassini" "soft-state"] $caps ["jira-observer" "soft-state-observer"]) []
+                assert equal (needs_workload "jira-processor" ["cassini" "graph-write"] $caps ["jira-processor"]) []
             }
         }
     ]

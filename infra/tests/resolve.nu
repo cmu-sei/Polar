@@ -464,7 +464,7 @@ def main [] {
             assert equal ($deps | split row "," | length) 1 $deps
         }
 
-        "the state agent's floor and readers are written from every workload's scaffold, and a read nobody owns fails the check": {
+        "the state agent's first schema is made from every workload's scaffold, and a read nobody owns fails the check": {
             # Stand-in graph declarations on the real scaffolds: jira-processor owns JiraIssue, jira-observer reads it.
             let dir = (mktemp --directory)
             cp ($env.POLAR_SCAFFOLD_DIR | path join "*.json" | into glob) $dir
@@ -474,15 +474,18 @@ def main [] {
             }
             do $declare "jira-processor" [{ label: "JiraIssue", access: "owns", purpose: "the issues" }]
             do $declare "jira-observer" [{ label: "JiraIssue", access: "reads", purpose: "its cursor" }]
-            let r = (with-env { POLAR_SCAFFOLD_DIR: $dir } { resolve "soft-state-observer" })
-            let floor = (with-env { POLAR_SCAFFOLD_DIR: $dir } { env_value $r "SOFT_STATE_FLOOR" } | from json)
-            assert equal $floor.format 1
-            assert equal ($floor.workloads | get workload) ["jira-observer" "jira-processor"]
-            let observer = ($floor.workloads | where workload == "jira-observer" | first)
+            let schema = (with-env { POLAR_SCAFFOLD_DIR: $dir } { ^nu $RESOLVER state-schema } | from json)
+            assert equal ($schema | columns) ["workloads"]
+            let observer = ($schema.workloads | where workload == "jira-observer" | first)
             assert equal $observer { workload: "jira-observer", identity: "jira-observer.polar.serviceaccount.cluster.local", owns: [], reads: ["JiraIssue"] }
-            assert equal (with-env { POLAR_SCAFFOLD_DIR: $dir } { env_value $r "POLAR_STATE_READERS" }) "jira-observer"
-            # The served workloads are not what its family is expanded over.
-            assert equal (with-env { POLAR_SCAFFOLD_DIR: $dir } { env_value $r "POLAR_SERVED_WORKLOADS" }) null
+            assert equal ($schema.workloads | where workload == "jira-processor" | first | get owns) ["JiraIssue"]
+            # The state agent's document carries no floor and no readers: its schema is signed configuration.
+            let r = (with-env { POLAR_SCAFFOLD_DIR: $dir } { resolve "soft-state-observer" })
+            for name in ["SOFT_STATE_FLOOR" "POLAR_STATE_READERS"] {
+                assert equal (with-env { POLAR_SCAFFOLD_DIR: $dir } { env_value $r $name }) null $name
+            }
+            # Its reply family is over the served workloads, as the scheduler's is.
+            assert ((with-env { POLAR_SCAFFOLD_DIR: $dir } { env_value $r "POLAR_SERVED_WORKLOADS" }) | str contains "jira-observer")
             # A read of a label no workload owns is named by the check.
             do $declare "jira-observer" [{ label: "JiraIssue", access: "reads", purpose: "its cursor" } { label: "Nobody", access: "reads", purpose: "x" }]
             let checked = (with-env { POLAR_SCAFFOLD_DIR: $dir } { do { ^nu $RESOLVER check } | complete })
@@ -490,6 +493,16 @@ def main [] {
             assert ($checked.exit_code != 0) "the check passed"
             assert ($checked.stderr | str contains "jira-observer reads Nobody, and no workload in local-minimal owns it") $checked.stderr
             assert (not ($checked.stderr | str contains "reads JiraIssue")) $checked.stderr
+        }
+
+        "a target that runs an agent needing the state agent and not the state agent fails the check": {
+            let config = (open ($INFRA | path join "targets/local-minimal/config.nuon"))
+            let workloads = ($config.workloads | upsert soft-state-observer { enabled: false, issuer: "credentials-agent" })
+            with_target ($config | upsert workloads $workloads) {|t|
+                let checked = (do { ^nu $RESOLVER check --target $t } | complete)
+                assert ($checked.exit_code != 0) "the check passed"
+                assert ($checked.stderr | str contains "jira-observer needs soft-state, which needs the workload soft-state-observer") $checked.stderr
+            }
         }
 
         "every workload's budget is in what the agent is given, as the code declared": {

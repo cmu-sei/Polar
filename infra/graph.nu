@@ -23,26 +23,13 @@
 #
 # The catalog's graph schema, as the agents state it in their scaffolds (`graph`: each label with its access, `owns` or
 # `reads`, and its purpose; polar-agent-builder/src/graph_schema.rs). Nothing here computes a schema: the agent does.
-# What is decided here is who the state agent answers (docs/architecture/soft-state.md): the workloads that read, which
-# its reply family is expanded over; its floor, written into its document; and the reads of a label that no workload
-# owns, which fail the check as a one-sided topic does.
-
-# The variable a family over the readers is expanded from, as a scaffold names it in a family's `over`.
-export const READERS_VARIABLE = "POLAR_STATE_READERS"
+# What is decided here (docs/architecture/soft-state.md): the body of the state agent's first `schema` section, which
+# infra/seed.nu signs into polar-schedules; the reads of a label that no workload owns, which fail the check as a
+# one-sided topic does; and that a target running an agent that needs the state agent runs it too.
 
 # The labels a scaffold's `graph` gives `access`, each once, in order.
 def labels_of [graph: list, access: string]: nothing -> list {
     $graph | where access == $access | get label | uniq | sort
-}
-
-# The workloads among `sets` ({ workload, graph }) that read a label, comma-separated as POLAR_STATE_READERS takes them.
-export def readers [sets: list]: nothing -> string {
-    $sets
-    | where {|s| ($s.graph? | default [] | where access == "reads" | is-not-empty) }
-    | get workload
-    | uniq
-    | sort
-    | str join ","
 }
 
 # The reads among `sets` ({ workload, graph }) of a label that nothing in `sets` owns: { workload, label } each. The
@@ -56,11 +43,12 @@ export def unowned_reads [sets: list]: nothing -> list {
     } | flatten
 }
 
-# The state agent's floor (soft-state/observe/src/floor.rs): every workload of `records` ({ who, namespace,
-# service_account, graph }) that declares a label, by its one identity `<workload>.<namespace>.serviceaccount.<domain>`,
-# with the labels it owns and reads. A workload whose service account is not its name would have another identity than
-# its name says, and is an error, as in the authority model (rules.nu `model_facts`).
-export def state_floor [records: list, domain: string]: nothing -> record {
+# The body of the state agent's `schema` runtime section (soft-state/observe/src/floor.rs): every workload of `records`
+# ({ who, namespace, service_account, graph }) that declares a label, by its one identity
+# `<workload>.<namespace>.serviceaccount.<domain>`, with the labels it owns and reads. A workload whose service account is
+# not its name would have another identity than its name says, and is an error, as in the authority model (rules.nu
+# `model_facts`).
+export def state_schema [records: list, domain: string]: nothing -> record {
     let declaring = ($records | where {|r| ($r.graph? | default [] | is-not-empty) })
     let misnamed = ($declaring | where {|r| $r.service_account != $r.who })
     if ($misnamed | is-not-empty) {
@@ -75,10 +63,14 @@ export def state_floor [records: list, domain: string]: nothing -> record {
             reads: (labels_of $r.graph "reads")
         }
     } | sort-by workload)
-    { format: 1, workloads: $workloads }
+    { workloads: $workloads }
 }
 
-# Whether a scaffold has a topic family expanded over the readers.
-export def over_readers [scaffold: record]: nothing -> bool {
-    $scaffold.topic_families? | default [] | any {|f| ($f.over? | default "") == $READERS_VARIABLE }
+# What is wrong with workload `who`'s needs in a target running `running`: each capability of `caps` whose dependency is
+# a workload (soft-state's is the state agent) that the target does not run.
+export def needs_workload [who: string, needs: list, caps: record, running: list]: nothing -> list {
+    $needs
+    | each {|n| { need: $n, workload: ($caps | get -o $n | default {} | get -o dependency.workload) } }
+    | where {|d| $d.workload != null and $d.workload not-in $running }
+    | each {|d| $"($who) needs ($d.need), which needs the workload ($d.workload), and this target does not run it" }
 }

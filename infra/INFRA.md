@@ -328,7 +328,9 @@ every **facet**:
 
 Today's capabilities are `cassini`, `graph-write`, `graph-read` (the same Neo4j
 environment and certificate as `graph-write`, with no `dependency` and no graph
-watch in the health check: the state agent's, `docs/architecture/soft-state.md`), `encryption`,
+watch in the health check: the state agent's, `docs/architecture/soft-state.md`), `soft-state`
+(never listed: the builder adds it for an agent that declares a graph read and starts its state actor; its
+`dependency` is the state agent's workload, which `resolve.nu check` requires the target to run), `encryption`,
 `kube-api-read`, and others that describe the shape of the pod rather than what
 the code needs: `persistent-data` (a claim named for the workload, mounted at
 `/var/lib/<workload>`), `pinned-ca` (polar-init and the container trust the Polar CA
@@ -398,15 +400,14 @@ Read while planning cert-issuer's move into the catalog (`docs/architecture/cert
   directory and leaves it in place. The four tests that run the agents' own `--check` still need the cluster.
   `rules.nu` and `charts.nu` need nothing. *Since 2026-10-27:* each agent binary prints its own scaffold
   (`<binary> --scaffold`), so the workspace's builds give a scaffold directory without a cluster.
-- **The state agent's scaffold is asked twice** (*since 2026-10-30*, `docs/architecture/soft-state.md`). Its reply
-  family is expanded over the workloads whose scaffolds declare a graph read (`POLAR_STATE_READERS`, `graph.nu`
-  `readers`), which are known only once every other scaffold is in, so `collect_into` (`resolve.nu`) asks every image
-  first, then asks again, with the readers, the images whose scaffold has a family `over` them; the cache key carries
-  the readers (`agent-pods.nu` `scaffold_key`). The render writes the same list into its document, and its floor
-  (`SOFT_STATE_FLOOR`, `graph.nu` `state_floor`: every workload that declares a label, by its identity, with what it
-  owns and reads) from the scaffolds, as it writes the credentials agent's authority model. `resolve.nu check` fails a
-  read of a label no workload of the target owns, and `tests/catalog-topics.nu` the same catalog-wide; `tests/graph.nu`
-  tests the functions.
+- **The state agent's schema is seeded, not rendered** (*since 2026-10-30*, `docs/architecture/soft-state.md`). Who
+  owns and who reads which graph label is the state agent's signed runtime section `schema`. Its first version is made
+  from the scaffolds' `graph` declarations by `resolve.nu state-schema` (`graph.nu` `state_schema`) and signed into
+  polar-schedules by `up.nu`'s seed (`seed.nu`, beside the credentials agent's policy); later versions are an author's.
+  Nothing about it is in the agent's document, and its reply family is over `POLAR_SERVED_WORKLOADS`, as the
+  scheduler's is, so the scaffolds are asked once. `resolve.nu check` fails a read of a label no workload of the target
+  owns, and `tests/catalog-topics.nu` the same catalog-wide; `tests/graph.nu` tests the functions. (Built first, the
+  same day, as an env var with a second scaffold pass; replaced on the maintainer's review.)
 - **Volumes.** A capability's `pod.volumes` entry is a Secret (with `items`), a claim, a ConfigMap or, with none of
   them, an emptyDir (`capabilities.nuon:32-50`). There is no `defaultMode`, and the pod has no `securityContext`
   (`agent.dhall:166-224`). `persistent-data` is a claim named `{workload}-data` at `/var/lib/{workload}`

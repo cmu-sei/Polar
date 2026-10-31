@@ -35,9 +35,10 @@ export const REPO = "polar-schedules"
 export const GIT_HOST = "polar-git-server.polar.svc.cluster.local"
 export const GIT_PORT = "8443"
 
-# The documents a cluster starts with. `field` is the one field of the section's body that the file
-# fills; `version` is 1 because this is only ever the first: a path that already exists is left alone,
-# and a later change is an author's, at a higher version.
+# The documents a cluster starts with. A body comes from a file (`file`, its text in the one `field`) or from the agents'
+# scaffolds (`from: "scaffolds"`: the state agent's first `schema`, docs/architecture/soft-state.md, which up.nu asks
+# `resolve.nu state-schema` for). `version` is 1 because this is only ever the first: a path that already exists is
+# left alone, and a later change is an author's, at a higher version.
 export def documents [] {
     [
         {
@@ -49,12 +50,31 @@ export def documents [] {
             field: "source"
             file: "infra/seeds/signed/policy.cedar"
         }
+        {
+            path: "permanent/soft-state-observer-schema.dhall"
+            agent: "soft-state-observer"
+            section: "schema"
+            version: 1
+            capability: "c:update-runtime"
+            from: "scaffolds"
+        }
     ]
 }
 
-# The body of a section, as the JSON `polar-sign runtime` takes: the file's text, exactly, in its field.
-export def body_json [doc: record, root: string] {
-    { ($doc.field): (open --raw ($root | path join $doc.file)) } | to json --raw
+# Whether a document's body is made from the agents' scaffolds, and not from a file.
+export def from_scaffolds [doc: record] {
+    ($doc.from? | default "file") == "scaffolds"
+}
+
+# The body of a section, as the JSON `polar-sign runtime` takes: the file's text, exactly, in its field; or, for a body
+# made from the scaffolds, `schema` (the record `resolve.nu state-schema` printed), as it is.
+export def body_json [doc: record, root: string, schema?: record] {
+    if (from_scaffolds $doc) {
+        if $schema == null { error make { msg: $"($doc.section) for ($doc.agent) is made from the scaffolds, and none was given" } }
+        $schema | to json --raw
+    } else {
+        { ($doc.field): (open --raw ($root | path join $doc.file)) } | to json --raw
+    }
 }
 
 # The documents whose path is not in the repository yet.
