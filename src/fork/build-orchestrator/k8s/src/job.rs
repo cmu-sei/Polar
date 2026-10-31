@@ -106,10 +106,26 @@ pub fn git_secret_name_for_build(build_id: Uuid) -> String {
     format!("build-{}-git", build_id)
 }
 
-/// The ServiceAccount a build's pod runs under. Its name is the identity on the job's certificate, and the
-/// broker allows one session per identity, so every build has one of its own.
-pub fn service_account_for_build(build_id: Uuid) -> String {
-    format!("build-{}", build_id)
+/// The ServiceAccount a Job's pod runs under, if the Job has not finished: the one it holds. The accounts are a
+/// fixed set that the deployment makes (`JobOptions::accounts`); a Job holds its account until it completes or
+/// fails, and then the account is free for the next build.
+pub fn account_held_by(job: &Job) -> Option<String> {
+    let finished = job
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .is_some_and(|cs| cs.iter().any(|c| (c.type_ == "Complete" || c.type_ == "Failed") && c.status == "True"));
+    if finished {
+        return None;
+    }
+    job.spec.as_ref()?.template.spec.as_ref()?.service_account_name.clone()
+}
+
+/// The first of the deployment's accounts that no unfinished Job holds. The broker allows one session per
+/// identity, so a build must not share its account with another that is running.
+pub fn free_account<'a>(accounts: &'a [String], jobs: &[Job]) -> Option<&'a String> {
+    let held: Vec<String> = jobs.iter().filter_map(account_held_by).collect();
+    accounts.iter().find(|a| !held.contains(a))
 }
 
 /// The pod additions that give each job a certificate of its own: the library's `polar-init` init container
@@ -174,8 +190,12 @@ pub struct JobOptions {
     /// `Always`, `IfNotPresent` or `Never` for the clone and pipeline images. Left alone, a `latest` tag is
     /// pulled every time, which an image loaded into a node by hand cannot survive.
     pub image_pull_policy: Option<String>,
-    /// A certificate of the job's own, from its own ServiceAccount (see `JobIdentity`).
+    /// A certificate for the job, issued to the ServiceAccount its pod runs under (see `JobIdentity`).
     pub identity: Option<JobIdentity>,
+    /// The ServiceAccounts a job may run under, made by the deployment. Each is a workload the authority model
+    /// knows, and the broker allows one session per identity, so a job takes an account no running job holds
+    /// (`free_account`). Needed with an `identity`.
+    pub accounts: Vec<String>,
     /// Keep the repository's `.git` in the workspace. The instrumented pipeline records which commit and tree it
     /// built, so it needs it; a pipeline that only reads source does not.
     pub keep_git: bool,
@@ -192,6 +212,7 @@ impl JobOptions {
             workspace_size_limit: None,
             image_pull_policy: None,
             identity: None,
+            accounts: Vec::new(),
             keep_git: false,
         }
     }
@@ -231,6 +252,11 @@ impl Default for PipelineResources {
 /// `ca_bundle_secret`, when set, names a Secret whose `ca-bundle.crt` becomes
 /// the trust store of both containers (see `trust_ca_bundle`).
 pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
+    build_job_manifest_as(spec, options, None)
+}
+
+/// The same, with the pod running under `account` (one of `JobOptions::accounts`) when the job has an identity.
+pub fn build_job_manifest_as(spec: &BuildSpec, options: &JobOptions, account: Option<&str>) -> Job {
     let namespace = options.namespace.as_str();
     let job_name = job_name_for_build(spec.build_id);
     let (labels, annotations) = standard_metadata(spec.build_id, &spec.source, "pipeline");
@@ -314,7 +340,7 @@ pub fn build_job_manifest(spec: &BuildSpec, options: &JobOptions) -> Job {
 
     let pod_spec = PodSpec {
         init_containers: Some(init_containers),
-        service_account_name: identity.map(|_| service_account_for_build(spec.build_id)),
+        service_account_name: identity.and(account).map(str::to_string),
         containers: vec![pipeline_container],
         volumes: Some(volumes),
         // the clone image runs as non-root user, so we must make sure that the emptydir we clone into is owned by git
@@ -1236,14 +1262,14 @@ mod tests {
     }
 
     #[test]
-    fn a_job_with_an_identity_runs_as_its_own_service_account_and_gets_its_certificate_first() {
+    fn a_job_with_an_identity_runs_as_the_account_it_is_given_and_gets_its_certificate_first() {
         let mut options = JobOptions::new("polar-builds");
         options.identity = Some(JobIdentity::from_json(IDENTITY).unwrap());
         let build = git_spec();
-        let job = build_job_manifest(&build, &options);
+        let job = build_job_manifest_as(&build, &options, Some("build-job-2"));
         let pod = pod(&job);
 
-        assert_eq!(pod.service_account_name.as_deref(), Some(service_account_for_build(build.build_id).as_str()));
+        assert_eq!(pod.service_account_name.as_deref(), Some("build-job-2"));
         let inits: Vec<_> = pod.init_containers.as_ref().unwrap().iter().map(|c| c.name.as_str()).collect();
         assert_eq!(inits.len(), 2);
         assert_eq!(inits[0], "polar-init", "the certificate comes before the source");
@@ -1268,6 +1294,54 @@ mod tests {
             mounts.iter().any(|m| m.name == WORKSPACE_VOLUME && m.read_only == Some(false)),
             "a git build's pipeline writes beside its source"
         );
+    }
+
+    fn a_job_as(account: &str, conditions: &[(&str, &str)]) -> Job {
+        use k8s_openapi::api::batch::v1::{JobCondition, JobStatus};
+        let mut options = JobOptions::new("polar-builds");
+        options.identity = Some(JobIdentity::from_json(IDENTITY).unwrap());
+        let mut job = build_job_manifest_as(&git_spec(), &options, Some(account));
+        job.status = Some(JobStatus {
+            conditions: Some(
+                conditions
+                    .iter()
+                    .map(|(t, s)| JobCondition {
+                        type_: t.to_string(),
+                        status: s.to_string(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        });
+        job
+    }
+
+    fn accounts() -> Vec<String> {
+        vec!["build-job-1".into(), "build-job-2".into()]
+    }
+
+    #[test]
+    fn a_job_takes_the_first_account_no_running_job_holds() {
+        assert_eq!(free_account(&accounts(), &[]).map(String::as_str), Some("build-job-1"));
+        let running = [a_job_as("build-job-1", &[])];
+        assert_eq!(free_account(&accounts(), &running).map(String::as_str), Some("build-job-2"));
+        let both = [a_job_as("build-job-1", &[]), a_job_as("build-job-2", &[("Suspended", "False")])];
+        assert_eq!(free_account(&accounts(), &both), None, "two running builds leave nothing to give a third");
+    }
+
+    #[test]
+    fn a_finished_job_gives_its_account_back() {
+        let done = [a_job_as("build-job-1", &[("Complete", "True")]), a_job_as("build-job-2", &[("Failed", "True")])];
+        assert_eq!(free_account(&accounts(), &done).map(String::as_str), Some("build-job-1"));
+        // A condition that is not true does not end the job.
+        assert!(account_held_by(&a_job_as("build-job-1", &[("Failed", "False")])).is_some());
+    }
+
+    #[test]
+    fn a_job_without_an_identity_holds_no_account() {
+        let job = build_job_manifest(&git_spec(), &JobOptions::new("polar-builds"));
+        assert_eq!(account_held_by(&job), None);
     }
 
     #[test]

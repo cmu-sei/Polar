@@ -10,6 +10,15 @@ pub struct OrchestratorConfig {
     #[serde(default)]
     pub repo_mappings: Vec<RepoMapping>,
     pub storage: StorageConfig,
+    /// The most builds run at once. Each is a Job that may use several CPUs and gigabytes, so the number is
+    /// capped; a request over it waits its turn. With jobs that have certificates it is also held to the number of
+    /// `backend.kubernetes.accounts` (see `admission`). One unless set.
+    #[serde(default = "one")]
+    pub max_concurrent_builds: usize,
+}
+
+fn one() -> usize {
+    1
 }
 
 // ── Backend ──────────────────────────────────────────────────────────────────
@@ -77,6 +86,12 @@ pub struct KubernetesBackendConfig {
     #[serde(default)]
     pub identity: Option<String>,
 
+    /// The ServiceAccounts a job's pod may run under, which the deployment makes: each is a workload in the
+    /// authority model, and the broker allows one session per identity, so a job takes one that no running job
+    /// holds. Needed with an `identity`, and no more builds run at once than there are.
+    #[serde(default)]
+    pub accounts: Vec<String>,
+
     /// Leave the repository's `.git` in each job's workspace, for a pipeline that records which commit it built.
     #[serde(default)]
     pub keep_git: bool,
@@ -88,6 +103,18 @@ pub struct ResourceConfig {
     pub memory_limit: Option<String>,
     pub cpu_request: Option<String>,
     pub memory_request: Option<String>,
+}
+
+impl OrchestratorConfig {
+    /// How many builds may run at once: the configured cap, and no more than there are ServiceAccounts for jobs to
+    /// hold when their certificates come from those.
+    pub fn build_cap(&self) -> usize {
+        let cap = self.max_concurrent_builds.max(1);
+        match self.backend.kubernetes.as_ref() {
+            Some(k) if k.identity.is_some() && !k.accounts.is_empty() => cap.min(k.accounts.len()),
+            _ => cap,
+        }
+    }
 }
 
 // ── Repo mappings ─────────────────────────────────────────────────────────────
@@ -192,5 +219,48 @@ mod tests {
                 },
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod build_cap {
+    use super::*;
+
+    fn config(cap: usize, kubernetes: serde_json::Value) -> OrchestratorConfig {
+        serde_json::from_value(serde_json::json!({
+            "backend": { "driver": "kubernetes", "command": [], "kubernetes": kubernetes },
+            "storage": {
+                "endpoint_url": "http://localhost:9000", "bucket": "b", "region": "r",
+                "access_key": "abcdefghijklmnop", "secret_key": "abcdefghijklmnop"
+            },
+            "max_concurrent_builds": cap,
+        }))
+        .expect("a configuration")
+    }
+
+    #[test]
+    fn the_cap_is_one_unless_set() {
+        let c: OrchestratorConfig = serde_json::from_value(serde_json::json!({
+            "backend": { "driver": "kubernetes", "command": [] },
+            "storage": {
+                "endpoint_url": "http://localhost:9000", "bucket": "b", "region": "r",
+                "access_key": "abcdefghijklmnop", "secret_key": "abcdefghijklmnop"
+            },
+        }))
+        .unwrap();
+        assert_eq!(c.build_cap(), 1);
+    }
+
+    #[test]
+    fn accounts_for_jobs_hold_the_cap_down() {
+        let k = serde_json::json!({ "namespace": "build-jobs", "identity": "{}", "accounts": ["build-job-1", "build-job-2"] });
+        assert_eq!(config(8, k.clone()).build_cap(), 2, "one session per identity, two identities");
+        assert_eq!(config(1, k).build_cap(), 1, "the cap still applies below the accounts");
+    }
+
+    #[test]
+    fn without_certificates_for_jobs_the_cap_is_the_setting() {
+        let k = serde_json::json!({ "namespace": "build-jobs" });
+        assert_eq!(config(3, k).build_cap(), 3);
     }
 }

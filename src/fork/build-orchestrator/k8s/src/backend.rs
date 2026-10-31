@@ -8,14 +8,15 @@ use orchestrator_core::types::{BuildSpec, SourceRef};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tracing::{error, info, instrument};
 
-use crate::job::{
-    JobOptions, build_job_manifest, git_secret_name_for_build, job_name_for_build, service_account_for_build,
-};
+use crate::job::{JobOptions, build_job_manifest_as, free_account, git_secret_name_for_build, job_name_for_build};
 
 pub struct KubernetesBackend {
     client: Client,
     /// Deployment-level job settings: namespace, CA bundle, resources.
     options: JobOptions,
+    /// Held from choosing an account to the Job existing, so two builds submitted together cannot be given the
+    /// same one. What holds an account is the Jobs in the cluster, which also survive this process.
+    accounts: tokio::sync::Mutex<()>,
 }
 
 impl KubernetesBackend {
@@ -46,7 +47,7 @@ impl KubernetesBackend {
                 Client::try_default().await?
             }
         };
-        Ok(Self { client, options })
+        Ok(Self { client, options, accounts: tokio::sync::Mutex::new(()) })
     }
 }
 
@@ -56,13 +57,34 @@ impl BuildBackend for KubernetesBackend {
     async fn submit(&self, spec: &BuildSpec) -> Result<SubmittedJob, BackendError> {
         use k8s_openapi::api::batch::v1::Job;
         use k8s_openapi::ByteString;
-        use k8s_openapi::api::core::v1::{Secret, ServiceAccount};
+        use k8s_openapi::api::core::v1::Secret;
         use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-        use kube::api::{Api, DeleteParams, Patch, PatchParams, PostParams};
+        use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams};
         use std::collections::BTreeMap;
 
         let job_name = job_name_for_build(spec.build_id);
-        let manifest = build_job_manifest(spec, &self.options);
+        let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.options.namespace);
+
+        // The pod runs under one of the ServiceAccounts the deployment made, the first no running job holds: the
+        // broker allows one session per identity. The jobs the cluster has say which are held.
+        let _account_choice = self.accounts.lock().await;
+        let account = match &self.options.identity {
+            Some(_) => {
+                let running = jobs
+                    .list(&ListParams::default())
+                    .await
+                    .map_err(|e| BackendError::SubmissionFailed(format!("could not list the jobs to find a free account: {e}")))?;
+                let free = free_account(&self.options.accounts, &running.items).ok_or_else(|| {
+                    BackendError::SubmissionFailed(format!(
+                        "every one of the {} ServiceAccounts for jobs is held by a running job",
+                        self.options.accounts.len()
+                    ))
+                })?;
+                Some(free.clone())
+            }
+            None => None,
+        };
+        let manifest = build_job_manifest_as(spec, &self.options, account.as_deref());
 
         tracing::debug!(
             "Deploying job manifest \n {}",
@@ -70,30 +92,6 @@ impl BuildBackend for KubernetesBackend {
         );
 
         // TODO: We might want to use the final job manifest later, so maybe we Write manifest back to the supervisor ?
-        let jobs: Api<Job> = Api::namespaced(self.client.clone(), &self.options.namespace);
-
-        // The pod runs under a ServiceAccount of its own, which has to be there when the pod is made.
-        let accounts: Api<ServiceAccount> = Api::namespaced(self.client.clone(), &self.options.namespace);
-        let account = self.options.identity.as_ref().map(|_| service_account_for_build(spec.build_id));
-        if let Some(name) = &account {
-            let sa = ServiceAccount {
-                metadata: ObjectMeta {
-                    name: Some(name.clone()),
-                    labels: Some(BTreeMap::from([(
-                        "cyclops/build-id".to_string(),
-                        spec.build_id.to_string(),
-                    )])),
-                    ..Default::default()
-                },
-                // The job's token is the one `polar-init` is given, projected; nothing else may have one.
-                automount_service_account_token: Some(false),
-                ..Default::default()
-            };
-            accounts
-                .create(&PostParams::default(), &sa)
-                .await
-                .map_err(|e| BackendError::SubmissionFailed(format!("could not make the build's ServiceAccount: {e}")))?;
-        }
 
         // A git credential is a Secret of the build's own, made before the job so the pod does not wait for it.
         let secrets: Api<Secret> = Api::namespaced(self.client.clone(), &self.options.namespace);
@@ -117,9 +115,6 @@ impl BuildBackend for KubernetesBackend {
                     ..Default::default()
                 };
                 if let Err(e) = secrets.create(&PostParams::default(), &secret).await {
-                    if let Some(account) = &account {
-                        let _ = accounts.delete(account, &DeleteParams::default()).await;
-                    }
                     // The error is the API server's about the object, which does not repeat its data.
                     return Err(BackendError::SubmissionFailed(format!("could not make the build's git credential Secret: {e}")));
                 }
@@ -131,9 +126,6 @@ impl BuildBackend for KubernetesBackend {
         let job = match jobs.create(&PostParams::default(), &manifest).await {
             Ok(job) => job,
             Err(e) => {
-                if let Some(name) = &account {
-                    let _ = accounts.delete(name, &DeleteParams::default()).await;
-                }
                 if let Some(name) = &git_secret {
                     let _ = secrets.delete(name, &DeleteParams::default()).await;
                 }
@@ -141,7 +133,7 @@ impl BuildBackend for KubernetesBackend {
             }
         };
 
-        // The Secret goes with the job, as the ServiceAccount does: nothing outlives the build.
+        // The Secret goes with the job: nothing outlives the build.
         if let (Some(name), Some(job_uid), Some(job_name)) = (&git_secret, &job.metadata.uid, &job.metadata.name) {
             let owner = serde_json::json!({"metadata": {"ownerReferences": [{
                 "apiVersion": "batch/v1", "kind": "Job", "name": job_name, "uid": job_uid
@@ -150,16 +142,6 @@ impl BuildBackend for KubernetesBackend {
                 // A credential left behind is worse than a build that fails: take it away now.
                 tracing::error!(error = %e, secret = %name, "the build's credential could not be given to its job; deleting it");
                 let _ = secrets.delete(name, &DeleteParams::default()).await;
-            }
-        }
-
-        // The ServiceAccount goes with the job (and its time-to-live), so nothing is left behind.
-        if let (Some(name), Some(job_uid), Some(job_name)) = (&account, &job.metadata.uid, &job.metadata.name) {
-            let owner = serde_json::json!({"metadata": {"ownerReferences": [{
-                "apiVersion": "batch/v1", "kind": "Job", "name": job_name, "uid": job_uid
-            }]}});
-            if let Err(e) = accounts.patch(name, &PatchParams::default(), &Patch::Merge(&owner)).await {
-                tracing::warn!(error = %e, account = %name, "the build's ServiceAccount could not be given to its job; it is left for the reaper");
             }
         }
 
@@ -175,6 +157,7 @@ impl BuildBackend for KubernetesBackend {
         tracing::info!(
             build_id = %spec.build_id,
             job_name = %job_name,
+            account = ?account,
             namespace = %self.options.namespace,
             "pipeline Job created"
         );

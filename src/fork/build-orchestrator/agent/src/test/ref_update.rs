@@ -29,6 +29,7 @@ mod ref_update {
                 access_key: "abcdefghijklmnop".to_string(),
                 secret_key: "abcdefghijklmnop".to_string(),
             },
+            max_concurrent_builds: 1,
         }
     }
 

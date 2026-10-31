@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::actors::build_job::{BuildJobActor, BuildJobArguments};
 use crate::actors::build_registry::{BuildRegistryActor, RegistryMessage};
+use crate::admission::{Admission, Admitted};
 use crate::client::StorageClient;
 use crate::config::RepoMapping;
 use crate::credentials;
@@ -70,6 +71,8 @@ pub struct SupervisorState {
     /// The repositories built: the configuration file's list until the `mappings` section arrives, and then
     /// the section's, replaced whole each time.
     mappings: Vec<RepoMapping>,
+    /// How many builds run at once, and who waits.
+    admission: Admission,
     draining: bool,
 }
 
@@ -257,6 +260,8 @@ impl Actor for OrchestratorSupervisor {
         tracing::info!("BuildRegistryActor spawned");
 
         let mappings = args.config.repo_mappings.clone();
+        let admission = Admission::new(args.config.build_cap());
+        tracing::info!(cap = admission.cap(), "builds run at most this many at once; the rest wait");
         Ok(SupervisorState {
             backend: args.backend,
             registry,
@@ -267,6 +272,7 @@ impl Actor for OrchestratorSupervisor {
             healthcheck: resources.healthcheck,
             crypto: Arc::new(crypto),
             mappings,
+            admission,
             draining: false,
         })
     }
@@ -315,6 +321,9 @@ impl Actor for OrchestratorSupervisor {
             SupervisorMessage::PrepareShutdown => {
                 info!("PrepareShutdown received: no new builds are taken; jobs already submitted keep running");
                 state.draining = true;
+                for request in state.admission.abandon_waiting() {
+                    tracing::warn!(build_id = %request.build_id, "shutting down: a build that was waiting for a place is not started");
+                }
                 let _ = state
                     .infrastructure
                     .cast(InfrastructureSupervisorMessage::ProceedWithShutdown);
@@ -325,7 +334,7 @@ impl Actor for OrchestratorSupervisor {
 
     async fn handle_supervisor_evt(
         &self,
-        _myself: ActorRef<Self::Msg>,
+        myself: ActorRef<Self::Msg>,
         event: ractor::SupervisionEvent,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -336,6 +345,9 @@ impl Actor for OrchestratorSupervisor {
                     reason = ?reason,
                     "child actor terminated"
                 );
+                if let Some(name) = actor.get_name() {
+                    Self::build_ended(&myself, state, &name).await?;
+                }
                 // The infrastructure is this supervisor's linked child from build(): its ending means the
                 // shutdown handshake is done, or that it failed. Either way exit non-zero, so the operator
                 // starts a new pod with fresh certificates.
@@ -357,6 +369,7 @@ impl Actor for OrchestratorSupervisor {
                     // A build job actor only fails on a bug or a backend error it didn't handle. Its
                     // registry record keeps its last state; nothing marks it failed.
                     tracing::error!(actor = %name, error = %error, "build job actor failed; its registry record keeps its last state");
+                    Self::build_ended(&myself, state, &name).await?;
                 } else {
                     tracing::error!(actor = %name, error = %error, "child actor failed");
                 }
@@ -474,12 +487,64 @@ impl OrchestratorSupervisor {
         let mut request = request;
         Self::command_from_mapping(&state.mappings, &state.config.backend.command, &mut request);
 
-        // Insert into the registry before spawning the actor so there is never
-        // a window where the actor exists but has no registry record.
-        state
-            .registry
-            .send_message(RegistryMessage::Insert(request.clone()))?;
+        match state.admission.request(request.clone()) {
+            Admitted::Duplicate => {
+                tracing::warn!(build_id = %build_id, "ignored a build request for a build already running or waiting");
+                Ok(())
+            }
+            Admitted::Waiting(place) => {
+                // Known to the registry, as Pending, while it waits.
+                state
+                    .registry
+                    .send_message(RegistryMessage::Insert(request))?;
+                tracing::info!(
+                    build_id = %build_id,
+                    place,
+                    running = state.admission.running(),
+                    cap = state.admission.cap(),
+                    "all places are taken; the build waits"
+                );
+                Ok(())
+            }
+            Admitted::Now(request) => {
+                state
+                    .registry
+                    .send_message(RegistryMessage::Insert(request.clone()))?;
+                Self::start_build(&myself, state, request).await
+            }
+        }
+    }
 
+    /// A build job actor ended, however it did. Its place goes to the next build waiting, if any.
+    async fn build_ended(
+        myself: &ActorRef<SupervisorMessage>,
+        state: &mut SupervisorState,
+        actor_name: &str,
+    ) -> Result<(), ActorProcessingErr> {
+        let Some(id) = actor_name
+            .strip_prefix("build-job-")
+            .and_then(|id| id.parse::<uuid::Uuid>().ok())
+        else {
+            return Ok(());
+        };
+        if state.draining {
+            return Ok(());
+        }
+        if let Some(next) = state.admission.finished(id) {
+            tracing::info!(build_id = %next.build_id, "a place is free; the next build starts");
+            Self::start_build(myself, state, next).await?;
+        }
+        Ok(())
+    }
+
+    /// Spawn the actor for a build that has a place. Its registry record was made before this, so there is never
+    /// a window where the actor exists but has no record.
+    async fn start_build(
+        myself: &ActorRef<SupervisorMessage>,
+        state: &mut SupervisorState,
+        request: BuildRequest,
+    ) -> Result<(), ActorProcessingErr> {
+        let build_id = request.build_id;
         let actor_name = format!("build-job-{}", build_id);
 
         let client = StorageClient::new(&state.config.storage);
@@ -494,14 +559,15 @@ impl OrchestratorSupervisor {
             crypto: Some(Arc::clone(&state.crypto)),
         };
 
-        let (_, _handle) =
-            Actor::spawn_linked(Some(actor_name), BuildJobActor, args, myself.get_cell())
-                .await
-                .map_err(|e| {
-                    ActorProcessingErr::from(format!(
-                        "failed to spawn BuildJobActor for {build_id}: {e}"
-                    ))
-                })?;
+        if let Err(e) =
+            Actor::spawn_linked(Some(actor_name), BuildJobActor, args, myself.get_cell()).await
+        {
+            // The place it was given is free again.
+            let _ = state.admission.finished(build_id);
+            return Err(ActorProcessingErr::from(format!(
+                "failed to spawn BuildJobActor for {build_id}: {e}"
+            )));
+        }
 
         tracing::info!(build_id = %build_id, "BuildJobActor spawned");
         Ok(())
