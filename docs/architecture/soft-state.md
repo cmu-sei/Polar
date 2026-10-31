@@ -139,7 +139,22 @@ security-sensitive authority. Decided instead:
 - **Services that are not Cassini clients** (the broker) cannot be asked over Cassini; their health does not reach the
   graph yet.
 
-### Proposed (to confirm): self-state and introspection
+### The as-built decisions, reviewed (2026-10-30)
+
+Kept: an asker is matched by its exact identity (another namespace's same service account is refused); owning a label
+does not grant reading it through the state agent, and the state agent declares no labels; Cedar is asked
+`read-state` without the certificate, groups coming from the signed groups document, `context.declared` meaning (after
+the rebuild) that the state agent's signed runtime section says so, and `context.implied` false; a request with no
+verified asker has no reply topic and gets no reply; the state agent runs on the writers pool (it holds the graph
+password); a property that is not an integer is `Refused` (asking again cannot change it). Changed by the rebuild:
+`graph-read` keeps no dependency, and the state agent reports `Degraded` with reason `Graph` while the graph is down
+(it stays up and answers `Unavailable`); the timeouts (10 s for the graph, 8 s for a reply) become declared variables
+of the StateActor with those defaults; the check that a reply comes from the state agent's identity moves into the
+StateActor. To fix: the cursor reads Jira's system field `updated` (known from `/field`'s `schema.system`), not the
+English display name `Updated`. Gap kept: the `JiraIssue_<field>` labels jira-processor makes from custom fields cannot
+be declared by name.
+
+### Self-state and introspection (proposed 2026-10-30, accepted by the maintainer)
 
 Two kinds of state pass through the state agent, and they are kept apart:
 
