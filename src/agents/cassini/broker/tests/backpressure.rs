@@ -622,38 +622,53 @@ async fn a_processor_publishing_large_frames_under_an_exhausted_budget_is_not_cu
 }
 
 /// A processor (an agent's client that subscribes to the topics it publishes to, and reads and acknowledges what it
-/// is given) publishes `rounds` messages of `size` bytes to each of nine topics, while a slow subscriber on each reads
-/// and acknowledges them at half a MiB a second: together they exhaust the budget for longer than the stall bound
-/// (each topic under its high water, and every subscriber making progress), and the processor's own deliveries, the
-/// same messages, are among what holds it, its acknowledgements behind its publishes on its one connection. No one is
-/// cut, and the processor is given everything it published.
+/// is given) publishes `rounds` messages of `size` bytes to each of nine topics, back to back, while a slow subscriber
+/// on each reads and acknowledges them at half a MiB a second: together they exhaust the budget for longer than the
+/// stall bound (each topic under its high water, and every subscriber making progress), and the processor's own
+/// deliveries, the same messages, are among what holds it, its acknowledgements behind its publishes on its one
+/// connection. No one is cut, and the processor is given everything it published.
+///
+/// The rounds are only just more than the budget (for large frames, 270 of 262,320 bytes against 67,108,864: at most
+/// 14 may have been acknowledged by both subscribers when the last is read), so what the slow subscribers drain while
+/// they go may leave it short (a loaded debug build took 4.5 s to publish them, the slow subscribers had 46
+/// acknowledged meanwhile, and the budget peaked at 58.8 MB). The processor then publishes more, a round at a time,
+/// each once the broker has taken every publish before it and only while every topic stays under its high water,
+/// until the budget is exhausted: the state the test is about, whatever the machine's speed.
 async fn processor_under_exhaustion(size: usize, rounds: u32) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     let stall = Duration::from_secs(2);
     with_broker_bounded(BUDGET, stall, move |broker| async move {
         let budget = broker.budget();
         let topics = 9;
         let pace = Duration::from_micros(size as u64 * 1_000_000 / (512 * 1024));
+        // How many rounds the processor published, once it has finished.
+        let published = Arc::new(AtomicU32::new(rounds));
+        let finished = Arc::new(AtomicBool::new(false));
         let mut slow = Vec::new();
+        let mut reads = Vec::new();
         for t in 0..topics {
             let mut connection =
                 RawConnection::open(&broker, &format!("slow-{t}.test"), Some(4096)).await;
             let session = connection.register().await;
             let topic = format!("t{t}");
             connection.subscribe(&session, &topic).await;
+            let read = Arc::new(AtomicU32::new(0));
+            reads.push(read.clone());
+            let (published, finished) = (published.clone(), finished.clone());
             slow.push(tokio::spawn(async move {
-                let mut read = 0;
                 while let Some(delivery) = connection
                     .next_delivery(&topic, Duration::from_secs(60))
                     .await
                 {
                     connection.acknowledge(delivery.delivery_id).await;
-                    read += 1;
-                    if read == rounds {
+                    let now = read.fetch_add(1, Ordering::SeqCst) + 1;
+                    if finished.load(Ordering::SeqCst) && now == published.load(Ordering::SeqCst) {
                         break;
                     }
                     tokio::time::sleep(pace).await;
                 }
-                read
+                read.load(Ordering::SeqCst)
             }));
         }
         let agent = support::FacadeClient::connect(&broker, "processor.test").await;
@@ -666,18 +681,41 @@ async fn processor_under_exhaustion(size: usize, rounds: u32) {
                 (0..topics).all(|t| c.subscribed(&format!("t{t}")))
             })
             .await;
-        for n in 0..rounds {
+        let publish_round = |n: u32| {
             for t in 0..topics {
                 let mut payload = vec![0u8; size];
                 payload[..4].copy_from_slice(&n.to_be_bytes());
                 processor.publish(&format!("t{t}"), &payload);
             }
+        };
+        for n in 0..rounds {
+            publish_round(n);
         }
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // A frame weighs its payload and at most a KiB more; a slow subscriber holds at most what was published on its
+        // topic less what it has read.
+        let high_water_frames = broker.bounds().high_water() / (size + 1024);
+        let mut rounds = rounds;
+        let deadline = Instant::now() + Duration::from_secs(30);
         while budget.stats().alarms == 0 && Instant::now() < deadline {
+            let taken: std::collections::BTreeSet<_> =
+                processor.acknowledged_ids().into_iter().collect();
+            let all_taken = taken.len() == rounds as usize * topics;
+            let under_high_water = reads.iter().all(|read| {
+                (rounds + 1 - read.load(Ordering::SeqCst)) as usize <= high_water_frames
+            });
+            if all_taken && under_high_water {
+                publish_round(rounds);
+                rounds += 1;
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(budget.stats().alarms > 0, "the budget was exhausted");
+        published.store(rounds, Ordering::SeqCst);
+        finished.store(true, Ordering::SeqCst);
+        assert!(
+            budget.stats().alarms > 0,
+            "the budget was exhausted: {:?}, {rounds} rounds",
+            budget.stats()
+        );
         let distinct = |c: &TestClient, t: usize| {
             c.received(&format!("t{t}"))
                 .iter()

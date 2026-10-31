@@ -320,6 +320,20 @@ backlog instead of per session); `a_processor_holding_back_its_own_topic_is_not_
 `a_client_that_publishes_and_never_acknowledges_is_spared_once_and_then_ended` (the bound on sparing; mutation: spared
 without progress).
 
+*The two processor tests' exhaustion, made certain (2026-10-31).* The large-frames test failed about one run in three
+alone on main, and every run under load, at its first check, "the budget was exhausted": the rest of the test never
+ran. Its 270 frames of 262,320 bytes are 70.8 MB against a budget of 67,108,864, so the budget is exhausted only if the
+slow subscribers have had at most 14 messages acknowledged when the processor's last publish is read. Measured with the
+budget's counters every 100 ms: alone, a passing run's alarm rose at 269 charges and exactly 14 refunds (1.3 s of
+publishing); under load (three copies and eight busy loops) the processor took 4.5 s to publish, 46 were refunded
+meanwhile, and the budget peaked at 58.8 MB, with no reader waiting and nothing refused: the broker took every
+publish as it came, so the processor was not starved, and nothing was cut. The test assumed the processor outruns the
+slow subscribers by 14 messages; the broker was not at fault. Now the processor publishes its rounds back to back as
+before and then, until the budget is exhausted, one more round at a time, each once the broker has taken every
+publish before it and only while every topic stays under its high water (what the test is about is unchanged: each
+topic under its high water, every subscriber making progress, the budget exhausted); the checks after are the same,
+over the rounds it published. Before, 0 of 9 under that load; after, 9 of 9, and the counts in `remaining-work.md`.
+
 **B. Progress was one subscription's (plausible, confirmed by its test).** A client acknowledging a large backlog on one
 topic was ended for a delivery on another waiting behind those writes past the stall bound; and the acknowledgements
 themselves wait in the Listener's mailbox behind its writes, so the subscriber learns of them late. Progress is now the
