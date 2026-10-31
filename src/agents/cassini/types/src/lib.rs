@@ -34,8 +34,9 @@ pub use trace::WireTraceCtx;
 
 pub type SessionMap = HashMap<String, SessionDetails>;
 
-/// What the subscriber manager answers a `CreateSubscriber` with: the subscriber, and its backlog, which its topic reads.
-pub type CreatedSubscriber = Result<(ActorRef<BrokerMessage>, Arc<Backlog>), ActorProcessingErr>;
+/// What the subscriber manager answers a `CreateSubscriber` with: the subscriber, which owns its backlog and tells its
+/// topic whether it holds the topic back (`TopicHold`).
+pub type CreatedSubscriber = Result<ActorRef<BrokerMessage>, ActorProcessingErr>;
 
 /// A message a subscriber keeps for its client: delivered and not acknowledged, or not yet delivered.
 #[derive(Debug, Clone)]
@@ -271,8 +272,6 @@ pub enum BrokerMessage {
     AddSubscriber {
         registration_id: String,
         subscriber_ref: ActorRef<BrokerMessage>,
-        /// The subscriber's backlog, which its topic reads before it accepts a publish.
-        backlog: Arc<Backlog>,
         trace_ctx: Option<opentelemetry::Context>,
     },
     /// instructs the topic manager to create a new topic actor,
@@ -417,28 +416,68 @@ pub enum BrokerMessage {
     /// messages that have been waiting too long with no subscriber to
     /// receive them.
     QueueExpiryTick,
-    /// Internal: a subscriber of this topic fell below its low water, or no longer holds the topic back (its client
-    /// went, it ended): the topic accepts what waits, as far as its subscribers allow.
-    TopicResume,
-    /// Internal: a topic held back by a subscriber looks whether one has been above its high water for longer than
-    /// the stall bound.
+    /// Internal, from a subscriber to its topic: it holds the topic back (connected and above its high water), or no
+    /// longer does (below its low water, away, or ended). The topic accepts nothing while any does
+    /// (docs/architecture/cassini-backpressure.md, phase 1).
+    TopicHold {
+        registration_id: String,
+        holds: bool,
+    },
+    /// Internal, from a topic to a subscriber it takes: where to say whether it holds the topic back.
+    TopicAttached { topic: ActorRef<BrokerMessage> },
+    /// Internal, from the pressure manager through the subscriber manager to each subscriber: look whether you have
+    /// stalled (above your high water for the stall bound), and say so to your session.
     StallCheck,
-    /// Internal, from a topic to the session manager: the subscriber of `registration_id` on `topic` has held it back
-    /// above its high water (`held` bytes unacknowledged) for `above_for`, past the stall bound; its connection is
-    /// ended (docs/architecture/cassini-backpressure.md, "Decided" 1).
-    SlowSubscriber {
+    /// Internal, from a subscriber to its session: it has stalled for `stalled_for`, holding `held` bytes, above its
+    /// high water or, if `exhausted`, with nothing acknowledged while the budget is exhausted. The session decides from
+    /// its own facts, by the one stall policy (`pressure::verdict`), and tells `subscriber` if it ended it (`StallEnded`).
+    SubscriberStalled {
+        topic: String,
+        held: usize,
+        stalled_for: std::time::Duration,
+        exhausted: bool,
+        stall: std::time::Duration,
+        subscriber: ActorRef<BrokerMessage>,
+    },
+    /// Internal, from a session to a stalled subscriber: its connection was ended for the stall (counted).
+    StallEnded,
+    /// Internal, from a session agent to the session manager: it ended its connection for a stall (logged with its
+    /// identity).
+    SessionStallEnded {
         registration_id: String,
         topic: String,
         held: usize,
-        above_for: std::time::Duration,
+        stalled_for: std::time::Duration,
     },
+    /// Internal, from a Listener to its session: its connection, and how to end it or make its reader refuse for now
+    /// from outside the Listener (which may be waiting on a write to its client).
+    ConnectionOpened {
+        client_id: String,
+        control: Arc<dyn ConnectionControl>,
+    },
+    /// Internal, from a Listener's reader to its session: it read an acknowledgement (at most a few a second).
+    ConnectionProgress { client_id: String },
+    /// Internal, from a Listener's reader to its session: it waits for a frame's admission, or no longer does; while
+    /// it waits, what follows the frame (its client's acknowledgements among it) is not read.
+    ConnectionWaiting { client_id: String, waiting: bool },
     /// Internal, from the session manager to the subscriber manager: the session's client went away; its
     /// subscribers hold their topics back no longer, and keep what they hold while the budget allows.
     SessionDetached { registration_id: String },
-    /// Internal: the broker's memory budget is exhausted. Subscribers whose clients are away let go of what they
-    /// hold, so the budget can recover (cassini-backpressure.md: what a subscriber is owed is kept only while the
-    /// budget allows).
+    /// Internal, from the pressure manager through the subscriber manager to each subscriber, at each stall check
+    /// while the broker's memory budget is exhausted: one whose client is away lets go of what it holds, so the budget
+    /// can recover (what a subscriber is owed is kept only while the budget allows); one connected looks whether it has
+    /// stalled, as on `StallCheck`, counting time without an acknowledgement too.
     BudgetExhausted,
+}
+
+/// How a session reaches its connection from outside the connection's Listener, which may be waiting on a write to a
+/// client that does not read: given by the Listener (`BrokerMessage::ConnectionOpened`), so nothing is looked up.
+pub trait ConnectionControl: Send + Sync + std::fmt::Debug {
+    /// Ends the connection, saying `why`: its writes and its reader give up, and its Listener ends.
+    fn cut(&self, why: &str);
+    /// Its reader refuses for now, for `how_long`, each publish it cannot admit at once, and stops waiting for the
+    /// one it waits for, so it reads on to what follows.
+    fn refuse_for(&self, how_long: std::time::Duration);
 }
 
 impl BrokerMessage {

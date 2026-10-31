@@ -26,6 +26,7 @@ use crate::{
     UNEXPECTED_MESSAGE_STR,
     control::{ControlManager, ControlManagerState},
     listener::{ListenerManager, ListenerManagerArgs},
+    pressure::{PressureManager, PressureManagerArgs, PressureMsg},
     session::{SessionManager, SessionManagerArgs},
     subscriber::{SubscriberManager, SubscriberManagerArgs},
     topic::{TopicManager, TopicManagerArgs},
@@ -64,8 +65,11 @@ pub struct BrokerState {
     control_mgr: Option<ActorRef<BrokerMessage>>,
 
     is_shutting_down: bool,
-    /// The memory budget, told when the drain begins (its watchdog stops then).
-    budget: crate::budget::Budget,
+    /// The broker's pressure (the budget's alarm, and the stall checks): stopped when the drain begins, started
+    /// again if it ends otherwise.
+    pressure: Option<ActorRef<PressureMsg>>,
+    /// What it is started with.
+    bounds: crate::budget::Bounds,
 }
 
 /// What the broker is started with: where it listens and with what certificate, and the
@@ -154,6 +158,7 @@ impl Actor for Broker {
 
                 SupervisionEvent::ActorTerminated(actor_cell, _, _reason) => {
                     let span = trace_span!("cassini.broker.supervision_event.terminated");
+                    let mut restart_pressure = false;
                     {
                         let _g = span.enter();
 
@@ -185,15 +190,34 @@ impl Actor for Broker {
                                     state.control_mgr = None;
                                     debug!("ControlManager removed from broker state");
                                 }
+                                crate::PRESSURE_MANAGER_NAME => {
+                                    state.pressure = None;
+                                    restart_pressure = !state.is_shutting_down;
+                                }
                                 _ => {}
                             }
                         }
+                    }
+                    if restart_pressure {
+                        Self::restart_pressure(&myself, state, "it ended").await;
                     }
 
                     if state.is_shutting_down {
                         self.check_shutdown_completion(myself.clone(), state)
                             .instrument(span)
                             .await?;
+                    }
+                }
+
+                SupervisionEvent::ActorFailed(actor_cell, e)
+                    if actor_cell.get_name().as_deref() == Some(crate::PRESSURE_MANAGER_NAME) =>
+                {
+                    // It holds nothing a new one cannot see again at its first look: started again, unless the
+                    // broker is ending.
+                    error!(error = %e, "the pressure manager failed");
+                    state.pressure = None;
+                    if !state.is_shutting_down {
+                        Self::restart_pressure(&myself, state, &e.to_string()).await;
                     }
                 }
 
@@ -310,10 +334,10 @@ impl Actor for Broker {
                 subscriber_mgr: subscriber_mgr.clone(),
             });
 
-            // Subscribers whose clients are away let go of what they hold when the budget is exhausted.
-            args.bounds
-                .budget
-                .tell_when_exhausted(subscriber_mgr.clone());
+            // The broker's pressure: the budget's alarm, and the stall checks, through the subscriber manager to each
+            // subscriber.
+            let pressure =
+                Self::start_pressure(&myself, &args.bounds, subscriber_mgr.clone()).await?;
 
             let topic_mgr_args = TopicManagerArgs {
                 topics: None,
@@ -415,7 +439,6 @@ impl Actor for Broker {
 
             info!("Broker startup complete");
             crate::budget_report::spawn(args.bounds.budget.clone(), myself.clone());
-            crate::budget::spawn_watchdog(args.bounds.clone(), myself.clone());
 
             Ok::<BrokerState, ActorProcessingErr>(BrokerState {
                 listener_mgr: Some(listener_mgr),
@@ -425,7 +448,8 @@ impl Actor for Broker {
                 control_mgr: Some(control_mgr),
                 infrastructure: infrastructure.infrastructure,
                 is_shutting_down: false,
-                budget: args.bounds.budget.clone(),
+                pressure: Some(pressure),
+                bounds: args.bounds.clone(),
             })
         }
         .instrument(span)
@@ -650,6 +674,66 @@ impl Broker {
         Ok(())
     }
 
+    /// Starts the pressure manager under the broker, telling the subscriber manager its checks.
+    async fn start_pressure(
+        myself: &ActorRef<BrokerMessage>,
+        bounds: &crate::budget::Bounds,
+        subscribers: ActorRef<BrokerMessage>,
+    ) -> Result<ActorRef<PressureMsg>, ActorProcessingErr> {
+        let (pressure, _) = Actor::spawn_linked(
+            Some(crate::PRESSURE_MANAGER_NAME.to_string()),
+            PressureManager,
+            PressureManagerArgs {
+                bounds: bounds.clone(),
+                subscribers: Some(subscribers),
+            },
+            myself.clone().into(),
+        )
+        .await
+        .map_err(|e| {
+            error!(error = ?e, "the pressure manager failed to start");
+            ActorProcessingErr::from(e)
+        })?;
+        Ok(pressure)
+    }
+
+    /// The pressure manager ended while the broker runs (`why`): a new one is started, or, if there is no subscriber
+    /// manager to tell, the broker ends in order.
+    async fn restart_pressure(
+        myself: &ActorRef<BrokerMessage>,
+        state: &mut BrokerState,
+        why: &str,
+    ) {
+        // Not while the broker itself ends: a new one would outlive it, holding its name.
+        if matches!(
+            myself.get_status(),
+            ractor::ActorStatus::Stopping | ractor::ActorStatus::Stopped
+        ) {
+            return;
+        }
+        let started = match state.subscriber_mgr.clone() {
+            Some(subscribers) => Self::start_pressure(myself, &state.bounds, subscribers)
+                .await
+                .ok(),
+            None => None,
+        };
+        match started {
+            Some(pressure) => {
+                warn!(%why, "the pressure manager ended while the broker runs: a new one is started");
+                state.pressure = Some(pressure);
+            }
+            None => {
+                let _ = state
+                    .infrastructure
+                    .cast(InfrastructureSupervisorMessage::BeginShutdown {
+                        reason: format!(
+                            "the pressure manager ended ({why}) and could not be started again"
+                        ),
+                    });
+            }
+        }
+    }
+
     async fn handle_initiate_shutdown_phase(
         &self,
         _myself: ActorRef<BrokerMessage>,
@@ -669,7 +753,10 @@ impl Broker {
                 .cast(InfrastructureSupervisorMessage::BeginShutdown {
                     reason: "an orderly shutdown was requested".to_string(),
                 });
-            state.budget.begin_drain();
+            // The pressure manager ends: what the drain lets go of is the drain's.
+            if let Some(pressure) = &state.pressure {
+                let _ = pressure.cast(PressureMsg::Drain);
+            }
         }
         state.is_shutting_down = true;
 

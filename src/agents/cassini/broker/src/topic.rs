@@ -149,11 +149,10 @@ impl TopicManager {
                 )
                 .await;
             let outcome = match asked {
-                Ok(CallResult::Success(Ok((subscriber_ref, backlog)))) => attach_to
+                Ok(CallResult::Success(Ok(subscriber_ref))) => attach_to
                     .cast(BrokerMessage::AddSubscriber {
                         registration_id: registration_id.clone(),
                         subscriber_ref,
-                        backlog,
                         trace_ctx: trace_ctx.clone(),
                     })
                     .map_err(|e| format!("the topic could not take the subscriber: {e}")),
@@ -548,8 +547,9 @@ impl TopicManager {
 /// A topic accepts a publish (fans it out to its subscribers, or queues it when it has none, and acknowledges it)
 /// only while none of its connected subscribers is above its high water of unacknowledged deliveries
 /// (docs/architecture/cassini-backpressure.md, phase 1). Until then the publish waits here, in order, holding its
-/// connection's window, so a publisher that outruns the slowest subscriber is slowed by TCP. A subscriber that holds
-/// the topic back for longer than the stall bound has its connection ended, and the topic moves again.
+/// connection's window, so a publisher that outruns the slowest subscriber is slowed by TCP. Each subscriber says
+/// whether it holds the topic back (`TopicHold`); whether one has stalled is its session's to decide
+/// (`crate::pressure`), and when it ends or goes away it holds the topic back no more.
 struct TopicAgent;
 
 /// A message waiting in a topic with no subscriber: when it came, its payload, who published it and their number for it.
@@ -574,15 +574,15 @@ struct Pending {
 
 struct TopicAgentState {
     name: String,
-    subscribers: HashMap<String, (ActorRef<BrokerMessage>, Arc<Backlog>)>,
+    subscribers: HashMap<String, ActorRef<BrokerMessage>>,
+    /// The subscribers that say they hold the topic back (connected, above their high water).
+    holding: std::collections::BTreeSet<String>,
     queue: VecDeque<Queued>,
     /// Publishes waiting for the subscribers to catch up, oldest first.
     waiting: VecDeque<Pending>,
     /// The bytes this topic holds, queued or waiting, as the budget's report names its holders.
     held: Arc<Backlog>,
     bounds: Bounds,
-    /// A stall check is due.
-    stall_armed: bool,
     flushing: bool,
 }
 
@@ -604,11 +604,11 @@ impl Actor for TopicAgent {
         Ok(TopicAgentState {
             name,
             subscribers: HashMap::new(),
+            holding: std::collections::BTreeSet::new(),
             queue: VecDeque::new(),
             waiting: VecDeque::new(),
             held,
             bounds,
-            stall_armed: false,
             flushing: false,
         })
     }
@@ -668,7 +668,6 @@ impl Actor for TopicAgent {
             BrokerMessage::AddSubscriber {
                 registration_id,
                 subscriber_ref,
-                backlog,
                 trace_ctx,
             } => {
                 self.handle_add_subscriber(
@@ -676,7 +675,6 @@ impl Actor for TopicAgent {
                     state,
                     registration_id,
                     subscriber_ref,
-                    backlog,
                     trace_ctx,
                 )
                 .await?;
@@ -696,10 +694,15 @@ impl Actor for TopicAgent {
                 .await?;
                 Self::pump(&myself, state);
             }
-            BrokerMessage::TopicResume => Self::pump(&myself, state),
-            BrokerMessage::StallCheck => {
-                state.stall_armed = false;
-                Self::end_stalled(state);
+            BrokerMessage::TopicHold {
+                registration_id,
+                holds,
+            } => {
+                if holds && state.subscribers.contains_key(&registration_id) {
+                    state.holding.insert(registration_id);
+                } else {
+                    state.holding.remove(&registration_id);
+                }
                 Self::pump(&myself, state);
             }
             BrokerMessage::QueueExpiryTick => {
@@ -712,91 +715,24 @@ impl Actor for TopicAgent {
 }
 
 impl TopicAgent {
-    /// The subscriber holding the topic back, if one is: connected, and above its high water.
-    fn holder_back(state: &TopicAgentState) -> Option<&Arc<Backlog>> {
-        state
-            .subscribers
-            .values()
-            .map(|(_, backlog)| backlog)
-            .find(|backlog| backlog.holds_back())
-    }
-
-    /// Accepts what waits, oldest first, for as long as no subscriber holds the topic back. Held back, it arranges to
-    /// look again whether a subscriber has stalled. While the broker flushes for its shutdown, everything is accepted.
-    fn pump(myself: &ActorRef<BrokerMessage>, state: &mut TopicAgentState) {
+    /// Accepts what waits, oldest first, for as long as no subscriber holds the topic back. While the broker flushes
+    /// for its shutdown, everything is accepted.
+    fn pump(_myself: &ActorRef<BrokerMessage>, state: &mut TopicAgentState) {
         while !state.waiting.is_empty() {
             if !state.flushing
-                && let Some(backlog) = Self::holder_back(state)
+                && let Some(registration_id) = state.holding.iter().next()
             {
                 debug!(
                     topic = %state.name,
-                    subscriber = backlog.name(),
-                    held = backlog.bytes(),
+                    subscriber = %registration_id,
                     waiting = state.waiting.len(),
                     "a subscriber above its high water holds the topic back"
                 );
-                if !state.stall_armed {
-                    state.stall_armed = true;
-                    drop(
-                        myself.send_after(state.bounds.stall_check(), || BrokerMessage::StallCheck),
-                    );
-                }
                 return;
             }
             if let Some(pending) = state.waiting.pop_front() {
                 state.held.remove(pending.payload.weight());
                 Self::accept(state, pending);
-            }
-        }
-    }
-
-    /// Ends the connection of each subscriber that has held the topic back above its high water for longer than the
-    /// stall bound (docs/architecture/cassini-backpressure.md, "Decided" 1). It no longer holds the topic back; its
-    /// session detaches for the retention window, keeping what it is owed while the budget allows.
-    fn end_stalled(state: &mut TopicAgentState) {
-        let stall = state.bounds.stall;
-        for (registration_id, (_, backlog)) in &state.subscribers {
-            let Some(above_for) = backlog.above_for() else {
-                continue;
-            };
-            if !backlog.holds_back() || above_for < stall {
-                continue;
-            }
-            // Its reader waits for room, so its acknowledgements may be what the broker is not reading: its
-            // publishes are refused for now instead, and its reader reads on. It is ended at a later check if it is
-            // still above its high water then (cassini-backpressure.md, second review, A).
-            if let Some(connection) = crate::listener::connection_of(registration_id)
-                && connection.spare(stall)
-            {
-                // It is given the stall bound again to drain, now that what it acknowledged is read.
-                backlog.restart_stall_clock();
-                info!(
-                    topic = %state.name,
-                    subscriber = backlog.name(),
-                    held = backlog.bytes(),
-                    "a subscriber holding the topic back waits for room to publish: its publishes are refused for now"
-                );
-                continue;
-            }
-            backlog.set_connected(false);
-            state.bounds.budget.count_slow_disconnection();
-            warn!(
-                topic = %state.name,
-                subscriber = backlog.name(),
-                held = backlog.bytes(),
-                ?above_for,
-                ?stall,
-                "a subscriber has held the topic back past the stall bound: its connection is ended"
-            );
-            if let Some(sessions) =
-                ractor::registry::where_is(crate::SESSION_MANAGER_NAME.to_string())
-            {
-                let _ = sessions.send_message(BrokerMessage::SlowSubscriber {
-                    registration_id: registration_id.clone(),
-                    topic: state.name.clone(),
-                    held: backlog.bytes(),
-                    above_for,
-                });
             }
         }
     }
@@ -818,7 +754,7 @@ impl TopicAgent {
 
         let mut delivered = 0usize;
         let mut ended = Vec::new();
-        for (registration_id, (subscriber, _)) in &state.subscribers {
+        for (registration_id, subscriber) in &state.subscribers {
             match subscriber.send_message(BrokerMessage::PublishResponse {
                 topic: topic.clone(),
                 payload: pending.payload.clone(),
@@ -836,6 +772,7 @@ impl TopicAgent {
         if !ended.is_empty() {
             for registration_id in &ended {
                 state.subscribers.remove(registration_id);
+                state.holding.remove(registration_id);
             }
             warn!(%topic, ended = ?ended, "{PUBLISH_REQ_FAILED_TXT}: these subscribers have ended and are dropped");
         }
@@ -930,7 +867,7 @@ impl TopicAgent {
                 );
                 continue;
             }
-            for (subscriber, _) in state.subscribers.values() {
+            for subscriber in state.subscribers.values() {
                 if let Err(e) = subscriber.send_message(BrokerMessage::PublishResponse {
                     topic: state.name.clone(),
                     payload: msg.clone(),
@@ -970,11 +907,10 @@ impl TopicAgent {
 
     async fn handle_add_subscriber(
         &self,
-        _myself: ActorRef<BrokerMessage>,
+        myself: ActorRef<BrokerMessage>,
         state: &mut TopicAgentState,
         registration_id: String,
         subscriber_ref: ActorRef<BrokerMessage>,
-        backlog: Arc<Backlog>,
         trace_ctx: Option<opentelemetry::Context>,
     ) -> Result<(), ActorProcessingErr> {
         if state.flushing {
@@ -993,7 +929,9 @@ impl TopicAgent {
         // (registration_id, topic) -> SubscriberAgent relationship.
         state
             .subscribers
-            .insert(registration_id, (subscriber_ref.clone(), backlog));
+            .insert(registration_id, subscriber_ref.clone());
+        // Where it says whether it holds this topic back.
+        let _ = subscriber_ref.send_message(BrokerMessage::TopicAttached { topic: myself });
 
         // Drain queued messages now that someone is listening.
         while let Some((_queued_at, msg, published_by, origin)) = state.queue.pop_front() {
@@ -1026,6 +964,7 @@ impl TopicAgent {
         try_set_parent_otel(&span, trace_ctx);
         let _g = span.enter();
 
+        state.holding.remove(&registration_id);
         if state.subscribers.remove(&registration_id).is_some() {
             trace!("Removed subscriber for registration {registration_id}");
         } else {

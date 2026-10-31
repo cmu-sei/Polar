@@ -65,7 +65,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use cassini_tracing::try_set_parent_otel;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -74,19 +74,19 @@ static ZERO_LEN_LAST_LOG_MS: AtomicU64 = AtomicU64::new(0);
 static ZERO_LEN_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// A connection's write half, and what ends it from outside: a write that waits on a client that does not read, and
-/// the reader, both give up when it is cut.
+/// the reader, both give up when it is cut. Its session holds it as its `ConnectionControl`, given by the Listener
+/// (`BrokerMessage::ConnectionOpened`), and its reader tells the session what it reads and when it waits.
 pub struct ConnWriter {
     half: Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>,
     cut: CancellationToken,
     why: std::sync::Mutex<Option<String>>,
-    /// The session registered on this connection, once it is.
-    session: std::sync::Mutex<Option<String>>,
-    /// When its reader last read an acknowledgement (or the connection opened), in milliseconds since the epoch: the
-    /// connection's progress, whatever topic it was for and however long the Listener takes to pass it on
-    /// (cassini-backpressure.md, second review, finding B).
-    progress_ms: AtomicU64,
-    /// Its reader waits for a frame's admission: what follows that frame (its acknowledgements among it) is not read.
-    admitting: AtomicBool,
+    /// The connection's client id, as its session knows it.
+    client_id: String,
+    /// The session registered on this connection, once it is: its reader's facts go to it.
+    session: std::sync::Mutex<Option<ActorRef<BrokerMessage>>>,
+    /// When its reader last told its session of an acknowledgement, in milliseconds since the epoch (at most a few a
+    /// second are told).
+    told_progress_ms: AtomicU64,
     /// Until when its reader refuses for now a publish it cannot admit at once, instead of waiting for it, in
     /// milliseconds since the epoch (second review, finding A).
     refuse_until_ms: AtomicU64,
@@ -94,88 +94,84 @@ pub struct ConnWriter {
     refuse: tokio::sync::Notify,
     /// How many frames have been written to it: each write is numbered, from one, as its client counts what it reads.
     frames: AtomicU64,
-    /// When it was last spared an ending for refusals for now (`spare`), in milliseconds since the epoch; zero if never.
-    spared_ms: AtomicU64,
 }
 
-/// A reader waiting for an admission, marked on its connection until it stops waiting.
+impl std::fmt::Debug for ConnWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnWriter")
+            .field("client_id", &self.client_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// How often a reader tells its session it read an acknowledgement, at most.
+const PROGRESS_TOLD_EVERY: Duration = Duration::from_millis(100);
+
+/// A reader waiting for an admission: its session is told when it starts and stops waiting.
 struct Admitting<'a>(&'a ConnWriter);
 
 impl<'a> Admitting<'a> {
     fn new(writer: &'a ConnWriter) -> Self {
-        writer.admitting.store(true, Ordering::SeqCst);
+        writer.tell_session(BrokerMessage::ConnectionWaiting {
+            client_id: writer.client_id.clone(),
+            waiting: true,
+        });
         Admitting(writer)
     }
 }
 
 impl Drop for Admitting<'_> {
     fn drop(&mut self) {
-        self.0.admitting.store(false, Ordering::SeqCst);
+        self.0.tell_session(BrokerMessage::ConnectionWaiting {
+            client_id: self.0.client_id.clone(),
+            waiting: false,
+        });
     }
 }
 
 type SharedWriter = Arc<ConnWriter>;
 
 impl ConnWriter {
-    fn new(half: BufWriter<WriteHalf<TlsStream<TcpStream>>>) -> SharedWriter {
+    fn new(client_id: String, half: BufWriter<WriteHalf<TlsStream<TcpStream>>>) -> SharedWriter {
         Arc::new(ConnWriter {
             half: Mutex::new(half),
             cut: CancellationToken::new(),
             why: std::sync::Mutex::new(None),
+            client_id,
             session: std::sync::Mutex::new(None),
-            progress_ms: AtomicU64::new(now_ms()),
-            admitting: AtomicBool::new(false),
+            told_progress_ms: AtomicU64::new(0),
             refuse_until_ms: AtomicU64::new(0),
             refuse: tokio::sync::Notify::new(),
             frames: AtomicU64::new(0),
-            spared_ms: AtomicU64::new(0),
         })
     }
 
-    /// Whether its reader waits for a frame's admission, so the broker is not reading what follows it.
-    pub fn is_admitting(&self) -> bool {
-        self.admitting.load(Ordering::SeqCst)
+    /// Tells its session, if it has one yet.
+    fn tell_session(&self, message: BrokerMessage) {
+        if let Some(session) = self.session.lock().unwrap().as_ref() {
+            let _ = session.send_message(message);
+        }
     }
 
-    /// Its reader refuses for now, for `how_long`, each publish it cannot admit at once, and stops waiting for the one
-    /// it waits for: it reads on, so the acknowledgements behind them are read. For a connection whose session holds
-    /// part of an exhausted budget while its reader waits for room: the room may be its own acknowledgements' to make.
-    pub fn refuse_for(&self, how_long: Duration) {
-        let until = now_ms().saturating_add(how_long.as_millis() as u64);
-        self.refuse_until_ms.store(until, Ordering::SeqCst);
-        self.refuse.notify_one();
-    }
-
-    /// Spares this connection the ending a stall would bring, when the stall may be the broker's doing: its reader
-    /// waits for room, so what follows (its acknowledgements among it) is not read. Its publishes are refused for now
-    /// for `stall` instead (`refuse_for`), and its reader reads on. Spared again only once it has made progress since:
-    /// a client that acknowledges nothing is ended at the next look. True if it was spared.
-    pub fn spare(&self, stall: Duration) -> bool {
-        if !self.is_admitting() {
-            return false;
+    /// Its reader read an acknowledgement: its session is told, at most every `PROGRESS_TOLD_EVERY`.
+    fn progressed(&self) {
+        let now = now_ms();
+        let told = self.told_progress_ms.load(Ordering::SeqCst);
+        if now.saturating_sub(told) >= PROGRESS_TOLD_EVERY.as_millis() as u64
+            && self
+                .told_progress_ms
+                .compare_exchange(told, now, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            self.tell_session(BrokerMessage::ConnectionProgress {
+                client_id: self.client_id.clone(),
+            });
         }
-        let spared = self.spared_ms.load(Ordering::SeqCst);
-        if spared != 0 && self.progress_ms.load(Ordering::SeqCst) < spared {
-            return false;
-        }
-        self.spared_ms.store(now_ms().max(1), Ordering::SeqCst);
-        self.refuse_for(stall);
-        true
     }
 
     /// Whether its reader refuses for now what it cannot admit at once.
     fn refusing(&self) -> bool {
         now_ms() < self.refuse_until_ms.load(Ordering::SeqCst)
-    }
-
-    /// Its reader read an acknowledgement.
-    fn progressed(&self) {
-        self.progress_ms.store(now_ms(), Ordering::SeqCst);
-    }
-
-    /// How long since its reader last read an acknowledgement, or since it opened.
-    pub fn idle_for(&self) -> Duration {
-        Duration::from_millis(now_ms().saturating_sub(self.progress_ms.load(Ordering::SeqCst)))
     }
 
     fn why(&self) -> String {
@@ -187,36 +183,30 @@ impl ConnWriter {
     }
 }
 
-/// The connections open now, by client id, so one can be ended from outside its Listener: a Listener waiting on a
-/// write to a client that does not read cannot be sent anything.
-static CONNECTIONS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<String, std::sync::Weak<ConnWriter>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+/// What a session holds of its connection: weakly, so the connection closes when its Listener ends, whoever holds this.
+#[derive(Debug)]
+struct ConnHandle(std::sync::Weak<ConnWriter>);
 
-/// The open connection of the session `registration_id`, if it has one.
-pub fn connection_of(registration_id: &str) -> Option<SharedWriter> {
-    CONNECTIONS
-        .lock()
-        .unwrap()
-        .values()
-        .filter_map(std::sync::Weak::upgrade)
-        .find(|writer| writer.session.lock().unwrap().as_deref() == Some(registration_id))
-}
+impl cassini_types::ConnectionControl for ConnHandle {
+    /// Ends the connection, saying `why`: its writes and its reader give up, and its Listener ends, as on a lost
+    /// connection (its session is kept for the retention window).
+    fn cut(&self, why: &str) {
+        if let Some(writer) = self.0.upgrade() {
+            *writer.why.lock().unwrap() = Some(why.to_string());
+            writer.cut.cancel();
+        }
+    }
 
-/// Ends the connection of `client_id`, saying `why`: its writes and its reader give up, and its Listener ends, as on a
-/// lost connection (its session is kept for the retention window). False if there is no such connection.
-pub fn cut_connection(client_id: &str, why: &str) -> bool {
-    let Some(writer) = CONNECTIONS
-        .lock()
-        .unwrap()
-        .get(client_id)
-        .and_then(std::sync::Weak::upgrade)
-    else {
-        return false;
-    };
-    *writer.why.lock().unwrap() = Some(why.to_string());
-    writer.cut.cancel();
-    true
+    /// Its reader refuses for now, for `how_long`, each publish it cannot admit at once, and stops waiting for the one
+    /// it waits for: it reads on, so the acknowledgements behind them are read. For a connection whose session holds
+    /// part of an exhausted budget while its reader waits for room: the room may be its own acknowledgements' to make.
+    fn refuse_for(&self, how_long: Duration) {
+        if let Some(writer) = self.0.upgrade() {
+            let until = now_ms().saturating_add(how_long.as_millis() as u64);
+            writer.refuse_until_ms.store(until, Ordering::SeqCst);
+            writer.refuse.notify_one();
+        }
+    }
 }
 
 /// Takes a frame's bytes from its connection's window and from the budget, waiting for each; `None` if the connection
@@ -718,11 +708,7 @@ impl Actor for ListenerManager {
                                 }
                                 let client_id = Uuid::new_v4().to_string();
                                 let (reader, writer) = split(stream);
-                                let writer = ConnWriter::new(BufWriter::new(writer));
-                                CONNECTIONS
-                                    .lock()
-                                    .unwrap()
-                                    .insert(client_id.clone(), Arc::downgrade(&writer));
+                                let writer = ConnWriter::new(client_id.clone(), BufWriter::new(writer));
                                 let listener_args = ListenerArguments {
                                     writer,
                                     reader: Some(reader),
@@ -1250,7 +1236,6 @@ impl Actor for Listener {
         if let Some(handle) = state.task_handle.take() {
             handle.abort();
         }
-        CONNECTIONS.lock().unwrap().remove(&state.client_id);
         Ok(())
     }
 
@@ -1534,6 +1519,13 @@ impl Actor for Listener {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             BrokerMessage::SetListenerSessionRef { session_ref } => {
+                // The session is given its connection, and from now on its reader tells it what it reads and when it
+                // waits, beside this Listener's mailbox (which waits behind its writes).
+                let _ = session_ref.send_message(BrokerMessage::ConnectionOpened {
+                    client_id: state.client_id.clone(),
+                    control: Arc::new(ConnHandle(Arc::downgrade(&state.writer))),
+                });
+                *state.writer.session.lock().unwrap() = Some(session_ref.clone());
                 state.session_ref = Some(session_ref);
             }
             BrokerMessage::JudgeSubscriptions { topics } => {
@@ -1826,7 +1818,6 @@ impl Listener {
                 Ok(registration_id) => {
                     let reg_id_clone = registration_id.clone();
                     state.registration_id = Some(registration_id.clone());
-                    *state.writer.session.lock().unwrap() = Some(registration_id.clone());
 
                     let msg = ClientMessage::RegistrationResponse {
                         result: Ok(registration_id.clone()),

@@ -234,7 +234,6 @@ mod tests {
             .send_message(BrokerMessage::AddSubscriber {
                 registration_id: "live".to_string(),
                 subscriber_ref: live,
-                backlog: Arc::new(cassini_types::Backlog::new("test", usize::MAX)),
                 trace_ctx: None,
             })
             .unwrap();
@@ -295,7 +294,6 @@ mod tests {
         topic_actor.send_message(BrokerMessage::AddSubscriber {
             registration_id: "ended".to_string(),
             subscriber_ref: ended.clone(),
-            backlog: Arc::new(cassini_types::Backlog::new("test", usize::MAX)),
             trace_ctx: None,
         })?;
         ended.stop(None);
@@ -318,7 +316,6 @@ mod tests {
         topic_actor.send_message(BrokerMessage::AddSubscriber {
             registration_id: "live".to_string(),
             subscriber_ref: live,
-            backlog: Arc::new(cassini_types::Backlog::new("test", usize::MAX)),
             trace_ctx: None,
         })?;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;

@@ -30,16 +30,18 @@
 //!   alarm), until what is held falls to its low water. Deliveries keep draining, so it recovers.
 //! - **A window per connection:** the bytes of the frames its reader has admitted that no topic has yet accepted. A
 //!   reader that cannot take a frame's bytes from it does not read, and TCP pushes back on the publisher.
-//! - **A high water per subscriber** ([`cassini_types::Backlog`]) on its delivery outbox, which its topic reads, and
-//!   **the stall bound**: a subscriber above its high water for longer than it has its connection ended.
+//! - **A high water per subscriber** ([`cassini_types::Backlog`]) on its delivery outbox, which the subscriber owns and
+//!   tells its topic of (`TopicHold`), and **the stall bound**, kept by the pressure manager and decided by the one
+//!   stall policy (`crate::pressure`).
+//!
+//! The budget is accounting only: what it holds, its alarm, and its counters. No decision across actors is made
+//! through it.
 
-use cassini_types::{Backlog, BrokerMessage, MAX_FRAME_BYTES};
-use ractor::ActorRef;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use cassini_types::{Backlog, MAX_FRAME_BYTES};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::Notify;
-use tracing::{info, warn};
 
 const MIB: usize = 1024 * 1024;
 
@@ -152,11 +154,8 @@ struct Inner {
     refused: AtomicU64,
     slow: AtomicU64,
     alarms: AtomicU64,
+    /// What is held, by name, for the budget's report: read for it only, never for a decision.
     holders: Mutex<Vec<Weak<Backlog>>>,
-    /// Told when the budget is exhausted: the subscriber manager, whose subscribers that are away let go.
-    listener: Mutex<Option<ActorRef<BrokerMessage>>>,
-    /// The broker's drain has begun: the watchdog stops.
-    draining: AtomicBool,
 }
 
 /// A reader counted as waiting on the budget, until it is dropped.
@@ -221,14 +220,9 @@ impl Inner {
         let mut state = self.state.lock().unwrap();
         state.used = state.used.saturating_sub(bytes);
         if state.alarm && state.used <= self.low_water {
+            // Lifted: its readers read. The pressure manager says so when it next looks.
             state.alarm = false;
-            let used = state.used;
             drop(state);
-            info!(
-                used,
-                limit = self.limit,
-                "the broker's memory budget is below its low water again: its readers read"
-            );
             self.notify.notify_waiters();
         }
     }
@@ -248,20 +242,7 @@ impl Budget {
             slow: AtomicU64::new(0),
             alarms: AtomicU64::new(0),
             holders: Mutex::new(Vec::new()),
-            listener: Mutex::new(None),
-            draining: AtomicBool::new(false),
         }))
-    }
-
-    /// The broker's drain has begun: from now its sessions are let go by the drain, and the watchdog ends (it would
-    /// otherwise go on telling the subscribers and cutting connections the drain is ending).
-    pub fn begin_drain(&self) {
-        self.0.draining.store(true, Ordering::SeqCst);
-    }
-
-    /// Whether the broker's drain has begun.
-    pub fn is_draining(&self) -> bool {
-        self.0.draining.load(Ordering::SeqCst)
     }
 
     pub fn limit(&self) -> usize {
@@ -278,7 +259,7 @@ impl Budget {
     }
 
     /// Takes `bytes` if they fit and the budget is not exhausted. When they do not fit the budget is exhausted from now
-    /// until what is held falls to its low water, and that is logged, once, with its largest holders.
+    /// until what is held falls to its low water (counted; the pressure manager says so, with its largest holders).
     pub fn try_charge(&self, bytes: usize) -> Option<Charge> {
         let mut state = self.0.state.lock().unwrap();
         if !state.alarm && state.used + bytes <= self.0.limit {
@@ -293,9 +274,8 @@ impl Budget {
         }
         if !state.alarm {
             state.alarm = true;
-            let used = state.used;
             drop(state);
-            self.raise_alarm(used, bytes);
+            self.0.alarms.fetch_add(1, Ordering::Relaxed);
         }
         None
     }
@@ -314,28 +294,6 @@ impl Budget {
             let _waiting = Waiting::new(&self.0);
             notified.await;
         }
-    }
-
-    fn raise_alarm(&self, used: usize, wanted: usize) {
-        self.0.alarms.fetch_add(1, Ordering::Relaxed);
-        let largest = self.largest_holders(5);
-        warn!(
-            used,
-            limit = self.0.limit,
-            wanted,
-            largest = ?largest,
-            "the broker's memory budget is exhausted: every reader waits until what is held falls to {} bytes, and \
-             subscribers whose clients are away let go of what they hold",
-            self.0.low_water
-        );
-        if let Some(listener) = self.0.listener.lock().unwrap().as_ref() {
-            let _ = listener.send_message(BrokerMessage::BudgetExhausted);
-        }
-    }
-
-    /// Who is told when the budget is exhausted.
-    pub fn tell_when_exhausted(&self, listener: ActorRef<BrokerMessage>) {
-        *self.0.listener.lock().unwrap() = Some(listener);
     }
 
     /// Counts what is held under `backlog`'s name in what the budget reports: a subscriber's delivery outbox, a
@@ -399,99 +357,6 @@ impl Budget {
             alarms: self.0.alarms.load(Ordering::Relaxed),
         }
     }
-}
-
-/// The connected subscribers the watchdog ends while the budget is exhausted: each holding something and without
-/// progress (an acknowledgement, a return) for at least `stall`. Pure, for its tests.
-pub fn stalled_while_exhausted(holders: &[Arc<Backlog>], stall: Duration) -> Vec<Arc<Backlog>> {
-    holders
-        .iter()
-        .filter(|b| b.owner().is_some() && b.stalled_for().is_some_and(|d| d >= stall))
-        .cloned()
-        .collect()
-}
-
-/// While the budget is exhausted, every stall check: tells the subscriber manager again (a subscriber that went away
-/// since the alarm rose lets go of what it holds), and ends the connection of every connected subscriber that holds
-/// something and has made no progress for the stall bound. A topic sees a stall only when a subscriber is above its
-/// high water and holds the topic back; with the budget exhausted no reader reads, so nothing may be held back while
-/// subscribers below their high water hold the budget. This bounds the broker's recovery by the stall bound
-/// (docs/architecture/cassini-backpressure.md, review finding 1). Ends with `broker`.
-pub fn spawn_watchdog(bounds: Bounds, broker: ActorRef<BrokerMessage>) {
-    tokio::spawn(async move {
-        let mut every = tokio::time::interval(bounds.stall_check());
-        loop {
-            every.tick().await;
-            // The drain lets go of what is held; the watchdog would only cut what it is ending.
-            if bounds.budget.is_draining()
-                || matches!(
-                    broker.get_status(),
-                    ractor::ActorStatus::Stopping | ractor::ActorStatus::Stopped
-                )
-            {
-                return;
-            }
-            if !bounds.budget.is_exhausted() {
-                continue;
-            }
-            if let Some(listener) = bounds.budget.0.listener.lock().unwrap().as_ref() {
-                let _ = listener.send_message(BrokerMessage::BudgetExhausted);
-            }
-            let sessions = ractor::registry::where_is(crate::SESSION_MANAGER_NAME.to_string());
-            // Decided once a session a look: its other stalled subscriptions go with it.
-            let mut ended = std::collections::HashSet::new();
-            let mut spared = std::collections::HashSet::new();
-            for backlog in stalled_while_exhausted(&bounds.budget.holders(), bounds.stall) {
-                let Some((registration_id, topic)) = backlog.owner() else {
-                    continue;
-                };
-                if spared.contains(registration_id) {
-                    continue;
-                }
-                if let Some(connection) = crate::listener::connection_of(registration_id) {
-                    // Progress is the connection's: an acknowledgement on any topic, read by its reader, however long
-                    // its Listener takes to pass it on (cassini-backpressure.md, second review, finding B).
-                    if connection.idle_for() < bounds.stall {
-                        continue;
-                    }
-                    // Its reader waits for room, so what it has acknowledged is not read: the broker's doing, not
-                    // its. Its publishes are refused for now instead, and its reader reads on (finding A).
-                    if connection.spare(bounds.stall) {
-                        spared.insert(registration_id.to_string());
-                        info!(
-                            subscriber = backlog.name(),
-                            held = backlog.bytes(),
-                            "the broker's memory budget is exhausted and a subscriber's acknowledgements wait behind \
-                             its own publishes: they are refused for now, and its connection kept"
-                        );
-                        continue;
-                    }
-                }
-                if !ended.insert(registration_id.to_string()) {
-                    backlog.set_connected(false);
-                    continue;
-                }
-                let stalled = backlog.stalled_for().unwrap_or_default();
-                backlog.set_connected(false);
-                bounds.budget.count_slow_disconnection();
-                warn!(
-                    subscriber = backlog.name(),
-                    held = backlog.bytes(),
-                    ?stalled,
-                    "the broker's memory budget is exhausted and a subscriber has acknowledged nothing for the stall \
-                     bound: its connection is ended"
-                );
-                if let Some(sessions) = &sessions {
-                    let _ = sessions.send_message(BrokerMessage::SlowSubscriber {
-                        registration_id: registration_id.to_string(),
-                        topic: topic.to_string(),
-                        held: backlog.bytes(),
-                        above_for: stalled,
-                    });
-                }
-            }
-        }
-    });
 }
 
 /// One connection's ingress window: the bytes of the publishes its reader admitted that no topic has accepted yet.
@@ -651,68 +516,5 @@ mod tests {
         waiting.abort();
         let _ = waiting.await;
         assert_eq!(budget.stats().readers_waiting, 0);
-    }
-
-    /// An actor that records the messages it is sent, standing in for whoever the watchdog tells.
-    struct Recorder;
-
-    #[ractor::async_trait]
-    impl ractor::Actor for Recorder {
-        type Msg = BrokerMessage;
-        type State = Arc<Mutex<Vec<String>>>;
-        type Arguments = Arc<Mutex<Vec<String>>>;
-
-        async fn pre_start(
-            &self,
-            _myself: ActorRef<BrokerMessage>,
-            seen: Self::Arguments,
-        ) -> Result<Self::State, ractor::ActorProcessingErr> {
-            Ok(seen)
-        }
-
-        async fn handle(
-            &self,
-            _myself: ActorRef<BrokerMessage>,
-            message: BrokerMessage,
-            seen: &mut Self::State,
-        ) -> Result<(), ractor::ActorProcessingErr> {
-            seen.lock().unwrap().push(format!("{message:?}"));
-            Ok(())
-        }
-    }
-
-    /// The watchdog tells the listener again while the budget is exhausted, and stops once the broker's drain has
-    /// begun: what the drain lets go of is the drain's (finding F).
-    #[tokio::test]
-    async fn the_watchdog_stops_when_the_drain_begins() {
-        let bounds = Bounds::new(MAX_FRAME_BYTES, Duration::from_millis(400)).unwrap();
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let (listener, _) = ractor::Actor::spawn(None, Recorder, seen.clone())
-            .await
-            .unwrap();
-        let (broker, _) = ractor::Actor::spawn(None, Recorder, Arc::new(Mutex::new(Vec::new())))
-            .await
-            .unwrap();
-        bounds.budget.tell_when_exhausted(listener.clone());
-        let _held = bounds.budget.try_charge(MAX_FRAME_BYTES).unwrap();
-        assert!(bounds.budget.try_charge(1).is_none());
-        let told = || {
-            seen.lock()
-                .unwrap()
-                .iter()
-                .filter(|m| m.contains("BudgetExhausted"))
-                .count()
-        };
-        let raised = told();
-        spawn_watchdog(bounds.clone(), broker.clone());
-        tokio::time::sleep(Duration::from_millis(450)).await;
-        assert!(told() > raised, "told again while exhausted");
-        bounds.budget.begin_drain();
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        let at_drain = told();
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(told(), at_drain, "not told again once the drain has begun");
-        listener.stop(None);
-        broker.stop(None);
     }
 }

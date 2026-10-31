@@ -977,6 +977,50 @@ async fn a_delivery_the_client_could_not_decode_is_let_go_when_it_says_so() {
     .await;
 }
 
+/// The pressure manager is the broker's child: one that ends while the broker runs is started again by it, and the
+/// stall checks go on (the maintainer's review: no policy outside the supervision tree).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_pressure_manager_is_started_again_when_it_ends_and_the_checks_go_on() {
+    let stall = Duration::from_secs(2);
+    with_broker_bounded(BUDGET, stall, |broker| async move {
+        let budget = broker.budget();
+        let first = ractor::registry::where_is(cassini_broker::PRESSURE_MANAGER_NAME.to_string())
+            .expect("the broker runs its pressure manager");
+        let first_id = first.get_id();
+        first.kill();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let again = loop {
+            if let Some(cell) =
+                ractor::registry::where_is(cassini_broker::PRESSURE_MANAGER_NAME.to_string())
+                && cell.get_id() != first_id
+            {
+                break Some(cell);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(again.is_some(), "a new pressure manager is started");
+        // Its checks go on: a subscriber that stops reading is ended after the stall bound, as before.
+        let mut silent = RawConnection::open(&broker, "silent.test", Some(4096)).await;
+        let session = silent.register().await;
+        silent.subscribe(&session, "news").await;
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        for n in 0..64u32 {
+            let mut payload = vec![0u8; MESSAGE];
+            payload[..4].copy_from_slice(&n.to_be_bytes());
+            publisher.publish("news", &payload);
+        }
+        assert!(
+            silent.closed_within(stall * 4).await,
+            "the new manager's checks end a stalled subscriber: {:?}",
+            budget.stats()
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_broker_whose_budget_is_below_one_frame_does_not_start_and_says_why() {
     let refused = cassini_broker::budget::Bounds::new(

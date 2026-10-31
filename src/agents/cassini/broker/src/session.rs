@@ -264,34 +264,24 @@ impl Actor for SessionManager {
             BrokerMessage::SessionExpiryTick => {
                 Self::end_expired_sessions(state);
             }
-            // A subscriber held its topic back past the stall bound: its connection is ended (cassini-backpressure.md,
-            // "Decided" 1), and its session detaches for the retention window as on any lost connection.
-            BrokerMessage::SlowSubscriber {
+            // A session ended its connection for a stall (cassini-backpressure.md, "Decided" 1, by the one stall policy
+            // in crate::pressure): said with its identity. The session detaches for the retention window as on any
+            // lost connection.
+            BrokerMessage::SessionStallEnded {
                 registration_id,
                 topic,
                 held,
-                above_for,
+                stalled_for,
             } => {
-                let session = state.sessions.get(&registration_id);
                 warn!(
                     %registration_id,
-                    identity = ?session.and_then(|s| s.identity.clone()),
+                    identity = ?state.sessions.get(&registration_id).and_then(|s| s.identity.clone()),
                     %topic,
                     held,
-                    ?above_for,
+                    ?stalled_for,
                     "a subscriber held its topic back past the stall bound: its connection is ended, and its \
                      session kept for the retention window"
                 );
-                if let Some(session) = session {
-                    let _ = session
-                        .agent_ref
-                        .send_message(BrokerMessage::SlowSubscriber {
-                            registration_id,
-                            topic,
-                            held,
-                            above_for,
-                        });
-                }
             }
             BrokerMessage::SessionHeld { registration_id } => {
                 Self::complete_takeover(state, &registration_id);
@@ -865,6 +855,84 @@ pub struct SessionAgentState {
     registration_id: String, // store for convenience
     shutting_down: bool,
     broker: Option<ActorRef<BrokerMessage>>, // will be set after creation
+    /// Its connection, as its Listener gave it, and what its reader has told of it: the facts the stall policy decides
+    /// from (`crate::pressure::verdict`).
+    connection: Option<Connection>,
+}
+
+/// A session's connection, and what its reader has said of it.
+struct Connection {
+    client_id: String,
+    control: Arc<dyn cassini_types::ConnectionControl>,
+    /// When its reader last read an acknowledgement, or the connection opened.
+    progress_at: tokio::time::Instant,
+    /// Its reader waits for a frame's admission.
+    waiting: bool,
+    /// When it was last spared, and when its last progress before that was.
+    spared: Option<(tokio::time::Instant, tokio::time::Instant)>,
+}
+
+impl SessionAgent {
+    /// A subscriber of this session says it has stalled: decided by the one stall policy from what this session knows
+    /// of its connection (`crate::pressure::verdict`). Spared, its reader refuses for now and reads on; ended, its
+    /// connection is cut from outside its Listener (which may be waiting on a write to this client), and the session
+    /// detaches as on any lost connection.
+    #[allow(clippy::too_many_arguments)]
+    fn judge_stall(
+        myself: &ActorRef<BrokerMessage>,
+        state: &mut SessionAgentState,
+        topic: String,
+        held: usize,
+        stalled_for: std::time::Duration,
+        exhausted: bool,
+        stall: std::time::Duration,
+        subscriber: ActorRef<BrokerMessage>,
+    ) {
+        use crate::pressure::{StallFacts, Verdict, verdict};
+        let Some(connection) = state.connection.as_mut() else {
+            return;
+        };
+        let now = tokio::time::Instant::now();
+        let facts = StallFacts {
+            exhausted,
+            since_progress: now - connection.progress_at,
+            reader_waiting: connection.waiting,
+            since_spared: connection.spared.map(|(at, _)| now - at),
+            progressed_since_spared: connection
+                .spared
+                .is_some_and(|(_, before)| connection.progress_at > before),
+        };
+        match verdict(stall, facts) {
+            Verdict::Ignore => {}
+            Verdict::Spare => {
+                connection.control.refuse_for(stall);
+                connection.spared = Some((now, connection.progress_at));
+                info!(
+                    registration_id = %state.registration_id,
+                    %topic,
+                    held,
+                    ?stalled_for,
+                    "a stalled subscriber's connection waits for room, so what it acknowledged may be unread: its \
+                     publishes are refused for now, and its connection kept"
+                );
+            }
+            Verdict::End => {
+                connection.control.cut(&format!(
+                    "the broker ended this connection: its subscription to {topic} stalled past the stall bound"
+                ));
+                state.connection = None;
+                let _ = subscriber.send_message(BrokerMessage::StallEnded);
+                if let Some(manager) = myself.try_get_supervisor() {
+                    let _ = manager.send_message(BrokerMessage::SessionStallEnded {
+                        registration_id: state.registration_id.clone(),
+                        topic,
+                        held,
+                        stalled_for,
+                    });
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -884,6 +952,7 @@ impl Actor for SessionAgent {
             registration_id,
             shutting_down: false,
             broker: None,
+            connection: None,
         })
     }
 
@@ -984,17 +1053,46 @@ impl Actor for SessionAgent {
                     });
                 }
             }
-            BrokerMessage::SlowSubscriber { topic, .. } => {
-                // The connection is cut from outside its Listener, which may be waiting on a write to this client.
-                let client_id = state.client_ref.get_name().unwrap_or_default();
-                let why = format!(
-                    "the broker ended this connection: its subscription to {topic} held the topic back past the \
-                     stall bound"
-                );
-                if !crate::listener::cut_connection(&client_id, &why) {
-                    debug!(%client_id, "the slow subscriber's connection had already ended");
+            BrokerMessage::ConnectionOpened { client_id, control } => {
+                state.connection = Some(Connection {
+                    client_id,
+                    control,
+                    progress_at: tokio::time::Instant::now(),
+                    waiting: false,
+                    spared: None,
+                });
+            }
+            BrokerMessage::ConnectionProgress { client_id } => {
+                if let Some(connection) = state.connection.as_mut()
+                    && connection.client_id == client_id
+                {
+                    connection.progress_at = tokio::time::Instant::now();
                 }
             }
+            BrokerMessage::ConnectionWaiting { client_id, waiting } => {
+                if let Some(connection) = state.connection.as_mut()
+                    && connection.client_id == client_id
+                {
+                    connection.waiting = waiting;
+                }
+            }
+            BrokerMessage::SubscriberStalled {
+                topic,
+                held,
+                stalled_for,
+                exhausted,
+                stall,
+                subscriber,
+            } => Self::judge_stall(
+                &myself,
+                state,
+                topic,
+                held,
+                stalled_for,
+                exhausted,
+                stall,
+                subscriber,
+            ),
             BrokerMessage::PushMessage {
                 payload,
                 topic,

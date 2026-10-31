@@ -262,8 +262,9 @@ fn default_limits() -> (usize, Duration) {
 
 /// The names the broker's actors register under. A broker left over from a test that failed holds
 /// them, so every start clears them first.
-const NAMES: [&str; 6] = [
+const NAMES: [&str; 7] = [
     cassini_broker::BROKER_NAME,
+    cassini_broker::PRESSURE_MANAGER_NAME,
     cassini_broker::LISTENER_MANAGER_NAME,
     cassini_broker::SESSION_MANAGER_NAME,
     cassini_broker::TOPIC_MANAGER_NAME,
