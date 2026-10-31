@@ -1025,7 +1025,11 @@ impl GitRepoWorker {
                 on_commit(ref_name, commit)
             })?;
 
-            on_ref_update(ref_name, prev, tip);
+            // A ref that is where the last pass left it has not been updated, and is not reported as if it had:
+            // every consumer would otherwise have to know to ignore an event whose `old` is its `new`.
+            if prev != Some(tip) {
+                on_ref_update(ref_name, prev, tip);
+            }
             tips.push((ref_name.to_string(), tip));
         }
 

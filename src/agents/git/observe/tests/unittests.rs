@@ -312,6 +312,49 @@ async fn an_event_the_client_refused_leaves_its_ref_s_last_seen_where_it_was() {
     );
 }
 
+#[test]
+fn a_ref_that_has_not_moved_is_not_reported_again() {
+    init_logging();
+    let (_dir, repo) = bare_repo();
+    let history = linear_history(&repo, "refs/heads/main", 2);
+    let tip = *history.last().unwrap();
+
+    let mut last_seen = HashMap::new();
+    let config = dummy_config(vec!["refs/heads/main".into()]);
+    let provider = noop_provider();
+    let mut pass = |last_seen: &mut HashMap<String, Oid>| {
+        let mut reported = Vec::new();
+        GitRepoWorker::observe_repository(
+            &repo,
+            &provider,
+            &config,
+            None,
+            last_seen,
+            |_, _| {},
+            |ref_name, old, new| reported.push((ref_name.to_string(), old, new)),
+        )
+        .unwrap();
+        reported
+    };
+
+    // The first pass reports the ref from nothing; a second, with the ref where it was, reports nothing.
+    assert_eq!(
+        pass(&mut last_seen),
+        vec![("refs/heads/main".to_string(), None, tip)]
+    );
+    assert!(pass(&mut last_seen).is_empty());
+    assert_eq!(last_seen["refs/heads/main"], tip);
+
+    // Once it moves, it is reported again, with the tip it moved from.
+    let next = make_commit(&repo, "next", &[&repo.find_commit(tip).unwrap()]);
+    repo.reference("refs/heads/main", next, true, "advance")
+        .unwrap();
+    assert_eq!(
+        pass(&mut last_seen),
+        vec![("refs/heads/main".to_string(), Some(tip), next)]
+    );
+}
+
 // One repository that cannot be started (an unreachable host, bad credentials) must not end the
 // supervisor of all the others: its failure is logged and the supervisor carries on.
 #[test]
