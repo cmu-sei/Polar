@@ -18,11 +18,13 @@
 
   This Software includes and/or makes use of Third-Party Software each subject to its own license.
 
+  DM26-0670
+-->
 
 # Feature request: the git observer reports a ref when it moves
 
-Requested 2026-10-31 by the Blitz deployment (a consumer of the fork). Part of it is built on this branch
-(`fix/git-observer-report-moved-refs-only`); the rest is the item already in `remaining-work.md`, "Git observer state,
+Requested 2026-10-31 by the Blitz deployment (a consumer of the fork). Part of it is built (merged 2026-10-31,
+in both `observe_refs` and the worker's `publish_ref_update`); the rest is the item already in `remaining-work.md`, "Git observer state,
 decided 2026-10-12 (not built)", and is left for its owner.
 
 ## What was seen

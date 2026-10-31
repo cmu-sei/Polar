@@ -322,7 +322,7 @@ fn a_ref_that_has_not_moved_is_not_reported_again() {
     let mut last_seen = HashMap::new();
     let config = dummy_config(vec!["refs/heads/main".into()]);
     let provider = noop_provider();
-    let mut pass = |last_seen: &mut HashMap<String, Oid>| {
+    let pass = |last_seen: &mut HashMap<String, Oid>| {
         let mut reported = Vec::new();
         GitRepoWorker::observe_repository(
             &repo,
@@ -576,4 +576,81 @@ proptest::proptest! {
         proptest::prop_assert_eq!(published, reachable(&repo, *oids.last().unwrap()));
         proptest::prop_assert!(parents_first(&repo, &order));
     }
+}
+
+/// The worker's path (`publish_ref`, then `publish_ref_update`) keeps the same rule as `observe_refs`: a ref whose tip is
+/// where its checkpoint left it is not reported again, so a consumer acting on `RefUpdated` acts once per move.
+#[tokio::test]
+async fn the_worker_does_not_report_a_ref_again_until_it_moves() {
+    init_logging();
+    let (_dir, repo) = bare_repo();
+    let history = linear_history(&repo, "refs/heads/main", 3);
+    let tip = *history.last().unwrap();
+    let repo_id = RepoId::from_url("local");
+    let mut checkpoint = Checkpoint::default();
+
+    let first = RoomFor::new(usize::MAX);
+    assert!(
+        publish_ref(
+            &first,
+            &repo,
+            &repo_id,
+            "refs/heads/main",
+            &mut checkpoint,
+            100,
+            2
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(first.ref_updates(), 1, "the first pass reports the ref");
+    assert_eq!(checkpoint.tip, Some(tip));
+
+    let again = RoomFor::new(usize::MAX);
+    assert!(
+        publish_ref(
+            &again,
+            &repo,
+            &repo_id,
+            "refs/heads/main",
+            &mut checkpoint,
+            100,
+            2
+        )
+        .await
+        .unwrap(),
+        "nothing to publish is done, not refused"
+    );
+    assert_eq!(
+        again.ref_updates(),
+        0,
+        "an unmoved ref is not reported again"
+    );
+    assert!(again.commits().is_empty());
+    assert_eq!(
+        checkpoint.tip,
+        Some(tip),
+        "the checkpoint stays where it was"
+    );
+
+    let next = make_commit(&repo, "next", &[&repo.find_commit(tip).unwrap()]);
+    repo.reference("refs/heads/main", next, true, "advance")
+        .unwrap();
+    let moved = RoomFor::new(usize::MAX);
+    assert!(
+        publish_ref(
+            &moved,
+            &repo,
+            &repo_id,
+            "refs/heads/main",
+            &mut checkpoint,
+            100,
+            2
+        )
+        .await
+        .unwrap()
+    );
+    assert_eq!(moved.ref_updates(), 1, "once it moves it is reported again");
+    assert_eq!(moved.commits(), vec![next.to_string()]);
+    assert_eq!(checkpoint.tip, Some(next));
 }

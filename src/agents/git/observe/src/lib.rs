@@ -639,7 +639,9 @@ pub async fn publish_batch(
     true
 }
 
-/// Publishes the ref's update once all its commits were taken, and moves its checkpoint to the tip.
+/// Publishes the ref's update once all its commits were taken, and moves its checkpoint to the tip. A ref already at
+/// the tip its checkpoint holds has not moved and is not reported again (as in `observe_refs`): a consumer acting on
+/// `RefUpdated` would otherwise act on every pass.
 pub async fn publish_ref_update(
     sink: &impl EventSink,
     repo_id: &RepoId,
@@ -647,6 +649,9 @@ pub async fn publish_ref_update(
     checkpoint: &mut Checkpoint,
     tip: Oid,
 ) -> bool {
+    if checkpoint.tip == Some(tip) {
+        return true;
+    }
     if let Err(e) = sink
         .publish(&ref_update_event(
             repo_id.clone(),
