@@ -1132,6 +1132,8 @@ pub struct Delivery {
 /// what no client would (a frame header over the limit) or stop reading while the socket stays open.
 pub struct RawConnection {
     stream: tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    /// How many frames it has read, as the broker numbers them (from one).
+    pub frames: u64,
 }
 
 impl RawConnection {
@@ -1161,7 +1163,17 @@ impl RawConnection {
             .connect(ServerName::try_from("localhost").unwrap(), tcp)
             .await
             .expect("the TLS handshake");
-        Self { stream }
+        Self { stream, frames: 0 }
+    }
+
+    /// Its two halves, to read and write at once (a client whose writes block while it goes on reading).
+    pub fn into_split(
+        self,
+    ) -> (
+        tokio::io::ReadHalf<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
+        tokio::io::WriteHalf<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
+    ) {
+        tokio::io::split(self.stream)
     }
 
     /// Writes `len` as a frame's header, and nothing after it.
@@ -1185,6 +1197,7 @@ impl RawConnection {
         let len = self.stream.read_u32().await.ok()? as usize;
         let mut body = vec![0u8; len];
         self.stream.read_exact(&mut body).await.ok()?;
+        self.frames += 1;
         Some(TcpClientActor::unframe(&body).unwrap())
     }
 

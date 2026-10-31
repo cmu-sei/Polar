@@ -438,10 +438,39 @@ pub fn spawn_watchdog(bounds: Bounds, broker: ActorRef<BrokerMessage>) {
                 let _ = listener.send_message(BrokerMessage::BudgetExhausted);
             }
             let sessions = ractor::registry::where_is(crate::SESSION_MANAGER_NAME.to_string());
+            // Decided once a session a look: its other stalled subscriptions go with it.
+            let mut ended = std::collections::HashSet::new();
+            let mut spared = std::collections::HashSet::new();
             for backlog in stalled_while_exhausted(&bounds.budget.holders(), bounds.stall) {
                 let Some((registration_id, topic)) = backlog.owner() else {
                     continue;
                 };
+                if spared.contains(registration_id) {
+                    continue;
+                }
+                if let Some(connection) = crate::listener::connection_of(registration_id) {
+                    // Progress is the connection's: an acknowledgement on any topic, read by its reader, however long
+                    // its Listener takes to pass it on (cassini-backpressure.md, second review, finding B).
+                    if connection.idle_for() < bounds.stall {
+                        continue;
+                    }
+                    // Its reader waits for room, so what it has acknowledged is not read: the broker's doing, not
+                    // its. Its publishes are refused for now instead, and its reader reads on (finding A).
+                    if connection.spare(bounds.stall) {
+                        spared.insert(registration_id.to_string());
+                        info!(
+                            subscriber = backlog.name(),
+                            held = backlog.bytes(),
+                            "the broker's memory budget is exhausted and a subscriber's acknowledgements wait behind \
+                             its own publishes: they are refused for now, and its connection kept"
+                        );
+                        continue;
+                    }
+                }
+                if !ended.insert(registration_id.to_string()) {
+                    backlog.set_connected(false);
+                    continue;
+                }
                 let stalled = backlog.stalled_for().unwrap_or_default();
                 backlog.set_connected(false);
                 bounds.budget.count_slow_disconnection();

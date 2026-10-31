@@ -617,22 +617,19 @@ pub enum DeliveryMode {
 /// the transport's mailbox: an acknowledgement never waits behind the publishes queued there, only behind the frame
 /// being written (a single stream keeps its order). Ends when the channel's senders are gone or a write fails (the
 /// connection is gone, and its reader says so).
-pub fn spawn_ack_writer<W>(writer: Arc<Mutex<W>>) -> tokio::sync::mpsc::UnboundedSender<u64>
+pub fn spawn_ack_writer<W>(writer: Arc<Mutex<W>>) -> AckSender
 where
     W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let (acks, mut pending) = tokio::sync::mpsc::unbounded_channel::<u64>();
+    let (acks, mut pending) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
     tokio::spawn(async move {
         while let Some(first) = pending.recv().await {
             let mut frames = Vec::new();
             let mut next = Some(first);
-            while let Some(delivery_id) = next {
-                match TcpClientActor::frame(&ClientMessage::PublishResponseAck { delivery_id }) {
+            while let Some(message) = next {
+                match TcpClientActor::frame(&message) {
                     Ok(frame) => frames.extend_from_slice(&frame),
-                    Err(e) => warn!(
-                        delivery_id,
-                        "a delivery acknowledgement was not framed: {e}"
-                    ),
+                    Err(e) => warn!(?message, "a delivery acknowledgement was not framed: {e}"),
                 }
                 next = pending.try_recv().ok();
             }
@@ -644,6 +641,9 @@ where
     });
     acks
 }
+
+/// What a connection's acknowledgement writer is sent: `PublishResponseAck`s, and `FrameUndecodable`s.
+pub type AckSender = tokio::sync::mpsc::UnboundedSender<ClientMessage>;
 
 /// Actor state for the TCP client
 pub struct TcpClientState {
@@ -759,6 +759,8 @@ impl TcpClientActor {
         let abort = tokio::spawn(
             async move {
                 let mut msg_count = 0;
+                // The frames read on this connection, numbered as the broker numbers what it writes.
+                let mut frames: u64 = 0;
                 let mut buf_reader = tokio::io::BufReader::new(reader);
                 loop {
                     msg_count += 1;
@@ -809,25 +811,15 @@ impl TcpClientActor {
                                         "Received frame"
                                     );
 
-                                    match rkyv::from_bytes::<ClientMessage, Error>(&buffer) {
-                                        Ok(message) => {
-                                            TcpClientActor::process_client_message_with(
-                                                myself.clone(),
-                                                &delivery,
-                                                answers.as_ref(),
-                                                acks.as_ref(),
-                                                message,
-                                            );
-                                        }
-                                        Err(e) => {
-                                            error!(
-                                                len = buffer.len(),
-                                                first_8 = ?&buffer[..buffer.len().min(8)],
-                                                "{e} Received raw frame"
-                                            );
-                                            continue;
-                                        }
-                                    }
+                                    frames += 1;
+                                    TcpClientActor::on_frame(
+                                        myself.clone(),
+                                        &delivery,
+                                        answers.as_ref(),
+                                        acks.as_ref(),
+                                        frames,
+                                        &buffer,
+                                    );
                                 }
                             }
                         }
@@ -878,13 +870,50 @@ impl TcpClientActor {
         Self::process_client_message_with(myself, delivery, answers, None, message)
     }
 
+    /// One frame from the broker, the `frame`th on this connection: decoded and handled, or, if it does not decode,
+    /// logged and named to the broker (`ClientMessage::FrameUndecodable`): the client will never decode it, so a
+    /// delivery in it could never be acknowledged, and would be held, and sent again on every resume, for good
+    /// (cassini-backpressure.md, second review, finding B).
+    fn on_frame(
+        myself: ActorRef<TcpClientMessage>,
+        delivery: &DeliveryMode,
+        answers: Option<&ActorRef<TcpClientMessage>>,
+        acks: Option<&AckSender>,
+        frame: u64,
+        buffer: &[u8],
+    ) {
+        match rkyv::from_bytes::<ClientMessage, Error>(buffer) {
+            Ok(message) => {
+                Self::process_client_message_with(myself, delivery, answers, acks, message);
+            }
+            Err(e) => {
+                error!(
+                    frame,
+                    len = buffer.len(),
+                    first_8 = ?&buffer[..buffer.len().min(8)],
+                    "{e} Received a frame that does not decode: the broker is told which"
+                );
+                if let Some(acks) = acks
+                    && acks
+                        .send(ClientMessage::FrameUndecodable { frame })
+                        .is_err()
+                {
+                    warn!(
+                        frame,
+                        "the broker could not be told of a frame that does not decode"
+                    );
+                }
+            }
+        }
+    }
+
     /// As [`process_client_message`](Self::process_client_message), acknowledging deliveries through `acks` (the
     /// connection's acknowledgement writer, [`spawn_ack_writer`]) when there is one.
     fn process_client_message_with(
         myself: ActorRef<TcpClientMessage>,
         delivery: &DeliveryMode,
         answers: Option<&ActorRef<TcpClientMessage>>,
-        acks: Option<&tokio::sync::mpsc::UnboundedSender<u64>>,
+        acks: Option<&AckSender>,
         message: ClientMessage,
     ) {
         let answer = |topic: &str, use_: facade::TopicUse, result: &Result<(), String>| {
@@ -1241,11 +1270,13 @@ impl TcpClientActor {
     /// never waits behind the publishes queued there (docs/architecture/cassini-backpressure.md, review finding 1).
     fn delivery_handed_off(
         myself: &ActorRef<TcpClientMessage>,
-        acks: Option<&tokio::sync::mpsc::UnboundedSender<u64>>,
+        acks: Option<&AckSender>,
         delivery_id: u64,
     ) {
         if let Some(acks) = acks
-            && acks.send(delivery_id).is_ok()
+            && acks
+                .send(ClientMessage::PublishResponseAck { delivery_id })
+                .is_ok()
         {
             return;
         }
@@ -2173,6 +2204,46 @@ mod process_client_message_tests {
         assert!(bare.starts_with("Broker is shutting down"), "{bare}");
         assert!(bare.contains(DEFERRED_NOT_KEPT), "{bare}");
         assert!(!bare.contains(DEFERRED_AND_KEPT), "{bare}");
+    }
+
+    /// A frame from the broker that does not decode is named to the broker by its number, on the acknowledgement
+    /// path: the client will never decode it, and a delivery in it is let go rather than held for good (second review,
+    /// finding B). One that decodes is handled as before.
+    #[tokio::test]
+    async fn a_frame_that_does_not_decode_is_named_to_the_broker() {
+        let (myself, _) = spawn_fake_tcp_client().await;
+        let (delivery, _) = broadcast_delivery().await;
+        let (acks, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        TcpClientActor::on_frame(
+            myself.clone(),
+            &delivery,
+            None,
+            Some(&acks),
+            7,
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+        );
+        match sent.try_recv() {
+            Ok(ClientMessage::FrameUndecodable { frame }) => assert_eq!(frame, 7),
+            other => panic!("the broker is told which frame: {other:?}"),
+        }
+        let delivered = TcpClientActor::frame(&ClientMessage::PublishResponse {
+            topic: "news".to_string(),
+            payload: b"fine".to_vec().into(),
+            result: Ok(()),
+            trace_ctx: None,
+            published_by: None,
+            origin: None,
+            delivery_id: Some(3),
+            refusal: None,
+        })
+        .unwrap();
+        // Read into a buffer of its own, as the reader does (rkyv wants it aligned).
+        let body = delivered[4..].to_vec();
+        TcpClientActor::on_frame(myself, &delivery, None, Some(&acks), 8, &body);
+        match sent.try_recv() {
+            Ok(ClientMessage::PublishResponseAck { delivery_id }) => assert_eq!(delivery_id, 3),
+            other => panic!("a delivery that decodes is acknowledged: {other:?}"),
+        }
     }
 
     /// The events the client dispatches for one message from the broker.

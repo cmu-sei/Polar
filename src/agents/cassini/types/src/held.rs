@@ -303,6 +303,13 @@ impl Backlog {
         self.above_since_ms.store(since, Ordering::SeqCst);
     }
 
+    /// Starts its stall clock (and its progress) again, as on a return: it is given the stall bound anew.
+    pub fn restart_stall_clock(&self) {
+        if self.is_connected() {
+            self.set_connected(true);
+        }
+    }
+
     /// Whether its topic must wait for it: connected and above its high water.
     pub fn holds_back(&self) -> bool {
         self.is_connected() && self.is_above()

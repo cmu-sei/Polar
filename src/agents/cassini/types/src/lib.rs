@@ -252,6 +252,8 @@ pub enum BrokerMessage {
     /// The client has the delivery numbered `delivery_id`: its subscriber lets go of it. From the client to its
     /// Listener, which passes it to the subscriber of the topic the delivery was on.
     PublishResponseAck { delivery_id: u64 },
+    /// The client could not decode the `frame`th frame its Listener wrote (`ClientMessage::FrameUndecodable`).
+    FrameUndecodable { frame: u64 },
     /// Subscribe request from the client.
     SubscribeRequest {
         registration_id: String,
@@ -528,6 +530,7 @@ impl BrokerMessage {
             ClientMessage::PublishResponseAck { delivery_id } => {
                 BrokerMessage::PublishResponseAck { delivery_id }
             }
+            ClientMessage::FrameUndecodable { frame } => BrokerMessage::FrameUndecodable { frame },
 
             _ => {
                 // For other message types, we don't have conversion yet
@@ -830,4 +833,9 @@ pub enum ClientMessage {
         result: Result<ControlResult, ControlError>,
         trace_ctx: Option<WireTraceCtx>,
     },
+    /// From the client: the `frame`th frame the broker wrote on this connection (counting from one) did not decode,
+    /// so the client cannot name what it was. A delivery is let go as acknowledged: the client will never decode it,
+    /// and holding it would hold the budget and stall the session for good (cassini-backpressure.md, second review,
+    /// finding B). Last, so no earlier variant's tag moves.
+    FrameUndecodable { frame: u64 },
 }

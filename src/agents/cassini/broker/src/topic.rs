@@ -762,6 +762,22 @@ impl TopicAgent {
             if !backlog.holds_back() || above_for < stall {
                 continue;
             }
+            // Its reader waits for room, so its acknowledgements may be what the broker is not reading: its
+            // publishes are refused for now instead, and its reader reads on. It is ended at a later check if it is
+            // still above its high water then (cassini-backpressure.md, second review, A).
+            if let Some(connection) = crate::listener::connection_of(registration_id)
+                && connection.spare(stall)
+            {
+                // It is given the stall bound again to drain, now that what it acknowledged is read.
+                backlog.restart_stall_clock();
+                info!(
+                    topic = %state.name,
+                    subscriber = backlog.name(),
+                    held = backlog.bytes(),
+                    "a subscriber holding the topic back waits for room to publish: its publishes are refused for now"
+                );
+                continue;
+            }
             backlog.set_connected(false);
             state.bounds.budget.count_slow_disconnection();
             warn!(

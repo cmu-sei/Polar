@@ -574,6 +574,409 @@ async fn a_subscriber_away_when_the_budget_is_exhausted_lets_go_of_all_it_was_ow
     .await;
 }
 
+/// A processor publishing small frames back to back to the topics it subscribes to, under a budget exhausted by
+/// what it and silent subscribers hold, is not cut and loses nothing (second review, finding A).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_processor_publishing_small_frames_back_to_back_under_an_exhausted_budget_is_not_cut() {
+    processor_under_exhaustion(60 * 1024, 130).await;
+}
+
+/// As above, with frames too large to read before they are admitted (finding A).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_processor_publishing_large_frames_under_an_exhausted_budget_is_not_cut() {
+    processor_under_exhaustion(MESSAGE, 30).await;
+}
+
+/// A processor (an agent's client that subscribes to the topics it publishes to, and reads and acknowledges what it
+/// is given) publishes `rounds` messages of `size` bytes to each of nine topics, while a slow subscriber on each reads
+/// and acknowledges them at half a MiB a second: together they exhaust the budget for longer than the stall bound
+/// (each topic under its high water, and every subscriber making progress), and the processor's own deliveries, the
+/// same messages, are among what holds it, its acknowledgements behind its publishes on its one connection. No one is
+/// cut, and the processor is given everything it published.
+async fn processor_under_exhaustion(size: usize, rounds: u32) {
+    let stall = Duration::from_secs(2);
+    with_broker_bounded(BUDGET, stall, move |broker| async move {
+        let budget = broker.budget();
+        let topics = 9;
+        let pace = Duration::from_micros(size as u64 * 1_000_000 / (512 * 1024));
+        let mut slow = Vec::new();
+        for t in 0..topics {
+            let mut connection =
+                RawConnection::open(&broker, &format!("slow-{t}.test"), Some(4096)).await;
+            let session = connection.register().await;
+            let topic = format!("t{t}");
+            connection.subscribe(&session, &topic).await;
+            slow.push(tokio::spawn(async move {
+                let mut read = 0;
+                while let Some(delivery) = connection
+                    .next_delivery(&topic, Duration::from_secs(60))
+                    .await
+                {
+                    connection.acknowledge(delivery.delivery_id).await;
+                    read += 1;
+                    if read == rounds {
+                        break;
+                    }
+                    tokio::time::sleep(pace).await;
+                }
+                read
+            }));
+        }
+        let agent = support::FacadeClient::connect(&broker, "processor.test").await;
+        let processor = &agent.client;
+        for t in 0..topics {
+            processor.subscribe(&format!("t{t}"));
+        }
+        processor
+            .wait_for("its subscriptions", Duration::from_secs(5), |c| {
+                (0..topics).all(|t| c.subscribed(&format!("t{t}")))
+            })
+            .await;
+        for n in 0..rounds {
+            for t in 0..topics {
+                let mut payload = vec![0u8; size];
+                payload[..4].copy_from_slice(&n.to_be_bytes());
+                processor.publish(&format!("t{t}"), &payload);
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while budget.stats().alarms == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(budget.stats().alarms > 0, "the budget was exhausted");
+        let distinct = |c: &TestClient, t: usize| {
+            c.received(&format!("t{t}"))
+                .iter()
+                .map(|p| u32::from_be_bytes(p[..4].try_into().unwrap()))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        };
+        processor
+            .wait_for("everything it published", Duration::from_secs(60), |c| {
+                (0..topics).all(|t| distinct(c, t) == rounds as usize)
+            })
+            .await;
+        processor
+            .wait_for("every publish accepted", Duration::from_secs(30), |c| {
+                let ids: std::collections::BTreeSet<_> = c.acknowledged_ids().into_iter().collect();
+                ids.len() == rounds as usize * topics
+            })
+            .await;
+        let stats = budget.stats();
+        assert_eq!(
+            agent.registrations().len(),
+            1,
+            "the processor kept its connection: {stats:?}"
+        );
+        for subscriber in slow {
+            assert_eq!(
+                subscriber.await.unwrap(),
+                rounds,
+                "each slow subscriber is given all"
+            );
+        }
+        assert_eq!(
+            budget.stats().slow_disconnections,
+            0,
+            "no one was cut: {stats:?}"
+        );
+    })
+    .await;
+}
+
+/// A processor publishing to the topic it reads faster than the broker takes it, under a budget it cannot exhaust: it
+/// writes 160 MiB of publishes before it reads, so its own backlog on the topic goes above its high water, the topic
+/// is held back, its window fills and its reader waits; then it reads, and its acknowledgements are written behind
+/// its blocked publishes. The topic's stall rule refuses its publishes for now rather than end its connection: the
+/// broker reads on, reaches its acknowledgements, and the topic moves (second review, finding A).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_processor_holding_back_its_own_topic_is_not_cut_for_acknowledgements_the_broker_has_not_read()
+ {
+    use cassini_types::ClientMessage;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let stall = Duration::from_secs(2);
+    with_broker_bounded(ROOMY, stall, |broker| async move {
+        let budget = broker.budget();
+        let mut connection = RawConnection::open(&broker, "processor.test", Some(4096)).await;
+        let session = connection.register().await;
+        connection.subscribe(&session, "loop").await;
+        let (mut reading, mut writing) = connection.into_split();
+        let count = 160 * 1024 * 1024 / MESSAGE as u64; // its high water (32 MiB) and its window (64 MiB) over
+        let (acks, mut to_ack) = tokio::sync::mpsc::unbounded_channel::<u64>();
+        let writer = tokio::spawn(async move {
+            for seq in 1..=count {
+                let frame = cassini_client::TcpClientActor::frame(&ClientMessage::PublishRequest {
+                    topic: "loop".to_string(),
+                    payload: std::sync::Arc::new(vec![0u8; MESSAGE]),
+                    registration_id: session.clone(),
+                    trace_ctx: None,
+                    share_identity: false,
+                    epoch: 1,
+                    seq,
+                })
+                .unwrap();
+                if writing.write_all(&frame).await.is_err() {
+                    return;
+                }
+            }
+            let _ = writing.flush().await;
+            while let Some(delivery_id) = to_ack.recv().await {
+                let frame = cassini_client::TcpClientActor::frame(&ClientMessage::PublishResponseAck {
+                    delivery_id,
+                })
+                .unwrap();
+                if writing.write_all(&frame).await.is_err() || writing.flush().await.is_err() {
+                    return;
+                }
+            }
+        });
+        // It reads nothing at first, while its backlog passes its high water.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let (mut accepted, mut deferred, mut delivered) = (0u64, 0u64, 0u64);
+        let ended = loop {
+            if accepted + deferred == count && delivered >= accepted {
+                break false;
+            }
+            let read = tokio::time::timeout(Duration::from_secs(20), async {
+                let len = reading.read_u32().await.ok()? as usize;
+                let mut body = vec![0u8; len];
+                reading.read_exact(&mut body).await.ok()?;
+                Some(cassini_client::TcpClientActor::unframe(&body).unwrap())
+            })
+            .await
+            .expect("the broker goes on");
+            match read {
+                None => break true,
+                Some(ClientMessage::PublishRequestAck { .. }) => accepted += 1,
+                Some(ClientMessage::PublishResponse {
+                    result: Err(_),
+                    refusal: Some(cassini_types::PublishRefusal::Unavailable),
+                    ..
+                }) => deferred += 1,
+                Some(ClientMessage::PublishResponse {
+                    delivery_id: Some(delivery_id),
+                    result: Ok(()),
+                    ..
+                }) => {
+                    delivered += 1;
+                    let _ = acks.send(delivery_id);
+                }
+                Some(_) => {}
+            }
+        };
+        let stats = budget.stats();
+        assert!(
+            !ended,
+            "its connection is not ended ({accepted} accepted, {deferred} deferred, {delivered} given back): {stats:?}"
+        );
+        assert!(deferred > 0, "some were refused for now: {stats:?}");
+        assert_eq!(stats.slow_disconnections, 0, "{stats:?}");
+        assert_eq!(stats.alarms, 0, "the budget was never exhausted: {stats:?}");
+        drop(acks);
+        writer.abort();
+    })
+    .await;
+}
+
+/// The bound on sparing: a client that publishes to the topic it subscribes to, and reads what it is given but never
+/// acknowledges it, holds the topic back while its reader waits: it is spared once, its publishes refused for now, and
+/// then, having acknowledged nothing since, has its connection ended as any stalled subscriber does (second review,
+/// finding A).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_publishes_and_never_acknowledges_is_spared_once_and_then_ended() {
+    use cassini_types::ClientMessage;
+    use tokio::io::AsyncWriteExt;
+    let stall = Duration::from_secs(2);
+    with_broker_bounded(ROOMY, stall, |broker| async move {
+        let budget = broker.budget();
+        let mut connection = RawConnection::open(&broker, "deaf.test", Some(4096)).await;
+        let session = connection.register().await;
+        connection.subscribe(&session, "loop").await;
+        let (mut reading, mut writing) = connection.into_split();
+        let began = Instant::now();
+        let reader = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut sink = vec![0u8; 64 * 1024];
+            while let Ok(n) = reading.read(&mut sink).await {
+                if n == 0 {
+                    break;
+                }
+            }
+        });
+        let writer = tokio::spawn(async move {
+            for seq in 1.. {
+                let frame = cassini_client::TcpClientActor::frame(&ClientMessage::PublishRequest {
+                    topic: "loop".to_string(),
+                    payload: std::sync::Arc::new(vec![0u8; MESSAGE]),
+                    registration_id: session.clone(),
+                    trace_ctx: None,
+                    share_identity: false,
+                    epoch: 1,
+                    seq,
+                })
+                .unwrap();
+                if writing.write_all(&frame).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let ended = tokio::time::timeout(Duration::from_secs(30), writer).await;
+        reader.abort();
+        let stats = budget.stats();
+        assert!(ended.is_ok(), "its connection is ended: {stats:?}");
+        assert!(stats.slow_disconnections >= 1, "{stats:?}");
+        assert!(
+            began.elapsed() > stall,
+            "after the stall bound, not before: {:?}",
+            began.elapsed()
+        );
+    })
+    .await;
+}
+
+/// A client acknowledging steadily what it is given on one topic is making progress, though a delivery on another
+/// topic waits behind those writes for longer than the stall bound: progress is its connection's, not one topic's
+/// (second review, finding B).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_acknowledging_one_topic_is_not_cut_for_a_delivery_waiting_behind_it_on_another() {
+    let stall = Duration::from_secs(2);
+    with_broker_bounded(BUDGET, stall, |broker| async move {
+        let budget = broker.budget();
+        let mut steady = RawConnection::open(&broker, "steady.test", Some(4096)).await;
+        let session = steady.register().await;
+        steady.subscribe(&session, "a").await;
+        steady.subscribe(&session, "b").await;
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        // Just under its high water on "a", and then one message on "b", written after them.
+        let on_a = 28;
+        for n in 0..on_a {
+            let mut payload = vec![0u8; MESSAGE];
+            payload[..4].copy_from_slice(&(n as u32).to_be_bytes());
+            publisher.publish("a", &payload);
+        }
+        publisher
+            .wait_for("those on a accepted", Duration::from_secs(10), |c| {
+                c.acknowledged("a") == on_a
+            })
+            .await;
+        publisher.publish("b", b"behind");
+        publisher
+            .wait_for("the one on b accepted", Duration::from_secs(10), |c| {
+                c.acknowledged("b") == 1
+            })
+            .await;
+        // Silent subscribers then exhaust the budget.
+        let topics = 9;
+        let mut silent = Vec::new();
+        for t in 0..topics {
+            let mut connection =
+                RawConnection::open(&broker, &format!("silent-{t}.test"), Some(4096)).await;
+            let session = connection.register().await;
+            connection.subscribe(&session, &format!("s{t}")).await;
+            silent.push(connection);
+        }
+        for n in 0..30u32 {
+            for t in 0..topics {
+                let mut payload = vec![0u8; MESSAGE];
+                payload[..4].copy_from_slice(&n.to_be_bytes());
+                publisher.publish(&format!("s{t}"), &payload);
+            }
+        }
+        // It reads and acknowledges steadily; the one on "b" comes last, past the stall bound.
+        let began = Instant::now();
+        let (mut a, mut b) = (0, false);
+        while a < on_a || !b {
+            let message = tokio::time::timeout(Duration::from_secs(10), steady.read())
+                .await
+                .expect("it is given what it is owed")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "its connection is not ended (after {a} on a, {:?}): {:?}",
+                        began.elapsed(),
+                        budget.stats()
+                    )
+                });
+            if let cassini_types::ClientMessage::PublishResponse {
+                topic,
+                delivery_id: Some(delivery_id),
+                result: Ok(()),
+                ..
+            } = message
+            {
+                match topic.as_str() {
+                    "a" => a += 1,
+                    "b" => b = true,
+                    _ => {}
+                }
+                steady.acknowledge(delivery_id).await;
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        }
+        assert!(
+            began.elapsed() > stall,
+            "the one on b waited past the stall bound: {:?}",
+            began.elapsed()
+        );
+        assert!(budget.stats().alarms > 0, "while the budget was exhausted");
+        drop(silent);
+    })
+    .await;
+}
+
+/// A delivery its client cannot decode is let go when the client names the frame it came in: it is not held, nor
+/// sent again on resume, for a client that will never decode it (second review, finding B).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delivery_the_client_could_not_decode_is_let_go_when_it_says_so() {
+    with_broker_bounded(BUDGET, Duration::from_secs(10), |broker| async move {
+        let budget = broker.budget();
+        let mut client = RawConnection::open(&broker, "poisoned.test", None).await;
+        let session = client.register().await;
+        client.subscribe(&session, "news").await;
+        let publisher = TestClient::connect(&broker, "publisher.test").await;
+        publisher.publish("news", b"undecodable");
+        publisher.publish("news", b"fine");
+        let first = client
+            .next_delivery("news", Duration::from_secs(5))
+            .await
+            .expect("the first");
+        // The client could not decode the frame it came in, and says which; the next it acknowledges.
+        client
+            .send(&cassini_types::ClientMessage::FrameUndecodable {
+                frame: client.frames,
+            })
+            .await;
+        let second = client
+            .next_delivery("news", Duration::from_secs(5))
+            .await
+            .expect("the second");
+        client.acknowledge(second.delivery_id).await;
+        let owes = || {
+            budget
+                .holders()
+                .into_iter()
+                .find(|b| b.owner().is_some_and(|(_, t)| t == "news"))
+                .map(|b| b.bytes())
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while owes() != Some(0) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(owes(), Some(0), "it owes nothing");
+        drop(client);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mut back = RawConnection::open(&broker, "poisoned.test", None).await;
+        assert_eq!(back.register_resuming(Some(session.clone())).await, session);
+        let replayed = back.next_delivery("news", Duration::from_secs(1)).await;
+        assert_eq!(
+            replayed.map(|d| d.delivery_id),
+            None,
+            "nothing is sent again (the first was {})",
+            first.delivery_id
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_broker_whose_budget_is_below_one_frame_does_not_start_and_says_why() {
     let refused = cassini_broker::budget::Bounds::new(

@@ -65,7 +65,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use cassini_tracing::try_set_parent_otel;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -79,6 +79,39 @@ pub struct ConnWriter {
     half: Mutex<BufWriter<WriteHalf<TlsStream<TcpStream>>>>,
     cut: CancellationToken,
     why: std::sync::Mutex<Option<String>>,
+    /// The session registered on this connection, once it is.
+    session: std::sync::Mutex<Option<String>>,
+    /// When its reader last read an acknowledgement (or the connection opened), in milliseconds since the epoch: the
+    /// connection's progress, whatever topic it was for and however long the Listener takes to pass it on
+    /// (cassini-backpressure.md, second review, finding B).
+    progress_ms: AtomicU64,
+    /// Its reader waits for a frame's admission: what follows that frame (its acknowledgements among it) is not read.
+    admitting: AtomicBool,
+    /// Until when its reader refuses for now a publish it cannot admit at once, instead of waiting for it, in
+    /// milliseconds since the epoch (second review, finding A).
+    refuse_until_ms: AtomicU64,
+    /// Wakes its reader, waiting for an admission, to refuse it.
+    refuse: tokio::sync::Notify,
+    /// How many frames have been written to it: each write is numbered, from one, as its client counts what it reads.
+    frames: AtomicU64,
+    /// When it was last spared an ending for refusals for now (`spare`), in milliseconds since the epoch; zero if never.
+    spared_ms: AtomicU64,
+}
+
+/// A reader waiting for an admission, marked on its connection until it stops waiting.
+struct Admitting<'a>(&'a ConnWriter);
+
+impl<'a> Admitting<'a> {
+    fn new(writer: &'a ConnWriter) -> Self {
+        writer.admitting.store(true, Ordering::SeqCst);
+        Admitting(writer)
+    }
+}
+
+impl Drop for Admitting<'_> {
+    fn drop(&mut self) {
+        self.0.admitting.store(false, Ordering::SeqCst);
+    }
 }
 
 type SharedWriter = Arc<ConnWriter>;
@@ -89,7 +122,60 @@ impl ConnWriter {
             half: Mutex::new(half),
             cut: CancellationToken::new(),
             why: std::sync::Mutex::new(None),
+            session: std::sync::Mutex::new(None),
+            progress_ms: AtomicU64::new(now_ms()),
+            admitting: AtomicBool::new(false),
+            refuse_until_ms: AtomicU64::new(0),
+            refuse: tokio::sync::Notify::new(),
+            frames: AtomicU64::new(0),
+            spared_ms: AtomicU64::new(0),
         })
+    }
+
+    /// Whether its reader waits for a frame's admission, so the broker is not reading what follows it.
+    pub fn is_admitting(&self) -> bool {
+        self.admitting.load(Ordering::SeqCst)
+    }
+
+    /// Its reader refuses for now, for `how_long`, each publish it cannot admit at once, and stops waiting for the one
+    /// it waits for: it reads on, so the acknowledgements behind them are read. For a connection whose session holds
+    /// part of an exhausted budget while its reader waits for room: the room may be its own acknowledgements' to make.
+    pub fn refuse_for(&self, how_long: Duration) {
+        let until = now_ms().saturating_add(how_long.as_millis() as u64);
+        self.refuse_until_ms.store(until, Ordering::SeqCst);
+        self.refuse.notify_one();
+    }
+
+    /// Spares this connection the ending a stall would bring, when the stall may be the broker's doing: its reader
+    /// waits for room, so what follows (its acknowledgements among it) is not read. Its publishes are refused for now
+    /// for `stall` instead (`refuse_for`), and its reader reads on. Spared again only once it has made progress since:
+    /// a client that acknowledges nothing is ended at the next look. True if it was spared.
+    pub fn spare(&self, stall: Duration) -> bool {
+        if !self.is_admitting() {
+            return false;
+        }
+        let spared = self.spared_ms.load(Ordering::SeqCst);
+        if spared != 0 && self.progress_ms.load(Ordering::SeqCst) < spared {
+            return false;
+        }
+        self.spared_ms.store(now_ms().max(1), Ordering::SeqCst);
+        self.refuse_for(stall);
+        true
+    }
+
+    /// Whether its reader refuses for now what it cannot admit at once.
+    fn refusing(&self) -> bool {
+        now_ms() < self.refuse_until_ms.load(Ordering::SeqCst)
+    }
+
+    /// Its reader read an acknowledgement.
+    fn progressed(&self) {
+        self.progress_ms.store(now_ms(), Ordering::SeqCst);
+    }
+
+    /// How long since its reader last read an acknowledgement, or since it opened.
+    pub fn idle_for(&self) -> Duration {
+        Duration::from_millis(now_ms().saturating_sub(self.progress_ms.load(Ordering::SeqCst)))
     }
 
     fn why(&self) -> String {
@@ -106,6 +192,16 @@ impl ConnWriter {
 static CONNECTIONS: std::sync::LazyLock<
     std::sync::Mutex<HashMap<String, std::sync::Weak<ConnWriter>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// The open connection of the session `registration_id`, if it has one.
+pub fn connection_of(registration_id: &str) -> Option<SharedWriter> {
+    CONNECTIONS
+        .lock()
+        .unwrap()
+        .values()
+        .filter_map(std::sync::Weak::upgrade)
+        .find(|writer| writer.session.lock().unwrap().as_deref() == Some(registration_id))
+}
 
 /// Ends the connection of `client_id`, saying `why`: its writes and its reader give up, and its Listener ends, as on a
 /// lost connection (its session is kept for the retention window). False if there is no such connection.
@@ -269,6 +365,61 @@ async fn read_body<R: AsyncRead + Unpin>(
             }
         },
     )
+}
+
+/// What a frame's admission came to.
+enum Admission {
+    Admitted((WindowCharge, Charge)),
+    /// Refused for now: its connection's reader refuses what it cannot admit at once (`ConnWriter::refuse_for`).
+    Refused,
+    /// The connection was cut while it waited.
+    Cut,
+}
+
+/// What a publish refused for now is told (`PublishRefusal::Unavailable`; its client keeps it and sends it again).
+pub const REFUSED_FOR_NOW: &str = "the broker's memory budget is exhausted, and this connection's acknowledgements \
+    wait behind its publishes: refused for now, so they are read";
+
+/// The one frame body read while its frame is refused (`admit_or_refuse`): its connection must read past it, and
+/// what it reads is let go at once. One at a time, so the budget is passed by at most one frame, and only while
+/// connections refuse.
+static REFUSED_BODY: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+/// Takes a frame's bytes as [`admit`] does, unless its connection's reader is told to refuse for now: then a frame it
+/// cannot admit at once is refused, and so is the one it waits for when it is told. While it waits it is marked as
+/// waiting (`ConnWriter::is_admitting`).
+async fn admit_or_refuse(
+    window: &Arc<Window>,
+    budget: &Budget,
+    len: usize,
+    cut: &CancellationToken,
+    writer: &ConnWriter,
+) -> Admission {
+    if let Some(credit) = window.try_take(len)
+        && let Some(charge) = budget.try_charge(len)
+    {
+        return Admission::Admitted((credit, charge));
+    }
+    if writer.refusing() {
+        return Admission::Refused;
+    }
+    let _admitting = Admitting::new(writer);
+    let mut admission = std::pin::pin!(admit(window, budget, len, cut));
+    loop {
+        tokio::select! {
+            admission = &mut admission => {
+                return match admission {
+                    Some(admission) => Admission::Admitted(admission),
+                    None => Admission::Cut,
+                };
+            }
+            _ = writer.refuse.notified() => {
+                if writer.refusing() {
+                    return Admission::Refused;
+                }
+            }
+        }
+    }
 }
 
 fn now_ms() -> u64 {
@@ -923,6 +1074,10 @@ struct ListenerState {
     dropped: std::collections::HashSet<String>,
     /// The deliveries written to this client and not yet acknowledged, by number, with the topic each came on.
     deliveries: HashMap<u64, String>,
+    /// The frame each of those was written in, and the delivery each such frame carried, so a frame its client could
+    /// not decode can be named (`ClientMessage::FrameUndecodable`).
+    frame_of: HashMap<u64, u64>,
+    delivery_in: HashMap<u64, u64>,
     bounds: Bounds,
 }
 
@@ -1009,11 +1164,12 @@ impl Listener {
     ///
     /// Header is **u32 big-endian length**, followed by payload bytes.
     #[instrument(level = "trace", skip(writer, message), fields(client_id = %client_id))]
+    /// Writes `message` as one frame, and returns its number on this connection.
     async fn write(
         client_id: String,
         message: ClientMessage,
         writer: SharedWriter,
-    ) -> Result<(), Error> {
+    ) -> Result<u64, Error> {
         let bytes = rkyv::to_bytes::<Error>(&message)?;
 
         let len_u32: u32 = bytes.len().try_into().map_err(|_| {
@@ -1034,9 +1190,10 @@ impl Listener {
         // is cut (`cut_connection`).
         let written = async {
             let mut w = writer.half.lock().await;
+            let frame = writer.frames.fetch_add(1, Ordering::SeqCst) + 1;
             w.write_all(&len_u32.to_be_bytes()).await?;
             w.write_all(&bytes).await?;
-            w.flush().await
+            w.flush().await.map(|()| frame)
         };
         tokio::select! {
             written = written => written.map_err(rancor::Error::new),
@@ -1079,6 +1236,8 @@ impl Actor for Listener {
             subscribed: std::collections::HashSet::new(),
             dropped: std::collections::HashSet::new(),
             deliveries: HashMap::new(),
+            frame_of: HashMap::new(),
+            delivery_in: HashMap::new(),
             bounds: args.bounds,
         })
     }
@@ -1127,6 +1286,7 @@ impl Actor for Listener {
         // subscribers that hold the budget and make no progress (budget.rs, `spawn_watchdog`).
         let window = Window::new(state.bounds.window);
         let budget = state.bounds.budget.clone();
+        let stall = state.bounds.stall;
         let writer = state.writer.clone();
         let handle = tokio::spawn({
             let myself = myself.clone();
@@ -1169,22 +1329,49 @@ impl Actor for Listener {
                     );
 
                     let mut admitted = None;
+                    // A frame refused for now, and the slot its body is read under, held until it is let go.
+                    let mut refused = false;
+                    let mut _refused_body = None;
                     let deserialized = match read {
                         Some(message) => message,
                         None => {
                             if len > SMALL_FRAME {
-                                match admit(&window, &budget, len, &cut)
+                                match admit_or_refuse(&window, &budget, len, &cut, &writer)
                                     .instrument(frame_span.clone())
                                     .await
                                 {
-                                    Some(admission) => admitted = Some(admission),
-                                    None => {
+                                    Admission::Admitted(admission) => admitted = Some(admission),
+                                    Admission::Refused => refused = true,
+                                    Admission::Cut => {
                                         disconnect(Gone::Cut.reason(&writer));
                                         return;
                                     }
                                 }
                             }
-                            match read_body(&mut buf_reader, len, &cut, &frame_span).await {
+                            let body = if refused {
+                                // Read past, under the one slot, within the stall bound, and let go.
+                                _refused_body = tokio::select! {
+                                    permit = REFUSED_BODY.acquire() => permit.ok(),
+                                    _ = cut.cancelled() => {
+                                        disconnect(Gone::Cut.reason(&writer));
+                                        return;
+                                    }
+                                };
+                                match tokio::time::timeout(
+                                    stall,
+                                    read_body(&mut buf_reader, len, &cut, &frame_span),
+                                )
+                                .await
+                                {
+                                    Ok(body) => body,
+                                    Err(_) => Err(Gone::Failed(format!(
+                                        "a frame refused for now was not sent within the stall bound ({stall:?})"
+                                    ))),
+                                }
+                            } else {
+                                read_body(&mut buf_reader, len, &cut, &frame_span).await
+                            };
+                            match body {
                                 Ok(Some(message)) => message,
                                 Ok(None) => continue,
                                 Err(gone) => {
@@ -1195,7 +1382,26 @@ impl Actor for Listener {
                         }
                     };
 
-                    let is_publish = matches!(deserialized, ClientMessage::PublishRequest { .. });
+                    if matches!(
+                        deserialized,
+                        ClientMessage::PublishResponseAck { .. }
+                            | ClientMessage::FrameUndecodable { .. }
+                    ) {
+                        writer.progressed();
+                    }
+                    let publish = match &deserialized {
+                        ClientMessage::PublishRequest {
+                            topic, epoch, seq, ..
+                        } => Some((
+                            topic.clone(),
+                            MessageId {
+                                epoch: *epoch,
+                                seq: *seq,
+                            },
+                        )),
+                        _ => None,
+                    };
+                    let is_publish = publish.is_some();
                     // Convert to broker message and forward to actor handler.
                     let mut converted = BrokerMessage::from_client_message(
                         deserialized,
@@ -1204,21 +1410,23 @@ impl Actor for Listener {
                     );
                     if is_publish {
                         let admission = match admitted.take() {
-                            Some(admission) => admission,
+                            Some(admission) => Some(admission),
+                            None if refused => None,
                             // A small publish waits for its admission while what follows it is read: an
                             // acknowledgement goes on at once (it may be what makes the room), and the first frame
                             // that is not one is kept for after, when reading stops until the publish is admitted.
                             None => {
                                 let mut admission = std::pin::pin!(
-                                    admit(&window, &budget, len, &cut)
+                                    admit_or_refuse(&window, &budget, len, &cut, &writer)
                                         .instrument(frame_span.clone())
                                 );
                                 loop {
                                     tokio::select! {
                                         biased;
                                         admission = &mut admission => match admission {
-                                            Some(admission) => break admission,
-                                            None => {
+                                            Admission::Admitted(admission) => break Some(admission),
+                                            Admission::Refused => break None,
+                                            Admission::Cut => {
                                                 disconnect(Gone::Cut.reason(&writer));
                                                 return;
                                             }
@@ -1255,9 +1463,13 @@ impl Actor for Listener {
                                                 frame_len = following
                                             );
                                             match read_body(&mut buf_reader, following, &cut, &span).await {
-                                                Ok(Some(ClientMessage::PublishResponseAck { delivery_id })) => {
+                                                Ok(Some(
+                                                    ack @ (ClientMessage::PublishResponseAck { .. }
+                                                    | ClientMessage::FrameUndecodable { .. }),
+                                                )) => {
+                                                    writer.progressed();
                                                     let ack = BrokerMessage::from_client_message(
-                                                        ClientMessage::PublishResponseAck { delivery_id },
+                                                        ack,
                                                         client_id.clone(),
                                                         peer_identity.clone(),
                                                     );
@@ -1277,7 +1489,28 @@ impl Actor for Listener {
                                 }
                             }
                         };
-                        converted = charged(converted, admission);
+                        match admission {
+                            Some(admission) => converted = charged(converted, admission),
+                            None => {
+                                // Refused for now: its client keeps it and sends it again; this reader reads on.
+                                let (topic, id) = publish.expect("a publish");
+                                debug!(%topic, ?id, "a publish refused for now: its connection's acknowledgements wait behind it");
+                                let refusal = BrokerMessage::PublishResponse {
+                                    topic,
+                                    payload: Payload::uncharged(Arc::new(Vec::new())),
+                                    result: Err(REFUSED_FOR_NOW.to_string()),
+                                    trace_ctx: None,
+                                    published_by: None,
+                                    origin: Some(id),
+                                    delivery_id: None,
+                                    refusal: Some(cassini_types::PublishRefusal::Unavailable),
+                                };
+                                if let Err(e) = myself.send_message(refusal) {
+                                    warn!(error = %e, "Failed forwarding a refusal for now to listener actor");
+                                }
+                                continue;
+                            }
+                        }
                     }
                     // Anything else admitted gives its bytes back now.
                     drop(admitted);
@@ -1443,6 +1676,28 @@ impl Actor for Listener {
             BrokerMessage::PublishResponseAck { delivery_id } => {
                 Self::handle_delivery_ack(state, delivery_id);
             }
+            // The client will never decode it: a delivery is let go as acknowledged, or it would be held, and sent
+            // again on every resume, for good (cassini-backpressure.md, second review, finding B).
+            BrokerMessage::FrameUndecodable { frame } => {
+                match state.delivery_in.get(&frame).copied() {
+                    Some(delivery_id) => {
+                        warn!(
+                            client_id = %state.client_id,
+                            identity = ?state.peer_identity,
+                            frame,
+                            delivery_id,
+                            "the client could not decode a delivery: it is let go as acknowledged"
+                        );
+                        Self::handle_delivery_ack(state, delivery_id);
+                    }
+                    None => warn!(
+                        client_id = %state.client_id,
+                        identity = ?state.peer_identity,
+                        frame,
+                        "the client could not decode a frame that was not a delivery it holds"
+                    ),
+                }
+            }
             BrokerMessage::PublishRequestAck {
                 topic,
                 id,
@@ -1571,6 +1826,7 @@ impl Listener {
                 Ok(registration_id) => {
                     let reg_id_clone = registration_id.clone();
                     state.registration_id = Some(registration_id.clone());
+                    *state.writer.session.lock().unwrap() = Some(registration_id.clone());
 
                     let msg = ClientMessage::RegistrationResponse {
                         result: Ok(registration_id.clone()),
@@ -1867,9 +2123,13 @@ impl Listener {
                 delivery_id,
                 refusal,
             };
-            if let Err(e) =
-                Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await
-            {
+            let written =
+                Listener::write(state.client_id.clone(), msg, Arc::clone(&state.writer)).await;
+            if let (Ok(frame), Some(id)) = (&written, delivery_id) {
+                state.frame_of.insert(id, *frame);
+                state.delivery_in.insert(*frame, id);
+            }
+            if let Err(e) = written {
                 if state.writer.cut.is_cancelled() {
                     // The connection was ended (a slow subscriber's): what waits for it is not written.
                     debug!(error = ?e, "a delivery was not written: the connection was ended");
@@ -1885,6 +2145,9 @@ impl Listener {
 
     /// The client has the delivery numbered `delivery_id`: the subscriber of the topic it came on lets go of it.
     fn handle_delivery_ack(state: &mut ListenerState, delivery_id: u64) {
+        if let Some(frame) = state.frame_of.remove(&delivery_id) {
+            state.delivery_in.remove(&frame);
+        }
         let Some(topic) = state.deliveries.remove(&delivery_id) else {
             debug!(
                 delivery_id,
